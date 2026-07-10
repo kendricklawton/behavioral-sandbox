@@ -84,6 +84,7 @@ pub struct RunResult {
 /// A microVM sandbox: the CLI-facing lifecycle type, backed by a [`RunningVm`]. `boot` is live as
 /// of Phase 1; `exec` lands in Phase 2.
 #[derive(Debug)]
+#[must_use = "dropping a Sandbox kills its microVM"]
 pub struct Sandbox {
     vm: RunningVm,
 }
@@ -123,7 +124,9 @@ impl Sandbox {
     /// Shut the microVM down and reclaim its resources.
     ///
     /// # Errors
-    /// [`VmmError`] if teardown fails.
+    /// Currently never returns `Err` — teardown is best-effort and the guarantee lives in `Drop`
+    /// (see [`RunningVm::shutdown`]) — but the signature stays fallible for the jailed/cgroup
+    /// teardown of later phases.
     pub fn shutdown(self) -> Result<(), VmmError> {
         self.vm.shutdown()
     }

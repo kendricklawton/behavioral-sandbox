@@ -12,7 +12,7 @@
 //!   `{"fault_message": "..."}`. We surface that message as a typed error.
 //! - Read/write **timeouts** bound every call so a wedged VMM is a typed error, never a hang.
 
-use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,6 +27,10 @@ const API_TIMEOUT: Duration = Duration::from_secs(5);
 /// Cap on a response body. Firecracker's replies are at most a small JSON object; a huge
 /// `Content-Length` is a broken peer and must be a typed error, not a huge upfront allocation.
 const MAX_BODY: usize = 1 << 20; // 1 MiB
+
+/// Cap on the whole response (status line + headers + body): `read_line` grows unboundedly on a
+/// newline-free stream, so the reader is clamped before any line is read.
+const MAX_RESPONSE: u64 = MAX_BODY as u64 + 8 * 1024;
 
 /// A client bound to one Firecracker API socket. Cheap to clone; opens a fresh connection per call.
 #[derive(Debug, Clone)]
@@ -85,7 +89,9 @@ impl ApiClient {
 }
 
 /// Parse `HTTP/1.1 <code> ...\r\n`, the headers, then exactly `Content-Length` body bytes.
-fn read_response<R: BufRead>(mut reader: R, ctx: &str) -> Result<(u16, Vec<u8>), VmmError> {
+fn read_response<R: BufRead>(reader: R, ctx: &str) -> Result<(u16, Vec<u8>), VmmError> {
+    // Clamp everything we will ever read for one response, so no line/body can grow past it.
+    let mut reader = reader.take(MAX_RESPONSE);
     let mut status_line = String::new();
     reader
         .read_line(&mut status_line)
@@ -227,6 +233,38 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n";
         let err = read_response(&raw[..], "test").unwrap_err();
         assert!(matches!(err, VmmError::Vmm(_)));
+    }
+
+    #[test]
+    fn timeouts_classify_as_timeout_other_io_as_vmm() {
+        let e = io_err("test", &std::io::Error::from(ErrorKind::WouldBlock));
+        assert!(matches!(e, VmmError::Timeout(_)));
+        let e = io_err("test", &std::io::Error::from(ErrorKind::TimedOut));
+        assert!(matches!(e, VmmError::Timeout(_)));
+        let e = io_err("test", &std::io::Error::from(ErrorKind::ConnectionRefused));
+        assert!(matches!(e, VmmError::Vmm(_)));
+    }
+
+    #[test]
+    fn newline_free_stream_is_bounded_not_unbounded_memory() {
+        // A peer that never sends `\n` must hit the response cap and fail typed — the status
+        // line's String must not grow with the stream.
+        let raw = vec![b'a'; MAX_RESPONSE as usize + 1024];
+        assert!(read_response(&raw[..], "test").is_err());
+    }
+
+    #[test]
+    fn truncated_body_is_typed_error() {
+        // EOF before Content-Length bytes arrive: read_exact must surface, not hang or misframe.
+        let raw = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 50\r\n\r\nshort";
+        assert!(read_response(&raw[..], "test").is_err());
+    }
+
+    #[test]
+    fn fault_message_on_non_json_body_is_none() {
+        // `put` then falls back to the "HTTP <status>" detail.
+        assert_eq!(fault_message(b"<html>oops</html>"), None);
+        assert_eq!(fault_message(b""), None);
     }
 
     #[test]

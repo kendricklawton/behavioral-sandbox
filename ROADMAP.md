@@ -174,7 +174,9 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
 - [ ] **P5.4** Restore N clones from one warm snapshot; each gets a fresh overlay/tap.
 - [ ] **P5.5** Handle the uniqueness problems restore creates (network identity, entropy, clocks).
 - [ ] **P5.6** `Pool` that keeps warm restores ready so `exec` starts in ms.
-- [ ] **P5.7** Benchmark: cold boot vs snapshot restore vs warm-pool `exec` latency.
+- [ ] **P5.7** Benchmark: cold boot vs snapshot restore vs warm-pool `exec` latency. *(Baseline
+      to beat: Phase 1 boots a full rootfs copy in `/tmp` — on a tmpfs host that's ≈300 MB of RAM
+      per sandbox on top of guest memory; overlays should collapse that.)*
 - [ ] **P5.8** Test: restore a warm Python snapshot, run code, get output in ≪ cold-boot time.
 - **Exit gate + lesson:** warm restores make runs start in ms; write up **snapshotting, guest
   memory, and the state you must fix up on restore.**
@@ -190,7 +192,11 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 - [ ] **P6.5** `(decision)` per-run resource policy shape (the knobs the engine exposes) →
       `ARCHITECTURE.md`.
 - [ ] **P6.6** Verify isolation: a hostile guest + a hostile-ish workload can't escape the jail.
-- [ ] **P6.7** Clean cgroup/namespace teardown per run.
+- [ ] **P6.7** Clean cgroup/namespace teardown per run — and the leak-proofing this buys:
+      **host-process death (Ctrl-C, SIGKILL, OOM) cannot leak a VM**, because the cgroup owns its
+      lifetime from outside the driver. (Until here, teardown is `Drop`-based: killing the driver
+      mid-run leaks the VMM — a signal handler would only paper over SIGINT, so we wait for the
+      real mechanism.)
 - [ ] **P6.8** Test: a fork-bomb / mem-hog in the guest is bounded by the cgroup, host unaffected.
 - **Exit gate + lesson:** the VMM runs jailed + cgroup-limited; write up **namespaces, cgroups v2,
   seccomp, and capabilities** — the container-isolation primitives, seen through Firecracker.

@@ -12,6 +12,7 @@
 //! jailer (Phase 6) will break, hence the console capture sits behind [`Console`].
 
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,8 +42,12 @@ static VM_SEQ: AtomicU64 = AtomicU64::new(0);
 /// is tens of KiB, so the userspace marker is never dropped while it still matters.
 const CONSOLE_CAP: usize = 1 << 20; // 1 MiB
 
-/// Everything needed to boot one microVM. `from_env` resolves each field from `AGENT_*` env then a
-/// default; [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget on top.
+/// Firecracker's own stderr, captured to a file in the scratch dir (see `Spawned::launch`).
+const FC_STDERR: &str = "fc.stderr";
+
+/// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
+/// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
+/// [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget onto the resource knobs.
 #[derive(Debug, Clone)]
 pub struct BootConfig {
     /// The `firecracker` binary (name resolved via `PATH`, or an absolute path).
@@ -64,23 +69,24 @@ pub struct BootConfig {
 }
 
 impl BootConfig {
-    /// Resolve from the environment: `AGENT_FIRECRACKER`, `AGENT_KERNEL`, `AGENT_ROOTFS`,
-    /// `AGENT_MARKER`, else the pinned-artifact defaults under `artifacts/`.
+    /// Layer the environment overrides — `AGENT_FIRECRACKER`, `AGENT_KERNEL`, `AGENT_ROOTFS`,
+    /// `AGENT_MARKER` — onto [`BootConfig::default`]. The resource knobs (`vcpus`, `mem_mib`,
+    /// `boot_timeout`) have no env key; they come from [`Limits`] via
+    /// [`with_limits`](BootConfig::with_limits).
     pub fn from_env() -> Self {
-        let env_path = |key: &str, default: &str| {
-            PathBuf::from(std::env::var_os(key).unwrap_or_else(|| default.into()))
+        let mut cfg = Self::default();
+        let env_path = |key: &str, slot: &mut PathBuf| {
+            if let Some(v) = std::env::var_os(key) {
+                *slot = PathBuf::from(v);
+            }
         };
-        Self {
-            firecracker: env_path("AGENT_FIRECRACKER", "firecracker"),
-            kernel: env_path("AGENT_KERNEL", "artifacts/vmlinux"),
-            rootfs: env_path("AGENT_ROOTFS", "artifacts/rootfs.ext4"),
-            vcpus: 1,
-            mem_mib: 256,
-            boot_args: DEFAULT_BOOT_ARGS.to_string(),
-            userspace_marker: std::env::var("AGENT_MARKER")
-                .unwrap_or_else(|_| DEFAULT_USERSPACE_MARKER.to_string()),
-            boot_timeout: Duration::from_secs(30),
+        env_path("AGENT_FIRECRACKER", &mut cfg.firecracker);
+        env_path("AGENT_KERNEL", &mut cfg.kernel);
+        env_path("AGENT_ROOTFS", &mut cfg.rootfs);
+        if let Ok(v) = std::env::var("AGENT_MARKER") {
+            cfg.userspace_marker = v;
         }
+        cfg
     }
 
     /// Fold a per-sandbox [`Limits`] budget onto the config (vCPUs, memory, and the boot deadline).
@@ -94,14 +100,28 @@ impl BootConfig {
 }
 
 impl Default for BootConfig {
+    /// The pure pinned defaults — no environment reads (that's [`BootConfig::from_env`]), so
+    /// `default()` is deterministic. The resource knobs mirror [`Limits::default`] so the two
+    /// baselines cannot silently diverge.
     fn default() -> Self {
-        Self::from_env()
+        let limits = Limits::default();
+        Self {
+            firecracker: PathBuf::from("firecracker"),
+            kernel: PathBuf::from("artifacts/vmlinux"),
+            rootfs: PathBuf::from("artifacts/rootfs.ext4"),
+            vcpus: limits.vcpus,
+            mem_mib: limits.mem_mib,
+            boot_args: DEFAULT_BOOT_ARGS.to_string(),
+            userspace_marker: DEFAULT_USERSPACE_MARKER.to_string(),
+            boot_timeout: limits.wall,
+        }
     }
 }
 
 /// A booted-and-ready microVM: the `firecracker` child, its API socket, scratch dir, and the
 /// captured console. Guaranteed teardown lives in `Drop`, so losing this value can't leak the VMM.
 #[derive(Debug)]
+#[must_use = "dropping a RunningVm kills its microVM"]
 pub struct RunningVm {
     child: Child,
     workdir: PathBuf,
@@ -126,12 +146,17 @@ impl Vm {
     /// [`VmmError::Vmm`] for any Firecracker API or process failure. On any error the child is
     /// killed and the scratch dir removed before returning.
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
+        // Checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
+        // on hosts without KVM (a fake "firecracker" needs no VM).
+        if !Path::new("/dev/kvm").exists() {
+            return Err(VmmError::NoKvm);
+        }
         let mut spawned = Spawned::launch(&config)?;
         let boot_latency = match spawned.run_boot(&config) {
             Ok(latency) => latency,
             Err(e) => return Err(spawned.abort(e)),
         };
-        Ok(spawned.into_running(boot_latency))
+        spawned.into_running(boot_latency)
     }
 }
 
@@ -184,22 +209,29 @@ impl Drop for RunningVm {
 }
 
 /// A spawned-but-not-yet-ready VMM. Kept distinct from [`RunningVm`] so the boot sequence can fail
-/// and clean up without ever constructing a half-booted `RunningVm`.
+/// and clean up without ever constructing a half-booted `RunningVm`. Its `Drop` is the panic
+/// safety net: if anything unwinds between `launch` and `abort`/`into_running` (a panicking
+/// `tracing` subscriber, a future bug), the VMM still dies and the scratch dir is still reclaimed.
 struct Spawned {
-    child: Child,
-    stderr: Option<std::process::ChildStderr>,
+    /// `Some` until `abort`/`into_running` disarm the guard by taking it.
+    child: Option<Child>,
     console: Console,
     workdir: PathBuf,
     rootfs: PathBuf,
     api: ApiClient,
 }
 
-impl Spawned {
-    /// Validate prerequisites, lay out the scratch dir, and spawn `firecracker --api-sock`.
-    fn launch(config: &BootConfig) -> Result<Self, VmmError> {
-        if !Path::new("/dev/kvm").exists() {
-            return Err(VmmError::NoKvm);
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            teardown(&mut child, &mut self.console, &self.workdir);
         }
+    }
+}
+
+impl Spawned {
+    /// Validate the inputs, lay out the scratch dir, and spawn `firecracker --api-sock`.
+    fn launch(config: &BootConfig) -> Result<Self, VmmError> {
         require_file(&config.kernel, "kernel image")?;
         require_file(&config.rootfs, "rootfs image")?;
 
@@ -211,14 +243,30 @@ impl Spawned {
             let _ = std::fs::remove_dir_all(&workdir);
             VmmError::Vmm(format!("copy rootfs to {}: {e}", rootfs.display()))
         })?;
+        // `fs::copy` propagates the source's mode; a read-only pinned base (0444) would make the
+        // read-write root drive unopenable. The copy is ours alone — force owner read-write.
+        if let Err(e) = std::fs::set_permissions(&rootfs, std::fs::Permissions::from_mode(0o600)) {
+            let _ = std::fs::remove_dir_all(&workdir);
+            return Err(VmmError::Vmm(format!("chmod rootfs copy: {e}")));
+        }
 
+        // Firecracker's own logs go to a *file* in the scratch dir: not our stderr (that's the
+        // host's tracing), and not a pipe — an unread pipe back-pressures a chatty VMM, and a
+        // dropped one would feed it EPIPE mid-run. `abort` reads the file back for diagnostics.
         let socket = workdir.join("fc.sock");
+        let fc_stderr = match std::fs::File::create(workdir.join(FC_STDERR)) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(VmmError::Vmm(format!("create firecracker stderr log: {e}")));
+            }
+        };
         let mut child = match Command::new(&config.firecracker)
             .arg("--api-sock")
             .arg(&socket)
             .stdin(Stdio::null())
             .stdout(Stdio::piped()) // guest serial console
-            .stderr(Stdio::piped()) // Firecracker's own logs, kept off our stderr
+            .stderr(Stdio::from(fc_stderr))
             .spawn()
         {
             Ok(child) => child,
@@ -237,11 +285,17 @@ impl Spawned {
         };
 
         let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        let console = Console::spawn(stdout);
+        let console = match Console::spawn(stdout) {
+            Ok(console) => console,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(e);
+            }
+        };
         Ok(Self {
-            child,
-            stderr,
+            child: Some(child),
             console,
             workdir,
             rootfs,
@@ -260,8 +314,20 @@ impl Spawned {
             .unwrap_or_else(|| now + Duration::from_secs(86_400));
         self.await_api_socket(deadline)?;
 
+        // Each API call is individually time-capped by the client, but their *sum* must also
+        // respect the boot deadline — otherwise a slow VMM could stretch `boot` well past `wall`.
+        fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
+            if Instant::now() >= deadline {
+                return Err(VmmError::Timeout(format!(
+                    "boot deadline expired before {what}"
+                )));
+            }
+            Ok(())
+        }
+
         let kernel = path_str(&config.kernel)?;
         let rootfs = path_str(&self.rootfs)?;
+        still_before(deadline, "PUT /boot-source")?;
         self.api.put(
             "/boot-source",
             &BootSource {
@@ -269,6 +335,7 @@ impl Spawned {
                 boot_args: &config.boot_args,
             },
         )?;
+        still_before(deadline, "PUT /drives/rootfs")?;
         self.api.put(
             "/drives/rootfs",
             &Drive {
@@ -278,6 +345,7 @@ impl Spawned {
                 is_read_only: false,
             },
         )?;
+        still_before(deadline, "PUT /machine-config")?;
         self.api.put(
             "/machine-config",
             &MachineConfig {
@@ -286,6 +354,7 @@ impl Spawned {
             },
         )?;
 
+        still_before(deadline, "InstanceStart")?;
         // The number that matters is measured from InstanceStart to the userspace marker.
         let started = Instant::now();
         self.api.put(
@@ -347,19 +416,25 @@ impl Spawned {
 
     /// `Some(status)` if the child has already exited, mapping the wait error to a typed value.
     fn exited(&mut self) -> Result<Option<std::process::ExitStatus>, VmmError> {
-        self.child
-            .try_wait()
-            .map_err(|e| VmmError::Vmm(format!("wait on firecracker: {e}")))
+        match self.child.as_mut() {
+            Some(child) => child
+                .try_wait()
+                .map_err(|e| VmmError::Vmm(format!("wait on firecracker: {e}"))),
+            // Unreachable while the guard is armed; a typed error beats lying about liveness.
+            None => Err(VmmError::Vmm("VMM child already reclaimed".into())),
+        }
     }
 
-    /// Boot failed: tear the VMM down and enrich the cause with Firecracker's stderr tail.
+    /// Boot failed: kill the VMM, read back its stderr log to enrich the cause, then reclaim the
+    /// scratch dir — in that order, because the log lives *in* the scratch dir.
     fn abort(mut self, cause: VmmError) -> VmmError {
-        teardown(&mut self.child, &mut self.console, &self.workdir);
-        let mut detail = String::new();
-        if let Some(mut stderr) = self.stderr.take() {
-            // The child is dead, so this reads to EOF and cannot block.
-            let _ = stderr.read_to_string(&mut detail);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
+        self.console.join();
+        let detail = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&self.workdir);
         let tail = detail.lines().rev().take(3).collect::<Vec<_>>();
         if tail.is_empty() {
             return cause;
@@ -372,16 +447,20 @@ impl Spawned {
         }
     }
 
-    /// Promote a successfully-booted VMM to a [`RunningVm`]. The stderr pipe is dropped: past boot
-    /// it's noise, and leaving it unread could back-pressure a chatty VMM.
-    fn into_running(mut self, boot_latency: Duration) -> RunningVm {
-        RunningVm {
-            child: self.child,
+    /// Promote a successfully-booted VMM to a [`RunningVm`], disarming this guard's `Drop`
+    /// (hence the `mem::take`s — a `Drop` type can't be destructured).
+    fn into_running(mut self, boot_latency: Duration) -> Result<RunningVm, VmmError> {
+        let Some(child) = self.child.take() else {
+            // Unreachable: `boot` only promotes a still-armed guard.
+            return Err(VmmError::Vmm("VMM child already reclaimed".into()));
+        };
+        Ok(RunningVm {
+            child,
             workdir: std::mem::take(&mut self.workdir),
             console: std::mem::take(&mut self.console),
             api: self.api.clone(),
             boot_latency,
-        }
+        })
     }
 }
 
@@ -402,7 +481,18 @@ fn create_workdir() -> Result<PathBuf, VmmError> {
             VM_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         match std::fs::DirBuilder::new().mode(0o700).create(&workdir) {
-            Ok(()) => return Ok(workdir),
+            Ok(()) => {
+                // mkdir's mode is masked by the umask; an explicit chmod after the
+                // fail-if-exists create makes 0700 unconditional (and race-free — the dir is
+                // already exclusively ours).
+                if let Err(e) =
+                    std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o700))
+                {
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(VmmError::Vmm(format!("chmod {}: {e}", workdir.display())));
+                }
+                return Ok(workdir);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(VmmError::Vmm(format!("create {}: {e}", workdir.display()))),
         }
@@ -418,9 +508,7 @@ fn teardown(child: &mut Child, console: &mut Console, workdir: &Path) {
     let _ = child.kill();
     let _ = child.wait();
     console.join();
-    if !workdir.as_os_str().is_empty() {
-        let _ = std::fs::remove_dir_all(workdir);
-    }
+    let _ = std::fs::remove_dir_all(workdir);
 }
 
 /// The captured serial console: a background thread appends the child's stdout into a shared
@@ -434,25 +522,36 @@ struct Console {
 impl Console {
     /// Start draining `stdout` immediately (before `InstanceStart`): the OS pipe buffer is ~64 KiB
     /// and a chatty boot would deadlock the guest if we only read after starting it.
-    fn spawn(stdout: Option<ChildStdout>) -> Self {
+    ///
+    /// # Errors
+    /// [`VmmError::Vmm`] if the OS refuses a new thread (`thread::spawn` would *panic* on that —
+    /// EAGAIN is a real state under many-sandbox load, so it must stay a typed error).
+    fn spawn(stdout: Option<ChildStdout>) -> Result<Self, VmmError> {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
-        let reader = stdout.map(|mut out| {
-            let sink = Arc::clone(&buf);
-            std::thread::spawn(move || {
-                let mut chunk = [0u8; 4096];
-                loop {
-                    match out.read(&mut chunk) {
-                        Ok(0) | Err(_) => break,
-                        Ok(n) => {
-                            if let Ok(mut g) = sink.lock() {
-                                append_capped(&mut g, &chunk[..n]);
+        let reader = match stdout {
+            None => None,
+            Some(mut out) => {
+                let sink = Arc::clone(&buf);
+                let handle = std::thread::Builder::new()
+                    .name("agent-console".into())
+                    .spawn(move || {
+                        let mut chunk = [0u8; 4096];
+                        loop {
+                            match out.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => {
+                                    if let Ok(mut g) = sink.lock() {
+                                        append_capped(&mut g, &chunk[..n]);
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-            })
-        });
-        Self { buf, reader }
+                    })
+                    .map_err(|e| VmmError::Vmm(format!("spawn console reader: {e}")))?;
+                Some(handle)
+            }
+        };
+        Ok(Self { buf, reader })
     }
 
     /// Whether the console captured so far contains `marker`.
@@ -546,9 +645,67 @@ mod tests {
 
     #[test]
     fn console_captures_and_scans() {
-        let console = Console::spawn(None); // no stdout: buffer stays empty but the API works
+        // No stdout: the buffer stays empty but the API works.
+        let console = Console::spawn(None).expect("no thread needed");
         assert!(!console.contains("login:"));
         assert_eq!(console.snapshot(), "");
+    }
+
+    #[test]
+    fn default_is_pure_and_matches_limits_defaults() {
+        let (cfg, limits) = (BootConfig::default(), Limits::default());
+        assert_eq!(cfg.vcpus, limits.vcpus);
+        assert_eq!(cfg.mem_mib, limits.mem_mib);
+        assert_eq!(cfg.boot_timeout, limits.wall);
+    }
+
+    #[test]
+    fn from_env_layers_overrides_onto_defaults() {
+        // `set_var` is process-global, but only this test touches these keys and no other test
+        // asserts on the fields they feed.
+        std::env::set_var("AGENT_KERNEL", "/elsewhere/vmlinux");
+        std::env::set_var("AGENT_MARKER", "guest-ready");
+        let cfg = BootConfig::from_env();
+        std::env::remove_var("AGENT_KERNEL");
+        std::env::remove_var("AGENT_MARKER");
+        assert_eq!(cfg.kernel, PathBuf::from("/elsewhere/vmlinux"));
+        assert_eq!(cfg.userspace_marker, "guest-ready");
+        let default = BootConfig::default();
+        assert_eq!(cfg.rootfs, default.rootfs, "unset keys keep the default");
+        assert_eq!(cfg.firecracker, default.firecracker);
+    }
+
+    #[test]
+    fn dead_vmm_fails_fast_with_its_stderr_tail() {
+        // A "firecracker" that exits immediately, complaining on stderr: `sh --api-sock <path>`
+        // rejects the flag. Boot must fail fast with the exit surfaced — not wait out the whole
+        // deadline — and carry the stderr tail. Needs no KVM, so it runs in the host gate.
+        let dir = std::env::temp_dir().join(format!("agent-fake-fc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("test scratch dir");
+        let kernel = dir.join("vmlinux");
+        let rootfs = dir.join("rootfs.ext4");
+        std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
+        std::fs::write(&rootfs, b"not a rootfs").expect("fake rootfs");
+
+        let cfg = BootConfig {
+            firecracker: PathBuf::from("sh"),
+            kernel,
+            rootfs,
+            boot_timeout: Duration::from_secs(10),
+            ..BootConfig::default()
+        };
+        let started = Instant::now();
+        let mut spawned = Spawned::launch(&cfg).expect("launch the fake vmm");
+        let err = spawned.run_boot(&cfg).expect_err("a dead vmm cannot boot");
+        let msg = spawned.abort(err).to_string();
+
+        assert!(msg.contains("exited before boot"), "fail fast, got: {msg}");
+        assert!(msg.contains("[firecracker:"), "stderr tail attached: {msg}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "must not wait out the boot deadline"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -565,7 +722,6 @@ mod tests {
 
     #[test]
     fn workdirs_are_fresh_private_and_distinct() {
-        use std::os::unix::fs::PermissionsExt;
         let a = create_workdir().expect("first workdir");
         let b = create_workdir().expect("second workdir");
         assert_ne!(a, b, "each VM gets its own scratch dir");

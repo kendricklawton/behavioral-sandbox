@@ -6,6 +6,7 @@
 //! ROADMAP Phase 1+ (until then they report a typed "not implemented yet" and exit `2`).
 #![forbid(unsafe_code)]
 
+use std::io::Write;
 use std::process::ExitCode;
 
 use agent_vmm::{Limits, Sandbox, VmmError};
@@ -48,7 +49,8 @@ fn main() -> ExitCode {
     match run(cli.cmd) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("agent: {e}");
+            // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
+            let _ = writeln!(std::io::stderr(), "agent: {e}");
             ExitCode::from(2) // operational error
         }
     }
@@ -60,8 +62,11 @@ fn run(cmd: Cmd) -> Result<ExitCode, VmmError> {
             // Phase 1 boots the microVM; Phase 2 execs the argv and streams its output.
             let sandbox = Sandbox::boot(Limits::default())?;
             if args.demo_boot {
-                // The run result goes to stdout (stderr is reserved for logs).
-                println!(
+                // The run result goes to stdout (stderr is reserved for logs). Not `println!` —
+                // it panics on a closed pipe (`agent run … | head -0`), and a no-panic host path
+                // includes the shell pipeline case.
+                let _ = writeln!(
+                    std::io::stdout(),
                     "booted microVM to userspace in {} ms",
                     sandbox.boot_latency().as_millis()
                 );

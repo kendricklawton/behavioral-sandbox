@@ -163,5 +163,10 @@ cargo xtask ci-privileged     # the real boot test (needs /dev/kvm + artifacts)
 
 No networking (the guest has zero egress by construction — *deny by default*), no way to run a
 command yet (that's `exec`, Phase 2, over vsock), no jailer/cgroup confinement of the VMM itself
-(Phase 6), no snapshots (Phase 5). Phase 1 is the single load-bearing capability everything else
-hangs off: **a hardware-isolated guest that boots to userspace and dies on command.**
+(Phase 6), no snapshots (Phase 5). Two consequences of that scoping, owned by later phases:
+teardown is `Drop`-based, so killing the *driver* mid-run (Ctrl-C, SIGKILL) leaks the VMM until
+the cgroup owns its lifetime (P6.7 — a signal handler would only cover SIGINT, so we wait for the
+real mechanism); and each boot copies the full rootfs into `/tmp` — on a tmpfs host that's
+~300 MB of RAM per sandbox, the density baseline Phase 5's overlays are measured against (P5.7).
+Phase 1 is the single load-bearing capability everything else hangs off: **a hardware-isolated
+guest that boots to userspace and dies on command.**

@@ -10,11 +10,17 @@ use std::time::Duration;
 use agent_vmm::{BootConfig, Vm};
 
 /// A boot config pointed at the workspace's fetched artifacts (absolute, so it's cwd-independent).
+/// Explicit `AGENT_KERNEL`/`AGENT_ROOTFS` overrides still win — they're the documented escape
+/// hatch for hosts without the pinned artifacts (e.g. non-x86_64).
 fn config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut cfg = BootConfig::from_env();
-    cfg.kernel = root.join("artifacts/vmlinux");
-    cfg.rootfs = root.join("artifacts/rootfs.ext4");
+    if std::env::var_os("AGENT_KERNEL").is_none() {
+        cfg.kernel = root.join("artifacts/vmlinux");
+    }
+    if std::env::var_os("AGENT_ROOTFS").is_none() {
+        cfg.rootfs = root.join("artifacts/rootfs.ext4");
+    }
     cfg.boot_timeout = Duration::from_secs(30);
     cfg
 }
@@ -22,13 +28,15 @@ fn config() -> BootConfig {
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn boots_to_userspace_and_shuts_down() {
-    let vm = Vm::boot(config()).expect("microVM should boot to userspace");
+    let cfg = config();
+    let marker = cfg.userspace_marker.clone();
+    let vm = Vm::boot(cfg).expect("microVM should boot to userspace");
 
     // Boot returns only after the marker is seen, so this is guaranteed — but assert it anyway to
     // document what "reached userspace" means, and that the console was actually captured.
     assert!(
-        vm.console().contains("login:"),
-        "console should show the userspace (getty) marker; got:\n{}",
+        vm.console().contains(&marker),
+        "console should show the userspace marker {marker:?}; got:\n{}",
         vm.console()
     );
 

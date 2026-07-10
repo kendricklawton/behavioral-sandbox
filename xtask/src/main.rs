@@ -169,10 +169,17 @@ fn fetch_artifacts() -> Result<()> {
             continue;
         }
         println!("↓ {} <- {}", name.display(), a.url);
-        curl_download(&a.url, &a.dest)?;
-        let got = sha256_of(&a.dest)?;
+        // Download to a `.part` and rename into place only after the hash verifies, so an
+        // interrupted or failed download can never leave a plausible-looking file at the final
+        // path (`ci-privileged` gates on presence alone).
+        let part = a.dest.with_extension("part");
+        if let Err(e) = curl_download(&a.url, &part) {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+        let got = sha256_of(&part)?;
         if got != a.sha256 {
-            let _ = std::fs::remove_file(&a.dest);
+            let _ = std::fs::remove_file(&part);
             bail!(
                 "sha256 mismatch for {}: expected {}, got {} (removed)",
                 name.display(),
@@ -180,6 +187,8 @@ fn fetch_artifacts() -> Result<()> {
                 got
             );
         }
+        std::fs::rename(&part, &a.dest)
+            .with_context(|| format!("move {} into place", part.display()))?;
         println!("✓ {} verified", name.display());
     }
     println!("\n✓ artifacts ready in {}", dir.display());
