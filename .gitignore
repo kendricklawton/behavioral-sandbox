@@ -1,7 +1,10 @@
 /target
-# detectors build to their own target dir under the git-ignored root target
+# eBPF objects build to their own target dir under the git-ignored root target
 **/target/
 **/*.rs.bk
 .env
 .env.local
 *.log
+# Built/downloaded VM images (guest kernel + rootfs) — fetched by `cargo xtask fetch-artifacts`,
+# never committed.
+/artifacts/

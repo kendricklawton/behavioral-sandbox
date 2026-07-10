@@ -41,6 +41,16 @@ Four properties every phase must protect:
 - **Git is human-driven.** The user makes every commit/branch/push; the coding agent's job ends at
   changes made, demo working, box checked in the working tree.
 
+## §0.6 Versioning (the finish line)
+
+- **`v0.1.0` is the finish line** — the first real release, cut only once **every phase below is
+  green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; this is
+  P18.8).
+- **Everything until then is a pre-release `v0.0.x`.** Tag the foundation baseline (the engine
+  boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
+  patch as they land. These are checkpoints, not releases — no stability promise.
+- Tags are a **human git step** (§0.5): the coding agent checks boxes; the user cuts the tag.
+
 ## §0.75 Dev environment (one-time)
 
 A modern Linux box with `/dev/kvm` (the dev machine already has a bleeding-edge kernel + BTF —
@@ -82,20 +92,27 @@ Turn `agent` from the wasm scanner into the Firecracker + aya sandbox; keep the 
 
 The "hello, KVM" moment: a program that boots a real Linux microVM and reads its console.
 
-- [ ] **P1.1** `(decision)` how to drive Firecracker: its **HTTP API over a unix socket** vs the
+- [x] **P1.1** `(decision)` how to drive Firecracker: its **HTTP API over a unix socket** vs the
       `firecracker` binary vs embedding `rust-vmm` crates → `ARCHITECTURE.md`. (Default: API socket.)
-- [ ] **P1.2** Fetch/pin a guest kernel (`vmlinux`) and a minimal rootfs image for first boot.
-- [ ] **P1.3** `crates/vmm`: start a `firecracker` process with a jailer-free config for dev;
+      *(Recorded as decision 001: API socket, hand-rolled HTTP/1.1 over `UnixStream`, `unsafe`-free.)*
+- [x] **P1.2** Fetch/pin a guest kernel (`vmlinux`) and a minimal rootfs image for first boot.
+      *(Firecracker v1.9 CI artifacts, sha256-pinned; `cargo xtask fetch-artifacts`, gitignored.)*
+- [x] **P1.3** `crates/vmm`: start a `firecracker` process with a jailer-free config for dev;
       talk to its API socket.
-- [ ] **P1.4** Configure the boot source (kernel + boot args) and a root block device via the API.
-- [ ] **P1.5** Set the machine config (vcpus, mem) and `InstanceStart`.
-- [ ] **P1.6** Capture the serial console to the host; assert the guest reached userspace.
-- [ ] **P1.7** Clean shutdown + teardown (kill VMM, remove socket/artifacts); no leaks between runs.
-- [ ] **P1.8** A `Vm::boot(config) -> RunningVm` / `RunningVm::shutdown()` API over all of the above.
-- [ ] **P1.9** Timing: measure and log boot-to-userspace latency (the number that matters).
-- [ ] **P1.10** Test: boot → see the login/init banner → shut down, repeatable.
+- [x] **P1.4** Configure the boot source (kernel + boot args) and a root block device via the API.
+- [x] **P1.5** Set the machine config (vcpus, mem) and `InstanceStart`.
+- [x] **P1.6** Capture the serial console to the host; assert the guest reached userspace.
+      *(`login:` marker; reader thread drains stdout before `InstanceStart` to avoid a pipe deadlock.)*
+- [x] **P1.7** Clean shutdown + teardown (kill VMM, remove socket/artifacts); no leaks between runs.
+      *(Guaranteed teardown in `Drop`; per-VM short scratch dir; boots a rootfs copy, base stays pinned.)*
+- [x] **P1.8** A `Vm::boot(config) -> RunningVm` / `RunningVm::shutdown()` API over all of the above.
+- [x] **P1.9** Timing: measure and log boot-to-userspace latency (the number that matters).
+      *(~1.2 s cold on the dev box; logged every run and printed by `--demo-boot`.)*
+- [x] **P1.10** Test: boot → see the login/init banner → shut down, repeatable.
+      *(`crates/vmm/tests/boot.rs`, `#[ignore]`d; two cycles asserting no leaked scratch dirs.)*
 - **Exit gate + lesson:** a microVM boots to userspace from `cargo run` and shuts down clean; write
   up the **boot protocol** (kernel + boot args + virtio-block rootfs) and the microVM lifecycle.
+  *(Demo: `agent run --demo-boot`. Writeup: `docs/001-boot-a-microvm.md`.)*
 
 ## Phase 2 — Run code in the guest & get results back
 

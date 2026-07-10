@@ -8,8 +8,12 @@ publish = false
 description = "The Firecracker driver — microVM lifecycle, networking, snapshots, and the Sandbox API."
 
 [dependencies]
-# Skeleton has no deps yet. Phase 1 adds the Firecracker API client (serde/serde_json over a unix
-# socket) + tracing; the host path stays `unsafe`-free.
+# The Firecracker API is JSON over a unix socket: serde builds the request bodies, serde_json
+# (de)serializes, and a tiny hand-rolled HTTP/1.1 client over `std::os::unix::net::UnixStream`
+# speaks to it — no async runtime, no HTTP crate. The host path stays `unsafe`-free.
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
 
 [lints]
 workspace = true

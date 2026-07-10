@@ -10,7 +10,7 @@
 //! workspace; its object build folds into `ci` at ROADMAP Phase 8.
 #![forbid(unsafe_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -34,6 +34,8 @@ enum Cmd {
     CiPrivileged,
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
+    /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
+    FetchArtifacts,
 }
 
 fn main() -> Result<()> {
@@ -41,6 +43,7 @@ fn main() -> Result<()> {
         Cmd::Ci => ci(),
         Cmd::CiPrivileged => ci_privileged(),
         Cmd::Setup => setup(),
+        Cmd::FetchArtifacts => fetch_artifacts(),
     }
 }
 
@@ -73,6 +76,17 @@ fn ci_privileged() -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
     }
+    // The boot tests need the pinned kernel + rootfs; fail with the fix rather than a cryptic
+    // boot error. `fetch-artifacts` (not this gate) does the network download, so this stays a
+    // pure presence check.
+    for a in artifacts()? {
+        if !a.dest.is_file() {
+            bail!(
+                "missing artifact {} — run `cargo xtask fetch-artifacts` first",
+                a.dest.display()
+            );
+        }
+    }
     cargo(&["test", "--workspace", "--locked", "--", "--ignored"])?;
     println!("\n✓ privileged integration passed");
     Ok(())
@@ -90,8 +104,117 @@ fn setup() -> Result<()> {
     check("firecracker in PATH", in_path("firecracker"));
     check("jailer in PATH", in_path("jailer"));
     check("bpf-linker installed", in_path("bpf-linker"));
+    let dir = artifacts_dir();
+    check(
+        "guest kernel + rootfs (cargo xtask fetch-artifacts)",
+        dir.join("vmlinux").is_file() && dir.join("rootfs.ext4").is_file(),
+    );
     println!("\nMissing items are covered in CONTRIBUTING.md → Prerequisites.");
     Ok(())
+}
+
+/// A pinned boot artifact: a stable URL, its expected sha256 (the real contract — the URL is
+/// replaceable), and where it lands under `artifacts/`.
+struct Artifact {
+    url: String,
+    sha256: &'static str,
+    dest: PathBuf,
+}
+
+/// The kernel + rootfs pinned for the host architecture. Matched to Firecracker v1.9's CI
+/// artifacts (uncompressed `vmlinux` + a minimal Ubuntu ext4). Only x86_64 is pinned so far.
+fn artifacts() -> Result<Vec<Artifact>> {
+    let dir = artifacts_dir();
+    let base = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.9";
+    match std::env::consts::ARCH {
+        "x86_64" => Ok(vec![
+            Artifact {
+                url: format!("{base}/x86_64/vmlinux-6.1.102"),
+                sha256: "3b6e45c66d1b66d4fb0a1528107abbe890972f94e902bafe85fdf5108288c575",
+                dest: dir.join("vmlinux"),
+            },
+            Artifact {
+                url: format!("{base}/x86_64/ubuntu-22.04.ext4"),
+                sha256: "b930af6ed56c5347c200eddfa4ae4701eed6f7d7fb30a6b9b8d2d30bfc2a2ed7",
+                dest: dir.join("rootfs.ext4"),
+            },
+        ]),
+        other => bail!(
+            "no pinned artifacts for arch {other} yet (x86_64 only) — set AGENT_KERNEL/AGENT_ROOTFS \
+             to your own uncompressed vmlinux + ext4 rootfs"
+        ),
+    }
+}
+
+/// `artifacts/` under the workspace root (not the cwd), so `fetch-artifacts` works from anywhere.
+fn artifacts_dir() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| Path::new("."));
+    root.join("artifacts")
+}
+
+/// Download each artifact (skipping any already present with the right hash) and sha256-verify it.
+fn fetch_artifacts() -> Result<()> {
+    let items = artifacts()?;
+    let dir = artifacts_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    for a in &items {
+        let name = a
+            .dest
+            .file_name()
+            .map_or_else(|| a.dest.clone(), PathBuf::from);
+        if a.dest.is_file() && sha256_of(&a.dest)? == a.sha256 {
+            println!("✓ {} already present (sha256 ok)", name.display());
+            continue;
+        }
+        println!("↓ {} <- {}", name.display(), a.url);
+        curl_download(&a.url, &a.dest)?;
+        let got = sha256_of(&a.dest)?;
+        if got != a.sha256 {
+            let _ = std::fs::remove_file(&a.dest);
+            bail!(
+                "sha256 mismatch for {}: expected {}, got {} (removed)",
+                name.display(),
+                a.sha256,
+                got
+            );
+        }
+        println!("✓ {} verified", name.display());
+    }
+    println!("\n✓ artifacts ready in {}", dir.display());
+    Ok(())
+}
+
+/// `curl -fSL` a URL to `dest` (fail on HTTP error, follow redirects).
+fn curl_download(url: &str, dest: &Path) -> Result<()> {
+    let status = Command::new("curl")
+        .args(["-fSL", "-o"])
+        .arg(dest)
+        .arg(url)
+        .status()
+        .context("running curl (is it installed?)")?;
+    if !status.success() {
+        bail!("curl failed for {url}");
+    }
+    Ok(())
+}
+
+/// The sha256 of a file, via the `sha256sum` CLI (no hashing crate on the dev-tooling path).
+fn sha256_of(path: &Path) -> Result<String> {
+    let out = Command::new("sha256sum")
+        .arg(path)
+        .output()
+        .context("running sha256sum (is it installed?)")?;
+    if !out.status.success() {
+        bail!("sha256sum failed for {}", path.display());
+    }
+    let text = String::from_utf8(out.stdout).context("sha256sum output not UTF-8")?;
+    let hash = text
+        .split_whitespace()
+        .next()
+        .context("empty sha256sum output")?;
+    Ok(hash.to_string())
 }
 
 fn check(label: &str, ok: bool) {

@@ -60,6 +60,11 @@ fn run(cmd: Cmd) -> Result<ExitCode, VmmError> {
             // Phase 1 boots the microVM; Phase 2 execs the argv and streams its output.
             let sandbox = Sandbox::boot(Limits::default())?;
             if args.demo_boot {
+                // The run result goes to stdout (stderr is reserved for logs).
+                println!(
+                    "booted microVM to userspace in {} ms",
+                    sandbox.boot_latency().as_millis()
+                );
                 return sandbox.shutdown().map(|()| ExitCode::SUCCESS);
             }
             let result = sandbox.exec(&args.argv)?;

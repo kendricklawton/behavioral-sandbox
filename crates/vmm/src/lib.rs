@@ -2,21 +2,34 @@
 //! [`Sandbox`] lifecycle API.
 //!
 //! The host path is `unsafe`-free; a hostile or crashing guest is a typed [`VmmError`], never a
-//! panic, hang, or leak. **Skeleton only** — the API surface is sketched so the CLI compiles
-//! against it; the real boot/exec/networking land in ROADMAP Phase 1+.
+//! panic, hang, or leak. Phase 1 makes [`Vm::boot`] real — it boots a Firecracker microVM and
+//! reads its serial console; [`exec`](Sandbox::exec) and networking land in later phases.
+//!
+//! Two layers:
+//! - [`Vm`] / [`RunningVm`] — the raw microVM: boot to userspace, read the console, shut down.
+//! - [`Sandbox`] — the CLI-facing lifecycle wrapper (grows `exec`/files/policy in later phases).
 #![forbid(unsafe_code)]
 
+mod firecracker;
+mod vm;
+
 use std::time::Duration;
+
+pub use vm::{BootConfig, RunningVm, Vm};
 
 /// Every way driving a microVM can fail, as a typed value.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VmmError {
-    /// Not implemented yet — the driver is a Phase-0 skeleton. Names the surface + its phase.
+    /// Not implemented yet — names the surface and the phase that lands it.
     Unimplemented(&'static str),
     /// The host can't do KVM (`/dev/kvm` missing or not permitted).
     NoKvm,
-    /// A Firecracker API, boot, or host↔guest channel failure.
+    /// A required input is missing: the `firecracker` binary, the kernel, or the rootfs image.
+    Artifact(String),
+    /// A bounded wait expired (API socket readiness, boot-to-userspace, a wedged API call).
+    Timeout(String),
+    /// A Firecracker API, boot, process, or host↔guest channel failure.
     Vmm(String),
 }
 
@@ -25,6 +38,8 @@ impl std::fmt::Display for VmmError {
         match self {
             VmmError::Unimplemented(what) => write!(f, "not implemented yet: {what}"),
             VmmError::NoKvm => f.write_str("KVM unavailable: /dev/kvm missing or not permitted"),
+            VmmError::Artifact(e) => write!(f, "missing artifact: {e}"),
+            VmmError::Timeout(e) => write!(f, "timed out: {e}"),
             VmmError::Vmm(e) => write!(f, "vmm error: {e}"),
         }
     }
@@ -40,7 +55,7 @@ pub struct Limits {
     pub vcpus: u32,
     /// Guest memory, MiB.
     pub mem_mib: u32,
-    /// Wall-clock budget for a run.
+    /// Wall-clock budget for a run (also the boot-to-userspace deadline).
     pub wall: Duration,
 }
 
@@ -66,19 +81,22 @@ pub struct RunResult {
     pub stderr: Vec<u8>,
 }
 
-/// A microVM sandbox. `boot` lands in Phase 1, `exec` in Phase 2.
+/// A microVM sandbox: the CLI-facing lifecycle type, backed by a [`RunningVm`]. `boot` is live as
+/// of Phase 1; `exec` lands in Phase 2.
 #[derive(Debug)]
-#[non_exhaustive]
-pub struct Sandbox {}
+pub struct Sandbox {
+    vm: RunningVm,
+}
 
 impl Sandbox {
-    /// Boot a microVM under `limits`, ready to run code. **ROADMAP Phase 1.**
+    /// Boot a microVM under `limits`, ready to run code.
     ///
     /// # Errors
-    /// [`VmmError`] on any boot failure (no KVM, a Firecracker error).
+    /// [`VmmError`] on any boot failure (no KVM, a missing artifact, a Firecracker error, or a
+    /// boot-to-userspace timeout).
     pub fn boot(limits: Limits) -> Result<Self, VmmError> {
-        let _ = limits;
-        Err(VmmError::Unimplemented("Sandbox::boot (ROADMAP Phase 1)"))
+        let vm = Vm::boot(BootConfig::from_env().with_limits(limits))?;
+        Ok(Self { vm })
     }
 
     /// Run `argv` in the guest and capture its output. **ROADMAP Phase 2.**
@@ -90,13 +108,23 @@ impl Sandbox {
         Err(VmmError::Unimplemented("Sandbox::exec (ROADMAP Phase 2)"))
     }
 
+    /// Boot-to-userspace latency of this sandbox's microVM.
+    #[must_use]
+    pub fn boot_latency(&self) -> Duration {
+        self.vm.boot_latency()
+    }
+
+    /// A UTF-8-lossy snapshot of the guest serial console captured so far.
+    #[must_use]
+    pub fn console(&self) -> String {
+        self.vm.console()
+    }
+
     /// Shut the microVM down and reclaim its resources.
     ///
     /// # Errors
     /// [`VmmError`] if teardown fails.
     pub fn shutdown(self) -> Result<(), VmmError> {
-        Err(VmmError::Unimplemented(
-            "Sandbox::shutdown (ROADMAP Phase 1)",
-        ))
+        self.vm.shutdown()
     }
 }
