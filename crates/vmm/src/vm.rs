@@ -48,7 +48,11 @@ const FC_STDERR: &str = "fc.stderr";
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
 /// [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget onto the resource knobs.
+/// `#[non_exhaustive]`: construct via [`from_env`](BootConfig::from_env) /
+/// [`default`](BootConfig::default) and mutate fields — later phases add knobs (tap, jailer,
+/// snapshots) without breaking downstream literals.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct BootConfig {
     /// The `firecracker` binary (name resolved via `PATH`, or an absolute path).
     pub firecracker: PathBuf,
@@ -74,16 +78,25 @@ impl BootConfig {
     /// `boot_timeout`) have no env key; they come from [`Limits`] via
     /// [`with_limits`](BootConfig::with_limits).
     pub fn from_env() -> Self {
+        Self::from_env_with(|key| std::env::var_os(key))
+    }
+
+    /// The testable core of [`from_env`](BootConfig::from_env): overrides come through `lookup`,
+    /// so precedence is unit-testable without mutating the process environment (which races
+    /// under the parallel test runner and is `unsafe` from edition 2024).
+    fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
         let mut cfg = Self::default();
-        let env_path = |key: &str, slot: &mut PathBuf| {
-            if let Some(v) = std::env::var_os(key) {
-                *slot = PathBuf::from(v);
-            }
-        };
-        env_path("AGENT_FIRECRACKER", &mut cfg.firecracker);
-        env_path("AGENT_KERNEL", &mut cfg.kernel);
-        env_path("AGENT_ROOTFS", &mut cfg.rootfs);
-        if let Ok(v) = std::env::var("AGENT_MARKER") {
+        if let Some(v) = lookup("AGENT_FIRECRACKER") {
+            cfg.firecracker = PathBuf::from(v);
+        }
+        if let Some(v) = lookup("AGENT_KERNEL") {
+            cfg.kernel = PathBuf::from(v);
+        }
+        if let Some(v) = lookup("AGENT_ROOTFS") {
+            cfg.rootfs = PathBuf::from(v);
+        }
+        // Strict UTF-8 like `env::var`: a non-UTF-8 marker can't be searched for anyway.
+        if let Some(v) = lookup("AGENT_MARKER").and_then(|v| v.into_string().ok()) {
             cfg.userspace_marker = v;
         }
         cfg
@@ -306,6 +319,17 @@ impl Spawned {
     /// Drive the API through the boot sequence and wait for the userspace marker; returns the
     /// boot-to-userspace latency.
     fn run_boot(&mut self, config: &BootConfig) -> Result<Duration, VmmError> {
+        // One span per boot, keyed by the scratch-dir name, so interleaved logs from concurrent
+        // VMs (the warm pool, Phase 5) stay attributable to their sandbox.
+        let vm = self
+            .workdir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let span = tracing::info_span!("boot", vm = %vm);
+        let _span = span.enter();
+
         // `Instant + Duration` panics on overflow, and `boot_timeout` is caller-set (a
         // `Duration::MAX` "no limit" must stay a *bounded* wait, not a panic) — clamp to a day.
         let now = Instant::now();
@@ -313,6 +337,7 @@ impl Spawned {
             .checked_add(config.boot_timeout)
             .unwrap_or_else(|| now + Duration::from_secs(86_400));
         self.await_api_socket(deadline)?;
+        tracing::debug!("api socket ready");
 
         // Each API call is individually time-capped by the client, but their *sum* must also
         // respect the boot deadline — otherwise a slow VMM could stretch `boot` well past `wall`.
@@ -353,6 +378,12 @@ impl Spawned {
                 mem_size_mib: config.mem_mib,
             },
         )?;
+
+        tracing::debug!(
+            vcpus = config.vcpus,
+            mem_mib = config.mem_mib,
+            "boot source, root drive, and machine config set"
+        );
 
         still_before(deadline, "InstanceStart")?;
         // The number that matters is measured from InstanceStart to the userspace marker.
@@ -425,24 +456,33 @@ impl Spawned {
         }
     }
 
-    /// Boot failed: kill the VMM, read back its stderr log to enrich the cause, then reclaim the
-    /// scratch dir — in that order, because the log lives *in* the scratch dir.
+    /// Boot failed: kill the VMM, then enrich the cause with the two diagnostics that explain
+    /// most boot failures — Firecracker's stderr tail and the guest console tail (the kernel's
+    /// last words are exactly what a pre-marker hang needs) — then reclaim the scratch dir, in
+    /// that order, because the stderr log lives *in* the scratch dir.
     fn abort(mut self, cause: VmmError) -> VmmError {
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
         self.console.join();
-        let detail = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
+        let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
+        let console = self.console.snapshot();
         let _ = std::fs::remove_dir_all(&self.workdir);
-        let tail = detail.lines().rev().take(3).collect::<Vec<_>>();
-        if tail.is_empty() {
+
+        let mut detail = String::new();
+        if let Some(tail) = last_lines(&fc_log, 3) {
+            detail.push_str(&format!(" [firecracker: {tail}]"));
+        }
+        if let Some(tail) = last_lines(&console, 3) {
+            detail.push_str(&format!(" [console: {tail}]"));
+        }
+        if detail.is_empty() {
             return cause;
         }
-        let tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
         match cause {
-            VmmError::Vmm(m) => VmmError::Vmm(format!("{m} [firecracker: {tail}]")),
-            VmmError::Timeout(m) => VmmError::Timeout(format!("{m} [firecracker: {tail}]")),
+            VmmError::Vmm(m) => VmmError::Vmm(format!("{m}{detail}")),
+            VmmError::Timeout(m) => VmmError::Timeout(format!("{m}{detail}")),
             other => other,
         }
     }
@@ -578,6 +618,22 @@ impl Console {
     }
 }
 
+/// The last `n` non-empty lines of `text`, oldest first, joined with ` | ` — `None` if there are
+/// none. Diagnostic tails for error enrichment.
+fn last_lines(text: &str, n: usize) -> Option<String> {
+    let tail: Vec<&str> = text
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.is_empty())
+        .rev()
+        .take(n)
+        .collect();
+    if tail.is_empty() {
+        return None;
+    }
+    Some(tail.into_iter().rev().collect::<Vec<_>>().join(" | "))
+}
+
 /// Append a console chunk, dropping the oldest bytes once the buffer exceeds [`CONSOLE_CAP`].
 fn append_capped(buf: &mut Vec<u8>, chunk: &[u8]) {
     buf.extend_from_slice(chunk);
@@ -616,6 +672,28 @@ fn require_file(path: &Path, what: &str) -> Result<(), VmmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A test scratch dir that is removed even when an assertion fails first.
+    struct TestDir(PathBuf);
+    impl TestDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("test scratch dir");
+            Self(dir)
+        }
+        /// Own an existing dir (e.g. one `create_workdir` made) so it's reclaimed on drop.
+        fn adopt(dir: PathBuf) -> Self {
+            Self(dir)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn find_locates_substring() {
@@ -661,13 +739,12 @@ mod tests {
 
     #[test]
     fn from_env_layers_overrides_onto_defaults() {
-        // `set_var` is process-global, but only this test touches these keys and no other test
-        // asserts on the fields they feed.
-        std::env::set_var("AGENT_KERNEL", "/elsewhere/vmlinux");
-        std::env::set_var("AGENT_MARKER", "guest-ready");
-        let cfg = BootConfig::from_env();
-        std::env::remove_var("AGENT_KERNEL");
-        std::env::remove_var("AGENT_MARKER");
+        // Injected lookup, not `set_var`: no process-global mutation, no parallel-test race.
+        let cfg = BootConfig::from_env_with(|key| match key {
+            "AGENT_KERNEL" => Some("/elsewhere/vmlinux".into()),
+            "AGENT_MARKER" => Some("guest-ready".into()),
+            _ => None,
+        });
         assert_eq!(cfg.kernel, PathBuf::from("/elsewhere/vmlinux"));
         assert_eq!(cfg.userspace_marker, "guest-ready");
         let default = BootConfig::default();
@@ -680,10 +757,9 @@ mod tests {
         // A "firecracker" that exits immediately, complaining on stderr: `sh --api-sock <path>`
         // rejects the flag. Boot must fail fast with the exit surfaced — not wait out the whole
         // deadline — and carry the stderr tail. Needs no KVM, so it runs in the host gate.
-        let dir = std::env::temp_dir().join(format!("agent-fake-fc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("test scratch dir");
-        let kernel = dir.join("vmlinux");
-        let rootfs = dir.join("rootfs.ext4");
+        let dir = TestDir::new("agent-fake-fc");
+        let kernel = dir.path().join("vmlinux");
+        let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
         std::fs::write(&rootfs, b"not a rootfs").expect("fake rootfs");
 
@@ -705,7 +781,6 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "must not wait out the boot deadline"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -722,15 +797,13 @@ mod tests {
 
     #[test]
     fn workdirs_are_fresh_private_and_distinct() {
-        let a = create_workdir().expect("first workdir");
-        let b = create_workdir().expect("second workdir");
-        assert_ne!(a, b, "each VM gets its own scratch dir");
-        let mode = std::fs::metadata(&a)
+        let a = TestDir::adopt(create_workdir().expect("first workdir"));
+        let b = TestDir::adopt(create_workdir().expect("second workdir"));
+        assert_ne!(a.path(), b.path(), "each VM gets its own scratch dir");
+        let mode = std::fs::metadata(a.path())
             .expect("stat workdir")
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o700, "scratch dir must be private to us");
-        let _ = std::fs::remove_dir_all(&a);
-        let _ = std::fs::remove_dir_all(&b);
     }
 }

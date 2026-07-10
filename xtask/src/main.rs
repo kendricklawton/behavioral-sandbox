@@ -59,8 +59,16 @@ fn ci() -> Result<()> {
         "-D",
         "warnings",
     ])?;
-    cargo(&["build", "--workspace", "--locked"])?;
-    cargo(&["test", "--workspace", "--locked"])?;
+    // Mirror CI's global `RUSTFLAGS=-D warnings` so the local gate and the runner agree on
+    // rustc lints too, not just clippy's.
+    cargo_env(
+        &["build", "--workspace", "--locked"],
+        &[("RUSTFLAGS", "-D warnings")],
+    )?;
+    cargo_env(
+        &["test", "--workspace", "--locked"],
+        &[("RUSTFLAGS", "-D warnings")],
+    )?;
     cargo_env(
         &["doc", "--no-deps", "--workspace", "--locked"],
         &[("RUSTDOCFLAGS", "-D warnings")],
@@ -77,13 +85,24 @@ fn ci_privileged() -> Result<()> {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
     }
     // The boot tests need the pinned kernel + rootfs; fail with the fix rather than a cryptic
-    // boot error. `fetch-artifacts` (not this gate) does the network download, so this stays a
-    // pure presence check.
+    // boot error. `fetch-artifacts` (not this gate) does the network download; here we verify
+    // the hashes too — the sha256 is the contract, and a hand-placed or corrupted artifact
+    // should fail this gate, not the boot inside it.
     for a in artifacts()? {
         if !a.dest.is_file() {
             bail!(
                 "missing artifact {} — run `cargo xtask fetch-artifacts` first",
                 a.dest.display()
+            );
+        }
+        let got = sha256_of(&a.dest)?;
+        if got != a.sha256 {
+            bail!(
+                "artifact {} does not match its pin (expected {}, got {}) — re-run \
+                 `cargo xtask fetch-artifacts`",
+                a.dest.display(),
+                a.sha256,
+                got
             );
         }
     }

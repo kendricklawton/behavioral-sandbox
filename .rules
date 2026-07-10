@@ -43,7 +43,7 @@ crates/
   probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
                  maps, stream events into the flight recorder.
   cli/           the `agent` binary (`run`, `shell`, `--trace`); later the `agentd` daemon.
-xtask/           dev orchestration — `cargo xtask ci` (host-safe gate + eBPF object build),
+xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF build at P8),
                  `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
                  and the rootfs/kernel build. Never shipped.
 ```
@@ -70,13 +70,14 @@ xtask/           dev orchestration — `cargo xtask ci` (host-safe gate + eBPF o
 - **Rust**, stable, one workspace. Linux-only (it needs KVM). The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · clippy `-D warnings` · build · unit tests ·
-  docs · `deny` · the eBPF object build) and runs everywhere. `cargo xtask ci-privileged` runs
+  docs · `deny`; the eBPF object build joins at Phase 8) and runs everywhere. `cargo xtask ci-privileged` runs
   the VM-boot + eBPF-load integration tests and needs `/dev/kvm` + `CAP_NET_ADMIN`/`CAP_BPF`
   (your dev box or a bare-metal/nested-virt runner — a stock cloud VM can't nest KVM). Never gate
   the everyday loop on a privileged runner.
 - `tracing` logs to stderr; a run's structured result/flight-recorder to stdout, so
   `agent run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`AGENT_*`) >
-  file (`.agent.toml`) > defaults**.
+  file (`.agent.toml`) > defaults** — env > defaults exists today; the flags and `.agent.toml`
+  layers land with the engine-surface phases (P7+).
 - Don't commit built rootfs/kernel images or generated eBPF objects — they're built by `xtask`.
 - **Git is human-driven.** The user makes every commit and push; the **coding agent** (Claude,
   Gemini, Codex — as opposed to `agent`, this project) never runs `git commit` / `git push` (or

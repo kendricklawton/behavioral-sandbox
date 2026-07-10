@@ -3,7 +3,7 @@
 > Phase 1 of the sandbox engine. The demo: `agent run --demo-boot` boots a real Linux microVM
 > under KVM, reads its serial console until the guest reaches userspace, prints the
 > boot-to-userspace latency, and shuts down clean — repeatably, with no leaked processes or files.
-> On the dev box that's **~1.2 s cold**.
+> On the dev box cold boots land around **2–3.5 s** (best observed ~1.2 s; distribution below).
 
 ```console
 $ AGENT_LOG=info cargo run -q -p agent-cli -- run --demo-boot
@@ -127,10 +127,18 @@ signal. It's tied to *this* rootfs, though — a different image needs a differe
 ## The number that matters
 
 Boot-to-userspace is measured from the instant we send `InstanceStart` to the instant `login:`
-appears. That's the latency a caller feels, and the baseline every later optimization
-(snapshots, a warm pool) is measured against. On the dev box it's **~1.2 s cold** — already far
-under a container-cold-start-plus-language-runtime, and snapshots (Phase 5) will cut it to
-milliseconds. *Measured, not marketed* (spine property four): the number is logged every run.
+appears. It deliberately **excludes the driver's setup** — spawning `firecracker`, waiting for
+the API socket, and copying the ~300 MB rootfs — so it isolates the *guest's* boot; the
+wall-clock a `Sandbox::boot` caller feels is strictly larger. It's the baseline every later
+optimization (snapshots, a warm pool) is measured against.
+
+Measured on the dev box (10 sequential cold boots, 1 vCPU / 256 MiB): **p50 2.6 s, p90 3.4 s,
+spread 2.0–3.8 s**. Isolated single runs have landed as low as ~1.2 s — which is exactly why a
+single number is marketing, not measurement: the spread is the finding. Still comfortably under
+a container-cold-start-plus-language-runtime, and snapshots (Phase 5) should cut it to
+milliseconds. *Measured, not marketed* (spine property four): the latency is logged on every
+run, and the real benchmark harness (percentiles over many runs, tracked over time) lands with
+the snapshot/density phases.
 
 ## Clean teardown, or it doesn't count
 

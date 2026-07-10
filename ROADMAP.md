@@ -107,7 +107,8 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
       *(Guaranteed teardown in `Drop`; per-VM short scratch dir; boots a rootfs copy, base stays pinned.)*
 - [x] **P1.8** A `Vm::boot(config) -> RunningVm` / `RunningVm::shutdown()` API over all of the above.
 - [x] **P1.9** Timing: measure and log boot-to-userspace latency (the number that matters).
-      *(~1.2 s cold on the dev box; logged every run and printed by `--demo-boot`.)*
+      *(Dev box, n=10 sequential cold boots: p50 2.6 s, p90 3.4 s, best isolated ~1.2 s; logged
+      every run, printed by `--demo-boot`. Excludes driver setup — see docs/001.)*
 - [x] **P1.10** Test: boot → see the login/init banner → shut down, repeatable.
       *(`crates/vmm/tests/boot.rs`, `#[ignore]`d; two cycles asserting no leaked scratch dirs.)*
 - **Exit gate + lesson:** a microVM boots to userspace from `cargo run` and shuts down clean; write

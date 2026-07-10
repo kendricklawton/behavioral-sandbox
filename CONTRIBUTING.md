@@ -47,14 +47,14 @@ cargo run -p agent-cli -- run --trace -- <cmd>
 ## Before you push — the local gate
 
 ```console
-cargo install bpf-linker cargo-deny cargo-hack   # one-time
+cargo install bpf-linker cargo-deny               # one-time
 cargo xtask ci                                    # fmt + clippy -D warnings + build + test
-                                                  # + docs + deny + the eBPF object build
+                                                  # + docs + deny
 ```
 
 `cargo xtask ci` runs the host-safe gate everywhere: fmt · clippy `-D warnings` · build · unit
-tests · docs · `cargo deny` · and it **builds the eBPF programs** for their own target so a
-verifier-breaking change fails fast.
+tests · docs · `cargo deny`. The **eBPF object build** joins this gate when the probes land
+(ROADMAP Phase 8), so verifier-breaking changes will fail fast from then on.
 
 **The privileged tests are separate.** Booting a microVM and loading/attaching eBPF need
 `/dev/kvm` and elevated caps, so the **integration tests** (VM boot, exec, tap networking,
@@ -66,8 +66,8 @@ Never gate the everyday loop on a privileged runner.
 
 1. **Unit / pure:** driver config assembly, protocol framing, policy-map encoding, error
    mapping — no VM, no root.
-2. **eBPF object build:** the probes compile for `bpfel-unknown-none` in the gate; a program the
-   verifier would reject fails the build.
+2. **eBPF object build** *(joins the gate at ROADMAP Phase 8)*: the probes compile for
+   `bpfel-unknown-none`; a program the verifier would reject fails the build.
 3. **Privileged integration:** boot a real microVM → `exec` → tap networking → attach probes →
    assert the flight recorder shows exactly what the workload did. Needs KVM + caps.
 4. **Benchmarks:** cold boot, snapshot restore, warm-pool `exec` latency (p50/p99), density, and
