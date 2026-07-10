@@ -1,0 +1,15 @@
+# Standalone manifest — `crates/probes` is **excluded** from the workspace (root Cargo.toml), so it
+# can't inherit workspace fields. It builds for `bpfel-unknown-none`, not the host triple.
+[package]
+name = "agent-probes"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+description = "The eBPF programs (no_std) — syscall tracepoints, tc/XDP on the tap, cgroup accounting."
+
+# Placeholder. ROADMAP Phase 8 converts this into the real `#![no_std]` aya-ebpf crate:
+#   - deps: aya-ebpf (+ aya-log-ebpf)
+#   - `[[bin]]` per program, built via `bpf-linker` for `bpfel-unknown-none`
+#   - `[profile.release] panic = "abort"` (eBPF has no unwinder)
+[dependencies]

@@ -1,0 +1,32 @@
+# cargo-deny config — the supply-chain gate (`cargo deny check`, run by CI and `cargo xtask ci`).
+# Keep the dependency tree light, license-clean, and advisory-free. See https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# Fail on any known RustSec advisory in the tree. `yanked` crates are also rejected.
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Minimal permissive set — only the licenses actually present in the tree today, so `cargo deny`
+# runs warning-clean. Add to this list deliberately (with a reason) when a new dependency needs
+# it: a missing license fails the gate and names the offending crate.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+# Flag multiple versions of the same crate (bloat / drift); tighten to "deny" once the tree is stable.
+multiple-versions = "warn"
+# No `*` version requirements on crates.io deps. The workspace's internal `{ path = ... }` crates carry no
+# version and would otherwise trip this, so path deps are explicitly allowed.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Only the official crates.io registry — no unknown git or alternate registries.
+unknown-registry = "deny"
+unknown-git = "deny"

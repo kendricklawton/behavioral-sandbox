@@ -1,0 +1,15 @@
+[package]
+name = "agent-vmm"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "The Firecracker driver — microVM lifecycle, networking, snapshots, and the Sandbox API."
+
+[dependencies]
+# Skeleton has no deps yet. Phase 1 adds the Firecracker API client (serde/serde_json over a unix
+# socket) + tracing; the host path stays `unsafe`-free.
+
+[lints]
+workspace = true

@@ -1,0 +1,96 @@
+# agent *(working name)*
+
+**A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
+**Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
+enforces what it does — syscalls, its network, its cgroup — from *outside* the guest, where the
+code can't see or subvert you. Every run yields a tamper-resistant, host-observed **flight
+recorder** of exactly what happened. This file is the operating manual — read it every session.
+
+**Scope: the engine, not the platform.** A runtime + a clean driver API you self-host. Running
+untrusted code safely is otherwise a heavy cloud VM (E2B) or a shared-kernel container (weaker
+isolation); this is the boring, embeddable, self-hostable core underneath. **Kubernetes is not
+a PaaS, and neither is this** — multi-tenant auth, billing, fleet scheduling, and a dashboard
+are the *hoster's* job, out of scope. If a change pulls tenancy/billing/scheduling into this
+repo, or moves the security boundary into the guest, the design is wrong.
+
+**Why this exists.** It's a **Linux-mastery vehicle** — the path to deep systems competence, not
+a business. Firecracker + aya together teach Linux from the hardware-isolation boundary up to
+the syscall/network boundary. So the *why* is a first-class deliverable: **every phase ships a
+working demo and a writeup.**
+
+## The spine (four properties every change protects)
+
+1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM; the trust
+   boundary is the CPU, not guest-side software.
+2. **Observe & enforce from the host.** Visibility and policy live in host-side eBPF the guest
+   cannot reach. In-guest agents exist for convenience (exec/IO), **never** for security.
+3. **Engine, not platform.** A self-hostable runtime + a driver API; tenancy/billing/scheduling/
+   dashboards are the hoster's. (Tombstone.)
+4. **Measured, and taught.** Boot, snapshot-restore, density, and eBPF overhead are benchmarked
+   with percentiles; every phase produces a writeup.
+
+## Repo layout
+
+```
+crates/
+  vmm/           the Firecracker driver: microVM lifecycle (boot/exec/shutdown), rootfs and
+                 tap networking, snapshots + the warm pool, jailer/cgroup confinement, and the
+                 `Sandbox` lifecycle API. No `unsafe` on the host path; a hostile guest is a
+                 typed error, never a panic/hang/leak.
+  probes/        the eBPF programs (`#![no_std]`, built for `bpfel-unknown-none` via
+                 `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting.
+                 CO-RE/BTF so they're portable across kernels.
+  probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
+                 maps, stream events into the flight recorder.
+  cli/           the `agent` binary (`run`, `shell`, `--trace`); later the `agentd` daemon.
+xtask/           dev orchestration — `cargo xtask ci` (host-safe gate + eBPF object build),
+                 `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
+                 and the rootfs/kernel build. Never shipped.
+```
+
+## Guardrails (non-negotiable)
+
+1. **Isolation is hardware.** Untrusted code runs in a KVM microVM. Never weaken this to a
+   shared-kernel shortcut to "make it simpler."
+2. **Observe & enforce from the host.** Security-relevant visibility and policy live in
+   host-side eBPF, out of the guest's reach. A guest agent may carry exec/IO, but must never be
+   the thing that *contains* the guest.
+3. **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
+   capability; every allowance is explicit and **recorded** in the flight recorder.
+4. **Engine, not platform.** No tenancy, auth, billing, fleet scheduler, or dashboard in this
+   repo. Those belong to whatever hosts the engine.
+5. **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken
+   channel is a typed error — never a host panic, hang, or leak.
+6. **Measured, not marketed.** Boot/restore/density/overhead are benchmarked with percentiles;
+   no hand-waved performance claims.
+7. **Teach as you go.** Every phase ships a writeup; the *why* outlives the diff.
+
+## Conventions
+
+- **Rust**, stable, one workspace. Linux-only (it needs KVM). The eBPF programs build for their
+  own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
+- **Two gates.** `cargo xtask ci` is host-safe (fmt · clippy `-D warnings` · build · unit tests ·
+  docs · `deny` · the eBPF object build) and runs everywhere. `cargo xtask ci-privileged` runs
+  the VM-boot + eBPF-load integration tests and needs `/dev/kvm` + `CAP_NET_ADMIN`/`CAP_BPF`
+  (your dev box or a bare-metal/nested-virt runner — a stock cloud VM can't nest KVM). Never gate
+  the everyday loop on a privileged runner.
+- `tracing` logs to stderr; a run's structured result/flight-recorder to stdout, so
+  `agent run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`AGENT_*`) >
+  file (`.agent.toml`) > defaults**.
+- Don't commit built rootfs/kernel images or generated eBPF objects — they're built by `xtask`.
+- **Git is human-driven.** The user makes every commit and push; the **coding agent** (Claude,
+  Gemini, Codex — as opposed to `agent`, this project) never runs `git commit` / `git push` (or
+  any other CI-triggering action). The coding agent's job ends at: changes made, demo working,
+  roadmap box checked in the working tree, and — **only when asked** — a commit message drafted
+  (imperative subject describing **what was done**; do **not** reference phase IDs, the roadmap
+  can change; never an AI co-author/attribution trailer).
+
+## Build order (roadmap)
+
+The phase-by-phase plan is the single source of truth in **`ROADMAP.md`** (its **checkboxes are
+the state**). Work it per its §0.5 loop: first unchecked box in ID order, one item per
+iteration, and the box checked **together with the work** so they land in one commit. The
+**user** makes that commit. A phase isn't left until its **Exit gate** passes — *a working demo
+and a writeup.* The tree currently still holds the retired wasm-scanner crates; the reset to the
+new layout is Phase 0. Don't duplicate phase status here — update the roadmap. Hard-to-reverse
+choices land as dated `(decision)` entries in `ARCHITECTURE.md`.

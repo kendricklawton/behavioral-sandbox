@@ -1,0 +1,4 @@
+# `cargo xtask <cmd>` → runs the dev-orchestration crate (the cargo-xtask pattern).
+# `cargo xtask ci` is the full local gate (fmt, clippy, build, test, docs, feature powerset, deny).
+[alias]
+xtask = "run --quiet --package xtask --"

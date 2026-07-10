@@ -1,0 +1,37 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vmm",
+    "crates/probes-loader",
+    "crates/cli",
+    "xtask",
+]
+# `crates/probes` holds the eBPF programs. They build for `bpfel-unknown-none` (not the host
+# triple) via `bpf-linker`, so excluding them keeps the everyday host gate (clippy --all-targets,
+# test) host-only and green; the eBPF object is built separately for its own target. See
+# `.rules`, `ROADMAP.md` (Phase 8), and `CONTRIBUTING.md`.
+exclude = ["crates/probes"]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+authors = ["k-henry <khe4r6@gmail.com>"]
+
+# Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON
+# over a unix socket (serde), the CLI parses with clap, logs with tracing.
+[workspace.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Structured logging to stderr; stdout stays reserved for a run's result / flight recorder.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# No-panic discipline on the host path: a hostile or crashing guest, a failed probe, or a broken
+# channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`
+# re-allows them in tests. Enforced by the `clippy … -D warnings` step in CI and `cargo xtask ci`.
+# Each crate opts in with `[lints] workspace = true`.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

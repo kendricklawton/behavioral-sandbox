@@ -1,0 +1,8 @@
+# Pin the whole workspace to stable Rust (no nightly — see .rules) and ensure the wasm target
+# + fmt/clippy are installed for both the gate and detector builds. `targets` only installs the
+# std for that triple; it does NOT change the default build target (do not set build.target),
+# so `cargo build` and `cargo xtask ci` stay host-native.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

@@ -1,0 +1,75 @@
+# CI — the host-safe gate: fmt, clippy, build, test, docs, and supply-chain. Needs no KVM, root,
+# or network, so it runs on a stock runner. Mirror it locally with `cargo xtask ci`.
+#
+# The privileged tests (booting a microVM, loading/attaching eBPF) need /dev/kvm + elevated caps
+# and cannot run on a stock GitHub runner — a standard cloud VM can't nest KVM. They run under
+# `cargo xtask ci-privileged` on a bare-metal / nested-virt (or self-hosted) runner, added later.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Deny compiler warnings on build/test too, not just clippy. Dependency warnings are `--cap-lints`
+  # capped by cargo, so only our own crates are held to this — keeping CI == the local gate.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: build · lint · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: rustup component add rustfmt clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # --locked everywhere: build from the committed Cargo.lock, so a stale lock fails CI here
+      # instead of surfacing at release time.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Docs
+        run: cargo doc --no-deps --workspace --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  deny:
+    name: supply chain (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # The single check to require in branch protection. Green only if every job above succeeded or
+  # was skipped — add a job above and it's covered here automatically, no branch-rule edit needed.
+  ci-status:
+    name: CI status
+    if: always()
+    needs: [check, deny]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every job passed
+        run: jq --exit-status 'all(.result == "success" or .result == "skipped")' <<< '${{ toJson(needs) }}'

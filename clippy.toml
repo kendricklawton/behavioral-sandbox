@@ -1,0 +1,4 @@
+# Re-allow `unwrap`/`expect` in tests: the no-panic discipline (workspace clippy lints) is for production
+# code paths, where a failure must be a value; tests assert and may unwrap freely.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
