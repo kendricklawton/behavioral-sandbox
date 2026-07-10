@@ -24,6 +24,10 @@ use crate::VmmError;
 /// Per-call socket timeout. The API itself answers instantly; this only bounds a wedged VMM.
 const API_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Cap on a response body. Firecracker's replies are at most a small JSON object; a huge
+/// `Content-Length` is a broken peer and must be a typed error, not a huge upfront allocation.
+const MAX_BODY: usize = 1 << 20; // 1 MiB
+
 /// A client bound to one Firecracker API socket. Cheap to clone; opens a fresh connection per call.
 #[derive(Debug, Clone)]
 pub(crate) struct ApiClient {
@@ -112,6 +116,11 @@ fn read_response<R: BufRead>(mut reader: R, ctx: &str) -> Result<(u16, Vec<u8>),
     }
     if chunked {
         return Err(VmmError::Vmm(format!("{ctx}: unexpected chunked response")));
+    }
+    if content_length > MAX_BODY {
+        return Err(VmmError::Vmm(format!(
+            "{ctx}: content-length {content_length} exceeds the {MAX_BODY}-byte cap"
+        )));
     }
 
     let mut body = vec![0u8; content_length];
@@ -218,6 +227,20 @@ mod tests {
         let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nhi\r\n0\r\n\r\n";
         let err = read_response(&raw[..], "test").unwrap_err();
         assert!(matches!(err, VmmError::Vmm(_)));
+    }
+
+    #[test]
+    fn oversized_content_length_is_rejected_before_allocating() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 18446744073709551615\r\n\r\n";
+        assert!(matches!(
+            read_response(&raw[..], "test"),
+            Err(VmmError::Vmm(_))
+        ));
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 1048577\r\n\r\n";
+        assert!(matches!(
+            read_response(&raw[..], "test"),
+            Err(VmmError::Vmm(_))
+        ));
     }
 
     #[test]

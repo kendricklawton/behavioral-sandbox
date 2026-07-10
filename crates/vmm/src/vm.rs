@@ -36,6 +36,11 @@ const DEFAULT_USERSPACE_MARKER: &str = "login:";
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
 static VM_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// Cap on the captured console (the most recent bytes are kept). A guest that floods its serial
+/// port must not grow host memory without bound — a hostile guest never causes a leak. Boot output
+/// is tens of KiB, so the userspace marker is never dropped while it still matters.
+const CONSOLE_CAP: usize = 1 << 20; // 1 MiB
+
 /// Everything needed to boot one microVM. `from_env` resolves each field from `AGENT_*` env then a
 /// default; [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget on top.
 #[derive(Debug, Clone)]
@@ -198,15 +203,7 @@ impl Spawned {
         require_file(&config.kernel, "kernel image")?;
         require_file(&config.rootfs, "rootfs image")?;
 
-        // A short scratch path: the API socket lives here and `sockaddr_un.sun_path` caps at ~108
-        // bytes, so a deep `TMPDIR`-based path would make Firecracker's bind() fail with EINVAL.
-        let workdir = PathBuf::from(format!(
-            "/tmp/agent-{}-{}",
-            std::process::id(),
-            VM_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&workdir)
-            .map_err(|e| VmmError::Vmm(format!("create {}: {e}", workdir.display())))?;
+        let workdir = create_workdir()?;
 
         // Boot a *copy* rw, never the pinned base image — runs stay independent, base stays pinned.
         let rootfs = workdir.join("rootfs.ext4");
@@ -255,7 +252,12 @@ impl Spawned {
     /// Drive the API through the boot sequence and wait for the userspace marker; returns the
     /// boot-to-userspace latency.
     fn run_boot(&mut self, config: &BootConfig) -> Result<Duration, VmmError> {
-        let deadline = Instant::now() + config.boot_timeout;
+        // `Instant + Duration` panics on overflow, and `boot_timeout` is caller-set (a
+        // `Duration::MAX` "no limit" must stay a *bounded* wait, not a panic) — clamp to a day.
+        let now = Instant::now();
+        let deadline = now
+            .checked_add(config.boot_timeout)
+            .unwrap_or_else(|| now + Duration::from_secs(86_400));
         self.await_api_socket(deadline)?;
 
         let kernel = path_str(&config.kernel)?;
@@ -383,6 +385,33 @@ impl Spawned {
     }
 }
 
+/// Create the per-VM scratch dir. Two constraints shape it:
+/// - **Short path** (`/tmp/agent-<pid>-<n>`): the API socket lives here and
+///   `sockaddr_un.sun_path` caps at ~108 bytes, so a deep `TMPDIR`-based path would make
+///   Firecracker's `bind()` fail with EINVAL.
+/// - **Fail-if-exists, mode `0700`**: `/tmp` is world-writable and PIDs recycle, so a
+///   pre-existing path (squatted by another user, or stale from a killed run) must never be
+///   silently adopted — the rootfs copy and socket go here. A collision just advances to the
+///   next sequence number.
+fn create_workdir() -> Result<PathBuf, VmmError> {
+    use std::os::unix::fs::DirBuilderExt;
+    for _ in 0..1024 {
+        let workdir = PathBuf::from(format!(
+            "/tmp/agent-{}-{}",
+            std::process::id(),
+            VM_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        match std::fs::DirBuilder::new().mode(0o700).create(&workdir) {
+            Ok(()) => return Ok(workdir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(VmmError::Vmm(format!("create {}: {e}", workdir.display()))),
+        }
+    }
+    Err(VmmError::Vmm(
+        "no fresh scratch dir under /tmp after 1024 attempts (stale agent-* dirs?)".into(),
+    ))
+}
+
 /// Guaranteed, best-effort teardown shared by `abort` and `Drop`: kill the VMM, join the console
 /// reader (which ends once the killed child's stdout closes), and remove the scratch dir.
 fn teardown(child: &mut Child, console: &mut Console, workdir: &Path) {
@@ -416,7 +445,7 @@ impl Console {
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             if let Ok(mut g) = sink.lock() {
-                                g.extend_from_slice(&chunk[..n]);
+                                append_capped(&mut g, &chunk[..n]);
                             }
                         }
                     }
@@ -447,6 +476,15 @@ impl Console {
         if let Some(handle) = self.reader.take() {
             let _ = handle.join();
         }
+    }
+}
+
+/// Append a console chunk, dropping the oldest bytes once the buffer exceeds [`CONSOLE_CAP`].
+fn append_capped(buf: &mut Vec<u8>, chunk: &[u8]) {
+    buf.extend_from_slice(chunk);
+    if buf.len() > CONSOLE_CAP {
+        let excess = buf.len() - CONSOLE_CAP;
+        buf.drain(..excess);
     }
 }
 
@@ -511,5 +549,32 @@ mod tests {
         let console = Console::spawn(None); // no stdout: buffer stays empty but the API works
         assert!(!console.contains("login:"));
         assert_eq!(console.snapshot(), "");
+    }
+
+    #[test]
+    fn console_buffer_is_capped_keeping_the_tail() {
+        let mut buf = vec![b'a'; CONSOLE_CAP];
+        append_capped(&mut buf, b"login:");
+        assert_eq!(buf.len(), CONSOLE_CAP, "buffer must not grow past the cap");
+        assert!(
+            find(&buf, b"login:"),
+            "the newest bytes (where the marker lands) must be kept"
+        );
+        assert_eq!(&buf[..1], b"a", "only the oldest bytes are dropped");
+    }
+
+    #[test]
+    fn workdirs_are_fresh_private_and_distinct() {
+        use std::os::unix::fs::PermissionsExt;
+        let a = create_workdir().expect("first workdir");
+        let b = create_workdir().expect("second workdir");
+        assert_ne!(a, b, "each VM gets its own scratch dir");
+        let mode = std::fs::metadata(&a)
+            .expect("stat workdir")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "scratch dir must be private to us");
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
     }
 }
