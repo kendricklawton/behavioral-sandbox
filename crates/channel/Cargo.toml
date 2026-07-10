@@ -1,0 +1,16 @@
+[package]
+name = "agent-channel"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "The host↔guest wire protocol for the sandbox exec channel (ARCHITECTURE decision 002)."
+
+# Dependency-free by design: the protocol is hand-rolled over `std::io::{Read, Write}` so it stays
+# tiny and transport-agnostic (vsock in the guest, a unix socket in tests), and both the host driver
+# and the guest agent can depend on it without pulling a serialization stack into a static binary.
+[dependencies]
+
+[lints]
+workspace = true

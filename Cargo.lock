@@ -3,11 +3,24 @@
 version = 4
 
 [[package]]
+name = "agent-channel"
+version = "0.1.0"
+
+[[package]]
 name = "agent-cli"
 version = "0.1.0"
 dependencies = [
  "agent-vmm",
  "clap",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "agent-guest"
+version = "0.1.0"
+dependencies = [
+ "agent-channel",
  "tracing",
  "tracing-subscriber",
 ]

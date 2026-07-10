@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/vmm",
+    "crates/channel",
+    "crates/guest-agent",
     "crates/probes-loader",
     "crates/cli",
     "xtask",

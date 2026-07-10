@@ -50,6 +50,9 @@ Four properties every phase must protect:
   boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
   patch as they land. These are checkpoints, not releases — no stability promise.
 - Tags are a **human git step** (§0.5): the coding agent checks boxes; the user cuts the tag.
+- **No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the roadmap checkboxes, the
+  `docs/` writeups, and `ARCHITECTURE.md`'s decision log *are* the change record; a curated
+  changelog is written once, for the first real release, rather than churned every `v0.0.x`.
 
 ## §0.75 Dev environment (one-time)
 
@@ -78,7 +81,9 @@ Turn `agent` from the wasm scanner into the Firecracker + aya sandbox; keep the 
       (the eBPF crate builds for its own target, gated separately — see P8).
 - [x] **P0.6** Naming: keep the `agent` umbrella (binary + repo); crates are
       `vmm`/`probes`/`probes-loader`/`cli`.
-- [x] **P0.7** `CHANGELOG.md` reset; a short `docs/` for the per-phase writeups each phase feeds.
+- [x] **P0.7** A short `docs/` for the per-phase writeups each phase feeds. *(No `CHANGELOG.md`
+      in the pre-release `v0.0.x` line — the roadmap's checkboxes and `docs/` are the record; the
+      changelog is first written at `v0.1.0`. See §0.6.)*
 - [x] **P0.8** `cargo xtask ci-privileged` runs the KVM/eBPF (`#[ignore]`d) tests behind a
       `/dev/kvm` guard, so day-to-day dev isn't `sudo cargo` roulette.
 - **Exit gate:** `cargo xtask ci` green on an empty-but-scaffolded tree; `xtask setup` verifies the
@@ -119,10 +124,17 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
 
 Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
 
-- [ ] **P2.1** `(decision)` host↔guest channel: **vsock** vs a serial protocol vs a guest agent →
+- [x] **P2.1** `(decision)` host↔guest channel: **vsock** vs a serial protocol vs a guest agent →
       `ARCHITECTURE.md`. (Default: vsock + a tiny guest agent.)
-- [ ] **P2.2** A minimal **guest init/agent** (statically-linked Rust) that runs a command and
+      *(Recorded as decision 002: vsock + a statically-linked guest agent, a versioned
+      length-prefixed protocol over Firecracker's vsock UDS; serial kept as a fallback, network/SSH
+      rejected to preserve deny-by-default. Agent is exec/IO convenience, never containment.)*
+- [x] **P2.2** A minimal **guest init/agent** (statically-linked Rust) that runs a command and
       reports stdout/stderr/exit over the channel.
+      *(`crates/guest-agent` + the shared `crates/channel` wire protocol. `serve` is transport-
+      agnostic (runs over any `Read`+`Write`), drains the child's pipes unconditionally so a dead
+      host can't wedge a live guest, and maps signal death to `128+sig`. Static build via
+      `cargo xtask build-guest-agent`; unix-socket harness now, vsock transport in P2.3.)*
 - [ ] **P2.3** Wire vsock in the VMM config; host side connects and speaks the protocol.
 - [ ] **P2.4** `RunningVm::exec(cmd, stdin) -> {stdout, stderr, exit}`.
 - [ ] **P2.5** Push inputs in (stdin/files) and pull outputs out.

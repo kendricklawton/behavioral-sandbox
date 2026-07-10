@@ -1,0 +1,27 @@
+[package]
+name = "agent-guest"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "The in-guest agent: runs one command per connection and streams its output over the channel."
+
+[lib]
+name = "agent_guest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-guest"
+path = "src/main.rs"
+
+[dependencies]
+# The wire protocol is shared with the host driver; tracing is the guest agent's stderr log.
+# No transport dependency yet — `serve` is generic over the stream, `main` listens on a unix
+# socket, and the vsock listener lands in P2.3 with the host-side wiring.
+agent-channel = { path = "../channel" }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true

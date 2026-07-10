@@ -36,6 +36,8 @@ enum Cmd {
     Setup,
     /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
     FetchArtifacts,
+    /// Build the guest agent as a static musl binary (baked into the rootfs at Phase 3).
+    BuildGuestAgent,
 }
 
 fn main() -> Result<()> {
@@ -44,7 +46,48 @@ fn main() -> Result<()> {
         Cmd::CiPrivileged => ci_privileged(),
         Cmd::Setup => setup(),
         Cmd::FetchArtifacts => fetch_artifacts(),
+        Cmd::BuildGuestAgent => build_guest_agent(),
     }
+}
+
+/// The musl target the guest agent is built for: a fully static binary that runs in the guest with
+/// no dynamic loader or libc to bake into the rootfs.
+const GUEST_TARGET: &str = "x86_64-unknown-linux-musl";
+
+/// Build the guest agent as a static binary for the guest. Kept out of the `ci` gate (it needs the
+/// musl target installed and produces an artifact the host doesn't run); Phase 3 bakes the result
+/// into the rootfs.
+fn build_guest_agent() -> Result<()> {
+    let installed = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .context("running rustup (is it installed?)")?;
+    if !String::from_utf8_lossy(&installed.stdout)
+        .lines()
+        .any(|t| t == GUEST_TARGET)
+    {
+        bail!("missing target {GUEST_TARGET} — run `rustup target add {GUEST_TARGET}` first");
+    }
+    cargo(&[
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "agent-guest",
+        "--bin",
+        "agent-guest",
+        "--target",
+        GUEST_TARGET,
+    ])?;
+    let bin = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("target")
+        .join(GUEST_TARGET)
+        .join("release/agent-guest");
+    println!("\n✓ guest agent built: {}", bin.display());
+    println!("  (static musl binary; Phase 3 bakes it into the rootfs)");
+    Ok(())
 }
 
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.
