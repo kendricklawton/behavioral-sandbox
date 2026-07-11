@@ -72,8 +72,13 @@ fn run(cmd: Cmd) -> Result<ExitCode, VmmError> {
                 );
                 return sandbox.shutdown().map(|()| ExitCode::SUCCESS);
             }
-            let result = sandbox.exec(&args.argv)?;
+            // No stdin piped from the CLI yet (that lands with file/streaming I/O).
+            let result = sandbox.exec(&args.argv, &[])?;
             sandbox.shutdown()?;
+            // Relay the guest's output on our own stdout/stderr — the whole point of `exec`. Ignore
+            // write errors (a closed pipe is not our failure); the guest exit code is what we return.
+            let _ = std::io::stdout().write_all(&result.stdout);
+            let _ = std::io::stderr().write_all(&result.stderr);
             Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
         }
         Cmd::Shell => Err(VmmError::Unimplemented("agent shell (ROADMAP Phase 7)")),

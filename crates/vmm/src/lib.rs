@@ -15,6 +15,9 @@ mod vm;
 
 use std::time::Duration;
 
+use agent_channel::ChannelError;
+
+pub use agent_channel::{ClientConnection, Request, Response};
 pub use vm::{BootConfig, RunningVm, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 
 /// Every way driving a microVM can fail, as a typed value.
@@ -29,7 +32,16 @@ pub enum VmmError {
     Artifact(String),
     /// A bounded wait expired (API socket readiness, boot-to-userspace, a wedged API call).
     Timeout(String),
-    /// A Firecracker API, boot, process, or host↔guest channel failure.
+    /// The host↔guest exec **channel** failed — a transport or protocol fault. Distinct from a
+    /// guest command that merely exits non-zero (a normal [`RunResult`]) or fails to spawn
+    /// ([`GuestExec`](VmmError::GuestExec)). Preserves the [`ChannelError`] source.
+    Channel(ChannelError),
+    /// The **guest agent** could not run the command (e.g. no such binary in the guest, permission
+    /// denied) — a user fault on a healthy channel, not an infra failure.
+    GuestExec(String),
+    /// A command's captured output exceeded the host's `limit`-byte cap.
+    OutputCap { limit: usize },
+    /// A Firecracker API, boot, or process failure.
     Vmm(String),
 }
 
@@ -40,12 +52,30 @@ impl std::fmt::Display for VmmError {
             VmmError::NoKvm => f.write_str("KVM unavailable: /dev/kvm missing or not permitted"),
             VmmError::Artifact(e) => write!(f, "missing artifact: {e}"),
             VmmError::Timeout(e) => write!(f, "timed out: {e}"),
+            VmmError::Channel(e) => write!(f, "exec channel: {e}"),
+            VmmError::GuestExec(e) => write!(f, "guest could not run the command: {e}"),
+            VmmError::OutputCap { limit } => {
+                write!(f, "guest output exceeded the {limit}-byte cap")
+            }
             VmmError::Vmm(e) => write!(f, "vmm error: {e}"),
         }
     }
 }
 
-impl std::error::Error for VmmError {}
+impl std::error::Error for VmmError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            VmmError::Channel(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<ChannelError> for VmmError {
+    fn from(e: ChannelError) -> Self {
+        VmmError::Channel(e)
+    }
+}
 
 /// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy.
 #[derive(Debug, Clone, Copy)]
@@ -81,8 +111,8 @@ pub struct RunResult {
     pub stderr: Vec<u8>,
 }
 
-/// A microVM sandbox: the CLI-facing lifecycle type, backed by a [`RunningVm`]. `boot` is live as
-/// of Phase 1; `exec` lands in Phase 2.
+/// A microVM sandbox: the CLI-facing lifecycle type, backed by a [`RunningVm`]. Boots with the
+/// vsock exec channel enabled, so [`exec`](Sandbox::exec) can reach the in-guest agent.
 #[derive(Debug)]
 #[must_use = "dropping a Sandbox kills its microVM"]
 pub struct Sandbox {
@@ -90,23 +120,27 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// Boot a microVM under `limits`, ready to run code.
+    /// Boot a microVM under `limits`, ready to run code (vsock exec channel enabled).
     ///
     /// # Errors
     /// [`VmmError`] on any boot failure (no KVM, a missing artifact, a Firecracker error, or a
     /// boot-to-userspace timeout).
     pub fn boot(limits: Limits) -> Result<Self, VmmError> {
-        let vm = Vm::boot(BootConfig::from_env().with_limits(limits))?;
+        let mut config = BootConfig::from_env().with_limits(limits);
+        config.guest_cid = Some(DEFAULT_GUEST_CID);
+        let vm = Vm::boot(config)?;
         Ok(Self { vm })
     }
 
-    /// Run `argv` in the guest and capture its output. **ROADMAP Phase 2.**
+    /// Run `argv` in the guest, feeding it `stdin`, and capture its stdout/stderr/exit.
+    ///
+    /// Requires the in-guest agent to be listening on vsock; until it is baked into the rootfs the
+    /// call surfaces a clear "guest agent not listening" error.
     ///
     /// # Errors
-    /// [`VmmError`] on any exec/channel failure.
-    pub fn exec(&self, argv: &[String]) -> Result<RunResult, VmmError> {
-        let _ = argv;
-        Err(VmmError::Unimplemented("Sandbox::exec (ROADMAP Phase 2)"))
+    /// [`VmmError`] on any exec/channel failure (a non-zero command exit is a normal [`RunResult`]).
+    pub fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
+        self.vm.exec(argv, stdin)
     }
 
     /// Boot-to-userspace latency of this sandbox's microVM.

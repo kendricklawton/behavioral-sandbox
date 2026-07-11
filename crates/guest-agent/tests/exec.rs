@@ -20,7 +20,10 @@ fn run(argv: &[&str]) -> (Vec<u8>, Vec<u8>, Result<i32, String>) {
 
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
-        .send_request(&Request::Exec { argv })
+        .send_request(&Request::Exec {
+            argv,
+            stdin: Vec::new(),
+        })
         .expect("send request");
 
     let (mut out, mut err) = (Vec::new(), Vec::new());
@@ -87,6 +90,33 @@ fn signal_death_maps_to_128_plus_signal() {
 }
 
 #[test]
+fn stdin_is_fed_to_the_command() {
+    // `cat` echoes its stdin to stdout: proves the request's stdin buffer reaches the child and is
+    // closed (EOF), so `cat` exits.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::Exec {
+            argv: vec!["cat".into()],
+            stdin: b"piped input\n".to_vec(),
+        })
+        .expect("send request");
+
+    let mut out = Vec::new();
+    let code = loop {
+        match client.recv_response().expect("read response") {
+            Response::Stdout(b) => out.extend_from_slice(&b),
+            Response::Exit { code } => break code,
+            other => panic!("unexpected response frame: {other:?}"),
+        }
+    };
+    assert_eq!(out, b"piped input\n");
+    assert_eq!(code, 0);
+    let _ = agent.join();
+}
+
+#[test]
 fn bad_handshake_is_rejected_not_hung() {
     // A peer that opens the connection and sends garbage (≥6 bytes, wrong magic) must make `serve`
     // fail promptly, not block. No deadline needed: read_exact gets its 6 bytes and the magic fails.
@@ -120,6 +150,7 @@ fn stalled_host_does_not_wedge_the_guest() {
     client
         .send_request(&Request::Exec {
             argv: vec!["sh".into(), "-c".into(), "seq 1 200000".into()],
+            stdin: Vec::new(),
         })
         .expect("send request");
     // Deliberately never read a response — the guest's send buffer fills and its forward blocks.

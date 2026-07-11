@@ -144,12 +144,18 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       protocol-ready `ClientConnection`. Tested end-to-end KVM-free against the real guest agent
       behind a fake vsock socket; a privileged smoke test confirms real Firecracker boots with the
       device. Full host→guest round trip needs the agent in the rootfs — P3.)*
-- [ ] **P2.4** `RunningVm::exec(cmd, stdin) -> {stdout, stderr, exit}`.
-- [ ] **P2.5** Push inputs in (stdin/files) and pull outputs out.
-      *(Adds the second request type: at that point handle an unknown/additive request tag
-      gracefully — the framing layer surfaces it so the agent replies with a typed "unsupported"
-      rather than a fatal protocol error, closing the forward-compat gap the guest's `_` arm can't
-      reach today.)*
+- [x] **P2.4** `RunningVm::exec(cmd, stdin) -> {stdout, stderr, exit}`.
+      *(`exec(argv, stdin)` connects over vsock and speaks the protocol: sends a bounded up-front
+      stdin buffer, aggregates stdout/stderr/exit into `RunResult` under a 16 MiB output cap (a
+      flooding guest can't grow host memory). Guest agent feeds stdin on its own thread, closing it
+      for EOF. `Sandbox` now boots with vsock and wires `exec`. Tested KVM-free (echo + `cat`
+      stdin) against the real agent; full in-VM run needs the agent in the rootfs — P3.)*
+- [ ] **P2.5** Push richer inputs in (streaming stdin, injected files) and pull artifacts out.
+      *(P2.4 already carries a bounded up-front stdin buffer; this phase adds files and larger/
+      streaming I/O. Adding the second request type is also when to handle an unknown/additive
+      request tag gracefully — the framing layer surfaces it so the agent replies with a typed
+      "unsupported" rather than a fatal protocol error, closing the forward-compat gap the guest's
+      `_` arm can't reach today.)*
 - [ ] **P2.6** Timeouts + kill: a hung command is bounded and reaps cleanly.
       *(Must include a **guest-side self-timeout**: today `serve`'s `child.wait()` is unbounded, so a
       silent hung command (`sleep infinity`) wedges the agent — and the serial accept loop then

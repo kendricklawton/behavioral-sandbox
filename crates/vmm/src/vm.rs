@@ -21,10 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use agent_channel::ClientConnection;
+use agent_channel::{ClientConnection, Request, Response};
 
 use crate::firecracker::{Action, ApiClient, BootSource, Drive, MachineConfig, Vsock};
-use crate::{Limits, VmmError};
+use crate::{Limits, RunResult, VmmError};
 
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
 /// Firecracker hands to our stdout); `reboot=k panic=1` make a guest panic/reboot exit the VMM
@@ -64,6 +64,14 @@ const VSOCK_UDS: &str = "v.sock";
 /// connection carries — so a dead-or-stalled guest is a typed timeout, never a host hang
 /// (decision 002: liveness is the transport's job).
 const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Cap on the stdout+stderr the host buffers for one `exec`. Each frame is already `≤ MAX_PAYLOAD`,
+/// but a guest can send *unboundedly many* frames (`yes`), so the aggregate must be capped too — a
+/// hostile guest never grows host memory without bound. Bounding a command's *runtime* (a hung
+/// command) is a separate axis handled by the exec wall-timeout in a later phase. A fixed default
+/// for now — it joins the hoster-tunable per-run resource policy (cpu/mem/wall/output) once that
+/// shape is decided.
+const MAX_EXEC_OUTPUT: usize = 16 << 20; // 16 MiB
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
@@ -227,6 +235,21 @@ impl RunningVm {
             VmmError::Vmm("this microVM was booted without vsock (set BootConfig.guest_cid)".into())
         })?;
         connect_agent_at(uds, port, VSOCK_TIMEOUT)
+    }
+
+    /// Run `argv` in the guest, feeding it `stdin`, and collect its stdout/stderr/exit.
+    ///
+    /// Connects to the in-guest agent over vsock ([`connect_agent`](Self::connect_agent)) and speaks
+    /// the exec protocol. The captured output is bounded (16 MiB); a command that exits non-zero is
+    /// a normal [`RunResult`], not an error. Each call opens a fresh connection (the guest agent
+    /// serves one command per connection and loops), so repeated `exec` calls are fine.
+    ///
+    /// # Errors
+    /// [`VmmError::Vmm`] if the VM has no vsock, the agent isn't listening, the guest could not run
+    /// the command, or the output cap is exceeded; [`VmmError::Timeout`] on a stalled guest.
+    pub fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
+        let mut conn = self.connect_agent(AGENT_VSOCK_PORT)?;
+        run_exec(&mut conn, argv, stdin, MAX_EXEC_OUTPUT)
     }
 
     /// Shut the microVM down and reclaim its resources.
@@ -617,10 +640,68 @@ fn connect_agent_at(
         .map_err(|e| VmmError::Vmm(format!("channel handshake over vsock: {e}")))
 }
 
+/// Drive one exec over an established [`ClientConnection`]: send the request, then aggregate the
+/// response stream into a [`RunResult`]. Bounded by `max_output` so a flooding guest can't grow host
+/// memory without limit. Factored out of [`RunningVm::exec`] so it can be tested without a VM.
+fn run_exec<S: Read + Write>(
+    conn: &mut ClientConnection<S>,
+    argv: &[String],
+    stdin: &[u8],
+    max_output: usize,
+) -> Result<RunResult, VmmError> {
+    // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
+    // operator's stderr), keyed by argv so `agent run` failures are diagnosable host-side.
+    let span = tracing::info_span!("exec", argv = ?argv);
+    let _span = span.enter();
+    let started = Instant::now();
+
+    // `?` on channel calls now yields `VmmError::Channel(..)`, preserving the `ChannelError` source.
+    conn.send_request(&Request::Exec {
+        argv: argv.to_vec(),
+        stdin: stdin.to_vec(),
+    })?;
+
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    loop {
+        match conn.recv_response()? {
+            Response::Stdout(b) => stdout.extend_from_slice(&b),
+            Response::Stderr(b) => stderr.extend_from_slice(&b),
+            Response::Exit { code } => {
+                tracing::info!(
+                    exit_code = code,
+                    stdout_bytes = stdout.len(),
+                    stderr_bytes = stderr.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "guest command finished"
+                );
+                return Ok(RunResult {
+                    exit_code: code,
+                    stdout,
+                    stderr,
+                });
+            }
+            // A guest-side fault on a healthy channel — distinct from a transport failure.
+            Response::Error(msg) => return Err(VmmError::GuestExec(msg)),
+            _ => {
+                return Err(VmmError::Vmm(
+                    "unexpected response frame from guest agent".into(),
+                ))
+            }
+        }
+        if stdout.len() + stderr.len() > max_output {
+            return Err(VmmError::OutputCap { limit: max_output });
+        }
+    }
+}
+
 /// Connect to `uds` and perform Firecracker's host-initiated vsock handshake: send
 /// `CONNECT <port>\n`, expect `OK <host_port>\n`. Returns the stream positioned right after the
 /// ack, with read/write deadlines set.
 fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream, VmmError> {
+    // `connect` is the one step without a deadline (std has no `UnixStream::connect_timeout`), but
+    // the peer is Firecracker's own vsock socket — created pre-`InstanceStart` and accepting
+    // promptly — so it returns or refuses at once; every step after this is deadline-bounded.
     let mut stream = UnixStream::connect(uds)
         .map_err(|e| VmmError::Vmm(format!("connect vsock socket {}: {e}", uds.display())))?;
     stream
@@ -644,9 +725,11 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
     loop {
         match stream.read(&mut byte) {
             Ok(0) => {
+                // Firecracker closes the connection with no ack when nothing is listening on the
+                // guest port — the common case until the agent is in the rootfs.
                 return Err(VmmError::Vmm(format!(
-                    "vsock CONNECT {port}: peer closed before ack"
-                )))
+                    "vsock CONNECT {port}: peer closed before ack (is the guest agent listening?)"
+                )));
             }
             Ok(_) if byte[0] == b'\n' => break,
             Ok(_) => {
@@ -946,52 +1029,205 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700, "scratch dir must be private to us");
     }
 
-    #[test]
-    fn host_speaks_the_protocol_over_a_fake_vsock() {
-        // Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake,
-        // then hand the same stream to the *real* guest agent. This exercises the entire host side
-        // (vsock connect + CONNECT ack + channel handshake + exec round trip) with no VM.
+    /// Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake, then
+    /// hand the same stream to the *real* guest agent. Lets us exercise the entire host exec path
+    /// (vsock connect + `CONNECT` ack + channel handshake + exec round trip) with no VM.
+    fn fake_vsock_agent(tag: &str) -> (TestDir, PathBuf, std::thread::JoinHandle<()>) {
         use std::os::unix::net::UnixListener;
-
-        let dir = TestDir::new("agent-vsock");
+        let dir = TestDir::new(tag);
         let uds = dir.path().join("v.sock");
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
-
-        let server = std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
             // Read `CONNECT <port>\n` one byte at a time — mustn't over-read the client handshake.
-            let mut line = Vec::new();
             let mut b = [0u8; 1];
             loop {
                 stream.read_exact(&mut b).expect("read CONNECT");
                 if b[0] == b'\n' {
                     break;
                 }
-                line.push(b[0]);
             }
-            assert!(String::from_utf8_lossy(&line).starts_with("CONNECT "));
             stream.write_all(b"OK 10000\n").expect("write ack");
-            // The same stream now carries the channel protocol — run the real agent over it.
             let _ = agent_guest::serve(stream);
         });
+        (dir, uds, handle)
+    }
 
-        let mut conn = connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5))
-            .expect("host connects and handshakes");
-        conn.send_request(&agent_channel::Request::Exec {
-            argv: vec!["echo".into(), "hi".into()],
-        })
-        .expect("send request");
-
-        let mut out = Vec::new();
-        let code = loop {
-            match conn.recv_response().expect("recv response") {
-                agent_channel::Response::Stdout(b) => out.extend_from_slice(&b),
-                agent_channel::Response::Exit { code } => break code,
-                other => panic!("unexpected response: {other:?}"),
-            }
-        };
-        assert_eq!(out, b"hi\n");
-        assert_eq!(code, 0);
+    #[test]
+    fn exec_over_fake_vsock_runs_a_command() {
+        let (_dir, uds, server) = fake_vsock_agent("agent-vsock-echo");
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let result = run_exec(
+            &mut conn,
+            &["echo".into(), "hi".into()],
+            b"",
+            MAX_EXEC_OUTPUT,
+        )
+        .expect("exec");
+        assert_eq!(result.stdout, b"hi\n");
+        assert!(result.stderr.is_empty());
+        assert_eq!(result.exit_code, 0);
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_over_fake_vsock_feeds_stdin() {
+        let (_dir, uds, server) = fake_vsock_agent("agent-vsock-stdin");
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let result = run_exec(
+            &mut conn,
+            &["cat".into()],
+            b"from the host\n",
+            MAX_EXEC_OUTPUT,
+        )
+        .expect("exec");
+        assert_eq!(result.stdout, b"from the host\n");
+        assert_eq!(result.exit_code, 0);
+        server.join().expect("server thread");
+    }
+
+    /// A fake vsock peer that answers `CONNECT`, does the channel handshake, then hands the
+    /// [`ServerConnection`](agent_channel::ServerConnection) to `handler` — so a test can craft the
+    /// exact response stream (unlike `fake_vsock_agent`, which runs the real agent).
+    fn fake_vsock_server<F>(
+        tag: &str,
+        handler: F,
+    ) -> (TestDir, PathBuf, std::thread::JoinHandle<()>)
+    where
+        F: FnOnce(agent_channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
+    {
+        use std::os::unix::net::UnixListener;
+        let dir = TestDir::new(tag);
+        let uds = dir.path().join("v.sock");
+        let listener = UnixListener::bind(&uds).expect("bind fake vsock");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut b = [0u8; 1];
+            loop {
+                stream.read_exact(&mut b).expect("read CONNECT");
+                if b[0] == b'\n' {
+                    break;
+                }
+            }
+            stream.write_all(b"OK 10000\n").expect("write ack");
+            let conn = agent_channel::ServerConnection::accept(stream).expect("server handshake");
+            handler(conn);
+        });
+        (dir, uds, handle)
+    }
+
+    #[test]
+    fn exec_surfaces_a_guest_error_as_typed_error() {
+        // The agent reports a spawn failure with a terminal `Error` frame → `VmmError::GuestExec`,
+        // distinct from a transport fault.
+        let (_dir, uds, server) = fake_vsock_server("agent-vsock-err", |mut conn| {
+            let _ = conn.recv_request();
+            let _ = conn.send_response(&Response::Error("no such binary".into()));
+        });
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let err = run_exec(&mut conn, &["nope".into()], b"", MAX_EXEC_OUTPUT).unwrap_err();
+        assert!(matches!(err, VmmError::GuestExec(_)), "got {err:?}");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_output_cap_is_enforced() {
+        // A guest that floods stdout must trip the cap as a typed error, not grow host memory.
+        let (_dir, uds, server) = fake_vsock_server("agent-vsock-flood", |mut conn| {
+            let _ = conn.recv_request();
+            // Keep sending until the host drops the connection (cap exceeded → our writes error).
+            while conn
+                .send_response(&Response::Stdout(vec![b'x'; 500]))
+                .is_ok()
+            {}
+        });
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let err = run_exec(&mut conn, &["flood".into()], b"", 1000).unwrap_err();
+        assert!(
+            matches!(err, VmmError::OutputCap { limit: 1000 }),
+            "got {err:?}"
+        );
+        // Close the connection so the flooding server's next write errors and its loop ends.
+        drop(conn);
+        server.join().expect("server thread");
+    }
+
+    /// A fake `CONNECT` target: answer nothing but the ack `handler` chooses, so the connect-ack
+    /// paths can be tested without the channel layer.
+    fn fake_connect_target<F>(
+        tag: &str,
+        handler: F,
+    ) -> (TestDir, PathBuf, std::thread::JoinHandle<()>)
+    where
+        F: FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
+    {
+        use std::os::unix::net::UnixListener;
+        let dir = TestDir::new(tag);
+        let uds = dir.path().join("v.sock");
+        let listener = UnixListener::bind(&uds).expect("bind");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut b = [0u8; 1];
+            loop {
+                if stream.read_exact(&mut b).is_err() || b[0] == b'\n' {
+                    break;
+                }
+            }
+            handler(stream);
+        });
+        (dir, uds, handle)
+    }
+
+    #[test]
+    fn connect_ack_refused_is_typed_error() {
+        let (_d, uds, server) = fake_connect_target("agent-ack-refuse", |mut s| {
+            let _ = s.write_all(b"NOPE\n");
+        });
+        let err = vsock_connect(&uds, AGENT_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        assert!(
+            matches!(err, VmmError::Vmm(m) if m.contains("refused")),
+            "wrong error"
+        );
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn connect_ack_peer_close_is_typed_error() {
+        let (_d, uds, server) = fake_connect_target("agent-ack-close", drop);
+        let err = vsock_connect(&uds, AGENT_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        assert!(
+            matches!(err, VmmError::Vmm(m) if m.contains("closed")),
+            "wrong error"
+        );
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn connect_ack_too_long_is_typed_error() {
+        let (_d, uds, server) = fake_connect_target("agent-ack-long", |mut s| {
+            let _ = s.write_all(&[b'x'; 100]); // 100 bytes, no newline
+            std::thread::sleep(Duration::from_millis(200)); // keep the stream open past the read
+        });
+        let err = vsock_connect(&uds, AGENT_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        assert!(
+            matches!(err, VmmError::Vmm(m) if m.contains("too long")),
+            "wrong error"
+        );
+        server.join().expect("server");
+    }
+
+    #[test]
+    fn connect_ack_timeout_is_typed_error() {
+        let (_d, uds, server) = fake_connect_target("agent-ack-timeout", |s| {
+            std::thread::sleep(Duration::from_millis(300)); // never send; outlive the client deadline
+            drop(s);
+        });
+        let err = vsock_connect(&uds, AGENT_VSOCK_PORT, Duration::from_millis(100)).unwrap_err();
+        assert!(matches!(err, VmmError::Timeout(_)), "got {err:?}");
+        server.join().expect("server");
     }
 }

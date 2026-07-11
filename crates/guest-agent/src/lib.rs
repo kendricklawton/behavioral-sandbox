@@ -90,8 +90,8 @@ where
 {
     let mut conn = ServerConnection::accept(stream)?;
 
-    let argv = match conn.recv_request()? {
-        Request::Exec { argv } => argv,
+    let (argv, stdin) = match conn.recv_request()? {
+        Request::Exec { argv, stdin } => (argv, stdin),
         // `Request` is `#[non_exhaustive]`: a newer host may send a type we don't know yet.
         _ => {
             conn.send_response(&Response::Error("unsupported request".into()))?;
@@ -110,7 +110,7 @@ where
     let started = Instant::now();
     let mut child = match Command::new(program)
         .args(args)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -124,15 +124,24 @@ where
         }
     };
 
+    let child_stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // The connection is now write-only (P2.5 adds stdin streaming); share it across the pump
+    // The connection is now write-only (streaming stdin is a later phase); share it across the pump
     // threads. `first_err` records the first forward failure without stopping the drain.
     let conn = Mutex::new(conn);
     let first_err: Mutex<Option<ChannelError>> = Mutex::new(None);
 
     let status = std::thread::scope(|scope| {
+        // Feed stdin on its own thread and close it (EOF) — concurrently with the output pumps, so
+        // a command that writes before draining its stdin can't deadlock against us.
+        if let Some(mut sink) = child_stdin {
+            scope.spawn(move || {
+                let _ = sink.write_all(&stdin);
+                // `sink` drops here, closing the child's stdin so it sees EOF.
+            });
+        }
         if let Some(out) = stdout {
             scope.spawn(|| pump(out, Kind::Stdout, &conn, &first_err));
         }
@@ -141,7 +150,7 @@ where
         }
         // Reap in the scope's own thread while the pumps drain in parallel — this is what keeps the
         // child from blocking on a full pipe. (A silent hung command still blocks here; bounding
-        // that is P2.6's exec wall-timeout.)
+        // that is the exec wall-timeout in a later phase.)
         child.wait()
     });
 

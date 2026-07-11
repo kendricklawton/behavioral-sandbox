@@ -50,8 +50,10 @@ const TAG_ERROR: u8 = 5;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Request {
-    /// Run `argv` in the guest (`argv[0]` is the program). Empty argv is rejected by the agent.
-    Exec { argv: Vec<String> },
+    /// Run `argv` in the guest (`argv[0]` is the program), feeding `stdin` to it. `stdin` is a
+    /// bounded up-front buffer — the whole request is one `≤ MAX_PAYLOAD` frame; streaming larger
+    /// inputs and injecting files is a later phase. Empty argv is rejected by the agent.
+    Exec { argv: Vec<String>, stdin: Vec<u8> },
 }
 
 /// A guest→host message. The host reads these until a terminal [`Exit`](Response::Exit) or
@@ -203,7 +205,7 @@ fn read_frame(r: &mut impl Read) -> Result<(u8, Vec<u8>), ChannelError> {
 /// on a write failure.
 pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelError> {
     match req {
-        Request::Exec { argv } => {
+        Request::Exec { argv, stdin } => {
             let mut payload = Vec::new();
             payload.extend_from_slice(&(argv.len() as u32).to_le_bytes());
             for arg in argv {
@@ -216,6 +218,14 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
                         len: payload.len(),
                     });
                 }
+            }
+            payload.extend_from_slice(&(stdin.len() as u32).to_le_bytes());
+            payload.extend_from_slice(stdin);
+            if payload.len() > MAX_PAYLOAD {
+                return Err(ChannelError::PayloadTooLarge {
+                    tag: TAG_EXEC,
+                    len: payload.len(),
+                });
             }
             write_frame(w, TAG_EXEC, &payload)
         }
@@ -246,7 +256,9 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
             .map_err(|_| ChannelError::Protocol("argv entry is not valid UTF-8".into()))?;
         argv.push(arg);
     }
-    Ok(Request::Exec { argv })
+    let stdin_len = body.u32()? as usize;
+    let stdin = body.take(stdin_len)?.to_vec();
+    Ok(Request::Exec { argv, stdin })
 }
 
 /// Send a [`Response`].
@@ -435,15 +447,25 @@ mod tests {
 
     #[test]
     fn request_round_trips_including_unicode_and_empty() {
-        for argv in [
-            vec!["echo".to_string(), "hi".to_string()],
-            vec!["/bin/π".to_string(), "a b\tc".to_string(), String::new()],
-            vec![],
+        for (argv, stdin) in [
+            (vec!["echo".to_string(), "hi".to_string()], vec![]),
+            (
+                vec!["/bin/π".to_string(), "a b\tc".to_string(), String::new()],
+                b"piped input\n".to_vec(),
+            ),
+            (vec![], vec![0u8, 1, 2, 255]),
         ] {
             let mut buf = Vec::new();
-            write_request(&mut buf, &Request::Exec { argv: argv.clone() }).unwrap();
+            write_request(
+                &mut buf,
+                &Request::Exec {
+                    argv: argv.clone(),
+                    stdin: stdin.clone(),
+                },
+            )
+            .unwrap();
             let got = read_request(&mut buf.as_slice()).unwrap();
-            assert_eq!(got, Request::Exec { argv });
+            assert_eq!(got, Request::Exec { argv, stdin });
         }
     }
 
@@ -520,7 +542,8 @@ mod tests {
             assert_eq!(
                 req,
                 Request::Exec {
-                    argv: vec!["true".into()]
+                    argv: vec!["true".into()],
+                    stdin: vec![],
                 }
             );
             conn.send_response(&Response::Exit { code: 0 }).unwrap();
@@ -529,6 +552,7 @@ mod tests {
         client
             .send_request(&Request::Exec {
                 argv: vec!["true".into()],
+                stdin: vec![],
             })
             .unwrap();
         assert_eq!(client.recv_response().unwrap(), Response::Exit { code: 0 });
