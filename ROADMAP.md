@@ -150,22 +150,56 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       flooding guest can't grow host memory). Guest agent feeds stdin on its own thread, closing it
       for EOF. `Sandbox` now boots with vsock and wires `exec`. Tested KVM-free (echo + `cat`
       stdin) against the real agent; full in-VM run needs the agent in the rootfs — P3.)*
-- [ ] **P2.5** Push richer inputs in (streaming stdin, injected files) and pull artifacts out.
-      *(P2.4 already carries a bounded up-front stdin buffer; this phase adds files and larger/
-      streaming I/O. Adding the second request type is also when to handle an unknown/additive
-      request tag gracefully — the framing layer surfaces it so the agent replies with a typed
-      "unsupported" rather than a fatal protocol error, closing the forward-compat gap the guest's
-      `_` arm can't reach today.)*
-- [ ] **P2.6** Timeouts + kill: a hung command is bounded and reaps cleanly.
-      *(Must include a **guest-side self-timeout**: today `serve`'s `child.wait()` is unbounded, so a
-      silent hung command (`sleep infinity`) wedges the agent — and the serial accept loop then
-      blocks every later connection. Bound it (kill + a typed timeout / `Response::Error`); don't
-      rely only on host-side VM teardown.)*
-- [ ] **P2.7** Error taxonomy for the driver (boot failure, channel failure, guest crash) — typed,
+- [x] **P2.5** Push richer inputs in (injected files) and pull artifacts out — over the channel.
+      *(New `PutFile` request + `File` response frames; the agent gives each run a working dir,
+      writes injected files in (path-checked against `..`/absolute escapes), runs the command with
+      that cwd, and returns the requested `artifacts` — collected into `RunResult.files` under the
+      shared output cap. `exec_with_files` is the richer entry; plain `exec` stays. Unknown request
+      tags now decode to `Request::Unknown` so the agent replies a typed "unsupported" instead of a
+      fatal protocol error (the flagged forward-compat fix). Each file is one `≤1 MiB` frame;
+      **streaming/large I/O (chunked, whole working-dir) is the block-device path — P3.4/P3.5**.)*
+- [x] **P2.6** Timeouts + kill: a hung command is bounded and reaps cleanly.
+      *(Guest-side self-timeout: the host sends a per-exec `timeout_ms`; the agent replaces the
+      unbounded `child.wait()` with a deadline-polling `wait_bounded` that SIGKILLs + reaps the
+      child past the deadline and replies `Response::TimedOut`, which the host maps to
+      `VmmError::Timeout`. Clamped to an agent-side ceiling (a buggy host can't ask for ∞); the
+      host's exec read timeout is set longer than the command budget so a quiet-but-running command
+      isn't cut off and the `TimedOut` reply arrives. Frees the accept loop for the direct-child
+      hang. **Known gap:** `kill` hits only the direct child, so a command that double-forks a
+      grandchild holding the stdout pipe still wedges the agent's connection until the grandchild
+      exits (the host stays bounded); the definitive fix is the cgroup killing the whole tree — see
+      Phase 6. Timeout is the distinct `VmmError::ExecTimeout`; the guest also self-clamps the
+      budget. Also folded in the P2.5 review fixes: the output cap counts artifact `path` bytes +
+      a per-frame floor (no empty/all-path flood), and an over-cap artifact is skipped, not fatal.)*
+- [x] **P2.7** Error taxonomy for the driver (boot failure, channel failure, guest crash) — typed,
       no panics on the host.
-- [ ] **P2.8** Test: `exec("echo hi")` → `hi`, exit 0; a crashing command → typed error.
+      *(`VmmError` already carried the variants; this pass makes the taxonomy **legible** — a doc
+      that sorts every variant into three buckets: **boot/infra** (`NoKvm`/`Artifact`/`Timeout`/
+      `Vmm`, which also holds vsock **establishment** failures — connect + `CONNECT` ack + channel
+      handshake — since "the agent isn't listening yet" is infra), **channel/transport**
+      (`Channel`, reserved for a **steady-state** framing/IO fault mid-exec), and **guest fault**
+      (`GuestExec`/`ExecTimeout`/`OutputCap`). States the load-bearing semantic: a command that
+      merely exits non-zero **or dies by signal** (`128+sig`) is a faithful `RunResult`, not an
+      error. No-panic is gate-enforced (`#![forbid(unsafe_code)]` + clippy denies `unwrap`/`expect`
+      outside tests). Fixed a real bug: the stale `# Errors` rustdoc on `exec`/`exec_with_files`
+      claimed `Vmm` for guest-can't-run/output-cap. Deferred, safe under `#[non_exhaustive]`: a
+      `GuestUnavailable` variant (first retry/warm-pool caller, ~P5) and a `kind()` classifier
+      (first caller that branches on bucket).)*
+- [x] **P2.8** Test: `exec("echo hi")` → `hi`, exit 0; a crashing command → typed error.
+      *(Happy path `exec_over_fake_vsock_runs_a_command` drives `echo hi` through the **real** agent
+      → `hi\n`, exit 0. "Crashing → typed error" is disambiguated with two tests that pin the
+      boundary: a command the guest can't spawn → `VmmError::GuestExec` (typed error), and
+      `kill -9 $$` → `RunResult{exit_code:137}` (a faithful result, **not** an error — the
+      host-side mapping, distinct from the guest-agent-layer signal-death test). Added the
+      previously-untested channel bucket: a guest that drops mid-exec →
+      `VmmError::Channel` with `is_disconnect()`. All KVM-free, in the host gate.)*
 - **Exit gate + lesson:** `agent`-driven `exec` in a microVM returns real output; write up **vsock /
   guest agents** and how host↔guest comms actually work.
+  *(Writeup: `docs/002-host-guest-comms.md`. The exec **engine** is complete and tested against the
+  real guest agent (only the Firecracker vsock UDS is faked) + a privileged vsock-device boot smoke
+  test. The **"in a microVM" clause is provisional**: the agent isn't baked into the rootfs and
+  doesn't bind `AF_VSOCK` until Phase 3, so the literal in-VM `exec("echo hi")` transcript is the
+  **first P3 deliverable** — see `docs/002` "What's still stubbed".)*
 
 ## Phase 3 — Rootfs & the language runtime
 
@@ -175,8 +209,11 @@ Build the disk the guest runs, with a real runtime (e.g. Python) inside — nati
       base) + the guest agent baked in.
 - [ ] **P3.2** Add a language runtime (Python) to the rootfs; prove `exec("python -c 'print(2+2)')`.
 - [ ] **P3.3** Read-only base rootfs + a writable overlay per run (so runs don't mutate the base).
-- [ ] **P3.4** Inject a per-run working dir / files via a second block device or the channel.
-- [ ] **P3.5** Pull artifacts (files the run produced) back out.
+- [ ] **P3.4** Inject a per-run working dir / files via a second **block device** (the
+      channel path — small per-file injection — already landed in P2.5; this is the whole-working-dir
+      / large-file mechanism).
+- [ ] **P3.5** Pull artifacts back out at **working-dir / large-file** scale (the per-file channel
+      path landed in P2.5; here it's the block-device / bulk mechanism).
 - [ ] **P3.6** Pin the rootfs build in `xtask` so it's one command + reproducible.
 - [ ] **P3.7** Size/boot budget: keep the base small; measure its effect on boot time.
 - [ ] **P3.8** Test: run Python + a small script that writes a file → capture the file.
@@ -223,7 +260,10 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 - [ ] **P6.1** Run Firecracker under its **jailer** (chroot, uid/gid drop, namespaces).
 - [ ] **P6.2** Put each VMM in its own **cgroup**; set CPU/memory limits.
 - [ ] **P6.3** Apply Firecracker's **seccomp** filters; understand what syscalls it needs.
-- [ ] **P6.4** Resource caps enforced: a VM can't exceed its cgroup memory/CPU.
+- [ ] **P6.4** Resource caps enforced: a VM can't exceed its cgroup memory/CPU. *(Also closes the
+      P2.6 gap: killing the guest's cgroup reaps a command's whole process tree — grandchildren and
+      `setsid` daemons that a direct-child `kill` misses — so a double-forking command can't wedge
+      the guest agent's exec connection.)*
 - [ ] **P6.5** `(decision)` per-run resource policy shape (the knobs the engine exposes) →
       `ARCHITECTURE.md`.
 - [ ] **P6.6** Verify isolation: a hostile guest + a hostile-ish workload can't escape the jail.

@@ -65,13 +65,28 @@ const VSOCK_UDS: &str = "v.sock";
 /// (decision 002: liveness is the transport's job).
 const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Cap on the stdout+stderr the host buffers for one `exec`. Each frame is already `≤ MAX_PAYLOAD`,
-/// but a guest can send *unboundedly many* frames (`yes`), so the aggregate must be capped too — a
-/// hostile guest never grows host memory without bound. Bounding a command's *runtime* (a hung
-/// command) is a separate axis handled by the exec wall-timeout in a later phase. A fixed default
-/// for now — it joins the hoster-tunable per-run resource policy (cpu/mem/wall/output) once that
-/// shape is decided.
+/// Cap on the stdout+stderr+artifacts the host buffers for one `exec`. Each frame is already
+/// `≤ MAX_PAYLOAD`, but a guest can send *unboundedly many* frames (`yes`), so the aggregate is
+/// capped too — a hostile guest never grows host memory without bound. (A command's *runtime* is a
+/// separate axis, bounded by the exec wall-timeout below.) A fixed default for now — it joins the
+/// hoster-tunable per-run resource policy (cpu/mem/wall/output) once that shape is decided.
 const MAX_EXEC_OUTPUT: usize = 16 << 20; // 16 MiB
+
+/// Per-frame overhead charged toward the output cap, so a flood of empty (or all-`path`, no-`data`)
+/// frames can't spin the collect loop or grow the artifact list without advancing the cap.
+const FRAME_FLOOR: usize = 64;
+
+/// Default wall-clock budget for one command, sent to the guest agent, which kills the command past
+/// it. A fixed default for now — it joins the hoster-tunable per-run resource policy later. (The
+/// guest clamps a host-sent budget to its own 1 h ceiling; when the budget becomes a policy knob,
+/// [`EXEC_IO_TIMEOUT`] must be derived from the *requested* value, not this const.)
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The exec connection's read/write timeout: **derived** to outlast [`DEFAULT_EXEC_TIMEOUT`] so a
+/// legitimately long-but-quiet command isn't cut off by the transport before its own deadline, and
+/// so the host outlasts the agent's kill and receives its `TimedOut` reply. Derived (not a second
+/// magic number) so the two can't silently drift out of order.
+const EXEC_IO_TIMEOUT: Duration = DEFAULT_EXEC_TIMEOUT.saturating_add(Duration::from_secs(5));
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
@@ -245,11 +260,46 @@ impl RunningVm {
     /// serves one command per connection and loops), so repeated `exec` calls are fine.
     ///
     /// # Errors
-    /// [`VmmError::Vmm`] if the VM has no vsock, the agent isn't listening, the guest could not run
-    /// the command, or the output cap is exceeded; [`VmmError::Timeout`] on a stalled guest.
+    /// A typed [`VmmError`] across the taxonomy's three buckets: **establishment** —
+    /// [`VmmError::Vmm`] if the VM has no vsock or the agent isn't listening, [`VmmError::Timeout`]
+    /// on a stalled connect/ack; **steady-state transport** — [`VmmError::Channel`] on a mid-exec
+    /// framing/IO fault; **guest fault** — [`VmmError::GuestExec`] if the agent couldn't run the
+    /// command, [`VmmError::ExecTimeout`] if it outran its budget, [`VmmError::OutputCap`] if it
+    /// flooded output. A command that merely exits non-zero (even by signal) is a normal
+    /// [`RunResult`], not an error.
     pub fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
-        let mut conn = self.connect_agent(AGENT_VSOCK_PORT)?;
-        run_exec(&mut conn, argv, stdin, MAX_EXEC_OUTPUT)
+        self.exec_with_files(argv, stdin, &[], &[])
+    }
+
+    /// Run `argv` with `stdin`, first injecting `files_in` into the run's working directory, then
+    /// returning the files named in `artifacts` (paths relative to that directory) in
+    /// [`RunResult::files`]. The richer form of [`exec`](Self::exec); each file is bounded to the
+    /// channel's per-frame cap, and the total captured output+artifacts is bounded (16 MiB).
+    ///
+    /// # Errors
+    /// As [`exec`](Self::exec).
+    pub fn exec_with_files(
+        &self,
+        argv: &[String],
+        stdin: &[u8],
+        files_in: &[(String, Vec<u8>)],
+        artifacts: &[String],
+    ) -> Result<RunResult, VmmError> {
+        let uds = self.vsock_uds.as_ref().ok_or_else(|| {
+            VmmError::Vmm("this microVM was booted without vsock (set BootConfig.guest_cid)".into())
+        })?;
+        // Use the longer exec I/O timeout so a quiet-but-running command isn't cut off and the
+        // agent's `TimedOut` (at DEFAULT_EXEC_TIMEOUT) reaches us first.
+        let mut conn = connect_agent_at(uds, AGENT_VSOCK_PORT, EXEC_IO_TIMEOUT)?;
+        run_exec(
+            &mut conn,
+            argv,
+            stdin,
+            files_in,
+            artifacts,
+            DEFAULT_EXEC_TIMEOUT,
+            MAX_EXEC_OUTPUT,
+        )
     }
 
     /// Shut the microVM down and reclaim its resources.
@@ -647,6 +697,9 @@ fn run_exec<S: Read + Write>(
     conn: &mut ClientConnection<S>,
     argv: &[String],
     stdin: &[u8],
+    files_in: &[(String, Vec<u8>)],
+    artifacts: &[String],
+    timeout: Duration,
     max_output: usize,
 ) -> Result<RunResult, VmmError> {
     // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
@@ -655,23 +708,48 @@ fn run_exec<S: Read + Write>(
     let _span = span.enter();
     let started = Instant::now();
 
-    // `?` on channel calls now yields `VmmError::Channel(..)`, preserving the `ChannelError` source.
+    // Inject input files first, then the terminal exec request.
+    // `?` on channel calls yields `VmmError::Channel(..)`, preserving the `ChannelError` source.
+    for (path, data) in files_in {
+        conn.send_request(&Request::PutFile {
+            path: path.clone(),
+            data: data.clone(),
+        })?;
+    }
     conn.send_request(&Request::Exec {
         argv: argv.to_vec(),
         stdin: stdin.to_vec(),
+        artifacts: artifacts.to_vec(),
+        timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
     })?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    // Bound stdout + stderr + artifact *names and bytes* together. `FRAME_FLOOR` is charged per
+    // frame so a flood of empty frames (or `File` frames whose budget is spent on `path`, not
+    // `data`) can't spin the loop or grow `files` without advancing the cap.
+    let mut captured = 0usize;
     loop {
         match conn.recv_response()? {
-            Response::Stdout(b) => stdout.extend_from_slice(&b),
-            Response::Stderr(b) => stderr.extend_from_slice(&b),
+            Response::Stdout(b) => {
+                captured += b.len() + FRAME_FLOOR;
+                stdout.extend_from_slice(&b);
+            }
+            Response::Stderr(b) => {
+                captured += b.len() + FRAME_FLOOR;
+                stderr.extend_from_slice(&b);
+            }
+            Response::File { path, data } => {
+                captured += path.len() + data.len() + FRAME_FLOOR;
+                files.push((path, data));
+            }
             Response::Exit { code } => {
                 tracing::info!(
                     exit_code = code,
                     stdout_bytes = stdout.len(),
                     stderr_bytes = stderr.len(),
+                    artifacts = files.len(),
                     elapsed_ms = started.elapsed().as_millis() as u64,
                     "guest command finished"
                 );
@@ -679,7 +757,20 @@ fn run_exec<S: Read + Write>(
                     exit_code: code,
                     stdout,
                     stderr,
+                    files,
                 });
+            }
+            // The guest killed the command at its wall-clock deadline. Distinct typed error, and
+            // logged host-side (the guest's own log goes to the serial console, not the operator).
+            // NOTE: the partial stdout/stderr streamed before the kill is discarded here; carrying
+            // it on the error (or a `timed_out` RunResult) is a future enhancement.
+            Response::TimedOut { elapsed_ms } => {
+                tracing::warn!(
+                    limit_ms = timeout.as_millis() as u64,
+                    elapsed_ms,
+                    "guest command timed out"
+                );
+                return Err(VmmError::ExecTimeout { limit: timeout });
             }
             // A guest-side fault on a healthy channel — distinct from a transport failure.
             Response::Error(msg) => return Err(VmmError::GuestExec(msg)),
@@ -689,7 +780,7 @@ fn run_exec<S: Read + Write>(
                 ))
             }
         }
-        if stdout.len() + stderr.len() > max_output {
+        if captured > max_output {
             return Err(VmmError::OutputCap { limit: max_output });
         }
     }
@@ -1055,6 +1146,8 @@ mod tests {
 
     #[test]
     fn exec_over_fake_vsock_runs_a_command() {
+        // P2.8 happy path: `exec("echo hi")` → `hi`, exit 0 — through the *real* agent (only the
+        // Firecracker vsock UDS is faked).
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-echo");
         let mut conn =
             connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
@@ -1062,6 +1155,9 @@ mod tests {
             &mut conn,
             &["echo".into(), "hi".into()],
             b"",
+            &[],
+            &[],
+            Duration::from_secs(5),
             MAX_EXEC_OUTPUT,
         )
         .expect("exec");
@@ -1080,11 +1176,89 @@ mod tests {
             &mut conn,
             &["cat".into()],
             b"from the host\n",
+            &[],
+            &[],
+            Duration::from_secs(5),
             MAX_EXEC_OUTPUT,
         )
         .expect("exec");
         assert_eq!(result.stdout, b"from the host\n");
         assert_eq!(result.exit_code, 0);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_injects_files_and_returns_artifacts() {
+        // Put a file in, run a command that reads it and writes an output file, pull the artifact
+        // back. Exercises PutFile + working-dir cwd + artifact return end to end against the agent.
+        let (_dir, uds, server) = fake_vsock_agent("agent-vsock-files");
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let result = run_exec(
+            &mut conn,
+            &[
+                "sh".into(),
+                "-c".into(),
+                "mkdir -p out && tr a-z A-Z < in.txt > out/up.txt".into(),
+            ],
+            b"",
+            &[("in.txt".into(), b"hello\n".to_vec())],
+            &["out/up.txt".into(), "missing.txt".into()],
+            Duration::from_secs(5),
+            MAX_EXEC_OUTPUT,
+        )
+        .expect("exec");
+        assert_eq!(result.exit_code, 0);
+        // The one artifact that exists comes back; the missing one is simply omitted.
+        assert_eq!(
+            result.files,
+            vec![("out/up.txt".to_string(), b"HELLO\n".to_vec())]
+        );
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_crashing_command_is_a_typed_error() {
+        // P2.8: a command the guest can't run ("crashing" in the agent-fault sense) comes back as a
+        // terminal `Error` frame → the typed `VmmError::GuestExec`, end to end through the real
+        // agent (which reports the spawn failure), not via a hand-crafted `Error` response.
+        let (_dir, uds, server) = fake_vsock_agent("agent-vsock-crash");
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let err = run_exec(
+            &mut conn,
+            &["definitely-not-a-real-binary-zzz".into()],
+            b"",
+            &[],
+            &[],
+            Duration::from_secs(5),
+            MAX_EXEC_OUTPUT,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VmmError::GuestExec(_)), "got {err:?}");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_signal_death_is_a_faithful_result_not_an_error() {
+        // The load-bearing taxonomy semantic: a command that *runs and crashes* (here SIGKILL via
+        // `kill -9 $$`) is NOT a `VmmError` — the agent maps signal death to `128+sig` and the host
+        // returns a faithful `RunResult{exit_code: 137}`. This pins the *host*-side mapping in
+        // `run_exec`; the guest-agent-layer version lives in crates/guest-agent/tests/exec.rs.
+        let (_dir, uds, server) = fake_vsock_agent("agent-vsock-signal");
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let result = run_exec(
+            &mut conn,
+            &["sh".into(), "-c".into(), "kill -9 $$".into()],
+            b"",
+            &[],
+            &[],
+            Duration::from_secs(5),
+            MAX_EXEC_OUTPUT,
+        )
+        .expect("signal death is a result, not an error");
+        assert_eq!(result.exit_code, 137, "128 + SIGKILL(9)");
         server.join().expect("server thread");
     }
 
@@ -1128,8 +1302,47 @@ mod tests {
         });
         let mut conn =
             connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
-        let err = run_exec(&mut conn, &["nope".into()], b"", MAX_EXEC_OUTPUT).unwrap_err();
+        let err = run_exec(
+            &mut conn,
+            &["nope".into()],
+            b"",
+            &[],
+            &[],
+            Duration::from_secs(5),
+            MAX_EXEC_OUTPUT,
+        )
+        .unwrap_err();
         assert!(matches!(err, VmmError::GuestExec(_)), "got {err:?}");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_channel_drop_mid_exec_is_a_typed_channel_error() {
+        // The channel/transport bucket end to end: a guest that accepts the request then drops the
+        // connection makes `recv_response` hit EOF → `ChannelError::Io(UnexpectedEof)` →
+        // `VmmError::Channel`. Every *other* channel-ish fault is at connect time (→ `Vmm`), so this
+        // is the only test that exercises the steady-state `Channel` arm and the `From<ChannelError>`
+        // conversion at the vmm layer.
+        let (_dir, uds, server) = fake_vsock_server("agent-vsock-drop", |mut conn| {
+            let _ = conn.recv_request();
+            drop(conn); // no response frames — the host's next read sees a clean EOF
+        });
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let err = run_exec(
+            &mut conn,
+            &["echo".into(), "hi".into()],
+            b"",
+            &[],
+            &[],
+            Duration::from_secs(5),
+            MAX_EXEC_OUTPUT,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, VmmError::Channel(ref e) if e.is_disconnect()),
+            "got {err:?}"
+        );
         server.join().expect("server thread");
     }
 
@@ -1146,12 +1359,77 @@ mod tests {
         });
         let mut conn =
             connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
-        let err = run_exec(&mut conn, &["flood".into()], b"", 1000).unwrap_err();
+        let err = run_exec(
+            &mut conn,
+            &["flood".into()],
+            b"",
+            &[],
+            &[],
+            Duration::from_secs(5),
+            1000,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, VmmError::OutputCap { limit: 1000 }),
             "got {err:?}"
         );
         // Close the connection so the flooding server's next write errors and its loop ends.
+        drop(conn);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_maps_guest_timeout_to_typed_timeout() {
+        // The agent's terminal `TimedOut` (command killed at its deadline) becomes the distinct
+        // VmmError::ExecTimeout — not conflated with a channel/transport timeout.
+        let (_dir, uds, server) = fake_vsock_server("agent-vsock-timeout", |mut conn| {
+            let _ = conn.recv_request();
+            let _ = conn.send_response(&Response::TimedOut { elapsed_ms: 1000 });
+        });
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let err = run_exec(
+            &mut conn,
+            &["sleep".into()],
+            b"",
+            &[],
+            &[],
+            Duration::from_secs(1),
+            MAX_EXEC_OUTPUT,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VmmError::ExecTimeout { .. }), "got {err:?}");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn output_cap_counts_file_path_bytes_not_just_data() {
+        // Regression: a guest flooding File frames whose budget is spent on `path` (empty `data`)
+        // must still trip the cap — path bytes and a per-frame floor count toward it.
+        let (_dir, uds, server) = fake_vsock_server("agent-vsock-pathflood", |mut conn| {
+            let _ = conn.recv_request();
+            let big_path = "p".repeat(4096);
+            while conn
+                .send_response(&Response::File {
+                    path: big_path.clone(),
+                    data: Vec::new(),
+                })
+                .is_ok()
+            {}
+        });
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+        let err = run_exec(
+            &mut conn,
+            &["flood".into()],
+            b"",
+            &[],
+            &[],
+            Duration::from_secs(5),
+            10_000,
+        )
+        .unwrap_err();
+        assert!(matches!(err, VmmError::OutputCap { .. }), "got {err:?}");
         drop(conn);
         server.join().expect("server thread");
     }

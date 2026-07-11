@@ -1,10 +1,11 @@
 # agent *(working name)*
 
-**A self-hostable, isolated code-execution sandbox.** Run untrusted code inside a
-**Firecracker** microVM (hardware isolation via KVM), and watch and enforce what it does from
-**host-side eBPF** (**aya**) — syscalls, its network, its cgroup — from *outside* the guest,
-where the code can't see or subvert you. Every run yields a tamper-resistant, host-observed
-**flight recorder** of exactly what happened.
+**A self-hostable engine for running untrusted code — with a record of what it did that you
+can trust without trusting the code.** Untrusted code runs inside a **Firecracker** microVM
+(hardware isolation via KVM); **host-side eBPF** (**aya**) watches and enforces what it does —
+syscalls, its network, its cgroup — from *outside* the guest, where the code can't see or
+subvert you. Every run yields a tamper-resistant, host-observed **flight recorder** of exactly
+what happened.
 
 Built in the open as a **Linux-internals deep-dive** — each milestone is a working demo and a
 writeup, from the hardware-isolation boundary up to the syscall/network boundary.

@@ -44,16 +44,34 @@ const TAG_STDOUT: u8 = 2;
 const TAG_STDERR: u8 = 3;
 const TAG_EXIT: u8 = 4;
 const TAG_ERROR: u8 = 5;
+const TAG_PUTFILE: u8 = 6;
+const TAG_FILE: u8 = 7;
+const TAG_TIMEDOUT: u8 = 8;
 
-/// A host→guest message. `#[non_exhaustive]`: later phases add stdin/file frames (P2.5) without
-/// breaking a guest agent built against an older version.
+/// A host→guest message. `#[non_exhaustive]`: new request types are added as new tags without
+/// breaking an older guest agent — an unknown tag becomes [`Unknown`](Request::Unknown), which the
+/// agent answers with a typed "unsupported" rather than a fatal protocol error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Request {
-    /// Run `argv` in the guest (`argv[0]` is the program), feeding `stdin` to it. `stdin` is a
-    /// bounded up-front buffer — the whole request is one `≤ MAX_PAYLOAD` frame; streaming larger
-    /// inputs and injecting files is a later phase. Empty argv is rejected by the agent.
-    Exec { argv: Vec<String>, stdin: Vec<u8> },
+    /// Write a file into the run's working directory *before* the command runs. Sent zero or more
+    /// times ahead of [`Exec`](Request::Exec); each file is one `≤ MAX_PAYLOAD` frame. `path` is
+    /// relative to the working dir; the agent rejects absolute or `..`-escaping paths.
+    PutFile { path: String, data: Vec<u8> },
+    /// Run `argv` in the guest (`argv[0]` is the program), feeding `stdin` to it, then return the
+    /// files named in `artifacts` (paths relative to the working dir). `stdin` is a bounded up-front
+    /// buffer — larger/streaming input goes via the block-device path. `timeout_ms` bounds the
+    /// command's wall-clock runtime — the agent kills it and replies [`Response::TimedOut`] past
+    /// the deadline; **`0` means "use the agent's ceiling"**, not "no time". Empty argv is rejected.
+    Exec {
+        argv: Vec<String>,
+        stdin: Vec<u8>,
+        artifacts: Vec<String>,
+        timeout_ms: u32,
+    },
+    /// A well-framed request whose tag this build doesn't know — a *newer* host speaking a request
+    /// type we don't implement. Not a protocol error; the agent replies with a typed "unsupported".
+    Unknown { tag: u8 },
 }
 
 /// A guest→host message. The host reads these until a terminal [`Exit`](Response::Exit) or
@@ -65,9 +83,17 @@ pub enum Response {
     Stdout(Vec<u8>),
     /// A chunk of the command's stderr.
     Stderr(Vec<u8>),
+    /// A requested artifact read back from the working dir (sent before [`Exit`](Response::Exit)).
+    /// A missing artifact is simply omitted. Each file is one `≤ MAX_PAYLOAD` frame.
+    File { path: String, data: Vec<u8> },
     /// The command finished. Struct-form so a later phase can add a field (e.g. a separate
     /// `signal`) without a breaking change; `code` is `128 + signal` on signal death today.
     Exit { code: i32 },
+    /// The command exceeded its `timeout_ms` deadline and was killed by the agent — terminal, no
+    /// exit follows. Distinct from a channel timeout: the command ran, it just ran too long.
+    /// Struct-form (like [`Exit`](Response::Exit)) so fields can be added without a break; carries
+    /// the actual runtime the agent measured.
+    TimedOut { elapsed_ms: u32 },
     /// The agent could not run the command at all (e.g. spawn failed) — terminal, no exit follows.
     Error(String),
 }
@@ -198,67 +224,104 @@ fn read_frame(r: &mut impl Read) -> Result<(u8, Vec<u8>), ChannelError> {
     Ok((tag, payload))
 }
 
-/// Send a [`Request`].
-///
-/// # Errors
-/// [`ChannelError::PayloadTooLarge`] if the encoded argv exceeds [`MAX_PAYLOAD`]; [`ChannelError::Io`]
-/// on a write failure.
-pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelError> {
-    match req {
-        Request::Exec { argv, stdin } => {
-            let mut payload = Vec::new();
-            payload.extend_from_slice(&(argv.len() as u32).to_le_bytes());
-            for arg in argv {
-                let bytes = arg.as_bytes();
-                payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-                payload.extend_from_slice(bytes);
-                if payload.len() > MAX_PAYLOAD {
-                    return Err(ChannelError::PayloadTooLarge {
-                        tag: TAG_EXEC,
-                        len: payload.len(),
-                    });
-                }
-            }
-            payload.extend_from_slice(&(stdin.len() as u32).to_le_bytes());
-            payload.extend_from_slice(stdin);
-            if payload.len() > MAX_PAYLOAD {
-                return Err(ChannelError::PayloadTooLarge {
-                    tag: TAG_EXEC,
-                    len: payload.len(),
-                });
-            }
-            write_frame(w, TAG_EXEC, &payload)
-        }
+/// Append a `u32`-length-prefixed blob to `payload`.
+fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
+    payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    payload.extend_from_slice(bytes);
+}
+
+/// Guard a built payload against the frame cap before framing it.
+fn within_cap(tag: u8, payload: &[u8]) -> Result<(), ChannelError> {
+    if payload.len() > MAX_PAYLOAD {
+        Err(ChannelError::PayloadTooLarge {
+            tag,
+            len: payload.len(),
+        })
+    } else {
+        Ok(())
     }
 }
 
-/// Read a [`Request`].
+/// Send a [`Request`].
 ///
 /// # Errors
-/// [`ChannelError::Protocol`] on an unexpected tag or a malformed/non-UTF-8 body; otherwise the
-/// framing errors from reading the frame.
+/// [`ChannelError::PayloadTooLarge`] if the encoded request exceeds [`MAX_PAYLOAD`];
+/// [`ChannelError::Protocol`] if asked to send a [`Request::Unknown`] (a read-only variant);
+/// [`ChannelError::Io`] on a write failure.
+pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelError> {
+    match req {
+        Request::PutFile { path, data } => {
+            let mut payload = Vec::new();
+            put_blob(&mut payload, path.as_bytes());
+            put_blob(&mut payload, data);
+            within_cap(TAG_PUTFILE, &payload)?;
+            write_frame(w, TAG_PUTFILE, &payload)
+        }
+        Request::Exec {
+            argv,
+            stdin,
+            artifacts,
+            timeout_ms,
+        } => {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&(argv.len() as u32).to_le_bytes());
+            for arg in argv {
+                put_blob(&mut payload, arg.as_bytes());
+            }
+            put_blob(&mut payload, stdin);
+            payload.extend_from_slice(&(artifacts.len() as u32).to_le_bytes());
+            for path in artifacts {
+                put_blob(&mut payload, path.as_bytes());
+            }
+            payload.extend_from_slice(&timeout_ms.to_le_bytes());
+            within_cap(TAG_EXEC, &payload)?;
+            write_frame(w, TAG_EXEC, &payload)
+        }
+        Request::Unknown { tag } => Err(ChannelError::Protocol(format!(
+            "Request::Unknown (tag {tag}) is read-only and cannot be sent"
+        ))),
+    }
+}
+
+/// Read a [`Request`]. An unknown-but-well-framed tag becomes [`Request::Unknown`] (not an error),
+/// so a newer host's request type degrades to a graceful "unsupported" rather than a dropped
+/// connection.
+///
+/// # Errors
+/// [`ChannelError::Protocol`] on a malformed/non-UTF-8 body; otherwise the framing errors.
 pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
     let (tag, payload) = read_frame(r)?;
-    if tag != TAG_EXEC {
-        return Err(ChannelError::Protocol(format!(
-            "expected an exec request, got tag {tag}"
-        )));
-    }
     let mut body = Body::new(&payload);
-    let argc = body.u32()? as usize;
-    // Don't pre-size from the peer's count: `argc` is attacker-controlled, but each arg still costs
-    // real bytes we must read, so a lie just runs the loop dry and errors.
-    let mut argv = Vec::new();
-    for _ in 0..argc {
-        let len = body.u32()? as usize;
-        let bytes = body.take(len)?;
-        let arg = String::from_utf8(bytes.to_vec())
-            .map_err(|_| ChannelError::Protocol("argv entry is not valid UTF-8".into()))?;
-        argv.push(arg);
+    match tag {
+        TAG_EXEC => {
+            let argc = body.u32()? as usize;
+            // Don't pre-size from the peer's count: each entry still costs real bytes to read, so a
+            // lying count just runs the body dry and errors.
+            let mut argv = Vec::new();
+            for _ in 0..argc {
+                argv.push(body.string()?);
+            }
+            let stdin = body.blob()?.to_vec();
+            let artc = body.u32()? as usize;
+            let mut artifacts = Vec::new();
+            for _ in 0..artc {
+                artifacts.push(body.string()?);
+            }
+            let timeout_ms = body.u32()?;
+            Ok(Request::Exec {
+                argv,
+                stdin,
+                artifacts,
+                timeout_ms,
+            })
+        }
+        TAG_PUTFILE => {
+            let path = body.string()?;
+            let data = body.blob()?.to_vec();
+            Ok(Request::PutFile { path, data })
+        }
+        other => Ok(Request::Unknown { tag: other }),
     }
-    let stdin_len = body.u32()? as usize;
-    let stdin = body.take(stdin_len)?.to_vec();
-    Ok(Request::Exec { argv, stdin })
 }
 
 /// Send a [`Response`].
@@ -270,7 +333,17 @@ pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), 
     match resp {
         Response::Stdout(b) => write_frame(w, TAG_STDOUT, b),
         Response::Stderr(b) => write_frame(w, TAG_STDERR, b),
+        Response::File { path, data } => {
+            let mut payload = Vec::new();
+            put_blob(&mut payload, path.as_bytes());
+            put_blob(&mut payload, data);
+            within_cap(TAG_FILE, &payload)?;
+            write_frame(w, TAG_FILE, &payload)
+        }
         Response::Exit { code } => write_frame(w, TAG_EXIT, &code.to_le_bytes()),
+        Response::TimedOut { elapsed_ms } => {
+            write_frame(w, TAG_TIMEDOUT, &elapsed_ms.to_le_bytes())
+        }
         Response::Error(msg) => write_frame(w, TAG_ERROR, msg.as_bytes()),
     }
 }
@@ -285,6 +358,12 @@ pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError>
     match tag {
         TAG_STDOUT => Ok(Response::Stdout(payload)),
         TAG_STDERR => Ok(Response::Stderr(payload)),
+        TAG_FILE => {
+            let mut body = Body::new(&payload);
+            let path = body.string()?;
+            let data = body.blob()?.to_vec();
+            Ok(Response::File { path, data })
+        }
         TAG_EXIT => {
             let bytes: [u8; 4] = payload
                 .as_slice()
@@ -292,6 +371,15 @@ pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError>
                 .map_err(|_| ChannelError::Protocol("exit frame is not 4 bytes".into()))?;
             Ok(Response::Exit {
                 code: i32::from_le_bytes(bytes),
+            })
+        }
+        TAG_TIMEDOUT => {
+            let bytes: [u8; 4] = payload
+                .as_slice()
+                .try_into()
+                .map_err(|_| ChannelError::Protocol("timed-out frame is not 4 bytes".into()))?;
+            Ok(Response::TimedOut {
+                elapsed_ms: u32::from_le_bytes(bytes),
             })
         }
         TAG_ERROR => {
@@ -406,6 +494,19 @@ impl<'a> Body<'a> {
         Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
     }
 
+    /// A `u32`-length-prefixed byte blob.
+    fn blob(&mut self) -> Result<&'a [u8], ChannelError> {
+        let len = self.u32()? as usize;
+        self.take(len)
+    }
+
+    /// A `u32`-length-prefixed UTF-8 string.
+    fn string(&mut self) -> Result<String, ChannelError> {
+        let bytes = self.blob()?;
+        String::from_utf8(bytes.to_vec())
+            .map_err(|_| ChannelError::Protocol("field is not valid UTF-8".into()))
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8], ChannelError> {
         let end = self
             .pos
@@ -447,26 +548,56 @@ mod tests {
 
     #[test]
     fn request_round_trips_including_unicode_and_empty() {
-        for (argv, stdin) in [
-            (vec!["echo".to_string(), "hi".to_string()], vec![]),
-            (
-                vec!["/bin/π".to_string(), "a b\tc".to_string(), String::new()],
-                b"piped input\n".to_vec(),
-            ),
-            (vec![], vec![0u8, 1, 2, 255]),
+        for req in [
+            Request::Exec {
+                argv: vec!["echo".into(), "hi".into()],
+                stdin: vec![],
+                artifacts: vec![],
+                timeout_ms: 30_000,
+            },
+            Request::Exec {
+                argv: vec!["/bin/π".into(), "a b\tc".into(), String::new()],
+                stdin: b"piped input\n".to_vec(),
+                artifacts: vec!["out.txt".into(), "sub/dir.bin".into()],
+                timeout_ms: 1,
+            },
+            Request::Exec {
+                argv: vec![],
+                stdin: vec![0u8, 1, 2, 255],
+                artifacts: vec![],
+                timeout_ms: 0,
+            },
+            Request::PutFile {
+                path: "in/data.csv".into(),
+                data: b"a,b,c\n".to_vec(),
+            },
+            Request::PutFile {
+                path: "empty".into(),
+                data: vec![],
+            },
         ] {
             let mut buf = Vec::new();
-            write_request(
-                &mut buf,
-                &Request::Exec {
-                    argv: argv.clone(),
-                    stdin: stdin.clone(),
-                },
-            )
-            .unwrap();
-            let got = read_request(&mut buf.as_slice()).unwrap();
-            assert_eq!(got, Request::Exec { argv, stdin });
+            write_request(&mut buf, &req).unwrap();
+            assert_eq!(read_request(&mut buf.as_slice()).unwrap(), req);
         }
+    }
+
+    #[test]
+    fn unknown_request_tag_is_graceful_not_fatal() {
+        // A well-framed frame with an unknown tag → Request::Unknown, so the agent can reply
+        // "unsupported" instead of the connection dying. (Forward-compat for newer request types.)
+        let mut framed = vec![99u8]; // unknown tag
+        framed.extend_from_slice(&0u32.to_le_bytes()); // empty body
+        assert_eq!(
+            read_request(&mut framed.as_slice()).unwrap(),
+            Request::Unknown { tag: 99 }
+        );
+        // ...and it's read-only: you can't send one.
+        let mut buf = Vec::new();
+        assert!(matches!(
+            write_request(&mut buf, &Request::Unknown { tag: 99 }),
+            Err(ChannelError::Protocol(_))
+        ));
     }
 
     #[test]
@@ -474,8 +605,13 @@ mod tests {
         for resp in [
             Response::Stdout(b"out".to_vec()),
             Response::Stderr(vec![0, 1, 2, 255]),
+            Response::File {
+                path: "result.json".into(),
+                data: b"{}".to_vec(),
+            },
             Response::Exit { code: -1 },
             Response::Exit { code: 3 },
+            Response::TimedOut { elapsed_ms: 30_000 },
             Response::Error("could not spawn".to_string()),
         ] {
             let mut buf = Vec::new();
@@ -523,38 +659,23 @@ mod tests {
     }
 
     #[test]
-    fn wrong_tag_for_request_is_rejected() {
-        let mut buf = Vec::new();
-        write_response(&mut buf, &Response::Exit { code: 0 }).unwrap();
-        assert!(matches!(
-            read_request(&mut buf.as_slice()),
-            Err(ChannelError::Protocol(_))
-        ));
-    }
-
-    #[test]
     fn connection_pair_handshakes_and_exchanges() {
         use std::os::unix::net::UnixStream;
         let (host, guest) = UnixStream::pair().unwrap();
+        let req = Request::Exec {
+            argv: vec!["true".into()],
+            stdin: vec![],
+            artifacts: vec![],
+            timeout_ms: 30_000,
+        };
+        let expected = req.clone();
         let server = std::thread::spawn(move || {
             let mut conn = ServerConnection::accept(guest).unwrap();
-            let req = conn.recv_request().unwrap();
-            assert_eq!(
-                req,
-                Request::Exec {
-                    argv: vec!["true".into()],
-                    stdin: vec![],
-                }
-            );
+            assert_eq!(conn.recv_request().unwrap(), expected);
             conn.send_response(&Response::Exit { code: 0 }).unwrap();
         });
         let mut client = ClientConnection::connect(host).unwrap();
-        client
-            .send_request(&Request::Exec {
-                argv: vec!["true".into()],
-                stdin: vec![],
-            })
-            .unwrap();
+        client.send_request(&req).unwrap();
         assert_eq!(client.recv_response().unwrap(), Response::Exit { code: 0 });
         server.join().unwrap();
     }

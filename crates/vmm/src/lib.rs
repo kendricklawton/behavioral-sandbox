@@ -20,7 +20,37 @@ use agent_channel::ChannelError;
 pub use agent_channel::{ClientConnection, Request, Response};
 pub use vm::{BootConfig, RunningVm, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 
-/// Every way driving a microVM can fail, as a typed value.
+/// Every way driving a microVM can fail, as a typed value — the driver's **error taxonomy**.
+///
+/// A hostile or crashing guest is one of these, never a host panic/hang/leak (the host path is
+/// `#![forbid(unsafe_code)]` and the CI gate denies `unwrap`/`expect` outside tests). The variants
+/// fall in three buckets:
+///
+/// - **Boot / infra** — [`NoKvm`](VmmError::NoKvm), [`Artifact`](VmmError::Artifact),
+///   [`Timeout`](VmmError::Timeout), [`Vmm`](VmmError::Vmm): the host couldn't stand the microVM up
+///   (or a bounded wait expired). This bucket also holds vsock **establishment** failures — the
+///   socket connect, the `CONNECT <port>` ack, *and the channel handshake* surface here (as
+///   `Vmm`/`Timeout`) even though the handshake is protocol-layer. Establishment is infra, and it's
+///   where "the guest agent isn't listening yet" shows up.
+/// - **Channel / transport** — [`Channel`](VmmError::Channel): a **steady-state** framing/IO fault
+///   on an already-established connection (a `send_request`/`recv_response` mid-exec). Preserves the
+///   [`ChannelError`] source. Distinct from a guest command that merely exits non-zero (a normal
+///   [`RunResult`]) or fails to spawn ([`GuestExec`](VmmError::GuestExec)).
+/// - **Guest fault** — [`GuestExec`](VmmError::GuestExec) (the agent couldn't run the command),
+///   [`ExecTimeout`](VmmError::ExecTimeout) (the command outran its wall-clock budget and was
+///   killed), [`OutputCap`](VmmError::OutputCap) (it flooded output past the host cap).
+///
+/// **Not an error.** A command that merely exits non-zero — *including dying by signal*, which the
+/// guest agent reports as exit code `128 + signal` — is a faithful [`RunResult`], not a `VmmError`.
+/// Typed errors are reserved for infra, transport, and guest-agent faults; a crash *inside* the
+/// sandbox is a normal result the caller inspects.
+///
+/// Deliberately deferred (safe to add later — this enum is `#[non_exhaustive]`):
+/// - A dedicated `GuestUnavailable` variant splitting "peer closed before ack / nothing listening"
+///   out of `Vmm`. Add it for the first retry/warm-pool caller (~Phase 5) that must tell "agent not
+///   up yet / transient" from "infra broken." Today the only caller renders the error to a human.
+/// - A `kind()` category classifier. Add it when a caller needs to **branch** on bucket; today none
+///   does (`agent run` prints the error and exits 2).
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VmmError {
@@ -41,6 +71,9 @@ pub enum VmmError {
     GuestExec(String),
     /// A command's captured output exceeded the host's `limit`-byte cap.
     OutputCap { limit: usize },
+    /// A command exceeded its exec wall-clock budget and was killed by the guest — a *user* fault
+    /// (the code ran too long), distinct from a transport/boot [`Timeout`](VmmError::Timeout).
+    ExecTimeout { limit: Duration },
     /// A Firecracker API, boot, or process failure.
     Vmm(String),
 }
@@ -56,6 +89,9 @@ impl std::fmt::Display for VmmError {
             VmmError::GuestExec(e) => write!(f, "guest could not run the command: {e}"),
             VmmError::OutputCap { limit } => {
                 write!(f, "guest output exceeded the {limit}-byte cap")
+            }
+            VmmError::ExecTimeout { limit } => {
+                write!(f, "guest command exceeded its {limit:?} deadline")
             }
             VmmError::Vmm(e) => write!(f, "vmm error: {e}"),
         }
@@ -85,7 +121,8 @@ pub struct Limits {
     pub vcpus: u32,
     /// Guest memory, MiB.
     pub mem_mib: u32,
-    /// Wall-clock budget for a run (also the boot-to-userspace deadline).
+    /// The boot-to-userspace deadline. (It does **not** yet bound a command's exec runtime — that
+    /// has its own default budget until the per-run resource policy makes it a knob.)
     pub wall: Duration,
 }
 
@@ -109,6 +146,9 @@ pub struct RunResult {
     pub stdout: Vec<u8>,
     /// Bytes the guest wrote to stderr.
     pub stderr: Vec<u8>,
+    /// Requested artifact files the guest returned, as `(path, contents)`. A requested artifact
+    /// that didn't exist is simply absent.
+    pub files: Vec<(String, Vec<u8>)>,
 }
 
 /// A microVM sandbox: the CLI-facing lifecycle type, backed by a [`RunningVm`]. Boots with the

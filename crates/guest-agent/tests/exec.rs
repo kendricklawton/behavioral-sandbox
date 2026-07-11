@@ -23,6 +23,8 @@ fn run(argv: &[&str]) -> (Vec<u8>, Vec<u8>, Result<i32, String>) {
         .send_request(&Request::Exec {
             argv,
             stdin: Vec::new(),
+            artifacts: Vec::new(),
+            timeout_ms: 30_000,
         })
         .expect("send request");
 
@@ -100,6 +102,8 @@ fn stdin_is_fed_to_the_command() {
         .send_request(&Request::Exec {
             argv: vec!["cat".into()],
             stdin: b"piped input\n".to_vec(),
+            artifacts: Vec::new(),
+            timeout_ms: 30_000,
         })
         .expect("send request");
 
@@ -114,6 +118,126 @@ fn stdin_is_fed_to_the_command() {
     assert_eq!(out, b"piped input\n");
     assert_eq!(code, 0);
     let _ = agent.join();
+}
+
+#[test]
+fn injected_file_is_read_by_the_command_and_artifact_returned() {
+    // Put a file in, `cat` it (proving cwd = the working dir), and pull an artifact back.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::PutFile {
+            path: "note.txt".into(),
+            data: b"contents\n".to_vec(),
+        })
+        .expect("put file");
+    client
+        .send_request(&Request::Exec {
+            argv: vec![
+                "sh".into(),
+                "-c".into(),
+                "cat note.txt; cp note.txt copy.txt".into(),
+            ],
+            stdin: Vec::new(),
+            artifacts: vec!["copy.txt".into()],
+            timeout_ms: 30_000,
+        })
+        .expect("exec");
+
+    let (mut out, mut files) = (Vec::new(), Vec::new());
+    let code = loop {
+        match client.recv_response().expect("recv") {
+            Response::Stdout(b) => out.extend_from_slice(&b),
+            Response::File { path, data } => files.push((path, data)),
+            Response::Exit { code } => break code,
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    };
+    assert_eq!(code, 0);
+    assert_eq!(out, b"contents\n");
+    assert_eq!(
+        files,
+        vec![("copy.txt".to_string(), b"contents\n".to_vec())]
+    );
+    let _ = agent.join();
+}
+
+#[test]
+fn hung_command_is_killed_at_its_deadline() {
+    // A command that would run far longer than its timeout must be killed and reported as TimedOut,
+    // not hang the agent. A short timeout keeps the test fast.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::Exec {
+            argv: vec!["sleep".into(), "30".into()],
+            stdin: Vec::new(),
+            artifacts: Vec::new(),
+            timeout_ms: 300,
+        })
+        .expect("send request");
+
+    let started = std::time::Instant::now();
+    match client.recv_response().expect("recv") {
+        Response::TimedOut { .. } => {}
+        other => panic!("expected TimedOut, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the agent must kill the command promptly, not wait it out"
+    );
+    // The agent's own return signals the SIGKILL convention.
+    assert!(matches!(agent.join().expect("agent thread"), Ok(137)));
+}
+
+#[test]
+fn command_under_its_deadline_is_not_falsely_killed() {
+    // A command that finishes well within its budget must exit normally, never TimedOut.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::Exec {
+            argv: vec!["sh".into(), "-c".into(), "sleep 0.1; echo done".into()],
+            stdin: Vec::new(),
+            artifacts: Vec::new(),
+            timeout_ms: 5_000,
+        })
+        .expect("send request");
+
+    let mut out = Vec::new();
+    let code = loop {
+        match client.recv_response().expect("recv") {
+            Response::Stdout(b) => out.extend_from_slice(&b),
+            Response::Exit { code } => break code,
+            other => panic!("unexpected frame (false timeout?): {other:?}"),
+        }
+    };
+    assert_eq!(code, 0);
+    assert_eq!(out, b"done\n");
+    let _ = agent.join();
+}
+
+#[test]
+fn put_file_rejects_path_traversal() {
+    // A path that climbs out of the working dir must be rejected with a terminal Error, not written.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::PutFile {
+            path: "../escape.txt".into(),
+            data: b"nope".to_vec(),
+        })
+        .expect("put file");
+    match client.recv_response().expect("recv") {
+        Response::Error(_) => {}
+        other => panic!("expected a rejection, got {other:?}"),
+    }
+    let result = agent.join().expect("agent thread");
+    assert!(result.is_err(), "a traversing path must fail the request");
 }
 
 #[test]
@@ -151,6 +275,8 @@ fn stalled_host_does_not_wedge_the_guest() {
         .send_request(&Request::Exec {
             argv: vec!["sh".into(), "-c".into(), "seq 1 200000".into()],
             stdin: Vec::new(),
+            artifacts: Vec::new(),
+            timeout_ms: 30_000,
         })
         .expect("send request");
     // Deliberately never read a response — the guest's send buffer fills and its forward blocks.
