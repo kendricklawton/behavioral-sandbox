@@ -14,6 +14,12 @@ description = "The Firecracker driver — microVM lifecycle, networking, snapsho
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# The host↔guest exec channel: the driver speaks the shared protocol over Firecracker's vsock.
+agent-channel = { path = "../channel" }
+
+[dev-dependencies]
+# The round-trip channel test runs the real guest agent behind a fake vsock socket — no VM needed.
+agent-guest = { path = "../guest-agent" }
 
 [lints]
 workspace = true

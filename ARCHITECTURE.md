@@ -151,3 +151,14 @@ the transport pick:
   re-checking it.
 - **The agent is exec/IO convenience, never containment.** If a later phase is ever tempted to move
   a security check into the guest agent, the design is wrong (spine property 2, tombstone).
+- **The channel's public API is type-state, not free functions.** `ClientConnection`/
+  `ServerConnection` perform the handshake on construction and expose only their role's operations,
+  so a message-before-handshake or a client/server role mix-up is a *compile* error; the raw codec
+  is `pub(crate)`. Chosen while the only callers were the guest agent and tests — cheap to commit to
+  before the host side (P2.3) adopts it.
+- **Liveness is the transport's responsibility, not the channel's.** The framing is transport-
+  agnostic and sets no timeouts itself; every connection (the unix harness now, the vsock device +
+  the host response read in P2.3) must set read/write deadlines on the concrete socket before
+  wrapping it, so a dead-or-stalled peer is a typed timeout, never a hang. The guest agent's
+  unconditional pipe-drain only bounds the guest *given* that write deadline. A silent hung *command*
+  is a separate axis, bounded by the exec wall-timeout (P2.6).

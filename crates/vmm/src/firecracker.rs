@@ -186,6 +186,14 @@ pub(crate) struct Action<'a> {
     pub action_type: &'a str,
 }
 
+/// `PUT /vsock` — a virtio-vsock device. The host reaches a guest-listening port by connecting to
+/// `uds_path` and sending `CONNECT <port>\n`; the guest sees it on context id `guest_cid`.
+#[derive(Serialize)]
+pub(crate) struct Vsock<'a> {
+    pub guest_cid: u32,
+    pub uds_path: &'a str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,5 +318,16 @@ mod tests {
         assert_eq!(json["drive_id"], "rootfs");
         assert_eq!(json["is_root_device"], true);
         assert_eq!(json["is_read_only"], false);
+    }
+
+    #[test]
+    fn vsock_serializes_to_expected_fields() {
+        let json = serde_json::to_value(Vsock {
+            guest_cid: 3,
+            uds_path: "/tmp/agent-1-0/v.sock",
+        })
+        .unwrap();
+        assert_eq!(json["guest_cid"], 3);
+        assert_eq!(json["uds_path"], "/tmp/agent-1-0/v.sock");
     }
 }

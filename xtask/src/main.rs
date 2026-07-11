@@ -85,9 +85,40 @@ fn build_guest_agent() -> Result<()> {
         .join("target")
         .join(GUEST_TARGET)
         .join("release/agent-guest");
-    println!("\n✓ guest agent built: {}", bin.display());
-    println!("  (static musl binary; Phase 3 bakes it into the rootfs)");
+    verify_static(&bin)?;
+    println!("\n✓ guest agent built (static): {}", bin.display());
+    println!("  (Phase 3 bakes it into the rootfs)");
     Ok(())
+}
+
+/// Verify the built binary is actually statically linked — "measured, not marketed." A sys-crate or
+/// `build.rs` can silently reintroduce a `NEEDED` dynamic dependency, and a dynamically-linked
+/// binary baked into a scratch rootfs would fail at boot with a confusing loader error. Checks for a
+/// dynamic-library dependency via `readelf -d`; on a static binary there are no `(NEEDED)` entries.
+fn verify_static(bin: &Path) -> Result<()> {
+    let out = Command::new("readelf").arg("-d").arg(bin).output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let dynamic = String::from_utf8_lossy(&o.stdout);
+            let needed: Vec<_> = dynamic.lines().filter(|l| l.contains("(NEEDED)")).collect();
+            if needed.is_empty() {
+                Ok(())
+            } else {
+                bail!(
+                    "guest agent is NOT statically linked — it needs {} shared object(s):\n{}",
+                    needed.len(),
+                    needed.join("\n")
+                );
+            }
+        }
+        // No `readelf` (binutils) on this host: don't fake a guarantee we couldn't check.
+        _ => {
+            println!(
+                "  ! could not run `readelf` to verify staticness — install binutils to check"
+            );
+            Ok(())
+        }
+    }
 }
 
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.

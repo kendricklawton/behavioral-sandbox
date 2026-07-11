@@ -15,7 +15,7 @@ mod vm;
 
 use std::time::Duration;
 
-pub use vm::{BootConfig, RunningVm, Vm};
+pub use vm::{BootConfig, RunningVm, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 
 /// Every way driving a microVM can fail, as a typed value.
 #[derive(Debug)]

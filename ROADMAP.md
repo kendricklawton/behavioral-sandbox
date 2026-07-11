@@ -131,14 +131,30 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       rejected to preserve deny-by-default. Agent is exec/IO convenience, never containment.)*
 - [x] **P2.2** A minimal **guest init/agent** (statically-linked Rust) that runs a command and
       reports stdout/stderr/exit over the channel.
-      *(`crates/guest-agent` + the shared `crates/channel` wire protocol. `serve` is transport-
-      agnostic (runs over any `Read`+`Write`), drains the child's pipes unconditionally so a dead
-      host can't wedge a live guest, and maps signal death to `128+sig`. Static build via
-      `cargo xtask build-guest-agent`; unix-socket harness now, vsock transport in P2.3.)*
-- [ ] **P2.3** Wire vsock in the VMM config; host side connects and speaks the protocol.
+      *(`crates/guest-agent` + the shared `crates/channel` wire protocol, whose public API is a
+      type-state `ClientConnection`/`ServerConnection`. `serve` is transport-agnostic (any
+      `Read`+`Write`); it drains the child's pipes to discard-on-forward-error so a dead-or-stalled
+      host — **given the connection's read/write deadlines** — is a typed error, not a hang, and it
+      maps signal death to `128+sig`. Static build (verified) via `cargo xtask build-guest-agent`;
+      unix-socket harness now, vsock transport in P2.3.)*
+- [x] **P2.3** Wire vsock in the VMM config; host side connects and speaks the protocol.
+      *(`BootConfig.guest_cid` adds a virtio-vsock device via `PUT /vsock`; `RunningVm::connect_agent`
+      dials Firecracker's vsock socket, speaks the `CONNECT <port>` handshake (ack read byte-by-byte
+      so it can't swallow the guest's channel handshake), sets read/write deadlines, and returns a
+      protocol-ready `ClientConnection`. Tested end-to-end KVM-free against the real guest agent
+      behind a fake vsock socket; a privileged smoke test confirms real Firecracker boots with the
+      device. Full host→guest round trip needs the agent in the rootfs — P3.)*
 - [ ] **P2.4** `RunningVm::exec(cmd, stdin) -> {stdout, stderr, exit}`.
 - [ ] **P2.5** Push inputs in (stdin/files) and pull outputs out.
+      *(Adds the second request type: at that point handle an unknown/additive request tag
+      gracefully — the framing layer surfaces it so the agent replies with a typed "unsupported"
+      rather than a fatal protocol error, closing the forward-compat gap the guest's `_` arm can't
+      reach today.)*
 - [ ] **P2.6** Timeouts + kill: a hung command is bounded and reaps cleanly.
+      *(Must include a **guest-side self-timeout**: today `serve`'s `child.wait()` is unbounded, so a
+      silent hung command (`sleep infinity`) wedges the agent — and the serial accept loop then
+      blocks every later connection. Bound it (kill + a typed timeout / `Response::Error`); don't
+      rely only on host-side VM teardown.)*
 - [ ] **P2.7** Error taxonomy for the driver (boot failure, channel failure, guest crash) — typed,
       no panics on the host.
 - [ ] **P2.8** Test: `exec("echo hi")` → `hi`, exit 0; a crashing command → typed error.

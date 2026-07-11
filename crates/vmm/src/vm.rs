@@ -11,8 +11,9 @@
 //! when unjailed, so "read the child's stdout" is "read the guest console" — a coupling the
 //! jailer (Phase 6) will break, hence the console capture sits behind [`Console`].
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::firecracker::{Action, ApiClient, BootSource, Drive, MachineConfig};
+use agent_channel::ClientConnection;
+
+use crate::firecracker::{Action, ApiClient, BootSource, Drive, MachineConfig, Vsock};
 use crate::{Limits, VmmError};
 
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
@@ -44,6 +47,23 @@ const CONSOLE_CAP: usize = 1 << 20; // 1 MiB
 
 /// Firecracker's own stderr, captured to a file in the scratch dir (see `Spawned::launch`).
 const FC_STDERR: &str = "fc.stderr";
+
+/// The vsock context id the guest gets (the host is always cid 2). The default when a boot enables
+/// the exec channel; overridable per-VM via [`BootConfig::guest_cid`].
+pub const DEFAULT_GUEST_CID: u32 = 3;
+
+/// The vsock port the in-guest agent listens on for exec connections. The host dials this port
+/// through Firecracker's vsock unix socket; the guest agent binds it (from Phase 3).
+pub const AGENT_VSOCK_PORT: u32 = 1024;
+
+/// The vsock unix socket Firecracker creates in the scratch dir; the host connects here and speaks
+/// the `CONNECT <port>` handshake to reach a guest port.
+const VSOCK_UDS: &str = "v.sock";
+
+/// Deadline for the vsock connect + `CONNECT` handshake, and the read/write timeout the exec
+/// connection carries — so a dead-or-stalled guest is a typed timeout, never a host hang
+/// (decision 002: liveness is the transport's job).
+const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
@@ -70,6 +90,10 @@ pub struct BootConfig {
     pub userspace_marker: String,
     /// Upper bound on boot-to-userspace before the boot is a typed timeout.
     pub boot_timeout: Duration,
+    /// Configure a virtio-vsock device with this guest context id, enabling the exec channel
+    /// ([`RunningVm::connect_agent`]). `None` (the default) boots with no vsock — the Phase 1
+    /// demo path. Set to `Some(`[`DEFAULT_GUEST_CID`]`)` to enable exec.
+    pub guest_cid: Option<u32>,
 }
 
 impl BootConfig {
@@ -127,6 +151,7 @@ impl Default for BootConfig {
             boot_args: DEFAULT_BOOT_ARGS.to_string(),
             userspace_marker: DEFAULT_USERSPACE_MARKER.to_string(),
             boot_timeout: limits.wall,
+            guest_cid: None,
         }
     }
 }
@@ -141,6 +166,8 @@ pub struct RunningVm {
     console: Console,
     api: ApiClient,
     boot_latency: Duration,
+    /// The vsock unix socket Firecracker created, if this VM was booted with a `guest_cid`.
+    vsock_uds: Option<PathBuf>,
 }
 
 /// Boot entry point — `Vm::boot(config) -> RunningVm`.
@@ -184,6 +211,22 @@ impl RunningVm {
     #[must_use]
     pub fn console(&self) -> String {
         self.console.snapshot()
+    }
+
+    /// Connect to the in-guest agent over vsock and complete the channel handshake, returning a
+    /// protocol-ready [`ClientConnection`]. This is the host side of the exec path (P2.4 builds
+    /// `exec` on top): it dials Firecracker's vsock socket, speaks the `CONNECT <port>` handshake,
+    /// sets read/write deadlines, then does the channel handshake.
+    ///
+    /// # Errors
+    /// [`VmmError::Vmm`] if the VM was booted without a `guest_cid`, if the `CONNECT` handshake is
+    /// refused (e.g. nothing is listening on `port` in the guest yet), or on any I/O or channel
+    /// failure; [`VmmError::Timeout`] if the connect exceeds the deadline.
+    pub fn connect_agent(&self, port: u32) -> Result<ClientConnection<UnixStream>, VmmError> {
+        let uds = self.vsock_uds.as_ref().ok_or_else(|| {
+            VmmError::Vmm("this microVM was booted without vsock (set BootConfig.guest_cid)".into())
+        })?;
+        connect_agent_at(uds, port, VSOCK_TIMEOUT)
     }
 
     /// Shut the microVM down and reclaim its resources.
@@ -232,6 +275,8 @@ struct Spawned {
     workdir: PathBuf,
     rootfs: PathBuf,
     api: ApiClient,
+    /// The vsock socket path (in `workdir`) when the boot config enables vsock, else `None`.
+    vsock_uds: Option<PathBuf>,
 }
 
 impl Drop for Spawned {
@@ -307,12 +352,15 @@ impl Spawned {
                 return Err(e);
             }
         };
+        // Firecracker creates the vsock socket here on `PUT /vsock`; the host dials it post-boot.
+        let vsock_uds = config.guest_cid.map(|_| workdir.join(VSOCK_UDS));
         Ok(Self {
             child: Some(child),
             console,
             workdir,
             rootfs,
             api: ApiClient::new(socket),
+            vsock_uds,
         })
     }
 
@@ -378,6 +426,19 @@ impl Spawned {
                 mem_size_mib: config.mem_mib,
             },
         )?;
+
+        if let (Some(cid), Some(uds)) = (config.guest_cid, self.vsock_uds.as_ref()) {
+            still_before(deadline, "PUT /vsock")?;
+            let uds_path = path_str(uds)?;
+            self.api.put(
+                "/vsock",
+                &Vsock {
+                    guest_cid: cid,
+                    uds_path,
+                },
+            )?;
+            tracing::debug!(guest_cid = cid, uds = uds_path, "vsock device configured");
+        }
 
         tracing::debug!(
             vcpus = config.vcpus,
@@ -500,6 +561,7 @@ impl Spawned {
             console: std::mem::take(&mut self.console),
             api: self.api.clone(),
             boot_latency,
+            vsock_uds: self.vsock_uds.take(),
         })
     }
 }
@@ -540,6 +602,83 @@ fn create_workdir() -> Result<PathBuf, VmmError> {
     Err(VmmError::Vmm(
         "no fresh scratch dir under /tmp after 1024 attempts (stale agent-* dirs?)".into(),
     ))
+}
+
+/// Dial Firecracker's vsock socket, speak the `CONNECT <port>` handshake, and complete the channel
+/// handshake — the whole host side of reaching the guest agent. Factored out of
+/// [`RunningVm::connect_agent`] so it can be tested against a fake vsock socket without a VM.
+fn connect_agent_at(
+    uds: &Path,
+    port: u32,
+    timeout: Duration,
+) -> Result<ClientConnection<UnixStream>, VmmError> {
+    let stream = vsock_connect(uds, port, timeout)?;
+    ClientConnection::connect(stream)
+        .map_err(|e| VmmError::Vmm(format!("channel handshake over vsock: {e}")))
+}
+
+/// Connect to `uds` and perform Firecracker's host-initiated vsock handshake: send
+/// `CONNECT <port>\n`, expect `OK <host_port>\n`. Returns the stream positioned right after the
+/// ack, with read/write deadlines set.
+fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream, VmmError> {
+    let mut stream = UnixStream::connect(uds)
+        .map_err(|e| VmmError::Vmm(format!("connect vsock socket {}: {e}", uds.display())))?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .and_then(|()| stream.set_write_timeout(Some(timeout)))
+        .map_err(|e| VmmError::Vmm(format!("set vsock timeouts: {e}")))?;
+
+    stream
+        .write_all(format!("CONNECT {port}\n").as_bytes())
+        .map_err(|e| VmmError::Vmm(format!("vsock CONNECT {port}: {e}")))?;
+    read_connect_ack(&mut stream, port)?;
+    Ok(stream)
+}
+
+/// Read Firecracker's `OK <port>\n` ack **one byte at a time**: the guest agent sends its channel
+/// handshake immediately after the connection is established, so a buffered read here would swallow
+/// those bytes and desync the protocol.
+fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => {
+                return Err(VmmError::Vmm(format!(
+                    "vsock CONNECT {port}: peer closed before ack"
+                )))
+            }
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) => {
+                line.push(byte[0]);
+                if line.len() > 64 {
+                    return Err(VmmError::Vmm(format!(
+                        "vsock CONNECT {port}: ack line too long"
+                    )));
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Err(VmmError::Timeout(format!(
+                    "vsock CONNECT {port}: no ack before deadline"
+                )))
+            }
+            Err(e) => return Err(VmmError::Vmm(format!("vsock CONNECT {port}: {e}"))),
+        }
+    }
+    let ack = String::from_utf8_lossy(&line);
+    if ack.starts_with("OK ") {
+        Ok(())
+    } else {
+        Err(VmmError::Vmm(format!(
+            "vsock CONNECT {port} refused: {ack:?} (is the guest agent listening?)"
+        )))
+    }
 }
 
 /// Guaranteed, best-effort teardown shared by `abort` and `Drop`: kill the VMM, join the console
@@ -805,5 +944,54 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o700, "scratch dir must be private to us");
+    }
+
+    #[test]
+    fn host_speaks_the_protocol_over_a_fake_vsock() {
+        // Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake,
+        // then hand the same stream to the *real* guest agent. This exercises the entire host side
+        // (vsock connect + CONNECT ack + channel handshake + exec round trip) with no VM.
+        use std::os::unix::net::UnixListener;
+
+        let dir = TestDir::new("agent-vsock");
+        let uds = dir.path().join("v.sock");
+        let listener = UnixListener::bind(&uds).expect("bind fake vsock");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            // Read `CONNECT <port>\n` one byte at a time — mustn't over-read the client handshake.
+            let mut line = Vec::new();
+            let mut b = [0u8; 1];
+            loop {
+                stream.read_exact(&mut b).expect("read CONNECT");
+                if b[0] == b'\n' {
+                    break;
+                }
+                line.push(b[0]);
+            }
+            assert!(String::from_utf8_lossy(&line).starts_with("CONNECT "));
+            stream.write_all(b"OK 10000\n").expect("write ack");
+            // The same stream now carries the channel protocol — run the real agent over it.
+            let _ = agent_guest::serve(stream);
+        });
+
+        let mut conn = connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5))
+            .expect("host connects and handshakes");
+        conn.send_request(&agent_channel::Request::Exec {
+            argv: vec!["echo".into(), "hi".into()],
+        })
+        .expect("send request");
+
+        let mut out = Vec::new();
+        let code = loop {
+            match conn.recv_response().expect("recv response") {
+                agent_channel::Response::Stdout(b) => out.extend_from_slice(&b),
+                agent_channel::Response::Exit { code } => break code,
+                other => panic!("unexpected response: {other:?}"),
+            }
+        };
+        assert_eq!(out, b"hi\n");
+        assert_eq!(code, 0);
+        server.join().expect("server thread");
     }
 }

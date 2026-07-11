@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_vmm::{BootConfig, Vm};
+use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID};
 
 /// A boot config pointed at the workspace's fetched artifacts (absolute, so it's cwd-independent).
 /// Explicit `AGENT_KERNEL`/`AGENT_ROOTFS` overrides still win — they're the documented escape
@@ -47,6 +47,24 @@ fn boots_to_userspace_and_shuts_down() {
         "boot latency {latency:?} should be well under the deadline"
     );
 
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+fn boots_with_a_vsock_device() {
+    // Real Firecracker must accept `PUT /vsock` and boot to userspace with the device configured.
+    // (A full host→guest-agent round trip needs the agent baked into the rootfs — P3 — so here we
+    // only prove the config path and that the vsock socket is created.)
+    let mut cfg = config();
+    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+    let marker = cfg.userspace_marker.clone();
+
+    let vm = Vm::boot(cfg).expect("microVM with vsock should boot to userspace");
+    assert!(
+        vm.console().contains(&marker),
+        "guest should still reach userspace with vsock configured"
+    );
     vm.shutdown().expect("shutdown should succeed");
 }
 

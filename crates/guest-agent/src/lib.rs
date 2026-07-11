@@ -1,17 +1,19 @@
 //! `agent-guest` — the in-guest agent that runs a command and reports its result over the channel.
 //!
-//! [`serve`] handles **one connection**: it does the [`agent_channel`] handshake, reads a single
+//! [`serve`] handles **one connection**: it accepts a [`ServerConnection`], reads a single
 //! [`Request::Exec`], runs the command, streams its `stdout`/`stderr` back as they arrive, and ends
 //! with the exit code. It is generic over the byte stream, so the same logic runs over **vsock** in
 //! a real guest (P2.3) and over a **unix socket** in tests and the `main` harness here — the driver
 //! is unit-testable without a VM.
 //!
 //! **The load-bearing subtlety** (the Phase-1 pipe-deadlock lesson, again): the child's `stdout`
-//! and `stderr` are drained by two threads that **keep reading even if forwarding to the host
-//! fails**. If a pump stopped on a broken connection, the child's ~64 KiB pipe would fill, the child
-//! would block writing, and `wait()` would hang forever — so a dead host would wedge a live guest
-//! process. Draining unconditionally guarantees the child can always finish; the first forward error
-//! is recorded and returned after the child is reaped.
+//! and `stderr` are drained by two threads that keep reading **even after forwarding to the host
+//! fails** — on the first forward error they switch to read-and-discard, so the child's ~64 KiB
+//! pipe can never fill and block `wait()`. This is what stops a *dead* host from wedging a live
+//! guest. A merely *stalled* (open but not-reading) host only becomes a forward error if the
+//! connection has a **write deadline** — without one, `write` blocks indefinitely and the drain
+//! stalls. So the guarantee is: **given a stream with read/write deadlines set** (the caller's job —
+//! see [`ServerConnection`]), any dead-or-stalled host is a bounded, typed error, never a hang.
 //!
 //! The agent carries exec/IO only — it is a convenience inside the isolation boundary, never part of
 //! the trust boundary (spine property 2). Containment is the microVM, not this code.
@@ -20,8 +22,9 @@
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
+use std::time::Instant;
 
-use agent_channel::{ChannelError, Request, Response};
+use agent_channel::{ChannelError, Request, Response, ServerConnection};
 
 /// Everything running one command over the channel can fail with, as a typed value.
 #[derive(Debug)]
@@ -67,39 +70,44 @@ impl From<ChannelError> for AgentError {
     }
 }
 
-/// Serve one exec request over `conn` and return the command's exit code.
+/// Serve one exec request over `stream` and return the command's exit code.
 ///
-/// Both peers send-then-receive the handshake, so this never deadlocks against a well-behaved host.
-/// On a spawn failure the agent sends a terminal [`Response::Error`] to the host *and* returns
-/// [`AgentError::Spawn`], so both sides learn the command never ran.
+/// The handshake is done by [`ServerConnection::accept`]; on a spawn failure the agent sends a
+/// terminal [`Response::Error`] to the host *and* returns [`AgentError::Spawn`], so both sides learn
+/// the command never ran. Emits a `tracing` span (`exec`) carrying the argv, exit code, and elapsed
+/// time, so a guest-side failure is diagnosable from the log.
+///
+/// The no-hang guarantee holds **only if `stream` carries read/write deadlines** (see the module
+/// note); a silent hung *command* (`sleep infinity`, no output) is a different matter, bounded by
+/// the exec wall-timeout in a later phase (P2.6), not here.
 ///
 /// # Errors
 /// [`AgentError`] on any channel, spawn, or wait failure. Note a command that runs and exits
 /// non-zero is **not** an error here — that's a normal [`Response::Exit`] with a non-zero code.
-pub fn serve<S>(mut conn: S) -> Result<i32, AgentError>
+pub fn serve<S>(stream: S) -> Result<i32, AgentError>
 where
     S: Read + Write + Send,
 {
-    agent_channel::write_handshake(&mut conn)?;
-    agent_channel::read_handshake(&mut conn)?;
+    let mut conn = ServerConnection::accept(stream)?;
 
-    let argv = match agent_channel::read_request(&mut conn)? {
+    let argv = match conn.recv_request()? {
         Request::Exec { argv } => argv,
         // `Request` is `#[non_exhaustive]`: a newer host may send a type we don't know yet.
         _ => {
-            agent_channel::write_response(
-                &mut conn,
-                &Response::Error("unsupported request".into()),
-            )?;
+            conn.send_response(&Response::Error("unsupported request".into()))?;
             return Err(AgentError::UnsupportedRequest);
         }
     };
 
+    let span = tracing::info_span!("exec", argv = ?argv);
+    let _enter = span.enter();
+
     let Some((program, args)) = argv.split_first() else {
-        agent_channel::write_response(&mut conn, &Response::Error("empty command".into()))?;
+        conn.send_response(&Response::Error("empty command".into()))?;
         return Err(AgentError::EmptyCommand);
     };
 
+    let started = Instant::now();
     let mut child = match Command::new(program)
         .args(args)
         .stdin(Stdio::null())
@@ -109,10 +117,9 @@ where
     {
         Ok(child) => child,
         Err(e) => {
-            let _ = agent_channel::write_response(
-                &mut conn,
-                &Response::Error(format!("could not run {program}: {e}")),
-            );
+            // Report to the host if we can; the local `Spawn` error is the salient one either way,
+            // so a failed report (a broken socket) is intentionally dropped.
+            let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
             return Err(AgentError::Spawn(e));
         }
     };
@@ -133,7 +140,8 @@ where
             scope.spawn(|| pump(err, Kind::Stderr, &conn, &first_err));
         }
         // Reap in the scope's own thread while the pumps drain in parallel — this is what keeps the
-        // child from blocking on a full pipe.
+        // child from blocking on a full pipe. (A silent hung command still blocks here; bounding
+        // that is P2.6's exec wall-timeout.)
         child.wait()
     });
 
@@ -147,7 +155,12 @@ where
     let code = exit_code(&status);
 
     let mut guard = conn.lock().unwrap_or_else(PoisonError::into_inner);
-    agent_channel::write_response(&mut *guard, &Response::Exit(code))?;
+    guard.send_response(&Response::Exit { code })?;
+    tracing::info!(
+        exit_code = code,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "command finished"
+    );
     Ok(code)
 }
 
@@ -158,20 +171,27 @@ enum Kind {
     Stderr,
 }
 
-/// Drain one child pipe to the host, in chunks under `MAX_PAYLOAD`. Reads to EOF **unconditionally**
-/// (see the module note): once a forward fails, the first error is recorded and later chunks are
-/// discarded, but the pipe is still drained so the child can exit.
-fn pump<R, S>(mut src: R, kind: Kind, conn: &Mutex<S>, first_err: &Mutex<Option<ChannelError>>)
-where
+/// Drain one child pipe to the host, in chunks well under `MAX_PAYLOAD`. Reads to EOF
+/// **unconditionally** (see the module note): once a forward fails, the first error is recorded and
+/// later chunks are dropped, but the pipe is still drained so the child can exit.
+fn pump<R, S>(
+    mut src: R,
+    kind: Kind,
+    conn: &Mutex<ServerConnection<S>>,
+    first_err: &Mutex<Option<ChannelError>>,
+) where
     R: Read,
-    S: Write,
+    S: Read + Write,
 {
     let mut buf = [0u8; 16 * 1024];
     loop {
         match src.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                // Skip the forward once something has already failed — but keep looping to drain.
+                // Best-effort skip once a forward has failed — keep looping to drain regardless.
+                // NOTE: this lock is a *temporary* whose guard drops at the end of the `if`
+                // condition; it must NOT be bound to a local, or it would still be held when
+                // `conn.lock()` is taken below and the two pump threads could deadlock.
                 if first_err
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -185,8 +205,8 @@ where
                     Kind::Stderr => Response::Stderr(chunk),
                 };
                 let mut w = conn.lock().unwrap_or_else(PoisonError::into_inner);
-                if let Err(e) = agent_channel::write_response(&mut *w, &resp) {
-                    drop(w);
+                if let Err(e) = w.send_response(&resp) {
+                    drop(w); // release `conn` before taking `first_err` — consistent lock order
                     let mut slot = first_err.lock().unwrap_or_else(PoisonError::into_inner);
                     if slot.is_none() {
                         *slot = Some(e);

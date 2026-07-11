@@ -16,14 +16,20 @@
 //!   client in `agent-vmm`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
 //!   source; nothing here panics.
 //!
-//! The host is the **client** (sends [`Request`], reads a stream of [`Response`] ending in
-//! [`Response::Exit`] or [`Response::Error`]); the guest agent is the **server** (the mirror).
+//! **The API is type-state, not free functions.** [`ClientConnection`] (host) and
+//! [`ServerConnection`] (guest) each perform the handshake on construction and then expose only
+//! their role's operations — a client sends a [`Request`] and reads [`Response`]s ending in
+//! [`Response::Exit`]/[`Response::Error`]; a server does the mirror. You cannot send a message
+//! before the handshake, and a client cannot `recv_request`; the raw codec is internal. **Liveness
+//! is the transport's job**: set read/write deadlines on the stream before constructing, so a
+//! stalled peer becomes a typed [`ChannelError::Io`] timeout rather than a hang.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
 
 /// Frames the start of a connection so a mismatched peer is rejected before any message. "AGCH".
-pub const MAGIC: [u8; 4] = *b"AGCH";
+/// Internal: callers go through [`ClientConnection`]/[`ServerConnection`], which handle the magic.
+pub(crate) const MAGIC: [u8; 4] = *b"AGCH";
 
 /// The wire-protocol version. Bump on any breaking framing/message change; the handshake rejects a
 /// peer that doesn't match.
@@ -57,8 +63,9 @@ pub enum Response {
     Stdout(Vec<u8>),
     /// A chunk of the command's stderr.
     Stderr(Vec<u8>),
-    /// The command finished with this exit code (signal death is reported as `128 + signal`).
-    Exit(i32),
+    /// The command finished. Struct-form so a later phase can add a field (e.g. a separate
+    /// `signal`) without a breaking change; `code` is `128 + signal` on signal death today.
+    Exit { code: i32 },
     /// The agent could not run the command at all (e.g. spawn failed) — terminal, no exit follows.
     Error(String),
 }
@@ -107,12 +114,22 @@ impl From<std::io::Error> for ChannelError {
     }
 }
 
+impl ChannelError {
+    /// Whether this is the peer going away (EOF) rather than a live protocol/IO fault — so a caller
+    /// can treat a clean hang-up as normal shutdown. Note a mid-frame truncation also reports EOF,
+    /// so this means "peer closed, possibly mid-message," not "closed exactly on a frame boundary."
+    #[must_use]
+    pub fn is_disconnect(&self) -> bool {
+        matches!(self, ChannelError::Io(e) if e.kind() == std::io::ErrorKind::UnexpectedEof)
+    }
+}
+
 /// Send our magic + version. Both peers call this *before* [`read_handshake`], so the small fixed
 /// header always fits the socket buffer and the exchange can't deadlock.
 ///
 /// # Errors
 /// [`ChannelError::Io`] if the stream write fails.
-pub fn write_handshake(w: &mut impl Write) -> Result<(), ChannelError> {
+pub(crate) fn write_handshake(w: &mut impl Write) -> Result<(), ChannelError> {
     let mut buf = [0u8; 6];
     buf[..4].copy_from_slice(&MAGIC);
     buf[4..].copy_from_slice(&PROTOCOL_VERSION.to_le_bytes());
@@ -126,7 +143,7 @@ pub fn write_handshake(w: &mut impl Write) -> Result<(), ChannelError> {
 /// # Errors
 /// [`ChannelError::Protocol`] on a bad magic or an unsupported version; [`ChannelError::Io`] on a
 /// short read (including a peer that closed before sending a full handshake).
-pub fn read_handshake(r: &mut impl Read) -> Result<(), ChannelError> {
+pub(crate) fn read_handshake(r: &mut impl Read) -> Result<(), ChannelError> {
     let mut buf = [0u8; 6];
     r.read_exact(&mut buf)?;
     if buf[..4] != MAGIC {
@@ -184,7 +201,7 @@ fn read_frame(r: &mut impl Read) -> Result<(u8, Vec<u8>), ChannelError> {
 /// # Errors
 /// [`ChannelError::PayloadTooLarge`] if the encoded argv exceeds [`MAX_PAYLOAD`]; [`ChannelError::Io`]
 /// on a write failure.
-pub fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelError> {
+pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelError> {
     match req {
         Request::Exec { argv } => {
             let mut payload = Vec::new();
@@ -210,7 +227,7 @@ pub fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelErr
 /// # Errors
 /// [`ChannelError::Protocol`] on an unexpected tag or a malformed/non-UTF-8 body; otherwise the
 /// framing errors from reading the frame.
-pub fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
+pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
     let (tag, payload) = read_frame(r)?;
     if tag != TAG_EXEC {
         return Err(ChannelError::Protocol(format!(
@@ -237,11 +254,11 @@ pub fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
 /// # Errors
 /// [`ChannelError::PayloadTooLarge`] if the payload exceeds [`MAX_PAYLOAD`]; [`ChannelError::Io`]
 /// on a write failure.
-pub fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), ChannelError> {
+pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), ChannelError> {
     match resp {
         Response::Stdout(b) => write_frame(w, TAG_STDOUT, b),
         Response::Stderr(b) => write_frame(w, TAG_STDERR, b),
-        Response::Exit(code) => write_frame(w, TAG_EXIT, &code.to_le_bytes()),
+        Response::Exit { code } => write_frame(w, TAG_EXIT, &code.to_le_bytes()),
         Response::Error(msg) => write_frame(w, TAG_ERROR, msg.as_bytes()),
     }
 }
@@ -251,7 +268,7 @@ pub fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), Channel
 /// # Errors
 /// [`ChannelError::Protocol`] on an unknown tag or a malformed body; otherwise the framing errors
 /// from reading the frame.
-pub fn read_response(r: &mut impl Read) -> Result<Response, ChannelError> {
+pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError> {
     let (tag, payload) = read_frame(r)?;
     match tag {
         TAG_STDOUT => Ok(Response::Stdout(payload)),
@@ -261,7 +278,9 @@ pub fn read_response(r: &mut impl Read) -> Result<Response, ChannelError> {
                 .as_slice()
                 .try_into()
                 .map_err(|_| ChannelError::Protocol("exit frame is not 4 bytes".into()))?;
-            Ok(Response::Exit(i32::from_le_bytes(bytes)))
+            Ok(Response::Exit {
+                code: i32::from_le_bytes(bytes),
+            })
         }
         TAG_ERROR => {
             let msg = String::from_utf8(payload)
@@ -271,6 +290,90 @@ pub fn read_response(r: &mut impl Read) -> Result<Response, ChannelError> {
         other => Err(ChannelError::Protocol(format!(
             "unknown response tag {other}"
         ))),
+    }
+}
+
+/// Exchange the handshake on a fresh stream: send ours, then read the peer's. Both roles do this
+/// identically, and both *send before receiving*, so the fixed 6-byte headers always fit the
+/// socket buffer and the exchange can't deadlock.
+fn handshake<S: Read + Write>(stream: &mut S) -> Result<(), ChannelError> {
+    write_handshake(stream)?;
+    read_handshake(stream)
+}
+
+/// The **host** side of a handshaken connection: send one [`Request`], then read [`Response`]s
+/// until a terminal [`Response::Exit`]/[`Response::Error`].
+///
+/// Type-state, not convention: you can only reach these methods *after* [`connect`](Self::connect)
+/// has completed the handshake, and the role split means a client can never accidentally
+/// `recv_request`. Set any read/write deadlines on the stream **before** constructing — liveness is
+/// the transport's responsibility (a stalled peer then surfaces as a [`ChannelError::Io`] timeout,
+/// not a hang), and this wrapper can't set transport-specific socket timeouts itself.
+#[derive(Debug)]
+pub struct ClientConnection<S> {
+    stream: S,
+}
+
+impl<S: Read + Write> ClientConnection<S> {
+    /// Establish the connection by exchanging the handshake.
+    ///
+    /// # Errors
+    /// [`ChannelError`] if the handshake write/read fails or the peer's magic/version is wrong.
+    pub fn connect(mut stream: S) -> Result<Self, ChannelError> {
+        handshake(&mut stream)?;
+        Ok(Self { stream })
+    }
+
+    /// Send the exec request.
+    ///
+    /// # Errors
+    /// [`ChannelError`] on a framing or write failure.
+    pub fn send_request(&mut self, req: &Request) -> Result<(), ChannelError> {
+        write_request(&mut self.stream, req)
+    }
+
+    /// Read the next response frame.
+    ///
+    /// # Errors
+    /// [`ChannelError`] on a framing/protocol violation or an I/O failure; use
+    /// [`ChannelError::is_disconnect`] to tell a clean peer hang-up from a fault.
+    pub fn recv_response(&mut self) -> Result<Response, ChannelError> {
+        read_response(&mut self.stream)
+    }
+}
+
+/// The **guest** side of a handshaken connection: read the [`Request`], then send [`Response`]s.
+/// The mirror of [`ClientConnection`]; the same type-state and deadline notes apply.
+#[derive(Debug)]
+pub struct ServerConnection<S> {
+    stream: S,
+}
+
+impl<S: Read + Write> ServerConnection<S> {
+    /// Accept a connection by exchanging the handshake.
+    ///
+    /// # Errors
+    /// [`ChannelError`] if the handshake fails or the peer's magic/version is wrong.
+    pub fn accept(mut stream: S) -> Result<Self, ChannelError> {
+        handshake(&mut stream)?;
+        Ok(Self { stream })
+    }
+
+    /// Read the request.
+    ///
+    /// # Errors
+    /// [`ChannelError`] on a framing/protocol violation or an I/O failure.
+    pub fn recv_request(&mut self) -> Result<Request, ChannelError> {
+        read_request(&mut self.stream)
+    }
+
+    /// Send one response frame.
+    ///
+    /// # Errors
+    /// [`ChannelError`] on a framing or write failure (a write timeout, if the stream has one set,
+    /// surfaces here as [`ChannelError::Io`]).
+    pub fn send_response(&mut self, resp: &Response) -> Result<(), ChannelError> {
+        write_response(&mut self.stream, resp)
     }
 }
 
@@ -349,8 +452,8 @@ mod tests {
         for resp in [
             Response::Stdout(b"out".to_vec()),
             Response::Stderr(vec![0, 1, 2, 255]),
-            Response::Exit(-1),
-            Response::Exit(3),
+            Response::Exit { code: -1 },
+            Response::Exit { code: 3 },
             Response::Error("could not spawn".to_string()),
         ] {
             let mut buf = Vec::new();
@@ -400,10 +503,44 @@ mod tests {
     #[test]
     fn wrong_tag_for_request_is_rejected() {
         let mut buf = Vec::new();
-        write_response(&mut buf, &Response::Exit(0)).unwrap();
+        write_response(&mut buf, &Response::Exit { code: 0 }).unwrap();
         assert!(matches!(
             read_request(&mut buf.as_slice()),
             Err(ChannelError::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn connection_pair_handshakes_and_exchanges() {
+        use std::os::unix::net::UnixStream;
+        let (host, guest) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut conn = ServerConnection::accept(guest).unwrap();
+            let req = conn.recv_request().unwrap();
+            assert_eq!(
+                req,
+                Request::Exec {
+                    argv: vec!["true".into()]
+                }
+            );
+            conn.send_response(&Response::Exit { code: 0 }).unwrap();
+        });
+        let mut client = ClientConnection::connect(host).unwrap();
+        client
+            .send_request(&Request::Exec {
+                argv: vec!["true".into()],
+            })
+            .unwrap();
+        assert_eq!(client.recv_response().unwrap(), Response::Exit { code: 0 });
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn is_disconnect_flags_eof_only() {
+        let eof = ChannelError::Io(std::io::Error::from(std::io::ErrorKind::UnexpectedEof));
+        assert!(eof.is_disconnect());
+        let other = ChannelError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(!other.is_disconnect());
+        assert!(!ChannelError::Protocol("x".into()).is_disconnect());
     }
 }
