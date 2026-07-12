@@ -241,8 +241,9 @@ binary, so adding a runtime is a packaging step, not an engine change.
       signature-verified against the keys the minirootfs itself ships. `--no-scripts` because
       install scripts need a chroot (root); the in-VM test proves the payload runs. Versions float
       *within* the pinned `v3.24` branch — Alpine branch repos carry only the latest revision per
-      package, so an exact `pkg=ver-rN` pin would break on every upstream patch bump; the
-      exact-version lockfile is **P3.6**. Image: 33 packages, ~50 MB in the 128 MiB ext4. Proof:
+      package, so an exact `pkg=ver-rN` pin would *break* the build on every upstream patch bump
+      rather than reproduce it; **P3.6** instead records the resolved closure in a lockfile and detects
+      drift. Image: 33 packages, ~50 MB in the 128 MiB ext4. Proof:
       `execs_python_in_the_microvm` boots the image and `exec("python3 -c 'print(2+2)'") → 4`,
       exit 0, in a real microVM.)*
 - [x] **P3.3** Read-only base rootfs + a writable overlay per run (so runs don't mutate the base).
@@ -291,7 +292,18 @@ binary, so adding a runtime is a packaging step, not an engine change.
       nested file + an escaping symlink into `/output`, pulls the tree back with a matching sha256, and
       asserts the escaping symlink and `lost+found` are gone. `Sandbox`/`agent run --output-dir`
       plumbing deferred, as `input_dir`'s was.)*
-- [ ] **P3.6** Pin the rootfs build in `xtask` so it's one command + reproducible.
+- [x] **P3.6** Pin the rootfs build in `xtask` so it's one command + reproducible.
+      *(`cargo xtask build-rootfs` is now **byte-for-byte deterministic** (decision 007): two builds
+      produce an identical `rootfs-agent.ext4`. `SOURCE_DATE_EPOCH` (fixed, scoped to `mke2fs`) stamps
+      the superblock times and clamps `-d` file mtimes; `-E hash_seed=<UUID>,lazy_itable_init=0` fixes
+      the htree seed + eagerly writes the inode table; apk's wall-clock `/var/log/apk.log` is dropped
+      (the last non-obvious source, found by diffing two builds' trees); the musl agent binary was
+      already reproducible (`--locked` + pinned toolchain). A committed `xtask/rootfs-packages.lock`
+      records the exact 33-package closure; `build-rootfs --verify` (run by `ci-privileged`) builds
+      twice, asserts byte-identical, and fails on closure drift, `--update-lock` re-pins. **Exact
+      version pinning was rejected** — Alpine branch repos delete old `.apk`s on a bump, so a pin would
+      *fail* the build, not reproduce it; the durable fix (vendoring the `.apk` closure as sha-pinned
+      artifacts) is tombstoned. Default `build-rootfs` stays one command.)*
 - [ ] **P3.7** Size/boot budget: keep the base small; measure its effect on boot time.
 - [ ] **P3.8** Test: run Python + a small script that writes a file → capture the file.
 - [ ] **P3.9** **Runtime-agnostic proof:** a second, *differently-shaped* runtime runs unchanged

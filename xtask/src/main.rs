@@ -43,8 +43,17 @@ enum Cmd {
     BuildGuestAgent,
     /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
     /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-agent.ext4` (needs `curl`,
-    /// `tar`, `mke2fs`, `truncate`).
-    BuildRootfs,
+    /// `tar`, `mke2fs`, `truncate`). Reproducible: two builds are byte-identical.
+    BuildRootfs {
+        /// Build a second time and assert the image is byte-identical, and fail if the resolved
+        /// package closure has drifted from the committed lockfile. The reproducibility gate.
+        #[arg(long)]
+        verify: bool,
+        /// Re-record the resolved package closure into the committed lockfile — the "re-pin" step
+        /// after Alpine's branch repo bumps a package out from under the floating install.
+        #[arg(long)]
+        update_lock: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -54,7 +63,10 @@ fn main() -> Result<()> {
         Cmd::Setup => setup(),
         Cmd::FetchArtifacts => fetch_artifacts(),
         Cmd::BuildGuestAgent => build_guest_agent().map(|_| ()),
-        Cmd::BuildRootfs => build_rootfs(),
+        Cmd::BuildRootfs {
+            verify,
+            update_lock,
+        } => build_rootfs(verify, update_lock),
     }
 }
 
@@ -134,8 +146,17 @@ fn verify_static(bin: &Path) -> Result<()> {
 // ---- rootfs build (ROADMAP P3.1) -------------------------------------------------------------
 
 /// A fixed rootfs UUID so repeated builds don't churn it (Firecracker roots by device, not UUID).
-/// True byte-for-byte reproducibility is P3.6; P3.1's bar is pinned inputs + one scripted command.
+/// Reused as the ext4 directory-hash seed (P3.6): the seed only guards against adversarial
+/// directory-hash flooding, which a trusted, pinned build-time image doesn't face — so a fixed seed
+/// costs nothing and buys byte-for-byte determinism.
 const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
+
+/// A fixed build epoch for the rootfs image (P3.6). `mke2fs` honours `SOURCE_DATE_EPOCH`: it stamps
+/// the filesystem's create/write/check times with it and **clamps every `-d`-copied file mtime down
+/// to it**, so repeated builds don't churn timestamps. A constant, deliberately — a `git log` or
+/// wall-clock date would vary across shallow clones and over time, defeating the purpose. Together
+/// with the fixed UUID + hash seed, this makes two builds byte-identical. 2024-01-01T00:00:00Z.
+const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
 
 /// Image size. Generous headroom over the ~15 MB payload so a later `apk.static --root` (P3.2's
 /// Python, P3.9's Node) has room without a re-size. Per-run growth is P3.3's overlay, not this.
@@ -194,10 +215,12 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 const ALPINE_BRANCH: &str = "v3.24";
 
 /// The language runtimes baked into the guest image (P3.2's reference runtime; P3.9 broadens it).
-/// Installed by `apk.static` from the pinned branch. Versions float *within* that stable branch —
-/// Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN` pin
-/// would break the build on every upstream patch bump; the exact-version lockfile is P3.6's
-/// reproducibility work.
+/// Installed by `apk.static` from the pinned branch. The install **floats** within that stable
+/// branch — Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN`
+/// pin would just *fail* the build the day upstream bumps (the old `.apk` is gone from the CDN), not
+/// reproduce it. Instead P3.6 **records** the resolved closure in a committed lockfile and detects
+/// drift (`build-rootfs --verify`), keeping the everyday build working; durable pinning would mean
+/// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
 const GUEST_PACKAGES: &[&str] = &["python3"];
 
 /// The overlay init (`/sbin/overlay-init`), run as PID 1 when the driver boots this image
@@ -255,11 +278,12 @@ fn apk_tools_artifact() -> Result<Artifact> {
     }
 }
 
-/// Assemble `artifacts/rootfs-agent.ext4`: extract the pinned Alpine base, bake the static agent in,
-/// install the vsock init, and build the ext4 from the staging dir with `mke2fs -d` (rootless — no
-/// loopback mount, no `sudo`). A distinct output path, so the pinned Ubuntu `rootfs.ext4` (and the
-/// `ci-privileged` hash-guard + the Phase-1 `login:` boot test) are untouched.
-fn build_rootfs() -> Result<()> {
+/// One full rootfs assembly into `out_image`: extract the pinned Alpine base, install the guest
+/// packages, bake the static agent + init in, and build the ext4 from the staging dir with
+/// `mke2fs -d` (rootless — no loopback, no `sudo`). A distinct output path from the pinned Ubuntu
+/// `rootfs.ext4`, so its hash-guard + the Phase-1 `login:` boot test are untouched. Returns the
+/// image's sha256 and the resolved package closure, so [`build_rootfs`] can check reproducibility.
+fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     let agent = build_guest_agent()?;
 
     let base = alpine_artifact()?;
@@ -319,18 +343,22 @@ fn build_rootfs() -> Result<()> {
     std::fs::create_dir_all(staging.join("input")).context("create /input mountpoint")?;
     std::fs::create_dir_all(staging.join("output")).context("create /output mountpoint")?;
 
-    // Build the ext4 from the staging dir — rootless, via `mke2fs -d`.
-    let out = dir.join("rootfs-agent.ext4");
-    let _ = std::fs::remove_file(&out);
+    // Build the ext4 from the staging dir — rootless, via `mke2fs -d`, and **deterministic** (P3.6):
+    // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` — which stamps the superblock
+    // create/write/check times and clamps the copied file mtimes down to the epoch — make two builds
+    // byte-identical. `lazy_itable_init=0` writes the inode table eagerly, so its bytes are fixed here
+    // rather than finished non-deterministically by the guest kernel on first mount.
+    let _ = std::fs::remove_file(out_image);
     run_tool(
         "truncate",
         &[
             OsStr::new("-s"),
             OsStr::new(&format!("{ROOTFS_SIZE_MIB}M")),
-            out.as_os_str(),
+            out_image.as_os_str(),
         ],
     )?;
-    run_tool(
+    let ext_opts = format!("hash_seed={ROOTFS_UUID},lazy_itable_init=0");
+    run_tool_env(
         "mke2fs",
         &[
             OsStr::new("-F"),
@@ -343,23 +371,167 @@ fn build_rootfs() -> Result<()> {
             OsStr::new("0"),
             OsStr::new("-U"),
             OsStr::new(ROOTFS_UUID),
+            OsStr::new("-E"),
+            OsStr::new(&ext_opts),
             OsStr::new("-d"),
             staging.as_os_str(),
-            out.as_os_str(),
+            out_image.as_os_str(),
         ],
+        &[("SOURCE_DATE_EPOCH", ROOTFS_SOURCE_DATE_EPOCH)],
     )?;
 
+    // Record the resolved package closure before the staging tree (with its apk db) is removed.
+    let packages = resolved_packages(&staging)?;
     // The image is the product — don't leave the extracted staging tree behind.
     std::fs::remove_dir_all(&staging)
         .with_context(|| format!("clean up staging {}", staging.display()))?;
 
+    Ok(RootfsBuild {
+        image_sha256: sha256_of(out_image)?,
+        packages,
+    })
+}
+
+/// The result of one rootfs assembly: the image's content hash and the exact resolved package
+/// closure (sorted `name-version-rN`), the two things a reproducibility check compares.
+struct RootfsBuild {
+    image_sha256: String,
+    packages: Vec<String>,
+}
+
+/// `cargo xtask build-rootfs [--verify] [--update-lock]`. The default (no flags) is one command: it
+/// assembles the deterministic image, prints its sha256, and warns if the package closure drifted
+/// from the committed lockfile. `--update-lock` re-records that lockfile (the "re-pin" after an
+/// upstream bump); `--verify` proves reproducibility — a second build must be byte-identical — and
+/// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the gate.
+fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
+    let out = artifacts_dir().join("rootfs-agent.ext4");
+    let build = assemble_rootfs(&out)?;
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
+    println!("  sha256: {}", build.image_sha256);
+
+    if update_lock {
+        write_packages_lock(&build.packages)?;
+        println!(
+            "  ✓ recorded {} packages in {}",
+            build.packages.len(),
+            packages_lock_path().display()
+        );
+    } else {
+        check_packages_lock(&build.packages, verify)?;
+    }
+
+    if verify {
+        // Prove determinism: a second full build must be byte-for-byte identical. Built to a temp
+        // path so the canonical image (which the boot test uses) stays in place; removed after.
+        let tmp = artifacts_dir().join("rootfs-agent.verify.ext4");
+        let again = assemble_rootfs(&tmp)?;
+        let _ = std::fs::remove_file(&tmp);
+        if again.image_sha256 != build.image_sha256 {
+            bail!(
+                "rootfs build is NOT reproducible — two builds differ:\n  {}\n  {}",
+                build.image_sha256,
+                again.image_sha256
+            );
+        }
+        println!("  ✓ reproducible: two builds are byte-identical");
+    }
+
     // The full runnable hint, printed from the contract constants so it can't drift from the code.
     println!(
         "  exec inside a microVM with:\n  AGENT_ROOTFS={} AGENT_MARKER={} cargo run -p agent-cli -- run -- echo hi",
         out.display(),
         agent_channel::GUEST_READY_MARKER
     );
+    Ok(())
+}
+
+/// The committed lockfile recording the exact guest package closure (P3.6). Lives next to the build
+/// code — **not** in the gitignored `artifacts/` — so it's version-controlled and a diff shows
+/// exactly when Alpine's branch repo moved a package under the floating install.
+fn packages_lock_path() -> PathBuf {
+    workspace_root().join("xtask/rootfs-packages.lock")
+}
+
+/// The resolved package closure from a staging tree's apk database: every installed package (the
+/// pinned base + the `apk add` dependency closure) as sorted `name-version-rN`. The db content is
+/// deterministic for a given set of package revisions, so this is a stable fingerprint of the
+/// rootfs's software — it changes only when a package revision does.
+fn resolved_packages(staging: &Path) -> Result<Vec<String>> {
+    let db = staging.join("lib/apk/db/installed");
+    let text =
+        std::fs::read_to_string(&db).with_context(|| format!("read apk db {}", db.display()))?;
+    let mut pkgs = Vec::new();
+    let (mut name, mut version): (Option<&str>, Option<&str>) = (None, None);
+    for line in text.lines() {
+        if let Some(n) = line.strip_prefix("P:") {
+            name = Some(n);
+        } else if let Some(v) = line.strip_prefix("V:") {
+            version = Some(v);
+        } else if line.is_empty() {
+            // A blank line ends a package record; emit the one we just read.
+            if let (Some(n), Some(v)) = (name.take(), version.take()) {
+                pkgs.push(format!("{n}-{v}"));
+            }
+        }
+    }
+    if let (Some(n), Some(v)) = (name, version) {
+        pkgs.push(format!("{n}-{v}")); // last record may lack a trailing blank line
+    }
+    pkgs.sort();
+    Ok(pkgs)
+}
+
+/// Write the committed package lockfile (the `--update-lock` action).
+fn write_packages_lock(packages: &[String]) -> Result<()> {
+    let path = packages_lock_path();
+    let mut body = String::from(
+        "# Resolved guest rootfs package closure (P3.6) — the exact Alpine packages baked into\n\
+         # artifacts/rootfs-agent.ext4. Regenerate after an upstream bump with:\n\
+         #   cargo xtask build-rootfs --update-lock\n\
+         # Drift from this list means Alpine's branch repo moved and the image no longer reproduces.\n",
+    );
+    for p in packages {
+        body.push_str(p);
+        body.push('\n');
+    }
+    std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))
+}
+
+/// Compare the freshly-resolved closure against the committed lockfile. `hard` (set by `--verify`)
+/// makes drift or a missing lockfile a build failure; otherwise it's a warning, so the everyday
+/// build still succeeds even after an upstream bump (it just tells you to re-pin).
+fn check_packages_lock(built: &[String], hard: bool) -> Result<()> {
+    let path = packages_lock_path();
+    let recorded = match std::fs::read_to_string(&path) {
+        Ok(text) => text
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>(),
+        Err(_) => {
+            let msg = format!(
+                "no package lockfile at {} — run `cargo xtask build-rootfs --update-lock`",
+                path.display()
+            );
+            if hard {
+                bail!("{msg}");
+            }
+            println!("  ! {msg}");
+            return Ok(());
+        }
+    };
+    if recorded.as_slice() != built {
+        let msg = format!(
+            "guest package closure drifted from {} (Alpine bumped a package) — the image no longer \
+             matches the lockfile; run `cargo xtask build-rootfs --update-lock` to re-pin",
+            path.display()
+        );
+        if hard {
+            bail!("{msg}");
+        }
+        println!("  ! {msg}");
+    }
     Ok(())
 }
 
@@ -411,7 +583,16 @@ fn install_guest_packages(staging: &Path) -> Result<()> {
 
     // The tool is scratch either way — clean it before propagating any install failure.
     let _ = std::fs::remove_dir_all(&tooldir);
-    result
+    result?;
+
+    // Drop apk's install log: it records each action with a **wall-clock** timestamp, the one piece
+    // of the install that isn't reproducible (the package db itself is deterministic). It has no
+    // runtime purpose in the guest, so removing it makes the image byte-identical across builds (P3.6).
+    let apk_log = staging.join("var/log/apk.log");
+    if apk_log.exists() {
+        std::fs::remove_file(&apk_log).with_context(|| format!("remove {}", apk_log.display()))?;
+    }
+    Ok(())
 }
 
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.
@@ -475,8 +656,10 @@ fn ci_privileged() -> Result<()> {
     }
     // The in-VM exec test boots a rootfs with the agent baked in — build it here (not from inside a
     // `#[test]`, which mustn't shell out to a musl `cargo build`). Idempotent: the Alpine base is
-    // cached by sha256, so this is a rebuild of the agent + the image, not a re-download.
-    build_rootfs()?;
+    // cached by sha256, so this is a rebuild of the agent + the image, not a re-download. `--verify`
+    // makes this the reproducibility gate: it builds twice, asserts byte-identical, and fails on
+    // package-closure drift from the lockfile.
+    build_rootfs(true, false)?;
     cargo(&["test", "--workspace", "--locked", "--", "--ignored"])?;
     println!("\n✓ privileged integration passed");
     Ok(())
@@ -633,10 +816,21 @@ fn sha256_of(path: &Path) -> Result<String> {
 
 /// Run an external build tool, echoing the command; fail with context if it's missing or errors.
 fn run_tool(program: &str, args: &[&OsStr]) -> Result<()> {
+    run_tool_env(program, args, &[])
+}
+
+/// [`run_tool`] with extra environment scoped to **this child only** (not `std::env::set_var`, which
+/// is process-global and would leak into every later tool). Used to hand `mke2fs` its
+/// `SOURCE_DATE_EPOCH` without affecting `tar`/`apk`/`truncate`.
+fn run_tool_env(program: &str, args: &[&OsStr], env: &[(&str, &str)]) -> Result<()> {
     let shown: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
     println!("$ {program} {}", shown.join(" "));
-    let status = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let status = cmd
         .status()
         .with_context(|| format!("running {program} (is it installed?)"))?;
     if !status.success() {

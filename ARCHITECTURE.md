@@ -216,9 +216,11 @@ vsock transport + `CONFIG_DEVTMPFS_MOUNT` — proven by the in-VM `exec("echo hi
 round trip.
 
 **Consequences / tombstones.**
-- **P3.1's reproducibility bar is "pinned inputs + a fixed UUID + one scripted command," not
-  byte-identical.** A content-manifest hash + any `SOURCE_DATE_EPOCH`/`hash_seed` byte-for-byte
-  polish is **P3.6**.
+- **P3.1's reproducibility bar was "pinned inputs + a fixed UUID + one scripted command," not
+  byte-identical.** ~~A content-manifest hash + any `SOURCE_DATE_EPOCH`/`hash_seed` byte-for-byte
+  polish is **P3.6**.~~ **Resolved in P3.6 (decision 007):** `SOURCE_DATE_EPOCH` + a fixed htree hash
+  seed + dropping apk's wall-clock install log make two builds byte-identical, verified by a gate; a
+  committed lockfile records the resolved package closure.
 - **The agent now depends on the `vsock` crate** (guest-agent-only; the host still reaches
   Firecracker's vsock over a plain `UnixStream`). Its tree is MIT/Apache and it doesn't breach the
   agent's own `forbid(unsafe_code)`.
@@ -373,3 +375,55 @@ link targets, not the metadata `e2fsck`/`debugfs` parse.
 - **`Sandbox` plumbing is deferred** (as `input_dir` was): `output_dir`/`collect_outputs` live at the
   `RunningVm` layer for now; a `Sandbox::collect_outputs` + `agent run --output-dir` follow-up is
   noted in the roadmap.
+
+### 007 — A byte-for-byte reproducible rootfs build *(2026-07-12, P3.6)*
+
+**Decision.** `cargo xtask build-rootfs` is **deterministic**: two builds from the same inputs produce
+a byte-identical `rootfs-agent.ext4`. Three non-determinism sources are pinned:
+- **`mke2fs` timestamps + directory-hash seed.** `SOURCE_DATE_EPOCH` (a fixed constant, scoped to the
+  `mke2fs` child) stamps the superblock create/write/check times and clamps every `-d`-copied file
+  mtime down to it; `-E hash_seed=<fixed UUID>` fixes the htree seed (otherwise random per build);
+  `lazy_itable_init=0` writes the inode table eagerly so its bytes are fixed here, not finished
+  non-deterministically by the guest kernel on first mount.
+- **apk's install log.** `/var/log/apk.log` records each action with a **wall-clock** timestamp — the
+  one install artifact that isn't reproducible (the package db content is deterministic). It has no
+  runtime purpose, so the build removes it. (Found by diffing two builds' extracted trees, not by
+  the `mke2fs` polish alone.)
+- **The guest agent binary** is already reproducible (pinned `rust-toolchain.toml` + `--locked`) — so
+  no `--remap-path-prefix` is needed.
+
+A committed **package lockfile** (`xtask/rootfs-packages.lock`) records the exact resolved closure
+(`name-version-rN`, base + `apk add` deps). `build-rootfs --verify` (which `ci-privileged` runs)
+builds twice, asserts byte-identical, and fails on closure drift; `--update-lock` re-records after an
+upstream bump. The default `build-rootfs` stays one command (deterministic image; warns on drift).
+
+**Alternatives considered.**
+- **Exact-pin the packages (`apk add python3=<ver>`) as the reproducibility contract.** Rejected —
+  the tempting analogy to the sha-pinned *tarball* is false. The minirootfs lives at a stable
+  *release* URL (its bytes stay fetchable forever), but Alpine **branch** repos keep only the latest
+  revision and **delete** the old `.apk` on every bump. So an exact pin doesn't reproduce the old
+  build — it **fails** it the day upstream moves, and churns the repo with a lockfile commit per
+  patch. A floating install that *records* the closure and *detects* drift keeps the everyday build
+  working while still flagging when the image would change.
+- **Vendor the `.apk` closure as sha-pinned artifacts** (hash-pin each of the ~33 packages, install
+  offline). The genuinely durable end state — it closes the one security-relevant input still
+  fetched-not-pinned — but it's a phase's worth of fetch/verify/offline-install rework. **Tombstoned**
+  as the later hardening, out of scope for the byte-for-byte polish.
+- **A separate content-manifest file** re-listing the Alpine/apk-tools shas + branch + target.
+  Rejected: those are already source-of-truth constants in `xtask`; a second copy just drifts. The
+  only thing not already captured is the resolved closure — which *is* the lockfile.
+
+**Why.** Reproducibility is a first-class "measured, not marketed" property: a build you can't
+reproduce is a claim you can't check. `SOURCE_DATE_EPOCH`/`hash_seed`/`lazy_itable_init=0` are the
+standard ext4 determinism levers; the apk-log removal was the non-obvious last mile. The lockfile
+makes package drift *visible* without making the build *brittle*.
+
+**Consequences / tombstones.**
+- **Reproducibility is a `ci-privileged`-guarded property**, not the everyday `ci` gate's — it needs
+  the musl target + network + `mke2fs`, so `--verify` runs where the boot tests already do.
+- **The lockfile drifts only on an Alpine package bump**, never on guest-agent code changes (the
+  closure is independent of the agent binary) — so it isn't a per-commit chore.
+- **Durable over-time reproducibility still rests on Alpine's CDN** until the `.apk` closure is
+  vendored (the tombstoned hardening); today a bump makes `--verify` fail loudly with a re-pin hint.
+- **A fixed htree hash seed is safe here** — the seed only matters against adversarial directory-hash
+  flooding, which a trusted, pinned, build-time image doesn't face.
