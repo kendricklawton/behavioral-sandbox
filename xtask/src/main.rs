@@ -791,6 +791,17 @@ fn ci_privileged() -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
     }
+    // This gate builds and verifies the static guest agent (below), and that verification is the
+    // *only* thing standing between a silently-reintroduced dynamic dependency and a confusing
+    // in-guest loader failure. `verify_static` soft-skips when `readelf` is absent (so ad-hoc
+    // `build-rootfs` still works), so require it *here* — a missing binutils must fail the gate
+    // loudly, not quietly disarm the check.
+    if !in_path("readelf") {
+        bail!(
+            "readelf (binutils) not found — the privileged gate verifies the guest agent is \
+               statically linked and won't run that check blind; install binutils"
+        );
+    }
     // The boot tests need the pinned kernel + rootfs; fail with the fix rather than a cryptic
     // boot error. `fetch-artifacts` (not this gate) does the network download; here we verify
     // the hashes too — the sha256 is the contract, and a hand-placed or corrupted artifact
@@ -849,6 +860,7 @@ fn setup() -> Result<()> {
         "readelf (binutils — static-link verification)",
         in_path("readelf"),
     );
+    check("ip (iproute2 — per-VM tap device)", in_path("ip"));
     let dir = artifacts_dir();
     check(
         "guest kernel + rootfs (cargo xtask fetch-artifacts)",

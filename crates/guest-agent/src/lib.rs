@@ -345,9 +345,23 @@ impl RunDir {
     }
 
     /// Read an artifact back: `Ok(None)` if it doesn't exist, `Err` on a bad path or read failure.
+    ///
+    /// The command ran *before* this read and may have planted a symlink inside the run dir pointing
+    /// outside it (`ln -s /etc/passwd out`); a bare `fs::read` would follow it and hand the host an
+    /// out-of-tree file. So require the link-resolved real path to stay within the run dir, treating
+    /// an escape as "no such artifact" (omitted, not fatal). The agent is not the security boundary,
+    /// but this keeps it from leaking files a de-privileged command couldn't otherwise reach.
     fn get(&self, rel: &str) -> Result<Option<Vec<u8>>, AgentError> {
         let src = self.resolve(rel)?;
-        match std::fs::read(&src) {
+        let (real, root) = match (src.canonicalize(), self.path.canonicalize()) {
+            (Ok(real), Ok(root)) => (real, root),
+            // Doesn't resolve (absent or dangling) → simply "no such artifact".
+            _ => return Ok(None),
+        };
+        if !real.starts_with(&root) {
+            return Ok(None);
+        }
+        match std::fs::read(&real) {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(AgentError::WorkDir(e)),

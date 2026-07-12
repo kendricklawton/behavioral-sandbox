@@ -52,7 +52,7 @@ crates/
                  CO-RE/BTF so they're portable across kernels.
   probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
                  maps, stream events into the flight recorder.
-  cli/           the `agent` binary (`run`, `shell`, `--trace`); later the `agentd` daemon.
+  cli/           the `agent` binary (`run`, `shell`, `--log`); later the `agentd` daemon.
 xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF build at P8),
                  `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
                  and the rootfs/kernel build. Never shipped.

@@ -427,6 +427,13 @@ makes package drift *visible* without making the build *brittle*.
   vendored (the tombstoned hardening); today a bump makes `--verify` fail loudly with a re-pin hint.
 - **A fixed htree hash seed is safe here** — the seed only matters against adversarial directory-hash
   flooding, which a trusted, pinned, build-time image doesn't face.
+- **The guarantee is same-host determinism, not cross-machine bit-reproducibility.** The rootless
+  build stages files owned by the *build user's* uid/gid, and `mke2fs -d` copies that ownership into
+  the image, so an image built by a different user (or from a different checkout path, which can leak
+  into the agent binary's debug strings) differs byte-for-byte. `--verify` builds twice as the same
+  user from the same path back to back, so it proves the build is deterministic *on this host*, which
+  is what catches an accidental non-determinism regression. Cross-host reproducibility (normalize
+  ownership to `0:0`, `--remap-path-prefix` the binary) is a separate, tombstoned hardening.
 
 ### 008 — Guest networking is deny-by-default: a tap with no route to the world *(2026-07-12, P4.3)*
 
@@ -467,3 +474,54 @@ allowance is recorded" invariant true from the first tap.
 - **No default masquerade is a standing rule**, not a P4-only stopgap: if a hoster wants NAT egress,
   that is an explicit configured allowance the flight recorder captures, consistent with guardrail #3
   (the hoster's policy, enabled explicitly), never an engine default.
+
+### 009 — The per-VM tap: shelled out to `ip`, deleted on every teardown path *(2026-07-12, P4.1)*
+
+**Decision.** With `BootConfig.enable_network`, the driver gives the guest a virtio-net `eth0` backed
+by a per-VM host **tap**. Mechanism:
+- **Create by shelling out to `ip` (iproute2)**, not a netlink crate — the same convention the driver
+  already uses for `mke2fs`/`truncate`/`e2fsck`/`debugfs`. Creating a tap needs `CAP_NET_ADMIN`, so
+  this is a privileged operation (like `/dev/kvm`); the integration test skips without the capability.
+- **Host-global unique name via create-and-retry.** The name is `fc<hex>` (≤14 bytes, within the
+  15-byte `IFNAMSIZ` limit), seeded from a PID-mixed counter. Uniqueness across concurrent driver
+  processes rests on `ip tuntap add` failing on an already-taken name as the **atomic reservation**
+  (detected by asking netlink whether the interface now exists, since `ip tuntap` fails with `EBUSY`,
+  not the RTNETLINK `EEXIST`, on a collision) — the same
+  fail-if-exists-then-retry pattern as `create_workdir`, never a `/sys/class/net` scan (which would
+  race between check and create).
+- **A locally-administered unicast MAC** (`02:00:xx:xx:xx:xx`) derived from the per-VM index: first
+  octet sets the LAA bit and clears the multicast bit, so every VM gets a distinct, valid NIC address.
+- **Attach** via `PUT /network-interfaces/eth0` (`host_dev_name` + `guest_mac`), a sixth API body
+  struct mirroring the vsock block.
+- **Delete on every teardown path.** A tap lives **outside** the per-VM scratch dir, so
+  `remove_dir_all(workdir)` cannot reclaim it. The `Tap` handle is threaded through `Spawned` and
+  `RunningVm` (like `vsock_uds`/`output`) and deleted (`ip link del`) in all three reclamation paths —
+  `RunningVm::drop`, `Spawned::drop`, and `Spawned::abort` — so a boot that fails *after* tap-create
+  still cleans up. Deletion is best-effort (`tracing::warn!` on failure, never a panic — the host path
+  is `#![forbid(unsafe_code)]`/no-panic).
+
+**Alternatives considered.**
+- **`rtnetlink` (a netlink crate) instead of shelling `ip`.** Rejected: it pulls an async dependency
+  tree through `cargo deny` for no benefit; the driver's whole style is dependency-light shell-outs to
+  host tools, and `ip` is already a documented `ci-privileged` requirement.
+- **Encode VM identity in the tap name.** Rejected: `IFNAMSIZ` is 15 bytes and a PID+sequence blows
+  the budget. The name is just a claimed host-global token; per-VM identity is the MAC (and, later, the
+  subnet/CID the allocator will derive from the same index).
+- **A `Drop` on `Tap`.** Rejected: `Spawned`/`RunningVm` already own the guaranteed-teardown `Drop`s;
+  a second `Drop` would risk double-delete noise. One owner, explicit delete in the three paths.
+
+**Why.** The tap is the first per-VM resource that isn't inside the scratch dir, so it's the first
+thing the "everything reclaimable lives in `workdir`" teardown model doesn't cover — hence threading a
+handle and deleting on every path is load-bearing, not incidental (decision 008's tombstone flagged
+exactly this). Shelling to `ip` keeps the driver dependency-light and `unsafe`-free.
+
+**Consequences / tombstones.**
+- **The allocator yields name + MAC only** for now; the `/30`-or-`/31` subnet and the guest CID are
+  deterministic functions of the same per-VM index, added when addressing (P4.2) and per-VM isolation
+  (P4.4) land — not a rewrite. `DEFAULT_GUEST_CID = 3` stays a hardcoded const until then.
+- **Deny-by-default holds by construction:** `enable_network` gives the guest an *unconfigured* NIC —
+  no `ip=` boot arg, no host address on the tap, no route, no masquerade — so it reaches nothing until
+  addressing and, ultimately, eBPF-enforced egress policy (decision 008) arrive.
+- **A hard-killed driver can still orphan a tap** (no `Drop`-of-temp-dir safety net, unlike the
+  scratch dir) — the same class of gap as P6.7's SIGKILL-leaks-a-VM, and the reason the leak test scans
+  for orphaned `fc*` interfaces. The durable owner is the Phase-6 jailer/cgroup model.

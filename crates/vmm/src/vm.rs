@@ -15,7 +15,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 
 use agent_channel::{ClientConnection, Request, Response};
 
-use crate::firecracker::{Action, ApiClient, BootSource, Drive, MachineConfig, Vsock};
+use crate::firecracker::{
+    Action, ApiClient, BootSource, Drive, MachineConfig, NetworkInterface, Vsock,
+};
 use crate::{Limits, RunResult, VmmError};
 
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
@@ -169,6 +171,13 @@ pub struct BootConfig {
     /// device. Readback needs `e2fsck` + `debugfs` (e2fsprogs) on the host; the directory is created
     /// if missing and receives the guest's `/output` tree (host-escaping symlinks are dropped).
     pub output_dir: Option<PathBuf>,
+    /// Give the guest a **virtio-net** interface backed by a per-VM host **tap** device (P4.1). The
+    /// driver creates the tap (`ip tuntap`, needs `CAP_NET_ADMIN`), attaches it via
+    /// `PUT /network-interfaces`, and deletes it on teardown. `false` (the default) boots with **no
+    /// NIC** — deny-by-default. Even when `true`, the guest gets an *unconfigured* `eth0`: this box
+    /// adds no address, route, or masquerade (decision 008), so the guest reaches nothing until
+    /// addressing lands. Needs `ip` (iproute2) on the host.
+    pub enable_network: bool,
 }
 
 impl BootConfig {
@@ -230,6 +239,7 @@ impl Default for BootConfig {
             read_only_root: false,
             input_dir: None,
             output_dir: None,
+            enable_network: false,
         }
     }
 }
@@ -249,6 +259,9 @@ pub struct RunningVm {
     /// The writable output image (in `workdir`) and the host directory to extract it into, when the
     /// boot config set `output_dir`; `None` otherwise. Read back by [`RunningVm::collect_outputs`].
     output: Option<OutputDevice>,
+    /// The per-VM host tap backing the guest's virtio-net, when the boot config set
+    /// `enable_network`. Lives **outside** `workdir`, so teardown must delete it explicitly.
+    tap: Option<Tap>,
 }
 
 /// A booted VM's writable output device: the ext4 image the guest mounts at `/output`, and the host
@@ -482,7 +495,12 @@ impl RunningVm {
 
 impl Drop for RunningVm {
     fn drop(&mut self) {
-        teardown(&mut self.child, &mut self.console, &self.workdir);
+        teardown(
+            &mut self.child,
+            &mut self.console,
+            &self.workdir,
+            self.tap.as_ref(),
+        );
     }
 }
 
@@ -505,12 +523,20 @@ struct Spawned {
     /// The blank writable output image (in `workdir`) + its host destination, when `output_dir` was
     /// set; `None` otherwise. Attached read-write; extracted by `collect_outputs`, then reclaimed.
     output: Option<OutputDevice>,
+    /// The per-VM host tap backing the guest's virtio-net, when `enable_network` was set. Lives
+    /// **outside** `workdir`, so every teardown path must delete it explicitly.
+    tap: Option<Tap>,
 }
 
 impl Drop for Spawned {
     fn drop(&mut self) {
         if let Some(mut child) = self.child.take() {
-            teardown(&mut child, &mut self.console, &self.workdir);
+            teardown(
+                &mut child,
+                &mut self.console,
+                &self.workdir,
+                self.tap.as_ref(),
+            );
         }
     }
 }
@@ -621,6 +647,23 @@ impl Spawned {
                 return Err(e);
             }
         };
+        // Per-VM tap for the guest's virtio-net (P4.1), when enabled. Created here — after the child
+        // is spawned but before `Spawned` owns it — with the same inline cleanup as its neighbours, so
+        // a failed create can't leak a tap; once `Spawned` holds it, every teardown path deletes it.
+        let tap = if config.enable_network {
+            match Tap::create() {
+                Ok(tap) => Some(tap),
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+
         // Firecracker creates the vsock socket here on `PUT /vsock`; the host dials it post-boot.
         let vsock_uds = config.guest_cid.map(|_| workdir.join(VSOCK_UDS));
         Ok(Self {
@@ -632,6 +675,7 @@ impl Spawned {
             vsock_uds,
             input_image,
             output,
+            tap,
         })
     }
 
@@ -759,6 +803,22 @@ impl Spawned {
             tracing::debug!(guest_cid = cid, uds = uds_path, "vsock device configured");
         }
 
+        // Per-VM virtio-net (P4.1), backed by the host tap created in `launch`. Deny-by-default: the
+        // guest gets an *unconfigured* `eth0` (no `ip=` boot arg, no host route or masquerade), so it
+        // reaches nothing until addressing lands. The tap is deleted on every teardown path.
+        if let Some(tap) = self.tap.as_ref() {
+            still_before(deadline, "PUT /network-interfaces/eth0")?;
+            self.api.put(
+                "/network-interfaces/eth0",
+                &NetworkInterface {
+                    iface_id: "eth0",
+                    host_dev_name: &tap.name,
+                    guest_mac: &tap.mac,
+                },
+            )?;
+            tracing::debug!(tap = %tap.name, mac = %tap.mac, "virtio-net device configured");
+        }
+
         tracing::debug!(
             vcpus = config.vcpus,
             mem_mib = config.mem_mib,
@@ -845,6 +905,11 @@ impl Spawned {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // The tap lives outside the scratch dir, so `remove_dir_all` below won't reclaim it — delete
+        // it explicitly (best-effort) on this boot-failure path too, or a failed boot leaks a tap.
+        if let Some(tap) = self.tap.take() {
+            tap.delete();
+        }
         self.console.join();
         let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
         let console = self.console.snapshot();
@@ -882,6 +947,7 @@ impl Spawned {
             boot_latency,
             vsock_uds: self.vsock_uds.take(),
             output: self.output.take(),
+            tap: self.tap.take(),
         })
     }
 }
@@ -922,6 +988,135 @@ fn create_workdir() -> Result<PathBuf, VmmError> {
     Err(VmmError::Vmm(
         "no fresh scratch dir under /tmp after 1024 attempts (stale agent-* dirs?)".into(),
     ))
+}
+
+/// Names the next per-VM tap/MAC within this process. Host-global uniqueness rests on `ip tuntap
+/// add` failing on an already-taken name as an atomic reservation (like [`create_workdir`]); this counter,
+/// mixed with the PID, just keeps candidates distinct so a cross-process collision is rare.
+static NET_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A per-VM host **tap** backing the guest's virtio-net (P4.1). The driver creates it (`ip tuntap`,
+/// needs `CAP_NET_ADMIN`), names it on the `PUT /network-interfaces`, and deletes it on every
+/// teardown path — it lives **outside** the scratch dir, so `remove_dir_all` can't reclaim it.
+#[derive(Debug, Clone)]
+struct Tap {
+    /// Host interface name (`fc<hex>`, ≤ `IFNAMSIZ`-1 = 15 bytes).
+    name: String,
+    /// The guest NIC's MAC: a locally-administered unicast address, distinct per VM.
+    mac: String,
+}
+
+impl Tap {
+    /// Create a uniquely-named tap and bring it up. Shells out to `ip` (iproute2), consistent with
+    /// the driver's other host-tool calls (`mke2fs`/`e2fsck`); needs `CAP_NET_ADMIN`, so this only
+    /// succeeds under the privileged test/runtime tier.
+    fn create() -> Result<Tap, VmmError> {
+        for _ in 0..1024 {
+            // Mix the PID in so two driver processes rarely pick the same name/MAC; the `ip tuntap
+            // add` name-taken retry below is the real cross-process reservation.
+            let token =
+                (u64::from(std::process::id()) << 20) ^ NET_SEQ.fetch_add(1, Ordering::Relaxed);
+            let name = tap_name(token);
+            match tap_add(&name)? {
+                TapAdd::Exists => continue, // raced or stale — try the next candidate name
+                TapAdd::Created => {}
+            }
+            // A half-created (down) tap must not leak if bring-up fails.
+            if let Err(e) = run_ip(&["link", "set", "dev", &name, "up"]) {
+                let _ = run_ip(&["link", "del", "dev", &name]);
+                return Err(e);
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let mac = mac_for(token as u32);
+            return Ok(Tap { name, mac });
+        }
+        Err(VmmError::Vmm(
+            "could not allocate a unique tap name after 1024 attempts".into(),
+        ))
+    }
+
+    /// Best-effort delete for teardown/`Drop` context: a failure is logged, never propagated or
+    /// panicked (the host path is `#![forbid(unsafe_code)]` and must not panic on teardown).
+    fn delete(&self) {
+        if let Err(e) = run_ip(&["link", "del", "dev", &self.name]) {
+            tracing::warn!(tap = %self.name, error = %e, "failed to delete tap on teardown");
+        }
+    }
+}
+
+/// The tap name for a token: `fc` + up to 12 hex digits (48 bits) = ≤ 14 bytes, within the 15-byte
+/// `IFNAMSIZ` limit. Factored out so the length bound is unit-testable.
+fn tap_name(token: u64) -> String {
+    format!("fc{:x}", token & 0xffff_ffff_ffff)
+}
+
+/// A locally-administered **unicast** MAC derived from a per-VM value. The first octet `0x02` sets
+/// the locally-administered bit (`0x02`) and clears the multicast bit (`0x01`); the low four bytes
+/// carry the value, so each VM gets a distinct, valid NIC address.
+fn mac_for(v: u32) -> String {
+    let b = v.to_be_bytes();
+    format!("02:00:{:02x}:{:02x}:{:02x}:{:02x}", b[0], b[1], b[2], b[3])
+}
+
+/// Outcome of `ip tuntap add`: a taken name is the retryable case (another VM or a stale tap holds
+/// it), distinct from a real failure.
+enum TapAdd {
+    Created,
+    Exists,
+}
+
+/// `ip tuntap add <name> mode tap`, classifying a name already taken (retry) apart from a real error.
+/// The name-taken case *is* the atomic host-global reservation across concurrent processes. We
+/// classify it by *asking netlink whether the interface now exists* rather than parsing the error
+/// string: `ip tuntap` creates via the `TUNSETIFF` ioctl, which fails with `EBUSY` ("Device or
+/// resource busy") on a collision — not the RTNETLINK `EEXIST` ("File exists") — so a message match
+/// would be both wrong and locale-fragile. The existence probe is exit-code- and namespace-based.
+fn tap_add(name: &str) -> Result<TapAdd, VmmError> {
+    let out = Command::new("ip")
+        .args(["tuntap", "add", "dev", name, "mode", "tap"])
+        .output()
+        .map_err(|e| tool_spawn_error("ip", e))?;
+    if out.status.success() {
+        return Ok(TapAdd::Created);
+    }
+    // A failure whose cause is "the name is taken" leaves the interface present; anything else
+    // (e.g. EPERM without CAP_NET_ADMIN) does not, and must surface — never retry it.
+    if iface_exists(name) {
+        return Ok(TapAdd::Exists);
+    }
+    Err(VmmError::Vmm(format!(
+        "ip tuntap add {name}: {}",
+        String::from_utf8_lossy(&out.stderr).trim()
+    )))
+}
+
+/// Whether a network interface named `name` exists in the current network namespace, via
+/// `ip link show` (exit 0 = present). Netlink-based, so it's correct inside a network namespace where
+/// `/sys/class/net` may reflect a different one, and it keys on the exit code, not a localized string.
+fn iface_exists(name: &str) -> bool {
+    Command::new("ip")
+        .args(["link", "show", "dev", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run `ip <args>`, mapping a missing binary or a nonzero exit to a typed error. Used for tap
+/// bring-up and delete; tap *creation* is [`tap_add`] (it must classify the retryable name-taken case).
+fn run_ip(args: &[&str]) -> Result<(), VmmError> {
+    let out = Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(|e| tool_spawn_error("ip", e))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(VmmError::Vmm(format!(
+            "ip {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )))
+    }
 }
 
 /// Dial Firecracker's vsock socket, speak the `CONNECT <port>` handshake, and complete the channel
@@ -1139,12 +1334,16 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
     }
 }
 
-/// Guaranteed, best-effort teardown shared by `abort` and `Drop`: kill the VMM, join the console
-/// reader (which ends once the killed child's stdout closes), and remove the scratch dir.
-fn teardown(child: &mut Child, console: &mut Console, workdir: &Path) {
+/// Guaranteed, best-effort teardown shared by both `Drop`s: kill the VMM, join the console reader
+/// (which ends once the killed child's stdout closes), delete the per-VM tap (it lives outside the
+/// scratch dir, so `remove_dir_all` can't reclaim it), and remove the scratch dir.
+fn teardown(child: &mut Child, console: &mut Console, workdir: &Path, tap: Option<&Tap>) {
     let _ = child.kill();
     let _ = child.wait();
     console.join();
+    if let Some(tap) = tap {
+        tap.delete();
+    }
     let _ = std::fs::remove_dir_all(workdir);
 }
 
@@ -1408,12 +1607,13 @@ fn run_host_tool(program: &str, args: &[&OsStr]) -> Result<(), VmmError> {
     Ok(())
 }
 
-/// Map a failure to spawn one of the driver's e2fsprogs/coreutils helpers to a typed error: a missing
-/// binary is a clear [`VmmError::Artifact`] (install hint), anything else a [`VmmError::Vmm`].
+/// Map a failure to spawn one of the driver's host helpers (`mke2fs`/`truncate`/`e2fsck`/`debugfs`
+/// for the block devices, `ip` for the tap) to a typed error: a missing binary is a clear
+/// [`VmmError::Artifact`] (install hint), anything else a [`VmmError::Vmm`].
 fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
     if e.kind() == std::io::ErrorKind::NotFound {
         VmmError::Artifact(format!(
-            "{program} not found (needed for the input/output block devices — install e2fsprogs/coreutils)"
+            "{program} not found (a host tool the driver shells out to — install e2fsprogs/coreutils/iproute2)"
         ))
     } else {
         VmmError::Vmm(format!("run {program}: {e}"))
@@ -1559,13 +1759,25 @@ fn dir_alloc_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Remove every symlink under `dest` whose target escapes `dest` (absolute, or `..` climbing out of
-/// it). `debugfs rdump` recreates a guest symlink verbatim as a **host** symlink, so an un-sanitised
-/// `link -> /etc/shadow` (or `../../../../etc/shadow`) would make a later host read of the results
-/// read host files — the inverse of the input side, where `mke2fs -d` resolves links inside the
-/// guest image. In-tree links (e.g. `a -> sub/b`) are kept. The walk never traverses a symlink (all
-/// checks are `lstat`-like), so it can't be redirected onto the host mid-scan.
+/// Remove every symlink under `dest` whose target escapes `dest`. `debugfs rdump` recreates a guest
+/// symlink verbatim as a **host** symlink, so an un-sanitised `link -> /etc/shadow` (or one that
+/// climbs out with `..`) would make a later host read of the results read host files — the inverse of
+/// the input side, where `mke2fs -d` resolves links inside the guest image. In-tree links (e.g.
+/// `a -> sub/b`) are kept.
+///
+/// Containment is checked by **canonical resolution**, not lexically: a lexical `..`-depth count is
+/// unsound because a kept in-tree symlink makes a `Normal` path component *not* descend a real level
+/// — a guest can chain `d -> .` with `evil -> d/../../etc/shadow` to pass a lexical check while
+/// resolving above `dest`. `Path::canonicalize` follows every intermediate link to the real target,
+/// which we require to sit under the canonical `dest`; a target that doesn't resolve (dangling, or
+/// pointing outside to a nonexistent path) can't be proven in-tree, so it's dropped. Safe from
+/// TOCTOU: the VMM is already reaped and `dest` is host-private, so nothing mutates the tree
+/// concurrently. The walk itself never traverses a symlink (`lstat`-like `file_type`), so it can't be
+/// redirected onto the host mid-scan.
 fn sanitize_symlinks(dest: &Path) -> Result<(), VmmError> {
+    let root = dest
+        .canonicalize()
+        .map_err(|e| VmmError::Vmm(format!("canonicalize output dir {}: {e}", dest.display())))?;
     let mut stack = vec![dest.to_path_buf()];
     while let Some(d) = stack.pop() {
         let entries = std::fs::read_dir(&d)
@@ -1577,9 +1789,14 @@ fn sanitize_symlinks(dest: &Path) -> Result<(), VmmError> {
                 .map_err(|e| VmmError::Vmm(format!("stat output entry: {e}")))?;
             let path = entry.path();
             if ft.is_symlink() {
-                let target = std::fs::read_link(&path)
-                    .map_err(|e| VmmError::Vmm(format!("read symlink {}: {e}", path.display())))?;
-                if !symlink_stays_within(&path, &target, dest) {
+                // Follow the link (and any intermediate links) to a real path; keep only if it
+                // stays within the canonical destination.
+                let contained = path
+                    .canonicalize()
+                    .map(|real| real.starts_with(&root))
+                    .unwrap_or(false);
+                if !contained {
+                    let target = std::fs::read_link(&path).unwrap_or_default();
                     std::fs::remove_file(&path).map_err(|e| {
                         VmmError::Vmm(format!("drop escaping symlink {}: {e}", path.display()))
                     })?;
@@ -1595,35 +1812,6 @@ fn sanitize_symlinks(dest: &Path) -> Result<(), VmmError> {
         }
     }
     Ok(())
-}
-
-/// Whether the symlink at `link` with `target` resolves within `root`, checked **lexically** (never
-/// touching the target on disk). An absolute target, or one whose `..` chain climbs above `root` at
-/// any point, escapes.
-fn symlink_stays_within(link: &Path, target: &Path, root: &Path) -> bool {
-    if target.is_absolute() {
-        return false;
-    }
-    let Ok(rel) = link.strip_prefix(root) else {
-        return false;
-    };
-    // Depth of the directory that holds the link, relative to `root` (the link's own name aside).
-    let mut depth = rel.components().count().saturating_sub(1) as i64;
-    for comp in target.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::Normal(_) => depth += 1,
-            Component::ParentDir => {
-                depth -= 1;
-                if depth < 0 {
-                    return false;
-                }
-            }
-            // A root or drive-prefix component inside a "relative" path — treat as an escape.
-            Component::RootDir | Component::Prefix(_) => return false,
-        }
-    }
-    true
 }
 
 /// The captured tree as relative-path strings (files and surviving symlinks, directories descended),
@@ -1686,41 +1874,39 @@ mod tests {
     }
 
     #[test]
-    fn symlink_containment_keeps_in_tree_and_rejects_escapes() {
-        let root = Path::new("/out");
-        // In-tree links are kept.
-        assert!(symlink_stays_within(
-            &root.join("a"),
-            Path::new("sub/b"),
-            root
-        ));
-        assert!(symlink_stays_within(
-            &root.join("sub/a"),
-            Path::new("../b"),
-            root
-        ));
-        assert!(symlink_stays_within(
-            &root.join("a"),
-            Path::new("./b"),
-            root
-        ));
-        // Absolute targets escape (the host-disclosure case: `link -> /etc/shadow`).
-        assert!(!symlink_stays_within(
-            &root.join("escape"),
-            Path::new("/etc/passwd"),
-            root
-        ));
-        // `..` chains that climb above the root escape, even when they'd re-descend.
-        assert!(!symlink_stays_within(
-            &root.join("climb"),
-            Path::new("../../../../etc/shadow"),
-            root
-        ));
-        assert!(!symlink_stays_within(
-            &root.join("sub/x"),
-            Path::new("../../outside"),
-            root
-        ));
+    fn sanitize_symlinks_drops_escapes_including_chained_intermediate_links() {
+        use std::os::unix::fs::symlink;
+        let dir = TestDir::new("agent-sanitize");
+        let dest = dir.path();
+
+        // A real file + a legitimate in-tree symlink to it: must survive.
+        std::fs::write(dest.join("real.txt"), b"hi").expect("write real file");
+        symlink("real.txt", dest.join("good")).expect("in-tree link");
+
+        // A direct absolute escape (`link -> /etc/passwd`): must be dropped.
+        symlink("/etc/passwd", dest.join("abs")).expect("absolute link");
+
+        // The chained bypass that defeats a *lexical* check: `d -> .` makes `d` a `Normal` component
+        // that doesn't descend a real level, so `evil -> d/../../…/etc/passwd` climbs above `dest` on
+        // disk while a lexical `..`-depth count never goes negative. Must be dropped.
+        symlink(".", dest.join("d")).expect("self link");
+        symlink("d/../../../../../../etc/passwd", dest.join("evil")).expect("chained link");
+
+        sanitize_symlinks(dest).expect("sanitize");
+
+        assert!(dest.join("real.txt").exists(), "real file untouched");
+        assert!(
+            dest.join("good").symlink_metadata().is_ok(),
+            "in-tree symlink should be kept"
+        );
+        assert!(
+            dest.join("abs").symlink_metadata().is_err(),
+            "absolute escape must be dropped"
+        );
+        assert!(
+            dest.join("evil").symlink_metadata().is_err(),
+            "chained intermediate-symlink escape must be dropped"
+        );
     }
 
     #[test]
@@ -1787,6 +1973,28 @@ mod tests {
         let default = BootConfig::default();
         assert_eq!(cfg.rootfs, default.rootfs, "unset keys keep the default");
         assert_eq!(cfg.firecracker, default.firecracker);
+    }
+
+    #[test]
+    fn tap_name_fits_ifnamsiz_and_is_prefixed() {
+        // The name must stay within IFNAMSIZ-1 (15 bytes) for any token, including the max, and be
+        // distinct per token so the create-and-retry loop actually advances.
+        for token in [0u64, 1, 42, 0xffff_ffff, u64::MAX] {
+            let name = tap_name(token);
+            assert!(name.starts_with("fc"), "{name}");
+            assert!(name.len() <= 15, "{name} is {} bytes", name.len());
+        }
+        assert_ne!(tap_name(0), tap_name(1));
+    }
+
+    #[test]
+    fn mac_for_is_locally_administered_unicast_and_unique() {
+        let mac = mac_for(0x0102_0304);
+        assert_eq!(mac, "02:00:01:02:03:04");
+        // First octet 0x02: locally-administered bit (0x02) set, multicast bit (0x01) clear.
+        assert_eq!(0x02 & 0x02, 0x02);
+        assert_eq!(0x02 & 0x01, 0x00);
+        assert_ne!(mac_for(0), mac_for(1), "distinct values → distinct MACs");
     }
 
     #[test]

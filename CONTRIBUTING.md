@@ -24,6 +24,8 @@ This is **Linux-only** (it needs KVM). You'll need:
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
   rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
   loopback, no `sudo`). A missing tool is a clear typed error.
+- **`iproute2`** (`ip`): the driver creates and deletes the per-VM **tap** device backing the guest's
+  virtio-net. A missing binary is a clear typed error; creating a tap itself needs `CAP_NET_ADMIN`.
 - **Elevated capabilities** for the parts that touch the kernel: creating **tap** devices
   (`CAP_NET_ADMIN`) and loading eBPF (`CAP_BPF`/`CAP_PERFMON`, or root). Day-to-day dev uses an
   `xtask`/`just` wrapper so it isn't `sudo cargo` roulette.

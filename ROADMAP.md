@@ -352,15 +352,23 @@ binary, so adding a runtime is a packaging step, not an engine change.
 
 Give the microVM a network with per-VM isolation — the classic tap/bridge lesson.
 
-- [ ] **P4.1** Create a **tap device** per VM on the host; attach it as virtio-net in the VMM config.
-      *(Pre-flight, from the Phases 1–3 review: (1) attaching the NIC is **additive** — a
-      `NetworkInterface` PUT mirrors the existing `Vsock` block and a `#[non_exhaustive] BootConfig`
-      field; (2) **thread the tap handle through `Spawned` and `RunningVm`** (like `vsock_uds`/`output`
-      via `into_running`) so teardown can reach it — see P4.5; (3) **add a host-scoped allocator** (tap
-      name + /30 or /31 subnet + derived locally-administered MAC + CID); the process-local `VM_SEQ` is
-      insufficient for host-global network identity, and this is the home for P4.6; (4) start
-      **deny-by-default** — no default masquerade, host-local route only (decision 008), so P4.3's
-      direction is settled before the tap lands.)*
+- [x] **P4.1** Create a **tap device** per VM on the host; attach it as virtio-net in the VMM config.
+      *(New `BootConfig.enable_network` (decision 009): the driver creates a per-VM host tap by shelling
+      out to `ip tuntap` (needs `CAP_NET_ADMIN`, like `/dev/kvm`), names it `fc<hex>` host-globally via
+      `ip tuntap add` failing on an already-taken name as the atomic reservation (the `create_workdir` pattern),
+      gives it a locally-administered unicast MAC (`02:00:xx:xx:xx:xx`) from a per-VM index, and attaches
+      it as `eth0` via a new `PUT /network-interfaces` (a sixth API body struct mirroring `Vsock`). The
+      `Tap` handle is threaded through `Spawned`/`RunningVm` (like `vsock_uds`/`output`) and deleted
+      (`ip link del`, best-effort) on **all three** teardown paths, since the tap lives outside the
+      scratch dir that `remove_dir_all` reclaims (closes the P4.5 leak requirement for the tap itself).
+      **Deny-by-default:** the guest gets an *unconfigured* `eth0` (no `ip=` boot arg, no host address,
+      no route, no masquerade), so it reaches nothing until addressing (P4.2). The allocator yields name
+      + MAC only; subnet + CID are deterministic functions of the same index, grown at P4.2/P4.4/P4.6.
+      Proof: `attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic` boots with a NIC and asserts the
+      guest's `eth0` carries the LAA MAC and has no default route; `repeated_boots_leave_no_leaks` now
+      also asserts no orphaned `fc*` interfaces. Both are `CAP_NET_ADMIN`-gated (skip without it; verified
+      under a user+net namespace). New host dep `ip` (iproute2; `setup` check). P4.3's direction was
+      settled up front by decision 008.)*
 - [ ] **P4.2** Address the guest (static or a tiny DHCP) and route host↔guest.
 - [ ] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
       `ARCHITECTURE.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)

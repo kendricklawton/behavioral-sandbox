@@ -194,6 +194,16 @@ pub(crate) struct Vsock<'a> {
     pub uds_path: &'a str,
 }
 
+/// `PUT /network-interfaces/{iface_id}` — a virtio-net device backed by a host tap. Firecracker does
+/// not create the tap; the host makes it first and names it here via `host_dev_name`. Rate limiters
+/// are optional and omitted (deny-by-default; no shaping in this engine).
+#[derive(Serialize)]
+pub(crate) struct NetworkInterface<'a> {
+    pub iface_id: &'a str,
+    pub host_dev_name: &'a str,
+    pub guest_mac: &'a str,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +339,18 @@ mod tests {
         .unwrap();
         assert_eq!(json["guest_cid"], 3);
         assert_eq!(json["uds_path"], "/tmp/agent-1-0/v.sock");
+    }
+
+    #[test]
+    fn network_interface_serializes_to_expected_fields() {
+        let json = serde_json::to_value(NetworkInterface {
+            iface_id: "eth0",
+            host_dev_name: "fc0",
+            guest_mac: "02:00:00:00:00:01",
+        })
+        .unwrap();
+        assert_eq!(json["iface_id"], "eth0");
+        assert_eq!(json["host_dev_name"], "fc0");
+        assert_eq!(json["guest_mac"], "02:00:00:00:00:01");
     }
 }

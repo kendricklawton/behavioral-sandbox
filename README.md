@@ -57,7 +57,7 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 | `crates/guest-agent` | The in-guest agent (`agent-guest`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, never the trust boundary. |
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
-| `crates/cli` | The `agent` binary (`run`, `shell`, `--trace`) and later the `agentd` daemon. |
+| `crates/cli` | The `agent` binary (`run`, `shell`, `--log`) and later the `agentd` daemon. |
 | `xtask` | Dev orchestration — `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 
 ## Scope — engine, not platform

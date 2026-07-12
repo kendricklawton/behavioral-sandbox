@@ -37,3 +37,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+# Guardrail #5 (no panic on the host path) is a stated guarantee, so make the compiler enforce it,
+# not just habit: the explicit-panic macros are denied tree-wide. Unlike `unwrap`/`expect`, clippy
+# has no "allow in tests" knob for these, so the two integration-test crates that use `panic!` as an
+# assertion helper opt out with a file-level `#![allow(clippy::panic)]`.
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"

@@ -3,7 +3,7 @@
 //! over vsock, but with no VM.
 // This is a test binary; the `run` helper isn't a `#[test]` fn, so the workspace's
 // no-unwrap/expect lints don't auto-exempt it. Panicking on setup failure is correct in a test.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;

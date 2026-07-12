@@ -2,8 +2,8 @@
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result / flight recorder, so
 //! `agent run … 2>/dev/null` stays pipe-clean. Log filter resolves flags > env (`AGENT_LOG`) >
-//! default. **Skeleton** — the subcommands are wired to the driver, whose behavior lands in
-//! ROADMAP Phase 1+ (until then they report a typed "not implemented yet" and exit `2`).
+//! default. `run` boots a microVM and execs a command end to end; `shell` is not implemented yet
+//! (it reports a typed "not implemented yet" and exits `2` until the interactive surface lands).
 #![forbid(unsafe_code)]
 
 use std::io::Write;

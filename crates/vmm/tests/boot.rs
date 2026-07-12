@@ -3,6 +3,9 @@
 //!
 //! `#[ignore]`d because it needs `/dev/kvm` and the fetched artifacts. Run it with
 //! `cargo xtask ci-privileged` (which guards on both) or `cargo test -p agent-vmm -- --ignored`.
+// A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
+// assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
+#![allow(clippy::panic)]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -502,11 +505,91 @@ fn overlay_is_writable_and_base_is_untouched() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
+    // P4.1: with `enable_network`, the driver creates a host tap and attaches it as virtio-net, so
+    // the guest gets an `eth0` carrying the driver's locally-administered MAC. Deny-by-default: this
+    // box adds no address, route, or masquerade, so the guest reaches nothing. Needs CAP_NET_ADMIN.
+    if !have_net_admin() {
+        eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
+        return;
+    }
+    let mut cfg = agent_rootfs_config();
+    cfg.enable_network = true;
+    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+
+    // The NIC is present with our LAA MAC (first octet 0x02 = locally administered + unicast); the
+    // guest kernel exposes it at `/sys/class/net/eth0/address` regardless of link state.
+    let mac = vm
+        .exec(&["cat".into(), "/sys/class/net/eth0/address".into()], b"")
+        .expect("read the guest NIC address");
+    assert_eq!(
+        mac.exit_code,
+        0,
+        "eth0 should exist; console:\n{}",
+        vm.console()
+    );
+    assert!(
+        String::from_utf8_lossy(&mac.stdout)
+            .trim()
+            .starts_with("02:"),
+        "guest eth0 should carry the driver's locally-administered MAC; got {:?}",
+        String::from_utf8_lossy(&mac.stdout)
+    );
+
+    // Deny-by-default: no addressing, so no route to anywhere — `ip route` lists no `default`.
+    let routes = vm
+        .exec(&["ip".into(), "route".into()], b"")
+        .expect("list guest routes");
+    assert!(
+        !String::from_utf8_lossy(&routes.stdout).contains("default"),
+        "deny-by-default: guest must have no default route; got {:?}",
+        String::from_utf8_lossy(&routes.stdout)
+    );
+
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+/// Whether this process holds `CAP_NET_ADMIN` (effective) — needed to create a tap. Creating a tap
+/// is privileged (unlike the rootless block-device builds), so the NIC tests skip without it rather
+/// than fail on a box that can do KVM but not net-admin. `CAP_NET_ADMIN` is bit 12 of `CapEff`.
+fn have_net_admin() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("CapEff:").map(|v| v.trim().to_string()))
+        })
+        .and_then(|hex| u64::from_str_radix(&hex, 16).ok())
+        .is_some_and(|caps| caps & (1 << 12) != 0)
+}
+
+/// Host tap interfaces currently present (`fc*`), for the leak assertion below.
+fn fc_interfaces() -> std::collections::BTreeSet<String> {
+    std::fs::read_dir("/sys/class/net")
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("fc"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + artifacts (run via `cargo xtask ci-privileged`)"]
 fn repeated_boots_leave_no_leaks() {
+    // When we have CAP_NET_ADMIN, enable networking so each cycle also creates a per-VM tap — which
+    // must be deleted on teardown, since the tap lives outside the scratch dir and is reclaimed
+    // separately from `remove_dir_all`. Without the capability, this still covers the scratch-dir path.
+    let net = have_net_admin();
+    let taps_before = fc_interfaces();
+
     // Two full cycles back to back; the second only works if the first was fully reclaimed.
     for i in 0..2 {
-        let vm = Vm::boot(config()).unwrap_or_else(|e| panic!("boot {i} failed: {e}"));
+        let mut cfg = config();
+        cfg.enable_network = net;
+        let vm = Vm::boot(cfg).unwrap_or_else(|e| panic!("boot {i} failed: {e}"));
         vm.shutdown()
             .unwrap_or_else(|e| panic!("shutdown {i} failed: {e}"));
     }
@@ -521,4 +604,10 @@ fn repeated_boots_leave_no_leaks() {
         })
         .unwrap_or(0);
     assert_eq!(leftovers, 0, "per-VM scratch dirs should be cleaned up");
+
+    // No tap interface survived the cycles either (only asserted when networking was enabled).
+    if net {
+        let leaked: Vec<_> = fc_interfaces().difference(&taps_before).cloned().collect();
+        assert!(leaked.is_empty(), "leaked tap interfaces: {leaked:?}");
+    }
 }
