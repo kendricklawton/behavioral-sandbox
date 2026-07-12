@@ -259,9 +259,20 @@ binary, so adding a runtime is a packaging step, not an engine change.
       unchanged after two boots; the exec/python tests now run overlay-backed. Density: the per-VM
       scratch dir no longer holds a rootfs copy. Second-block-device path stays for P3.4; byte-level
       reproducibility for P3.6.)*
-- [ ] **P3.4** Inject a per-run working dir / files via a second **block device** (the
+- [x] **P3.4** Inject a per-run working dir / files via a second **block device** (the
       channel path — small per-file injection — already landed in P2.5; this is the whole-working-dir
       / large-file mechanism).
+      *(New `BootConfig.input_dir` (decision 005): the driver builds a **read-only** ext4 from a host
+      dir (rootless `mke2fs -d`, in the per-VM scratch dir, sized from the tree + `-N` inodes) and
+      attaches it as `/dev/vdb` `is_read_only:true`; the agent rootfs mounts it RO at `/input` via a
+      best-effort `sysinit` line (baked `/input` mountpoint). Read-**only**, not a read-write working
+      dir: RW would front-run P3.5 and its dirty-ext4-on-hard-kill readback problem, and `O_RDONLY`
+      makes the input provably immutable. **No guest-agent change** — `/input` is a path the command
+      references; the per-exec `/tmp` `RunDir` is untouched. Proof: `injects_a_large_file_via_block_device`
+      injects a **4 MiB** file (4× the 1 MiB channel frame cap) and the guest reads it back from
+      `/input` with a matching byte count + sha256. New runtime dep (`mke2fs`/`truncate`, typed error
+      + `setup` check); boot-path build cost moves behind the warm pool at P5. Pulling large outputs
+      back is P3.5.)*
 - [ ] **P3.5** Pull artifacts back out at **working-dir / large-file** scale (the per-file channel
       path landed in P2.5; here it's the block-device / bulk mechanism).
 - [ ] **P3.6** Pin the rootfs build in `xtask` so it's one command + reproducible.

@@ -133,6 +133,62 @@ fn execs_python_in_the_microvm() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn injects_a_large_file_via_block_device() {
+    // P3.4: a whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
+    // **larger than the 1 MiB channel frame cap** (the whole point) in a host dir, inject it as a
+    // read-only block device, and prove the guest reads it back byte-for-byte from `/input`.
+    let dir = std::env::temp_dir().join(format!("agent-p34-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("input dir");
+    let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect(); // 4 MiB, > 1 MiB
+    std::fs::write(dir.join("big.bin"), &payload).expect("write input file");
+
+    let mut cfg = agent_rootfs_config();
+    cfg.input_dir = Some(dir.clone());
+    let vm = Vm::boot(cfg).expect("microVM with an input block device should boot");
+    let out = vm
+        .exec(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "wc -c < /input/big.bin && sha256sum /input/big.bin".into(),
+            ],
+            b"",
+        )
+        .expect("read the injected file from /input");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("4194304"),
+        "guest should see the 4 MiB file; got:\n{text}\nconsole:\n{}",
+        vm.console()
+    );
+    // Content integrity end to end: the sha256 the guest computed must match the host bytes.
+    let mut hasher_input = std::process::Command::new("sha256sum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn sha256sum");
+    use std::io::Write as _;
+    hasher_input
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(&payload)
+        .expect("feed payload");
+    let host_hash = hasher_input.wait_with_output().expect("host sha256");
+    let host_hex = String::from_utf8_lossy(&host_hash.stdout);
+    let host_hex = host_hex.split_whitespace().next().expect("host hash hex");
+    assert!(
+        text.contains(host_hex),
+        "guest sha256 must match host {host_hex}; guest output:\n{text}"
+    );
+    assert_eq!(out.exit_code, 0);
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn overlay_is_writable_and_base_is_untouched() {
     // P3.3 acceptance: the read-only base is shared (no copy), a per-run tmpfs overlay makes `/`
     // writable in-guest, and the base file on the host is never mutated.

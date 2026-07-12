@@ -156,6 +156,9 @@ fn rootfs_inittab() -> String {
 ::sysinit:/bin/mount -t devtmpfs dev /dev
 ::sysinit:/bin/mount -t proc proc /proc
 ::sysinit:/bin/mount -t sysfs sys /sys
+# Bulk input (P3.4): if the driver attached an input block device, mount it read-only at /input.
+# Best-effort — no /dev/vdb means a nonzero exit that sysinit ignores, so plain boots are unaffected.
+::sysinit:/bin/mount -o ro /dev/vdb /input
 ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r
@@ -284,6 +287,9 @@ fn build_rootfs() -> Result<()> {
     std::fs::write(&overlay_init, OVERLAY_INIT).context("write /sbin/overlay-init")?;
     set_mode_0755(&overlay_init)?;
     std::fs::create_dir_all(staging.join("overlay")).context("create /overlay mountpoint")?;
+    // The mountpoint for a bulk-input block device (P3.4). Baked, not `mkdir`'d at runtime, so it's
+    // an image property that works regardless of whether `/` is the writable overlay or a base.
+    std::fs::create_dir_all(staging.join("input")).context("create /input mountpoint")?;
 
     // Build the ext4 from the staging dir — rootless, via `mke2fs -d`.
     let out = dir.join("rootfs-agent.ext4");
@@ -460,7 +466,7 @@ fn setup() -> Result<()> {
     check("firecracker in PATH", in_path("firecracker"));
     check("jailer in PATH", in_path("jailer"));
     check("bpf-linker installed", in_path("bpf-linker"));
-    check("mke2fs (rootfs build)", in_path("mke2fs"));
+    check("mke2fs (rootfs + input block device)", in_path("mke2fs"));
     let dir = artifacts_dir();
     check(
         "guest kernel + rootfs (cargo xtask fetch-artifacts)",

@@ -11,6 +11,7 @@
 //! when unjailed, so "read the child's stdout" is "read the guest console" — a coupling the
 //! jailer (Phase 6) will break, hence the console capture sits behind [`Console`].
 
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -127,6 +128,12 @@ pub struct BootConfig {
     /// default) keeps the copy-then-boot-read-write path. One concept, not two knobs: a read-only
     /// base *implies* the overlay (without it a read-only `/` would break the agent's `/tmp` workdir).
     pub read_only_root: bool,
+    /// A host directory to inject as **bulk read-only input** (P3.4): the driver builds an ext4 from
+    /// it and attaches it as a second block device (`/dev/vdb`, `O_RDONLY`); the agent rootfs mounts
+    /// it at `/input`, so a command reads it as `/input/...`. This is the whole-working-dir /
+    /// large-file path — the vsock channel's [`Request::PutFile`] carries only small per-frame files.
+    /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
+    pub input_dir: Option<PathBuf>,
 }
 
 impl BootConfig {
@@ -186,6 +193,7 @@ impl Default for BootConfig {
             boot_timeout: limits.wall,
             guest_cid: None,
             read_only_root: false,
+            input_dir: None,
         }
     }
 }
@@ -364,6 +372,9 @@ struct Spawned {
     api: ApiClient,
     /// The vsock socket path (in `workdir`) when the boot config enables vsock, else `None`.
     vsock_uds: Option<PathBuf>,
+    /// The built bulk-input image (in `workdir`) when `input_dir` was set, attached read-only as a
+    /// second block device; `None` otherwise. Reclaimed with `workdir` on teardown.
+    input_image: Option<PathBuf>,
 }
 
 impl Drop for Spawned {
@@ -405,6 +416,19 @@ impl Spawned {
                 return Err(VmmError::Vmm(format!("chmod rootfs copy: {e}")));
             }
             copy
+        };
+
+        // Bulk read-only input (P3.4): build an ext4 from the host `input_dir` and attach it as a
+        // second block device (`/dev/vdb`). Lives in the scratch dir, so teardown reclaims it too.
+        let input_image = match &config.input_dir {
+            None => None,
+            Some(dir) => match build_input_image(dir, &workdir) {
+                Ok(img) => Some(img),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            },
         };
 
         // Firecracker's own logs go to a *file* in the scratch dir: not our stderr (that's the
@@ -460,6 +484,7 @@ impl Spawned {
             rootfs,
             api: ApiClient::new(socket),
             vsock_uds,
+            input_image,
         })
     }
 
@@ -531,6 +556,22 @@ impl Spawned {
                 is_read_only: config.read_only_root,
             },
         )?;
+        // Bulk read-only input (P3.4): attach the built image as `/dev/vdb`. `is_read_only` is what
+        // makes the input provably immutable (Firecracker opens it `O_RDONLY`) and sidesteps the
+        // read-back-a-dirty-ext4 hazard that a writable device would carry into P3.5.
+        if let Some(image) = self.input_image.as_ref() {
+            let input = path_str(image)?;
+            still_before(deadline, "PUT /drives/input")?;
+            self.api.put(
+                "/drives/input",
+                &Drive {
+                    drive_id: "input",
+                    path_on_host: input,
+                    is_root_device: false,
+                    is_read_only: true,
+                },
+            )?;
+        }
         still_before(deadline, "PUT /machine-config")?;
         self.api.put(
             "/machine-config",
@@ -1020,6 +1061,115 @@ fn require_file(path: &Path, what: &str) -> Result<(), VmmError> {
             path.display()
         )))
     }
+}
+
+/// Build a read-only ext4 from `src_dir` for the bulk-input block device (P3.4), populated
+/// **rootless** via `mke2fs -d` (no loopback, no `sudo`). Sized from the tree's byte total with
+/// slack and given enough inodes for its file count; the image lands in `workdir` (the per-VM
+/// scratch dir) so teardown reclaims it. Returns the image path.
+fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBuf, VmmError> {
+    require_dir(src_dir, "input directory")?;
+    let (bytes, files) = measure_tree(src_dir)?;
+    // ext4 has a small floor and `mke2fs` needs metadata headroom; over-sizing only wastes scratch
+    // (reclaimed on teardown) while under-sizing fails the build, so size up generously. `-N` gives
+    // enough inodes that many tiny files exhaust bytes before inodes.
+    let size_mib = (bytes / (1024 * 1024) * 3 / 2).max(8) + 8;
+    let inodes = files + 256;
+
+    let image = workdir.join("input.ext4");
+    run_host_tool(
+        "truncate",
+        &[
+            OsStr::new("-s"),
+            OsStr::new(&format!("{size_mib}M")),
+            image.as_os_str(),
+        ],
+    )?;
+    run_host_tool(
+        "mke2fs",
+        &[
+            OsStr::new("-F"),
+            OsStr::new("-q"),
+            OsStr::new("-t"),
+            OsStr::new("ext4"),
+            OsStr::new("-m"),
+            OsStr::new("0"),
+            OsStr::new("-N"),
+            OsStr::new(&inodes.to_string()),
+            OsStr::new("-d"),
+            src_dir.as_os_str(),
+            image.as_os_str(),
+        ],
+    )?;
+    Ok(image)
+}
+
+/// One walk of `dir` for `(total_bytes, file_count)`, to size the input image. Bounded: an input
+/// past a sane ceiling is a typed error, not a giant image. Symlinks are counted (each is an inode)
+/// but not descended — `mke2fs -d` copies them verbatim, so a link resolves inside the *guest* fs,
+/// never the host's, and there's no symlink-loop or host-escape via traversal.
+fn measure_tree(dir: &Path) -> Result<(u64, u64), VmmError> {
+    const MAX_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB bulk-input ceiling
+    let mut bytes = 0u64;
+    let mut files = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d)
+            .map_err(|e| VmmError::Artifact(format!("read input dir {}: {e}", d.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| VmmError::Artifact(format!("read input entry: {e}")))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| VmmError::Artifact(format!("stat input entry: {e}")))?;
+            if ft.is_dir() {
+                stack.push(entry.path());
+            } else {
+                files += 1;
+                if let Ok(meta) = entry.metadata() {
+                    bytes = bytes.saturating_add(meta.len());
+                }
+            }
+        }
+        if bytes > MAX_INPUT_BYTES {
+            return Err(VmmError::Artifact(format!(
+                "input directory exceeds the {MAX_INPUT_BYTES}-byte bulk-input ceiling"
+            )));
+        }
+    }
+    Ok((bytes, files))
+}
+
+/// Like [`require_file`] but for a directory.
+fn require_dir(path: &Path, what: &str) -> Result<(), VmmError> {
+    if path.is_dir() {
+        Ok(())
+    } else {
+        Err(VmmError::Artifact(format!(
+            "{what} not found or not a directory: {}",
+            path.display()
+        )))
+    }
+}
+
+/// Run a host build tool (`truncate`/`mke2fs`) for the input image. A missing tool is a typed
+/// [`VmmError::Artifact`] — the driver's only other external process is `firecracker`, so this is a
+/// real new runtime dependency, surfaced clearly rather than as a cryptic spawn failure.
+fn run_host_tool(program: &str, args: &[&OsStr]) -> Result<(), VmmError> {
+    let status = Command::new(program).args(args).status().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            VmmError::Artifact(format!(
+                "{program} not found (needed to build the input block device — install e2fsprogs/coreutils)"
+            ))
+        } else {
+            VmmError::Vmm(format!("run {program}: {e}"))
+        }
+    })?;
+    if !status.success() {
+        return Err(VmmError::Vmm(format!(
+            "{program} failed building the input image"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
