@@ -175,6 +175,26 @@ const ALPINE_BRANCH: &str = "v3.24";
 /// reproducibility work.
 const GUEST_PACKAGES: &[&str] = &["python3"];
 
+/// The overlay init (`/sbin/overlay-init`), run as PID 1 when the driver boots this image
+/// **read-only** (`BootConfig::read_only_root`). It stacks a per-run tmpfs over the read-only base
+/// so `/` is writable but the base is never mutated, then `pivot_root`s in and `exec`s the real
+/// init. `pivot_root` (not `switch_root`): the base stays mounted as the overlay lowerdir, shadowed
+/// at `/rom` — `switch_root` would try to free a root that's still in use. PATH is set explicitly
+/// because the kernel gives PID 1 no PATH; `$overlay_size` arrives from the kernel command line (the
+/// driver appends `overlay_size=<N>M`, which the kernel routes into PID 1's environment).
+const OVERLAY_INIT: &str = "\
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+size=\"${overlay_size:-64m}\"
+mount -t tmpfs -o \"size=$size\" tmpfs /overlay
+mkdir -p /overlay/up /overlay/work /overlay/root
+mount -t overlay overlay -o lowerdir=/,upperdir=/overlay/up,workdir=/overlay/work /overlay/root
+mkdir -p /overlay/root/rom
+cd /overlay/root
+pivot_root . rom
+exec chroot . /sbin/init
+";
+
 /// The pinned Alpine minirootfs — a real musl+busybox userland (so init and a shell just work, and
 /// `apk` adds the [`GUEST_PACKAGES`] runtimes). A *build input*, deliberately separate from
 /// [`artifacts`] (the boot kernel+rootfs the `ci-privileged` hash-guard requires present).
@@ -255,6 +275,15 @@ fn build_rootfs() -> Result<()> {
 
     // Replace Alpine's OpenRC inittab with our minimal vsock init.
     std::fs::write(staging.join("etc/inittab"), rootfs_inittab()).context("write /etc/inittab")?;
+
+    // Bake the overlay init + its mountpoint: when the driver boots this image read-only, the
+    // kernel runs `/sbin/overlay-init` (PID 1), which stacks a per-run tmpfs over the RO base so `/`
+    // is writable, then hands off to the real init. `/overlay` must exist in the image because the
+    // root is read-only at that point — you can't `mkdir` a mountpoint on a read-only `/`.
+    let overlay_init = staging.join("sbin/overlay-init");
+    std::fs::write(&overlay_init, OVERLAY_INIT).context("write /sbin/overlay-init")?;
+    set_mode_0755(&overlay_init)?;
+    std::fs::create_dir_all(staging.join("overlay")).context("create /overlay mountpoint")?;
 
     // Build the ext4 from the staging dir — rootless, via `mke2fs -d`.
     let out = dir.join("rootfs-agent.ext4");

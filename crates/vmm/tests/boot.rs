@@ -80,6 +80,10 @@ fn agent_rootfs_config() -> BootConfig {
     cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
     cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+    // Read-only shared base + a per-run tmpfs overlay (P3.3): `/` is writable in-guest but the base
+    // file is never mutated. This is what makes the agent's `/tmp` working dir usable, so the exec
+    // tests below exercise the overlay end to end.
+    cfg.read_only_root = true;
     cfg.boot_timeout = Duration::from_secs(30);
     cfg
 }
@@ -125,6 +129,51 @@ fn execs_python_in_the_microvm() {
     );
     assert_eq!(out.exit_code, 0, "python should exit 0");
     vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn overlay_is_writable_and_base_is_untouched() {
+    // P3.3 acceptance: the read-only base is shared (no copy), a per-run tmpfs overlay makes `/`
+    // writable in-guest, and the base file on the host is never mutated.
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
+    let before = std::fs::metadata(&base).expect("stat base");
+    let (before_len, before_mtime) = (before.len(), before.modified().expect("base mtime"));
+
+    // Boot twice: writing to `/etc` (a path that lives on the read-only base) succeeds only because
+    // the overlay redirects the write to the tmpfs upper. A fresh tmpfs per boot, so each is clean.
+    for i in 0..2 {
+        let vm = Vm::boot(agent_rootfs_config())
+            .unwrap_or_else(|e| panic!("overlay microVM boot {i} failed: {e}"));
+        let out = vm
+            .exec(
+                &[
+                    "sh".into(),
+                    "-c".into(),
+                    "echo overlaid > /etc/p3_3 && cat /etc/p3_3".into(),
+                ],
+                b"",
+            )
+            .expect("write+read a normally-read-only path via the overlay");
+        assert_eq!(
+            out.stdout,
+            b"overlaid\n",
+            "overlay `/etc` should be writable; console:\n{}",
+            vm.console()
+        );
+        assert_eq!(out.exit_code, 0);
+        vm.shutdown().expect("shutdown should succeed");
+    }
+
+    // The read-only block device makes this a guarantee, not a hope: the guest opened the base
+    // `O_RDONLY`, so it cannot have changed size or been rewritten.
+    let after = std::fs::metadata(&base).expect("stat base again");
+    assert_eq!(after.len(), before_len, "base image size must not change");
+    assert_eq!(
+        after.modified().expect("base mtime after"),
+        before_mtime,
+        "base image must not be rewritten"
+    );
 }
 
 #[test]

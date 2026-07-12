@@ -102,7 +102,8 @@ pub struct BootConfig {
     pub firecracker: PathBuf,
     /// Uncompressed guest kernel image (an ELF/PVH `vmlinux`, not a `bzImage`).
     pub kernel: PathBuf,
-    /// The read-only base rootfs; each boot runs against a fresh copy (see [`Vm::boot`]).
+    /// The base rootfs. A read-write boot runs against a fresh per-VM copy; a
+    /// [`read_only_root`](BootConfig::read_only_root) boot shares it directly (see [`Vm::boot`]).
     pub rootfs: PathBuf,
     /// Guest vCPUs.
     pub vcpus: u32,
@@ -118,6 +119,14 @@ pub struct BootConfig {
     /// ([`RunningVm::connect_agent`]). `None` (the default) boots with no vsock — the Phase 1
     /// demo path. Set to `Some(`[`DEFAULT_GUEST_CID`]`)` to enable exec.
     pub guest_cid: Option<u32>,
+    /// Boot the base rootfs **read-only and shared** (no per-VM copy) under a per-run **tmpfs
+    /// overlay**, so `/` is writable but the base is never mutated and many VMs share one
+    /// page-cache-deduped base. Requires a rootfs whose `/sbin/overlay-init` builds the overlay
+    /// (the agent image from `cargo xtask build-rootfs`); the driver appends
+    /// `init=/sbin/overlay-init overlay_size=<mem/2>M` to the kernel command line. `false` (the
+    /// default) keeps the copy-then-boot-read-write path. One concept, not two knobs: a read-only
+    /// base *implies* the overlay (without it a read-only `/` would break the agent's `/tmp` workdir).
+    pub read_only_root: bool,
 }
 
 impl BootConfig {
@@ -176,6 +185,7 @@ impl Default for BootConfig {
             userspace_marker: DEFAULT_USERSPACE_MARKER.to_string(),
             boot_timeout: limits.wall,
             guest_cid: None,
+            read_only_root: false,
         }
     }
 }
@@ -201,8 +211,11 @@ pub struct Vm;
 impl Vm {
     /// Boot a microVM under `config` and return once the guest reaches userspace.
     ///
-    /// Copies the base rootfs into a fresh per-VM scratch dir and boots the copy read-write, so
-    /// repeated runs stay independent and the pinned base image is never mutated.
+    /// By default copies the base rootfs into a fresh per-VM scratch dir and boots the copy
+    /// read-write, so repeated runs stay independent and the pinned base is never mutated. With
+    /// [`read_only_root`](BootConfig::read_only_root) it instead shares the base read-only (no copy)
+    /// and the guest layers a per-run tmpfs overlay over it — same "base never mutated" guarantee,
+    /// far less per-VM cost.
     ///
     /// # Errors
     /// [`VmmError::NoKvm`] without `/dev/kvm`, [`VmmError::Artifact`] for a missing kernel/rootfs
@@ -369,18 +382,30 @@ impl Spawned {
 
         let workdir = create_workdir()?;
 
-        // Boot a *copy* rw, never the pinned base image — runs stay independent, base stays pinned.
-        let rootfs = workdir.join("rootfs.ext4");
-        std::fs::copy(&config.rootfs, &rootfs).map_err(|e| {
-            let _ = std::fs::remove_dir_all(&workdir);
-            VmmError::Vmm(format!("copy rootfs to {}: {e}", rootfs.display()))
-        })?;
-        // `fs::copy` propagates the source's mode; a read-only pinned base (0444) would make the
-        // read-write root drive unopenable. The copy is ours alone — force owner read-write.
-        if let Err(e) = std::fs::set_permissions(&rootfs, std::fs::Permissions::from_mode(0o600)) {
-            let _ = std::fs::remove_dir_all(&workdir);
-            return Err(VmmError::Vmm(format!("chmod rootfs copy: {e}")));
-        }
+        // Read-only boot shares the pinned base directly (no per-VM copy): Firecracker opens it
+        // `O_RDONLY` so the guest can't mutate it, and the writable layer comes from the guest's
+        // tmpfs overlay (see `BootConfig::read_only_root`). Read-write boot copies the base instead,
+        // so the guest's writes stay per-VM and the base stays pinned.
+        let rootfs = if config.read_only_root {
+            config.rootfs.clone()
+        } else {
+            let copy = workdir.join("rootfs.ext4");
+            if let Err(e) = std::fs::copy(&config.rootfs, &copy) {
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(VmmError::Vmm(format!(
+                    "copy rootfs to {}: {e}",
+                    copy.display()
+                )));
+            }
+            // `fs::copy` propagates the source's mode; a read-only pinned base (0444) would make the
+            // read-write root drive unopenable. The copy is ours alone — force owner read-write.
+            if let Err(e) = std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600))
+            {
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(VmmError::Vmm(format!("chmod rootfs copy: {e}")));
+            }
+            copy
+        };
 
         // Firecracker's own logs go to a *file* in the scratch dir: not our stderr (that's the
         // host's tracing), and not a pipe — an unread pipe back-pressures a chatty VMM, and a
@@ -474,12 +499,26 @@ impl Spawned {
 
         let kernel = path_str(&config.kernel)?;
         let rootfs = path_str(&self.rootfs)?;
+        // A read-only root hands off to the overlay init, which stacks a size-capped tmpfs over the
+        // RO base so `/` is writable per-run. The cap is half of guest RAM — the guest has no swap,
+        // so a tmpfs sized near RAM would OOM the guest rather than bound a runaway write. It rides
+        // the kernel command line as a `key=value` token, which the kernel routes into PID 1's
+        // environment (so `overlay-init` reads `$overlay_size` without mounting `/proc` first).
+        let boot_args = if config.read_only_root {
+            format!(
+                "{} init=/sbin/overlay-init overlay_size={}M",
+                config.boot_args,
+                config.mem_mib / 2
+            )
+        } else {
+            config.boot_args.clone()
+        };
         still_before(deadline, "PUT /boot-source")?;
         self.api.put(
             "/boot-source",
             &BootSource {
                 kernel_image_path: kernel,
-                boot_args: &config.boot_args,
+                boot_args: &boot_args,
             },
         )?;
         still_before(deadline, "PUT /drives/rootfs")?;
@@ -489,7 +528,7 @@ impl Spawned {
                 drive_id: "rootfs",
                 path_on_host: rootfs,
                 is_root_device: true,
-                is_read_only: false,
+                is_read_only: config.read_only_root,
             },
         )?;
         still_before(deadline, "PUT /machine-config")?;

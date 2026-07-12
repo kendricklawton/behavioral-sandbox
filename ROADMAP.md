@@ -245,7 +245,20 @@ binary, so adding a runtime is a packaging step, not an engine change.
       exact-version lockfile is **P3.6**. Image: 33 packages, ~50 MB in the 128 MiB ext4. Proof:
       `execs_python_in_the_microvm` boots the image and `exec("python3 -c 'print(2+2)'") → 4`,
       exit 0, in a real microVM.)*
-- [ ] **P3.3** Read-only base rootfs + a writable overlay per run (so runs don't mutate the base).
+- [x] **P3.3** Read-only base rootfs + a writable overlay per run (so runs don't mutate the base).
+      *(New `BootConfig.read_only_root` (decision 004): attaches the base **read-only and shared**
+      (no per-VM copy — Firecracker opens it `O_RDONLY`), and the guest stacks a **per-run tmpfs
+      overlay** so `/` is writable but ephemeral. `build-rootfs` bakes `/sbin/overlay-init` (mounts a
+      tmpfs, builds overlayfs lower=RO-base/upper=tmpfs, `pivot_root`s, `exec`s the real init) + the
+      baked `/overlay` mountpoint (can't `mkdir` on a read-only `/`). Cap = `mem_mib/2` via an
+      `overlay_size=` cmdline token the kernel routes into PID 1's env (guests have no swap → a
+      near-RAM tmpfs OOMs). Read-only-base **implies** overlay (one flag: a bare read-only `/` would
+      break the agent's `/tmp` workdir). **Additive** — set in code (`agent_rootfs_config`), not an
+      env var; the stock Ubuntu tests still boot copy+read-write. Proof: `overlay_is_writable_and_base_is_untouched`
+      writes to `/etc` in-guest (works via the overlay) and asserts the base file's size+mtime are
+      unchanged after two boots; the exec/python tests now run overlay-backed. Density: the per-VM
+      scratch dir no longer holds a rootfs copy. Second-block-device path stays for P3.4; byte-level
+      reproducibility for P3.6.)*
 - [ ] **P3.4** Inject a per-run working dir / files via a second **block device** (the
       channel path — small per-file injection — already landed in P2.5; this is the whole-working-dir
       / large-file mechanism).
