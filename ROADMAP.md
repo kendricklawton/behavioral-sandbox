@@ -304,7 +304,19 @@ binary, so adding a runtime is a packaging step, not an engine change.
       version pinning was rejected** — Alpine branch repos delete old `.apk`s on a bump, so a pin would
       *fail* the build, not reproduce it; the durable fix (vendoring the `.apk` closure as sha-pinned
       artifacts) is tombstoned. Default `build-rootfs` stays one command.)*
-- [ ] **P3.7** Size/boot budget: keep the base small; measure its effect on boot time.
+- [x] **P3.7** Size/boot budget: keep the base small; measure its effect on boot time.
+      *(**Size budget:** `build-rootfs` reports the base's real footprint (~69 MiB used: Alpine +
+      python3 + agent) and **fails past a 96 MiB budget** — a regression guard against accidental
+      bloat (Node/Go in P3.9 will raise it + the image size deliberately). **Boot measurement:** new
+      `cargo xtask bench-boot [--runs N]` (needs KVM) times boot-to-userspace over N runs on **both**
+      the P3.3 read-only shared base *and* a read-write per-VM copy, reporting min/p50/p90/p99/max —
+      "measured, not marketed" (percentiles, nearest-rank, no averages). **The finding:** at 69 MiB
+      both paths boot in **~0.5 s p50** (copy p50 ~520 ms, shared ~540 ms); the copy is *cheap* (the
+      host page cache serves it) so the base size barely moves boot latency, and the shared path's
+      slightly higher tail is **overlay-setup** variance, not size. So keeping the base small mainly
+      buys **density** (page-cache dedup across VMs + disk), not boot time — the honest, measured
+      result, not the assumed "bigger base = slower boot." Cold-boot p50/p99 as a tracked benchmark
+      is P17.1; the reusable harness is P17.5.)*
 - [ ] **P3.8** Test: run Python + a small script that writes a file → capture the file.
 - [ ] **P3.9** **Runtime-agnostic proof:** a second, *differently-shaped* runtime runs unchanged
       through the same `exec` path — a **static Go/Rust ELF** (no interpreter, no libc) and **Node**

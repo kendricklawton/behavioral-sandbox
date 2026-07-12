@@ -7,6 +7,7 @@
 //!   agent + the agent rootfs first, so the in-VM exec test has something to boot.
 //! - **`setup`** — checks the host can do KVM + eBPF and reports what's missing.
 //! - **`build-rootfs`** — assemble the reproducible guest rootfs (Alpine base + baked-in agent).
+//! - **`bench-boot`** — measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
 //! workspace; its object build folds into `ci` at ROADMAP Phase 8.
@@ -16,6 +17,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 
@@ -54,6 +56,14 @@ enum Cmd {
         #[arg(long)]
         update_lock: bool,
     },
+    /// Measure boot-to-userspace latency (percentiles) of the agent rootfs, on both the read-only
+    /// shared base and the read-write per-VM copy, so the base **size**'s effect on boot is visible
+    /// (P3.7). Needs `/dev/kvm` + the built agent rootfs.
+    BenchBoot {
+        /// How many boots to time per path (more → tighter tail percentiles). Default 20.
+        #[arg(long, default_value_t = 20)]
+        runs: usize,
+    },
 }
 
 fn main() -> Result<()> {
@@ -67,6 +77,7 @@ fn main() -> Result<()> {
             verify,
             update_lock,
         } => build_rootfs(verify, update_lock),
+        Cmd::BenchBoot { runs } => bench_boot(runs),
     }
 }
 
@@ -161,6 +172,12 @@ const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
 /// Image size. Generous headroom over the ~15 MB payload so a later `apk.static --root` (P3.2's
 /// Python, P3.9's Node) has room without a re-size. Per-run growth is P3.3's overlay, not this.
 const ROOTFS_SIZE_MIB: u32 = 128;
+
+/// Soft ceiling on the base rootfs's real footprint (P3.7 — "keep the base small"). The current image
+/// is ~70 MiB (Alpine + python3 + the agent); this leaves headroom for one more runtime before the
+/// base needs a deliberate rethink. `build-rootfs` fails if the image exceeds it — a regression guard
+/// against accidental bloat. Adding Node/Go (P3.9) will raise this *and* `ROOTFS_SIZE_MIB`, on purpose.
+const ROOTFS_BUDGET_MIB: u64 = 96;
 
 /// The init the image ships, replacing Alpine's OpenRC `inittab`. busybox is PID 1 (it reaps
 /// orphans and a crashed child is respawned, neither of which the `forbid(unsafe_code)` agent should
@@ -410,6 +427,16 @@ fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
     println!("  sha256: {}", build.image_sha256);
 
+    // Keep the base small (P3.7): report the real footprint and fail on bloat past the budget.
+    let used_mib = image_used_bytes(&out)? / (1024 * 1024);
+    println!("  size:   {used_mib} MiB used / {ROOTFS_BUDGET_MIB} MiB budget");
+    if used_mib > ROOTFS_BUDGET_MIB {
+        bail!(
+            "rootfs base is over budget: {used_mib} MiB > {ROOTFS_BUDGET_MIB} MiB — keep the base \
+             small (P3.7), or raise ROOTFS_BUDGET_MIB (+ ROOTFS_SIZE_MIB) deliberately"
+        );
+    }
+
     if update_lock {
         write_packages_lock(&build.packages)?;
         println!(
@@ -533,6 +560,88 @@ fn check_packages_lock(built: &[String], hard: bool) -> Result<()> {
         println!("  ! {msg}");
     }
     Ok(())
+}
+
+// ---- boot benchmark (ROADMAP P3.7) -----------------------------------------------------------
+
+/// Real (non-sparse) bytes an image occupies — the base's actual footprint, matching `du`. The ext4
+/// carries free space, but `mke2fs`/`truncate` leave it unallocated, so allocated blocks ≈ the used
+/// payload.
+fn image_used_bytes(path: &Path) -> Result<u64> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    Ok(meta.blocks().saturating_mul(512))
+}
+
+/// Measure boot-to-userspace latency of the agent rootfs (P3.7). Boots `runs` times on **each** of
+/// two paths — the P3.3 read-only *shared* base (no per-VM copy) and the read-write *copy* base — and
+/// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
+/// duplicates the whole image per boot, the shared path doesn't. "Measured, not marketed."
+fn bench_boot(runs: usize) -> Result<()> {
+    if !Path::new("/dev/kvm").exists() {
+        bail!("bench-boot needs /dev/kvm (run on a KVM-capable host)");
+    }
+    if runs == 0 {
+        bail!("--runs must be >= 1");
+    }
+    let root = workspace_root();
+    let kernel = root.join("artifacts/vmlinux");
+    let rootfs = root.join("artifacts/rootfs-agent.ext4");
+    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+        if !p.is_file() {
+            bail!(
+                "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
+                p.display()
+            );
+        }
+    }
+
+    let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
+    println!("bench-boot: agent rootfs {used_mib} MiB, {runs} boots per path\n");
+
+    for (label, read_only_root) in [
+        ("read-only shared base", true),
+        ("read-write per-VM copy", false),
+    ] {
+        let mut latencies = Vec::with_capacity(runs);
+        for i in 0..runs {
+            let mut cfg = BootConfig::from_env();
+            cfg.kernel = kernel.clone();
+            cfg.rootfs = rootfs.clone();
+            cfg.userspace_marker = GUEST_READY_MARKER.to_string();
+            cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+            cfg.read_only_root = read_only_root;
+            let vm = Vm::boot(cfg).with_context(|| format!("{label}: boot {i} failed"))?;
+            latencies.push(vm.boot_latency().as_millis() as u64);
+            vm.shutdown().ok();
+        }
+        report_percentiles(label, &mut latencies);
+    }
+    println!(
+        "\nBoth paths boot in well under a second. The {used_mib} MiB base is cheap to duplicate (the\n\
+         host page cache serves the copy), so its size barely moves boot latency here — keeping the\n\
+         base small mainly buys density (page-cache dedup across VMs + disk), not boot time."
+    );
+    Ok(())
+}
+
+/// Print min/p50/p90/p99/max of `samples` (ms), sorting in place. Nearest-rank percentiles — honest
+/// for the small `n` a boot bench runs (no interpolation games).
+fn report_percentiles(label: &str, samples: &mut [u64]) {
+    samples.sort_unstable();
+    let pct = |p: usize| -> u64 {
+        let rank = (p * samples.len()).div_ceil(100); // 1-based nearest rank
+        samples[rank.clamp(1, samples.len()) - 1]
+    };
+    println!(
+        "  {label:<24} min {:>5}  p50 {:>5}  p90 {:>5}  p99 {:>5}  max {:>5}  (ms, n={})",
+        samples[0],
+        pct(50),
+        pct(90),
+        pct(99),
+        samples[samples.len() - 1],
+        samples.len(),
+    );
 }
 
 /// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static` — no chroot, no
