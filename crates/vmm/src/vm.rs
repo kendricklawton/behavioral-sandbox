@@ -426,7 +426,13 @@ impl RunningVm {
                     break;
                 }
                 Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => break,
+                // `try_wait` itself failed (near-impossible): still force the kill/wait so the fd to
+                // the output image is released before readback, rather than trusting a later `Drop`.
+                Err(_) => {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    break;
+                }
             }
         }
         self.console.join();
@@ -1394,7 +1400,17 @@ fn fsck_output_image(image: &Path) -> Result<(), VmmError> {
         .status()
         .map_err(|e| tool_spawn_error("e2fsck", e))?;
     match status.code() {
-        Some(code) if code < 4 => Ok(()),
+        Some(0) => Ok(()),
+        // Errors were found and corrected (1) or corrected + reboot-advised (2): the tree is now
+        // consistent, but a hard-killed guest's in-flight writes may have been rolled back with the
+        // journal. Record it so a recovered output shows up in the flight recorder, not as pristine.
+        Some(code) if code < 4 => {
+            tracing::warn!(
+                exit = code,
+                "e2fsck corrected the output image before readback; captured artifacts may be missing the guest's last writes"
+            );
+            Ok(())
+        }
         Some(code) => Err(VmmError::Vmm(format!(
             "e2fsck could not repair the output image (exit {code})"
         ))),

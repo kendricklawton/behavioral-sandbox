@@ -63,8 +63,9 @@ enum Cmd {
     /// shared base and the read-write per-VM copy, so the base **size**'s effect on boot is visible
     /// (P3.7). Needs `/dev/kvm` + the built agent rootfs.
     BenchBoot {
-        /// How many boots to time per path (more → tighter tail percentiles). Default 20.
-        #[arg(long, default_value_t = 20)]
+        /// How many boots to time per path (more → tighter tail percentiles). Default 100 — the
+        /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
+        #[arg(long, default_value_t = 100)]
         runs: usize,
     },
 }
@@ -155,31 +156,42 @@ fn build_guest_example() -> Result<PathBuf> {
 
 /// Verify the built binary is actually statically linked — "measured, not marketed." A sys-crate or
 /// `build.rs` can silently reintroduce a `NEEDED` dynamic dependency, and a dynamically-linked
-/// binary baked into a scratch rootfs would fail at boot with a confusing loader error. Checks for a
-/// dynamic-library dependency via `readelf -d`; on a static binary there are no `(NEEDED)` entries.
+/// binary baked into a scratch rootfs would fail at boot with a confusing loader error. Two checks,
+/// so the guarantee matches the claim: `readelf -d` finds no `(NEEDED)` shared objects, **and**
+/// `readelf -l` finds no `INTERP` program header — a fully static binary needs no runtime loader, so
+/// a static-PIE (no `NEEDED` but with an interpreter) is also rejected.
 fn verify_static(bin: &Path, what: &str) -> Result<()> {
-    let out = Command::new("readelf").arg("-d").arg(bin).output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let dynamic = String::from_utf8_lossy(&o.stdout);
-            let needed: Vec<_> = dynamic.lines().filter(|l| l.contains("(NEEDED)")).collect();
-            if needed.is_empty() {
-                Ok(())
-            } else {
-                bail!(
-                    "{what} is NOT statically linked — it needs {} shared object(s):\n{}",
-                    needed.len(),
-                    needed.join("\n")
-                );
-            }
-        }
+    // `readelf -d` (dynamic section): a static binary lists no `(NEEDED)` shared objects.
+    let Some(dynamic) = readelf(bin, "-d") else {
         // No `readelf` (binutils) on this host: don't fake a guarantee we couldn't check.
-        _ => {
-            println!(
-                "  ! could not run `readelf` to verify staticness — install binutils to check"
-            );
-            Ok(())
-        }
+        println!("  ! could not run `readelf` to verify staticness — install binutils to check");
+        return Ok(());
+    };
+    let needed: Vec<_> = dynamic.lines().filter(|l| l.contains("(NEEDED)")).collect();
+    if !needed.is_empty() {
+        bail!(
+            "{what} is NOT statically linked — it needs {} shared object(s):\n{}",
+            needed.len(),
+            needed.join("\n")
+        );
+    }
+    // `readelf -l` (program headers): a fully static binary carries no `INTERP` segment (loader).
+    let Some(segments) = readelf(bin, "-l") else {
+        println!("  ! could not run `readelf -l` to verify no interpreter — install binutils");
+        return Ok(());
+    };
+    if segments.lines().any(|l| l.contains("INTERP")) {
+        bail!("{what} carries a PT_INTERP program header — it wants a runtime loader, not static");
+    }
+    Ok(())
+}
+
+/// Run `readelf <flag> <bin>` and return its stdout, or `None` if `readelf` is absent/failed — the
+/// caller decides whether a missing tool is a soft skip (we don't fake a guarantee we can't check).
+fn readelf(bin: &Path, flag: &str) -> Option<String> {
+    match Command::new("readelf").arg(flag).arg(bin).output() {
+        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
+        _ => None,
     }
 }
 
@@ -657,22 +669,28 @@ fn bench_boot(runs: usize) -> Result<()> {
     Ok(())
 }
 
-/// Print min/p50/p90/p99/max of `samples` (ms), sorting in place. Nearest-rank percentiles — honest
-/// for the small `n` a boot bench runs (no interpolation games).
+/// Print min/p50/p90/p99/max of `samples` (ms), sorting in place. Nearest-rank, no interpolation. A
+/// percentile whose rank lands on the last sample has no observation above it — it's `max` relabeled,
+/// which is dishonest at small `n` (e.g. `p99` needs n≥100 to mean anything). Those print `—`, so a
+/// short bench can't dress up its slowest boot as a tail percentile.
 fn report_percentiles(label: &str, samples: &mut [u64]) {
     samples.sort_unstable();
-    let pct = |p: usize| -> u64 {
-        let rank = (p * samples.len()).div_ceil(100); // 1-based nearest rank
-        samples[rank.clamp(1, samples.len()) - 1]
+    let n = samples.len();
+    let pct = |p: usize| -> String {
+        let rank = (p * n).div_ceil(100).clamp(1, n); // 1-based nearest rank
+        if rank >= n {
+            format!("{:>5}", "—")
+        } else {
+            format!("{:>5}", samples[rank - 1])
+        }
     };
     println!(
-        "  {label:<24} min {:>5}  p50 {:>5}  p90 {:>5}  p99 {:>5}  max {:>5}  (ms, n={})",
+        "  {label:<24} min {:>5}  p50 {}  p90 {}  p99 {}  max {:>5}  (ms, n={n})",
         samples[0],
         pct(50),
         pct(90),
         pct(99),
-        samples[samples.len() - 1],
-        samples.len(),
+        samples[n - 1],
     );
 }
 
@@ -826,6 +844,10 @@ fn setup() -> Result<()> {
     check(
         "e2fsck + debugfs (output readback)",
         in_path("e2fsck") && in_path("debugfs"),
+    );
+    check(
+        "readelf (binutils — static-link verification)",
+        in_path("readelf"),
     );
     let dir = artifacts_dir();
     check(

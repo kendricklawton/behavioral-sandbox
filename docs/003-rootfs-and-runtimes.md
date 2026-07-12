@@ -95,6 +95,12 @@ compare). The exact package set floats within Alpine's stable branch (the branch
 latest revision, so an exact pin would *fail* the build on an upstream bump, not reproduce it), so a
 committed `rootfs-packages.lock` **records** the resolved closure and `--verify` flags drift.
 
+One honest caveat: this is reproducibility *given the same input `.apk`s*. The packages are fetched
+from Alpine's CDN and verified against the keys the minirootfs ships — so tampering is caught, but a
+build is only bit-for-bit repeatable while those exact revisions are still served. When the branch
+bumps a package, the old `.apk` is gone and the closure drifts (which `--verify` reports). The durable
+fix — vendoring the resolved `.apk` closure as sha-pinned artifacts — is deliberately deferred.
+
 ## Static vs dynamic linking in a minimal rootfs
 
 This is where a minimal userland teaches you what linking actually means:
@@ -134,20 +140,24 @@ ceiling, a guard against accidental bloat. Adding Node was a *deliberate* bump �
 ~51 MiB of packages, Node's closure (`icu-libs`, `simdjson`, `ada-libs`, …) adds ~64 MiB, so the
 image went from ~69 MiB to ~132 MiB and the budget/size constants moved with it, on purpose.
 
-Does a bigger base boot slower? Measured (`cargo xtask bench-boot`, 15 boots per path, percentiles,
-not averages):
+Does a bigger base boot slower? Measured (`cargo xtask bench-boot`, 100 boots per path — enough that
+`p99` is a real observation, not the slowest sample relabelled — nearest-rank, not averages):
 
 ```
 agent rootfs 132 MiB
-  read-only shared base    p50 302  p90 323  p99 327   (ms)
-  read-write per-VM copy   p50 300  p90 321  p99 326   (ms)
+  read-only shared base    p50 388  p90 412  p99 667   (ms, n=100)
+  read-write per-VM copy   p50 371  p90 392  p99 413   (ms, n=100)
 ```
 
-The two paths are indistinguishable, and doubling the base didn't slow boot: the copy path
-duplicates the whole image per VM, but the **host page cache** serves those reads, so size barely
-moves boot latency. Keeping the base small mainly buys **density** (page-cache dedup across many VMs,
-disk), not boot time. (Absolute numbers move with cache warmth — cold-boot percentiles as a tracked
-benchmark are Phase 17; this is the Phase-3-scoped measurement.)
+At the **median** the two paths are within ~5%, and doubling the base didn't slow boot: the copy path
+duplicates the whole image per VM, but the **host page cache** serves those reads, so image size
+barely moves boot latency. The honest surprise is in the **tail**: the read-only *shared* path has a
+markedly heavier `p99` (667 ms vs 413 ms) — not from image size (it copies *less*), but from **per-run
+overlay setup** (mounting the tmpfs + stacking overlayfs + `pivot_root`), which the copy path skips.
+So keeping the base small mainly buys **density** (page-cache dedup across many VMs, disk), not boot
+time; if anything, the density path pays a little tail latency for the overlay. (Absolute numbers move
+with cache warmth and host load — cold-boot percentiles as a tracked benchmark are Phase 17; this is
+the Phase-3-scoped measurement.)
 
 ## Try it
 

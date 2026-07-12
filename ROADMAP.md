@@ -336,8 +336,10 @@ binary, so adding a runtime is a packaging step, not an engine change.
       since it's a 44-package closure); a `.js` runs via the channel path and its output is captured,
       like the Python test. Baking Node grew the image ~69→132 MiB, so `ROOTFS_SIZE_MIB` 128→256 and
       the budget 96→160 moved deliberately (P3.7's pre-authorized bump), the lockfile regenerated (44
-      pkgs, no npm), and P3.6 determinism re-verified byte-identical. Boot re-measured: ~300 ms p50,
-      copy≈shared — doubling the base didn't slow boot (page cache serves the copy), reinforcing P3.7.
+      pkgs, no npm), and P3.6 determinism re-verified byte-identical. Boot re-measured (n=100 so p99
+      is real, not max relabelled): ~380 ms p50, median copy≈shared — doubling the base didn't slow
+      boot (page cache serves the copy), reinforcing P3.7; the shared/overlay path carries a heavier
+      p99 (~670 vs ~410 ms) from per-run overlay setup, not image size.
       Tests: `runs_a_static_native_binary_and_captures_its_artifact`, `runs_node_a_second_interpreter`
       (11 privileged tests now). **Phase-3 exit gate met:** Python + a native binary + Node all produce
       captured artifacts; writeup in `docs/003-rootfs-and-runtimes.md` (ext4 `mke2fs -d`, overlayfs,
