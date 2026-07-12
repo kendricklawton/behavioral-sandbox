@@ -353,11 +353,32 @@ binary, so adding a runtime is a packaging step, not an engine change.
 Give the microVM a network with per-VM isolation — the classic tap/bridge lesson.
 
 - [ ] **P4.1** Create a **tap device** per VM on the host; attach it as virtio-net in the VMM config.
+      *(Pre-flight, from the Phases 1–3 review: (1) attaching the NIC is **additive** — a
+      `NetworkInterface` PUT mirrors the existing `Vsock` block and a `#[non_exhaustive] BootConfig`
+      field; (2) **thread the tap handle through `Spawned` and `RunningVm`** (like `vsock_uds`/`output`
+      via `into_running`) so teardown can reach it — see P4.5; (3) **add a host-scoped allocator** (tap
+      name + /30 or /31 subnet + derived locally-administered MAC + CID); the process-local `VM_SEQ` is
+      insufficient for host-global network identity, and this is the home for P4.6; (4) start
+      **deny-by-default** — no default masquerade, host-local route only (decision 008), so P4.3's
+      direction is settled before the tap lands.)*
 - [ ] **P4.2** Address the guest (static or a tiny DHCP) and route host↔guest.
 - [ ] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
       `ARCHITECTURE.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
+      *(Direction **pre-recorded as decision 008** (2026-07-12): deny-by-default, tap has no world
+      route, no default masquerade until eBPF enforcement (P8) — so this **blocks P4.1** (build denying,
+      not opened-then-restricted). The box closes when the decision's rationale is finalized with the
+      implementation.)*
 - [ ] **P4.4** Per-VM isolation: one VM cannot reach another's tap.
+      *(Depends on the P4.1 host-scoped allocator: a unique tap name / guest IP / MAC / CID per VM so
+      two concurrent sandboxes can't collide — `VM_SEQ` (process-local) is not enough.)*
 - [ ] **P4.5** Teardown removes the tap + routes; no orphaned interfaces after many runs.
+      *(The tap is the first per-VM resource **outside `workdir`**, so `remove_dir_all(workdir)` won't
+      reclaim it: delete it (and its routes) in **all three** paths — `RunningVm::drop`, `Spawned::drop`
+      (the boot-failure guard), and `Spawned::abort` — so a boot that fails *after* tap-create still
+      cleans up. Best-effort (`ip link del` can fail), with no `Drop`-of-temp-dir safety net → reinforces
+      the Phase-6 jailer/cgroup ownership model. **Extend `repeated_boots_leave_no_leaks`** to assert no
+      orphaned interfaces (and, cheaply, no orphaned firecracker processes) — today it only counts
+      `/tmp/agent-<pid>-*` dirs, so a tap leak would pass CI silently.)*
 - [ ] **P4.6** Name/track each tap so the eBPF track can bind policy to a specific VM later.
 - [ ] **P4.7** Test: guest can (optionally) reach an allowed host endpoint; cannot reach a blocked one.
 - [ ] **P4.8** Document the netfilter/routing rules the driver installs.

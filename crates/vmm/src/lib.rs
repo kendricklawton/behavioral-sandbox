@@ -37,8 +37,11 @@ pub use vm::{BootConfig, RunningVm, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 ///   [`ChannelError`] source. Distinct from a guest command that merely exits non-zero (a normal
 ///   [`RunResult`]) or fails to spawn ([`GuestExec`](VmmError::GuestExec)).
 /// - **Guest fault** — [`GuestExec`](VmmError::GuestExec) (the agent couldn't run the command),
-///   [`ExecTimeout`](VmmError::ExecTimeout) (the command outran its wall-clock budget and was
-///   killed), [`OutputCap`](VmmError::OutputCap) (it flooded output past the host cap).
+///   [`ExecTimeout`](VmmError::ExecTimeout) (the command outran its wall-clock budget and was killed
+///   *by the guest*, which reported it), [`OutputCap`](VmmError::OutputCap) (it flooded output past
+///   the host cap), [`ExecUnresponsive`](VmmError::ExecUnresponsive) (the guest never reported the
+///   command's end and the *host* gave up on its own deadline — a liveness/trust fault the host
+///   enforces because the guest can't be trusted to bound itself).
 ///
 /// **Not an error.** A command that merely exits non-zero — *including dying by signal*, which the
 /// guest agent reports as exit code `128 + signal` — is a faithful [`RunResult`], not a `VmmError`.
@@ -74,6 +77,12 @@ pub enum VmmError {
     /// A command exceeded its exec wall-clock budget and was killed by the guest — a *user* fault
     /// (the code ran too long), distinct from a transport/boot [`Timeout`](VmmError::Timeout).
     ExecTimeout { limit: Duration },
+    /// The **host** gave up on an exec after `limit` because the guest never reported the command's
+    /// end (no `Exit`/`TimedOut`) while keeping the channel's idle timer alive — a *liveness/trust*
+    /// fault (the guest went silent or hostile), distinct from [`ExecTimeout`](VmmError::ExecTimeout),
+    /// where the guest cooperatively reported the timeout. A caller should retire the VM, not blame
+    /// the user's command.
+    ExecUnresponsive { limit: Duration },
     /// A Firecracker API, boot, or process failure.
     Vmm(String),
 }
@@ -92,6 +101,9 @@ impl std::fmt::Display for VmmError {
             }
             VmmError::ExecTimeout { limit } => {
                 write!(f, "guest command exceeded its {limit:?} deadline")
+            }
+            VmmError::ExecUnresponsive { limit } => {
+                write!(f, "guest went unresponsive; host gave up after {limit:?}")
             }
             VmmError::Vmm(e) => write!(f, "vmm error: {e}"),
         }

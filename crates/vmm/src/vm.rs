@@ -102,15 +102,20 @@ const FRAME_FLOOR: usize = 64;
 
 /// Default wall-clock budget for one command, sent to the guest agent, which kills the command past
 /// it. A fixed default for now — it joins the hoster-tunable per-run resource policy later. (The
-/// guest clamps a host-sent budget to its own 1 h ceiling; when the budget becomes a policy knob,
-/// [`EXEC_IO_TIMEOUT`] must be derived from the *requested* value, not this const.)
+/// guest clamps a host-sent budget to its own 1 h ceiling. When the budget becomes a policy knob,
+/// both the socket idle timeout *and* the host deadline must be derived from the *requested* value —
+/// `budget + EXEC_KILL_SLACK` — not from this const, or a long quiet command is cut off early.)
 const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The exec connection's read/write timeout: **derived** to outlast [`DEFAULT_EXEC_TIMEOUT`] so a
-/// legitimately long-but-quiet command isn't cut off by the transport before its own deadline, and
-/// so the host outlasts the agent's kill and receives its `TimedOut` reply. Derived (not a second
-/// magic number) so the two can't silently drift out of order.
-const EXEC_IO_TIMEOUT: Duration = DEFAULT_EXEC_TIMEOUT.saturating_add(Duration::from_secs(5));
+/// Slack past a command's own budget before the *host* gives up on the exec connection: the margin
+/// for the guest agent to notice its deadline, SIGKILL the command, and get its `TimedOut` frame
+/// back. The host's total patience is `budget + EXEC_KILL_SLACK`, used both as the exec socket's
+/// per-read idle timeout (so a legitimately long-but-quiet command isn't cut off by the transport)
+/// and as the wall-clock deadline on the collect loop (so a silent-or-hostile guest that never
+/// self-reports can't park `exec` forever — decision 002: liveness is the transport's job, not the
+/// guest's). Ordered so the guest's cooperative `TimedOut` (fired at `budget`) always beats the host
+/// deadline for a legitimate timeout; the host fires only when the guest fails to report.
+const EXEC_KILL_SLACK: Duration = Duration::from_secs(5);
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
@@ -352,17 +357,25 @@ impl RunningVm {
         let uds = self.vsock_uds.as_ref().ok_or_else(|| {
             VmmError::Vmm("this microVM was booted without vsock (set BootConfig.guest_cid)".into())
         })?;
-        // Use the longer exec I/O timeout so a quiet-but-running command isn't cut off and the
-        // agent's `TimedOut` (at DEFAULT_EXEC_TIMEOUT) reaches us first.
-        let mut conn = connect_agent_at(uds, AGENT_VSOCK_PORT, EXEC_IO_TIMEOUT)?;
+        // The host's total patience: the command's own budget plus the agent's kill+report margin.
+        // Derived from the *actual* budget (not a fixed const) so raising the budget later can't
+        // leave the socket idle timeout cutting off a long quiet command. Used both as the socket's
+        // per-read idle timeout and, inside `run_exec`, as the wall-clock deadline on the loop — so
+        // the agent's `TimedOut` (at `budget`) reaches us first, and a silent guest can't park us.
+        let budget = DEFAULT_EXEC_TIMEOUT;
+        let wall = budget.saturating_add(EXEC_KILL_SLACK);
+        let mut conn = connect_agent_at(uds, AGENT_VSOCK_PORT, wall)?;
         run_exec(
             &mut conn,
             argv,
             stdin,
             files_in,
             artifacts,
-            DEFAULT_EXEC_TIMEOUT,
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: budget,
+                wall,
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
     }
 
@@ -925,22 +938,45 @@ fn connect_agent_at(
 }
 
 /// Drive one exec over an established [`ClientConnection`]: send the request, then aggregate the
-/// response stream into a [`RunResult`]. Bounded by `max_output` so a flooding guest can't grow host
-/// memory without limit. Factored out of [`RunningVm::exec`] so it can be tested without a VM.
+/// response stream into a [`RunResult`]. Bounded on two axes so a flooding *or* dribbling guest can't
+/// hurt the host: `max_output` caps buffered bytes, and `wall` is the host's own wall-clock deadline
+/// on the collect loop (`timeout` is the guest's command budget; `wall` = `timeout` + kill slack).
+/// A guest that keeps the per-read idle timer alive by dribbling tiny frames — never sending its
+/// terminal `Exit`/`TimedOut` — trips `wall` and yields [`VmmError::ExecUnresponsive`], rather than
+/// parking the caller indefinitely. Factored out of [`RunningVm::exec`] so it can be tested without a VM.
+/// The host-enforced bounds on one exec, bundled so they travel together (and to keep `run_exec`
+/// under the argument-count limit). Seeds the hoster-tunable per-run resource policy the timeout
+/// constants above anticipate.
+struct ExecBounds {
+    /// The guest's command wall-clock budget, sent to the agent as `timeout_ms`; the agent kills the
+    /// command past it and reports `TimedOut`.
+    timeout: Duration,
+    /// The *host's* own deadline on the collect loop — `timeout` + kill slack — so a guest that never
+    /// reports the command's end can't park `exec` forever. Trips [`VmmError::ExecUnresponsive`].
+    wall: Duration,
+    /// Aggregate cap on buffered stdout+stderr+artifacts, so a flooding guest can't grow host memory.
+    max_output: usize,
+}
+
 fn run_exec<S: Read + Write>(
     conn: &mut ClientConnection<S>,
     argv: &[String],
     stdin: &[u8],
     files_in: &[(String, Vec<u8>)],
     artifacts: &[String],
-    timeout: Duration,
-    max_output: usize,
+    bounds: ExecBounds,
 ) -> Result<RunResult, VmmError> {
     // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
     // operator's stderr), keyed by argv so `agent run` failures are diagnosable host-side.
     let span = tracing::info_span!("exec", argv = ?argv);
     let _span = span.enter();
     let started = Instant::now();
+    // The host's own deadline, independent of the socket's per-read idle timeout. A `Duration::MAX`
+    // "no limit" must stay a *bounded* wait, not an `Instant + Duration` overflow panic — clamp to a
+    // day (mirrors the boot deadline).
+    let deadline = started
+        .checked_add(bounds.wall)
+        .unwrap_or_else(|| started + Duration::from_secs(86_400));
 
     // Inject input files first, then the terminal exec request.
     // `?` on channel calls yields `VmmError::Channel(..)`, preserving the `ChannelError` source.
@@ -954,7 +990,7 @@ fn run_exec<S: Read + Write>(
         argv: argv.to_vec(),
         stdin: stdin.to_vec(),
         artifacts: artifacts.to_vec(),
-        timeout_ms: u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX),
+        timeout_ms: u32::try_from(bounds.timeout.as_millis()).unwrap_or(u32::MAX),
     })?;
 
     let mut stdout = Vec::new();
@@ -965,6 +1001,16 @@ fn run_exec<S: Read + Write>(
     // `data`) can't spin the loop or grow `files` without advancing the cap.
     let mut captured = 0usize;
     loop {
+        // The host's own wall-clock deadline, checked *before* each blocking read. The socket's
+        // per-read idle timeout is reset by every frame, so a guest that dribbles tiny well-formed
+        // frames — never sending its terminal `Exit`/`TimedOut` — would otherwise keep this loop
+        // alive indefinitely under the output cap. `wall` outlasts the guest's own `TimedOut`, so a
+        // legitimate timeout still arrives as `ExecTimeout`; this only fires for a non-reporting
+        // guest. Worst case the loop is parked in `recv_response` when the deadline passes, so the
+        // real bound is `deadline + one idle period` — bounded, not a hang.
+        if Instant::now() >= deadline {
+            return Err(VmmError::ExecUnresponsive { limit: bounds.wall });
+        }
         match conn.recv_response()? {
             Response::Stdout(b) => {
                 captured += b.len() + FRAME_FLOOR;
@@ -1000,11 +1046,13 @@ fn run_exec<S: Read + Write>(
             // it on the error (or a `timed_out` RunResult) is a future enhancement.
             Response::TimedOut { elapsed_ms } => {
                 tracing::warn!(
-                    limit_ms = timeout.as_millis() as u64,
+                    limit_ms = bounds.timeout.as_millis() as u64,
                     elapsed_ms,
                     "guest command timed out"
                 );
-                return Err(VmmError::ExecTimeout { limit: timeout });
+                return Err(VmmError::ExecTimeout {
+                    limit: bounds.timeout,
+                });
             }
             // A guest-side fault on a healthy channel — distinct from a transport failure.
             Response::Error(msg) => return Err(VmmError::GuestExec(msg)),
@@ -1014,8 +1062,10 @@ fn run_exec<S: Read + Write>(
                 ))
             }
         }
-        if captured > max_output {
-            return Err(VmmError::OutputCap { limit: max_output });
+        if captured > bounds.max_output {
+            return Err(VmmError::OutputCap {
+                limit: bounds.max_output,
+            });
         }
     }
 }
@@ -1831,8 +1881,11 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(5),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .expect("exec");
         assert_eq!(result.stdout, b"hi\n");
@@ -1852,8 +1905,11 @@ mod tests {
             b"from the host\n",
             &[],
             &[],
-            Duration::from_secs(5),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .expect("exec");
         assert_eq!(result.stdout, b"from the host\n");
@@ -1878,8 +1934,11 @@ mod tests {
             b"",
             &[("in.txt".into(), b"hello\n".to_vec())],
             &["out/up.txt".into(), "missing.txt".into()],
-            Duration::from_secs(5),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .expect("exec");
         assert_eq!(result.exit_code, 0);
@@ -1905,8 +1964,11 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(5),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, VmmError::GuestExec(_)), "got {err:?}");
@@ -1928,8 +1990,11 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(5),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .expect("signal death is a result, not an error");
         assert_eq!(result.exit_code, 137, "128 + SIGKILL(9)");
@@ -1982,8 +2047,11 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(5),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, VmmError::GuestExec(_)), "got {err:?}");
@@ -2009,8 +2077,11 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(5),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .unwrap_err();
         assert!(
@@ -2039,8 +2110,11 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(5),
-            1000,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: 1000,
+            },
         )
         .unwrap_err();
         assert!(
@@ -2068,8 +2142,11 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(1),
-            MAX_EXEC_OUTPUT,
+            ExecBounds {
+                timeout: Duration::from_secs(1),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, VmmError::ExecTimeout { .. }), "got {err:?}");
@@ -2099,11 +2176,59 @@ mod tests {
             b"",
             &[],
             &[],
-            Duration::from_secs(5),
-            10_000,
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: 10_000,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, VmmError::OutputCap { .. }), "got {err:?}");
+        drop(conn);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn exec_dribbling_guest_trips_the_host_wall_deadline() {
+        // A guest that keeps the per-read idle timer alive with tiny well-formed frames but never
+        // sends its terminal Exit/TimedOut would, without a host wall deadline, park exec forever
+        // under the output cap. The host's own `wall` must give up with `ExecUnresponsive`, fast.
+        let (_dir, uds, server) = fake_vsock_server("agent-vsock-dribble", |mut conn| {
+            let _ = conn.recv_request();
+            // Dribble every 50 ms — well under the 200 ms idle timeout, so the idle timer never
+            // fires; only the host's wall deadline can end this.
+            while conn.send_response(&Response::Stdout(vec![b'x'; 8])).is_ok() {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        // Idle (200 ms) > dribble interval (50 ms), so the socket idle timeout can't fire; wall
+        // (150 ms) is the thing under test. All sub-second so the suite stays fast.
+        let mut conn =
+            connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_millis(200)).expect("connect");
+        let started = std::time::Instant::now();
+        let err = run_exec(
+            &mut conn,
+            &["dribble".into()],
+            b"",
+            &[],
+            &[],
+            ExecBounds {
+                timeout: Duration::from_millis(100), // guest budget (the fake server ignores it)
+                wall: Duration::from_millis(150),    // host wall deadline — under test
+                max_output: MAX_EXEC_OUTPUT,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, VmmError::ExecUnresponsive { .. }),
+            "got {err:?}"
+        );
+        // Loose upper bound only (never a tight lower bound): it must fail fast, not hang the suite.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "should fail fast, took {:?}",
+            started.elapsed()
+        );
         drop(conn);
         server.join().expect("server thread");
     }
