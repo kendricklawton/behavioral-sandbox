@@ -224,6 +224,103 @@ fn python_script_writes_a_file_and_we_capture_it() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn runs_node_a_second_interpreter() {
+    // P3.9 runtime-agnostic proof, second half: a *different* interpreter (Node) runs unchanged
+    // through the same exec path as Python — the rootfs isn't Python-specific. Inject a small `.js`,
+    // run the real `node` on it, and capture the file it writes (the per-file channel path, P2.5).
+    let vm = Vm::boot(agent_rootfs_config())
+        .expect("agent microVM should boot and the agent should announce readiness");
+
+    // A real Node script: use the runtime's own APIs (JSON + fs) to write a file.
+    let script = "const fs = require('fs');\n\
+                  fs.writeFileSync('result.json', JSON.stringify({ answer: 6 * 7 }));\n";
+
+    let out = vm
+        .exec_with_files(
+            &["node".into(), "script.js".into()],
+            b"",
+            &[("script.js".into(), script.as_bytes().to_vec())],
+            &["result.json".into()],
+        )
+        .expect("run the node script and capture its output file");
+
+    assert_eq!(
+        out.exit_code,
+        0,
+        "node should exit 0; console:\n{}",
+        vm.console()
+    );
+    assert_eq!(out.files.len(), 1, "one artifact requested and returned");
+    let (path, data) = &out.files[0];
+    assert_eq!(path, "result.json");
+    let text = String::from_utf8_lossy(data);
+    assert!(
+        text.contains("\"answer\"") && text.contains("42"),
+        "captured file should hold the JSON Node wrote; got {text:?}"
+    );
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs + the static example (run via `cargo xtask ci-privileged`)"]
+fn runs_a_static_native_binary_and_captures_its_artifact() {
+    // P3.9 runtime-agnostic proof: a **static native ELF** (no interpreter, no libc, no loader) runs
+    // unchanged through the same exec path. Inject the binary read-only via a block device (P3.4),
+    // exec it, and capture the file it writes via the output device (P3.5) — showing the engine runs
+    // *any* Linux binary handed in at runtime, not just the baked-in interpreters. (Contrast the
+    // Wasmtime sibling, which needs code recompiled to wasm32.)
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bin = root.join("target/x86_64-unknown-linux-musl/release/examples/writefile");
+    assert!(
+        bin.is_file(),
+        "missing static example at {} — run `cargo xtask build-guest-example` (ci-privileged does)",
+        bin.display()
+    );
+
+    let indir = TmpDir::new("p39in");
+    let outdir = TmpDir::new("p39out");
+    std::fs::create_dir_all(indir.path()).expect("input dir");
+    // `fs::copy` preserves the 0755 mode, which `mke2fs -d` carries into the read-only `/input` image,
+    // so the guest can exec it directly (the mount is `-o ro`, not `noexec`).
+    std::fs::copy(&bin, indir.path().join("writefile")).expect("stage the native binary");
+
+    let mut cfg = agent_rootfs_config();
+    cfg.input_dir = Some(indir.path().to_path_buf());
+    cfg.output_dir = Some(outdir.path().to_path_buf());
+    let vm = Vm::boot(cfg).expect("microVM with input + output devices should boot");
+    let out = vm
+        .exec(
+            &["/input/writefile".into(), "/output/answer.txt".into()],
+            b"",
+        )
+        .expect("run the injected native binary");
+    assert_eq!(
+        out.exit_code,
+        0,
+        "native binary should exit 0; console:\n{}",
+        vm.console()
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("writefile ok"),
+        "native binary should print its marker; got {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // Consumes the VM: stop it, then read the output device back.
+    let captured = vm.collect_outputs().expect("pull /output back");
+    assert!(
+        captured.iter().any(|p| p == "answer.txt"),
+        "the native binary's artifact should be captured; got {captured:?}"
+    );
+    let text = std::fs::read_to_string(outdir.path().join("answer.txt")).expect("read answer.txt");
+    assert!(
+        text.contains("6*7=42"),
+        "captured file should hold the native binary's payload; got {text:?}"
+    );
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn injects_a_large_file_via_block_device() {
     // P3.4: a whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
     // **larger than the 1 MiB channel frame cap** (the whole point) in a host dir, inject it as a

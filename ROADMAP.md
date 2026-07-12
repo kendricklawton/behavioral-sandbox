@@ -324,10 +324,24 @@ binary, so adding a runtime is a packaging step, not an engine change.
       inject → run → capture loop end to end with an actual language runtime, not a shell builtin.
       Uses the per-file **channel** path (`exec_with_files`, P2.5); the bulk block-device paths are
       P3.4/P3.5. Asserts the captured file holds what the script computed. 9 privileged tests now.)*
-- [ ] **P3.9** **Runtime-agnostic proof:** a second, *differently-shaped* runtime runs unchanged
+- [x] **P3.9** **Runtime-agnostic proof:** a second, *differently-shaped* runtime runs unchanged
       through the same `exec` path — a **static Go/Rust ELF** (no interpreter, no libc) and **Node**
       (a different interpreter) — showing the rootfs isn't Python-specific and the engine runs any
       Linux binary. (Contrast the Wasmtime sibling, which needs code recompiled to wasm32.)
+      *(Two proofs. **Static native ELF:** a fully-static musl Rust binary (`guest-agent`'s
+      `examples/writefile`, no `NEEDED`/`PT_INTERP` — verified) is **injected at runtime** on the
+      read-only `/input` device (P3.4, exec'd directly — the mount is `-o ro`, not `noexec`), writes
+      to the `/output` device, and the file is captured host-side (P3.5) — the engine runs **any**
+      binary handed in, no pre-provisioning. **Node:** `nodejs` joins the base (a **baked** interpreter,
+      since it's a 44-package closure); a `.js` runs via the channel path and its output is captured,
+      like the Python test. Baking Node grew the image ~69→132 MiB, so `ROOTFS_SIZE_MIB` 128→256 and
+      the budget 96→160 moved deliberately (P3.7's pre-authorized bump), the lockfile regenerated (44
+      pkgs, no npm), and P3.6 determinism re-verified byte-identical. Boot re-measured: ~300 ms p50,
+      copy≈shared — doubling the base didn't slow boot (page cache serves the copy), reinforcing P3.7.
+      Tests: `runs_a_static_native_binary_and_captures_its_artifact`, `runs_node_a_second_interpreter`
+      (11 privileged tests now). **Phase-3 exit gate met:** Python + a native binary + Node all produce
+      captured artifacts; writeup in `docs/003-rootfs-and-runtimes.md` (ext4 `mke2fs -d`, overlayfs,
+      initramfs-vs-rootfs, reproducibility, static-vs-dynamic linking, inject-vs-bake).)*
 - **Exit gate + lesson:** real Python **and a static native binary + Node** run in the microVM and
   produce artifacts — the rootfs is runtime-agnostic; write up **filesystems, ext4 images, overlayfs,
   initramfs vs rootfs, and static vs dynamic linking in a minimal rootfs.**

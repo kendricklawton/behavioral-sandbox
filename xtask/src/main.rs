@@ -43,6 +43,9 @@ enum Cmd {
     FetchArtifacts,
     /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
     BuildGuestAgent,
+    /// Build the P3.9 static native-ELF fixture (`examples/writefile`) for the guest target — the
+    /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
+    BuildGuestExample,
     /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
     /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-agent.ext4` (needs `curl`,
     /// `tar`, `mke2fs`, `truncate`). Reproducible: two builds are byte-identical.
@@ -73,6 +76,7 @@ fn main() -> Result<()> {
         Cmd::Setup => setup(),
         Cmd::FetchArtifacts => fetch_artifacts(),
         Cmd::BuildGuestAgent => build_guest_agent().map(|_| ()),
+        Cmd::BuildGuestExample => build_guest_example().map(|_| ()),
         Cmd::BuildRootfs {
             verify,
             update_lock,
@@ -111,7 +115,7 @@ fn build_guest_agent() -> Result<PathBuf> {
         GUEST_TARGET,
     ])?;
     let bin = guest_agent_bin();
-    verify_static(&bin)?;
+    verify_static(&bin, "guest agent")?;
     println!("\n✓ guest agent built (static): {}", bin.display());
     Ok(bin)
 }
@@ -124,11 +128,36 @@ fn guest_agent_bin() -> PathBuf {
         .join("release/agent-guest")
 }
 
+/// Build the P3.9 static native-ELF fixture (`crates/guest-agent/examples/writefile.rs`) for the
+/// guest target and return its path. A statically linked musl binary with no interpreter/libc, which
+/// the runtime-agnostic test injects and execs to prove the engine runs *any* Linux binary. Built
+/// like the agent (musl, `--locked`) and verified static.
+fn build_guest_example() -> Result<PathBuf> {
+    cargo(&[
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "agent-guest",
+        "--example",
+        "writefile",
+        "--target",
+        GUEST_TARGET,
+    ])?;
+    let bin = workspace_root()
+        .join("target")
+        .join(GUEST_TARGET)
+        .join("release/examples/writefile");
+    verify_static(&bin, "writefile example")?;
+    println!("\n✓ guest example built (static): {}", bin.display());
+    Ok(bin)
+}
+
 /// Verify the built binary is actually statically linked — "measured, not marketed." A sys-crate or
 /// `build.rs` can silently reintroduce a `NEEDED` dynamic dependency, and a dynamically-linked
 /// binary baked into a scratch rootfs would fail at boot with a confusing loader error. Checks for a
 /// dynamic-library dependency via `readelf -d`; on a static binary there are no `(NEEDED)` entries.
-fn verify_static(bin: &Path) -> Result<()> {
+fn verify_static(bin: &Path, what: &str) -> Result<()> {
     let out = Command::new("readelf").arg("-d").arg(bin).output();
     match out {
         Ok(o) if o.status.success() => {
@@ -138,7 +167,7 @@ fn verify_static(bin: &Path) -> Result<()> {
                 Ok(())
             } else {
                 bail!(
-                    "guest agent is NOT statically linked — it needs {} shared object(s):\n{}",
+                    "{what} is NOT statically linked — it needs {} shared object(s):\n{}",
                     needed.len(),
                     needed.join("\n")
                 );
@@ -169,15 +198,16 @@ const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
 /// with the fixed UUID + hash seed, this makes two builds byte-identical. 2024-01-01T00:00:00Z.
 const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
 
-/// Image size. Generous headroom over the ~15 MB payload so a later `apk.static --root` (P3.2's
-/// Python, P3.9's Node) has room without a re-size. Per-run growth is P3.3's overlay, not this.
-const ROOTFS_SIZE_MIB: u32 = 128;
+/// Image size. Headroom over the payload so `apk.static --root` has room without a re-size. Bumped
+/// 128→256 at P3.9 when Node (its `icu-libs`/`simdjson`/`ada-libs` closure, ~64 MiB) joined python3.
+const ROOTFS_SIZE_MIB: u32 = 256;
 
-/// Soft ceiling on the base rootfs's real footprint (P3.7 — "keep the base small"). The current image
-/// is ~70 MiB (Alpine + python3 + the agent); this leaves headroom for one more runtime before the
-/// base needs a deliberate rethink. `build-rootfs` fails if the image exceeds it — a regression guard
-/// against accidental bloat. Adding Node/Go (P3.9) will raise this *and* `ROOTFS_SIZE_MIB`, on purpose.
-const ROOTFS_BUDGET_MIB: u64 = 96;
+/// Soft ceiling on the base rootfs's real footprint (P3.7 — "keep the base small"). `build-rootfs`
+/// fails past it, a regression guard against accidental bloat. The image is ~132 MiB (Alpine +
+/// python3 + **Node** + the agent, P3.9); this leaves ~28 MiB headroom. Adding another runtime is a
+/// deliberate bump of this *and* `ROOTFS_SIZE_MIB`, not a silent creep — and a prompt to ask whether
+/// the base is still "small."
+const ROOTFS_BUDGET_MIB: u64 = 160;
 
 /// The init the image ships, replacing Alpine's OpenRC `inittab`. busybox is PID 1 (it reaps
 /// orphans and a crashed child is respawned, neither of which the `forbid(unsafe_code)` agent should
@@ -231,14 +261,16 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 /// runtime packages install from. One pin, used by both, so base and packages can't skew branches.
 const ALPINE_BRANCH: &str = "v3.24";
 
-/// The language runtimes baked into the guest image (P3.2's reference runtime; P3.9 broadens it).
-/// Installed by `apk.static` from the pinned branch. The install **floats** within that stable
+/// The language runtimes baked into the guest image: python3 (P3.2's reference) + **nodejs** (P3.9's
+/// second, differently-shaped interpreter, proving the rootfs isn't Python-specific — a static native
+/// ELF is injected at runtime rather than baked, so it isn't listed here). Installed by `apk.static`
+/// from the pinned branch. The install **floats** within that stable
 /// branch — Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN`
 /// pin would just *fail* the build the day upstream bumps (the old `.apk` is gone from the CDN), not
 /// reproduce it. Instead P3.6 **records** the resolved closure in a committed lockfile and detects
 /// drift (`build-rootfs --verify`), keeping the everyday build working; durable pinning would mean
 /// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
-const GUEST_PACKAGES: &[&str] = &["python3"];
+const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
 
 /// The overlay init (`/sbin/overlay-init`), run as PID 1 when the driver boots this image
 /// **read-only** (`BootConfig::read_only_root`). It stacks a per-run tmpfs over the read-only base
@@ -769,6 +801,10 @@ fn ci_privileged() -> Result<()> {
     // makes this the reproducibility gate: it builds twice, asserts byte-identical, and fails on
     // package-closure drift from the lockfile.
     build_rootfs(true, false)?;
+    // The runtime-agnostic test (P3.9) injects a static native binary; build it here (musl), like the
+    // agent — the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
+    // not part of the image, so it's built separately, not baked into the rootfs.
+    build_guest_example()?;
     cargo(&["test", "--workspace", "--locked", "--", "--ignored"])?;
     println!("\n✓ privileged integration passed");
     Ok(())
