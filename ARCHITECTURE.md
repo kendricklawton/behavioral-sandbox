@@ -516,12 +516,16 @@ handle and deleting on every path is load-bearing, not incidental (decision 008'
 exactly this). Shelling to `ip` keeps the driver dependency-light and `unsafe`-free.
 
 **Consequences / tombstones.**
-- **The allocator yields name + MAC only** for now; the `/30`-or-`/31` subnet and the guest CID are
-  deterministic functions of the same per-VM index, added when addressing (P4.2) and per-VM isolation
-  (P4.4) land — not a rewrite. `DEFAULT_GUEST_CID = 3` stays a hardcoded const until then.
-- **Deny-by-default holds by construction:** `enable_network` gives the guest an *unconfigured* NIC —
-  no `ip=` boot arg, no host address on the tap, no route, no masquerade — so it reaches nothing until
-  addressing and, ultimately, eBPF-enforced egress policy (decision 008) arrive.
+- **The allocator now yields name + MAC + a point-to-point /30** (`subnet_for`, added by P4.2): from
+  `10.200.0.0/16`, host = block+1, guest = block+2, with the /30 index folding the PID bits down so
+  concurrent processes don't collide at `NET_SEQ=0`. Guest addressing is the kernel `ip=` param
+  (`CONFIG_IP_PNP`, present in the pinned kernel), so it needs no rootfs change; the host end is
+  assigned in `Tap::create` and cascades away on `ip link del`. Still open on the same index: the
+  guest **CID** (still the hardcoded `DEFAULT_GUEST_CID = 3`) and per-VM **netns isolation** (P4.4).
+- **Deny-by-default holds by construction:** with P4.2 the guest is addressed on the /30 and can reach
+  the host end — but the `ip=` gateway field is **empty**, so the kernel installs only the connected
+  route, **no default route**, and the driver installs no masquerade or `ip_forward`. So the guest
+  reaches the host and nothing else, until eBPF-enforced egress policy (decision 008) opens anything.
 - **A hard-killed driver can still orphan a tap** (no `Drop`-of-temp-dir safety net, unlike the
   scratch dir) — the same class of gap as P6.7's SIGKILL-leaks-a-VM, and the reason the leak test scans
   for orphaned `fc*` interfaces. The durable owner is the Phase-6 jailer/cgroup model.

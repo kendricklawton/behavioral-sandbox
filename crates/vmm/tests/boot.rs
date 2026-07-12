@@ -508,8 +508,9 @@ fn overlay_is_writable_and_base_is_untouched() {
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
     // P4.1: with `enable_network`, the driver creates a host tap and attaches it as virtio-net, so
-    // the guest gets an `eth0` carrying the driver's locally-administered MAC. Deny-by-default: this
-    // box adds no address, route, or masquerade, so the guest reaches nothing. Needs CAP_NET_ADMIN.
+    // the guest gets an `eth0` carrying the driver's locally-administered MAC. This test pins the NIC
+    // + MAC and the deny-by-default invariant (no default route); guest addressing itself is P4.2's
+    // `addresses_the_guest_and_routes_host_to_guest`. Needs CAP_NET_ADMIN.
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
@@ -537,7 +538,8 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
         String::from_utf8_lossy(&mac.stdout)
     );
 
-    // Deny-by-default: no addressing, so no route to anywhere — `ip route` lists no `default`.
+    // Deny-by-default: the guest has no default route (P4.2 adds a connected /30, never a route to
+    // the world) — `ip route` lists no `default`.
     let routes = vm
         .exec(&["ip".into(), "route".into()], b"")
         .expect("list guest routes");
@@ -545,6 +547,86 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
         !String::from_utf8_lossy(&routes.stdout).contains("default"),
         "deny-by-default: guest must have no default route; got {:?}",
         String::from_utf8_lossy(&routes.stdout)
+    );
+
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn addresses_the_guest_and_routes_host_to_guest() {
+    // P4.2: static addressing over the tap. The kernel configures `eth0` with the guest's /30 IP via
+    // the `ip=` boot param, giving a connected route to the host end and NO default route — so
+    // host<->guest works but the guest reaches nothing else (deny-by-default). Needs CAP_NET_ADMIN.
+    if !have_net_admin() {
+        eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
+        return;
+    }
+    let mut cfg = agent_rootfs_config();
+    cfg.enable_network = true;
+    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+    let host_ip = vm.host_ip().expect("host ip when networked").to_string();
+    let guest_ip = vm.guest_ip().expect("guest ip when networked").to_string();
+
+    // The guest kernel configured eth0 with its assigned address.
+    let addr = vm
+        .exec(
+            &[
+                "ip".into(),
+                "-4".into(),
+                "addr".into(),
+                "show".into(),
+                "eth0".into(),
+            ],
+            b"",
+        )
+        .expect("show guest eth0");
+    assert!(
+        String::from_utf8_lossy(&addr.stdout).contains(&guest_ip),
+        "guest eth0 should carry {guest_ip}; got:\n{}\nconsole:\n{}",
+        String::from_utf8_lossy(&addr.stdout),
+        vm.console()
+    );
+
+    // Host<->guest reachability: the guest can reach the host end of the point-to-point /30.
+    let ping = vm
+        .exec(
+            &[
+                "ping".into(),
+                "-c".into(),
+                "1".into(),
+                "-W".into(),
+                "1".into(),
+                host_ip.clone(),
+            ],
+            b"",
+        )
+        .expect("ping the host tap IP");
+    assert_eq!(
+        ping.exit_code,
+        0,
+        "guest should reach the host tap IP {host_ip}; console:\n{}",
+        vm.console()
+    );
+
+    // Deny-by-default: an off-subnet address is unreachable (a fast ENETUNREACH, no route — not a
+    // timeout), proving there's no default route or masquerade opening the guest to the world.
+    let off = vm
+        .exec(
+            &[
+                "ping".into(),
+                "-c".into(),
+                "1".into(),
+                "-W".into(),
+                "1".into(),
+                "192.0.2.1".into(), // RFC 5737 TEST-NET-1, provably off the /30
+            ],
+            b"",
+        )
+        .expect("ping an off-subnet address");
+    assert_ne!(
+        off.exit_code, 0,
+        "deny-by-default: the guest must not reach an off-subnet address"
     );
 
     vm.shutdown().expect("shutdown should succeed");
@@ -576,20 +658,35 @@ fn fc_interfaces() -> std::collections::BTreeSet<String> {
         .unwrap_or_default()
 }
 
+/// Whether `pid` is still a live `firecracker` process. A reaped child leaves `/proc` entirely, so a
+/// `firecracker` still present at a VMM pid we booted means teardown failed to kill+reap it. Keyed on
+/// the *specific* pid (via `comm`), not a scan, so it can't be confused by other parallel tests' VMMs
+/// (they have different pids); a reaped-then-recycled pid running something else reads as gone.
+fn is_firecracker(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|c| c.trim() == "firecracker")
+        .unwrap_or(false)
+}
+
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + artifacts (run via `cargo xtask ci-privileged`)"]
 fn repeated_boots_leave_no_leaks() {
-    // When we have CAP_NET_ADMIN, enable networking so each cycle also creates a per-VM tap — which
-    // must be deleted on teardown, since the tap lives outside the scratch dir and is reclaimed
-    // separately from `remove_dir_all`. Without the capability, this still covers the scratch-dir path.
+    // After two boot/teardown cycles, nothing this test spawned may survive: no per-VM scratch dir,
+    // no orphaned firecracker VMM process, and (with CAP_NET_ADMIN) no per-VM tap. The tap is the
+    // one resource outside the scratch dir, so it's reclaimed separately from `remove_dir_all`;
+    // without the capability, networking is off and this still covers the scratch-dir + process paths.
     let net = have_net_admin();
     let taps_before = fc_interfaces();
+    let mut vmm_pids = Vec::new();
 
     // Two full cycles back to back; the second only works if the first was fully reclaimed.
     for i in 0..2 {
         let mut cfg = config();
         cfg.enable_network = net;
         let vm = Vm::boot(cfg).unwrap_or_else(|e| panic!("boot {i} failed: {e}"));
+        vmm_pids.push(vm.vmm_pid());
+        // `shutdown` consumes the VM, so its `Drop` (kill + reap + reclaim) has run by the time it
+        // returns — the leak checks below therefore observe the fully-torn-down state.
         vm.shutdown()
             .unwrap_or_else(|e| panic!("shutdown {i} failed: {e}"));
     }
@@ -604,6 +701,14 @@ fn repeated_boots_leave_no_leaks() {
         })
         .unwrap_or(0);
     assert_eq!(leftovers, 0, "per-VM scratch dirs should be cleaned up");
+
+    // Every firecracker VMM we booted must have been killed and reaped — no orphaned process.
+    let orphans: Vec<_> = vmm_pids
+        .iter()
+        .copied()
+        .filter(|&p| is_firecracker(p))
+        .collect();
+    assert!(orphans.is_empty(), "orphaned firecracker VMMs: {orphans:?}");
 
     // No tap interface survived the cycles either (only asserted when networking was enabled).
     if net {

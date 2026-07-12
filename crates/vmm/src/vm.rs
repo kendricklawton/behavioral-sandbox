@@ -13,6 +13,7 @@
 
 use std::ffi::OsStr;
 use std::io::{Read, Write};
+use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -316,6 +317,30 @@ impl RunningVm {
     #[must_use]
     pub fn console(&self) -> String {
         self.console.snapshot()
+    }
+
+    /// The PID of the `firecracker` VMM process. Useful for out-of-band supervision — putting the VMM
+    /// in a cgroup (Phase 6), attaching host-side observers to it, or asserting it was reaped on
+    /// teardown. The process is killed and reaped when this `RunningVm` is dropped, so the PID is only
+    /// valid for the VM's lifetime.
+    #[must_use]
+    pub fn vmm_pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// The host end of the per-VM point-to-point link, when booted with
+    /// [`enable_network`](BootConfig::enable_network); `None` otherwise. The guest can reach this
+    /// address over its `eth0` (and nothing beyond it — deny-by-default).
+    #[must_use]
+    pub fn host_ip(&self) -> Option<Ipv4Addr> {
+        self.tap.as_ref().map(|t| t.host_ip)
+    }
+
+    /// The guest's `eth0` address, when booted with [`enable_network`](BootConfig::enable_network);
+    /// `None` otherwise. Reachable from the host over the tap.
+    #[must_use]
+    pub fn guest_ip(&self) -> Option<Ipv4Addr> {
+        self.tap.as_ref().map(|t| t.guest_ip)
     }
 
     /// Connect to the in-guest agent over vsock and complete the channel handshake, returning a
@@ -720,7 +745,7 @@ impl Spawned {
         // so a tmpfs sized near RAM would OOM the guest rather than bound a runaway write. It rides
         // the kernel command line as a `key=value` token, which the kernel routes into PID 1's
         // environment (so `overlay-init` reads `$overlay_size` without mounting `/proc` first).
-        let boot_args = if config.read_only_root {
+        let mut boot_args = if config.read_only_root {
             format!(
                 "{} init=/sbin/overlay-init overlay_size={}M",
                 config.boot_args,
@@ -729,6 +754,16 @@ impl Spawned {
         } else {
             config.boot_args.clone()
         };
+        // Static guest addressing (P4.2) when a NIC is attached: the kernel configures `eth0` before
+        // userspace via `CONFIG_IP_PNP`. The gateway field is **empty**, so the kernel installs only
+        // the connected /30 route (guest ⇄ host over the tap) and **no default route** — the guest
+        // reaches the host and nothing else (deny-by-default, decision 008). Netmask is a /30.
+        if let Some(tap) = self.tap.as_ref() {
+            boot_args = format!(
+                "{boot_args} ip={}:::255.255.255.252::eth0:off",
+                tap.guest_ip
+            );
+        }
         still_before(deadline, "PUT /boot-source")?;
         self.api.put(
             "/boot-source",
@@ -995,25 +1030,31 @@ fn create_workdir() -> Result<PathBuf, VmmError> {
 /// mixed with the PID, just keeps candidates distinct so a cross-process collision is rare.
 static NET_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A per-VM host **tap** backing the guest's virtio-net (P4.1). The driver creates it (`ip tuntap`,
-/// needs `CAP_NET_ADMIN`), names it on the `PUT /network-interfaces`, and deletes it on every
-/// teardown path — it lives **outside** the scratch dir, so `remove_dir_all` can't reclaim it.
+/// A per-VM host **tap** backing the guest's virtio-net (P4.1) with the host end of a point-to-point
+/// /30 assigned (P4.2). The driver creates it (`ip tuntap`, needs `CAP_NET_ADMIN`), names it on the
+/// `PUT /network-interfaces`, addresses the host end, and deletes it on every teardown path — it
+/// lives **outside** the scratch dir, so `remove_dir_all` can't reclaim it (and `ip link del`
+/// cascades away its address + connected route, so addressing adds no teardown burden).
 #[derive(Debug, Clone)]
 struct Tap {
     /// Host interface name (`fc<hex>`, ≤ `IFNAMSIZ`-1 = 15 bytes).
     name: String,
     /// The guest NIC's MAC: a locally-administered unicast address, distinct per VM.
     mac: String,
+    /// The host end of the point-to-point /30 (assigned to the tap).
+    host_ip: Ipv4Addr,
+    /// The guest end of the /30 (configured on the guest's `eth0` via the kernel `ip=` param).
+    guest_ip: Ipv4Addr,
 }
 
 impl Tap {
-    /// Create a uniquely-named tap and bring it up. Shells out to `ip` (iproute2), consistent with
-    /// the driver's other host-tool calls (`mke2fs`/`e2fsck`); needs `CAP_NET_ADMIN`, so this only
-    /// succeeds under the privileged test/runtime tier.
+    /// Create a uniquely-named tap, bring it up, and assign the host end of the per-VM /30. Shells
+    /// out to `ip` (iproute2), consistent with the driver's other host-tool calls (`mke2fs`/`e2fsck`);
+    /// needs `CAP_NET_ADMIN`, so this only succeeds under the privileged test/runtime tier.
     fn create() -> Result<Tap, VmmError> {
         for _ in 0..1024 {
-            // Mix the PID in so two driver processes rarely pick the same name/MAC; the `ip tuntap
-            // add` name-taken retry below is the real cross-process reservation.
+            // Mix the PID in so two driver processes rarely pick the same name/MAC/subnet; the `ip
+            // tuntap add` name-taken retry below is the real cross-process reservation for the name.
             let token =
                 (u64::from(std::process::id()) << 20) ^ NET_SEQ.fetch_add(1, Ordering::Relaxed);
             let name = tap_name(token);
@@ -1021,14 +1062,26 @@ impl Tap {
                 TapAdd::Exists => continue, // raced or stale — try the next candidate name
                 TapAdd::Created => {}
             }
-            // A half-created (down) tap must not leak if bring-up fails.
-            if let Err(e) = run_ip(&["link", "set", "dev", &name, "up"]) {
+            // A half-configured tap must not leak if bring-up or addressing fails.
+            let (host_ip, guest_ip, prefix) = subnet_for(token);
+            let setup = run_ip(&["link", "set", "dev", &name, "up"]).and_then(|()| {
+                // Assign the host end of the /30. This auto-installs the connected route so the host
+                // reaches the guest — the only route on the link. Deny-by-default (decision 008): no
+                // default route, no masquerade, no ip_forward; `ip link del` removes this on teardown.
+                run_ip(&["addr", "add", &format!("{host_ip}/{prefix}"), "dev", &name])
+            });
+            if let Err(e) = setup {
                 let _ = run_ip(&["link", "del", "dev", &name]);
                 return Err(e);
             }
             #[allow(clippy::cast_possible_truncation)]
             let mac = mac_for(token as u32);
-            return Ok(Tap { name, mac });
+            return Ok(Tap {
+                name,
+                mac,
+                host_ip,
+                guest_ip,
+            });
         }
         Err(VmmError::Vmm(
             "could not allocate a unique tap name after 1024 attempts".into(),
@@ -1036,7 +1089,8 @@ impl Tap {
     }
 
     /// Best-effort delete for teardown/`Drop` context: a failure is logged, never propagated or
-    /// panicked (the host path is `#![forbid(unsafe_code)]` and must not panic on teardown).
+    /// panicked (the host path is `#![forbid(unsafe_code)]` and must not panic on teardown). Removing
+    /// the interface also removes its address and connected route.
     fn delete(&self) {
         if let Err(e) = run_ip(&["link", "del", "dev", &self.name]) {
             tracing::warn!(tap = %self.name, error = %e, "failed to delete tap on teardown");
@@ -1056,6 +1110,33 @@ fn tap_name(token: u64) -> String {
 fn mac_for(v: u32) -> String {
     let b = v.to_be_bytes();
     format!("02:00:{:02x}:{:02x}:{:02x}:{:02x}", b[0], b[1], b[2], b[3])
+}
+
+/// The two high octets of the per-VM address space: `10.200.0.0/16`, carved into 16384 point-to-point
+/// /30 blocks. An RFC1918 range chosen to dodge the defaults a host is likely to already route
+/// (Docker `172.17+`, libvirt `192.168.122`, home routers `192.168.0/1`, plain `10.0.0/24`).
+const NET_BASE: [u8; 2] = [10, 200];
+
+/// Fold a 64-bit token down to a 14-bit /30 index. The token is `(pid << 20) ^ NET_SEQ`, so its PID
+/// entropy lives in bits ≥ 20; a plain `token & 0x3fff` would drop all of it and collapse to
+/// `NET_SEQ & 0x3fff`, making two driver processes both at `NET_SEQ = 0` pick the *same* /30 in the
+/// shared host netns. XOR-folding the high bits down mixes the PID back into the index.
+fn subnet_index(token: u64) -> u16 {
+    ((token ^ (token >> 14) ^ (token >> 28) ^ (token >> 42)) & 0x3fff) as u16
+}
+
+/// The `(host_ip, guest_ip, prefix)` of the per-VM point-to-point /30 for `token`, derived from the
+/// same token that won the tap name/MAC so a VM's identity is consistent. Within the 4-address block
+/// (`index * 4`): `+1` is the host end, `+2` the guest end, so it's a /30 (netmask `255.255.255.252`).
+/// `index ∈ [0, 16383]` ⇒ `block ∈ {0, 4, …, 65532}` ⇒ the low octet is a multiple of 4 in `[0, 252]`,
+/// so `+1`/`+2` never overflow an octet.
+fn subnet_for(token: u64) -> (Ipv4Addr, Ipv4Addr, u8) {
+    let block = u32::from(subnet_index(token)) << 2; // index * 4
+    let o3 = (block >> 8) as u8;
+    let o4 = (block & 0xff) as u8;
+    let host = Ipv4Addr::new(NET_BASE[0], NET_BASE[1], o3, o4 + 1);
+    let guest = Ipv4Addr::new(NET_BASE[0], NET_BASE[1], o3, o4 + 2);
+    (host, guest, 30)
 }
 
 /// Outcome of `ip tuntap add`: a taken name is the retryable case (another VM or a stale tap holds
@@ -1995,6 +2076,38 @@ mod tests {
         assert_eq!(0x02 & 0x02, 0x02);
         assert_eq!(0x02 & 0x01, 0x00);
         assert_ne!(mac_for(0), mac_for(1), "distinct values → distinct MACs");
+    }
+
+    #[test]
+    fn subnet_for_carves_a_point_to_point_30() {
+        let (host, guest, prefix) = subnet_for(0);
+        assert_eq!(prefix, 30);
+        // Both ends live in 10.200.0.0/16, and the guest is the host's neighbour (host + 1).
+        assert_eq!(host.octets()[0..2], [10, 200]);
+        assert_eq!(guest.octets()[0..2], [10, 200]);
+        assert_eq!(u32::from(guest), u32::from(host) + 1);
+        // The block base is a multiple of 4, so host/guest are the .1/.2 of their /30 (never the
+        // network .0 or broadcast .3) and the low octet can't overflow.
+        assert_eq!(u32::from(host) % 4, 1);
+        for token in [1u64, 42, 0xffff_ffff, u64::MAX] {
+            let (_h, _g, p) = subnet_for(token);
+            assert_eq!(p, 30);
+        }
+    }
+
+    #[test]
+    fn subnet_index_folds_pid_bits_so_processes_dont_collide_at_seq_zero() {
+        // The real token is `(pid << 20) ^ seq`. Two processes both at seq 0 must land on different
+        // /30s — a plain low-bit mask would collapse to `seq & mask` (identical). The fold mixes the
+        // PID (bits ≥ 20) back into the 14-bit index.
+        let token = |pid: u64, seq: u64| (pid << 20) ^ seq;
+        assert_ne!(
+            subnet_index(token(1234, 0)),
+            subnet_index(token(5678, 0)),
+            "distinct PIDs → distinct blocks at seq 0"
+        );
+        // Successive sequence numbers within one process also differ.
+        assert_ne!(subnet_index(token(1234, 0)), subnet_index(token(1234, 1)));
     }
 
     #[test]

@@ -369,7 +369,23 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge less
       also asserts no orphaned `fc*` interfaces. Both are `CAP_NET_ADMIN`-gated (skip without it; verified
       under a user+net namespace). New host dep `ip` (iproute2; `setup` check). P4.3's direction was
       settled up front by decision 008.)*
-- [ ] **P4.2** Address the guest (static or a tiny DHCP) and route host↔guest.
+- [x] **P4.2** Address the guest (static or a tiny DHCP) and route host↔guest.
+      *(Static, via the kernel `ip=` param — the pinned kernel has `CONFIG_IP_PNP` (verified: the
+      `IP-Config:` strings are baked into `vmlinux`), so the guest configures `eth0` before userspace
+      with **no rootfs change**. The P4.1 per-VM index now also yields a point-to-point **/30** from
+      `10.200.0.0/16` (`subnet_for`: host = block+1, guest = block+2; the index folds the PID bits down
+      so two processes both at `NET_SEQ=0` don't pick the same block). `Tap::create` assigns the host
+      end (`ip addr add host_ip/30 dev tap`, which installs the connected route so the host reaches the
+      guest), and `run_boot` appends `ip=<guest_ip>:::255.255.255.252::eth0:off` — the **empty gateway**
+      is the deny-by-default lever: the kernel installs only the connected /30 route, **no default
+      route**, so host↔guest works and the guest reaches nothing else. No new `BootConfig` knob (rides
+      `enable_network`); `RunningVm::host_ip()`/`guest_ip()` expose the pair. Teardown is unchanged —
+      `ip link del` cascades away the address + route. Proof:
+      `addresses_the_guest_and_routes_host_to_guest` asserts the guest has its IP, can ping the host
+      end, and **cannot** reach an off-subnet address (RFC 5737 TEST-NET-1) — a fast `ENETUNREACH`, not
+      a timeout. `CAP_NET_ADMIN`-gated (skips without it; verified under a user+net namespace). Base
+      `10.200/16` dodges the common host defaults; making it a hoster knob and per-VM netns isolation
+      are P4.3/P4.4.)*
 - [ ] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
       `ARCHITECTURE.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
       *(Direction **pre-recorded as decision 008** (2026-07-12): deny-by-default, tap has no world
@@ -379,14 +395,17 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge less
 - [ ] **P4.4** Per-VM isolation: one VM cannot reach another's tap.
       *(Depends on the P4.1 host-scoped allocator: a unique tap name / guest IP / MAC / CID per VM so
       two concurrent sandboxes can't collide — `VM_SEQ` (process-local) is not enough.)*
-- [ ] **P4.5** Teardown removes the tap + routes; no orphaned interfaces after many runs.
-      *(The tap is the first per-VM resource **outside `workdir`**, so `remove_dir_all(workdir)` won't
-      reclaim it: delete it (and its routes) in **all three** paths — `RunningVm::drop`, `Spawned::drop`
-      (the boot-failure guard), and `Spawned::abort` — so a boot that fails *after* tap-create still
-      cleans up. Best-effort (`ip link del` can fail), with no `Drop`-of-temp-dir safety net → reinforces
-      the Phase-6 jailer/cgroup ownership model. **Extend `repeated_boots_leave_no_leaks`** to assert no
-      orphaned interfaces (and, cheaply, no orphaned firecracker processes) — today it only counts
-      `/tmp/agent-<pid>-*` dirs, so a tap leak would pass CI silently.)*
+- [x] **P4.5** Teardown removes the tap + routes; no orphaned interfaces after many runs.
+      *(Delivered across P4.1/P4.2 and finished here: the tap is the first per-VM resource **outside
+      `workdir`**, so it's deleted (with its address + connected route, which `ip link del` cascades
+      away) in **all three** teardown paths (`RunningVm::drop`, `Spawned::drop`, `Spawned::abort`) — a
+      boot that fails *after* tap-create still cleans up. Best-effort (`ip link del` can fail), no
+      `Drop`-of-temp-dir safety net, which reinforces the Phase-6 jailer/cgroup ownership model.
+      `repeated_boots_leave_no_leaks` now asserts **all three** leak dimensions after two cycles: no
+      per-VM scratch dir, no orphaned `fc*` interface, and no orphaned **firecracker VMM process** (the
+      new `RunningVm::vmm_pid()` records each VMM's pid; the check keys on that specific pid via
+      `/proc/<pid>/comm`, so it's non-flaky under the parallel test harness). Verified under a user+net
+      namespace. `vmm_pid()` is also the accessor Phase 6 will use to place the VMM in a cgroup.)*
 - [ ] **P4.6** Name/track each tap so the eBPF track can bind policy to a specific VM later.
 - [ ] **P4.7** Test: guest can (optionally) reach an allowed host endpoint; cannot reach a blocked one.
 - [ ] **P4.8** Document the netfilter/routing rules the driver installs.
