@@ -3,13 +3,16 @@
 //! - **`ci`** — the host-safe gate (fmt · clippy `-D warnings` · build · test · docs · `deny`).
 //!   Runs everywhere, needs no KVM or root, and mirrors `.github/workflows/ci.yml`.
 //! - **`ci-privileged`** — the KVM/eBPF integration tests (the `#[ignore]`d ones). Needs
-//!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop.
+//!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop. Builds the guest
+//!   agent + the agent rootfs first, so the in-VM exec test has something to boot.
 //! - **`setup`** — checks the host can do KVM + eBPF and reports what's missing.
+//! - **`build-rootfs`** — assemble the reproducible guest rootfs (Alpine base + baked-in agent).
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
 //! workspace; its object build folds into `ci` at ROADMAP Phase 8.
 #![forbid(unsafe_code)]
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -36,8 +39,11 @@ enum Cmd {
     Setup,
     /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
     FetchArtifacts,
-    /// Build the guest agent as a static musl binary (baked into the rootfs at Phase 3).
+    /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
     BuildGuestAgent,
+    /// Assemble the guest rootfs: a minimal Alpine base + the static agent + a vsock init, as an
+    /// ext4 image at `artifacts/rootfs-agent.ext4` (needs `curl`, `tar`, `mke2fs`, `truncate`).
+    BuildRootfs,
 }
 
 fn main() -> Result<()> {
@@ -46,7 +52,8 @@ fn main() -> Result<()> {
         Cmd::CiPrivileged => ci_privileged(),
         Cmd::Setup => setup(),
         Cmd::FetchArtifacts => fetch_artifacts(),
-        Cmd::BuildGuestAgent => build_guest_agent(),
+        Cmd::BuildGuestAgent => build_guest_agent().map(|_| ()),
+        Cmd::BuildRootfs => build_rootfs(),
     }
 }
 
@@ -54,10 +61,10 @@ fn main() -> Result<()> {
 /// no dynamic loader or libc to bake into the rootfs.
 const GUEST_TARGET: &str = "x86_64-unknown-linux-musl";
 
-/// Build the guest agent as a static binary for the guest. Kept out of the `ci` gate (it needs the
-/// musl target installed and produces an artifact the host doesn't run); Phase 3 bakes the result
-/// into the rootfs.
-fn build_guest_agent() -> Result<()> {
+/// Build the guest agent as a static binary for the guest and return its path. Kept out of the `ci`
+/// gate (it needs the musl target installed and produces an artifact the host doesn't run);
+/// `build-rootfs` bakes the result into the image.
+fn build_guest_agent() -> Result<PathBuf> {
     let installed = Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
@@ -79,16 +86,18 @@ fn build_guest_agent() -> Result<()> {
         "--target",
         GUEST_TARGET,
     ])?;
-    let bin = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("target")
-        .join(GUEST_TARGET)
-        .join("release/agent-guest");
+    let bin = guest_agent_bin();
     verify_static(&bin)?;
     println!("\n✓ guest agent built (static): {}", bin.display());
-    println!("  (Phase 3 bakes it into the rootfs)");
-    Ok(())
+    Ok(bin)
+}
+
+/// Where `build_guest_agent` leaves the static binary.
+fn guest_agent_bin() -> PathBuf {
+    workspace_root()
+        .join("target")
+        .join(GUEST_TARGET)
+        .join("release/agent-guest")
 }
 
 /// Verify the built binary is actually statically linked — "measured, not marketed." A sys-crate or
@@ -119,6 +128,140 @@ fn verify_static(bin: &Path) -> Result<()> {
             Ok(())
         }
     }
+}
+
+// ---- rootfs build (ROADMAP P3.1) -------------------------------------------------------------
+
+/// A fixed rootfs UUID so repeated builds don't churn it (Firecracker roots by device, not UUID).
+/// True byte-for-byte reproducibility is P3.6; P3.1's bar is pinned inputs + one scripted command.
+const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
+
+/// Image size. Generous headroom over the ~15 MB payload so a later `apk.static --root` (P3.2's
+/// Python, P3.9's Node) has room without a re-size. Per-run growth is P3.3's overlay, not this.
+const ROOTFS_SIZE_MIB: u32 = 128;
+
+/// The init the image ships, replacing Alpine's OpenRC `inittab`. busybox is PID 1 (it reaps
+/// orphans and a crashed child is respawned, neither of which the `forbid(unsafe_code)` agent should
+/// own). `sysinit` mounts the pseudo-filesystems a fresh ext4 lacks — a rootless `mke2fs -d` seeds
+/// no device nodes, so `devtmpfs` is what provides `/dev/ttyS0` + the vsock device (the guest kernel
+/// must auto-mount it, `CONFIG_DEVTMPFS_MOUNT`, for PID 1's own console). The agent then respawns on
+/// the contract vsock port (`agent_channel::AGENT_VSOCK_PORT` — the same constant the host dials,
+/// so the two sides can't drift), attached to `ttyS0` so its readiness line reaches the serial
+/// console the host scans.
+fn rootfs_inittab() -> String {
+    format!(
+        "\
+# Minimal init for the agent sandbox rootfs (replaces Alpine's OpenRC inittab).
+::sysinit:/bin/mount -t devtmpfs dev /dev
+::sysinit:/bin/mount -t proc proc /proc
+::sysinit:/bin/mount -t sysfs sys /sys
+ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
+::ctrlaltdel:/sbin/reboot
+::shutdown:/bin/umount -a -r
+",
+        port = agent_channel::AGENT_VSOCK_PORT
+    )
+}
+
+/// The pinned Alpine minirootfs — a real musl+busybox userland (so init and a shell just work, and
+/// `apk` can add Python/Node later). A *build input*, deliberately separate from [`artifacts`] (the
+/// boot kernel+rootfs the `ci-privileged` hash-guard requires present).
+fn alpine_artifact() -> Result<Artifact> {
+    let dir = artifacts_dir();
+    match std::env::consts::ARCH {
+        "x86_64" => Ok(Artifact {
+            url: "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/\
+                  alpine-minirootfs-3.24.1-x86_64.tar.gz"
+                .to_string(),
+            sha256: "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
+            dest: dir.join("alpine-minirootfs.tar.gz"),
+        }),
+        other => bail!("no pinned Alpine minirootfs for arch {other} yet (x86_64 only)"),
+    }
+}
+
+/// Assemble `artifacts/rootfs-agent.ext4`: extract the pinned Alpine base, bake the static agent in,
+/// install the vsock init, and build the ext4 from the staging dir with `mke2fs -d` (rootless — no
+/// loopback mount, no `sudo`). A distinct output path, so the pinned Ubuntu `rootfs.ext4` (and the
+/// `ci-privileged` hash-guard + the Phase-1 `login:` boot test) are untouched.
+fn build_rootfs() -> Result<()> {
+    let agent = build_guest_agent()?;
+
+    let base = alpine_artifact()?;
+    fetch_one(&base)?;
+
+    let dir = artifacts_dir();
+    let staging = dir.join("rootfs-staging");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .with_context(|| format!("clean staging {}", staging.display()))?;
+    }
+    std::fs::create_dir_all(&staging)?;
+
+    // Extract the Alpine base (preserves symlinks + mode bits).
+    run_tool(
+        "tar",
+        &[
+            OsStr::new("xzf"),
+            base.dest.as_os_str(),
+            OsStr::new("-C"),
+            staging.as_os_str(),
+        ],
+    )?;
+
+    // Bake the static agent in at /usr/local/bin/agent-guest.
+    let bindir = staging.join("usr/local/bin");
+    std::fs::create_dir_all(&bindir)?;
+    let agent_dest = bindir.join("agent-guest");
+    std::fs::copy(&agent, &agent_dest)
+        .with_context(|| format!("copy agent into {}", agent_dest.display()))?;
+    set_mode_0755(&agent_dest)?;
+
+    // Replace Alpine's OpenRC inittab with our minimal vsock init.
+    std::fs::write(staging.join("etc/inittab"), rootfs_inittab()).context("write /etc/inittab")?;
+
+    // Build the ext4 from the staging dir — rootless, via `mke2fs -d`.
+    let out = dir.join("rootfs-agent.ext4");
+    let _ = std::fs::remove_file(&out);
+    run_tool(
+        "truncate",
+        &[
+            OsStr::new("-s"),
+            OsStr::new(&format!("{ROOTFS_SIZE_MIB}M")),
+            out.as_os_str(),
+        ],
+    )?;
+    run_tool(
+        "mke2fs",
+        &[
+            OsStr::new("-F"),
+            OsStr::new("-q"),
+            OsStr::new("-t"),
+            OsStr::new("ext4"),
+            OsStr::new("-b"),
+            OsStr::new("4096"),
+            OsStr::new("-m"),
+            OsStr::new("0"),
+            OsStr::new("-U"),
+            OsStr::new(ROOTFS_UUID),
+            OsStr::new("-d"),
+            staging.as_os_str(),
+            out.as_os_str(),
+        ],
+    )?;
+
+    // The image is the product — don't leave the extracted staging tree behind.
+    std::fs::remove_dir_all(&staging)
+        .with_context(|| format!("clean up staging {}", staging.display()))?;
+
+    println!("\n✓ rootfs built (agent baked in): {}", out.display());
+    // The full runnable hint, printed from the contract constants so it can't drift from the code.
+    println!(
+        "  exec inside a microVM with:\n  AGENT_ROOTFS={} AGENT_MARKER={} cargo run -p agent-cli -- run -- echo hi",
+        out.display(),
+        agent_channel::GUEST_READY_MARKER
+    );
+    Ok(())
 }
 
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.
@@ -180,6 +323,10 @@ fn ci_privileged() -> Result<()> {
             );
         }
     }
+    // The in-VM exec test boots a rootfs with the agent baked in — build it here (not from inside a
+    // `#[test]`, which mustn't shell out to a musl `cargo build`). Idempotent: the Alpine base is
+    // cached by sha256, so this is a rebuild of the agent + the image, not a re-download.
+    build_rootfs()?;
     cargo(&["test", "--workspace", "--locked", "--", "--ignored"])?;
     println!("\n✓ privileged integration passed");
     Ok(())
@@ -197,6 +344,7 @@ fn setup() -> Result<()> {
     check("firecracker in PATH", in_path("firecracker"));
     check("jailer in PATH", in_path("jailer"));
     check("bpf-linker installed", in_path("bpf-linker"));
+    check("mke2fs (rootfs build)", in_path("mke2fs"));
     let dir = artifacts_dir();
     check(
         "guest kernel + rootfs (cargo xtask fetch-artifacts)",
@@ -239,52 +387,62 @@ fn artifacts() -> Result<Vec<Artifact>> {
     }
 }
 
-/// `artifacts/` under the workspace root (not the cwd), so `fetch-artifacts` works from anywhere.
-fn artifacts_dir() -> PathBuf {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+/// The workspace root (not the cwd), so the commands work from anywhere.
+fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
-        .unwrap_or_else(|| Path::new("."));
-    root.join("artifacts")
+        .unwrap_or_else(|| Path::new("."))
 }
 
-/// Download each artifact (skipping any already present with the right hash) and sha256-verify it.
+/// `artifacts/` under the workspace root.
+fn artifacts_dir() -> PathBuf {
+    workspace_root().join("artifacts")
+}
+
+/// Download each pinned kernel/rootfs artifact (skipping any already present with the right hash).
 fn fetch_artifacts() -> Result<()> {
     let items = artifacts()?;
-    let dir = artifacts_dir();
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
     for a in &items {
-        let name = a
-            .dest
-            .file_name()
-            .map_or_else(|| a.dest.clone(), PathBuf::from);
-        if a.dest.is_file() && sha256_of(&a.dest)? == a.sha256 {
-            println!("✓ {} already present (sha256 ok)", name.display());
-            continue;
-        }
-        println!("↓ {} <- {}", name.display(), a.url);
-        // Download to a `.part` and rename into place only after the hash verifies, so an
-        // interrupted or failed download can never leave a plausible-looking file at the final
-        // path (`ci-privileged` gates on presence alone).
-        let part = a.dest.with_extension("part");
-        if let Err(e) = curl_download(&a.url, &part) {
-            let _ = std::fs::remove_file(&part);
-            return Err(e);
-        }
-        let got = sha256_of(&part)?;
-        if got != a.sha256 {
-            let _ = std::fs::remove_file(&part);
-            bail!(
-                "sha256 mismatch for {}: expected {}, got {} (removed)",
-                name.display(),
-                a.sha256,
-                got
-            );
-        }
-        std::fs::rename(&part, &a.dest)
-            .with_context(|| format!("move {} into place", part.display()))?;
-        println!("✓ {} verified", name.display());
+        fetch_one(a)?;
     }
-    println!("\n✓ artifacts ready in {}", dir.display());
+    println!("\n✓ artifacts ready in {}", artifacts_dir().display());
+    Ok(())
+}
+
+/// Fetch one artifact into place if it isn't already present with the right hash. Downloads to a
+/// `.part` and renames only after the hash verifies, so an interrupted download can never leave a
+/// plausible-looking file at the final path (`ci-privileged` gates on presence alone).
+fn fetch_one(a: &Artifact) -> Result<()> {
+    let name = a
+        .dest
+        .file_name()
+        .map_or_else(|| a.dest.clone(), PathBuf::from);
+    if a.dest.is_file() && sha256_of(&a.dest)? == a.sha256 {
+        println!("✓ {} already present (sha256 ok)", name.display());
+        return Ok(());
+    }
+    if let Some(parent) = a.dest.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    println!("↓ {} <- {}", name.display(), a.url);
+    let part = a.dest.with_extension("part");
+    if let Err(e) = curl_download(&a.url, &part) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    let got = sha256_of(&part)?;
+    if got != a.sha256 {
+        let _ = std::fs::remove_file(&part);
+        bail!(
+            "sha256 mismatch for {}: expected {}, got {} (removed)",
+            name.display(),
+            a.sha256,
+            got
+        );
+    }
+    std::fs::rename(&part, &a.dest)
+        .with_context(|| format!("move {} into place", part.display()))?;
+    println!("✓ {} verified", name.display());
     Ok(())
 }
 
@@ -317,6 +475,30 @@ fn sha256_of(path: &Path) -> Result<String> {
         .next()
         .context("empty sha256sum output")?;
     Ok(hash.to_string())
+}
+
+/// Run an external build tool, echoing the command; fail with context if it's missing or errors.
+fn run_tool(program: &str, args: &[&OsStr]) -> Result<()> {
+    let shown: Vec<_> = args.iter().map(|a| a.to_string_lossy()).collect();
+    println!("$ {program} {}", shown.join(" "));
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .with_context(|| format!("running {program} (is it installed?)"))?;
+    if !status.success() {
+        bail!("{program} failed");
+    }
+    Ok(())
+}
+
+/// `chmod 0755` — the agent must be executable inside the image even if the copy didn't preserve it.
+fn set_mode_0755(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).with_context(|| format!("chmod +x {}", path.display()))
 }
 
 fn check(label: &str, ok: bool) {

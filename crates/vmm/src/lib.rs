@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use agent_channel::ChannelError;
 
-pub use agent_channel::{ClientConnection, Request, Response};
+pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER};
 pub use vm::{BootConfig, RunningVm, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 
 /// Every way driving a microVM can fail, as a typed value — the driver's **error taxonomy**.

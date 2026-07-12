@@ -17,11 +17,14 @@ path = "src/main.rs"
 
 [dependencies]
 # The wire protocol is shared with the host driver; tracing is the guest agent's stderr log.
-# No transport dependency yet — `serve` is generic over the stream, `main` listens on a unix
-# socket, and the vsock listener lands in P2.3 with the host-side wiring.
+# `serve` is transport-agnostic (any `Read`+`Write`); `main` binds the concrete listener.
 agent-channel = { path = "../channel" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# The in-VM transport: a static `AF_VSOCK` listener. Guest-agent-only — the host reaches Firecracker's
+# vsock over a plain `UnixStream`, not `AF_VSOCK`. The crate's internal `unsafe` is the dep's, not
+# ours (this crate stays `#![forbid(unsafe_code)]`). Pinned; all of its tree is MIT/Apache.
+vsock = "0.5.4"
 
 [lints]
 workspace = true

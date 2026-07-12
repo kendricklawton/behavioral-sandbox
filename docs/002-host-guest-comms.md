@@ -26,6 +26,10 @@ way is this chapter.
 > socket) there too. So the literal in-microVM `exec("echo hi")` transcript is the **first Phase 3
 > demo** — the exec engine is done here; the last inch is a rootfs concern. See "What's still
 > stubbed" below.
+>
+> *(Update, P3.1: closed. `cargo xtask build-rootfs` bakes the agent — now with an `AF_VSOCK`
+> listener — into an Alpine-based image, and `exec("echo hi") → hi, exit 0` runs in a real microVM.
+> See `ARCHITECTURE.md` decision 003.)*
 
 ## Why not just use the serial console?
 

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID};
+use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 /// A boot config pointed at the workspace's fetched artifacts (absolute, so it's cwd-independent).
 /// Explicit `AGENT_KERNEL`/`AGENT_ROOTFS` overrides still win — they're the documented escape
@@ -65,6 +65,39 @@ fn boots_with_a_vsock_device() {
         vm.console().contains(&marker),
         "guest should still reach userspace with vsock configured"
     );
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn execs_a_command_in_the_microvm() {
+    // Closes Phase 2's provisional "in a microVM" gate: the agent baked into `rootfs-agent.ext4`
+    // (built by `cargo xtask build-rootfs`) actually binds vsock in a real guest, so `exec`
+    // round-trips end to end — not against a faked socket. Boot returns once the agent's readiness
+    // marker reaches the console, so the connect can't race the bind.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut cfg = BootConfig::from_env();
+    if std::env::var_os("AGENT_KERNEL").is_none() {
+        cfg.kernel = root.join("artifacts/vmlinux");
+    }
+    // Always the agent rootfs (not `AGENT_ROOTFS`): this test is about *that* image specifically.
+    cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
+    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
+    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+    cfg.boot_timeout = Duration::from_secs(30);
+
+    let vm =
+        Vm::boot(cfg).expect("agent microVM should boot and the agent should announce readiness");
+    let out = vm
+        .exec(&["echo".into(), "hi".into()], b"")
+        .expect("exec `echo hi` in the guest");
+    assert_eq!(
+        out.stdout,
+        b"hi\n",
+        "guest stdout should be `hi`; console:\n{}",
+        vm.console()
+    );
+    assert_eq!(out.exit_code, 0, "`echo hi` should exit 0");
     vm.shutdown().expect("shutdown should succeed");
 }
 

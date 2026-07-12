@@ -52,9 +52,10 @@ const FC_STDERR: &str = "fc.stderr";
 /// the exec channel; overridable per-VM via [`BootConfig::guest_cid`].
 pub const DEFAULT_GUEST_CID: u32 = 3;
 
-/// The vsock port the in-guest agent listens on for exec connections. The host dials this port
-/// through Firecracker's vsock unix socket; the guest agent binds it (from Phase 3).
-pub const AGENT_VSOCK_PORT: u32 = 1024;
+/// The vsock port the in-guest agent listens on for exec connections — defined in `agent-channel`
+/// (it's a host↔guest contract value: the rootfs build writes it into the guest's init line, and
+/// the host dials it through Firecracker's vsock unix socket). Re-exported here for callers.
+pub use agent_channel::AGENT_VSOCK_PORT;
 
 /// The vsock unix socket Firecracker creates in the scratch dir; the host connects here and speaks
 /// the `CONNECT <port>` handshake to reach a guest port.

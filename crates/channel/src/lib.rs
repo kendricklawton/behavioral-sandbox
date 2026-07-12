@@ -39,6 +39,20 @@ pub const PROTOCOL_VERSION: u16 = 1;
 /// exists so a broken `len` header is a typed error, not a huge allocation.
 pub const MAX_PAYLOAD: usize = 1 << 20; // 1 MiB
 
+/// The boot-readiness sentinel: the in-guest agent prints this to its stdout (the serial console)
+/// **after** it has bound its vsock listener, and the host scans the console for it to know the
+/// agent is accepting connections. It's the pre-connection half of the host↔guest contract —
+/// emitting it post-`bind` (not from init before the agent starts) is what removes the
+/// connect-before-listen race. Both the guest agent (which prints it) and the driver (which waits
+/// for it) reference this one constant.
+pub const GUEST_READY_MARKER: &str = "AGENT-GUEST-READY";
+
+/// The vsock port the guest agent listens on and the host dials. Like [`GUEST_READY_MARKER`],
+/// it's a pre-connection half of the host↔guest contract, so it lives here where **both** sides
+/// (the driver that connects, and the rootfs build that writes the guest's init line) consume the
+/// one definition — a drifted copy would strand the host dialing a port nobody binds.
+pub const AGENT_VSOCK_PORT: u32 = 1024;
+
 const TAG_EXEC: u8 = 1;
 const TAG_STDOUT: u8 = 2;
 const TAG_STDERR: u8 = 3;

@@ -37,10 +37,13 @@ cargo build
 # Boot a microVM and read its console (ROADMAP Phase 1):
 cargo run -p agent-cli -- run --demo-boot
 
-# Later: run a command inside a microVM and capture its output (Phase 2+):
-cargo run -p agent-cli -- run -- python -c 'print(2 + 2)'
+# Run a command inside a real microVM (ROADMAP Phase 3): build the agent rootfs, then exec.
+cargo xtask build-rootfs   # sha256-pinned Alpine + the static agent, via mke2fs -d (no root)
+AGENT_ROOTFS=artifacts/rootfs-agent.ext4 AGENT_MARKER=AGENT-GUEST-READY \
+  cargo run -p agent-cli -- run -- echo hi
+# (A language runtime — Python — inside the guest is P3.2; the default rootfs stays the boot image.)
 
-# Later still: run it and print the eBPF-observed flight recorder (Phase 13+):
+# Later: run it and print the eBPF-observed flight recorder (Phase 13+):
 cargo run -p agent-cli -- run --trace -- <cmd>
 ```
 

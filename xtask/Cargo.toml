@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# The host↔guest contract constants (`AGENT_VSOCK_PORT`, `GUEST_READY_MARKER`): the rootfs build
+# writes the guest's init line from the same definition the driver dials, so they cannot drift.
+agent-channel = { path = "../crates/channel" }
 
 [lints]
 workspace = true

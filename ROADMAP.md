@@ -211,17 +211,31 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
   guest agents** and how host↔guest comms actually work.
   *(Writeup: `docs/002-host-guest-comms.md`. The exec **engine** is complete and tested against the
   real guest agent (only the Firecracker vsock UDS is faked) + a privileged vsock-device boot smoke
-  test. The **"in a microVM" clause is provisional**: the agent isn't baked into the rootfs and
-  doesn't bind `AF_VSOCK` until Phase 3, so the literal in-VM `exec("echo hi")` transcript is the
-  **first P3 deliverable** — see `docs/002` "What's still stubbed".)*
+  test. The **"in a microVM" clause was provisional** here — the agent wasn't baked into the rootfs
+  or binding `AF_VSOCK` yet — and is now **closed by P3.1**: the literal in-VM `exec("echo hi") → hi,
+  exit 0` runs against a real microVM. See `docs/002` "What's still stubbed".)*
 
 ## Phase 3 — Rootfs & the language runtime
 
-Build the disk the guest runs, with a real runtime (e.g. Python) inside — natively, no wasm gymnastics.
+Build the disk the guest runs, with a real runtime inside — natively, no wasm gymnastics. Python is
+the exit-gate demo, but the rootfs is **runtime-agnostic**: a real kernel + rootfs runs *any* Linux
+binary, so adding a runtime is a packaging step, not an engine change.
 
-- [ ] **P3.1** Reproducible **rootfs build**: a minimal ext4 image (busybox/alpine or a scratch
+- [x] **P3.1** Reproducible **rootfs build**: a minimal ext4 image (busybox/alpine or a scratch
       base) + the guest agent baked in.
-- [ ] **P3.2** Add a language runtime (Python) to the rootfs; prove `exec("python -c 'print(2+2)')`.
+      *(`cargo xtask build-rootfs` → `artifacts/rootfs-agent.ext4`: a sha256-pinned Alpine
+      minirootfs (`decision 003`) with the static agent baked in at `/usr/local/bin`, a minimal
+      busybox-init `/etc/inittab` that mounts the pseudo-fs and respawns the agent on vsock, built
+      with `mke2fs -d` — **rootless, no loopback, one command**. To make "agent baked in" real, the
+      agent gained its **`AF_VSOCK` listener** (the `vsock` crate; `vsock:<port>` in `main`), and it
+      prints the shared `GUEST_READY_MARKER` to the console **after `bind`** so boot-readiness means
+      "the agent is accepting" (no connect-before-listen race). **Closes Phase 2's provisional gate:**
+      a new privileged test boots this rootfs and runs `exec("echo hi") → hi, exit 0` **inside a real
+      microVM** (~3.5 s), wired via `ci-privileged` (which builds the agent + rootfs before the
+      `#[ignore]` tests). Additive — the Ubuntu boot rootfs + its hash-guard + the `login:` test are
+      untouched. Reproducibility rigor (content hash / byte-identical) is P3.6.)*
+- [ ] **P3.2** Add the reference language runtime (**Python**) to the rootfs; prove
+      `exec("python -c 'print(2+2)')`.
 - [ ] **P3.3** Read-only base rootfs + a writable overlay per run (so runs don't mutate the base).
 - [ ] **P3.4** Inject a per-run working dir / files via a second **block device** (the
       channel path — small per-file injection — already landed in P2.5; this is the whole-working-dir
@@ -231,8 +245,13 @@ Build the disk the guest runs, with a real runtime (e.g. Python) inside — nati
 - [ ] **P3.6** Pin the rootfs build in `xtask` so it's one command + reproducible.
 - [ ] **P3.7** Size/boot budget: keep the base small; measure its effect on boot time.
 - [ ] **P3.8** Test: run Python + a small script that writes a file → capture the file.
-- **Exit gate + lesson:** real Python runs in the microVM and produces artifacts; write up
-  **filesystems, ext4 images, overlayfs, and initramfs vs rootfs.**
+- [ ] **P3.9** **Runtime-agnostic proof:** a second, *differently-shaped* runtime runs unchanged
+      through the same `exec` path — a **static Go/Rust ELF** (no interpreter, no libc) and **Node**
+      (a different interpreter) — showing the rootfs isn't Python-specific and the engine runs any
+      Linux binary. (Contrast the Wasmtime sibling, which needs code recompiled to wasm32.)
+- **Exit gate + lesson:** real Python **and a static native binary + Node** run in the microVM and
+  produce artifacts — the rootfs is runtime-agnostic; write up **filesystems, ext4 images, overlayfs,
+  initramfs vs rootfs, and static vs dynamic linking in a minimal rootfs.**
 
 ## Phase 4 — Networking
 
