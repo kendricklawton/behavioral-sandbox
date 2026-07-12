@@ -234,8 +234,17 @@ binary, so adding a runtime is a packaging step, not an engine change.
       microVM** (~3.5 s), wired via `ci-privileged` (which builds the agent + rootfs before the
       `#[ignore]` tests). Additive — the Ubuntu boot rootfs + its hash-guard + the `login:` test are
       untouched. Reproducibility rigor (content hash / byte-identical) is P3.6.)*
-- [ ] **P3.2** Add the reference language runtime (**Python**) to the rootfs; prove
+- [x] **P3.2** Add the reference language runtime (**Python**) to the rootfs; prove
       `exec("python -c 'print(2+2)')`.
+      *(`build-rootfs` now installs `python3` into the staging root with a **sha256-pinned static
+      `apk`** (`apk-tools-static`) — still rootless, on any host distro; packages are
+      signature-verified against the keys the minirootfs itself ships. `--no-scripts` because
+      install scripts need a chroot (root); the in-VM test proves the payload runs. Versions float
+      *within* the pinned `v3.24` branch — Alpine branch repos carry only the latest revision per
+      package, so an exact `pkg=ver-rN` pin would break on every upstream patch bump; the
+      exact-version lockfile is **P3.6**. Image: 33 packages, ~50 MB in the 128 MiB ext4. Proof:
+      `execs_python_in_the_microvm` boots the image and `exec("python3 -c 'print(2+2)'") → 4`,
+      exit 0, in a real microVM.)*
 - [ ] **P3.3** Read-only base rootfs + a writable overlay per run (so runs don't mutate the base).
 - [ ] **P3.4** Inject a per-run working dir / files via a second **block device** (the
       channel path — small per-file injection — already landed in P2.5; this is the whole-working-dir

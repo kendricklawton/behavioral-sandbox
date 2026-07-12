@@ -54,8 +54,8 @@ fn boots_to_userspace_and_shuts_down() {
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn boots_with_a_vsock_device() {
     // Real Firecracker must accept `PUT /vsock` and boot to userspace with the device configured.
-    // (A full host→guest-agent round trip needs the agent baked into the rootfs — P3 — so here we
-    // only prove the config path and that the vsock socket is created.)
+    // (This proves just the config path on the stock Ubuntu rootfs; the full host→guest-agent
+    // round trip is `execs_a_command_in_the_microvm`, against the agent rootfs.)
     let mut cfg = config();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     let marker = cfg.userspace_marker.clone();
@@ -68,26 +68,31 @@ fn boots_with_a_vsock_device() {
     vm.shutdown().expect("shutdown should succeed");
 }
 
-#[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn execs_a_command_in_the_microvm() {
-    // Closes Phase 2's provisional "in a microVM" gate: the agent baked into `rootfs-agent.ext4`
-    // (built by `cargo xtask build-rootfs`) actually binds vsock in a real guest, so `exec`
-    // round-trips end to end — not against a faked socket. Boot returns once the agent's readiness
-    // marker reaches the console, so the connect can't race the bind.
+/// A boot config pointed at the **agent rootfs** (`cargo xtask build-rootfs`): readiness is the
+/// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable — the
+/// in-VM exec tests are about *that* image specifically.
+fn agent_rootfs_config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut cfg = BootConfig::from_env();
     if std::env::var_os("AGENT_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    // Always the agent rootfs (not `AGENT_ROOTFS`): this test is about *that* image specifically.
     cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
     cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     cfg.boot_timeout = Duration::from_secs(30);
+    cfg
+}
 
-    let vm =
-        Vm::boot(cfg).expect("agent microVM should boot and the agent should announce readiness");
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn execs_a_command_in_the_microvm() {
+    // Closes Phase 2's provisional "in a microVM" gate: the agent baked into `rootfs-agent.ext4`
+    // actually binds vsock in a real guest, so `exec` round-trips end to end — not against a faked
+    // socket. Boot returns once the agent's readiness marker reaches the console, so the connect
+    // can't race the bind.
+    let vm = Vm::boot(agent_rootfs_config())
+        .expect("agent microVM should boot and the agent should announce readiness");
     let out = vm
         .exec(&["echo".into(), "hi".into()], b"")
         .expect("exec `echo hi` in the guest");
@@ -98,6 +103,27 @@ fn execs_a_command_in_the_microvm() {
         vm.console()
     );
     assert_eq!(out.exit_code, 0, "`echo hi` should exit 0");
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn execs_python_in_the_microvm() {
+    // The reference language runtime: `build-rootfs` installs python3 from the pinned Alpine
+    // branch, and a real interpreter (dynamic musl binary + its stdlib, not a shell builtin) runs
+    // in the guest and computes — proving the image carries a working userland, not just busybox.
+    let vm = Vm::boot(agent_rootfs_config())
+        .expect("agent microVM should boot and the agent should announce readiness");
+    let out = vm
+        .exec(&["python3".into(), "-c".into(), "print(2+2)".into()], b"")
+        .expect("exec python in the guest");
+    assert_eq!(
+        out.stdout,
+        b"4\n",
+        "python should print 4; console:\n{}",
+        vm.console()
+    );
+    assert_eq!(out.exit_code, 0, "python should exit 0");
     vm.shutdown().expect("shutdown should succeed");
 }
 

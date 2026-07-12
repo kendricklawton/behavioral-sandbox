@@ -41,8 +41,9 @@ enum Cmd {
     FetchArtifacts,
     /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
     BuildGuestAgent,
-    /// Assemble the guest rootfs: a minimal Alpine base + the static agent + a vsock init, as an
-    /// ext4 image at `artifacts/rootfs-agent.ext4` (needs `curl`, `tar`, `mke2fs`, `truncate`).
+    /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
+    /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-agent.ext4` (needs `curl`,
+    /// `tar`, `mke2fs`, `truncate`).
     BuildRootfs,
 }
 
@@ -163,20 +164,49 @@ ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
     )
 }
 
+/// The Alpine branch the guest userland comes from: the minirootfs base and the package repo the
+/// runtime packages install from. One pin, used by both, so base and packages can't skew branches.
+const ALPINE_BRANCH: &str = "v3.24";
+
+/// The language runtimes baked into the guest image (P3.2's reference runtime; P3.9 broadens it).
+/// Installed by `apk.static` from the pinned branch. Versions float *within* that stable branch —
+/// Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN` pin
+/// would break the build on every upstream patch bump; the exact-version lockfile is P3.6's
+/// reproducibility work.
+const GUEST_PACKAGES: &[&str] = &["python3"];
+
 /// The pinned Alpine minirootfs — a real musl+busybox userland (so init and a shell just work, and
-/// `apk` can add Python/Node later). A *build input*, deliberately separate from [`artifacts`] (the
-/// boot kernel+rootfs the `ci-privileged` hash-guard requires present).
+/// `apk` adds the [`GUEST_PACKAGES`] runtimes). A *build input*, deliberately separate from
+/// [`artifacts`] (the boot kernel+rootfs the `ci-privileged` hash-guard requires present).
 fn alpine_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
         "x86_64" => Ok(Artifact {
-            url: "https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/\
-                  alpine-minirootfs-3.24.1-x86_64.tar.gz"
-                .to_string(),
+            url: format!(
+                "https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/releases/x86_64/\
+                 alpine-minirootfs-3.24.1-x86_64.tar.gz"
+            ),
             sha256: "41f73e3cf5fa919b8aa5ca6b30dc48f0da2720776d7423e2a7748211456fe081",
             dest: dir.join("alpine-minirootfs.tar.gz"),
         }),
         other => bail!("no pinned Alpine minirootfs for arch {other} yet (x86_64 only)"),
+    }
+}
+
+/// The pinned static `apk` (from Alpine's `apk-tools-static` package — itself a tarball): the
+/// installer that puts [`GUEST_PACKAGES`] into the staging dir **rootless**, on any host distro.
+fn apk_tools_artifact() -> Result<Artifact> {
+    let dir = artifacts_dir();
+    match std::env::consts::ARCH {
+        "x86_64" => Ok(Artifact {
+            url: format!(
+                "https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main/x86_64/\
+                 apk-tools-static-3.0.6-r0.apk"
+            ),
+            sha256: "a62f54609910d1eb23d8ebcf69dd7954280fe76047452bb88410122cbca14a6e",
+            dest: dir.join("apk-tools-static.apk"),
+        }),
+        other => bail!("no pinned apk-tools-static for arch {other} yet (x86_64 only)"),
     }
 }
 
@@ -208,6 +238,12 @@ fn build_rootfs() -> Result<()> {
             staging.as_os_str(),
         ],
     )?;
+
+    // Install the guest runtimes (P3.2: python3) into the staging root with the pinned static apk —
+    // rootless, on any host distro. Packages are signature-verified against the keys the minirootfs
+    // itself ships (`/etc/apk/keys`). `--no-scripts` because pre/post-install scripts need a chroot
+    // (root); the runtime packages are file payloads, and the in-VM exec test proves they run.
+    install_guest_packages(&staging)?;
 
     // Bake the static agent in at /usr/local/bin/agent-guest.
     let bindir = staging.join("usr/local/bin");
@@ -262,6 +298,57 @@ fn build_rootfs() -> Result<()> {
         agent_channel::GUEST_READY_MARKER
     );
     Ok(())
+}
+
+/// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static` — no chroot, no
+/// root, no host `apk`. The `.apk` is a tarball; its `sbin/apk.static` is extracted to a scratch
+/// dir that's removed after the install (the packages land in `staging`, the tool is ephemeral).
+fn install_guest_packages(staging: &Path) -> Result<()> {
+    if GUEST_PACKAGES.is_empty() {
+        return Ok(());
+    }
+    let tools = apk_tools_artifact()?;
+    fetch_one(&tools)?;
+
+    let tooldir = artifacts_dir().join("apk-tools");
+    if tooldir.exists() {
+        std::fs::remove_dir_all(&tooldir)?;
+    }
+    std::fs::create_dir_all(&tooldir)?;
+    run_tool(
+        "tar",
+        &[
+            OsStr::new("xzf"),
+            tools.dest.as_os_str(),
+            OsStr::new("-C"),
+            tooldir.as_os_str(),
+        ],
+    )?;
+
+    let apk = tooldir.join("sbin/apk.static");
+    let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main");
+    // The host's arch, not a literal: Alpine's arch names match Rust's for the arches we'll pin
+    // (x86_64/aarch64), and the pinned-artifact fns above already bail on anything unpinned — so
+    // this stays correct by itself when a second arch lands, instead of silently installing
+    // x86_64 packages into an aarch64 image.
+    let mut args: Vec<&OsStr> = vec![
+        OsStr::new("--root"),
+        staging.as_os_str(),
+        OsStr::new("--arch"),
+        OsStr::new(std::env::consts::ARCH),
+        OsStr::new("--repository"),
+        OsStr::new(&repo),
+        OsStr::new("--no-scripts"),
+        OsStr::new("--no-cache"),
+        OsStr::new("add"),
+    ];
+    args.extend(GUEST_PACKAGES.iter().map(OsStr::new));
+    let apk_str = apk.to_string_lossy().into_owned();
+    let result = run_tool(&apk_str, &args);
+
+    // The tool is scratch either way — clean it before propagating any install failure.
+    let _ = std::fs::remove_dir_all(&tooldir);
+    result
 }
 
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.

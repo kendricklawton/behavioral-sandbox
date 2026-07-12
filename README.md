@@ -31,9 +31,10 @@ is the **self-hostable engine** underneath that kind of product:
 ## Status
 
 **Early and learning-driven.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md) —
-its checkboxes are the state. So far a microVM boots and runs commands with captured
-stdout/stderr/exit (Phases 1–2); a real rootfs + language runtime is next (Phase 3). Nothing here
-is production yet — the point is depth, done in the open.
+its checkboxes are the state. So far a microVM boots, runs commands with captured
+stdout/stderr/exit, and runs real Python from a purpose-built rootfs (Phases 1–2 done, Phase 3 in
+progress); networking, snapshots, and the eBPF tracks are ahead. Nothing here is production yet —
+the point is depth, done in the open.
 
 ## How it fits together
 
