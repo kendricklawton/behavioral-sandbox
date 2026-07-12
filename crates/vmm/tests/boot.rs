@@ -181,6 +181,49 @@ fn execs_python_in_the_microvm() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn python_script_writes_a_file_and_we_capture_it() {
+    // Phase 3's runtime payoff, end to end: inject a small **Python script** as a file, run the real
+    // interpreter on it inside a microVM, and pull back the file it wrote — the exec surface's
+    // inject → run → capture loop with an actual language runtime (using the stdlib, `json`), not a
+    // shell builtin. This is the per-file channel path (P2.5); the bulk block-device paths are
+    // P3.4/P3.5.
+    let vm = Vm::boot(agent_rootfs_config())
+        .expect("agent microVM should boot and the agent should announce readiness");
+
+    // A real script: import a stdlib module, compute, and write a file in the working dir.
+    let script = "import json\n\
+                  with open('result.json', 'w') as f:\n\
+                  \x20\x20\x20\x20json.dump({'answer': 6 * 7}, f)\n";
+
+    let out = vm
+        .exec_with_files(
+            &["python3".into(), "script.py".into()],
+            b"",
+            &[("script.py".into(), script.as_bytes().to_vec())],
+            &["result.json".into()],
+        )
+        .expect("run the python script and capture its output file");
+
+    assert_eq!(
+        out.exit_code,
+        0,
+        "python should exit 0; console:\n{}",
+        vm.console()
+    );
+    // Exactly the one requested artifact comes back, holding what the script computed.
+    assert_eq!(out.files.len(), 1, "one artifact requested and returned");
+    let (path, data) = &out.files[0];
+    assert_eq!(path, "result.json");
+    let text = String::from_utf8_lossy(data);
+    assert!(
+        text.contains("\"answer\"") && text.contains("42"),
+        "captured file should hold the JSON the script wrote; got {text:?}"
+    );
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn injects_a_large_file_via_block_device() {
     // P3.4: a whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
     // **larger than the 1 MiB channel frame cap** (the whole point) in a host dir, inject it as a

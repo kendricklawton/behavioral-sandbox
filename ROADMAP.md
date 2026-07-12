@@ -317,7 +317,13 @@ binary, so adding a runtime is a packaging step, not an engine change.
       buys **density** (page-cache dedup across VMs + disk), not boot time — the honest, measured
       result, not the assumed "bigger base = slower boot." Cold-boot p50/p99 as a tracked benchmark
       is P17.1; the reusable harness is P17.5.)*
-- [ ] **P3.8** Test: run Python + a small script that writes a file → capture the file.
+- [x] **P3.8** Test: run Python + a small script that writes a file → capture the file.
+      *(Privileged `python_script_writes_a_file_and_we_capture_it`: injects a small Python script as a
+      file (`PutFile`), runs the **real** interpreter on it in a microVM (`python3 script.py`, using
+      the `json` stdlib), and pulls back the `result.json` it wrote — the exec surface's
+      inject → run → capture loop end to end with an actual language runtime, not a shell builtin.
+      Uses the per-file **channel** path (`exec_with_files`, P2.5); the bulk block-device paths are
+      P3.4/P3.5. Asserts the captured file holds what the script computed. 9 privileged tests now.)*
 - [ ] **P3.9** **Runtime-agnostic proof:** a second, *differently-shaped* runtime runs unchanged
       through the same `exec` path — a **static Go/Rust ELF** (no interpreter, no libc) and **Node**
       (a different interpreter) — showing the rootfs isn't Python-specific and the engine runs any
