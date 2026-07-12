@@ -600,3 +600,26 @@ backing file.
 - **Bundle size is state + ~guest-RAM memory + a full root-disk copy.** Copying the whole disk per
   snapshot is the honest cost of a portable, read-write bundle; diff snapshots and base-sharing (density
   over the warm pool) are the P5.3/P5.4/P5.7 optimizations.
+
+**Warm snapshots + concurrent clones (P5.3/P5.4, 2026-07-12).** Extended to snapshot a
+`read_only_root` VM carrying the vsock exec channel, and to restore many exec-ready clones from it:
+- **The read-only base is referenced, not copied.** A `read_only_root` boot's disk is the shared
+  pinned base at a persistent path, so the bundle records it in place (no per-VM copy) and restore
+  opens it read-only; N clones share one base (page-cache-deduped density) while each gets its own
+  in-RAM overlay from its own restored memory image. The structural test is which side of the scratch
+  dir the disk lives on. A read-write boot keeps the copy-and-stage path.
+- **Concurrent clones needed a per-clone vsock socket, solved without the jailer.** A first probe
+  confirmed empirically that clones restored concurrently **collide** on the socket path baked into the
+  snapshot (`Address in use`), because Firecracker re-binds the vsock listener at the recorded path on
+  load. Fix: bind vsock at a **relative** name (`v.sock`) and run each VMM with its scratch dir as
+  **cwd**, so the recorded relative path resolves per-clone. This is lighter than the Phase-6 jailer's
+  per-VM mount namespace and doesn't block the warm pool on it. Consequence: every *file* path handed
+  to Firecracker must now be **absolute** (its cwd is no longer the driver's), a small resolve-to-
+  absolute pass on kernel/rootfs/bundle paths; the vsock path is the one deliberate exception.
+- **Restore waits for exec-readiness.** A just-resumed guest agent needs a moment before its vsock
+  listener is reachable again, so restore polls a connect until it succeeds (bounded by the deadline)
+  before returning, its analogue of boot's userspace-marker wait. Restore of a warm agent VM measured
+  ~8 ms vs ~300 ms cold boot, then the clone runs code.
+- **Still deferred:** a snapshot with a **NIC or output device** is a typed error (a fresh tap / a
+  per-clone output image and the network-identity/entropy/clock uniqueness are P5.5). `ci-privileged`
+  now runs the VM tests serially (they boot real microVMs and some assert on host-global leak state).

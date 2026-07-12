@@ -479,8 +479,31 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
       P5.7. The restored VM has no exec channel wired yet (vsock-over-snapshot is P5.8). Proof:
       `restores_a_snapshot_onto_a_fresh_vmm` snapshots, drops the source entirely (proving the bundle is
       self-contained), restores, and asserts the VMM loads, resumes, and stays alive.)*
-- [ ] **P5.3** A "warm" snapshot: boot + runtime loaded (e.g. Python imported), snapshot *that*.
-- [ ] **P5.4** Restore N clones from one warm snapshot; each gets a fresh overlay/tap.
+- [x] **P5.3** A "warm" snapshot: boot + runtime loaded (e.g. Python imported), snapshot *that*.
+      *(`snapshot()` extended to the two things a warm snapshot needs (decision 010): a
+      **`read_only_root`** boot (the disk is the shared pinned base at a persistent path, so the bundle
+      **references it in place**, no per-VM copy) and the **vsock exec channel** (so a restored clone
+      can run code). The warm-up runs the runtime once before snapshotting (`python3 -c "import ..."`),
+      so the image captures a guest with Python resident, not a bare boot. Restore comes back
+      **exec-ready**: Firecracker re-binds the guest agent's vsock listener on load, and `run_restore`
+      polls until the agent is reachable before returning (restore's analogue of the boot
+      userspace-marker wait). **Measured** (dev box): ~300 ms cold boot vs **~8 ms** restore, then Python
+      runs on the clone. Closes P5.8's warm-restore-runs-code for the single clone. Proof:
+      `warm_snapshot_restores_and_runs_code` warms, snapshots, drops the source, restores, and runs
+      `python3` to `4`.)*
+- [x] **P5.4** Restore N clones from one warm snapshot; each gets a fresh overlay/tap.
+      *(N clones restored from one warm bundle, **all alive at once**, each an independent VM: its own
+      in-RAM overlay (independent memory image) and its own vsock socket, while sharing the read-only
+      base (page-cache-deduped density). The socket is the hard part, solved without the jailer: a
+      first probe showed concurrent clones **collide** on the source's baked-in absolute socket path
+      (`Address in use`), so the driver now binds vsock at a **relative** name and runs each VMM with
+      its scratch dir as cwd (decision 010), so each clone re-binds its own `v.sock` in its own dir.
+      That made every *file* path handed to Firecracker need to be absolute (its cwd moved), a small
+      resolved-to-absolute pass. The **"fresh tap"** half is a networked snapshot, still deferred with
+      network identity to P5.5. Proof: `restores_concurrent_clones_from_one_warm_snapshot` restores 3
+      clones and keeps all three alive at once, asserts distinct live VMMs, and runs a distinct
+      computation on each concurrently-alive clone, getting each clone's own answer. `ci-privileged` now runs the VM tests serially
+      (real-VM integration is boot-I/O-bound and some assert on host-global leak state).)*
 - [ ] **P5.5** `(decision)` Handle the uniqueness problems restore creates (network identity,
       entropy, clocks) → `ARCHITECTURE.md`. **Network identity is the load-bearing one:** Phase 4
       addresses the guest via kernel `ip=` at *boot* (decision 009), which runs once and won't re-fire

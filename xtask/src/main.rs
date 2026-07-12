@@ -844,7 +844,18 @@ fn ci_privileged() -> Result<()> {
     // agent — the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
     // not part of the image, so it's built separately, not baked into the rootfs.
     build_guest_example()?;
-    cargo(&["test", "--workspace", "--locked", "--", "--ignored"])?;
+    // Serial (`--test-threads=1`): these tests each boot a real microVM and some assert on
+    // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent warm clones). Run
+    // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
+    // leak check. Real-VM integration is I/O-bound on boot anyway, so serial costs little.
+    cargo(&[
+        "test",
+        "--workspace",
+        "--locked",
+        "--",
+        "--ignored",
+        "--test-threads=1",
+    ])?;
     println!("\n✓ privileged integration passed");
     Ok(())
 }

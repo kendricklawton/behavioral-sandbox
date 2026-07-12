@@ -271,6 +271,13 @@ pub struct RunningVm {
     /// base for a `read_only_root` boot, or the snapshot bundle's private copy for a restore. Held so
     /// [`snapshot`](RunningVm::snapshot) can bundle it into a portable snapshot.
     rootfs: PathBuf,
+    /// This VM was produced by [`Vm::restore`], so [`rootfs`](Self::rootfs) is a placeholder (the live
+    /// disk is an anonymous inode with no host path) and re-snapshotting it is refused.
+    restored: bool,
+    /// This VM has a bulk **input** block device (from `input_dir`), whose image lives in the scratch
+    /// dir. A snapshot bakes in that path, but the scratch dir is gone after teardown, so the VM can't
+    /// be restored — `snapshot` refuses it. (The input image itself is reclaimed with the workdir.)
+    has_input: bool,
     /// The vsock unix socket Firecracker created, if this VM was booted with a `guest_cid`.
     vsock_uds: Option<PathBuf>,
     /// The writable output image (in `workdir`) and the host directory to extract it into, when the
@@ -289,22 +296,34 @@ struct OutputDevice {
     dest: PathBuf,
 }
 
-/// A portable, self-contained microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU
-/// **state** file, the guest **memory** file (roughly the guest's RAM size), and a private copy of
-/// the **root disk** as it was when the VM was paused. [`Vm::restore`] rebuilds a VM from these on a
-/// fresh VMM, rebasing onto the bundled disk so a restored clone never shares a writable backing file
-/// with its source. The bundle references nothing outside its directory, so it can be moved or kept
-/// after the source VM is gone.
+/// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
+/// **memory** file (roughly the guest's RAM size), and the **root disk**. [`Vm::restore`] rebuilds a
+/// VM from these on a fresh VMM.
+///
+/// The disk is one of two shapes. A **read-write** boot bundles a private, point-in-time copy that
+/// restore stages back, so the clone shares no writable backing with its source (which may be gone). A
+/// **`read_only_root`** boot (a "warm" snapshot) references the shared, persistent base in place, so N
+/// clones restored from one bundle share it read-only (page-cache-deduped) while each gets its own
+/// in-RAM overlay. A **warm** snapshot also carries the vsock exec channel, so a restored clone can
+/// run code immediately.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
     state: PathBuf,
     mem: PathBuf,
-    /// The bundle's private, point-in-time copy of the root disk.
+    /// The bundle's point-in-time copy of the root disk (a read-write boot), or the shared read-only
+    /// base itself (a `read_only_root` boot, where [`shared_base`](Self::shared_base) is set).
     root_drive: PathBuf,
     /// The host path the snapshot baked in for the root disk (where the source VM booted it).
-    /// Firecracker opens the disk *here* during `PUT /snapshot/load`, so [`Vm::restore`] stages
-    /// [`root_drive`](Self::root_drive) at this path before loading.
+    /// Firecracker opens the disk *here* during `PUT /snapshot/load`.
     root_backing: PathBuf,
+    /// The root disk is a **read-only shared base** at a persistent path (a `read_only_root` boot):
+    /// restore references it in place (no copy, no staging), and many clones share it read-only. When
+    /// unset, the disk is a private per-VM copy that restore stages at `root_backing`.
+    shared_base: bool,
+    /// The source ran the vsock exec channel, so restored clones can be `exec`'d. The socket path was
+    /// baked in **relative** (`v.sock`), so Firecracker re-binds it in each restored VMM's own scratch
+    /// dir (its cwd) rather than on one shared absolute path, letting concurrent clones coexist.
+    has_vsock: bool,
 }
 
 impl Snapshot {
@@ -320,7 +339,8 @@ impl Snapshot {
         &self.mem
     }
 
-    /// The private root-disk copy the restore rebases onto.
+    /// The root disk restore uses: the bundle's private copy (a read-write snapshot), or the shared
+    /// read-only base referenced in place (a `read_only_root` warm snapshot).
     #[must_use]
     pub fn root_drive_path(&self) -> &Path {
         &self.root_drive
@@ -360,15 +380,20 @@ impl Vm {
     }
 
     /// Restore a microVM from a [`Snapshot`] on a fresh VMM and resume it, returning once it's
-    /// running. Reuses only the `firecracker` binary and `boot_timeout` from `config` (the guest's
-    /// kernel, memory, and devices all come from the snapshot). The root disk is rebased onto the
-    /// bundle's private copy, so the restored VM shares no writable backing file with its source,
-    /// which may already be gone.
+    /// running and (if the snapshot carried the exec channel) exec-ready. Reuses only the
+    /// `firecracker` binary and `boot_timeout` from `config` (the guest's kernel, memory, and devices
+    /// all come from the snapshot).
     ///
-    /// Restore latency (load → resumed) is [`RunningVm::boot_latency`] on the returned VM, for the
-    /// cold-boot-vs-restore comparison. The restored VM has **no exec channel** wired yet
-    /// (vsock-over-snapshot is P5.8), so it exposes liveness and teardown but not
-    /// [`exec`](RunningVm::exec).
+    /// A **read-write** snapshot's private disk copy is staged at its baked-in path; a **read-only
+    /// shared base** is referenced in place, so many clones restored from one warm snapshot share it
+    /// (page-cache-deduped) while each gets its own in-RAM overlay. A **warm** snapshot (one taken with
+    /// the vsock exec channel) restores exec-ready: its socket was baked in relative, so each clone
+    /// re-binds its own socket in its own scratch dir and concurrent clones don't collide. If the
+    /// snapshot carried vsock, restore waits until the guest agent is reachable before returning, so
+    /// the VM can [`exec`](RunningVm::exec) immediately.
+    ///
+    /// Restore latency (load + resume) is [`RunningVm::boot_latency`] on the returned VM, for the
+    /// cold-boot-vs-restore comparison.
     ///
     /// # Errors
     /// [`VmmError::NoKvm`] without `/dev/kvm`; [`VmmError::Artifact`] if a bundle file is missing or
@@ -554,46 +579,62 @@ impl RunningVm {
         collect_output_image(&output.image, &output.dest)
     }
 
-    /// Pause the VM, write a full [`Snapshot`] bundle (device + vCPU state, guest memory, and a copy
-    /// of the root disk) into `dir`, then resume — the VM keeps running and can be shut down or
-    /// snapshotted again.
+    /// Pause the VM, write a [`Snapshot`] bundle (device + vCPU state, guest memory, and the root
+    /// disk) into `dir`, then resume — the VM keeps running and can be shut down or snapshotted again.
     ///
-    /// The disk is copied **inside the paused window**, so the bundle is internally consistent (the
-    /// memory image and the disk agree). The result is self-contained: it references nothing outside
-    /// `dir`, so it survives the source VM's teardown and a later [`Vm::restore`].
+    /// A **read-write** boot's disk is copied into the bundle **inside the paused window**, so the copy
+    /// agrees with the memory image; a **`read_only_root`** boot (a warm snapshot) references the shared
+    /// base in place (no copy). The **vsock exec channel is supported** — restore re-binds its socket —
+    /// so a warm snapshot restores exec-ready.
     ///
-    /// Only a **root-disk-only** VM is supported today. A VM booted with vsock, a NIC, or an output
-    /// device carries devices whose host endpoints a restore can't yet recreate (unique vsock UDS /
-    /// tap per clone is P5.4/P5.5), so this returns a typed error rather than writing an
-    /// unrestorable snapshot.
+    /// Refused (a typed error, never an unrestorable bundle): a VM with a **NIC** or an **output** or
+    /// **input** block device (host endpoints / images a restore can't yet recreate per clone —
+    /// P5.4/P5.5), and an **already-restored** VM (its `rootfs` is a placeholder; the live disk is an
+    /// anonymous inode with no host path to bundle).
     ///
     /// # Errors
-    /// [`VmmError::Vmm`] if the VM has unsupported devices, or on any API or file-copy failure. A
-    /// create failure still falls through to the resume, so a failed snapshot never leaves the guest
+    /// [`VmmError::Vmm`] if the VM is unsupported for snapshotting, or on any API or file-copy failure.
+    /// A create failure still falls through to the resume, so a failed snapshot never leaves the guest
     /// frozen.
     pub fn snapshot(&self, dir: &Path) -> Result<Snapshot, VmmError> {
-        if self.vsock_uds.is_some() || self.tap.is_some() || self.output.is_some() {
+        // A restored VM's `rootfs` is a placeholder (its live disk is an anonymous inode), so the
+        // shared-base classifier below would misread it and bundle a stale, shared-writable disk.
+        // Refuse it outright, the way the pre-warm-snapshot guard did.
+        if self.restored {
             return Err(VmmError::Vmm(
-                "snapshot of a VM with vsock/network/output devices is not yet supported (P5.4/P5.5)"
+                "snapshot of an already-restored VM is not supported (its live disk has no host path)"
                     .into(),
             ));
         }
-        // Snapshot targets a VM booted from a **private, disposable** root-disk copy (the read-write
-        // boot, whose backing lives inside this VM's scratch dir): the bundle owns a point-in-time
-        // copy and `Vm::restore` stages it back. A read-only shared base (`read_only_root`) isn't
-        // copied per VM, so snapshotting it would mean referencing (and, on restore, clobbering) the
-        // pinned base — deferred to the warm-snapshot work (P5.3/P5.4).
-        if !self.rootfs.starts_with(&self.workdir) {
+        // A NIC, an output device, or an input device carries host state a restore can't yet recreate
+        // per clone (a fresh tap / a per-clone output image / the input image at the gone source
+        // scratch path, plus network identity — P5.5), so those stay refused. The vsock exec channel
+        // *is* supported: restore re-binds its baked-in socket.
+        if self.tap.is_some() || self.output.is_some() || self.has_input {
             return Err(VmmError::Vmm(
-                "snapshot requires a read-write root boot from a private per-VM disk; a read-only shared base or an already-restored VM is not supported"
+                "snapshot of a VM with a NIC or an input/output device is not yet supported (P5.4/P5.5)"
                     .into(),
             ));
         }
+        // The root disk is either a **private per-VM copy** (a read-write boot, whose backing lives
+        // inside this VM's scratch dir: the bundle owns a point-in-time copy that restore stages back)
+        // or a **read-only shared base** (a `read_only_root` boot: the base is a persistent pinned file
+        // outside the scratch dir, so the bundle references it in place and clones share it read-only).
+        // The structural test is which side of the scratch dir the backing lives on.
+        let shared_base = !self.rootfs.starts_with(&self.workdir);
         std::fs::create_dir_all(dir)
             .map_err(|e| VmmError::Vmm(format!("create snapshot dir {}: {e}", dir.display())))?;
+        // Absolute bundle paths: `restore` hands these to Firecracker, whose cwd is its own scratch
+        // dir, so a relative bundle path would resolve there instead of where the caller put it.
+        let dir = absolute(dir)?;
         let state = dir.join("snapshot.state");
         let mem = dir.join("snapshot.mem");
-        let root_drive = dir.join("rootfs.ext4");
+        // A private copy is bundled under `dir`; a shared base is referenced at its own path.
+        let root_drive = if shared_base {
+            self.rootfs.clone()
+        } else {
+            dir.join("rootfs.ext4")
+        };
 
         // Pause → create → copy the (now-quiescent) disk → resume. Pausing freezes the vCPUs so the
         // memory image is a consistent point-in-time; copying the disk in the same window keeps it in
@@ -605,7 +646,7 @@ impl RunningVm {
                 state: VmStateKind::Paused,
             },
         )?;
-        let created = self.write_snapshot_bundle(&state, &mem, &root_drive);
+        let created = self.write_snapshot_bundle(&state, &mem, &root_drive, shared_base);
         let resumed = self.api.patch(
             "/vm",
             &VmState {
@@ -614,22 +655,27 @@ impl RunningVm {
         );
         created?;
         resumed?;
-        tracing::info!(dir = %dir.display(), "wrote microVM snapshot bundle");
+        tracing::info!(dir = %dir.display(), shared_base, "wrote microVM snapshot bundle");
         Ok(Snapshot {
             state,
             mem,
             root_drive,
             root_backing: self.rootfs.clone(),
+            shared_base,
+            has_vsock: self.vsock_uds.is_some(),
         })
     }
 
-    /// Write the snapshot state + memory files and copy the root disk. Split out so `snapshot` can
-    /// run it between the pause and the guaranteed resume without an early return skipping the resume.
+    /// Write the snapshot state + memory files, and (for a private-copy disk) copy the root disk into
+    /// the bundle. Split out so `snapshot` can run it between the pause and the guaranteed resume
+    /// without an early return skipping the resume. A shared read-only base is referenced in place, so
+    /// there is nothing to copy.
     fn write_snapshot_bundle(
         &self,
         state: &Path,
         mem: &Path,
         root_drive: &Path,
+        shared_base: bool,
     ) -> Result<(), VmmError> {
         self.api.put(
             "/snapshot/create",
@@ -639,8 +685,10 @@ impl RunningVm {
                 mem_file_path: path_str(mem)?,
             },
         )?;
-        std::fs::copy(&self.rootfs, root_drive)
-            .map_err(|e| VmmError::Vmm(format!("copy root disk into snapshot bundle: {e}")))?;
+        if !shared_base {
+            std::fs::copy(&self.rootfs, root_drive)
+                .map_err(|e| VmmError::Vmm(format!("copy root disk into snapshot bundle: {e}")))?;
+        }
         Ok(())
     }
 
@@ -710,6 +758,9 @@ struct Spawned {
     console: Console,
     workdir: PathBuf,
     rootfs: PathBuf,
+    /// Set by [`launch_for_restore`](Spawned::launch_for_restore): the `rootfs` is a placeholder, so
+    /// the resulting VM is marked restored and can't be re-snapshotted.
+    restored: bool,
     api: ApiClient,
     /// The vsock socket path (in `workdir`) when the boot config enables vsock, else `None`.
     vsock_uds: Option<PathBuf>,
@@ -750,7 +801,16 @@ impl Spawned {
         // tmpfs overlay (see `BootConfig::read_only_root`). Read-write boot copies the base instead,
         // so the guest's writes stay per-VM and the base stays pinned.
         let rootfs = if config.read_only_root {
-            config.rootfs.clone()
+            // The shared base is handed to Firecracker as-is and recorded as the snapshot's disk path,
+            // so resolve it to absolute now (each VMM's cwd is its scratch dir; a relative base path
+            // would resolve there instead).
+            match absolute(&config.rootfs) {
+                Ok(p) => p,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            }
         } else {
             let copy = workdir.join("rootfs.ext4");
             if let Err(e) = std::fs::copy(&config.rootfs, &copy) {
@@ -833,6 +893,7 @@ impl Spawned {
             console,
             workdir,
             rootfs,
+            restored: false,
             api: ApiClient::new(socket),
             vsock_uds,
             input_image,
@@ -856,17 +917,22 @@ impl Spawned {
                 return Err(e);
             }
         };
+        // A warm snapshot carries the vsock exec channel. Its socket path was baked in relative, so
+        // Firecracker re-binds it in *this* restore's cwd (its scratch dir): the restored VM reaches
+        // the guest agent through its own `v.sock`, and concurrent clones don't collide. Computed
+        // before `workdir` is moved into the struct.
+        let vsock_uds = snapshot.has_vsock.then(|| workdir.join(VSOCK_UDS));
         Ok(Self {
             child: Some(child),
             console,
             workdir,
-            // The restored VM's live disk is an anonymous inode: `run_restore` stages the bundle copy
-            // at the baked-in backing path, lets Firecracker open it at load, then unlinks it. This
-            // field holds the bundle path only as a placeholder (there is no live host path to record);
-            // it isn't a device this scratch dir owns, and re-snapshotting a restored VM is refused.
+            // The restored VM's live disk is an anonymous inode (a private copy is staged at load then
+            // unlinked; a shared base is referenced in place). This field holds the bundle path only as
+            // a placeholder — it isn't a device this scratch dir owns, and re-snapshotting is refused.
             rootfs: snapshot.root_drive.clone(),
+            restored: true,
             api: ApiClient::new(socket),
-            vsock_uds: None,
+            vsock_uds,
             input_image: None,
             output: None,
             tap: None,
@@ -913,7 +979,16 @@ impl Spawned {
         let snapshot_path = path_str(&snapshot.state)?;
         let mem_path = path_str(&snapshot.mem)?;
 
-        stage_restore_disk(&snapshot.root_drive, &snapshot.root_backing)?;
+        // The vsock socket path was baked in relative, so Firecracker re-binds it in this VMM's cwd
+        // (its scratch dir, which already exists): no host-side path recreation is needed, and the
+        // socket lands in our own workdir where teardown reclaims it.
+
+        // A private per-VM disk is staged at its baked-in path so Firecracker can open it at load; a
+        // read-only shared base already exists there (and is shared across clones), so it's left alone.
+        let staged = !snapshot.shared_base;
+        if staged {
+            stage_restore_disk(&snapshot.root_drive, &snapshot.root_backing)?;
+        }
         let started = Instant::now();
         let loaded = self.api.put(
             "/snapshot/load",
@@ -928,9 +1003,11 @@ impl Spawned {
         );
         // The restore latency is the load + resume call itself, measured before host-side cleanup.
         let latency = started.elapsed();
-        // Firecracker now holds the disk's fd (or the load failed); either way remove the staged copy
-        // so it never outlives this restore. The open fd keeps the inode alive for the VM's lifetime.
-        unstage_restore_disk(&snapshot.root_backing);
+        // Firecracker now holds the disk's fd (or the load failed); either way remove a staged copy so
+        // it never outlives this restore. The open fd keeps the inode alive for the VM's lifetime.
+        if staged {
+            unstage_restore_disk(&snapshot.root_backing);
+        }
         loaded?;
 
         // A snapshot that loads but immediately dies (a corrupt bundle, an incompatible host) must be
@@ -940,11 +1017,42 @@ impl Spawned {
                 "firecracker exited after restore ({status})"
             )));
         }
+
+        // If the snapshot carried the exec channel, the guest agent needs a brief moment after resume
+        // before Firecracker's vsock backend is forwarding to it again. Poll until a connect succeeds
+        // (bounded by the deadline), so `restore` hands back a VM that's actually ready to `exec`,
+        // never one mid-resume (this is restore's analogue of boot's userspace-marker wait).
+        if let Some(uds) = self.vsock_uds.clone() {
+            self.await_agent_ready(&uds, deadline)?;
+        }
+
         tracing::info!(
             restore_ms = latency.as_millis() as u64,
             "microVM restored from snapshot"
         );
         Ok(latency)
+    }
+
+    /// Poll the guest agent's vsock port until a connect + handshake succeeds, so a restored VM is
+    /// exec-ready when it's handed back. The probe connection is dropped immediately (the agent serves
+    /// one connection then loops back to accept, so a connect-and-close just cycles it).
+    fn await_agent_ready(&mut self, uds: &Path, deadline: Instant) -> Result<(), VmmError> {
+        loop {
+            match connect_agent_at(uds, AGENT_VSOCK_PORT, Duration::from_millis(200)) {
+                Ok(_probe) => return Ok(()),
+                Err(e) => {
+                    if let Some(status) = self.exited()? {
+                        return Err(VmmError::Vmm(format!(
+                            "firecracker exited after restore ({status})"
+                        )));
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(e);
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+        }
     }
 
     /// `PUT /drives/{id}` — attach a virtio-block device, deriving the API path from `id` so the URL
@@ -987,7 +1095,10 @@ impl Spawned {
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 
-        let kernel = path_str(&config.kernel)?;
+        // Absolute paths for Firecracker (its cwd is the scratch dir); `self.rootfs` is already
+        // absolute from `launch`.
+        let kernel = absolute(&config.kernel)?;
+        let kernel = path_str(&kernel)?;
         let rootfs = path_str(&self.rootfs)?;
         // A read-only root hands off to the overlay init, which stacks a size-capped tmpfs over the
         // RO base so `/` is writable per-run. The cap is half of guest RAM — the guest has no swap,
@@ -1047,17 +1158,21 @@ impl Spawned {
             },
         )?;
 
-        if let (Some(cid), Some(uds)) = (config.guest_cid, self.vsock_uds.as_ref()) {
+        if let Some(cid) = config.guest_cid {
             still_before(deadline, "PUT /vsock")?;
-            let uds_path = path_str(uds)?;
+            // Bind the socket at the **relative** name `v.sock`, resolved against the VMM's cwd (its
+            // scratch dir — see `spawn_fc`). The host still connects via the absolute `self.vsock_uds`
+            // (same file), but baking a *relative* path into the snapshot is what lets warm clones
+            // restored from it each bind their own socket in their own scratch dir, instead of all
+            // colliding on one absolute path.
             self.api.put(
                 "/vsock",
                 &Vsock {
                     guest_cid: cid,
-                    uds_path,
+                    uds_path: VSOCK_UDS,
                 },
             )?;
-            tracing::debug!(guest_cid = cid, uds = uds_path, "vsock device configured");
+            tracing::debug!(guest_cid = cid, uds = VSOCK_UDS, "vsock device configured");
         }
 
         // Per-VM virtio-net (P4.1), backed by the host tap created in `launch`. Deny-by-default: the
@@ -1200,6 +1315,8 @@ impl Spawned {
             api: self.api.clone(),
             boot_latency,
             rootfs: std::mem::take(&mut self.rootfs),
+            restored: self.restored,
+            has_input: self.input_image.is_some(),
             vsock_uds: self.vsock_uds.take(),
             output: self.output.take(),
             tap: self.tap.take(),
@@ -1282,6 +1399,10 @@ fn spawn_fc(
     let mut child = Command::new(firecracker)
         .arg("--api-sock")
         .arg(socket)
+        // Run each VMM with its scratch dir as cwd, so a **relative** vsock socket path (`v.sock`)
+        // resolves per-VM. That's what lets N warm clones restored from one snapshot each bind their
+        // own socket instead of colliding on the source's absolute path (see `run_boot`'s `PUT /vsock`).
+        .current_dir(workdir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped()) // guest serial console
         .stderr(Stdio::from(fc_stderr))
@@ -1898,6 +2019,21 @@ fn find(haystack: &[u8], needle: &[u8]) -> bool {
 fn path_str(p: &Path) -> Result<&str, VmmError> {
     p.to_str()
         .ok_or_else(|| VmmError::Vmm(format!("path is not valid UTF-8: {}", p.display())))
+}
+
+/// Resolve `p` to an absolute path against the **driver's** cwd (where a relative artifact path is
+/// meant to resolve). Every *file* path handed to Firecracker must be absolute, because each VMM runs
+/// with its scratch dir as cwd (so a relative vsock socket resolves per-VM — see `spawn_fc`); a
+/// relative file path would otherwise resolve against that scratch dir instead. Lexical only (no
+/// symlink resolution, no existence requirement), so it's safe on a path that doesn't exist yet.
+fn absolute(p: &Path) -> Result<PathBuf, VmmError> {
+    if p.is_absolute() {
+        Ok(p.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .map_err(|e| VmmError::Vmm(format!("resolve {}: {e}", p.display())))
+    }
 }
 
 /// Fail fast if the boot deadline has already passed before the next step (`what`). Each API call is

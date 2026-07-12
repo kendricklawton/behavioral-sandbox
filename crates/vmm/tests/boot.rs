@@ -190,6 +190,120 @@ fn restores_a_snapshot_onto_a_fresh_vmm() {
         .expect("restored shutdown should succeed");
 }
 
+/// Boot the agent rootfs, warm the Python runtime (so the interpreter + stdlib are page-cache-hot in
+/// the guest's memory), and take a snapshot of *that* warm state. Returns the source's cold-boot
+/// latency alongside the bundle so callers can compare it to restore.
+// A free helper (not a `#[test]` fn), so it uses explicit `panic!` rather than `.expect()`, which the
+// workspace lints only re-allow inside test functions.
+fn warm_python_snapshot(bundle: &TmpDir) -> (agent_vmm::Snapshot, Duration) {
+    let source = match Vm::boot(agent_rootfs_config()) {
+        Ok(vm) => vm,
+        Err(e) => panic!("agent microVM should boot: {e}"),
+    };
+    let cold_boot = source.boot_latency();
+    // "Runtime loaded": run Python once so the snapshot captures a guest with the interpreter and its
+    // imports already resident, not a bare boot.
+    let warm = ["python3", "-c", "import json, os, sys"].map(String::from);
+    match source.exec(&warm, &[]) {
+        Ok(out) if out.exit_code == 0 => {}
+        Ok(out) => panic!("warm-up python should exit 0, got {}", out.exit_code),
+        Err(e) => panic!("warm-up exec should run: {e}"),
+    }
+    let snap = match source.snapshot(bundle.path()) {
+        Ok(s) => s,
+        Err(e) => panic!("warm snapshot (read_only_root + vsock) should succeed: {e}"),
+    };
+    if let Err(e) = source.shutdown() {
+        panic!("source shutdown should succeed: {e}");
+    }
+    (snap, cold_boot)
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn warm_snapshot_restores_and_runs_code() {
+    // P5.3: snapshot a warm agent VM (runtime loaded), throw the source away, restore a clone off the
+    // shared read-only base, and run Python on it — the exec channel survives the snapshot (Firecracker
+    // re-binds vsock on restore), so a warm clone runs code without paying the cold boot.
+    let bundle = TmpDir::new("snap-warm");
+    let (snap, cold_boot) = warm_python_snapshot(&bundle);
+    // A warm (read_only_root) snapshot references the shared base in place, so the bundle carries no
+    // root-disk copy: the disk path points outside the bundle dir, not at a copy within it.
+    assert!(
+        !snap.root_drive_path().starts_with(bundle.path()),
+        "a read_only_root snapshot should reference the shared base, not copy it into the bundle"
+    );
+
+    let restored = Vm::restore(&snap, &agent_rootfs_config()).expect("warm restore should resume");
+    let restore_latency = restored.boot_latency();
+    let argv = ["python3", "-c", "print(2 + 2)"].map(String::from);
+    let out = restored
+        .exec(&argv, &[])
+        .expect("exec on the restored warm clone should succeed");
+    assert_eq!(out.exit_code, 0, "python should exit 0");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "4",
+        "restored warm clone should run Python and return 4"
+    );
+    // A restored VM's live disk is an anonymous inode with no host path, so re-snapshotting it must be
+    // refused, not silently bundle a stale / shared-writable disk.
+    let redo = TmpDir::new("snap-warm-redo");
+    assert!(
+        restored.snapshot(redo.path()).is_err(),
+        "re-snapshotting a restored VM should be refused"
+    );
+
+    eprintln!("warm: cold boot {cold_boot:?} vs restore {restore_latency:?} + exec");
+    restored
+        .shutdown()
+        .expect("restored shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn restores_concurrent_clones_from_one_warm_snapshot() {
+    // P5.4: restore several clones from one warm snapshot and keep them all alive at once. Each shares
+    // the read-only base (density) but is an independent VM — its own vsock socket (bound relative to
+    // its own scratch dir, so no collision) and its own in-RAM overlay. Prove it by running a distinct
+    // computation on each concurrently-alive clone and getting each clone's own answer back.
+    const N: usize = 3;
+    let bundle = TmpDir::new("snap-warm-clones");
+    let (snap, _cold) = warm_python_snapshot(&bundle);
+
+    let clones: Vec<_> = (0..N)
+        .map(|i| {
+            Vm::restore(&snap, &agent_rootfs_config())
+                .unwrap_or_else(|e| panic!("clone {i} should restore concurrently: {e}"))
+        })
+        .collect();
+
+    // All N are alive simultaneously with distinct VMMs.
+    let pids: std::collections::BTreeSet<u32> = clones.iter().map(|c| c.vmm_pid()).collect();
+    assert_eq!(
+        pids.len(),
+        N,
+        "each clone should be its own live VMM process"
+    );
+
+    // Each clone runs its own code and returns its own result, while the others are still alive.
+    for (i, clone) in clones.iter().enumerate() {
+        let argv = ["python3", "-c", &format!("print({i} * {i})")].map(String::from);
+        let out = clone
+            .exec(&argv, &[])
+            .unwrap_or_else(|e| panic!("exec on clone {i} should succeed: {e}"));
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            (i * i).to_string(),
+            "clone {i} should compute its own value independently"
+        );
+    }
+
+    for clone in clones {
+        clone.shutdown().expect("clone shutdown should succeed");
+    }
+}
+
 /// A boot config pointed at the **agent rootfs** (`cargo xtask build-rootfs`): readiness is the
 /// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable — the
 /// in-VM exec tests are about *that* image specifically.
