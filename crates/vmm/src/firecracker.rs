@@ -50,19 +50,31 @@ impl ApiClient {
 
     /// `PUT <path>` with a JSON body, expecting a `2xx`. A `4xx` fault becomes a typed error.
     pub(crate) fn put<B: Serialize>(&self, path: &str, body: &B) -> Result<(), VmmError> {
+        self.send("PUT", path, body)
+    }
+
+    /// `PATCH <path>` with a JSON body, expecting a `2xx`. Firecracker uses `PATCH` for in-place
+    /// changes to an already-configured VM — its run state (`/vm`) and a drive's backing path — so
+    /// the snapshot/restore flow needs it alongside `put`. Framing is identical.
+    pub(crate) fn patch<B: Serialize>(&self, path: &str, body: &B) -> Result<(), VmmError> {
+        self.send("PATCH", path, body)
+    }
+
+    /// Serialize `body`, send `method path`, and expect a `2xx`; a `4xx` fault becomes a typed error.
+    fn send<B: Serialize>(&self, method: &str, path: &str, body: &B) -> Result<(), VmmError> {
         let json = serde_json::to_vec(body)
             .map_err(|e| VmmError::Vmm(format!("serialize {path}: {e}")))?;
-        let (status, resp) = self.request(path, &json)?;
+        let (status, resp) = self.request(method, path, &json)?;
         if (200..300).contains(&status) {
             return Ok(());
         }
         let detail = fault_message(&resp).unwrap_or_else(|| format!("HTTP {status}"));
-        Err(VmmError::Vmm(format!("PUT {path}: {detail}")))
+        Err(VmmError::Vmm(format!("{method} {path}: {detail}")))
     }
 
     /// Write the request and read the framed response: `(status_code, body_bytes)`.
-    fn request(&self, path: &str, body: &[u8]) -> Result<(u16, Vec<u8>), VmmError> {
-        let ctx = || format!("api PUT {path}");
+    fn request(&self, method: &str, path: &str, body: &[u8]) -> Result<(u16, Vec<u8>), VmmError> {
+        let ctx = || format!("api {method} {path}");
         let stream = UnixStream::connect(&self.socket).map_err(|e| io_err(&ctx(), &e))?;
         stream
             .set_read_timeout(Some(API_TIMEOUT))
@@ -71,7 +83,7 @@ impl ApiClient {
 
         // One `write_all`: request line, headers, blank line, then the body.
         let mut req = format!(
-            "PUT {path} HTTP/1.1\r\n\
+            "{method} {path} HTTP/1.1\r\n\
              Host: localhost\r\n\
              Accept: application/json\r\n\
              Content-Type: application/json\r\n\
@@ -206,6 +218,58 @@ pub(crate) struct NetworkInterface<'a> {
     pub iface_id: &'a str,
     pub host_dev_name: &'a str,
     pub guest_mac: &'a str,
+}
+
+/// `PATCH /vm` — move a running VM between run states. `Paused` freezes the vCPUs (the prerequisite
+/// for a consistent snapshot); `Resumed` continues them. Serializes to `{"state": "Paused"}` /
+/// `{"state": "Resumed"}` (a serde unit variant serializes as its PascalCase name, matching the
+/// wire schema — the same closed-set-as-enum discipline as [`Action`]).
+#[derive(Serialize)]
+pub(crate) struct VmState {
+    pub state: VmStateKind,
+}
+
+#[derive(Serialize)]
+pub(crate) enum VmStateKind {
+    Paused,
+    Resumed,
+}
+
+/// `PUT /snapshot/create` — write a snapshot of a **paused** VM: `snapshot_path` receives the vCPU
+/// and device state, `mem_file_path` the full guest memory. Only a `Full` snapshot is taken today;
+/// diff snapshots ride the warm pool later.
+#[derive(Serialize)]
+pub(crate) struct SnapshotCreate<'a> {
+    pub snapshot_type: SnapshotType,
+    pub snapshot_path: &'a str,
+    pub mem_file_path: &'a str,
+}
+
+#[derive(Serialize)]
+pub(crate) enum SnapshotType {
+    Full,
+}
+
+/// `PUT /snapshot/load` — rebuild a VM from a snapshot on a fresh VMM and (with `resume_vm`) resume
+/// it. `mem_backend` names the memory file. Firecracker opens each block device's backing file **at
+/// load**, at the path baked into the snapshot, so the driver stages the bundle's disk copy there
+/// before calling this (see `Vm::restore`).
+#[derive(Serialize)]
+pub(crate) struct SnapshotLoad<'a> {
+    pub snapshot_path: &'a str,
+    pub mem_backend: MemBackend<'a>,
+    pub resume_vm: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct MemBackend<'a> {
+    pub backend_type: MemBackendType,
+    pub backend_path: &'a str,
+}
+
+#[derive(Serialize)]
+pub(crate) enum MemBackendType {
+    File,
 }
 
 #[cfg(test)]
@@ -356,5 +420,49 @@ mod tests {
         assert_eq!(json["iface_id"], "eth0");
         assert_eq!(json["host_dev_name"], "fc0");
         assert_eq!(json["guest_mac"], "02:00:00:00:00:01");
+    }
+
+    #[test]
+    fn vm_state_serializes_to_the_wire_states() {
+        let paused = serde_json::to_value(VmState {
+            state: VmStateKind::Paused,
+        })
+        .unwrap();
+        assert_eq!(paused["state"], "Paused");
+        let resumed = serde_json::to_value(VmState {
+            state: VmStateKind::Resumed,
+        })
+        .unwrap();
+        assert_eq!(resumed["state"], "Resumed");
+    }
+
+    #[test]
+    fn snapshot_create_serializes_to_expected_fields() {
+        let json = serde_json::to_value(SnapshotCreate {
+            snapshot_type: SnapshotType::Full,
+            snapshot_path: "/b/snapshot.state",
+            mem_file_path: "/b/snapshot.mem",
+        })
+        .unwrap();
+        assert_eq!(json["snapshot_type"], "Full");
+        assert_eq!(json["snapshot_path"], "/b/snapshot.state");
+        assert_eq!(json["mem_file_path"], "/b/snapshot.mem");
+    }
+
+    #[test]
+    fn snapshot_load_serializes_with_nested_mem_backend() {
+        let json = serde_json::to_value(SnapshotLoad {
+            snapshot_path: "/b/snapshot.state",
+            mem_backend: MemBackend {
+                backend_type: MemBackendType::File,
+                backend_path: "/b/snapshot.mem",
+            },
+            resume_vm: true,
+        })
+        .unwrap();
+        assert_eq!(json["snapshot_path"], "/b/snapshot.state");
+        assert_eq!(json["mem_backend"]["backend_type"], "File");
+        assert_eq!(json["mem_backend"]["backend_path"], "/b/snapshot.mem");
+        assert_eq!(json["resume_vm"], true);
     }
 }

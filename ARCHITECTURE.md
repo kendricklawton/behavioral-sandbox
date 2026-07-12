@@ -549,3 +549,54 @@ exactly this). Shelling to `ip` keeps the driver dependency-light and `unsafe`-f
 - **A hard-killed driver can still orphan a tap** (no `Drop`-of-temp-dir safety net, unlike the
   scratch dir) — the same class of gap as P6.7's SIGKILL-leaks-a-VM, and the reason the leak test scans
   for orphaned `fc*` interfaces. The durable owner is the Phase-6 jailer/cgroup model.
+
+### 010 — Snapshots are self-contained bundles restored by staging the disk *(2026-07-12, P5.1/P5.2)*
+
+**Decision.** A microVM snapshot is a **self-contained bundle** in one directory: the vCPU/device
+**state** file, the full guest **memory** file, and a **point-in-time copy of the root disk**.
+- **Take it paused, copy the disk in the paused window.** `RunningVm::snapshot` does `PATCH /vm
+  {Paused}` (freeze vCPUs) then `PUT /snapshot/create {Full}`, and copies the root disk *while paused*
+  so the on-disk bytes agree with the frozen memory image, then `PATCH /vm {Resumed}`. A create
+  failure still falls through to the resume, so a failed snapshot never leaves the guest frozen (the
+  no-hang discipline).
+- **Restore stages the disk at the recorded path, then unlinks it.** Firecracker opens each drive's
+  backing file **during `PUT /snapshot/load`**, at the path baked into the snapshot, *before* any
+  `PATCH /drives` can repoint it (learned by trying the rebase-after-load path and watching the load
+  fail on the source's since-reclaimed scratch path). So `Vm::restore` copies the bundle's private disk
+  to that recorded path, loads with `resume_vm:true`, then **unlinks** the staged file once the VMM
+  holds the fd. The restored clone gets its own disk **inode** (the open fd keeps it alive for the VM's
+  lifetime), shares no writable backing with its source, and leaves nothing outside its own scratch
+  dir. Staging refuses to overwrite an existing file, so a still-live source's disk is never clobbered.
+- **The API client gained `patch`** (Firecracker uses `PATCH` for in-place changes to a configured VM)
+  and typed bodies for `/vm`, `/snapshot/create`, `/snapshot/load`, with the closed-set discriminants
+  (`Paused`/`Resumed`, `Full`, `File`) modelled as enums, the same wire-discriminant discipline as
+  `Action` (decision 001).
+
+**Alternatives considered.**
+- **Rebase the drive after load (`PATCH /drives`).** Rejected because it doesn't work: Firecracker
+  opens the backing file at load, so the recorded path must be valid *then*; a post-load patch is too
+  late. Staging-then-unlink is the workaround that keeps the bundle portable.
+- **Reference a read-only shared base instead of copying the disk.** The right long-term shape for
+  density (many clones over one base), but it needs the source booted `read_only_root`, which needs the
+  agent rootfs, which needs vsock to reach its readiness marker, and a vsock/NIC snapshot can't yet
+  recreate its host endpoints on restore. So the read-write, private-copy path is the P5.1/P5.2 scope;
+  read-only-base warm snapshots are P5.3/P5.4.
+
+**Why.** A self-contained bundle can be moved or kept after the source VM is gone, which is what makes
+"snapshot then restore N clones" (P5.4) and a warm pool (P5.6) tractable. The staging trick is the
+minimal correct way to honour Firecracker's load-time drive-open contract without a shared mutable
+backing file.
+
+**Consequences / tombstones.**
+- **Restore is dramatically faster than cold boot:** dev box, ~1.57 s cold vs **~8.9 ms** restore
+  (≈177×). This is the fast-start reason the phase exists; the tracked p50/p99 benchmark is P5.7.
+- **Snapshotting is scoped to a root-disk-only, read-write boot.** A VM with vsock, a NIC, or an output
+  device is a typed error today (its host endpoints can't be recreated on restore yet, P5.4/P5.5), and
+  a read-only shared base is deferred (P5.3/P5.4). The guard is structural (the root backing must live
+  inside the VM's scratch dir), so it can't silently produce an unrestorable bundle.
+- **The restored VM has no exec channel yet.** vsock-over-snapshot (so a restored warm VM can run code)
+  is P5.8; today restore exposes liveness + teardown, and `boot_latency()` on a restored VM holds the
+  restore latency.
+- **Bundle size is state + ~guest-RAM memory + a full root-disk copy.** Copying the whole disk per
+  snapshot is the honest cost of a portable, read-write bundle; diff snapshots and base-sharing (density
+  over the warm pool) are the P5.3/P5.4/P5.7 optimizations.

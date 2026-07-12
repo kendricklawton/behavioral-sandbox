@@ -447,12 +447,50 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge less
 
 The fast-start magic: pause, snapshot, and restore — fork many VMs from one warm image.
 
-- [ ] **P5.1** Pause a booted VM and take a **full snapshot** (memory + state) via the API.
-- [ ] **P5.2** Restore a VM from a snapshot; measure restore latency vs cold boot.
+> **Design for the Phase-6 jailer now.** Snapshot save/restore takes host paths for the mem file,
+> state file, and block devices; under Phase 6's jailer those become chroot-relative and jailed-uid-
+> owned. Lay out the snapshot + warm-pool files **chroot-relative from the start** so the jailer
+> doesn't force a rework of this phase. (Ordering is deliberate: snapshots are the motivating
+> fast-start capability; jailing is the confinement chore that follows.)
+
+- [x] **P5.1** Pause a booted VM and take a **full snapshot** (memory + state) via the API.
+      *(`RunningVm::snapshot(dir)` (decision 010): `PATCH /vm {Paused}` freezes the vCPUs, `PUT
+      /snapshot/create {Full}` writes the vCPU/device **state** + full guest **memory**, then `PATCH
+      /vm {Resumed}` continues the VM (a create failure still falls through to the resume, so a failed
+      snapshot never leaves the guest frozen). The result is a **self-contained bundle**: state + memory
+      + a point-in-time **copy of the root disk** taken inside the paused window (so disk and memory
+      agree), referencing nothing outside its directory. The API client gained `patch` (Firecracker
+      uses `PATCH` for in-place state) and typed bodies for `/vm`, `/snapshot/create`, `/snapshot/load`
+      (closed-set enums for the wire discriminants, like `Action`). Scoped to a read-write root boot
+      whose backing is a private, disposable copy; a read-only shared base is deferred to the warm
+      snapshot (P5.3/P5.4) and vsock/NIC/output-device snapshots to P5.4/P5.5 (both a typed error now,
+      never an unrestorable bundle). Proof: `snapshots_a_running_microvm` boots, snapshots, asserts the
+      three bundle files exist (memory ≈ guest RAM), and shuts down clean post-resume.)*
+- [x] **P5.2** Restore a VM from a snapshot; measure restore latency vs cold boot.
+      *(`Vm::restore(&snapshot, &config)` on a **fresh** VMM (`spawn_fc`, extracted from `launch` and
+      shared with the cold-boot path). The load wrinkle that shaped the design: Firecracker opens each
+      drive's backing file **at `PUT /snapshot/load`**, from the path baked into the snapshot, *before*
+      any `PATCH /drives` could rebase it. So the driver **stages** the bundle's private disk copy at
+      that recorded path, loads with `resume_vm:true`, then **unlinks** the staged file once the VMM
+      holds the fd: the restored clone gets its own disk inode (shares no writable backing with its
+      source, which may be gone) and nothing lingers outside its scratch dir. Guarded against clobbering
+      a still-live source's disk. **Measured** (n=1, dev box): cold boot ~1.57 s vs snapshot restore
+      **~8.9 ms** (≈177×), the fast-start payoff this phase exists for; the tracked p50/p99 benchmark is
+      P5.7. The restored VM has no exec channel wired yet (vsock-over-snapshot is P5.8). Proof:
+      `restores_a_snapshot_onto_a_fresh_vmm` snapshots, drops the source entirely (proving the bundle is
+      self-contained), restores, and asserts the VMM loads, resumes, and stays alive.)*
 - [ ] **P5.3** A "warm" snapshot: boot + runtime loaded (e.g. Python imported), snapshot *that*.
 - [ ] **P5.4** Restore N clones from one warm snapshot; each gets a fresh overlay/tap.
-- [ ] **P5.5** Handle the uniqueness problems restore creates (network identity, entropy, clocks).
-- [ ] **P5.6** `Pool` that keeps warm restores ready so `exec` starts in ms.
+- [ ] **P5.5** `(decision)` Handle the uniqueness problems restore creates (network identity,
+      entropy, clocks) → `ARCHITECTURE.md`. **Network identity is the load-bearing one:** Phase 4
+      addresses the guest via kernel `ip=` at *boot* (decision 009), which runs once and won't re-fire
+      on restore, so N clones would wake with the snapshot's baked-in IP/MAC. Pick and record the
+      restore-identity model (snapshot network-less then attach + reconfigure fresh, an in-guest reset
+      via the agent, or MMDS). Entropy is security-relevant: reseed `virtio-rng` on restore so clones
+      don't share RNG state.
+- [ ] **P5.6** `Pool` that keeps warm restores ready so `exec` starts in ms. *(First warm-pool/retry
+      caller: lands the `GuestUnavailable` variant + `kind()` classifier deferred at P2.7, so a
+      restore that isn't accepting yet is a typed, retryable error, not an infra failure.)*
 - [ ] **P5.7** Benchmark: cold boot vs snapshot restore vs warm-pool `exec` latency. *(Baseline
       to beat: Phase 1 boots a full rootfs copy in `/tmp` — on a tmpfs host that's ≈300 MB of RAM
       per sandbox on top of guest memory; overlays should collapse that.)*
@@ -478,7 +516,13 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       **host-process death (Ctrl-C, SIGKILL, OOM) cannot leak a VM**, because the cgroup owns its
       lifetime from outside the driver. (Until here, teardown is `Drop`-based: killing the driver
       mid-run leaks the VMM — a signal handler would only paper over SIGINT, so we wait for the
-      real mechanism.)
+      real mechanism.) *(**Embedder kill handle:** expose a cheap, cloneable **cancellation token**
+      that forces VM teardown from outside a blocked `exec` (the host-gave-up path, since
+      `Sandbox::exec` borrows `&self` and `shutdown` consumes `self`, so a blocking caller can't
+      currently stop a wedged run). It gets real teeth here: cgroup-owned lifetime makes a forced kill
+      leak-free even if the embedder's own thread is wedged. The settable exec deadline (P7.3) covers
+      the common timeout case; the token covers the host-abandons-the-run case. Surfaced on `Sandbox`
+      in P7.)*
 - [ ] **P6.8** Test: a fork-bomb / mem-hog in the guest is bounded by the cgroup, host unaffected.
 - **Exit gate + lesson:** the VMM runs jailed + cgroup-limited; write up **namespaces, cgroups v2,
   seccomp, and capabilities** — the container-isolation primitives, seen through Firecracker.
@@ -487,11 +531,38 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 
 Wrap the FC track into a clean, self-hostable engine API.
 
-- [ ] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`. *(Lifts the
-      bulk block-device file paths — P3.4 `input_dir`, P3.5 `output_dir`/`RunningVm::collect_outputs`
-      — onto the `Sandbox` surface, since P3.4/P3.5 keep them at the low-level `RunningVm` layer.)*
+> **Downstream seam (a real embedder pins `vmm` by git rev).** This phase lands the embedder-driven
+> seam capabilities, each with the embedder's acceptance criteria as its exit gate: per-exec **inputs**
+> (files + `env`) with a **secret-hygiene contract** (P7.1), the exec **wall-clock and output-cap
+> budgets as knobs** (P7.3), and a **kill handle** for the host-gave-up path (P6.7, surfaced on
+> `Sandbox` here). Every addition stays a generic library capability (engine, not platform): nothing
+> below knows who embeds it. `VmmError::kind()` (the bucket classifier) and the conservative,
+> documented `Limits::default()` contract already landed as out-of-band seam hardening.
+
+- [ ] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`, with **inputs at
+      the seam**. *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
+      `output_dir`/`RunningVm::collect_outputs` — onto the `Sandbox` surface, since P3.4/P3.5 keep them
+      at the low-level `RunningVm` layer. **Embedder inputs:** promote `exec_with_files(argv, stdin,
+      files, artifacts)` onto `Sandbox` so an embedder never reaches into `RunningVm`; add an **`env`**
+      field to `Request::Exec` (bounded like `stdin`, set on the **spawned command only**, never the
+      agent's own process); and pin a **secret-hygiene contract**: injected file contents and env
+      values never appear in an engine log line, a [`VmmError`] Display, or `console()` (error paths
+      may name a file path or an env key, never a value), and host-side copies of injected bytes are
+      wiped after send where practical. When the flight recorder lands (P13), it records *that* inputs
+      were injected (paths/keys/sizes or hashes), never their contents. **Exit gate:** `Sandbox`
+      exposes an exec taking files + env; a run receives both in-guest; the call stays synchronous and
+      returns the same `RunResult` shape; and a **leak test** greps an injected sentinel value out of
+      every observable surface (logs, every `VmmError` Display, `console()`) and finds nothing.)*
 - [ ] **P7.2** Stateful sessions: multiple `exec`s against one VM with a persistent overlay.
-- [ ] **P7.3** Per-sandbox limits (cpu/mem/wall/net policy) as one options struct.
+- [ ] **P7.3** Per-sandbox limits (cpu/mem/wall/net policy) as **one options struct**, its shape
+      settled by the P6.5 resource-policy decision. *(Turns two fixed internal budgets into **knobs**:
+      the **exec wall-clock budget** (today the internal `DEFAULT_EXEC_TIMEOUT`; make it settable per
+      call or on the struct so a host's run budget is enforced end to end, so `Limits.wall` stops
+      meaning boot-only), and the **exec output cap** (today the fixed `MAX_EXEC_OUTPUT`, already surfaced as
+      `OutputCap { limit }`). A wall breach keeps today's semantics: cooperative `ExecTimeout`, with
+      `ExecUnresponsive` as the liveness backstop. `Limits::default()` stays conservative and its
+      load-bearing-defaults doc already landed. **Exit gate:** the exec deadline is settable per run
+      with unchanged timeout semantics, and the output cap is settable.)*
 - [ ] **P7.4** `agent run <cmd>` / `agent shell` CLI over the lifecycle.
 - [ ] **P7.5** Structured run result (stdout/stderr/exit/artifacts/metrics).
 - [ ] **P7.6** Concurrency: many sandboxes at once; a bounded pool; no interference.
@@ -523,6 +594,14 @@ The eBPF on-ramp: build, load, and read a map from a trivial program.
 ## Phase 9 — Syscall observability
 
 Trace what a process (a firecracker/vhost worker, or the guest-adjacent host side) actually does.
+
+> **What host eBPF can and cannot see (the hardware-isolation consequence).** The guest runs its
+> *own* kernel, so untrusted code's syscalls are serviced in-guest and **never trap to the host**:
+> host tracepoints on `sys_enter_execve` etc. see only the **VMM's host footprint** (Firecracker/
+> vhost threads, KVM ioctls, block I/O), not in-guest syscalls. This is the price of spine #1: the
+> strong host-side signals are **network** (the tap, P10/P11) and **resources** (the cgroup, P12);
+> syscall-level visibility is inherently coarse for a microVM. Say so plainly (measured, not
+> marketed); do not promise in-guest syscall introspection this boundary cannot deliver.
 
 - [ ] **P9.1** Tracepoints for `execve`/`openat`/`connect` with per-event data via a **ring buffer**.
 - [ ] **P9.2** Filter to a target PID/cgroup (so you watch *one* sandbox's host footprint).
@@ -582,8 +661,10 @@ Per-sandbox CPU/mem/IO accounting from the kernel — the metering primitive (en
 Attach the eBPF programs to a sandbox at launch and produce a per-run **audit trail**.
 
 - [ ] **P13.1** On `Sandbox::open`, attach syscall + network + accounting probes bound to that VM.
-- [ ] **P13.2** Aggregate into one per-run record: network flows, notable syscalls, resources,
-      egress denials, timing.
+- [ ] **P13.2** Aggregate into one per-run record: network flows, resources, egress denials, timing,
+      and notable **host-side** syscalls (the VMM's footprint, not in-guest syscalls; see Phase 9).
+      The record's spine is network + resources + denials, the signals host eBPF observes strongly
+      across the hardware boundary.
 - [ ] **P13.3** Detach + finalize the record on `close`.
 - [ ] **P13.4** Deterministic, structured output (JSON) of "what this run did," from *outside* the guest.
 - [ ] **P13.5** Bound the overhead; keep concurrent sandboxes independent.

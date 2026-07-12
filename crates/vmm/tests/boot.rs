@@ -119,6 +119,77 @@ fn boots_with_a_vsock_device() {
     vm.shutdown().expect("shutdown should succeed");
 }
 
+#[test]
+#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+fn snapshots_a_running_microvm() {
+    // P5.1: pause a booted VM and take a full snapshot (memory + state) via the API. The bundle is
+    // three real files, and the VM is resumed so it stays usable afterward.
+    let vm = Vm::boot(config()).expect("microVM should boot to userspace");
+    let bundle = TmpDir::new("snap-p51");
+    let snap = vm
+        .snapshot(bundle.path())
+        .expect("pause + full snapshot should succeed");
+
+    for (label, path) in [
+        ("state", snap.state_path()),
+        ("memory", snap.mem_path()),
+        ("root disk", snap.root_drive_path()),
+    ] {
+        let meta = std::fs::metadata(path)
+            .unwrap_or_else(|e| panic!("{label} file {path:?} should exist: {e}"));
+        assert!(meta.len() > 0, "{label} file should be non-empty");
+    }
+    // The memory file is roughly the guest's RAM (256 MiB default) — a sanity floor, not an exact
+    // size, so this doesn't couple to Firecracker's exact memory-file layout.
+    let mem_len = std::fs::metadata(snap.mem_path()).expect("mem meta").len();
+    assert!(
+        mem_len >= 128 * 1024 * 1024,
+        "memory file {mem_len} bytes looks too small for a full snapshot"
+    );
+
+    // Resume worked, so the VM is still alive and shuts down cleanly.
+    vm.shutdown()
+        .expect("post-snapshot shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+fn restores_a_snapshot_onto_a_fresh_vmm() {
+    // P5.2: snapshot a VM, throw it away, then restore from the bundle on a fresh VMM and confirm it
+    // resumes. Measures restore latency alongside the source's cold boot for the comparison.
+    let cfg = config();
+    let source = Vm::boot(cfg.clone()).expect("source microVM should boot");
+    let cold_boot = source.boot_latency();
+
+    let bundle = TmpDir::new("snap-p52");
+    let snap = source
+        .snapshot(bundle.path())
+        .expect("snapshot should succeed");
+    // Drop the source entirely: its scratch dir (and the private rootfs copy it booted from) are
+    // reclaimed, so a successful restore proves the bundle is self-contained.
+    source.shutdown().expect("source shutdown should succeed");
+
+    let restored = Vm::restore(&snap, &cfg).expect("restore should load and resume");
+    let restore_latency = restored.boot_latency();
+    assert!(
+        restore_latency > Duration::ZERO,
+        "restore latency should be measured"
+    );
+
+    // Liveness: the restored VMM is a real, running process, and it stays up past resume (a bundle
+    // that loaded but instantly died would fail `run_restore`, but assert it held for a beat too).
+    let pid = restored.vmm_pid();
+    let alive = |pid: u32| std::path::Path::new(&format!("/proc/{pid}")).exists();
+    assert!(alive(pid), "restored VMM (pid {pid}) should be alive");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(alive(pid), "restored VMM should stay alive after resume");
+
+    eprintln!("cold boot {cold_boot:?} vs snapshot restore {restore_latency:?}");
+    restored
+        .shutdown()
+        .expect("restored shutdown should succeed");
+}
+
 /// A boot config pointed at the **agent rootfs** (`cargo xtask build-rootfs`): readiness is the
 /// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable — the
 /// in-VM exec tests are about *that* image specifically.

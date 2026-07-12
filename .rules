@@ -95,6 +95,12 @@ xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF 
   roadmap box checked in the working tree, and — **only when asked** — a commit message drafted
   (imperative subject describing **what was done**; do **not** reference phase IDs, the roadmap
   can change; never an AI co-author/attribution trailer).
+- **Public-seam changes are called out in the commit subject.** The engine is embedded downstream at
+  the `vmm` library seam, pinned by git rev, so a change to the **public API** (`Sandbox`, `Limits`,
+  `RunResult`, `VmmError` including its variants *or* the `kind()` bucket mapping, or the `channel`
+  wire protocol) must say so in the subject (e.g. a leading `seam:` marker) so a downstream pin bump
+  is auditable from the log alone. Internal-only changes don't need it. This is about legibility, not a new
+  process: still one imperative subject, still human-committed.
 
 ## Build order (roadmap)
 
