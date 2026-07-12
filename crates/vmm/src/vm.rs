@@ -343,6 +343,17 @@ impl RunningVm {
         self.tap.as_ref().map(|t| t.guest_ip)
     }
 
+    /// The host tap interface backing this VM's NIC (`fc<hex>`), when booted with
+    /// [`enable_network`](BootConfig::enable_network); `None` otherwise. This is the handle the
+    /// host-side eBPF track (Phase 8) binds policy to: the name is host-globally reserved for the VM's
+    /// lifetime, so the loader can resolve it to an ifindex (`if_nametoindex`) and attach `tc`/XDP
+    /// programs to *this* sandbox's traffic. Names, unlike ifindexes, don't churn if the interface is
+    /// recreated, so the driver hands out the name and lets the loader resolve the index at attach.
+    #[must_use]
+    pub fn tap_name(&self) -> Option<&str> {
+        self.tap.as_ref().map(|t| t.name.as_str())
+    }
+
     /// Connect to the in-guest agent over vsock and complete the channel handshake, returning a
     /// protocol-ready [`ClientConnection`]. This is the host side of the exec path (P2.4 builds
     /// `exec` on top): it dials Firecracker's vsock socket, speaks the `CONNECT <port>` handshake,
@@ -1059,19 +1070,38 @@ impl Tap {
                 (u64::from(std::process::id()) << 20) ^ NET_SEQ.fetch_add(1, Ordering::Relaxed);
             let name = tap_name(token);
             match tap_add(&name)? {
-                TapAdd::Exists => continue, // raced or stale — try the next candidate name
+                TapAdd::Exists => {
+                    // Raced or stale: another VM (or a leaked tap) holds this name. Try the next
+                    // candidate. Logged so allocator contention is visible, not silent.
+                    tracing::debug!(tap = %name, "tap name already taken, retrying with a fresh token");
+                    continue;
+                }
                 TapAdd::Created => {}
             }
             // A half-configured tap must not leak if bring-up or addressing fails.
             let (host_ip, guest_ip, prefix) = subnet_for(token);
-            let setup = run_ip(&["link", "set", "dev", &name, "up"]).and_then(|()| {
-                // Assign the host end of the /30. This auto-installs the connected route so the host
-                // reaches the guest — the only route on the link. Deny-by-default (decision 008): no
-                // default route, no masquerade, no ip_forward; `ip link del` removes this on teardown.
-                run_ip(&["addr", "add", &format!("{host_ip}/{prefix}"), "dev", &name])
-            });
-            if let Err(e) = setup {
+            if let Err(e) = run_ip(&["link", "set", "dev", &name, "up"]) {
                 let _ = run_ip(&["link", "del", "dev", &name]);
+                return Err(e);
+            }
+            // Assign the host end of the /30. This auto-installs the connected route so the host
+            // reaches the guest (the only route on the link). Deny-by-default (decision 008): no
+            // default route, no masquerade, no ip_forward; `ip link del` removes this on teardown.
+            //
+            // The assignment is also the /30's atomic reservation. `subnet_for` folds the token to a
+            // 14-bit index, so two tokens that won distinct tap names can still land on the same /30;
+            // that clash surfaces here as `ip addr add` failing because the address is already held.
+            // When that's the cause (another VM owns this /30), reclaim the tap and retry with a fresh
+            // token (the same fail-if-taken-then-retry the name uses), so two concurrent sandboxes
+            // never share a subnet and can't reach each other's tap (P4.4). Any other failure is real.
+            if let Err(e) = run_ip(&["addr", "add", &format!("{host_ip}/{prefix}"), "dev", &name]) {
+                let _ = run_ip(&["link", "del", "dev", &name]);
+                if host_addr_exists(host_ip) {
+                    // Another VM already owns this /30 (the folded index collided). Retry with a
+                    // fresh token; log it so subnet contention is observable.
+                    tracing::debug!(%host_ip, "/30 already reserved by another VM, retrying with a fresh token");
+                    continue;
+                }
                 return Err(e);
             }
             #[allow(clippy::cast_possible_truncation)]
@@ -1084,7 +1114,7 @@ impl Tap {
             });
         }
         Err(VmmError::Vmm(
-            "could not allocate a unique tap name after 1024 attempts".into(),
+            "could not allocate a unique tap (name + /30) after 1024 attempts".into(),
         ))
     }
 
@@ -1179,6 +1209,19 @@ fn iface_exists(name: &str) -> bool {
         .args(["link", "show", "dev", name])
         .output()
         .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Whether IPv4 `addr` is already assigned to some interface in the current network namespace, via
+/// `ip -o -4 addr show to <addr>/32`; non-empty output means present. Netlink-based like
+/// [`iface_exists`], so it's namespace-correct and locale-independent (it keys on whether any line
+/// was printed, not on a message). Used to tell "this /30 is already held by another VM" (retry the
+/// allocation) apart from a genuine `ip addr add` failure (surface it).
+fn host_addr_exists(addr: Ipv4Addr) -> bool {
+    Command::new("ip")
+        .args(["-o", "-4", "addr", "show", "to", &format!("{addr}/32")])
+        .output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
         .unwrap_or(false)
 }
 
@@ -2108,6 +2151,23 @@ mod tests {
         );
         // Successive sequence numbers within one process also differ.
         assert_ne!(subnet_index(token(1234, 0)), subnet_index(token(1234, 1)));
+    }
+
+    #[test]
+    fn subnet_for_gives_a_distinct_30_to_every_vm_in_a_process_run() {
+        // How the driver actually allocates: one PID, `NET_SEQ` climbing 0, 1, 2, … . Every VM in a
+        // run must get its own /30, or two guests would share a subnet and reach each other's tap
+        // (P4.4). The `ip addr add` reservation in `Tap::create` is the cross-process backstop; this
+        // asserts the common single-process path never needs it — no two host ends collide.
+        let token = |seq: u64| (u64::from(std::process::id()) << 20) ^ seq;
+        let mut seen = std::collections::BTreeSet::new();
+        for seq in 0..4096 {
+            let (host, _guest, _prefix) = subnet_for(token(seq));
+            assert!(
+                seen.insert(host),
+                "duplicate host /30 end {host} at seq {seq}"
+            );
+        }
     }
 
     #[test]

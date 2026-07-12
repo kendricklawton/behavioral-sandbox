@@ -475,6 +475,14 @@ allowance is recorded" invariant true from the first tap.
   that is an explicit configured allowance the flight recorder captures, consistent with guardrail #3
   (the hoster's policy, enabled explicitly), never an engine default.
 
+**As shipped.** The addressing/tap work (P4.1/P4.2) implements this directly: the guest's `eth0` is
+configured via the kernel `ip=` param with an **empty gateway field**, so the kernel installs only the
+connected /30 route and **no default route**, and the driver installs no masquerade and never enables
+`ip_forward`. Net effect: the guest reaches its host end of the /30 and nothing else. Proven by the
+`addresses_the_guest_and_routes_host_to_guest` integration test, which asserts the guest carries its
+address, reaches the host tap IP, and gets a fast `ENETUNREACH` (not a timeout) for an off-subnet
+address. So this decision is realized, not just intended.
+
 ### 009 — The per-VM tap: shelled out to `ip`, deleted on every teardown path *(2026-07-12, P4.1)*
 
 **Decision.** With `BootConfig.enable_network`, the driver gives the guest a virtio-net `eth0` backed
@@ -521,7 +529,19 @@ exactly this). Shelling to `ip` keeps the driver dependency-light and `unsafe`-f
   concurrent processes don't collide at `NET_SEQ=0`. Guest addressing is the kernel `ip=` param
   (`CONFIG_IP_PNP`, present in the pinned kernel), so it needs no rootfs change; the host end is
   assigned in `Tap::create` and cascades away on `ip link del`. Still open on the same index: the
-  guest **CID** (still the hardcoded `DEFAULT_GUEST_CID = 3`) and per-VM **netns isolation** (P4.4).
+  guest **CID** (still the hardcoded `DEFAULT_GUEST_CID = 3`).
+- **The /30 is atomically unique per VM** (P4.4): the PID-fold only makes a same-`NET_SEQ` collision
+  *unlikely*, and folding 64 bits to a 14-bit index means two distinct tap names can still map to one
+  /30. So `Tap::create` makes the **host-address assignment the reservation**: `ip addr add` fails when
+  another VM already holds that /30 (checked with `host_addr_exists`, netlink-truthy, not a string
+  match), and the loop reclaims the tap and retries with a fresh token (the same fail-if-taken pattern
+  as the name). Two concurrent sandboxes therefore never share a subnet, which is what keeps one VM off
+  another's tap (proven by `two_vms_cannot_reach_each_others_tap`).
+- **Per-VM network-namespace isolation is deferred, by design.** P4.4's bar is met at L3: with no
+  default route a guest can only address its own /30, so it can't even name another VM's tap, and the
+  unique-/30 reservation removes the one way subnets could overlap. Putting each tap in its own netns
+  (and running the VMM inside it) is stronger defence-in-depth but couples to running the VMM under the
+  Phase-6 **jailer**; it's recorded here as that phase's work, not built in Phase 4.
 - **Deny-by-default holds by construction:** with P4.2 the guest is addressed on the /30 and can reach
   the host end — but the `ip=` gateway field is **empty**, so the kernel installs only the connected
   route, **no default route**, and the driver installs no masquerade or `ip_forward`. So the guest

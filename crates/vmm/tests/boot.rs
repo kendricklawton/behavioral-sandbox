@@ -519,6 +519,24 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
 
+    // The driver exposes the tap name as the eBPF-binding handle (P4.6): it must be a real,
+    // `fc`-prefixed host interface the Phase-8 loader can resolve and attach `tc`/XDP to.
+    let tap = vm
+        .tap_name()
+        .expect("a networked VM should expose its tap name");
+    assert!(
+        tap.starts_with("fc"),
+        "tap name should be fc-prefixed; got {tap:?}"
+    );
+    let present = std::process::Command::new("ip")
+        .args(["link", "show", "dev", tap])
+        .output()
+        .expect("run ip link show");
+    assert!(
+        present.status.success(),
+        "the exposed tap name {tap} should be a live host interface"
+    );
+
     // The NIC is present with our LAA MAC (first octet 0x02 = locally administered + unicast); the
     // guest kernel exposes it at `/sys/class/net/eth0/address` regardless of link state.
     let mac = vm
@@ -630,6 +648,138 @@ fn addresses_the_guest_and_routes_host_to_guest() {
     );
 
     vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn two_vms_cannot_reach_each_others_tap() {
+    // P4.4: per-VM isolation. Two concurrently-booted networked VMs get distinct /30s — the driver
+    // makes each host-address assignment the /30's atomic reservation, so a folded-index collision
+    // retries instead of sharing a subnet — and with no default route a guest can only address its
+    // own connected /30. So VM-A cannot even reach VM-B's tap. Needs CAP_NET_ADMIN.
+    if !have_net_admin() {
+        eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
+        return;
+    }
+    let mut cfg_a = agent_rootfs_config();
+    cfg_a.enable_network = true;
+    let vm_a = Vm::boot(cfg_a).expect("VM A with a NIC should boot to readiness");
+    let mut cfg_b = agent_rootfs_config();
+    cfg_b.enable_network = true;
+    let vm_b = Vm::boot(cfg_b).expect("VM B with a NIC should boot to readiness");
+
+    let a_host = vm_a.host_ip().expect("A host ip when networked");
+    let a_guest = vm_a.guest_ip().expect("A guest ip when networked");
+    let b_host = vm_b.host_ip().expect("B host ip when networked");
+    let b_guest = vm_b.guest_ip().expect("B guest ip when networked");
+
+    // The allocator handed the two VMs disjoint /30s: no shared subnet to bridge them.
+    assert_ne!(
+        a_host, b_host,
+        "the two VMs must get distinct host /30 ends"
+    );
+    assert_ne!(
+        a_guest, b_guest,
+        "the two VMs must get distinct guest addresses"
+    );
+
+    // From A, B's addresses are off A's only (connected) route: a fast ENETUNREACH, not a timeout —
+    // the same deny-by-default lever that blocks the world also isolates one VM from another.
+    for target in [b_host.to_string(), b_guest.to_string()] {
+        let out = vm_a
+            .exec(
+                &[
+                    "ping".into(),
+                    "-c".into(),
+                    "1".into(),
+                    "-W".into(),
+                    "1".into(),
+                    target.clone(),
+                ],
+                b"",
+            )
+            .expect("ping VM B from VM A");
+        assert_ne!(
+            out.exit_code,
+            0,
+            "VM A must not reach VM B's address {target}; console:\n{}",
+            vm_a.console()
+        );
+    }
+
+    vm_a.shutdown().expect("shutdown A should succeed");
+    vm_b.shutdown().expect("shutdown B should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
+    // P4.7: prove the allow/deny posture at the transport layer, not just ICMP. Per decision 008,
+    // "allowed" in Phase 4 is host-local (world-egress allow-listing is eBPF-enforced in P8): the
+    // guest completes a real TCP connection to a listener bound on the host tap IP, and cannot reach
+    // an off-subnet endpoint (no route, fast failure). Needs CAP_NET_ADMIN.
+    if !have_net_admin() {
+        eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
+        return;
+    }
+    let mut cfg = agent_rootfs_config();
+    cfg.enable_network = true;
+    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+    let host_ip = vm.host_ip().expect("host ip when networked");
+
+    // A genuine host-side endpoint on the tap's host address. `bind` already starts listening, and the
+    // kernel queues the connection in the backlog, so the guest's connect completes even before the
+    // acceptor thread runs — no bind/connect race. Port 0 picks a free ephemeral port.
+    let listener =
+        std::net::TcpListener::bind((host_ip, 0)).expect("bind a host endpoint on the tap IP");
+    let port = listener.local_addr().expect("listener local addr").port();
+    let acceptor = std::thread::spawn(move || {
+        // One accepted connection is enough to prove reachability; drop it and finish.
+        let _ = listener.accept();
+    });
+
+    // Allowed: the guest's TCP connect to the host endpoint succeeds (python3 exits 0; an unreachable
+    // peer would raise and exit non-zero). python3 is in the agent rootfs (see execs_python_*).
+    let allowed = vm
+        .exec(
+            &[
+                "python3".into(),
+                "-c".into(),
+                format!(
+                    "import socket; s=socket.socket(); s.settimeout(3); s.connect(('{host_ip}',{port}))"
+                ),
+            ],
+            b"",
+        )
+        .expect("guest connects to the allowed host endpoint");
+    assert_eq!(
+        allowed.exit_code,
+        0,
+        "guest should reach the allowed host endpoint {host_ip}:{port}; console:\n{}",
+        vm.console()
+    );
+
+    // Blocked: an off-subnet endpoint has no route, so connect fails (raises, exits non-zero). RFC 5737
+    // TEST-NET-1 is provably off the /30. The same port keeps the two probes symmetric.
+    let blocked = vm
+        .exec(
+            &[
+                "python3".into(),
+                "-c".into(),
+                format!(
+                    "import socket; s=socket.socket(); s.settimeout(3); s.connect(('192.0.2.1',{port}))"
+                ),
+            ],
+            b"",
+        )
+        .expect("guest attempts a blocked endpoint");
+    assert_ne!(
+        blocked.exit_code, 0,
+        "deny-by-default: the guest must not reach an off-subnet endpoint"
+    );
+
+    vm.shutdown().expect("shutdown should succeed");
+    let _ = acceptor.join();
 }
 
 /// Whether this process holds `CAP_NET_ADMIN` (effective) — needed to create a tap. Creating a tap

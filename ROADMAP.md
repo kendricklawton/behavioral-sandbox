@@ -386,15 +386,24 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge less
       a timeout. `CAP_NET_ADMIN`-gated (skips without it; verified under a user+net namespace). Base
       `10.200/16` dodges the common host defaults; making it a hoster knob and per-VM netns isolation
       are P4.3/P4.4.)*
-- [ ] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
+- [x] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
       `ARCHITECTURE.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
       *(Direction **pre-recorded as decision 008** (2026-07-12): deny-by-default, tap has no world
       route, no default masquerade until eBPF enforcement (P8) — so this **blocks P4.1** (build denying,
-      not opened-then-restricted). The box closes when the decision's rationale is finalized with the
-      implementation.)*
-- [ ] **P4.4** Per-VM isolation: one VM cannot reach another's tap.
-      *(Depends on the P4.1 host-scoped allocator: a unique tap name / guest IP / MAC / CID per VM so
-      two concurrent sandboxes can't collide — `VM_SEQ` (process-local) is not enough.)*
+      not opened-then-restricted). Closed here: decision 008 gained an "As shipped" note pinning the
+      concrete mechanism (empty `ip=` gateway, so a connected-route-only guest with no default route, no
+      masquerade, no `ip_forward`) and citing the `addresses_the_guest_and_routes_host_to_guest` proof.
+      Rationale finalized with the P4.1/P4.2 implementation.)*
+- [x] **P4.4** Per-VM isolation: one VM cannot reach another's tap.
+      *(Two levers, both host-side: with no default route a guest can only address its own connected
+      /30 (so it can't even name another VM's tap), and the /30 is now **atomically unique**: the tap
+      name was already reserved by create-and-retry, but the 14-bit folded index could still alias, so
+      `Tap::create` makes the host-address assignment the reservation (`ip addr add` clash → reclaim the
+      tap and retry with a fresh token, clash detected via netlink `host_addr_exists`, not a string
+      match). Proven by `two_vms_cannot_reach_each_others_tap`: two concurrent networked VMs get disjoint
+      addresses and neither can ping the other's host or guest end (fast `ENETUNREACH`). Per-VM netns is
+      deferred to the Phase-6 jailer as defence-in-depth (decision 009). Guest **CID** stays the
+      hardcoded `DEFAULT_GUEST_CID`, fine because each VMM has its own vsock socket.)*
 - [x] **P4.5** Teardown removes the tap + routes; no orphaned interfaces after many runs.
       *(Delivered across P4.1/P4.2 and finished here: the tap is the first per-VM resource **outside
       `workdir`**, so it's deleted (with its address + connected route, which `ip link del` cascades
@@ -406,11 +415,33 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge less
       new `RunningVm::vmm_pid()` records each VMM's pid; the check keys on that specific pid via
       `/proc/<pid>/comm`, so it's non-flaky under the parallel test harness). Verified under a user+net
       namespace. `vmm_pid()` is also the accessor Phase 6 will use to place the VMM in a cgroup.)*
-- [ ] **P4.6** Name/track each tap so the eBPF track can bind policy to a specific VM later.
-- [ ] **P4.7** Test: guest can (optionally) reach an allowed host endpoint; cannot reach a blocked one.
-- [ ] **P4.8** Document the netfilter/routing rules the driver installs.
+- [x] **P4.6** Name/track each tap so the eBPF track can bind policy to a specific VM later.
+      *(Each VM already owns a host-globally-reserved tap name (`fc<hex>`); P4.6 exposes it as
+      `RunningVm::tap_name()`, the handle the Phase-8 loader binds to (resolve name → ifindex via
+      `if_nametoindex`, attach `tc`/XDP to *that* sandbox's traffic). Deliberately hands out the name,
+      not a stored ifindex: names don't churn if an interface is recreated, and reading ifindex from
+      `/sys/class/net` is netns-fragile, so the loader resolves the index at attach. Asserted by the
+      P4.1 tap test: `tap_name()` is a live, `fc`-prefixed host interface.)*
+- [x] **P4.7** Test: guest can (optionally) reach an allowed host endpoint; cannot reach a blocked one.
+      *(`guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one` proves it at the transport
+      layer, not just ICMP: a real `TcpListener` bound on the host tap IP is reachable (the guest's
+      python3 `connect` exits 0), while an off-subnet endpoint (RFC 5737 TEST-NET-1) has no route and
+      fails. Per decision 008, "allowed" in this phase is host-local; world-egress allow-listing is the
+      eBPF-enforced, recorded policy of P8. `have_net_admin()`-gated.)*
+- [x] **P4.8** Document the netfilter/routing rules the driver installs.
+      *(Enumerated in `docs/004-guest-networking.md` as an audit table: per networked VM the driver runs
+      exactly `ip tuntap add` / `ip link set up` / `ip addr add <host>/30` plus the kernel `ip=` guest
+      config, and installs **no** default route, **no** `MASQUERADE`/`nat`/`forward` rule, **no**
+      `ip_forward`, no bridge, no netns. Teardown is the inverse of one line (`ip link del`). The
+      point: the full host-side network change set is small and enumerable, which is what makes
+      deny-by-default auditable, cross-referenced from decisions 008/009.)*
 - **Exit gate + lesson:** a microVM has controlled network; write up **tap devices, bridges,
   netfilter/NAT, and virtio-net.**
+  *(Done: `docs/004-guest-networking.md` teaches the tap backend (and why not a bridge/veth), virtio-net
+  host-tap-to-guest-`eth0`, kernel `ip=`/`CONFIG_IP_PNP` static addressing with no rootfs change, the
+  connected-route-is-the-whole-security-model lever with NAT/forwarding as the road not taken, the
+  atomic per-VM /30, and the audit table. Working demo: the three `ci-privileged` network tests.
+  Indexed in `docs/README.md`.)*
 
 ## Phase 5 — Snapshots & warm start
 

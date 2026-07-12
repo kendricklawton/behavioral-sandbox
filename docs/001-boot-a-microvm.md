@@ -64,8 +64,9 @@ structure already filled in. Three inputs make a boot:
 
    Firecracker exposes it to the guest as a **virtio-block** device. `virtio` is the paravirtual
    I/O standard: instead of emulating a real disk controller register-by-register, host and guest
-   share ring buffers in memory and just pass descriptors, for near-native I/O with a tiny driver.
-   The guest kernel sees it as `/dev/vda`, mounts it as `/`, and runs its `/sbin/init`.
+   share ring buffers in memory and just pass descriptors, so I/O is a shared-memory handoff rather
+   than a trap-and-emulate, with a tiny driver. The guest kernel sees it as `/dev/vda`, mounts it as
+   `/`, and runs its `/sbin/init`.
 
 ## Driving Firecracker: HTTP over a unix socket
 
