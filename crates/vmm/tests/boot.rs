@@ -9,6 +9,54 @@ use std::time::Duration;
 
 use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
+/// A host scratch dir removed on drop, so a panicking assertion can't leak it. (The unit tests have
+/// their own copy; the integration crate is separate, so it needs one too.)
+struct TmpDir(PathBuf);
+impl TmpDir {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("agent-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Self(dir)
+    }
+    fn path(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+impl Drop for TmpDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep — mirrors the input test's
+/// host-side hash of the injected payload). A free helper (not a `#[test]` fn), so it uses explicit
+/// panics rather than `expect`, which the workspace lints only re-allow inside test functions.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut child = match std::process::Command::new("sha256sum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => panic!("spawn sha256sum: {e}"),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(bytes);
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => panic!("host sha256: {e}"),
+    };
+    match String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+    {
+        Some(h) => h.to_string(),
+        None => panic!("empty sha256sum output"),
+    }
+}
+
 /// A boot config pointed at the workspace's fetched artifacts (absolute, so it's cwd-independent).
 /// Explicit `AGENT_KERNEL`/`AGENT_ROOTFS` overrides still win — they're the documented escape
 /// hatch for hosts without the pinned artifacts (e.g. non-x86_64).
@@ -185,6 +233,87 @@ fn injects_a_large_file_via_block_device() {
     );
     assert_eq!(out.exit_code, 0);
     vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn collects_outputs_via_block_device() {
+    // P3.5: the whole-working-dir / large-file *output* path the vsock channel can't carry — the
+    // counterpart to `injects_a_large_file_via_block_device`. Boot with a writable output device, have
+    // the guest write a file **larger than the 1 MiB channel frame cap**, a nested file, and a
+    // host-escaping symlink into `/output`; pull the tree back and prove it arrived byte-for-byte —
+    // and that the escaping symlink was dropped, not recreated live on the host.
+    let dir = TmpDir::new("p35");
+
+    let mut cfg = agent_rootfs_config();
+    cfg.output_dir = Some(dir.path().to_path_buf());
+    let vm = Vm::boot(cfg).expect("microVM with an output block device should boot");
+    let out = vm
+        .exec(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "mkdir -p /output/sub \
+                 && head -c 4194304 /dev/urandom > /output/big.bin \
+                 && printf nested > /output/sub/y \
+                 && ln -s /etc/passwd /output/escape \
+                 && sha256sum /output/big.bin"
+                    .into(),
+            ],
+            b"",
+        )
+        .expect("write outputs in the guest");
+    assert_eq!(
+        out.exit_code,
+        0,
+        "guest write failed; console:\n{}",
+        vm.console()
+    );
+    let guest_hash = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .expect("guest sha256 hex")
+        .to_string();
+
+    // Consumes the VM: stops it, then reads the image back.
+    let captured = vm.collect_outputs().expect("pull the output tree back");
+
+    // The large file and the nested file arrived; the escaping symlink is absent from the manifest.
+    assert!(
+        captured.iter().any(|p| p == "big.bin"),
+        "big.bin missing from {captured:?}"
+    );
+    assert!(
+        captured.iter().any(|p| p == "sub/y"),
+        "sub/y missing from {captured:?}"
+    );
+    assert!(
+        !captured.iter().any(|p| p == "escape"),
+        "escaping symlink should be dropped: {captured:?}"
+    );
+
+    // Byte-for-byte integrity of a > 1 MiB file the channel frame can't carry in one piece.
+    let big = std::fs::read(dir.path().join("big.bin")).expect("read big.bin back");
+    assert_eq!(big.len(), 4 * 1024 * 1024, "big.bin should be 4 MiB");
+    assert_eq!(
+        sha256_hex(&big),
+        guest_hash,
+        "host readback must match the guest's sha256"
+    );
+
+    let nested = std::fs::read(dir.path().join("sub/y")).expect("read sub/y");
+    assert_eq!(nested, b"nested");
+
+    // Security (S1): the `escape -> /etc/passwd` symlink must not exist as a live host symlink, and
+    // the ext4 `lost+found` housekeeping dir must be pruned.
+    assert!(
+        std::fs::symlink_metadata(dir.path().join("escape")).is_err(),
+        "host-escaping symlink must be removed, not recreated on the host"
+    );
+    assert!(
+        std::fs::symlink_metadata(dir.path().join("lost+found")).is_err(),
+        "lost+found must be pruned"
+    );
 }
 
 #[test]

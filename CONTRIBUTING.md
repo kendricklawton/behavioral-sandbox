@@ -21,6 +21,9 @@ This is **Linux-only** (it needs KVM). You'll need:
   (`cargo install bpf-linker`; the eBPF crate targets `bpfel-unknown-none`).
 - **`firecracker`** + its **jailer** binary (pinned version — see below), a guest **kernel
   image** (`vmlinux`), and the ability to build a minimal **rootfs**.
+- **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
+  rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
+  loopback, no `sudo`). A missing tool is a clear typed error.
 - **Elevated capabilities** for the parts that touch the kernel: creating **tap** devices
   (`CAP_NET_ADMIN`) and loading eBPF (`CAP_BPF`/`CAP_PERFMON`, or root). Day-to-day dev uses an
   `xtask`/`just` wrapper so it isn't `sudo cargo` roulette.

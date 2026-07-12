@@ -273,8 +273,24 @@ binary, so adding a runtime is a packaging step, not an engine change.
       `/input` with a matching byte count + sha256. New runtime dep (`mke2fs`/`truncate`, typed error
       + `setup` check); boot-path build cost moves behind the warm pool at P5. Pulling large outputs
       back is P3.5.)*
-- [ ] **P3.5** Pull artifacts back out at **working-dir / large-file** scale (the per-file channel
+- [x] **P3.5** Pull artifacts back out at **working-dir / large-file** scale (the per-file channel
       path landed in P2.5; here it's the block-device / bulk mechanism).
+      *(New `BootConfig.output_dir` (decision 006): the driver attaches a blank **writable** ext4 as a
+      third block device (labelled `agent-output`, `lazy_itable_init=0` so it stays sparse); the guest
+      mounts it read-write `-o sync` at `/output`. `RunningVm::collect_outputs` (consumes the VM) stops
+      the VMM, then reads the image back **rootless** — `e2fsck -fy` to recover the journal, `debugfs
+      rdump` to extract — **after** the VMM has exited (a live `e2fsck` would race Firecracker). The
+      counterpart to P2.5's per-frame `Response::File`; **no guest-agent change** — `/output` is a path
+      the command writes. Order-robust: both data devices now mount by **label** (`findfs`), retiring
+      005's `/dev/vdb` order-dependence — so the P3.4 input mount moved to the same `/sbin/mount-drives`.
+      Guest-controlled tree is sanitised: `lost+found` pruned and **host-escaping symlinks dropped**
+      (`debugfs` recreates a guest `link -> /etc/shadow` as a live host symlink otherwise), and the
+      extraction is byte- and time-capped so a sparse-file image can't exhaust host disk. New runtime
+      deps (`e2fsck`/`debugfs`, e2fsprogs; typed error + `setup` check). Proof:
+      `collects_outputs_via_block_device` writes a **4 MiB** file (4× the 1 MiB channel frame cap) + a
+      nested file + an escaping symlink into `/output`, pulls the tree back with a matching sha256, and
+      asserts the escaping symlink and `lost+found` are gone. `Sandbox`/`agent run --output-dir`
+      plumbing deferred, as `input_dir`'s was.)*
 - [ ] **P3.6** Pin the rootfs build in `xtask` so it's one command + reproducible.
 - [ ] **P3.7** Size/boot budget: keep the base small; measure its effect on boot time.
 - [ ] **P3.8** Test: run Python + a small script that writes a file → capture the file.
@@ -346,7 +362,9 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 
 Wrap the FC track into a clean, self-hostable engine API.
 
-- [ ] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`.
+- [ ] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`. *(Lifts the
+      bulk block-device file paths — P3.4 `input_dir`, P3.5 `output_dir`/`RunningVm::collect_outputs`
+      — onto the `Sandbox` surface, since P3.4/P3.5 keep them at the low-level `RunningVm` layer.)*
 - [ ] **P7.2** Stateful sessions: multiple `exec`s against one VM with a persistent overlay.
 - [ ] **P7.3** Per-sandbox limits (cpu/mem/wall/net policy) as one options struct.
 - [ ] **P7.4** `agent run <cmd>` / `agent shell` CLI over the lifecycle.

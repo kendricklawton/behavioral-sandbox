@@ -15,7 +15,7 @@ use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -61,6 +61,28 @@ pub use agent_channel::AGENT_VSOCK_PORT;
 /// The vsock unix socket Firecracker creates in the scratch dir; the host connects here and speaks
 /// the `CONNECT <port>` handshake to reach a guest port.
 const VSOCK_UDS: &str = "v.sock";
+
+/// Size of the blank writable output image (P3.5). A fixed cap for now — it's the natural bulk-output
+/// bound (the guest can't write more than the filesystem holds), mirroring the channel path's
+/// [`MAX_EXEC_OUTPUT`]. Built with `lazy_itable_init=0` so the guest kernel never balloons the
+/// metadata: a fresh image is ~a few MiB of real host blocks, growing only with what's written.
+const OUTPUT_IMAGE_MIB: u32 = 256;
+
+/// Hard ceiling on the **real host bytes** [`RunningVm::collect_outputs`] will write while extracting
+/// the output image. `debugfs rdump` materialises filesystem holes as zeros, so a hostile guest could
+/// stage a sparse file with a huge logical size inside the capped image and inflate the readback — a
+/// watcher aborts once the extracted tree's allocated blocks pass this bound. Generous headroom over
+/// [`OUTPUT_IMAGE_MIB`] (a legitimate tree's real bytes can't exceed the image), so only abuse trips.
+const OUTPUT_EXTRACT_CAP: u64 = 2 * (OUTPUT_IMAGE_MIB as u64) * 1024 * 1024; // 512 MiB
+
+/// Wall-clock bound on the output readback (`e2fsck` + `debugfs rdump`), so a pathological image can
+/// never hang the host teardown. Read-back is off the boot path; generous is fine.
+const OUTPUT_READBACK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The filesystem labels the driver stamps on the data devices so the guest mounts them by label,
+/// not by enumeration-order `/dev/vdX` (a boot may attach input, output, both, or neither). Defined
+/// in `agent-channel` — the one host↔guest contract both the driver and the rootfs build consume.
+use agent_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
 /// Deadline for the vsock connect + `CONNECT` handshake, and the read/write timeout the exec
 /// connection carries — so a dead-or-stalled guest is a typed timeout, never a host hang
@@ -134,6 +156,14 @@ pub struct BootConfig {
     /// large-file path — the vsock channel's [`Request::PutFile`] carries only small per-frame files.
     /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
     pub input_dir: Option<PathBuf>,
+    /// A host directory to receive **bulk output** (P3.5): the driver attaches a blank, **writable**
+    /// ext4 as a third block device (`/dev/vd?`, labelled `agent-output`); the agent rootfs mounts it
+    /// read-write at `/output`, so a command's files under `/output/...` are pulled back here by
+    /// [`RunningVm::collect_outputs`]. This is the whole-working-dir / large-file counterpart to the
+    /// vsock channel's per-frame [`Response::File`] artifacts. `None` (the default) attaches no output
+    /// device. Readback needs `e2fsck` + `debugfs` (e2fsprogs) on the host; the directory is created
+    /// if missing and receives the guest's `/output` tree (host-escaping symlinks are dropped).
+    pub output_dir: Option<PathBuf>,
 }
 
 impl BootConfig {
@@ -194,6 +224,7 @@ impl Default for BootConfig {
             guest_cid: None,
             read_only_root: false,
             input_dir: None,
+            output_dir: None,
         }
     }
 }
@@ -210,6 +241,17 @@ pub struct RunningVm {
     boot_latency: Duration,
     /// The vsock unix socket Firecracker created, if this VM was booted with a `guest_cid`.
     vsock_uds: Option<PathBuf>,
+    /// The writable output image (in `workdir`) and the host directory to extract it into, when the
+    /// boot config set `output_dir`; `None` otherwise. Read back by [`RunningVm::collect_outputs`].
+    output: Option<OutputDevice>,
+}
+
+/// A booted VM's writable output device: the ext4 image the guest mounts at `/output`, and the host
+/// directory its tree is extracted into on [`RunningVm::collect_outputs`].
+#[derive(Debug, Clone)]
+struct OutputDevice {
+    image: PathBuf,
+    dest: PathBuf,
 }
 
 /// Boot entry point — `Vm::boot(config) -> RunningVm`.
@@ -324,6 +366,72 @@ impl RunningVm {
         )
     }
 
+    /// Pull the guest's `/output` tree back to the host directory set as [`BootConfig::output_dir`],
+    /// returning the captured paths (relative to that directory, sorted).
+    ///
+    /// The bulk counterpart to the per-file [`RunResult::files`] channel path: the guest wrote to a
+    /// writable block device (mounted at `/output`), and here the driver reads that image back. It
+    /// **consumes the VM** — the VMM is stopped first (a cooperative power-off, then a hard kill) so
+    /// it has released the image and flushed the guest's writes; reading a live, VMM-held image would
+    /// race the guest and corrupt the ext4 journal `e2fsck` replays. Read-back is fully **rootless**:
+    /// `e2fsck` recovers the journal, then `debugfs rdump` extracts the tree — no loopback, no
+    /// `mount`, no `sudo`.
+    ///
+    /// Guest-controlled contents are sanitised: `lost+found` is dropped; symlinks whose target
+    /// escapes the destination (absolute, or `..` climbing out) are removed, so a later host read of
+    /// the results can't be redirected onto the host filesystem; and the extraction is bounded in
+    /// both real bytes and wall-clock time, so a sparse-file or
+    /// pathological image can't exhaust host disk or hang teardown. Dropping the consumed VM reclaims
+    /// the scratch dir, the image included.
+    ///
+    /// # Errors
+    /// [`VmmError::Vmm`] if the VM was booted without an output device (no `output_dir`), or on a
+    /// host-side readback failure; [`VmmError::Artifact`] if `e2fsck`/`debugfs` are missing;
+    /// [`VmmError::OutputCap`] if the extracted tree exceeds the byte cap; [`VmmError::Timeout`] if
+    /// readback outruns its deadline.
+    pub fn collect_outputs(mut self) -> Result<Vec<String>, VmmError> {
+        let output = self.output.clone().ok_or_else(|| {
+            VmmError::Vmm(
+                "this microVM was booted without an output device (set BootConfig.output_dir)"
+                    .into(),
+            )
+        })?;
+        // Stop the VMM so it releases the image fd and the on-disk ext4 is consistent *before* we
+        // read it. `self` drops at the end of this method → `Drop` reclaims the scratch dir.
+        self.stop_and_reap();
+        collect_output_image(&output.image, &output.dest)
+    }
+
+    /// Best-effort power-off, then **guarantee** the VMM is dead and reaped, so its fd to the output
+    /// image is released before readback. Idempotent with `Drop`'s teardown (a second kill/wait on an
+    /// already-reaped child is a harmless no-op).
+    fn stop_and_reap(&mut self) {
+        let _ = self.api.put(
+            "/actions",
+            &Action {
+                action_type: "SendCtrlAltDel",
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            match self.child.try_wait() {
+                // Clean power-off: the guest ran `::shutdown:/bin/umount -a -r`, so `/output` is
+                // flushed and cleanly unmounted.
+                Ok(Some(_)) => break,
+                Ok(None) if Instant::now() >= deadline => {
+                    // A wedged guest: hard-kill it. The `-o sync` mount means the command's completed
+                    // writes are already on the image; `e2fsck` will recover the unclean journal.
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                    break;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        self.console.join();
+    }
+
     /// Shut the microVM down and reclaim its resources.
     ///
     /// Asks the guest to power off (`SendCtrlAltDel`) and waits briefly; the guaranteed teardown
@@ -375,6 +483,9 @@ struct Spawned {
     /// The built bulk-input image (in `workdir`) when `input_dir` was set, attached read-only as a
     /// second block device; `None` otherwise. Reclaimed with `workdir` on teardown.
     input_image: Option<PathBuf>,
+    /// The blank writable output image (in `workdir`) + its host destination, when `output_dir` was
+    /// set; `None` otherwise. Attached read-write; extracted by `collect_outputs`, then reclaimed.
+    output: Option<OutputDevice>,
 }
 
 impl Drop for Spawned {
@@ -424,6 +535,22 @@ impl Spawned {
             None => None,
             Some(dir) => match build_input_image(dir, &workdir) {
                 Ok(img) => Some(img),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            },
+        };
+
+        // Bulk writable output (P3.5): build a blank ext4 the guest mounts read-write at `/output`,
+        // attached as another block device. Its host destination rides along for `collect_outputs`.
+        let output = match &config.output_dir {
+            None => None,
+            Some(dest) => match build_output_image(&workdir) {
+                Ok(image) => Some(OutputDevice {
+                    image,
+                    dest: dest.clone(),
+                }),
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&workdir);
                     return Err(e);
@@ -485,6 +612,7 @@ impl Spawned {
             api: ApiClient::new(socket),
             vsock_uds,
             input_image,
+            output,
         })
     }
 
@@ -569,6 +697,24 @@ impl Spawned {
                     path_on_host: input,
                     is_root_device: false,
                     is_read_only: true,
+                },
+            )?;
+        }
+        // Bulk writable output (P3.5): attach the blank image read-write. The guest mounts it by
+        // label (`agent-output`), so the `/dev/vdX` letter this lands on doesn't matter — a boot may
+        // attach input, output, both, or neither. Durability of the guest's writes is the guest's
+        // `-o sync` mount plus a clean unmount on shutdown; `collect_outputs` reads it after the VMM
+        // exits (never while it holds the file open — see `RunningVm::collect_outputs`).
+        if let Some(out) = self.output.as_ref() {
+            let output = path_str(&out.image)?;
+            still_before(deadline, "PUT /drives/output")?;
+            self.api.put(
+                "/drives/output",
+                &Drive {
+                    drive_id: "output",
+                    path_on_host: output,
+                    is_root_device: false,
+                    is_read_only: false,
                 },
             )?;
         }
@@ -716,6 +862,7 @@ impl Spawned {
             api: self.api.clone(),
             boot_latency,
             vsock_uds: self.vsock_uds.take(),
+            output: self.output.take(),
         })
     }
 }
@@ -1096,8 +1243,46 @@ fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBuf, VmmError
             OsStr::new("0"),
             OsStr::new("-N"),
             OsStr::new(&inodes.to_string()),
+            // Label so the guest mounts by label, not `/dev/vdX` order (see `INPUT_LABEL`).
+            OsStr::new("-L"),
+            OsStr::new(INPUT_LABEL),
             OsStr::new("-d"),
             src_dir.as_os_str(),
+            image.as_os_str(),
+        ],
+    )?;
+    Ok(image)
+}
+
+/// Build a **blank, writable** ext4 for the bulk-output block device (P3.5), rootless via `mke2fs`.
+/// No `-d` (nothing to seed) and `lazy_itable_init=0`/`lazy_journal_init=0` so the guest kernel never
+/// lazily zeroes the inode table at runtime — that would balloon the sparse image toward its full
+/// [`OUTPUT_IMAGE_MIB`] on the host regardless of how little the command writes. Labelled
+/// [`OUTPUT_LABEL`] so the guest mounts it by label. The image lands in `workdir` (reclaimed on
+/// teardown); [`RunningVm::collect_outputs`] reads it back after the VMM exits.
+fn build_output_image(workdir: &Path) -> Result<PathBuf, VmmError> {
+    let image = workdir.join("output.ext4");
+    run_host_tool(
+        "truncate",
+        &[
+            OsStr::new("-s"),
+            OsStr::new(&format!("{OUTPUT_IMAGE_MIB}M")),
+            image.as_os_str(),
+        ],
+    )?;
+    run_host_tool(
+        "mke2fs",
+        &[
+            OsStr::new("-F"),
+            OsStr::new("-q"),
+            OsStr::new("-t"),
+            OsStr::new("ext4"),
+            OsStr::new("-m"),
+            OsStr::new("0"),
+            OsStr::new("-L"),
+            OsStr::new(OUTPUT_LABEL),
+            OsStr::new("-E"),
+            OsStr::new("lazy_itable_init=0,lazy_journal_init=0"),
             image.as_os_str(),
         ],
     )?;
@@ -1151,25 +1336,253 @@ fn require_dir(path: &Path, what: &str) -> Result<(), VmmError> {
     }
 }
 
-/// Run a host build tool (`truncate`/`mke2fs`) for the input image. A missing tool is a typed
-/// [`VmmError::Artifact`] — the driver's only other external process is `firecracker`, so this is a
-/// real new runtime dependency, surfaced clearly rather than as a cryptic spawn failure.
+/// Run a host build tool (`truncate`/`mke2fs`) for a data block device. A missing tool is a typed
+/// [`VmmError::Artifact`] — the driver's only other external process is `firecracker`, so these are
+/// real new runtime dependencies, surfaced clearly rather than as a cryptic spawn failure.
 fn run_host_tool(program: &str, args: &[&OsStr]) -> Result<(), VmmError> {
-    let status = Command::new(program).args(args).status().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            VmmError::Artifact(format!(
-                "{program} not found (needed to build the input block device — install e2fsprogs/coreutils)"
-            ))
-        } else {
-            VmmError::Vmm(format!("run {program}: {e}"))
-        }
-    })?;
+    let status = Command::new(program)
+        .args(args)
+        .status()
+        .map_err(|e| tool_spawn_error(program, e))?;
     if !status.success() {
         return Err(VmmError::Vmm(format!(
-            "{program} failed building the input image"
+            "{program} failed building a block device image"
         )));
     }
     Ok(())
+}
+
+/// Map a failure to spawn one of the driver's e2fsprogs/coreutils helpers to a typed error: a missing
+/// binary is a clear [`VmmError::Artifact`] (install hint), anything else a [`VmmError::Vmm`].
+fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        VmmError::Artifact(format!(
+            "{program} not found (needed for the input/output block devices — install e2fsprogs/coreutils)"
+        ))
+    } else {
+        VmmError::Vmm(format!("run {program}: {e}"))
+    }
+}
+
+/// Read the writable output image back into the host `dest` directory, rootless. Ordered so the tree
+/// is consistent and safe before it's returned: recover the journal (`e2fsck`), extract under a
+/// byte/time cap (`debugfs rdump`), drop `lost+found`, neutralise host-escaping symlinks, then list
+/// what survived. Called only after the VMM has exited (see [`RunningVm::collect_outputs`]).
+fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<String>, VmmError> {
+    std::fs::create_dir_all(dest)
+        .map_err(|e| VmmError::Vmm(format!("create output dir {}: {e}", dest.display())))?;
+    fsck_output_image(image)?;
+    rdump_capped(image, dest, OUTPUT_EXTRACT_CAP, OUTPUT_READBACK_TIMEOUT)?;
+    // Guest-controlled tree: drop the ext4 housekeeping dir and any symlink that would redirect a
+    // later host read onto the host filesystem, before the caller (or its tooling) touches the files.
+    let _ = std::fs::remove_dir_all(dest.join("lost+found"));
+    sanitize_symlinks(dest)?;
+    collect_paths(dest)
+}
+
+/// `e2fsck -fy` the image: force a full check and auto-answer, recovering the journal and clearing the
+/// "not cleanly unmounted" state a hard-killed guest leaves, so `debugfs` sees a consistent tree. The
+/// exit status is a bitmask — 0 clean, 1 errors corrected, 2 corrected + reboot advised (moot for an
+/// image file); `>= 4` means errors left uncorrected or an operational failure, which is a real error.
+fn fsck_output_image(image: &Path) -> Result<(), VmmError> {
+    let status = Command::new("e2fsck")
+        .arg("-fy")
+        .arg(image)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| tool_spawn_error("e2fsck", e))?;
+    match status.code() {
+        Some(code) if code < 4 => Ok(()),
+        Some(code) => Err(VmmError::Vmm(format!(
+            "e2fsck could not repair the output image (exit {code})"
+        ))),
+        None => Err(VmmError::Vmm("e2fsck terminated by a signal".into())),
+    }
+}
+
+/// Extract the image tree into `dest` with `debugfs rdump`, bounded so a hostile guest can't blow up
+/// the host. `debugfs` materialises filesystem holes as real zeros, so a sparse file staged in the
+/// capped image could still inflate the readback — a poll loop aborts the extraction once `dest`'s
+/// **allocated** bytes pass `byte_cap`, or once it outruns `timeout`. rdump prints benign
+/// "changing ownership" warnings when run non-root (it can't chown to the guest's uids) and still
+/// exits 0; those are ignored — only a non-zero exit or a tripped bound is an error.
+fn rdump_capped(
+    image: &Path,
+    dest: &Path,
+    byte_cap: u64,
+    timeout: Duration,
+) -> Result<(), VmmError> {
+    // debugfs parses its `-R` request by whitespace, with no quoting — reject a whitespace dest
+    // rather than silently truncate the path (the dest is operator-set, so this is a clear config
+    // error, not a guest-reachable one).
+    let dest_str = path_str(dest)?;
+    if dest_str.chars().any(char::is_whitespace) {
+        return Err(VmmError::Vmm(format!(
+            "output dir path must not contain whitespace (debugfs -R limitation): {dest_str}"
+        )));
+    }
+    let mut child = Command::new("debugfs")
+        .arg("-R")
+        .arg(format!("rdump / {dest_str}"))
+        .arg(image)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| tool_spawn_error("debugfs", e))?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child
+            .try_wait()
+            .map_err(|e| VmmError::Vmm(format!("wait on debugfs: {e}")))?
+        {
+            Some(status) => {
+                return match status.code() {
+                    Some(0) => Ok(()),
+                    Some(code) => Err(VmmError::Vmm(format!("debugfs rdump failed (exit {code})"))),
+                    None => Err(VmmError::Vmm("debugfs rdump terminated by a signal".into())),
+                };
+            }
+            None => {
+                if dir_alloc_bytes(dest) > byte_cap {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(VmmError::OutputCap {
+                        limit: byte_cap.min(usize::MAX as u64) as usize,
+                    });
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(VmmError::Timeout(
+                        "output readback exceeded its deadline".into(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
+/// Sum of **allocated** bytes (`blocks * 512`, real host disk, not logical size) under `dir`. Walks
+/// with `file_type`/`DirEntry::metadata` (both `lstat`-like), so a guest symlink is counted as the
+/// link itself and never followed — the walk can't be lured onto the host filesystem while sizing.
+fn dir_alloc_bytes(dir: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => stack.push(entry.path()),
+                Ok(_) => {
+                    if let Ok(meta) = entry.metadata() {
+                        total = total.saturating_add(meta.blocks().saturating_mul(512));
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    total
+}
+
+/// Remove every symlink under `dest` whose target escapes `dest` (absolute, or `..` climbing out of
+/// it). `debugfs rdump` recreates a guest symlink verbatim as a **host** symlink, so an un-sanitised
+/// `link -> /etc/shadow` (or `../../../../etc/shadow`) would make a later host read of the results
+/// read host files — the inverse of the input side, where `mke2fs -d` resolves links inside the
+/// guest image. In-tree links (e.g. `a -> sub/b`) are kept. The walk never traverses a symlink (all
+/// checks are `lstat`-like), so it can't be redirected onto the host mid-scan.
+fn sanitize_symlinks(dest: &Path) -> Result<(), VmmError> {
+    let mut stack = vec![dest.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d)
+            .map_err(|e| VmmError::Vmm(format!("scan output dir {}: {e}", d.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| VmmError::Vmm(format!("read output entry: {e}")))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| VmmError::Vmm(format!("stat output entry: {e}")))?;
+            let path = entry.path();
+            if ft.is_symlink() {
+                let target = std::fs::read_link(&path)
+                    .map_err(|e| VmmError::Vmm(format!("read symlink {}: {e}", path.display())))?;
+                if !symlink_stays_within(&path, &target, dest) {
+                    std::fs::remove_file(&path).map_err(|e| {
+                        VmmError::Vmm(format!("drop escaping symlink {}: {e}", path.display()))
+                    })?;
+                    tracing::warn!(
+                        link = %path.display(),
+                        target = %target.display(),
+                        "dropped output symlink escaping the destination"
+                    );
+                }
+            } else if ft.is_dir() {
+                stack.push(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the symlink at `link` with `target` resolves within `root`, checked **lexically** (never
+/// touching the target on disk). An absolute target, or one whose `..` chain climbs above `root` at
+/// any point, escapes.
+fn symlink_stays_within(link: &Path, target: &Path, root: &Path) -> bool {
+    if target.is_absolute() {
+        return false;
+    }
+    let Ok(rel) = link.strip_prefix(root) else {
+        return false;
+    };
+    // Depth of the directory that holds the link, relative to `root` (the link's own name aside).
+    let mut depth = rel.components().count().saturating_sub(1) as i64;
+    for comp in target.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::Normal(_) => depth += 1,
+            Component::ParentDir => {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            }
+            // A root or drive-prefix component inside a "relative" path — treat as an escape.
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
+/// The captured tree as relative-path strings (files and surviving symlinks, directories descended),
+/// sorted for a deterministic result. Purely a manifest of what `collect_outputs` produced.
+fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
+    let mut out = Vec::new();
+    let mut stack = vec![dest.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d)
+            .map_err(|e| VmmError::Vmm(format!("list output dir {}: {e}", d.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| VmmError::Vmm(format!("read output entry: {e}")))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| VmmError::Vmm(format!("stat output entry: {e}")))?;
+            let path = entry.path();
+            if ft.is_dir() {
+                stack.push(path);
+            } else if let Ok(rel) = path.strip_prefix(dest) {
+                out.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -1204,6 +1617,61 @@ mod tests {
         assert!(!find(b"Reached target Login Prompts", b"login:"));
         assert!(find(b"anything", b""));
         assert!(!find(b"hi", b"longer-than-haystack"));
+    }
+
+    #[test]
+    fn symlink_containment_keeps_in_tree_and_rejects_escapes() {
+        let root = Path::new("/out");
+        // In-tree links are kept.
+        assert!(symlink_stays_within(
+            &root.join("a"),
+            Path::new("sub/b"),
+            root
+        ));
+        assert!(symlink_stays_within(
+            &root.join("sub/a"),
+            Path::new("../b"),
+            root
+        ));
+        assert!(symlink_stays_within(
+            &root.join("a"),
+            Path::new("./b"),
+            root
+        ));
+        // Absolute targets escape (the host-disclosure case: `link -> /etc/shadow`).
+        assert!(!symlink_stays_within(
+            &root.join("escape"),
+            Path::new("/etc/passwd"),
+            root
+        ));
+        // `..` chains that climb above the root escape, even when they'd re-descend.
+        assert!(!symlink_stays_within(
+            &root.join("climb"),
+            Path::new("../../../../etc/shadow"),
+            root
+        ));
+        assert!(!symlink_stays_within(
+            &root.join("sub/x"),
+            Path::new("../../outside"),
+            root
+        ));
+    }
+
+    #[test]
+    fn output_dir_with_whitespace_is_rejected_before_debugfs() {
+        // A whitespace dest would be split by debugfs's `-R` parser; catch it as a typed error rather
+        // than silently truncating the extraction path. (No debugfs is spawned — the guard fires first.)
+        let err = rdump_capped(
+            Path::new("/nonexistent/img.ext4"),
+            Path::new("/tmp/has a space"),
+            OUTPUT_EXTRACT_CAP,
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, VmmError::Vmm(ref m) if m.contains("whitespace")),
+            "got {err:?}"
+        );
     }
 
     #[test]

@@ -53,6 +53,16 @@ pub const GUEST_READY_MARKER: &str = "AGENT-GUEST-READY";
 /// one definition — a drifted copy would strand the host dialing a port nobody binds.
 pub const AGENT_VSOCK_PORT: u32 = 1024;
 
+/// Filesystem labels the driver stamps on the data block devices it attaches, and the guest mounts
+/// by. A boot may attach a bulk-input device, a bulk-output device, both, or neither, which shifts
+/// the `/dev/vdX` letters — so the guest resolves each device by **label** (`findfs LABEL=…`) rather
+/// than by enumeration order. Like the vsock port above, these are a host↔guest contract: the driver
+/// (which builds the images) and the rootfs build (whose `mount-drives` mounts them) share the one
+/// definition, so a drifted copy can't leave the guest silently skipping a mount.
+pub const INPUT_LABEL: &str = "agent-input";
+/// See [`INPUT_LABEL`]. The output device is writable; the guest mounts it read-write at `/output`.
+pub const OUTPUT_LABEL: &str = "agent-output";
+
 const TAG_EXEC: u8 = 1;
 const TAG_STDOUT: u8 = 2;
 const TAG_STDERR: u8 = 3;

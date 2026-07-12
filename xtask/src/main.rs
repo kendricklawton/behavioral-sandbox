@@ -156,14 +156,36 @@ fn rootfs_inittab() -> String {
 ::sysinit:/bin/mount -t devtmpfs dev /dev
 ::sysinit:/bin/mount -t proc proc /proc
 ::sysinit:/bin/mount -t sysfs sys /sys
-# Bulk input (P3.4): if the driver attached an input block device, mount it read-only at /input.
-# Best-effort — no /dev/vdb means a nonzero exit that sysinit ignores, so plain boots are unaffected.
-::sysinit:/bin/mount -o ro /dev/vdb /input
+# Bulk input/output block devices (P3.4/P3.5): mount whichever the driver attached, by label — so
+# their /dev/vdX order doesn't matter. Best-effort: a missing device is skipped, so plain boots are
+# unaffected. Runs after devtmpfs/proc are up (findfs needs the device nodes + /proc/partitions).
+::sysinit:/sbin/mount-drives
 ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r
 ",
         port = agent_channel::AGENT_VSOCK_PORT
+    )
+}
+
+/// `/sbin/mount-drives` — mounts the driver-attached data block devices (P3.4 input, P3.5 output) by
+/// **filesystem label**, so their `/dev/vdX` enumeration order is irrelevant (a boot may attach
+/// input, output, both, or neither). `findfs LABEL=…` resolves each label from the superblock via
+/// busybox's volume_id (no udev / `/dev/disk/by-label` needed); a label with no matching device
+/// yields an empty result, so that mount is silently skipped and a plain boot is unaffected. `-t ext4`
+/// because busybox `mount`'s type autodetection is weaker than util-linux's; the output mount is
+/// `-o sync` so a command's writes are flushed straight to the device, surviving a hard-kill teardown.
+/// Labels come from `agent-channel`, the one definition the driver (which stamps them) also uses.
+fn mount_drives_script() -> String {
+    format!(
+        "\
+#!/bin/sh
+# Mount driver-attached data block devices by label (order-independent, best-effort).
+in=$(findfs LABEL={input} 2>/dev/null) && [ -n \"$in\" ] && /bin/mount -t ext4 -o ro \"$in\" /input
+out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext4 -o sync \"$out\" /output
+",
+        input = agent_channel::INPUT_LABEL,
+        output = agent_channel::OUTPUT_LABEL,
     )
 }
 
@@ -287,9 +309,15 @@ fn build_rootfs() -> Result<()> {
     std::fs::write(&overlay_init, OVERLAY_INIT).context("write /sbin/overlay-init")?;
     set_mode_0755(&overlay_init)?;
     std::fs::create_dir_all(staging.join("overlay")).context("create /overlay mountpoint")?;
-    // The mountpoint for a bulk-input block device (P3.4). Baked, not `mkdir`'d at runtime, so it's
-    // an image property that works regardless of whether `/` is the writable overlay or a base.
+
+    // The by-label mount helper (P3.4 input, P3.5 output) + its mountpoints. Baked, not `mkdir`'d at
+    // runtime, so they're image properties that hold regardless of whether `/` is the writable
+    // overlay or a base. `/sbin/mount-drives` is run from the inittab sysinit line.
+    let mount_drives = staging.join("sbin/mount-drives");
+    std::fs::write(&mount_drives, mount_drives_script()).context("write /sbin/mount-drives")?;
+    set_mode_0755(&mount_drives)?;
     std::fs::create_dir_all(staging.join("input")).context("create /input mountpoint")?;
+    std::fs::create_dir_all(staging.join("output")).context("create /output mountpoint")?;
 
     // Build the ext4 from the staging dir — rootless, via `mke2fs -d`.
     let out = dir.join("rootfs-agent.ext4");
@@ -467,6 +495,10 @@ fn setup() -> Result<()> {
     check("jailer in PATH", in_path("jailer"));
     check("bpf-linker installed", in_path("bpf-linker"));
     check("mke2fs (rootfs + input block device)", in_path("mke2fs"));
+    check(
+        "e2fsck + debugfs (output readback)",
+        in_path("e2fsck") && in_path("debugfs"),
+    );
     let dir = artifacts_dir();
     check(
         "guest kernel + rootfs (cargo xtask fetch-artifacts)",
