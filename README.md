@@ -30,9 +30,10 @@ is the **self-hostable engine** underneath that kind of product:
 
 ## Status
 
-**Early and learning-driven.** The direction is set in [`ROADMAP.md`](ROADMAP.md); the build
-starts at Phase 1 (boot a real microVM from `cargo run` and read its console). Nothing here is
-production yet — the point is depth, done in the open.
+**Early and learning-driven.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md) —
+its checkboxes are the state. So far a microVM boots and runs commands with captured
+stdout/stderr/exit (Phases 1–2); a real rootfs + language runtime is next (Phase 3). Nothing here
+is production yet — the point is depth, done in the open.
 
 ## How it fits together
 
@@ -51,6 +52,8 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 | Path | Role |
 |------|------|
 | `crates/vmm` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
+| `crates/channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
+| `crates/guest-agent` | The in-guest agent (`agent-guest`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, never the trust boundary. |
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
 | `crates/cli` | The `agent` binary (`run`, `shell`, `--trace`) and later the `agentd` daemon. |
@@ -62,6 +65,12 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 the sandbox lifecycle API, a self-hostable driver daemon, and the benchmarks that back the
 claims. **Out of scope, by design:** multi-tenant auth, billing, fleet scheduling, and a web
 dashboard — that's whatever *hosts* the engine. `containerd`, not Docker Cloud.
+
+**Adjacent (separate repos, post-`v0.1.0`):** language SDKs (Go · Python · Node · C#) that drive
+the engine's wire API, and a Wasmtime-based *software-isolation* sibling built to compare both
+boundaries. Each is its own repo built on this engine's frozen wire API — thin clients / a sibling,
+never part of its trust boundary, and never traded against the hardware-isolation spine. See
+[`ROADMAP.md`](ROADMAP.md) Phases 19–20.
 
 ## Contributing
 

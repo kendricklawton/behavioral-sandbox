@@ -23,7 +23,12 @@ Decisions queued by the (sandbox) roadmap, to be recorded here as they're made:
 - **P15.6** — the security boundary and its trust assumptions (what's trusted: CPU/KVM/host
   kernel; what isn't: the guest).
 - **P16.2** — the driver daemon's wire API surface: JSON-over-unix-socket vs gRPC.
-- **P0.6** — the project's working name (kept `agent` umbrella vs a codename).
+- **P19.1** — freeze + version the wire API as the language-agnostic **SDK contract** (schema,
+  error taxonomy, semver compat policy). *(vNext; the SDKs live in their own repos — see roadmap
+  Phase 19.)*
+- **P20.1** — the **Wasmtime sibling** is a separate repo that reuses the driver API + flight-
+  recorder format, **not a plug-in backend** here (so *isolation is hardware* is never traded in
+  this engine). *(vNext — see roadmap Phase 20.)*
 
 ---
 
@@ -35,6 +40,11 @@ seams:
 - `crates/vmm` — the **Firecracker driver**: microVM lifecycle (boot/exec/shutdown), rootfs and
   networking (tap), snapshots and the warm pool, jailer/cgroup confinement, and the `Sandbox`
   lifecycle API. No `unsafe` on the host path; a hostile guest is a typed error.
+- `crates/channel` — the **host↔guest wire protocol**: dependency-free length-prefixed framing over
+  `Read`/`Write`, shared by the driver and the guest agent (see decision 002).
+- `crates/guest-agent` — the **in-guest agent** (`agent-guest`): runs one command per connection and
+  streams stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at Phase 3.
+  Exec/IO convenience only — never the security boundary.
 - `crates/probes` — the **eBPF programs** (`#![no_std]`, built for `bpfel-unknown-none` via
   `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting. CO-RE/BTF.
 - `crates/probes-loader` — the **userspace loader** (aya): attaches the probes to a specific

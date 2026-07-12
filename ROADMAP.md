@@ -14,7 +14,16 @@
 > self-host. Multi-tenant auth, billing, scheduling across a fleet, a web dashboard — **out of
 > scope**, the hoster's job. `containerd`, not Docker Cloud.
 >
-> This file is the **single source of truth for progress**. Its checkboxes are the state.
+> **Scope of this repo:** the **core engine** — the Firecracker + eBPF sandbox of **Phases 0–18**,
+> defined by the four spine properties (§0). The **vNext tracks** (Phases 19–20: the polyglot SDKs
+> and the software-isolation Wasmtime sibling) are **adjacent repos** — they build on this engine's
+> frozen wire API + flight-recorder format, but their code lives **outside** this repo and is
+> tracked here only as a forward map. This repo never trades its spine to accommodate them: the
+> Wasmtime variant is a *sibling, not a backend* (Phase 20), so *isolation is hardware* holds here
+> without exception.
+>
+> This file is the **single source of truth for progress** — of the core engine, and a map to its
+> sibling repos. Its checkboxes are the state.
 
 ## §0 The spine
 
@@ -46,6 +55,11 @@ Four properties every phase must protect:
 - **`v0.1.0` is the finish line** — the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; this is
   P18.8).
+- **The vNext tracks (Phases 19–20) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
+  SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
+  (a second isolation boundary, to master both). Both presuppose the frozen wire API of Phase 16;
+  neither pulls tenancy/billing/scheduling into scope, and the Wasmtime sibling never dilutes this
+  engine's spine (it's a separate artifact — see Phase 20).
 - **Everything until then is a pre-release `v0.0.x`.** Tag the foundation baseline (the engine
   boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
   patch as they land. These are checkpoints, not releases — no stability promise.
@@ -415,9 +429,12 @@ Prove the isolation + observation claims hold under adversarial workloads.
 The containerd-style boundary: a local daemon others drive — still engine, not PaaS.
 
 - [ ] **P16.1** `agentd`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
-- [ ] **P16.2** A simple wire API (JSON/gRPC — `(decision)`) : open/exec/put/get/snapshot/close/trace.
+- [ ] **P16.2** A **versioned** wire API (JSON/gRPC — `(decision)`): open/exec/put/get/snapshot/
+      close/trace. This is the **SDK contract** — Phase 19 freezes and spec's it.
 - [ ] **P16.3** Warm-pool management lives in the daemon (fast `exec`).
-- [ ] **P16.4** A thin client + a Python/Go binding so non-Rust callers can drive it.
+- [ ] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agentd` over the
+      wire API — the seed the **polyglot SDKs (Phase 19)** harden into Go/Python/Node/C#. (The full
+      SDK set is post-`v0.1.0`.)
 - [ ] **P16.5** Structured logs + a metrics endpoint (Prometheus) — for the *hoster* to scrape.
 - [ ] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
 - [ ] **P16.7** Golden: the CLI and the daemon API produce identical run results.
@@ -451,6 +468,68 @@ Ship it as a thing others can run — and turn the journey into the career artif
 - [ ] **P18.8** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
   and read the eBPF-observed audit trail — and the blog series tells the whole Linux story.
+
+---
+
+## Post-v0.1.0 — vNext tracks
+
+> These land **after** the `v0.1.0` finish line (P18.8) and **do not gate that tag** (§0.6). They
+> extend the engine **outward** (more callers) and **sideways** (a second isolation boundary, to
+> master both) — without pulling tenancy/billing/scheduling into scope, and without diluting the
+> spine. Both depend on Phase 16's daemon + wire API.
+>
+> **Each ships as its own repository** — the four SDKs and the Wasmtime engine are all separate
+> repos. This repo owns only the **contract** they build against: the versioned wire API, the
+> cross-language conformance suite, and a reference Rust client. So the boxes below track *that
+> contract (and its certification) landing here* — the SDK/engine **code lives in its sibling
+> repo**, gated by the conformance suite this repo publishes.
+
+## Phase 19 — Polyglot SDKs (Go · Python · C# · Node.js)
+
+Thin, idiomatic clients so non-Rust callers can drive `agentd` — the E2B-style surface, still
+**engine, not platform**.
+
+- [ ] **P19.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
+      SDK contract): message schema, the error taxonomy, and a semver compat policy → `ARCHITECTURE.md`.
+- [ ] **P19.2** A **cross-language conformance suite** (golden request/response + flight-recorder
+      round-trips) every SDK must pass — the single source of SDK correctness, run in CI.
+- [ ] **P19.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
+- [ ] **P19.4** **Python** SDK (own repo; sync + async).
+- [ ] **P19.5** **Node.js / TypeScript** SDK (own repo).
+- [ ] **P19.6** **C# / .NET** SDK (own repo).
+- [ ] **P19.7** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
+      to a wire-API version, certified by the P19.2 conformance suite, and published to its language
+      registry with checksums.
+- [ ] **P19.8** Each SDK is a **thin protocol client** — no tenancy/auth/billing/scheduling; deny-by-
+      default and the non-goals hold at the SDK layer too (tombstone).
+- **Exit gate + lesson:** four languages run the same golden `exec` and read the same host-observed
+  flight recorder through `agentd`; write up **designing a stable polyglot wire API + conformance
+  testing across language runtimes.**
+
+## Phase 20 — The Wasmtime sibling (master both boundaries)
+
+A **separate** engine that reuses this one's driver API + flight-recorder format but swaps the
+isolation boundary from **hardware (KVM)** to **software (Wasmtime SFI)** — built to master both,
+not to replace this repo.
+
+- [ ] **P20.1** `(decision)` **Sibling repo, not a backend here.** Spine property 1 (*isolation is
+      hardware*) is never traded in this engine; the wasm variant carries a **different, weaker**
+      guarantee, so it's a distinct artifact that *shares the API*, not a plug-in backend →
+      `ARCHITECTURE.md`.
+- [ ] **P20.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
+      a `ResourceLimiter` (memory) → typed limits, mirroring the FC engine's no-hang/no-leak contract.
+- [ ] **P20.3** The **host-function (WASI) shim layer** = capabilities + policy + flight recorder:
+      enforcement moves from host-side eBPF to the **import boundary** (the module has zero ambient
+      authority; deny-by-default becomes "link no imports").
+- [ ] **P20.4** Reuse the `Sandbox` lifecycle shape + the flight-recorder **JSON schema**, so a caller
+      (and the Phase 19 SDKs) can drive either engine.
+- [ ] **P20.5** Comparative benchmarks: **instantiate latency + fuel overhead + density** vs the
+      microVM's boot/restore/density — same harness, honest numbers.
+- [ ] **P20.6** Test: the same untrusted program on both engines yields comparable flight-recorder
+      records; where they *can't* be comparable, document why.
+- **Exit gate + lesson:** two engines, one API, two isolation boundaries; write up **hardware vs
+  software isolation — TCB size, startup, density, scope, and threat model** (the capstone
+  comparison that proves you mastered both).
 
 ---
 
