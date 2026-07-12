@@ -94,6 +94,64 @@ const GUEST_TARGET: &str = "x86_64-unknown-linux-musl";
 /// gate (it needs the musl target installed and produces an artifact the host doesn't run);
 /// `build-rootfs` bakes the result into the image.
 fn build_guest_agent() -> Result<PathBuf> {
+    build_guest_musl(GuestBin::Agent)
+}
+
+/// Build the P3.9 static native-ELF fixture (`crates/guest-agent/examples/writefile.rs`) for the
+/// guest target and return its path. A statically linked musl binary with no interpreter/libc, which
+/// the runtime-agnostic test injects and execs to prove the engine runs *any* Linux binary. Built
+/// like the agent (musl, `--locked`) and verified static.
+fn build_guest_example() -> Result<PathBuf> {
+    build_guest_musl(GuestBin::Example)
+}
+
+/// A static musl guest binary `xtask` builds: the agent itself, or the P3.9 native-ELF fixture.
+enum GuestBin {
+    Agent,
+    Example,
+}
+
+impl GuestBin {
+    /// The cargo target selector, the built binary's path under `target/<triple>/release/`, and a
+    /// human label — the only things that differ between the two builds.
+    fn spec(&self) -> (&'static [&'static str], &'static str, &'static str) {
+        match self {
+            GuestBin::Agent => (
+                &["--bin", "agent-guest"],
+                "release/agent-guest",
+                "guest agent",
+            ),
+            GuestBin::Example => (
+                &["--example", "writefile"],
+                "release/examples/writefile",
+                "guest example",
+            ),
+        }
+    }
+}
+
+/// Build a static musl guest binary (`--locked`, the guest musl target) and verify it's actually
+/// statically linked before returning its path. The shared body of [`build_guest_agent`] and
+/// [`build_guest_example`], which differ only in [`GuestBin::spec`].
+fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
+    ensure_guest_target()?;
+    let (selector, subpath, label) = kind.spec();
+    let mut args = vec!["build", "--release", "--locked", "-p", "agent-guest"];
+    args.extend_from_slice(selector);
+    args.extend_from_slice(&["--target", GUEST_TARGET]);
+    cargo(&args)?;
+    let bin = workspace_root()
+        .join("target")
+        .join(GUEST_TARGET)
+        .join(subpath);
+    verify_static(&bin, label)?;
+    println!("\n✓ {label} built (static): {}", bin.display());
+    Ok(bin)
+}
+
+/// Fail with a clear fix if the guest musl target isn't installed — cargo would otherwise error more
+/// obscurely deep in the build.
+fn ensure_guest_target() -> Result<()> {
     let installed = Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
@@ -104,54 +162,7 @@ fn build_guest_agent() -> Result<PathBuf> {
     {
         bail!("missing target {GUEST_TARGET} — run `rustup target add {GUEST_TARGET}` first");
     }
-    cargo(&[
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "agent-guest",
-        "--bin",
-        "agent-guest",
-        "--target",
-        GUEST_TARGET,
-    ])?;
-    let bin = guest_agent_bin();
-    verify_static(&bin, "guest agent")?;
-    println!("\n✓ guest agent built (static): {}", bin.display());
-    Ok(bin)
-}
-
-/// Where `build_guest_agent` leaves the static binary.
-fn guest_agent_bin() -> PathBuf {
-    workspace_root()
-        .join("target")
-        .join(GUEST_TARGET)
-        .join("release/agent-guest")
-}
-
-/// Build the P3.9 static native-ELF fixture (`crates/guest-agent/examples/writefile.rs`) for the
-/// guest target and return its path. A statically linked musl binary with no interpreter/libc, which
-/// the runtime-agnostic test injects and execs to prove the engine runs *any* Linux binary. Built
-/// like the agent (musl, `--locked`) and verified static.
-fn build_guest_example() -> Result<PathBuf> {
-    cargo(&[
-        "build",
-        "--release",
-        "--locked",
-        "-p",
-        "agent-guest",
-        "--example",
-        "writefile",
-        "--target",
-        GUEST_TARGET,
-    ])?;
-    let bin = workspace_root()
-        .join("target")
-        .join(GUEST_TARGET)
-        .join("release/examples/writefile");
-    verify_static(&bin, "writefile example")?;
-    println!("\n✓ guest example built (static): {}", bin.display());
-    Ok(bin)
+    Ok(())
 }
 
 /// Verify the built binary is actually statically linked — "measured, not marketed." A sys-crate or
@@ -466,7 +477,7 @@ struct RootfsBuild {
 /// upstream bump); `--verify` proves reproducibility — a second build must be byte-identical — and
 /// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the gate.
 fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
-    let out = artifacts_dir().join("rootfs-agent.ext4");
+    let out = agent_rootfs_path();
     let build = assemble_rootfs(&out)?;
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
     println!("  sha256: {}", build.image_sha256);
@@ -628,9 +639,8 @@ fn bench_boot(runs: usize) -> Result<()> {
     if runs == 0 {
         bail!("--runs must be >= 1");
     }
-    let root = workspace_root();
-    let kernel = root.join("artifacts/vmlinux");
-    let rootfs = root.join("artifacts/rootfs-agent.ext4");
+    let kernel = kernel_path();
+    let rootfs = agent_rootfs_path();
     for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
@@ -861,10 +871,9 @@ fn setup() -> Result<()> {
         in_path("readelf"),
     );
     check("ip (iproute2 — per-VM tap device)", in_path("ip"));
-    let dir = artifacts_dir();
     check(
         "guest kernel + rootfs (cargo xtask fetch-artifacts)",
-        dir.join("vmlinux").is_file() && dir.join("rootfs.ext4").is_file(),
+        kernel_path().is_file() && boot_rootfs_path().is_file(),
     );
     println!("\nMissing items are covered in CONTRIBUTING.md → Prerequisites.");
     Ok(())
@@ -881,19 +890,18 @@ struct Artifact {
 /// The kernel + rootfs pinned for the host architecture. Matched to Firecracker v1.9's CI
 /// artifacts (uncompressed `vmlinux` + a minimal Ubuntu ext4). Only x86_64 is pinned so far.
 fn artifacts() -> Result<Vec<Artifact>> {
-    let dir = artifacts_dir();
     let base = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.9";
     match std::env::consts::ARCH {
         "x86_64" => Ok(vec![
             Artifact {
                 url: format!("{base}/x86_64/vmlinux-6.1.102"),
                 sha256: "3b6e45c66d1b66d4fb0a1528107abbe890972f94e902bafe85fdf5108288c575",
-                dest: dir.join("vmlinux"),
+                dest: kernel_path(),
             },
             Artifact {
                 url: format!("{base}/x86_64/ubuntu-22.04.ext4"),
                 sha256: "b930af6ed56c5347c200eddfa4ae4701eed6f7d7fb30a6b9b8d2d30bfc2a2ed7",
-                dest: dir.join("rootfs.ext4"),
+                dest: boot_rootfs_path(),
             },
         ]),
         other => bail!(
@@ -913,6 +921,19 @@ fn workspace_root() -> &'static Path {
 /// `artifacts/` under the workspace root.
 fn artifacts_dir() -> PathBuf {
     workspace_root().join("artifacts")
+}
+
+/// The artifact filenames under [`artifacts_dir`], defined once so the many readers/writers
+/// (`build-rootfs`, `bench-boot`, `setup`, `fetch-artifacts`) can't drift apart: the pinned guest
+/// kernel, the Phase-1 boot rootfs (fetched), and the agent rootfs (`build-rootfs` output).
+fn kernel_path() -> PathBuf {
+    artifacts_dir().join("vmlinux")
+}
+fn boot_rootfs_path() -> PathBuf {
+    artifacts_dir().join("rootfs.ext4")
+}
+fn agent_rootfs_path() -> PathBuf {
+    artifacts_dir().join("rootfs-agent.ext4")
 }
 
 /// Download each pinned kernel/rootfs artifact (skipping any already present with the right hash).

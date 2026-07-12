@@ -25,6 +25,15 @@ use vsock::{VsockListener, VMADDR_CID_ANY};
 /// Generous, because a real host reads continuously — anything this slow is a broken peer.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Exit code for an operational failure (bad usage, a bind/serve error): conventional "2", named so
+/// the intent is legible at the `ExitCode::from` sites.
+const EXIT_OPERATIONAL: u8 = 2;
+
+/// The listen-spec scheme tokens, shared by the parser and the readiness announcement so the
+/// `vsock:<port>` the host scans for can't drift from what [`parse_listen`] accepts.
+const VSOCK_SCHEME: &str = "vsock";
+const UNIX_SCHEME: &str = "unix";
+
 fn main() -> ExitCode {
     init_tracing();
 
@@ -33,14 +42,14 @@ fn main() -> ExitCode {
         .or_else(|| std::env::var("AGENT_GUEST_LISTEN").ok());
     let Some(spec) = spec else {
         eprintln!("usage: agent-guest <vsock:<port>|unix:<path>>   (or set AGENT_GUEST_LISTEN)");
-        return ExitCode::from(2);
+        return ExitCode::from(EXIT_OPERATIONAL);
     };
 
     match run(&spec) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("{e}");
-            ExitCode::from(2)
+            ExitCode::from(EXIT_OPERATIONAL)
         }
     }
 }
@@ -120,7 +129,11 @@ fn serve_one<S: std::io::Read + std::io::Write + Send>(stream: S) {
 /// `writeln!` (not `println!`) so a closed console is ignored, never a panic.
 fn announce_ready(port: u32) {
     let mut out = std::io::stdout();
-    let _ = writeln!(out, "{} vsock:{port}", agent_channel::GUEST_READY_MARKER);
+    let _ = writeln!(
+        out,
+        "{} {VSOCK_SCHEME}:{port}",
+        agent_channel::GUEST_READY_MARKER
+    );
     let _ = out.flush();
 }
 
@@ -135,14 +148,14 @@ fn set_unix_deadlines(stream: &UnixStream) -> std::io::Result<()> {
 /// testable without binding anything.
 fn parse_listen(spec: &str) -> Result<Listen<'_>, String> {
     match spec.split_once(':') {
-        Some(("vsock", port)) => port
+        Some((VSOCK_SCHEME, port)) => port
             .parse::<u32>()
             .map(Listen::Vsock)
-            .map_err(|_| format!("invalid vsock port {port:?} (want vsock:<port>)")),
-        Some(("unix", path)) if !path.is_empty() => Ok(Listen::Unix(path)),
-        Some(("unix", _)) => Err("empty unix socket path (want unix:<path>)".to_string()),
+            .map_err(|_| format!("invalid vsock port {port:?} (want {VSOCK_SCHEME}:<port>)")),
+        Some((UNIX_SCHEME, path)) if !path.is_empty() => Ok(Listen::Unix(path)),
+        Some((UNIX_SCHEME, _)) => Err("empty unix socket path (want unix:<path>)".to_string()),
         _ => Err(format!(
-            "unrecognized listen address {spec:?} (want vsock:<port> or unix:<path>)"
+            "unrecognized listen address {spec:?} (want {VSOCK_SCHEME}:<port> or {UNIX_SCHEME}:<path>)"
         )),
     }
 }

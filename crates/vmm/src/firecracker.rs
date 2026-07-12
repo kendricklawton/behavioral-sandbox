@@ -180,10 +180,14 @@ pub(crate) struct MachineConfig {
     pub mem_size_mib: u32,
 }
 
-/// `PUT /actions` — an instance action (`InstanceStart`, `SendCtrlAltDel`).
+/// `PUT /actions` — an instance action. The closed set of actions the driver issues, modelled as an
+/// enum so the wire discriminant can't be mistyped; serializes to `{"action_type": "<PascalCase>"}`,
+/// matching Firecracker's schema (mirrors how `channel` centralizes its `TAG_*` wire discriminants).
 #[derive(Serialize)]
-pub(crate) struct Action<'a> {
-    pub action_type: &'a str,
+#[serde(tag = "action_type")]
+pub(crate) enum Action {
+    InstanceStart,
+    SendCtrlAltDel,
 }
 
 /// `PUT /vsock` — a virtio-vsock device. The host reaches a guest-listening port by connecting to

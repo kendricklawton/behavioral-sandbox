@@ -65,6 +65,12 @@ pub use agent_channel::AGENT_VSOCK_PORT;
 /// the `CONNECT <port>` handshake to reach a guest port.
 const VSOCK_UDS: &str = "v.sock";
 
+/// The Firecracker id for the guest's single virtio-net device. `PUT /network-interfaces/{id}` must
+/// carry the same id in its path and body, so both come from here. (The guest kernel independently
+/// names the resulting NIC `eth0` by enumeration; that literal in the `ip=` boot arg is that other
+/// namespace, so it's intentionally not sourced from this constant.)
+const IFACE_ID: &str = "eth0";
+
 /// Size of the blank writable output image (P3.5). A fixed cap for now — it's the natural bulk-output
 /// bound (the guest can't write more than the filesystem holds), mirroring the channel path's
 /// [`MAX_EXEC_OUTPUT`]. Built with `lazy_itable_init=0` so the guest kernel never balloons the
@@ -81,6 +87,11 @@ const OUTPUT_EXTRACT_CAP: u64 = 2 * (OUTPUT_IMAGE_MIB as u64) * 1024 * 1024; // 
 /// Wall-clock bound on the output readback (`e2fsck` + `debugfs rdump`), so a pathological image can
 /// never hang the host teardown. Read-back is off the boot path; generous is fine.
 const OUTPUT_READBACK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long a graceful `SendCtrlAltDel` power-off is given to land before teardown stops waiting
+/// (the guaranteed kill in `Drop`/`stop_and_reap` takes over), and how often that wait polls.
+const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(3);
+const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 
 /// The filesystem labels the driver stamps on the data devices so the guest mounts them by label,
 /// not by enumeration-order `/dev/vdX` (a boot may attach input, output, both, or neither). Defined
@@ -364,10 +375,16 @@ impl RunningVm {
     /// refused (e.g. nothing is listening on `port` in the guest yet), or on any I/O or channel
     /// failure; [`VmmError::Timeout`] if the connect exceeds the deadline.
     pub fn connect_agent(&self, port: u32) -> Result<ClientConnection<UnixStream>, VmmError> {
-        let uds = self.vsock_uds.as_ref().ok_or_else(|| {
+        connect_agent_at(self.require_vsock()?, port, VSOCK_TIMEOUT)
+    }
+
+    /// The Firecracker vsock socket, or a typed error naming the fix if the VM was booted without a
+    /// `guest_cid`. Shared by [`connect_agent`](Self::connect_agent) and
+    /// [`exec_with_files`](Self::exec_with_files) so the guard and its message live once.
+    fn require_vsock(&self) -> Result<&Path, VmmError> {
+        self.vsock_uds.as_deref().ok_or_else(|| {
             VmmError::Vmm("this microVM was booted without vsock (set BootConfig.guest_cid)".into())
-        })?;
-        connect_agent_at(uds, port, VSOCK_TIMEOUT)
+        })
     }
 
     /// Run `argv` in the guest, feeding it `stdin`, and collect its stdout/stderr/exit.
@@ -403,9 +420,7 @@ impl RunningVm {
         files_in: &[(String, Vec<u8>)],
         artifacts: &[String],
     ) -> Result<RunResult, VmmError> {
-        let uds = self.vsock_uds.as_ref().ok_or_else(|| {
-            VmmError::Vmm("this microVM was booted without vsock (set BootConfig.guest_cid)".into())
-        })?;
+        let uds = self.require_vsock()?;
         // The host's total patience: the command's own budget plus the agent's kill+report margin.
         // Derived from the *actual* budget (not a fixed const) so raising the budget later can't
         // leave the socket idle timeout cutting off a long quiet command. Used both as the socket's
@@ -464,38 +479,32 @@ impl RunningVm {
         collect_output_image(&output.image, &output.dest)
     }
 
+    /// Ask the guest to power off (best-effort `SendCtrlAltDel`, an x86 ACPI-ish nicety over i8042),
+    /// then poll for the VMM to exit until `deadline`. Returns `true` if it exited on its own. The
+    /// shared core of `shutdown` and `stop_and_reap`, so the action and the poll cadence live once;
+    /// the *guaranteed* kill is the caller's (or `Drop`'s), never this.
+    fn power_off_and_wait(&mut self, deadline: Instant) -> bool {
+        let _ = self.api.put("/actions", &Action::SendCtrlAltDel);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return true, // clean power-off (guest ran its umount on shutdown)
+                Ok(None) if Instant::now() >= deadline => return false,
+                Ok(None) => std::thread::sleep(POWER_OFF_POLL),
+                Err(_) => return false, // `try_wait` failed (near-impossible): let the caller force it
+            }
+        }
+    }
+
     /// Best-effort power-off, then **guarantee** the VMM is dead and reaped, so its fd to the output
     /// image is released before readback. Idempotent with `Drop`'s teardown (a second kill/wait on an
     /// already-reaped child is a harmless no-op).
     fn stop_and_reap(&mut self) {
-        let _ = self.api.put(
-            "/actions",
-            &Action {
-                action_type: "SendCtrlAltDel",
-            },
-        );
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            match self.child.try_wait() {
-                // Clean power-off: the guest ran `::shutdown:/bin/umount -a -r`, so `/output` is
-                // flushed and cleanly unmounted.
-                Ok(Some(_)) => break,
-                Ok(None) if Instant::now() >= deadline => {
-                    // A wedged guest: hard-kill it. The `-o sync` mount means the command's completed
-                    // writes are already on the image; `e2fsck` will recover the unclean journal.
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    break;
-                }
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                // `try_wait` itself failed (near-impossible): still force the kill/wait so the fd to
-                // the output image is released before readback, rather than trusting a later `Drop`.
-                Err(_) => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    break;
-                }
-            }
+        if !self.power_off_and_wait(Instant::now() + POWER_OFF_TIMEOUT) {
+            // A wedged (or unwaitable) guest: hard-kill so the fd to the output image is released
+            // before readback rather than trusting a later `Drop`. The `-o sync` mount means the
+            // command's completed writes are already on the image; `e2fsck` recovers the journal.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
         }
         self.console.join();
     }
@@ -509,22 +518,8 @@ impl RunningVm {
     /// Currently never returns `Err` — teardown is best-effort — but the signature stays fallible
     /// for the jailed/cgroup teardown of later phases.
     pub fn shutdown(mut self) -> Result<(), VmmError> {
-        // `SendCtrlAltDel` is an x86-only ACPI-ish nicety (i8042); the kill in `Drop` is what
-        // actually guarantees no leak. Ignore its result — the guest may already be gone.
-        let _ = self.api.put(
-            "/actions",
-            &Action {
-                action_type: "SendCtrlAltDel",
-            },
-        );
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            match self.child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => break,
-            }
-        }
+        // The kill in `Drop` is what actually guarantees no leak; this is just the polite ask.
+        let _ = self.power_off_and_wait(Instant::now() + POWER_OFF_TIMEOUT);
         Ok(()) // `Drop` finishes the teardown.
     }
 }
@@ -715,6 +710,29 @@ impl Spawned {
         })
     }
 
+    /// `PUT /drives/{id}` — attach a virtio-block device, deriving the API path from `id` so the URL
+    /// and the body's `drive_id` are the same token and can't drift apart. `still_before` first, so a
+    /// boot already past its deadline fails fast with this drive named.
+    fn put_drive(
+        &self,
+        id: &str,
+        path_on_host: &str,
+        is_root_device: bool,
+        is_read_only: bool,
+        deadline: Instant,
+    ) -> Result<(), VmmError> {
+        still_before(deadline, &format!("PUT /drives/{id}"))?;
+        self.api.put(
+            &format!("/drives/{id}"),
+            &Drive {
+                drive_id: id,
+                path_on_host,
+                is_root_device,
+                is_read_only,
+            },
+        )
+    }
+
     /// Drive the API through the boot sequence and wait for the userspace marker; returns the
     /// boot-to-userspace latency.
     fn run_boot(&mut self, config: &BootConfig) -> Result<Duration, VmmError> {
@@ -737,17 +755,6 @@ impl Spawned {
             .unwrap_or_else(|| now + Duration::from_secs(86_400));
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
-
-        // Each API call is individually time-capped by the client, but their *sum* must also
-        // respect the boot deadline — otherwise a slow VMM could stretch `boot` well past `wall`.
-        fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
-            if Instant::now() >= deadline {
-                return Err(VmmError::Timeout(format!(
-                    "boot deadline expired before {what}"
-                )));
-            }
-            Ok(())
-        }
 
         let kernel = path_str(&config.kernel)?;
         let rootfs = path_str(&self.rootfs)?;
@@ -783,31 +790,13 @@ impl Spawned {
                 boot_args: &boot_args,
             },
         )?;
-        still_before(deadline, "PUT /drives/rootfs")?;
-        self.api.put(
-            "/drives/rootfs",
-            &Drive {
-                drive_id: "rootfs",
-                path_on_host: rootfs,
-                is_root_device: true,
-                is_read_only: config.read_only_root,
-            },
-        )?;
+        self.put_drive("rootfs", rootfs, true, config.read_only_root, deadline)?;
         // Bulk read-only input (P3.4): attach the built image as `/dev/vdb`. `is_read_only` is what
         // makes the input provably immutable (Firecracker opens it `O_RDONLY`) and sidesteps the
         // read-back-a-dirty-ext4 hazard that a writable device would carry into P3.5.
         if let Some(image) = self.input_image.as_ref() {
             let input = path_str(image)?;
-            still_before(deadline, "PUT /drives/input")?;
-            self.api.put(
-                "/drives/input",
-                &Drive {
-                    drive_id: "input",
-                    path_on_host: input,
-                    is_root_device: false,
-                    is_read_only: true,
-                },
-            )?;
+            self.put_drive("input", input, false, true, deadline)?;
         }
         // Bulk writable output (P3.5): attach the blank image read-write. The guest mounts it by
         // label (`agent-output`), so the `/dev/vdX` letter this lands on doesn't matter — a boot may
@@ -816,16 +805,7 @@ impl Spawned {
         // exits (never while it holds the file open — see `RunningVm::collect_outputs`).
         if let Some(out) = self.output.as_ref() {
             let output = path_str(&out.image)?;
-            still_before(deadline, "PUT /drives/output")?;
-            self.api.put(
-                "/drives/output",
-                &Drive {
-                    drive_id: "output",
-                    path_on_host: output,
-                    is_root_device: false,
-                    is_read_only: false,
-                },
-            )?;
+            self.put_drive("output", output, false, false, deadline)?;
         }
         still_before(deadline, "PUT /machine-config")?;
         self.api.put(
@@ -853,11 +833,11 @@ impl Spawned {
         // guest gets an *unconfigured* `eth0` (no `ip=` boot arg, no host route or masquerade), so it
         // reaches nothing until addressing lands. The tap is deleted on every teardown path.
         if let Some(tap) = self.tap.as_ref() {
-            still_before(deadline, "PUT /network-interfaces/eth0")?;
+            still_before(deadline, "PUT /network-interfaces")?;
             self.api.put(
-                "/network-interfaces/eth0",
+                &format!("/network-interfaces/{IFACE_ID}"),
                 &NetworkInterface {
-                    iface_id: "eth0",
+                    iface_id: IFACE_ID,
                     host_dev_name: &tap.name,
                     guest_mac: &tap.mac,
                 },
@@ -874,12 +854,7 @@ impl Spawned {
         still_before(deadline, "InstanceStart")?;
         // The number that matters is measured from InstanceStart to the userspace marker.
         let started = Instant::now();
-        self.api.put(
-            "/actions",
-            &Action {
-                action_type: "InstanceStart",
-            },
-        )?;
+        self.api.put("/actions", &Action::InstanceStart)?;
         self.await_userspace(&config.userspace_marker, deadline)?;
         let latency = started.elapsed();
         tracing::info!(
@@ -989,6 +964,8 @@ impl Spawned {
             child,
             workdir: std::mem::take(&mut self.workdir),
             console: std::mem::take(&mut self.console),
+            // `ApiClient` is a cheap-to-clone handle (just the socket path); the other fields can't
+            // clone (a `Child`, owned buffers), so they `take()`. `self` still `Drop`s afterward.
             api: self.api.clone(),
             boot_latency,
             vsock_uds: self.vsock_uds.take(),
@@ -1079,9 +1056,9 @@ impl Tap {
                 TapAdd::Created => {}
             }
             // A half-configured tap must not leak if bring-up or addressing fails.
-            let (host_ip, guest_ip, prefix) = subnet_for(token);
+            let (host_ip, guest_ip) = subnet_for(token);
             if let Err(e) = run_ip(&["link", "set", "dev", &name, "up"]) {
-                let _ = run_ip(&["link", "del", "dev", &name]);
+                ip_link_del(&name);
                 return Err(e);
             }
             // Assign the host end of the /30. This auto-installs the connected route so the host
@@ -1094,8 +1071,14 @@ impl Tap {
             // When that's the cause (another VM owns this /30), reclaim the tap and retry with a fresh
             // token (the same fail-if-taken-then-retry the name uses), so two concurrent sandboxes
             // never share a subnet and can't reach each other's tap (P4.4). Any other failure is real.
-            if let Err(e) = run_ip(&["addr", "add", &format!("{host_ip}/{prefix}"), "dev", &name]) {
-                let _ = run_ip(&["link", "del", "dev", &name]);
+            if let Err(e) = run_ip(&[
+                "addr",
+                "add",
+                &format!("{host_ip}/{HOST_PREFIX}"),
+                "dev",
+                &name,
+            ]) {
+                ip_link_del(&name);
                 if host_addr_exists(host_ip) {
                     // Another VM already owns this /30 (the folded index collided). Retry with a
                     // fresh token; log it so subnet contention is observable.
@@ -1122,9 +1105,16 @@ impl Tap {
     /// panicked (the host path is `#![forbid(unsafe_code)]` and must not panic on teardown). Removing
     /// the interface also removes its address and connected route.
     fn delete(&self) {
-        if let Err(e) = run_ip(&["link", "del", "dev", &self.name]) {
-            tracing::warn!(tap = %self.name, error = %e, "failed to delete tap on teardown");
-        }
+        ip_link_del(&self.name);
+    }
+}
+
+/// `ip link del dev <name>`, best-effort: the tap has no `Drop` safety net, so every teardown and
+/// half-configured-boot cleanup routes through here, and a failure is logged (never propagated or
+/// panicked, per the no-panic host path) so an orphaned interface is at least visible.
+fn ip_link_del(name: &str) {
+    if let Err(e) = run_ip(&["link", "del", "dev", name]) {
+        tracing::warn!(tap = %name, error = %e, "failed to delete tap");
     }
 }
 
@@ -1147,6 +1137,10 @@ fn mac_for(v: u32) -> String {
 /// (Docker `172.17+`, libvirt `192.168.122`, home routers `192.168.0/1`, plain `10.0.0/24`).
 const NET_BASE: [u8; 2] = [10, 200];
 
+/// The prefix length of each per-VM link: a `/30` (netmask `255.255.255.252`), the smallest subnet
+/// that holds two usable hosts (the host end and the guest end) and nothing else.
+const HOST_PREFIX: u8 = 30;
+
 /// Fold a 64-bit token down to a 14-bit /30 index. The token is `(pid << 20) ^ NET_SEQ`, so its PID
 /// entropy lives in bits ≥ 20; a plain `token & 0x3fff` would drop all of it and collapse to
 /// `NET_SEQ & 0x3fff`, making two driver processes both at `NET_SEQ = 0` pick the *same* /30 in the
@@ -1155,18 +1149,18 @@ fn subnet_index(token: u64) -> u16 {
     ((token ^ (token >> 14) ^ (token >> 28) ^ (token >> 42)) & 0x3fff) as u16
 }
 
-/// The `(host_ip, guest_ip, prefix)` of the per-VM point-to-point /30 for `token`, derived from the
-/// same token that won the tap name/MAC so a VM's identity is consistent. Within the 4-address block
-/// (`index * 4`): `+1` is the host end, `+2` the guest end, so it's a /30 (netmask `255.255.255.252`).
-/// `index ∈ [0, 16383]` ⇒ `block ∈ {0, 4, …, 65532}` ⇒ the low octet is a multiple of 4 in `[0, 252]`,
-/// so `+1`/`+2` never overflow an octet.
-fn subnet_for(token: u64) -> (Ipv4Addr, Ipv4Addr, u8) {
+/// The `(host_ip, guest_ip)` ends of the per-VM point-to-point [`HOST_PREFIX`] (`/30`) for `token`,
+/// derived from the same token that won the tap name/MAC so a VM's identity is consistent. Within the
+/// 4-address block (`index * 4`): `+1` is the host end, `+2` the guest end. `index ∈ [0, 16383]` ⇒
+/// `block ∈ {0, 4, …, 65532}` ⇒ the low octet is a multiple of 4 in `[0, 252]`, so `+1`/`+2` never
+/// overflow an octet.
+fn subnet_for(token: u64) -> (Ipv4Addr, Ipv4Addr) {
     let block = u32::from(subnet_index(token)) << 2; // index * 4
     let o3 = (block >> 8) as u8;
     let o4 = (block & 0xff) as u8;
     let host = Ipv4Addr::new(NET_BASE[0], NET_BASE[1], o3, o4 + 1);
     let guest = Ipv4Addr::new(NET_BASE[0], NET_BASE[1], o3, o4 + 2);
-    (host, guest, 30)
+    (host, guest)
 }
 
 /// Outcome of `ip tuntap add`: a taken name is the retryable case (another VM or a stale tap holds
@@ -1575,6 +1569,18 @@ fn find(haystack: &[u8], needle: &[u8]) -> bool {
 fn path_str(p: &Path) -> Result<&str, VmmError> {
     p.to_str()
         .ok_or_else(|| VmmError::Vmm(format!("path is not valid UTF-8: {}", p.display())))
+}
+
+/// Fail fast if the boot deadline has already passed before the next step (`what`). Each API call is
+/// individually time-capped by the client, but their *sum* must also respect the boot deadline, or a
+/// slow VMM could stretch `boot` well past `wall`.
+fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
+    if Instant::now() >= deadline {
+        return Err(VmmError::Timeout(format!(
+            "boot deadline expired before {what}"
+        )));
+    }
+    Ok(())
 }
 
 /// Require a file to exist, mapping absence to a clear [`VmmError::Artifact`].
@@ -2123,8 +2129,8 @@ mod tests {
 
     #[test]
     fn subnet_for_carves_a_point_to_point_30() {
-        let (host, guest, prefix) = subnet_for(0);
-        assert_eq!(prefix, 30);
+        assert_eq!(HOST_PREFIX, 30, "a point-to-point link is the smallest /30");
+        let (host, guest) = subnet_for(0);
         // Both ends live in 10.200.0.0/16, and the guest is the host's neighbour (host + 1).
         assert_eq!(host.octets()[0..2], [10, 200]);
         assert_eq!(guest.octets()[0..2], [10, 200]);
@@ -2132,10 +2138,6 @@ mod tests {
         // The block base is a multiple of 4, so host/guest are the .1/.2 of their /30 (never the
         // network .0 or broadcast .3) and the low octet can't overflow.
         assert_eq!(u32::from(host) % 4, 1);
-        for token in [1u64, 42, 0xffff_ffff, u64::MAX] {
-            let (_h, _g, p) = subnet_for(token);
-            assert_eq!(p, 30);
-        }
     }
 
     #[test]
@@ -2162,7 +2164,7 @@ mod tests {
         let token = |seq: u64| (u64::from(std::process::id()) << 20) ^ seq;
         let mut seen = std::collections::BTreeSet::new();
         for seq in 0..4096 {
-            let (host, _guest, _prefix) = subnet_for(token(seq));
+            let (host, _guest) = subnet_for(token(seq));
             assert!(
                 seen.insert(host),
                 "duplicate host /30 end {host} at seq {seq}"
@@ -2231,7 +2233,7 @@ mod tests {
     fn fake_vsock_agent(tag: &str) -> (TestDir, PathBuf, std::thread::JoinHandle<()>) {
         use std::os::unix::net::UnixListener;
         let dir = TestDir::new(tag);
-        let uds = dir.path().join("v.sock");
+        let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
@@ -2394,7 +2396,7 @@ mod tests {
     {
         use std::os::unix::net::UnixListener;
         let dir = TestDir::new(tag);
-        let uds = dir.path().join("v.sock");
+        let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
@@ -2625,7 +2627,7 @@ mod tests {
     {
         use std::os::unix::net::UnixListener;
         let dir = TestDir::new(tag);
-        let uds = dir.path().join("v.sock");
+        let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");

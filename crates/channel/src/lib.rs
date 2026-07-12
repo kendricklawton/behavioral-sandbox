@@ -248,22 +248,16 @@ fn read_frame(r: &mut impl Read) -> Result<(u8, Vec<u8>), ChannelError> {
     Ok((tag, payload))
 }
 
-/// Append a `u32`-length-prefixed blob to `payload`.
-fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
-    payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
-    payload.extend_from_slice(bytes);
+/// Append a little-endian `u32` to `payload` — the write-side counterpart of [`Body::u32`], so both
+/// halves of the framing keep their integer encoding in one place.
+fn put_u32(payload: &mut Vec<u8>, value: u32) {
+    payload.extend_from_slice(&value.to_le_bytes());
 }
 
-/// Guard a built payload against the frame cap before framing it.
-fn within_cap(tag: u8, payload: &[u8]) -> Result<(), ChannelError> {
-    if payload.len() > MAX_PAYLOAD {
-        Err(ChannelError::PayloadTooLarge {
-            tag,
-            len: payload.len(),
-        })
-    } else {
-        Ok(())
-    }
+/// Append a `u32`-length-prefixed blob to `payload`.
+fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
+    put_u32(payload, bytes.len() as u32);
+    payload.extend_from_slice(bytes);
 }
 
 /// Send a [`Request`].
@@ -278,7 +272,6 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
             let mut payload = Vec::new();
             put_blob(&mut payload, path.as_bytes());
             put_blob(&mut payload, data);
-            within_cap(TAG_PUTFILE, &payload)?;
             write_frame(w, TAG_PUTFILE, &payload)
         }
         Request::Exec {
@@ -288,17 +281,16 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
             timeout_ms,
         } => {
             let mut payload = Vec::new();
-            payload.extend_from_slice(&(argv.len() as u32).to_le_bytes());
+            put_u32(&mut payload, argv.len() as u32);
             for arg in argv {
                 put_blob(&mut payload, arg.as_bytes());
             }
             put_blob(&mut payload, stdin);
-            payload.extend_from_slice(&(artifacts.len() as u32).to_le_bytes());
+            put_u32(&mut payload, artifacts.len() as u32);
             for path in artifacts {
                 put_blob(&mut payload, path.as_bytes());
             }
-            payload.extend_from_slice(&timeout_ms.to_le_bytes());
-            within_cap(TAG_EXEC, &payload)?;
+            put_u32(&mut payload, *timeout_ms);
             write_frame(w, TAG_EXEC, &payload)
         }
         Request::Unknown { tag } => Err(ChannelError::Protocol(format!(
@@ -361,7 +353,6 @@ pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), 
             let mut payload = Vec::new();
             put_blob(&mut payload, path.as_bytes());
             put_blob(&mut payload, data);
-            within_cap(TAG_FILE, &payload)?;
             write_frame(w, TAG_FILE, &payload)
         }
         Response::Exit { code } => write_frame(w, TAG_EXIT, &code.to_le_bytes()),
