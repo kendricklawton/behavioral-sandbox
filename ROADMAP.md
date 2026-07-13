@@ -45,7 +45,9 @@ Four properties every phase must protect:
 - **Two tracks, one spine.** **FC** (Firecracker) and **BPF** (aya/eBPF) can be learned somewhat
   in parallel, but the **Convergence** phases need both, so the gate order still holds.
 - **Every phase exits on a demo + a lesson.** The exit gate is "I can show it running *and* write
-  up the Linux mechanism it taught me."
+  up the Linux mechanism it taught me." Lessons are recorded in the root `.md` files (the box
+  annotations here + `ARCHITECTURE.md`'s decision log); the separate `docs/` writeup directory was
+  retired 2026-07-13.
 - **Hard-to-reverse choices** (tagged `(decision)`) land as dated entries in `ARCHITECTURE.md`.
 - **Git is human-driven.** The user makes every commit/branch/push; the coding agent's job ends at
   changes made, demo working, box checked in the working tree.
@@ -64,8 +66,8 @@ Four properties every phase must protect:
   boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
   patch as they land. These are checkpoints, not releases — no stability promise.
 - Tags are a **human git step** (§0.5): the coding agent checks boxes; the user cuts the tag.
-- **No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the roadmap checkboxes, the
-  `docs/` writeups, and `ARCHITECTURE.md`'s decision log *are* the change record; a curated
+- **No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the roadmap checkboxes and
+  `ARCHITECTURE.md`'s decision log *are* the change record; a curated
   changelog is written once, for the first real release, rather than churned every `v0.0.x`.
 
 ## §0.75 Dev environment (one-time)
@@ -96,8 +98,9 @@ Turn `agent` from the wasm scanner into the Firecracker + aya sandbox; keep the 
 - [x] **P0.6** Naming: keep the `agent` umbrella (binary + repo); crates are
       `vmm`/`probes`/`probes-loader`/`cli`.
 - [x] **P0.7** A short `docs/` for the per-phase writeups each phase feeds. *(No `CHANGELOG.md`
-      in the pre-release `v0.0.x` line — the roadmap's checkboxes and `docs/` are the record; the
-      changelog is first written at `v0.1.0`. See §0.6.)*
+      in the pre-release `v0.0.x` line — the roadmap's checkboxes are the record; the changelog is
+      first written at `v0.1.0`. See §0.6. The `docs/` dir was later retired, 2026-07-13: lessons
+      live in these annotations + the decision log, per §0.5.)*
 - [x] **P0.8** `cargo xtask ci-privileged` runs the KVM/eBPF (`#[ignore]`d) tests behind a
       `/dev/kvm` guard, so day-to-day dev isn't `sudo cargo` roulette.
 - **Exit gate:** `cargo xtask ci` green on an empty-but-scaffolded tree; `xtask setup` verifies the
@@ -127,12 +130,13 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
 - [x] **P1.8** A `Vm::boot(config) -> RunningVm` / `RunningVm::shutdown()` API over all of the above.
 - [x] **P1.9** Timing: measure and log boot-to-userspace latency (the number that matters).
       *(Dev box, n=10 sequential cold boots: p50 2.6 s, p90 3.4 s, best isolated ~1.2 s; logged
-      every run, printed by `--demo-boot`. Excludes driver setup — see docs/001.)*
+      every run, printed by `--demo-boot`. Excludes driver setup.)*
 - [x] **P1.10** Test: boot → see the login/init banner → shut down, repeatable.
       *(`crates/vmm/tests/boot.rs`, `#[ignore]`d; two cycles asserting no leaked scratch dirs.)*
 - **Exit gate + lesson:** a microVM boots to userspace from `cargo run` and shuts down clean; write
   up the **boot protocol** (kernel + boot args + virtio-block rootfs) and the microVM lifecycle.
-  *(Demo: `agent run --demo-boot`. Writeup: `docs/001-boot-a-microvm.md`.)*
+  *(Demo: `agent run --demo-boot`. Writeup retired with `docs/`; the lesson lives in the box
+  annotations above and decision 001.)*
 
 ## Phase 2 — Run code in the guest & get results back
 
@@ -209,11 +213,11 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       `VmmError::Channel` with `is_disconnect()`. All KVM-free, in the host gate.)*
 - **Exit gate + lesson:** `agent`-driven `exec` in a microVM returns real output; write up **vsock /
   guest agents** and how host↔guest comms actually work.
-  *(Writeup: `docs/002-host-guest-comms.md`. The exec **engine** is complete and tested against the
+  *(Writeup retired with `docs/`. The exec **engine** is complete and tested against the
   real guest agent (only the Firecracker vsock UDS is faked) + a privileged vsock-device boot smoke
   test. The **"in a microVM" clause was provisional** here — the agent wasn't baked into the rootfs
   or binding `AF_VSOCK` yet — and is now **closed by P3.1**: the literal in-VM `exec("echo hi") → hi,
-  exit 0` runs against a real microVM. See `docs/002` "What's still stubbed".)*
+  exit 0` runs against a real microVM.)*
 
 ## Phase 3 — Rootfs & the language runtime
 
@@ -342,8 +346,9 @@ binary, so adding a runtime is a packaging step, not an engine change.
       p99 (~670 vs ~410 ms) from per-run overlay setup, not image size.
       Tests: `runs_a_static_native_binary_and_captures_its_artifact`, `runs_node_a_second_interpreter`
       (11 privileged tests now). **Phase-3 exit gate met:** Python + a native binary + Node all produce
-      captured artifacts; writeup in `docs/003-rootfs-and-runtimes.md` (ext4 `mke2fs -d`, overlayfs,
-      initramfs-vs-rootfs, reproducibility, static-vs-dynamic linking, inject-vs-bake).)*
+      captured artifacts; the lesson (ext4 `mke2fs -d`, overlayfs, initramfs-vs-rootfs,
+      reproducibility, static-vs-dynamic linking, inject-vs-bake) is recorded in these annotations
+      and decisions 006/007; its `docs/` writeup was retired.)*
 - **Exit gate + lesson:** real Python **and a static native binary + Node** run in the microVM and
   produce artifacts — the rootfs is runtime-agnostic; write up **filesystems, ext4 images, overlayfs,
   initramfs vs rootfs, and static vs dynamic linking in a minimal rootfs.**
@@ -429,7 +434,7 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge less
       fails. Per decision 008, "allowed" in this phase is host-local; world-egress allow-listing is the
       eBPF-enforced, recorded policy of P8. `have_net_admin()`-gated.)*
 - [x] **P4.8** Document the netfilter/routing rules the driver installs.
-      *(Enumerated in `docs/004-guest-networking.md` as an audit table: per networked VM the driver runs
+      *(Enumerated as an audit table: per networked VM the driver runs
       exactly `ip tuntap add` / `ip link set up` / `ip addr add <host>/30` plus the kernel `ip=` guest
       config, and installs **no** default route, **no** `MASQUERADE`/`nat`/`forward` rule, **no**
       `ip_forward`, no bridge, no netns. Teardown is the inverse of one line (`ip link del`). The
@@ -437,11 +442,11 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge less
       deny-by-default auditable, cross-referenced from decisions 008/009.)*
 - **Exit gate + lesson:** a microVM has controlled network; write up **tap devices, bridges,
   netfilter/NAT, and virtio-net.**
-  *(Done: `docs/004-guest-networking.md` teaches the tap backend (and why not a bridge/veth), virtio-net
-  host-tap-to-guest-`eth0`, kernel `ip=`/`CONFIG_IP_PNP` static addressing with no rootfs change, the
-  connected-route-is-the-whole-security-model lever with NAT/forwarding as the road not taken, the
-  atomic per-VM /30, and the audit table. Working demo: the three `ci-privileged` network tests.
-  Indexed in `docs/README.md`.)*
+  *(Done: lesson recorded in decisions 008/009 and the box annotations above: the tap backend (and
+  why not a bridge/veth), virtio-net host-tap-to-guest-`eth0`, kernel `ip=`/`CONFIG_IP_PNP` static
+  addressing with no rootfs change, the connected-route-is-the-whole-security-model lever with
+  NAT/forwarding as the road not taken, the atomic per-VM /30, and the P4.8 audit table. Working
+  demo: the three `ci-privileged` network tests.)*
 
 ## Phase 5 — Snapshots & warm start
 
@@ -572,12 +577,12 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
       now asserted in `ci-privileged`, not just printed by the bench. 23 privileged tests.)*
 - **Exit gate + lesson:** warm restores make runs start in ms; write up **snapshotting, guest
   memory, and the state you must fix up on restore.**
-  *(Done: `docs/005-snapshots-and-warm-start.md` teaches what a snapshot is (vCPU/device state + the
-  guest-memory file, disk copied in the paused window), how clones share memory through a
-  copy-on-write mmap and the page cache, the stage-then-unlink disk contract and the relative-vsock
-  cwd trick, and the three restore fix-ups: agent-applied network identity, the VMGenID entropy
-  reseed proven by test, and the documented wall-clock lag. Working demo: `cargo xtask bench-warm`
-  plus the eight snapshot/restore/pool tests in `ci-privileged`. Indexed in `docs/README.md`.)*
+  *(Done: lesson recorded in decisions 010/011 and the box annotations above: what a snapshot is
+  (vCPU/device state + the guest-memory file, disk copied in the paused window), how clones share
+  memory through a copy-on-write mmap and the page cache, the stage-then-unlink disk contract and
+  the relative-vsock cwd trick, and the three restore fix-ups (agent-applied network identity, the
+  VMGenID entropy reseed proven by test, the documented wall-clock lag). Working demo:
+  `cargo xtask bench-warm` plus the eight snapshot/restore/pool tests in `ci-privileged`.)*
 
 ## Phase 6 — Confinement: jailer, cgroups, seccomp
 

@@ -10,8 +10,14 @@
 //! - [`Sandbox`] — the CLI-facing lifecycle wrapper (grows `exec`/files/policy in later phases).
 #![forbid(unsafe_code)]
 
+mod console;
+mod drives;
+mod exec;
 mod firecracker;
+mod net;
 mod pool;
+#[cfg(test)]
+mod test_util;
 mod vm;
 
 use std::time::Duration;

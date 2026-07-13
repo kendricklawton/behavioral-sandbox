@@ -1,37 +1,53 @@
-# REVIEW.md: manual checklist before Phase 6
+# REVIEW.md: the between-phases review log
 
-A working checklist for the things only you (the human) should do before starting **Phase 6
-(confinement: jailer, cgroups, seccomp)**. The coding agent has landed all of Phase 5 (snapshots
-and warm start, P5.1 through P5.8); this file puts a human's eyes on that work before Phase 6
-jails the VMM those snapshots run on. It is a working note, not a permanent doc; delete it once
-you have worked through it.
+One entry per completed phase: the manual gate a human works before the next phase starts, kept
+for the life of the project. The engine exists to teach Linux mastery, so this file is where the
+*operator's* half of that happens: run it, read it, question it, and explain it back, before
+building on top of it. Entries are **appended, never rewritten**; a ticked entry is the durable
+record of what was reviewed, ratified, and consciously deferred. If a past entry turns out wrong,
+add a dated correction line under it rather than editing history.
 
-Tick each box as you go. Anything that fails is a stop: fix or file it before Phase 6.
+## How to work an entry
 
-## Git state
+- When the coding agent declares a phase complete, have it append the next entry here (same
+  skeleton, fresh anchors and numbers). Review its claims against the tree; the entry is itself
+  agent output and deserves the same skepticism as the code.
+- Work top to bottom. **Any failed box is a stop**: fix it or file it before the next phase. The
+  roadmap's own rule (never start a phase before the prior exit gate passes) is enforced *here*.
+- Line anchors (`file.rs:NNN`) point at the tree as of the entry's writing; refactors move them.
+  Trust the symbol name over the number.
 
-The tree is **clean** and every Phase 5 box is committed; this is a retrospective review
-(`git show <sha>`), not an uncommitted-diff review. There are still **no tags**. The commits under
-review (newest first):
+## The entry skeleton
 
-| commit    | subject                                                                  | phase work                          |
-|-----------|--------------------------------------------------------------------------|-------------------------------------|
-| `8ad02e3` | Benchmark the three start paths and assert warm restore beats cold boot  | P5.7 bench + P5.8 test              |
-| `8ff6b79` | seam: add a warm Pool and type agent-unavailable errors as retryable     | P5.6 + the P2.7 `GuestUnavailable` closure |
-| `660a1b5` | seam: restore networked clones with a fresh identity, reseeded entropy   | P5.5 / decision 011                 |
-| `902ca84` | seam: restore warm snapshots as exec-ready concurrent clones             | P5.3 + P5.4                         |
-| `3f027ce` | seam: add microVM snapshot/restore and a VmmError bucket classifier      | P5.1 + P5.2, `kind()`, `Limits` docs, the `.rules` seam convention |
+Every entry covers the same eight angles, so nothing relies on remembering to ask:
 
-Four of five carry the `seam:` marker because each changed the public `vmm` surface a downstream
-pin sees (`Snapshot`/`restore`, new `VmmError` variants, `kind()`, `Pool`). `8ad02e3` doesn't, and
-shouldn't (xtask + a test). Sanity-check that split reads right from `git log --oneline` alone;
-that legibility is the whole point of the convention.
+0. **Host check**: the box can still do the work (`cargo xtask setup`, disk/RAM headroom).
+1. **Operate it**: run the phase's demo by hand; watching it run catches what asserts don't.
+2. **Gates**: `cargo xtask ci` and `ci-privileged` green; capability-gated tests genuinely ran
+   (no silent skips); leak check by hand.
+3. **Read the work**: the mechanisms per commit, the judgment calls that deserve a human yes,
+   and the coverage gaps to accept or close.
+4. **Writeups and decisions**: the `ARCHITECTURE.md` decisions and the `ROADMAP.md` annotations
+   record the phase's lesson and describe the tree as it is; the exit gate (demo + recorded
+   lesson) is genuinely met. All documentation lives in the root `.md` files; no `docs/` dir.
+5. **Human git steps**: what to commit or tag (git stays human-driven).
+6. **Next-phase readiness**: the forward notes, environment realities, and tombstones the next
+   phase must pick up.
+7. **Teach-back**: the mastery check. Explain the phase's core mechanisms aloud, from memory,
+   as if teaching them. If an explanation won't come, the phase isn't done with *you* yet;
+   reread the writeup or interrogate the agent until it will.
 
-**One thing is genuinely outstanding: the Phase 5 exit-gate writeup (`docs/005-*.md`) does not
-exist yet.** See section 4. The working-demo half of the gate is done (the bench + 23 privileged
-tests); the phase is not closed until the writeup lands.
+---
 
-## 0. Confirm the host can still do the work
+## Entry 1: before Phase 6 (Phase 5 under review: snapshots and warm start)
+
+The coding agent has landed all of Phase 5 (P5.1 through P5.8: snapshot, restore, warm snapshots,
+concurrent clones, restore identity, the warm `Pool`, the bench, the timed proof), recorded the
+exit-gate lesson in the decision log, and split `vm.rs` / `tests/boot.rs` / xtask into modules by
+concern. Phase 6 (jailer,
+cgroups, seccomp) confines the VMM those snapshots run on; this entry is the gate in between.
+
+### 0. Host check
 
 - [ ] `cargo xtask setup` reports every item green (KVM writable, BTF, firecracker **and jailer**
       binaries, the rootfs tools, `ip`, fetched artifacts). The jailer line matters now: Phase 6
@@ -40,7 +56,7 @@ tests); the phase is not closed until the writeup lands.
       RAM (256 MiB at `Limits::default().mem_mib`), plus a disk copy for read-write-root bundles.
       The bench and tests clean up after themselves, but check `df /tmp` is comfortable.
 
-## 1. Operate the engine (see it actually run, not just pass tests)
+### 1. Operate the engine
 
 Snapshots have **no CLI surface yet** (Sandbox-level warm start is Phase 7), so operating Phase 5
 means the bench and the tests. Run from the repo root.
@@ -49,7 +65,7 @@ means the bench and the tests. Run from the repo root.
       couple of minutes). Reference numbers from this box (n=100 per path, time-to-first-result):
       cold boot + exec **p50 689 / p99 943 ms**, warm restore + exec **p50 105 / p99 172 ms**, pool
       take + exec **p50 45 / p99 90 ms**. Yours should be the same shape: warm paths several times
-      under cold, pool under restore. Record your numbers; they seed the `docs/005` writeup.
+      under cold, pool under restore.
 - [ ] **Footprint claim:** the bench's closing note (cold copies the 132 MiB image per VM; a warm
       clone copies nothing) matches what you see: while it runs, `ls /tmp/agent-*` shows clone
       scratch dirs without private rootfs copies during the warm-path runs.
@@ -59,54 +75,62 @@ means the bench and the tests. Run from the repo root.
       still execs. Phase 5 refactored the boot path (`spawn_fc`, absolute paths, per-VMM cwd), so
       confirm the pre-snapshot surface didn't regress in the operator's hands.
 
-## 2. Run both gates
+### 2. Gates
 
 - [ ] **Host gate:** `cargo xtask ci` green. The `kind_buckets_every_variant` pinned bucket test
       and the vsock ack unit tests (`connect_ack_*_is_typed_error`, now pinned to
       `GuestUnavailable`) run here.
-- [ ] **Privileged gate:** `cargo xtask ci-privileged` green: **23 tests, run serially**
-      (`--test-threads=1`; real-VM tests assert on host-global leak state). Without ambient caps:
-      `unshare -Urn --map-root-user sh -c 'ip link set lo up; cargo test -p agent-vmm --test boot -- --ignored --test-threads=1'`.
+- [ ] **Privileged gate:** `cargo xtask ci-privileged` green: **23 tests across four binaries**
+      (`tests/{boot,exec,net,snapshot}.rs`), run serially (`--test-threads=1`; real-VM tests
+      assert on host-global leak state). Without ambient caps:
+      `unshare -Urn --map-root-user sh -c 'ip link set lo up; cargo test -p agent-vmm --tests -- --ignored --test-threads=1'`.
 - [ ] **The network-gated tests must run, not skip silently.** `have_net_admin()` gating means
       they pass vacuously without `CAP_NET_ADMIN`. Confirm no "skipping" lines and that these say
-      `ok`: the four Phase 4 network tests plus Phase 5's
-      `restored_networked_clone_gets_a_fresh_identity`.
+      `ok`: the four tests in `tests/net.rs` plus `restored_networked_clone_gets_a_fresh_identity`
+      in `tests/snapshot.rs`.
 - [ ] **Leak check by hand, outside the namespace:** `ls /tmp/agent-* 2>/dev/null` empty,
       `ip -o link show | grep -E '\bfc[0-9a-f]+'` empty. Phase 5 multiplied the things that could
       leak (bundles, staged disk copies, pooled VMMs), so this check earns its keep now.
 
-## 3. Review the committed Phase 5 work
+### 3. Read the work
 
-`git show <sha>` for each; the heavy reading is `crates/vmm/src/vm.rs`.
+`git show <sha>` for each. Since these commits landed, `vm.rs`, `tests/boot.rs`, and xtask were
+split into modules by concern, so the anchors point at the *current* tree, not the commit-time
+layout: the driver is now `vm.rs` (lifecycle) + `net.rs` + `exec.rs` + `console.rs` + `drives.rs`
++ `pool.rs`.
 
-- [ ] **Snapshot correctness** (`3f027ce`): `RunningVm::snapshot` (`vm.rs:635`) pauses, creates,
+- [ ] **Snapshot correctness** (`3f027ce`): `RunningVm::snapshot` (`vm.rs:565`) pauses, creates,
       and **resumes even if create fails** (a failed snapshot never leaves a frozen guest); the
       disk copy happens inside the paused window so memory and disk agree; restored VMs,
       input/output devices, and NIC-without-vsock are refused with typed errors, never an
       unrestorable bundle.
 - [ ] **Restore staging** (`3f027ce`, decision 010): Firecracker opens drive backing files at
-      `PUT /snapshot/load` from paths baked into the snapshot, so `Vm::restore` (`vm.rs:424`)
+      `PUT /snapshot/load` from paths baked into the snapshot, so `Vm::restore` (`vm.rs:354`)
       stages the private disk copy at the recorded path and unlinks it once the VMM holds the fd
-      (`stage_restore_disk`, `vm.rs:1404`: atomic `create_new` reservation, self-cleaning). Confirm
+      (`stage_restore_disk`, `vm.rs:1334`: atomic `create_new` reservation, self-cleaning). Confirm
       no fallible call sits between stage and unstage that could strand the copy.
 - [ ] **Concurrent clones** (`902ca84`): vsock binds a **relative** `v.sock` with each VMM run in
-      its own scratch cwd (`spawn_fc`, `vm.rs:1506`), which is why every file path handed to FC is
-      now absolutized (`absolute`, `vm.rs:2210`). The one deliberate relative path is the socket;
+      its own scratch cwd (`spawn_fc`, `vm.rs:1396`), which is why every file path handed to FC is
+      now absolutized (`absolute`, `vm.rs:1494`). The one deliberate relative path is the socket;
       convince yourself nothing else depends on cwd.
 - [ ] **Restore identity** (`660a1b5`, decision 011): the guest agent re-addresses the clone's
-      `eth0` over vsock (`apply_guest_net_identity`, `vm.rs:1470`); the driver recreates the
-      snapshot's recorded tap name with a fresh /30 (`Tap::create_named`, `vm.rs:1674`); entropy is
+      `eth0` over vsock (`apply_guest_net_identity`, `net.rs:29`); the driver recreates the
+      snapshot's recorded tap name with a fresh /30 (`Tap::create_named`, `net.rs:150`); entropy is
       VMGenID-reseeded and **proven by test**, not assumed; the wall clock lags snapshot age and
       the engine deliberately leaves it.
 - [ ] **The Pool** (`8ff6b79`, `crates/vmm/src/pool.rs`): `take()` health-probes before handing out
-      (`probe_agent`, `vm.rs:509`), discards corpses, restores inline when dry; refill is explicit;
-      no background threads. `GuestUnavailable` (`lib.rs:125`) types the nothing-listening
-      establishment failures, bucketed `Infra` in `kind()` (`lib.rs:209`).
-- [ ] **The bench** (`8ad02e3`, `xtask/src/main.rs:741`): every sample verifies the output arrived;
-      teardown/refill are off the clock; percentile honesty reused from `bench-boot` (no `p99`
-      under n=100).
+      (`probe_agent`, `vm.rs:439`), discards corpses, restores inline when dry; refill is explicit;
+      no background threads. `GuestUnavailable` (`lib.rs:131`) types the nothing-listening
+      establishment failures, bucketed `Infra` in `kind()` (`lib.rs:215`).
+- [ ] **The bench** (`8ad02e3`, `xtask/src/bench.rs:116`): every sample verifies the output
+      arrived; teardown/refill are off the clock; percentile honesty reused from `bench-boot` (no
+      `p99` under n=100).
+- [ ] **The module splits** (uncommitted, see section 5): mechanical moves only. Spot-check that
+      the new module boundaries read sensibly (`net`/`exec`/`console`/`drives` in the driver;
+      topic files under `tests/`; `bench`/`rootfs`/`guest_bins`/`artifacts` in xtask) and that
+      nothing gained visibility beyond `pub(crate)`.
 
-### Judgment calls the agent made that deserve a human yes
+#### Judgment calls the agent made that deserve a human yes
 
 - [ ] **One live networked clone per snapshot** on the pinned FC v1.9 (`network_overrides` probed
       and rejected, so the tap name is baked into the snapshot). Tombstoned to an FC bump or the
@@ -127,12 +151,12 @@ means the bench and the tests. Run from the repo root.
       latency (measured headroom ~6.6x). Loose enough to survive a loaded CI box, tight enough to
       mean "far under". Tighten or loosen if your box disagrees.
 
-### Known coverage gaps to accept or close
+#### Known coverage gaps to accept or close
 
 - [ ] **Clock skew is printed, not asserted**
-      (`restored_clones_do_not_share_entropy_or_freeze_the_clock`, `boot.rs:431`): no test bounds
-      the wall-clock lag, it only reports it. Fine while the posture is "documented limitation";
-      revisit if that changes.
+      (`restored_clones_do_not_share_entropy_or_freeze_the_clock`, `tests/snapshot.rs:299`): no
+      test bounds the wall-clock lag, it only reports it. Fine while the posture is "documented
+      limitation"; revisit if that changes.
 - [ ] **Networked pooling at `target <= 1` is documented, not tested:** no test builds a Pool over
       a networked snapshot and asserts the deeper-prefill typed error (it falls out of
       `Tap::create_named`'s tested taken-name error, one layer down). Add the direct test now, or
@@ -141,34 +165,36 @@ means the bench and the tests. Run from the repo root.
       this barely moves the numbers, but the tracked Phase 17 benchmark should pick a profile
       explicitly.
 
-## 4. Review the writeups and decisions
+### 4. Writeups and decisions
 
-- [ ] `ARCHITECTURE.md` decision **010** (snapshot bundles + disk staging, `ARCHITECTURE.md:559`)
-      and **011** (restore identity: the agent re-addresses, VMGenID reseeds,
-      `ARCHITECTURE.md:634`) describe the mechanism actually in the tree, including the probed
-      v1.9 constraint and the rejected alternatives (MMDS, per-tap DHCP, reusing the source's /30).
+- [ ] `ARCHITECTURE.md` decision **010** (snapshot bundles + disk staging) and **011** (restore
+      identity: the agent re-addresses, VMGenID reseeds) describe the mechanism actually in the
+      tree, including the probed v1.9 constraint and the rejected alternatives (MMDS, per-tap
+      DHCP, reusing the source's /30).
 - [ ] `ROADMAP.md` Phase 5: all eight boxes checked, annotations match the code and carry the
-      measured numbers (no aspirational claims).
-- [ ] **STOP: the exit-gate writeup is missing.** Phase 5's gate is a working demo **and** a
-      writeup on **snapshotting, guest memory, and the state you must fix up on restore**; there is
-      no `docs/005-*.md` and no `docs/README.md` entry for it. Have the agent draft it (the
-      material exists: decisions 010/011, the bench numbers, the VMGenID/clock findings) or write
-      it yourself. Phase 6 does not start until this is committed.
+      measured numbers (no aspirational claims), and the exit-gate bullet carries its `(Done:)`
+      note.
+- [ ] The Phase 5 lesson is fully recorded in the root files (the `docs/` directory is retired):
+      decisions 010/011 carry what a snapshot is, stage-then-unlink, and the three restore
+      fix-ups; the ROADMAP P5.7 annotation carries the measured table and the copy-on-write
+      memory economics. Confirm nothing of the lesson lived *only* in the retired writeup. This
+      closes the Phase 5 exit gate (demo + recorded lesson).
 
-## 5. Human git steps
+### 5. Human git steps
 
-- [ ] Commit the `docs/005` writeup once it exists and reads true (imperative, phase-free,
-      attribution-free subject; docs only, so no `seam:` marker).
+- [ ] Commit the module-split refactor sitting in the working tree (driver split into
+      `net`/`exec`/`console`/`drives` + shared `test_util`; `tests/boot.rs` split into four topic
+      binaries + `common/`; xtask split; stale doc commands and this file's anchors fixed).
+      Internal-only, so no `seam:` marker; something like `Split the vmm driver and its
+      integration tests into modules by concern`.
 - [ ] Consider a `v0.0.x` checkpoint tag now that the engine snapshots, restores, and pools
       (`git tag` is still empty; `ROADMAP.md` §0.6). Still no `CHANGELOG.md` until `v0.1.0`.
-- [ ] Delete this file when done (throwaway; not part of the engine).
 
-## 6. Phase 6 readiness gate
+### 6. Phase 6 readiness
 
 Do not start **P6.1** (run Firecracker under its jailer) until:
 
-- [ ] Sections 0 through 5 are clean, including the committed `docs/005` writeup.
-- [ ] Both gates are green on this box.
+- [ ] Sections 0 through 5 are clean and both gates are green on this box.
 - [ ] You have read `ROADMAP.md` Phase 6 (P6.1 to P6.8), in particular the two forward notes it
       carries: **P6.4** also closes the P2.6 process-tree-reaping gap (a cgroup kill reaps the
       grandchildren and `setsid` daemons a direct kill misses), and **P6.7** is where the
@@ -187,3 +213,32 @@ Do not start **P6.1** (run Firecracker under its jailer) until:
 - [ ] Decision 011's netns tombstone is on the Phase 6 radar: the jailer's network namespace is
       the sanctioned path to concurrent networked clones. Keep it in scope when shaping P6.1
       rather than rediscovering it at Phase 8.
+
+### 7. Teach-back (Phase 5 mastery)
+
+Explain each aloud, from memory; `ARCHITECTURE.md` decisions 010 and 011 are the answer key.
+
+- [ ] Why must the root-disk copy happen **inside the paused window**, and what silent corruption
+      does copying from a running guest invite?
+- [ ] Firecracker opens drive backing files at `PUT /snapshot/load`, from the recorded path. Walk
+      through stage-then-unlink: why does the restored clone's disk survive the unlink, and what
+      Unix semantics make that safe?
+- [ ] What does the copy-on-write mmap of the memory file buy? Explain restore-in-milliseconds,
+      page-cache sharing across clones, and "dirty pages are the real per-clone cost" as one
+      coherent story.
+- [ ] Why can't kernel `ip=` address a restored clone, and why is "the guest agent applies the
+      identity, the host keeps enforcement" consistent with spine #2?
+- [ ] What goes wrong if two clones share CRNG state, and how does VMGenID close it? What would
+      break silently if a future kernel pin dropped the `vmgenid` driver, and which test catches
+      it?
+- [ ] Why is the guest wall clock behind after restore, why is monotonic time fine, and why does
+      the engine refuse to fix the wall clock itself?
+- [ ] Why does the pool health-probe on `take()` instead of trusting its stock, and why is
+      `GuestUnavailable` bucketed as retryable `Infra` rather than a `Guest` fault?
+- [ ] Why does `report_percentiles` refuse to print a `p99` below n=100, and what claim would a
+      10-sample "p99" actually be making?
+
+---
+
+*(Next entry: appended when Phase 6 exits, before Phase 7. Ask the agent to draft it from the
+skeleton above; review its claims like code.)*
