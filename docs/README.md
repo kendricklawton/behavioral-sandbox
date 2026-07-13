@@ -16,3 +16,4 @@ The writeups so far:
 - [002: Talking to the guest over vsock and a tiny agent](002-host-guest-comms.md): the host to guest channel.
 - [003: The disk the guest runs](003-rootfs-and-runtimes.md): rootfs, ext4, and runtime-agnosticism.
 - [004: The network the guest gets](004-guest-networking.md): tap, virtio-net, and deny-by-default.
+- [005: The boot you only pay once](005-snapshots-and-warm-start.md): snapshots, guest memory, and restore fix-ups.

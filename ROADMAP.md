@@ -572,6 +572,12 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
       now asserted in `ci-privileged`, not just printed by the bench. 23 privileged tests.)*
 - **Exit gate + lesson:** warm restores make runs start in ms; write up **snapshotting, guest
   memory, and the state you must fix up on restore.**
+  *(Done: `docs/005-snapshots-and-warm-start.md` teaches what a snapshot is (vCPU/device state + the
+  guest-memory file, disk copied in the paused window), how clones share memory through a
+  copy-on-write mmap and the page cache, the stage-then-unlink disk contract and the relative-vsock
+  cwd trick, and the three restore fix-ups: agent-applied network identity, the VMGenID entropy
+  reseed proven by test, and the documented wall-clock lag. Working demo: `cargo xtask bench-warm`
+  plus the eight snapshot/restore/pool tests in `ci-privileged`. Indexed in `docs/README.md`.)*
 
 ## Phase 6 — Confinement: jailer, cgroups, seccomp
 
