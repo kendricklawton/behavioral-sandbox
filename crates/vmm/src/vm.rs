@@ -104,6 +104,11 @@ use agent_channel::{INPUT_LABEL, OUTPUT_LABEL};
 /// (decision 002: liveness is the transport's job).
 const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Deadline for a [`RunningVm::probe_agent`] health check. Much shorter than [`VSOCK_TIMEOUT`]: an
+/// idle, healthy agent accepts immediately, and the pool's take-path shouldn't stall long on a dead
+/// clone before discarding it and serving the next.
+const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Cap on the stdout+stderr+artifacts the host buffers for one `exec`. Each frame is already
 /// `≤ MAX_PAYLOAD`, but a guest can send *unboundedly many* frames (`yes`), so the aggregate is
 /// capped too — a hostile guest never grows host memory without bound. (A command's *runtime* is a
@@ -487,11 +492,22 @@ impl RunningVm {
     /// sets read/write deadlines, then does the channel handshake.
     ///
     /// # Errors
-    /// [`VmmError::Vmm`] if the VM was booted without a `guest_cid`, if the `CONNECT` handshake is
-    /// refused (e.g. nothing is listening on `port` in the guest yet), or on any I/O or channel
-    /// failure; [`VmmError::Timeout`] if the connect exceeds the deadline.
+    /// [`VmmError::GuestUnavailable`] if nothing is listening on `port` in the guest (not up yet, or
+    /// not anymore) — the retryable case; [`VmmError::Vmm`] if the VM was booted without a
+    /// `guest_cid` or on any other I/O or channel failure; [`VmmError::Timeout`] if the connect
+    /// exceeds the deadline.
     pub fn connect_agent(&self, port: u32) -> Result<ClientConnection<UnixStream>, VmmError> {
         connect_agent_at(self.require_vsock()?, port, VSOCK_TIMEOUT)
+    }
+
+    /// Probe the exec channel: connect to the guest agent and complete the handshakes, discarding
+    /// the connection (the agent serves one connection then loops back to accept, so a
+    /// connect-and-close just cycles it). The warm [`Pool`](crate::Pool)'s health check on a clone
+    /// that has been sitting idle: a dead or wedged clone surfaces as a typed error — most
+    /// specifically [`VmmError::GuestUnavailable`] — so the pool can discard it and serve another.
+    /// Deliberately short-deadlined: an idle, healthy agent accepts immediately.
+    pub(crate) fn probe_agent(&self) -> Result<(), VmmError> {
+        connect_agent_at(self.require_vsock()?, AGENT_VSOCK_PORT, PROBE_TIMEOUT).map(|_| ())
     }
 
     /// The Firecracker vsock socket, or a typed error naming the fix if the VM was booted without a
@@ -512,7 +528,8 @@ impl RunningVm {
     ///
     /// # Errors
     /// A typed [`VmmError`] across the taxonomy's three buckets: **establishment** —
-    /// [`VmmError::Vmm`] if the VM has no vsock or the agent isn't listening, [`VmmError::Timeout`]
+    /// [`VmmError::GuestUnavailable`] if the agent isn't listening (retryable), [`VmmError::Vmm`] if
+    /// the VM has no vsock, [`VmmError::Timeout`]
     /// on a stalled connect/ack; **steady-state transport** — [`VmmError::Channel`] on a mid-exec
     /// framing/IO fault; **guest fault** — [`VmmError::GuestExec`] if the agent couldn't run the
     /// command, [`VmmError::ExecTimeout`] if it outran its budget, [`VmmError::OutputCap`] if it
@@ -1993,8 +2010,16 @@ fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream,
     // `connect` is the one step without a deadline (std has no `UnixStream::connect_timeout`), but
     // the peer is Firecracker's own vsock socket — created pre-`InstanceStart` and accepting
     // promptly — so it returns or refuses at once; every step after this is deadline-bounded.
-    let mut stream = UnixStream::connect(uds)
-        .map_err(|e| VmmError::Vmm(format!("connect vsock socket {}: {e}", uds.display())))?;
+    // ECONNREFUSED means the socket file exists but nothing accepts: a dead VMM's stale socket (a
+    // pooled clone that crashed) — the retryable/discard signal, not broken infra.
+    let mut stream = UnixStream::connect(uds).map_err(|e| {
+        let detail = format!("connect vsock socket {}: {e}", uds.display());
+        if e.kind() == std::io::ErrorKind::ConnectionRefused {
+            VmmError::GuestUnavailable(detail)
+        } else {
+            VmmError::Vmm(detail)
+        }
+    })?;
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
@@ -2017,8 +2042,9 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
         match stream.read(&mut byte) {
             Ok(0) => {
                 // Firecracker closes the connection with no ack when nothing is listening on the
-                // guest port — the common case until the agent is in the rootfs.
-                return Err(VmmError::Vmm(format!(
+                // guest port — the canonical "agent not up yet / not anymore" signal, typed so a
+                // retry/pool caller can branch on it (P2.7's deferred variant, landed with the pool).
+                return Err(VmmError::GuestUnavailable(format!(
                     "vsock CONNECT {port}: peer closed before ack (is the guest agent listening?)"
                 )));
             }
@@ -2049,7 +2075,9 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
     if ack.starts_with("OK ") {
         Ok(())
     } else {
-        Err(VmmError::Vmm(format!(
+        // A well-formed non-OK ack is Firecracker refusing the port — same "nothing listening"
+        // semantics as the peer-close above, so the same retryable variant.
+        Err(VmmError::GuestUnavailable(format!(
             "vsock CONNECT {port} refused: {ack:?} (is the guest agent listening?)"
         )))
     }
@@ -3266,9 +3294,10 @@ mod tests {
             let _ = s.write_all(b"NOPE\n");
         });
         let err = vsock_connect(&uds, AGENT_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        // "Nothing listening on the guest port" is the retryable GuestUnavailable, not broken infra.
         assert!(
-            matches!(err, VmmError::Vmm(m) if m.contains("refused")),
-            "wrong error"
+            matches!(err, VmmError::GuestUnavailable(ref m) if m.contains("refused")),
+            "got {err:?}"
         );
         server.join().expect("server");
     }
@@ -3277,9 +3306,10 @@ mod tests {
     fn connect_ack_peer_close_is_typed_error() {
         let (_d, uds, server) = fake_connect_target("agent-ack-close", drop);
         let err = vsock_connect(&uds, AGENT_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        // The canonical agent-not-up signal: typed retryable, so a pool can discard-and-retry.
         assert!(
-            matches!(err, VmmError::Vmm(m) if m.contains("closed")),
-            "wrong error"
+            matches!(err, VmmError::GuestUnavailable(ref m) if m.contains("closed")),
+            "got {err:?}"
         );
         server.join().expect("server");
     }

@@ -11,6 +11,7 @@
 #![forbid(unsafe_code)]
 
 mod firecracker;
+mod pool;
 mod vm;
 
 use std::time::Duration;
@@ -18,6 +19,7 @@ use std::time::Duration;
 use agent_channel::ChannelError;
 
 pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER};
+pub use pool::Pool;
 pub use vm::{BootConfig, RunningVm, Snapshot, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 
 #[cfg(test)]
@@ -36,6 +38,7 @@ mod tests {
             (VmmError::NoKvm, ErrorKind::Infra),
             (VmmError::Artifact("x".into()), ErrorKind::Infra),
             (VmmError::Timeout("x".into()), ErrorKind::Infra),
+            (VmmError::GuestUnavailable("x".into()), ErrorKind::Infra),
             (VmmError::Vmm("x".into()), ErrorKind::Infra),
             (
                 VmmError::Channel(ChannelError::Io(std::io::Error::from(
@@ -71,11 +74,14 @@ mod tests {
 /// fall in three buckets:
 ///
 /// - **Boot / infra** — [`NoKvm`](VmmError::NoKvm), [`Artifact`](VmmError::Artifact),
-///   [`Timeout`](VmmError::Timeout), [`Vmm`](VmmError::Vmm): the host couldn't stand the microVM up
-///   (or a bounded wait expired). This bucket also holds vsock **establishment** failures — the
-///   socket connect, the `CONNECT <port>` ack, *and the channel handshake* surface here (as
-///   `Vmm`/`Timeout`) even though the handshake is protocol-layer. Establishment is infra, and it's
-///   where "the guest agent isn't listening yet" shows up.
+///   [`Timeout`](VmmError::Timeout), [`Vmm`](VmmError::Vmm),
+///   [`GuestUnavailable`](VmmError::GuestUnavailable): the host couldn't stand the microVM up (or a
+///   bounded wait expired). This bucket also holds vsock **establishment** failures — the socket
+///   connect, the `CONNECT <port>` ack, *and the channel handshake* surface here even though the
+///   handshake is protocol-layer. Establishment is infra; the specific "nothing is listening"
+///   establishment failures (nothing accepting on the guest port, a dead VMM's stale socket) are the
+///   dedicated `GuestUnavailable`, so a retry/pool caller can tell **transient, retry or discard this
+///   VM** from "infra broken" without string-matching `Vmm`.
 /// - **Channel / transport** — [`Channel`](VmmError::Channel): a **steady-state** framing/IO fault
 ///   on an already-established connection (a `send_request`/`recv_response` mid-exec). Preserves the
 ///   [`ChannelError`] source. Distinct from a guest command that merely exits non-zero (a normal
@@ -94,11 +100,10 @@ mod tests {
 ///
 /// Callers that must **branch** on bucket (retry infra, retire the VM on a transport fault, surface a
 /// guest fault to the user) use [`kind`](VmmError::kind), whose mapping is a pinned public contract.
-///
-/// Deliberately deferred (safe to add later — this enum is `#[non_exhaustive]`):
-/// - A dedicated `GuestUnavailable` variant splitting "peer closed before ack / nothing listening"
-///   out of `Vmm`. Add it for the first retry/warm-pool caller (~Phase 5) that must tell "agent not
-///   up yet / transient" from "infra broken." Today the only caller renders the error to a human.
+/// (The `GuestUnavailable` variant and `kind()` were both deferred at first — "add them for the first
+/// caller that needs them" — and landed with that caller: the classifier for the embedder that
+/// branches on bucket, the variant for the warm [`Pool`], which discards a dead pooled clone and
+/// serves the next instead of surfacing an infra failure.)
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VmmError {
@@ -110,6 +115,14 @@ pub enum VmmError {
     Artifact(String),
     /// A bounded wait expired (API socket readiness, boot-to-userspace, a wedged API call).
     Timeout(String),
+    /// Nothing is accepting on the guest's exec channel: Firecracker closed (or refused) the vsock
+    /// `CONNECT` because no listener holds the guest port, or the vsock socket itself refused
+    /// (a dead VMM's stale socket). **Transient/retryable by contract**: the agent may not be up
+    /// *yet* (mid-boot, mid-resume) or not *anymore* (a pooled clone died) — a retry/pool caller
+    /// retries or discards this VM and takes another, rather than treating it as broken infra.
+    /// Distinct from [`Timeout`](VmmError::Timeout) (a bounded wait expired while the peer stayed
+    /// silent) and from [`Vmm`](VmmError::Vmm) (a protocol-violating or otherwise broken peer).
+    GuestUnavailable(String),
     /// The host↔guest exec **channel** failed — a transport or protocol fault. Distinct from a
     /// guest command that merely exits non-zero (a normal [`RunResult`]) or fails to spawn
     /// ([`GuestExec`](VmmError::GuestExec)). Preserves the [`ChannelError`] source.
@@ -139,6 +152,7 @@ impl std::fmt::Display for VmmError {
             VmmError::NoKvm => f.write_str("KVM unavailable: /dev/kvm missing or not permitted"),
             VmmError::Artifact(e) => write!(f, "missing artifact: {e}"),
             VmmError::Timeout(e) => write!(f, "timed out: {e}"),
+            VmmError::GuestUnavailable(e) => write!(f, "guest agent unavailable: {e}"),
             VmmError::Channel(e) => write!(f, "exec channel: {e}"),
             VmmError::GuestExec(e) => write!(f, "guest could not run the command: {e}"),
             VmmError::OutputCap { limit } => {
@@ -194,10 +208,14 @@ impl VmmError {
     #[must_use]
     pub fn kind(&self) -> ErrorKind {
         match self {
+            // `GuestUnavailable` is Infra by the taxonomy (establishment is infra), and Infra's
+            // contract — "a retry or a fixed host is the response" — is exactly its semantics; the
+            // variant itself carries the finer "this specific VM: retry/discard" signal.
             VmmError::Unimplemented(_)
             | VmmError::NoKvm
             | VmmError::Artifact(_)
             | VmmError::Timeout(_)
+            | VmmError::GuestUnavailable(_)
             | VmmError::Vmm(_) => ErrorKind::Infra,
             VmmError::Channel(_) => ErrorKind::Transport,
             VmmError::GuestExec(_)

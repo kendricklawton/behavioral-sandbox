@@ -529,9 +529,25 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
       gone, TCP-reachable on the new link, still deny-by-default, no-vsock refusal) and
       `restored_clones_do_not_share_entropy_or_freeze_the_clock` (urandom draws differ; skew reported).
       21 privileged tests, all run (not skipped) under a user+net namespace.)*
-- [ ] **P5.6** `Pool` that keeps warm restores ready so `exec` starts in ms. *(First warm-pool/retry
+- [x] **P5.6** `Pool` that keeps warm restores ready so `exec` starts in ms. *(First warm-pool/retry
       caller: lands the `GuestUnavailable` variant + `kind()` classifier deferred at P2.7, so a
       restore that isn't accepting yet is a typed, retryable error, not an infra failure.)*
+      *(`agent_vmm::Pool` (`pool.rs`): prefill `target` clones from one warm snapshot; `take()` pops
+      LIFO stock and **health-probes** each candidate before handing it out (`probe_agent`, a short
+      connect+handshake), discarding a clone that died while pooled and serving the next; a dry pool
+      **restores inline** rather than failing a take a fresh clone could serve; `refill()` is the
+      explicit top-up so the restore cost is paid at the caller's chosen moment. **Synchronous by
+      design**: no background threads in the library (the self-refilling pool is the Phase-16
+      daemon's job). Measured (dev box): `take()` from ready stock in **~1.1 ms** vs ~650 ms cold
+      boot, ~600×: the fast-start payoff, exec-ready. **Closes the P2.7 deferral for real:**
+      `VmmError::GuestUnavailable` now types the "nothing listening" establishment failures (vsock
+      peer-closed-before-ack, refused port, a dead VMM's stale socket refusing connect), bucketed
+      `Infra` in `kind()` (the pinned bucket test grew its row); the pool consumes it as the
+      discard-and-retry signal. Networked snapshots pool at `target <= 1` (decision 011's tap-name
+      limit; the typed error surfaces on deeper prefill). Proof:
+      `pool_serves_warm_clones_and_discards_dead_ones`: prefill 2, timed take + exec, SIGKILL a
+      pooled clone's VMM behind the pool's back, next take discards the corpse and serves a fresh
+      restore, refill tops back to target. 22 privileged tests.)*
 - [ ] **P5.7** Benchmark: cold boot vs snapshot restore vs warm-pool `exec` latency. *(Baseline
       to beat: Phase 1 boots a full rootfs copy in `/tmp` — on a tmpfs host that's ≈300 MB of RAM
       per sandbox on top of guest memory; overlays should collapse that.)*

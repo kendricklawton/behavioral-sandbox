@@ -488,6 +488,68 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     );
 }
 
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn pool_serves_warm_clones_and_discards_dead_ones() {
+    // P5.6: the warm Pool. Prefill keeps clones exec-ready so `take` is a pop (µs) plus a fast
+    // health probe — not a cold boot. A clone that died while pooled is a typed GuestUnavailable
+    // from the probe, so `take` discards it and serves the next (or restores inline when dry)
+    // instead of surfacing an infra failure — the retry semantics the P2.7 deferral promised.
+    use agent_vmm::Pool;
+
+    let bundle = TmpDir::new("snap-pool");
+    let (snap, cold_boot) = warm_python_snapshot(&bundle);
+
+    let mut pool =
+        Pool::new(snap, agent_rootfs_config(), 2).expect("pool should prefill two warm clones");
+    assert_eq!(pool.ready(), 2, "prefill should hit the target");
+
+    // Fast path: take a ready clone and run code on it. The take is a pop + probe, so it must come
+    // in far under a cold boot (the measured margin is printed, the bound asserted is generous).
+    let t0 = std::time::Instant::now();
+    let vm = pool.take().expect("take from a full pool");
+    let take_latency = t0.elapsed();
+    let out = vm
+        .exec(&["python3".into(), "-c".into(), "print(1 + 1)".into()], b"")
+        .expect("exec on a pooled clone");
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "2");
+    assert!(
+        take_latency < cold_boot,
+        "take ({take_latency:?}) should be far under a cold boot ({cold_boot:?})"
+    );
+    eprintln!("pool: take {take_latency:?} vs cold boot {cold_boot:?}");
+    vm.shutdown().expect("pooled clone shutdown");
+    assert_eq!(pool.ready(), 1, "take should consume ready stock");
+
+    // Kill the remaining pooled clone's VMM behind the pool's back: the next take must *not* hand
+    // out the corpse — the probe fails typed, the corpse is discarded, and (the pool now being dry)
+    // a fresh clone is restored inline and served.
+    let pids = pool.vmm_pids();
+    assert_eq!(pids.len(), 1);
+    let killed = std::process::Command::new("kill")
+        .args(["-9", &pids[0].to_string()])
+        .status()
+        .expect("kill the pooled VMM");
+    assert!(killed.success(), "SIGKILL the pooled VMM");
+    std::thread::sleep(Duration::from_millis(100)); // let the socket die
+
+    let vm2 = pool
+        .take()
+        .expect("take must discard the dead clone and restore a fresh one");
+    let out2 = vm2
+        .exec(&["python3".into(), "-c".into(), "print(2 + 2)".into()], b"")
+        .expect("exec on the replacement clone");
+    assert_eq!(String::from_utf8_lossy(&out2.stdout).trim(), "4");
+    vm2.shutdown().expect("replacement clone shutdown");
+    assert_eq!(pool.ready(), 0, "the corpse was discarded, not re-pooled");
+
+    // Explicit top-up back to target, then graceful teardown of the stock.
+    let restored = pool.refill().expect("refill should restore to target");
+    assert_eq!(restored, 2);
+    assert_eq!(pool.ready(), 2);
+    pool.shutdown();
+}
+
 /// A boot config pointed at the **agent rootfs** (`cargo xtask build-rootfs`): readiness is the
 /// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable — the
 /// in-VM exec tests are about *that* image specifically.
