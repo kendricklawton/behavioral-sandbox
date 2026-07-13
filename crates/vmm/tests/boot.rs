@@ -304,6 +304,190 @@ fn restores_concurrent_clones_from_one_warm_snapshot() {
     }
 }
 
+#[test]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn restored_networked_clone_gets_a_fresh_identity() {
+    // P5.5 (decision 011), network identity: the kernel `ip=` config runs once at the source's boot
+    // and can't re-fire on restore, so the clone would wake with the snapshot's baked-in address on a
+    // link it no longer matches. The driver recreates the snapshot's tap (fresh /30 on the host end)
+    // and the agent applies the guest's fresh address over vsock — this proves the clone ends up on
+    // its NEW /30 (old address gone), reachable at the transport layer, still deny-by-default.
+    if !have_net_admin() {
+        eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
+        return;
+    }
+
+    // A networked snapshot without vsock has no channel to re-address the clone: refused, typed.
+    // (The stock rootfs config: it boots to `login:` with no vsock, exactly the shape under test —
+    // the agent rootfs can't boot vsock-less, since its readiness marker is the agent's post-bind.)
+    let mut no_vsock = config();
+    no_vsock.enable_network = true;
+    let vm = Vm::boot(no_vsock).expect("networked VM without vsock should still boot");
+    let refused = TmpDir::new("snap-net-novsock");
+    assert!(
+        vm.snapshot(refused.path()).is_err(),
+        "a networked snapshot without the vsock exec channel must be refused"
+    );
+    vm.shutdown().expect("no-vsock VM shutdown");
+
+    // Source: networked + vsock + warm. Snapshot it, remember its identity, then drop it (freeing
+    // its tap name and /30 — the recreated tap needs the name; the /30 must be provably re-allocated).
+    let mut cfg = agent_rootfs_config();
+    cfg.enable_network = true;
+    let source = Vm::boot(cfg.clone()).expect("networked agent microVM should boot");
+    let source_guest_ip = source.guest_ip().expect("source guest ip");
+    let source_tap = source.tap_name().expect("source tap name").to_string();
+    let bundle = TmpDir::new("snap-net-warm");
+    let snap = source
+        .snapshot(bundle.path())
+        .expect("networked warm snapshot should succeed");
+    source.shutdown().expect("source shutdown");
+
+    let clone = Vm::restore(&snap, &cfg).expect("networked warm restore should resume");
+
+    // Same tap name (the snapshot baked it in; v1.9 has no network_overrides), fresh /30.
+    assert_eq!(
+        clone.tap_name(),
+        Some(source_tap.as_str()),
+        "the clone must reuse the snapshot's recorded tap name"
+    );
+    let clone_guest_ip = clone.guest_ip().expect("clone guest ip");
+    assert_ne!(
+        clone_guest_ip, source_guest_ip,
+        "the clone must get a fresh /30, not the source's baked-in one"
+    );
+
+    // In-guest: eth0 carries exactly the new address; the baked-in one is gone.
+    let addrs = clone
+        .exec(
+            &[
+                "ip".into(),
+                "-4".into(),
+                "addr".into(),
+                "show".into(),
+                "dev".into(),
+                "eth0".into(),
+            ],
+            b"",
+        )
+        .expect("read the clone's eth0 addresses");
+    let addrs = String::from_utf8_lossy(&addrs.stdout).into_owned();
+    assert!(
+        addrs.contains(&clone_guest_ip.to_string()),
+        "clone eth0 should carry its fresh address {clone_guest_ip}; got:\n{addrs}"
+    );
+    assert!(
+        !addrs.contains(&source_guest_ip.to_string()),
+        "clone eth0 must not keep the snapshot's baked-in address {source_guest_ip}; got:\n{addrs}"
+    );
+
+    // Transport-layer proof on the NEW link: a real host listener on the fresh /30 is reachable.
+    let clone_host_ip = clone.host_ip().expect("clone host ip");
+    let listener = std::net::TcpListener::bind((clone_host_ip, 0)).expect("bind on the fresh /30");
+    let port = listener.local_addr().expect("local addr").port();
+    let connect = clone
+        .exec(
+            &[
+                "python3".into(),
+                "-c".into(),
+                format!(
+                    "import socket; socket.create_connection((\"{clone_host_ip}\", {port}), timeout=3).close()"
+                ),
+            ],
+            b"",
+        )
+        .expect("guest connect to the fresh host end");
+    assert_eq!(
+        connect.exit_code,
+        0,
+        "clone should reach a listener on its fresh /30; console:\n{}",
+        clone.console()
+    );
+
+    // Deny-by-default carried over the restore: still no default route.
+    let off = clone
+        .exec(
+            &[
+                "ping".into(),
+                "-c".into(),
+                "1".into(),
+                "-W".into(),
+                "1".into(),
+                "192.0.2.1".into(),
+            ],
+            b"",
+        )
+        .expect("ping an off-subnet address");
+    assert_ne!(
+        off.exit_code, 0,
+        "restored clone must stay deny-by-default (no default route)"
+    );
+
+    clone.shutdown().expect("clone shutdown");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
+    // P5.5 (decision 011), entropy + clocks. Every clone wakes from the same memory image, so if the
+    // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical — the
+    // classic clone-entropy vulnerability (shared session keys/nonces/UUIDs). The pinned stack has
+    // both halves of the fix (Firecracker v1.9 ships VMGenID; kernel 6.1 has the vmgenid driver,
+    // which reseeds the CRNG on a generation bump): this proves it end to end. Clock skew is
+    // measured and reported, not asserted (decision 011 records the posture).
+    let bundle = TmpDir::new("snap-entropy");
+    let (snap, _cold) = warm_python_snapshot(&bundle);
+
+    let draw = |label: &str| {
+        let clone = Vm::restore(&snap, &agent_rootfs_config())
+            .unwrap_or_else(|e| panic!("clone {label} should restore: {e}"));
+        let out = clone
+            .exec(
+                &[
+                    "python3".into(),
+                    "-c".into(),
+                    // One read, immediately after restore — the dangerous window, before any natural
+                    // interrupt-entropy reseed could paper over shared CRNG state.
+                    "import os, time; print(os.urandom(16).hex()); print(int(time.time()))".into(),
+                ],
+                b"",
+            )
+            .unwrap_or_else(|e| panic!("clone {label} exec: {e}"));
+        assert_eq!(out.exit_code, 0, "clone {label} python should exit 0");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut lines = stdout.lines();
+        let hex = lines.next().unwrap_or_default().trim().to_string();
+        let epoch: i64 = lines.next().unwrap_or_default().trim().parse().unwrap_or(0);
+        assert_eq!(
+            hex.len(),
+            32,
+            "clone {label} should print 16 random bytes as hex"
+        );
+        clone
+            .shutdown()
+            .unwrap_or_else(|e| panic!("clone {label} shutdown: {e}"));
+        (hex, epoch)
+    };
+
+    let (hex_a, epoch_a) = draw("A");
+    let (hex_b, _epoch_b) = draw("B");
+    assert_ne!(
+        hex_a, hex_b,
+        "two clones' first urandom draws must differ (VMGenID must reseed the CRNG on restore)"
+    );
+
+    // Clock posture (measured, not asserted): report the restored guest's wall-clock skew vs the
+    // host. kvm-clock keeps the monotonic clock sane; CLOCK_REALTIME may lag by the snapshot age.
+    let host_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    eprintln!(
+        "clock: restored clone A wall-clock skew vs host ≈ {}s",
+        host_epoch - epoch_a
+    );
+}
+
 /// A boot config pointed at the **agent rootfs** (`cargo xtask build-rootfs`): readiness is the
 /// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable — the
 /// in-VM exec tests are about *that* image specifically.

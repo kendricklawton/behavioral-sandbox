@@ -504,13 +504,31 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
       clones and keeps all three alive at once, asserts distinct live VMMs, and runs a distinct
       computation on each concurrently-alive clone, getting each clone's own answer. `ci-privileged` now runs the VM tests serially
       (real-VM integration is boot-I/O-bound and some assert on host-global leak state).)*
-- [ ] **P5.5** `(decision)` Handle the uniqueness problems restore creates (network identity,
-      entropy, clocks) → `ARCHITECTURE.md`. **Network identity is the load-bearing one:** Phase 4
-      addresses the guest via kernel `ip=` at *boot* (decision 009), which runs once and won't re-fire
-      on restore, so N clones would wake with the snapshot's baked-in IP/MAC. Pick and record the
-      restore-identity model (snapshot network-less then attach + reconfigure fresh, an in-guest reset
-      via the agent, or MMDS). Entropy is security-relevant: reseed `virtio-rng` on restore so clones
-      don't share RNG state.
+- [x] **P5.5** `(decision)` Handle the uniqueness problems restore creates (network identity,
+      entropy, clocks) → `ARCHITECTURE.md`.
+      *(Recorded as **decision 011**, all three implemented-or-measured. **Network identity** (the
+      load-bearing one): keep `ip=` as the zero-overhead cold-boot path, and on restore the **guest
+      agent applies the clone's fresh address over vsock** (flush the baked-in `eth0` addr, add the
+      fresh /30's guest end), the runtime counterpart of boot-time `ip=`, with the empty-gateway
+      deny-by-default invariant carried over (config rides the agent; enforcement stays host-side,
+      spine #2). MMDS and per-tap DHCP rejected (a second in-guest config surface / a daemon, for what
+      the existing exec channel does in one command). The driver recreates the snapshot's recorded tap
+      with a fresh /30 (`Tap::create_named`); a networked snapshot without vsock is refused (no channel
+      to re-address its clone). **Probed constraint:** Firecracker v1.9 rejects `network_overrides` on
+      load ("unknown field", against the real binary), so the tap *name* is baked, so only **one
+      networked clone can be live at a time** on this pin; concurrent networked clones need an FC bump
+      or the Phase-6 jailer's netns (tombstoned; non-networked clones keep unbounded concurrency).
+      **Entropy:** rely on **VMGenID** (FC v1.9 ships the device and bumps the generation on restore;
+      the pinned 6.1.102 kernel's `vmgenid` driver reseeds the CRNG): no engine mechanism added, and
+      the property is **proven, not assumed**: two clones' first-window `getrandom` draws differ, and a
+      future pin that loses either half fails the test visibly. **Clocks:** kvm-clock keeps monotonic
+      sane; the wall clock **lags by the snapshot's age** (measured ~9 s for a ~9 s-old snapshot) and
+      the engine deliberately doesn't reach in to fix it (documented limitation; the flight recorder
+      timestamps host-side). Decision 009 gained the "`ip=` is cold-boot-only by nature" addendum.
+      Proof: `restored_networked_clone_gets_a_fresh_identity` (fresh /30 applied in-guest, old address
+      gone, TCP-reachable on the new link, still deny-by-default, no-vsock refusal) and
+      `restored_clones_do_not_share_entropy_or_freeze_the_clock` (urandom draws differ; skew reported).
+      21 privileged tests, all run (not skipped) under a user+net namespace.)*
 - [ ] **P5.6** `Pool` that keeps warm restores ready so `exec` starts in ms. *(First warm-pool/retry
       caller: lands the `GuestUnavailable` variant + `kind()` classifier deferred at P2.7, so a
       restore that isn't accepting yet is a typed, retryable error, not an infra failure.)*

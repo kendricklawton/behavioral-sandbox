@@ -324,6 +324,13 @@ pub struct Snapshot {
     /// baked in **relative** (`v.sock`), so Firecracker re-binds it in each restored VMM's own scratch
     /// dir (its cwd) rather than on one shared absolute path, letting concurrent clones coexist.
     has_vsock: bool,
+    /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
+    /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
+    /// restore must recreate a tap with **exactly this name** — which also means only one networked
+    /// clone can be live at a time (two taps can't share a name; decision 011's tombstone). The
+    /// recreated tap gets a fresh /30, and the guest's stale in-memory address is replaced by the
+    /// agent over vsock after resume.
+    tap_name: Option<String>,
 }
 
 impl Snapshot {
@@ -391,6 +398,15 @@ impl Vm {
     /// re-binds its own socket in its own scratch dir and concurrent clones don't collide. If the
     /// snapshot carried vsock, restore waits until the guest agent is reachable before returning, so
     /// the VM can [`exec`](RunningVm::exec) immediately.
+    ///
+    /// A **networked** snapshot restores with a **fresh network identity** (decision 011): the driver
+    /// recreates the snapshot's recorded tap (the pinned Firecracker has no `network_overrides`, so
+    /// the name must match — which also means only one networked clone can be live at a time; a taken
+    /// name is a typed error), assigns its host end a fresh /30, and the guest agent replaces the
+    /// baked-in `eth0` address with the new one over vsock. Entropy is reseeded via VMGenID
+    /// (Firecracker bumps the generation on restore and the guest kernel reseeds its CRNG — proven by
+    /// test, not assumed), so clones don't share RNG state. The guest's **wall clock is not fixed
+    /// up**: it lags by the snapshot's age until the workload resyncs it.
     ///
     /// Restore latency (load + resume) is [`RunningVm::boot_latency`] on the returned VM, for the
     /// cold-boot-vs-restore comparison.
@@ -587,10 +603,13 @@ impl RunningVm {
     /// base in place (no copy). The **vsock exec channel is supported** — restore re-binds its socket —
     /// so a warm snapshot restores exec-ready.
     ///
-    /// Refused (a typed error, never an unrestorable bundle): a VM with a **NIC** or an **output** or
-    /// **input** block device (host endpoints / images a restore can't yet recreate per clone —
-    /// P5.4/P5.5), and an **already-restored** VM (its `rootfs` is a placeholder; the live disk is an
-    /// anonymous inode with no host path to bundle).
+    /// Refused (a typed error, never an unrestorable bundle): a VM with an **output** or **input**
+    /// block device (per-clone images a restore can't yet recreate), a VM with a **NIC but no vsock**
+    /// (restore applies the clone's fresh network identity through the exec channel, so a networked
+    /// snapshot without one couldn't be re-addressed — decision 011), and an **already-restored** VM
+    /// (its `rootfs` is a placeholder; the live disk is an anonymous inode with no host path to
+    /// bundle). A NIC *with* vsock is supported: the bundle records the tap name and restore rebuilds
+    /// the link (see [`Vm::restore`]).
     ///
     /// # Errors
     /// [`VmmError::Vmm`] if the VM is unsupported for snapshotting, or on any API or file-copy failure.
@@ -606,13 +625,22 @@ impl RunningVm {
                     .into(),
             ));
         }
-        // A NIC, an output device, or an input device carries host state a restore can't yet recreate
-        // per clone (a fresh tap / a per-clone output image / the input image at the gone source
-        // scratch path, plus network identity — P5.5), so those stay refused. The vsock exec channel
-        // *is* supported: restore re-binds its baked-in socket.
-        if self.tap.is_some() || self.output.is_some() || self.has_input {
+        // An output or input device carries a per-clone image a restore can't yet recreate (and the
+        // input image lives at the gone source scratch path), so those stay refused. The vsock exec
+        // channel is supported (restore re-binds its baked-in relative socket), and a NIC is supported
+        // *through* it: restore recreates the recorded tap and the agent applies the clone's fresh
+        // address over vsock (decision 011) — so a networked snapshot without vsock is refused too,
+        // since its clone could never be re-addressed.
+        if self.output.is_some() || self.has_input {
             return Err(VmmError::Vmm(
-                "snapshot of a VM with a NIC or an input/output device is not yet supported (P5.4/P5.5)"
+                "snapshot of a VM with an input/output device is not yet supported (P5.4/P5.5)"
+                    .into(),
+            ));
+        }
+        if self.tap.is_some() && self.vsock_uds.is_none() {
+            return Err(VmmError::Vmm(
+                "snapshot of a networked VM requires the vsock exec channel (restore re-addresses the \
+                 clone through it); boot with BootConfig.guest_cid set"
                     .into(),
             ));
         }
@@ -663,6 +691,7 @@ impl RunningVm {
             root_backing: self.rootfs.clone(),
             shared_base,
             has_vsock: self.vsock_uds.is_some(),
+            tap_name: self.tap.as_ref().map(|t| t.name.clone()),
         })
     }
 
@@ -922,6 +951,24 @@ impl Spawned {
         // the guest agent through its own `v.sock`, and concurrent clones don't collide. Computed
         // before `workdir` is moved into the struct.
         let vsock_uds = snapshot.has_vsock.then(|| workdir.join(VSOCK_UDS));
+        // A networked snapshot baked in its tap's `host_dev_name`, which Firecracker will open at
+        // load — so a tap with **that exact name** must exist first (v1.9 has no `network_overrides`;
+        // decision 011). Recreate it with a fresh /30 on the host end; the guest side is re-addressed
+        // by the agent after resume. Same inline-cleanup discipline as `launch`'s tap: once `Spawned`
+        // holds the handle, every teardown path deletes it.
+        let tap = match snapshot.tap_name.as_deref() {
+            None => None,
+            Some(name) => match Tap::create_named(name) {
+                Ok(tap) => Some(tap),
+                Err(e) => {
+                    let mut child = child;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            },
+        };
         Ok(Self {
             child: Some(child),
             console,
@@ -935,7 +982,7 @@ impl Spawned {
             vsock_uds,
             input_image: None,
             output: None,
-            tap: None,
+            tap,
         })
     }
 
@@ -1024,6 +1071,16 @@ impl Spawned {
         // never one mid-resume (this is restore's analogue of boot's userspace-marker wait).
         if let Some(uds) = self.vsock_uds.clone() {
             self.await_agent_ready(&uds, deadline)?;
+            // Fresh network identity (decision 011): the clone woke with the snapshot's baked-in
+            // address, which no longer matches the recreated tap's fresh /30 (and would collide with
+            // the source's if it were kept). The kernel `ip=` config ran once at the source's boot and
+            // can't re-fire, so the **agent** applies the new address through the exec channel — the
+            // runtime counterpart of boot-time `ip=`. Network *configuration* rides the agent; network
+            // *enforcement* stays host-side (decision 008/spine #2).
+            if let Some(guest_ip) = self.tap.as_ref().map(|t| t.guest_ip) {
+                apply_guest_net_identity(&uds, guest_ip)?;
+                tracing::debug!(%guest_ip, "restored clone re-addressed");
+            }
         }
 
         tracing::info!(
@@ -1381,6 +1438,46 @@ fn unstage_restore_disk(backing: &Path) {
     }
 }
 
+/// Wall-clock budget for the in-guest network-identity command on restore. Two `ip` invocations on a
+/// live guest; seconds would already mean something is broken, so the budget is short and a breach is
+/// a typed error, not a stall on the restore path.
+const NET_IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Apply a restored clone's fresh network identity in-guest (decision 011): flush the snapshot's
+/// baked-in `eth0` address and install `guest_ip/30`, via the guest agent over vsock. `ip addr add`
+/// installs the connected /30 route with it, and the **empty gateway invariant carries over** — no
+/// default route is added, so deny-by-default (decision 008) holds for clones exactly as for cold
+/// boots. Runs as one `sh -c` so flush+add is a single guest command; a non-zero exit is a typed
+/// error naming the guest's stderr (the values interpolated are our own `Ipv4Addr`/const, not caller
+/// input).
+fn apply_guest_net_identity(uds: &Path, guest_ip: Ipv4Addr) -> Result<(), VmmError> {
+    let mut conn = connect_agent_at(uds, AGENT_VSOCK_PORT, VSOCK_TIMEOUT)?;
+    // `eth0` here is the guest kernel's enumerated NIC name — the same other-namespace literal the
+    // `ip=` boot arg uses — deliberately not `IFACE_ID` (the Firecracker device id; see its doc).
+    let cmd = format!("ip addr flush dev eth0 && ip addr add {guest_ip}/{HOST_PREFIX} dev eth0");
+    let argv = ["/bin/sh".to_string(), "-c".to_string(), cmd];
+    let result = run_exec(
+        &mut conn,
+        &argv,
+        &[],
+        &[],
+        &[],
+        ExecBounds {
+            timeout: NET_IDENTITY_TIMEOUT,
+            wall: NET_IDENTITY_TIMEOUT.saturating_add(EXEC_KILL_SLACK),
+            max_output: 64 * 1024, // two `ip` calls; anything past diagnostics-sized is noise
+        },
+    )?;
+    if result.exit_code != 0 {
+        return Err(VmmError::Vmm(format!(
+            "guest failed to apply its restored network identity (exit {}): {}",
+            result.exit_code,
+            String::from_utf8_lossy(&result.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
 /// Spawn `firecracker --api-sock <socket>`, wiring its serial console to a [`Console`] and its stderr
 /// to `<workdir>/fc.stderr`. Shared by a cold boot ([`Spawned::launch`]) and a snapshot restore
 /// ([`Spawned::launch_for_restore`]).
@@ -1548,6 +1645,62 @@ impl Tap {
         }
         Err(VmmError::Vmm(
             "could not allocate a unique tap (name + /30) after 1024 attempts".into(),
+        ))
+    }
+
+    /// Recreate a tap with a **fixed** name (a snapshot's recorded `host_dev_name` — the pinned
+    /// Firecracker v1.9 has no `network_overrides`, so restore must present the exact tap name the
+    /// snapshot baked in) and assign its host end a **fresh** /30. Unlike [`create`](Tap::create), a
+    /// taken name is a typed error, not a retry: the name is the snapshot's, and "taken" means the
+    /// source VM (or an earlier clone) is still alive — restoring anyway would hijack its link.
+    /// Only the /30 is allocated fresh, with the same `ip addr add`-as-reservation retry as `create`.
+    fn create_named(name: &str) -> Result<Tap, VmmError> {
+        match tap_add(name)? {
+            TapAdd::Exists => {
+                return Err(VmmError::Vmm(format!(
+                    "tap {name} is still in use; shut down the source VM (or a prior clone) before \
+                     restoring its networked snapshot"
+                )));
+            }
+            TapAdd::Created => {}
+        }
+        if let Err(e) = run_ip(&["link", "set", "dev", name, "up"]) {
+            ip_link_del(name);
+            return Err(e);
+        }
+        for _ in 0..1024 {
+            let token =
+                (u64::from(std::process::id()) << 20) ^ NET_SEQ.fetch_add(1, Ordering::Relaxed);
+            let (host_ip, guest_ip) = subnet_for(token);
+            if let Err(e) = run_ip(&[
+                "addr",
+                "add",
+                &format!("{host_ip}/{HOST_PREFIX}"),
+                "dev",
+                name,
+            ]) {
+                if host_addr_exists(host_ip) {
+                    // Another VM owns this /30; the name is ours and fixed, so retry the address only.
+                    tracing::debug!(%host_ip, "/30 already reserved by another VM, retrying with a fresh token");
+                    continue;
+                }
+                ip_link_del(name);
+                return Err(e);
+            }
+            // The guest NIC's MAC is restored from the snapshot, not this token's; recorded here only
+            // so the handle is well-formed (nothing reads it on the restore path).
+            #[allow(clippy::cast_possible_truncation)]
+            let mac = mac_for(token as u32);
+            return Ok(Tap {
+                name: name.to_string(),
+                mac,
+                host_ip,
+                guest_ip,
+            });
+        }
+        ip_link_del(name);
+        Err(VmmError::Vmm(
+            "could not allocate a unique /30 for the restored tap after 1024 attempts".into(),
         ))
     }
 

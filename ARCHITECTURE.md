@@ -549,6 +549,12 @@ exactly this). Shelling to `ip` keeps the driver dependency-light and `unsafe`-f
 - **A hard-killed driver can still orphan a tap** (no `Drop`-of-temp-dir safety net, unlike the
   scratch dir) — the same class of gap as P6.7's SIGKILL-leaks-a-VM, and the reason the leak test scans
   for orphaned `fc*` interfaces. The durable owner is the Phase-6 jailer/cgroup model.
+- **Kernel `ip=` addressing is cold-boot-only by nature** (learned at P5.5): it runs exactly once,
+  before userspace, so it cannot re-address a snapshot-restored clone. That is not a defect in this
+  decision, it is the boundary of what boot-time config can do; restore identity is decision 011's
+  runtime path (the guest agent applies a fresh address over vsock). `ip=` stays the zero-overhead
+  cold-boot mechanism; if the runtime path ever proves cleaner for cold boot too, unify then, with
+  evidence.
 
 ### 010 — Snapshots are self-contained bundles restored by staging the disk *(2026-07-12, P5.1/P5.2)*
 
@@ -620,6 +626,88 @@ backing file.
   listener is reachable again, so restore polls a connect until it succeeds (bounded by the deadline)
   before returning, its analogue of boot's userspace-marker wait. Restore of a warm agent VM measured
   ~8 ms vs ~300 ms cold boot, then the clone runs code.
-- **Still deferred:** a snapshot with a **NIC or output device** is a typed error (a fresh tap / a
-  per-clone output image and the network-identity/entropy/clock uniqueness are P5.5). `ci-privileged`
-  now runs the VM tests serially (they boot real microVMs and some assert on host-global leak state).
+- **Still deferred:** a snapshot with an **input or output device** is a typed error (per-clone
+  images a restore can't yet recreate). A **NIC** is no longer deferred: decision 011 restores
+  networked clones with a fresh identity. `ci-privileged` now runs the VM tests serially (they boot
+  real microVMs and some assert on host-global leak state).
+
+### 011 — Restore identity: the agent re-addresses the clone; VMGenID reseeds it *(2026-07-12, P5.5)*
+
+**Problem.** Restore hands every clone a byte-identical copy of one guest memory image, so anything
+that must be unique per VM but was frozen into that image is now shared: the guest's **network
+identity** (IP/MAC/routes), its **RNG state**, and its **clocks**. Network identity is the
+load-bearing one here because Phase 4 addresses the guest via the kernel `ip=` parameter (decision
+009), which runs exactly once, before userspace, at the *source's* boot; it cannot re-fire on
+restore, so a clone wakes still holding the snapshot's baked-in address on a link it no longer
+matches.
+
+**Decision (network): keep `ip=` for cold boot; the guest agent applies a fresh identity on restore.**
+- **Cold boot is unchanged.** `ip=` stays the cold-boot fast path: zero overhead, no rootfs change,
+  and nothing about restore makes it worse at that job.
+- **On restore of a networked snapshot**, the driver recreates the snapshot's recorded tap (see the
+  v1.9 constraint below), assigns its host end a **fresh /30** from the same allocator cold boot uses,
+  and then the **guest agent replaces the baked-in `eth0` address** with the new one, one
+  `sh -c "ip addr flush … && ip addr add <fresh>/30 …"` over the vsock exec channel, after the
+  exec-readiness poll. This is the runtime counterpart of boot-time `ip=`: same address shape, same
+  **empty-gateway invariant** (`ip addr add` installs only the connected /30 route, so deny-by-default
+  (decision 008) holds for clones exactly as for cold boots, proven by the off-subnet check in
+  `restored_networked_clone_gets_a_fresh_identity`).
+- **Spine check:** this puts network *configuration* in the guest agent, acceptable because the agent
+  is exec/IO convenience (spine #2) and enforcement never moves in-guest: policy stays host-side (the
+  route shape today, eBPF at the tap from Phase 11). A guest that tampers with its own address gains
+  nothing: the host end of the /30 and the tap it enforces on are outside its reach.
+- **MAC is deliberately not changed.** The clone keeps the snapshot's MAC; each clone sits on its own
+  point-to-point tap (a separate L2 segment), so MAC uniqueness across taps is irrelevant, and on
+  v1.9 only one networked clone can be live at a time anyway.
+- A **networked snapshot without vsock is refused** (typed): there would be no channel to re-address
+  its clone, which would otherwise wake permanently mis-addressed.
+
+**The v1.9 constraint (probed, not assumed).** `PUT /snapshot/load` on the pinned Firecracker v1.9
+rejects `network_overrides` ("unknown field", probed against the real binary), so the snapshot's
+recorded `host_dev_name` is fixed: restore must present a tap with **exactly that name**, which the
+driver recreates via `Tap::create_named` (a taken name is a typed error, it means the source or an
+earlier clone is still alive, and restoring anyway would hijack its link). Consequence: **only one
+networked clone can be live at a time** on v1.9. Concurrent networked clones need either a Firecracker
+with `network_overrides` (a deliberate version bump, revisiting this decision) or per-VM network
+namespaces (the Phase-6 jailer), tombstoned to whichever lands first. Non-networked warm clones keep
+their unbounded concurrency (P5.4).
+
+**Decision (entropy): rely on VMGenID, and prove it.** Both halves are already in the pinned stack:
+Firecracker v1.9 ships the VMGenID device and bumps the generation on snapshot restore, and the
+pinned 6.1.102 guest kernel carries the `vmgenid` driver (present in 5.18+), which reseeds the kernel
+CRNG on a generation bump. `restored_clones_do_not_share_entropy_or_freeze_the_clock` proves it end
+to end: two clones restored from one snapshot draw 16 bytes from `getrandom` immediately after
+restore, the dangerous window, before any natural interrupt-entropy reseed, and the draws differ.
+No engine mechanism was added because none is needed; if a future kernel/VMM pin loses either half,
+that test fails and the gap is visible, not silent.
+
+**Decision (clocks): document the staleness; don't fix it up.** kvm-clock keeps the monotonic clock
+sane across restore, but the guest's **wall clock lags by the snapshot's age** (measured: a clone
+restored ~9 s after its snapshot reports a wall clock ~9 s behind the host). The engine does not
+reach into the guest to set the time: a fix-up belongs to the workload or a later phase's explicit
+mechanism (and the flight recorder timestamps host-side, so the audit trail never depends on guest
+clocks). Recorded as a documented limitation the warm-pool docs must carry: code that trusts guest
+wall-clock time (TLS validity windows, token expiry) can misbehave in a clone until it resyncs.
+
+**Alternatives considered (network).**
+- **MMDS (Firecracker's metadata service) + in-guest fetch.** Cloud-init-style: bake a fetch-and-apply
+  step into the rootfs, host writes per-clone metadata. Rejected: a second in-guest config surface and
+  a rootfs change, to deliver exactly what the existing exec channel already delivers with one
+  command; MMDS earns its keep only when clones need richer metadata than an address.
+- **A tiny DHCP server per tap.** Rejected: a persistent host-side daemon per VM (or a shared one
+  with per-tap scoping) is a heavy, stateful addition for a two-address /30 whose contents the driver
+  already knows; and the guest would need a DHCP client re-trigger on restore anyway, the same
+  "poke the guest after resume" shape as the agent path, plus a daemon.
+- **Reuse the source's /30 for the clone.** Rejected: only ever works for a single sequential clone,
+  couples the clone's identity to the source's lifetime, and silently breaks the moment two clones
+  overlap; a fresh /30 keeps the isolation story uniform with cold boots.
+
+**Consequences / tombstones.**
+- `Snapshot` records the tap name; `Tap::create_named` reserves a fixed name with a fresh /30
+  (`ip addr add` remains the /30's atomic reservation, as in decision 009).
+- The **guest `ip` tool is now load-bearing for restore** (busybox `ip` in the agent rootfs); a future
+  rootfs slimming that drops it would break networked restore; the typed error from the identity
+  step names the guest's stderr, so the failure is legible.
+- **Decision 009 addendum:** boot-time `ip=` is cold-boot-only by nature; restore identity is this
+  decision's runtime path. If that runtime path ever proves cleaner for cold boot too, unify then,
+  with evidence, not speculatively.
