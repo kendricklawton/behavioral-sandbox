@@ -29,7 +29,7 @@ Every entry covers the same eight angles, so nothing relies on remembering to as
    and the coverage gaps to accept or close.
 4. **Writeups and decisions**: the `ARCHITECTURE.md` decisions and the `ROADMAP.md` annotations
    record the phase's lesson and describe the tree as it is; the exit gate (demo + recorded
-   lesson) is genuinely met. All documentation lives in the root `.md` files; no `docs/` dir.
+   lesson) is genuinely met. All documentation lives in the root `.md` files.
 5. **Human git steps**: what to commit or tag (git stays human-driven).
 6. **Next-phase readiness**: the forward notes, environment realities, and tombstones the next
    phase must pick up.
@@ -174,11 +174,10 @@ layout: the driver is now `vm.rs` (lifecycle) + `net.rs` + `exec.rs` + `console.
 - [ ] `ROADMAP.md` Phase 5: all eight boxes checked, annotations match the code and carry the
       measured numbers (no aspirational claims), and the exit-gate bullet carries its `(Done:)`
       note.
-- [ ] The Phase 5 lesson is fully recorded in the root files (the `docs/` directory is retired):
+- [ ] The Phase 5 lesson is fully recorded in the root files:
       decisions 010/011 carry what a snapshot is, stage-then-unlink, and the three restore
       fix-ups; the ROADMAP P5.7 annotation carries the measured table and the copy-on-write
-      memory economics. Confirm nothing of the lesson lived *only* in the retired writeup. This
-      closes the Phase 5 exit gate (demo + recorded lesson).
+      memory economics. This closes the Phase 5 exit gate (demo + recorded lesson).
 
 ### 5. Human git steps
 

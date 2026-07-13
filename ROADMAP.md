@@ -45,9 +45,8 @@ Four properties every phase must protect:
 - **Two tracks, one spine.** **FC** (Firecracker) and **BPF** (aya/eBPF) can be learned somewhat
   in parallel, but the **Convergence** phases need both, so the gate order still holds.
 - **Every phase exits on a demo + a lesson.** The exit gate is "I can show it running *and* write
-  up the Linux mechanism it taught me." Lessons are recorded in the root `.md` files (the box
-  annotations here + `ARCHITECTURE.md`'s decision log); the separate `docs/` writeup directory was
-  retired 2026-07-13.
+  up the Linux mechanism it taught me." Lessons are recorded in the root `.md` files: the box
+  annotations here + `ARCHITECTURE.md`'s decision log.
 - **Hard-to-reverse choices** (tagged `(decision)`) land as dated entries in `ARCHITECTURE.md`.
 - **Git is human-driven.** The user makes every commit/branch/push; the coding agent's job ends at
   changes made, demo working, box checked in the working tree.
@@ -97,10 +96,10 @@ Turn `agent` from the wasm scanner into the Firecracker + aya sandbox; keep the 
       (the eBPF crate builds for its own target, gated separately — see P8).
 - [x] **P0.6** Naming: keep the `agent` umbrella (binary + repo); crates are
       `vmm`/`probes`/`probes-loader`/`cli`.
-- [x] **P0.7** A short `docs/` for the per-phase writeups each phase feeds. *(No `CHANGELOG.md`
+- [x] **P0.7** A home for the per-phase writeups each phase feeds. *(No `CHANGELOG.md`
       in the pre-release `v0.0.x` line — the roadmap's checkboxes are the record; the changelog is
-      first written at `v0.1.0`. See §0.6. The `docs/` dir was later retired, 2026-07-13: lessons
-      live in these annotations + the decision log, per §0.5.)*
+      first written at `v0.1.0`. See §0.6. Lessons live in the root `.md` files: these annotations
+      + the decision log, per §0.5.)*
 - [x] **P0.8** `cargo xtask ci-privileged` runs the KVM/eBPF (`#[ignore]`d) tests behind a
       `/dev/kvm` guard, so day-to-day dev isn't `sudo cargo` roulette.
 - **Exit gate:** `cargo xtask ci` green on an empty-but-scaffolded tree; `xtask setup` verifies the
@@ -135,8 +134,8 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
       *(`crates/vmm/tests/boot.rs`, `#[ignore]`d; two cycles asserting no leaked scratch dirs.)*
 - **Exit gate + lesson:** a microVM boots to userspace from `cargo run` and shuts down clean; write
   up the **boot protocol** (kernel + boot args + virtio-block rootfs) and the microVM lifecycle.
-  *(Demo: `agent run --demo-boot`. Writeup retired with `docs/`; the lesson lives in the box
-  annotations above and decision 001.)*
+  *(Demo: `agent run --demo-boot`. The lesson lives in the box annotations above and
+  decision 001.)*
 
 ## Phase 2 — Run code in the guest & get results back
 
@@ -213,8 +212,8 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       `VmmError::Channel` with `is_disconnect()`. All KVM-free, in the host gate.)*
 - **Exit gate + lesson:** `agent`-driven `exec` in a microVM returns real output; write up **vsock /
   guest agents** and how host↔guest comms actually work.
-  *(Writeup retired with `docs/`. The exec **engine** is complete and tested against the
-  real guest agent (only the Firecracker vsock UDS is faked) + a privileged vsock-device boot smoke
+  *(The lesson lives in the box annotations above and decision 002. The exec **engine** is
+  complete and tested against the real guest agent (only the Firecracker vsock UDS is faked) + a privileged vsock-device boot smoke
   test. The **"in a microVM" clause was provisional** here — the agent wasn't baked into the rootfs
   or binding `AF_VSOCK` yet — and is now **closed by P3.1**: the literal in-VM `exec("echo hi") → hi,
   exit 0` runs against a real microVM.)*
@@ -348,7 +347,7 @@ binary, so adding a runtime is a packaging step, not an engine change.
       (11 privileged tests now). **Phase-3 exit gate met:** Python + a native binary + Node all produce
       captured artifacts; the lesson (ext4 `mke2fs -d`, overlayfs, initramfs-vs-rootfs,
       reproducibility, static-vs-dynamic linking, inject-vs-bake) is recorded in these annotations
-      and decisions 006/007; its `docs/` writeup was retired.)*
+      and decisions 006/007.)*
 - **Exit gate + lesson:** real Python **and a static native binary + Node** run in the microVM and
   produce artifacts — the rootfs is runtime-agnostic; write up **filesystems, ext4 images, overlayfs,
   initramfs vs rootfs, and static vs dynamic linking in a minimal rootfs.**
