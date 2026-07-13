@@ -550,6 +550,41 @@ fn pool_serves_warm_clones_and_discards_dead_ones() {
     pool.shutdown();
 }
 
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn warm_restore_returns_output_in_far_under_cold_boot() {
+    // P5.8: the phase's payoff asserted, not eyeballed: from "restore a warm Python snapshot" to
+    // "the code's output is back on the host" in well under the source's cold-boot latency. The
+    // bound is generous twofold: the asserted 2x margin is far inside the measured ~6.6x (P5.7's
+    // bench, n=100: restore-to-output p50 105 ms vs cold boot + exec p50 689 ms), and `cold_boot`
+    // itself understates the cold path, which pays boot *plus* this same exec.
+    let bundle = TmpDir::new("snap-warm-fast");
+    let (snap, cold_boot) = warm_python_snapshot(&bundle);
+
+    let t0 = std::time::Instant::now();
+    let restored = Vm::restore(&snap, &agent_rootfs_config()).expect("warm restore should resume");
+    let argv = ["python3", "-c", "print(6 * 7)"].map(String::from);
+    let out = restored
+        .exec(&argv, &[])
+        .expect("exec on the restored warm clone should succeed");
+    let to_output = t0.elapsed();
+
+    assert_eq!(out.exit_code, 0, "python should exit 0");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42",
+        "the restored clone should compute and return the output"
+    );
+    assert!(
+        to_output * 2 < cold_boot,
+        "restore-to-output ({to_output:?}) should be far under a cold boot ({cold_boot:?})"
+    );
+    eprintln!("warm restore to output {to_output:?} vs cold boot {cold_boot:?}");
+    restored
+        .shutdown()
+        .expect("restored shutdown should succeed");
+}
+
 /// A boot config pointed at the **agent rootfs** (`cargo xtask build-rootfs`): readiness is the
 /// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable — the
 /// in-VM exec tests are about *that* image specifically.

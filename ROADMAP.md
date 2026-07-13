@@ -548,10 +548,28 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
       `pool_serves_warm_clones_and_discards_dead_ones`: prefill 2, timed take + exec, SIGKILL a
       pooled clone's VMM behind the pool's back, next take discards the corpse and serves a fresh
       restore, refill tops back to target. 22 privileged tests.)*
-- [ ] **P5.7** Benchmark: cold boot vs snapshot restore vs warm-pool `exec` latency. *(Baseline
+- [x] **P5.7** Benchmark: cold boot vs snapshot restore vs warm-pool `exec` latency. *(Baseline
       to beat: Phase 1 boots a full rootfs copy in `/tmp` — on a tmpfs host that's ≈300 MB of RAM
       per sandbox on top of guest memory; overlays should collapse that.)*
-- [ ] **P5.8** Test: restore a warm Python snapshot, run code, get output in ≪ cold-boot time.
+      *(`cargo xtask bench-warm [--runs N]`: **time-to-first-result** (start a sandbox → a Python
+      one-liner's output back on the host) on the three start paths, reusing `bench-boot`'s honest
+      percentile reporting (nearest-rank, no `p99` under n=100); every sample verifies the answer
+      actually came back, and teardown/pool-refill run off the clock (the between-requests cost).
+      One warm snapshot feeds the restore and pool paths. Measured (dev box, n=100 per path): cold
+      boot + exec on a per-VM rootfs copy (the Phase-1-style baseline) **p50 689 / p99 943 ms**;
+      warm restore + exec **p50 105 / p99 172 ms**; pool take + exec **p50 45 / p99 90 ms**: ~6.6x
+      and ~15x at p50, and most of the remaining warm-path time is Python itself, not the engine.
+      The footprint baseline falls too: the cold path copies the 132 MiB image per VM, a warm clone
+      copies nothing (the shared read-only base is referenced in place and the bundle's one 256 MiB
+      memory file is mapped by every clone, both page-cache-shared; a clone's private cost is its
+      copy-on-write dirty pages).)*
+- [x] **P5.8** Test: restore a warm Python snapshot, run code, get output in ≪ cold-boot time.
+      *(`warm_restore_returns_output_in_far_under_cold_boot`: warms + snapshots a Python source,
+      then times restore → exec → output-verified on a fresh clone and asserts it lands with at
+      least a **2x margin under the source's cold-boot latency**: a generous bound against the
+      measured ~6.6x, and `cold_boot` itself understates the cold path, which pays boot *plus* the
+      same exec (one observed run: 85 ms to output vs a 367 ms cold boot). The phase's payoff is
+      now asserted in `ci-privileged`, not just printed by the bench. 23 privileged tests.)*
 - **Exit gate + lesson:** warm restores make runs start in ms; write up **snapshotting, guest
   memory, and the state you must fix up on restore.**
 
