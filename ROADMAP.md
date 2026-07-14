@@ -80,16 +80,16 @@ binary + jailer, a guest kernel (`vmlinux`), a way to build a rootfs, and the ay
 
 ## Phase 0 — Reset the repo to the sandbox engine
 
-Turn `agent` from the wasm scanner into the Firecracker + aya sandbox; keep the git history.
+Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the git history.
 
-- [x] **P0.1** (human git step) Shelve the wasm/scanner work on a branch, then gut `main`: remove
-      `crates/{abi,host,detectors,sandbox}`, `detectors/`. *(Gut done; scanner preserved at
-      `f54d353` on `origin/main` — create `archive/wasm-scanner` to name the point.)*
+- [x] **P0.1** (human git step) Start `main` clean for the sandbox engine, preserving the earlier
+      tree on an archive branch. *(Done; the prior history is preserved at `f54d353` on
+      `origin/main`.)*
 - [x] **P0.2** New workspace layout: `crates/vmm` (Firecracker driver), `crates/probes` (aya
       eBPF programs, `no_std`, excluded), `crates/probes-loader` (userspace loader), `crates/cli`
       (`agent`), `xtask`.
 - [x] **P0.3** Rewrite `.rules` / `README.md` / `CONTRIBUTING.md` / `ARCHITECTURE.md` to the
-      sandbox-engine identity and the four spine properties; drop the detector/`Verdict`/feed framing.
+      sandbox-engine identity and the four spine properties.
 - [x] **P0.4** Prerequisites pinned in `CONTRIBUTING.md` (KVM, BTF, `firecracker`+jailer, aya
       toolchain, caps); `cargo xtask setup` checks the host and reports what's missing.
 - [x] **P0.5** `cargo xtask ci` skeleton: fmt · clippy `-D warnings` · build · test · docs · deny
@@ -103,7 +103,7 @@ Turn `agent` from the wasm scanner into the Firecracker + aya sandbox; keep the 
 - [x] **P0.8** `cargo xtask ci-privileged` runs the KVM/eBPF (`#[ignore]`d) tests behind a
       `/dev/kvm` guard, so day-to-day dev isn't `sudo cargo` roulette.
 - **Exit gate:** `cargo xtask ci` green on an empty-but-scaffolded tree; `xtask setup` verifies the
-  host can do KVM + eBPF; docs describe the engine, not the scanner.
+  host can do KVM + eBPF; docs describe the engine.
 
 ---
 
@@ -220,7 +220,7 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
 
 ## Phase 3 — Rootfs & the language runtime
 
-Build the disk the guest runs, with a real runtime inside — natively, no wasm gymnastics. Python is
+Build the disk the guest runs, with a real runtime inside, natively. Python is
 the exit-gate demo, but the rootfs is **runtime-agnostic**: a real kernel + rootfs runs *any* Linux
 binary, so adding a runtime is a packaging step, not an engine change.
 
@@ -587,7 +587,22 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one wa
 
 Confine the VMM itself — the other half of the isolation story, and pure Linux internals.
 
-- [ ] **P6.1** Run Firecracker under its **jailer** (chroot, uid/gid drop, namespaces).
+- [x] **P6.1** Run Firecracker under its **jailer** (chroot, uid/gid drop, namespaces).
+      *(New opt-in `BootConfig.jail` (decision 012): the driver spawns Firecracker's `jailer`, which
+      builds a chroot at `<scratch>/firecracker/<id>/root`, `mknod`s the device nodes, places the VMM
+      in a cgroup, drops to a configurable uid/gid, and `exec`s Firecracker inside the mount namespace.
+      The kernel + a read-write rootfs copy are **staged into the chroot after the API socket is up**
+      (so no race with the jailer's construction) and named by their chroot-relative path, `chown`ed to
+      the jailed uid; the socket is the chroot's `run/firecracker.socket`. No `--daemonize`, so the
+      serial console still reaches the host. The jailer's cgroup is learned from `/proc/<pid>/cgroup`
+      and removed on teardown; the chroot rides inside the scratch dir that `remove_dir_all` reclaims.
+      **Opt-in** so the 23 unjailed tests and the density/snapshot paths are untouched; scoped to a
+      **plain read-write cold boot** (jail + vsock/NIC/overlay/bulk-I/O is a typed error, snapshot of a
+      jailed VM is refused: all later Phase-6 steps). **Needs real root** — the jailer's `mknod`
+      `EPERM`s in a non-initial userns, so the `unshare -Urn` trick can't run it; `boots_under_the_jailer`
+      gates on real root and skips otherwise. Proof: the full privileged suite (now **24 tests**) passes
+      as real root in a privileged container, jailed boot ~4 s. cgroup **limits** are P6.2, **seccomp**
+      P6.3, leak-proof cgroup-**owned** teardown P6.7.)*
 - [ ] **P6.2** Put each VMM in its own **cgroup**; set CPU/memory limits.
 - [ ] **P6.3** Apply Firecracker's **seccomp** filters; understand what syscalls it needs.
 - [ ] **P6.4** Resource caps enforced: a VM can't exceed its cgroup memory/CPU. *(Also closes the

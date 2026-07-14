@@ -5,13 +5,11 @@ produces a dated, numbered entry here — the decision, the alternatives conside
 so the reasoning outlives the diff. Entries are append-only; reversing one is a new entry, not an
 edit. (Roadmap *re-scopes* — cut phases and why — live in the roadmap's tombstones, not here.)
 
-**Pivot, 2026-07-10 — the Firecracker + aya sandbox engine.** The project was re-scoped from the
-`agent scan` wasm secrets scanner to a self-hostable, isolated **code-execution sandbox**:
-**Firecracker** microVMs for hardware isolation, **aya/eBPF** for host-side observability and
-enforcement (see `.rules`, `ROADMAP.md`). The decision log **restarts here** — the prior
-scanner-era decisions (core-wasm ABI, instance-per-call, PII locale) describe a retired design and
-**live in git history** if ever needed. The guiding properties are now the spine's four:
-*isolation is hardware · observe & enforce from the host · engine not platform · measured and taught.*
+**The Firecracker + aya sandbox engine.** This decision log covers the self-hostable, isolated
+**code-execution sandbox**: **Firecracker** microVMs for hardware isolation, **aya/eBPF** for
+host-side observability and enforcement (see `.rules`, `ROADMAP.md`). The guiding properties are
+the spine's four: *isolation is hardware · observe & enforce from the host · engine not platform ·
+measured and taught.*
 
 Decisions queued by the (sandbox) roadmap, to be recorded here as they're made:
 
@@ -711,3 +709,70 @@ wall-clock time (TLS validity windows, token expiry) can misbehave in a clone un
 - **Decision 009 addendum:** boot-time `ip=` is cold-boot-only by nature; restore identity is this
   decision's runtime path. If that runtime path ever proves cleaner for cold boot too, unify then,
   with evidence, not speculatively.
+
+### 012 — Confine the VMM: run Firecracker under its jailer *(2026-07-14, P6.1)*
+
+**Problem.** Hardware isolation (KVM) contains the *guest*, but the *VMM process* still runs on the
+host with the driver's privileges. A Firecracker bug, or a guest that breaks out into the VMM, would
+land in that context. The jailer is the host-side confinement: a chroot, a uid/gid drop, and a mount
+namespace around Firecracker.
+
+**Decision.** An **opt-in** [`BootConfig::jail`] runs Firecracker under Firecracker's `jailer` for a
+plain read-write cold boot. Opt-in, not the new default, because the whole FC track was built
+unjailed and every existing path (density's shared read-only base, snapshot bundles, the warm pool,
+the tap, bulk I/O) needs chroot-relative staging or a netns that later Phase-6 boxes add. This box
+lands the mechanism on the simplest boot; the rest migrates behind it.
+- **Chroot inside the scratch dir.** `--chroot-base-dir` is the VM's own `/tmp/agent-<pid>-<n>`
+  scratch dir, so the jail is `<scratch>/firecracker/<id>/root/` and teardown's `remove_dir_all`
+  reclaims the whole thing — no `/srv/jailer` residue. The jailer builds the chroot, `mknod`s the
+  device nodes, places the process in a cgroup, `chroot`s, drops to the configured uid/gid, and
+  `exec`s Firecracker (same pid, so the driver's `Child` is Firecracker and kill/reap are unchanged).
+- **Stage resources after the socket is up, name them chroot-relative.** Firecracker opens the
+  kernel and rootfs only on `PUT /boot-source` / `PUT /drives`, *after* the driver connects to the
+  API socket — which only exists once the jailer has finished building the chroot. So the driver
+  stages the kernel (`/kernel`, `0444`) and a read-write rootfs copy (`/rootfs.ext4`, `0600`) into
+  the chroot at that point, `chown`ed to the jailed uid so the dropped-privilege VMM can open them,
+  and names them by their chroot-relative path in the API. Staging-after-socket needs no hook into
+  the jailer and never races its chroot construction (the mirror of how the vsock socket is dialed
+  only after Firecracker binds it, decision 010).
+- **Console survives.** The jailer is run **without `--daemonize`**, so Firecracker keeps the driver's
+  piped stdout and the guest serial console still reaches [`crate::console`] — the coupling the old
+  module doc feared the jailer would break is preserved by choice.
+- **cgroup is read, not assumed.** The jailer always creates the microVM's cgroup (there is no
+  opt-out); on this cgroup-v2-only host it is passed `--cgroup-version 2` (the v1 default would fail
+  to find the hierarchy). The exact cgroup dir is learned from `/proc/<pid>/cgroup` once the VMM is up
+  (version-independent, no guess about the jailer's parent-cgroup layout) and removed (best-effort) on
+  teardown, since it lives outside the scratch dir — like the tap. cgroup *limits* are P6.2.
+- **Needs real root; refuses half-confinement.** The jailer's `mknod` of device nodes is `EPERM` in a
+  non-initial user namespace even with `CAP_MKNOD`, so a jailed boot needs real root — the
+  `unshare -Urn --map-root-user` trick that carries the other privileged tests is not enough (the
+  test gates on real root and skips otherwise; validated in a privileged container). Combining `jail`
+  with vsock, a NIC, the overlay, or bulk I/O is a typed error (deny-by-default over a half-jailed VM),
+  and snapshotting a jailed VM is refused (its disk lives in the chroot).
+
+**Alternatives considered.**
+- **Jail by default.** Rejected for this box: it would force every existing path chroot-relative at
+  once (P6.1–P6.7 in one change) and break the 23 unjailed privileged tests / the `unshare` dev flow.
+  The additive `#[non_exhaustive]` knob is the same discipline every prior phase used
+  (`read_only_root`, `enable_network`, …).
+- **Hardlink / bind-mount resources instead of copying.** Hardlink `EXDEV`s across the `/tmp` (tmpfs)
+  boundary; bind-mounting into the chroot wants the jailer's mount namespace we don't drive. Copying is
+  the honest P6.1 cost; zero-copy staging of a shared read-only base rides with the overlay-under-jailer
+  step, alongside snapshot density.
+- **`--daemonize`.** Rejected: it redirects stdio to `/dev/null`, which would sever the serial console
+  the boot-readiness wait depends on.
+
+**Consequences / tombstones.**
+- **A jailed cold boot copies the kernel and rootfs into the chroot per VM** (measured ~4 s for a
+  jailed plain-rootfs boot in a privileged container). Density-preserving staging (shared RO base) and
+  jailed **snapshot/restore/pool**, **vsock/exec**, **networking**, and **bulk I/O** are later Phase-6
+  steps behind this knob.
+- **cgroup lifecycle is best-effort here.** Teardown reaps the VMM's (now-empty) cgroup; leak-proof,
+  cgroup-**owned** lifetime (host-process death can't leak a VM) is **P6.7**, resource *limits* are
+  **P6.2**, and Firecracker's seccomp filters are **P6.3**.
+- **The jailer's netns is the sanctioned path to concurrent networked clones** (decisions 009/011's
+  tombstone): once networking is jailed, each VM's tap in its own netns removes the one-live-networked-
+  clone limit. Kept on the Phase-6 radar.
+- **`BootConfig` gained a public field**, but it is not one of the seam-pinned types (`Sandbox`,
+  `Limits`, `RunResult`, `VmmError`, the channel wire), and the jailer path is opt-in, so no downstream
+  pin bump is forced.

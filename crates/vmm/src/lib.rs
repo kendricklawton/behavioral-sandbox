@@ -14,6 +14,7 @@ mod console;
 mod drives;
 mod exec;
 mod firecracker;
+mod jail;
 mod net;
 mod pool;
 #[cfg(test)]
@@ -25,6 +26,7 @@ use std::time::Duration;
 use agent_channel::ChannelError;
 
 pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER};
+pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID};
 pub use pool::Pool;
 pub use vm::{BootConfig, RunningVm, Snapshot, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 

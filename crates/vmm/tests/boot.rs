@@ -12,9 +12,9 @@ mod common;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_vmm::{Vm, DEFAULT_GUEST_CID};
+use agent_vmm::{Jail, Vm, DEFAULT_GUEST_CID, DEFAULT_JAIL_UID};
 
-use common::{agent_rootfs_config, config, have_net_admin};
+use common::{agent_rootfs_config, config, have_jailer_privileges, have_net_admin};
 
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
@@ -57,6 +57,69 @@ fn boots_with_a_vsock_device() {
         "guest should still reach userspace with vsock configured"
     );
     vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
+fn boots_under_the_jailer() {
+    // P6.1: the same plain rootfs boots to userspace, but Firecracker now runs under its jailer — in
+    // a chroot, dropped to an unprivileged uid/gid, inside the jailer's mount namespace. The jailer
+    // `mknod`s device nodes, which needs real root (the `unshare -Urn` trick used by the other
+    // privileged tests can't), so skip rather than fail on a box that can do KVM but not real root.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping boots_under_the_jailer: needs real root (euid 0 in the initial user namespace)"
+        );
+        return;
+    }
+    let mut cfg = config();
+    cfg.jail = Some(Jail::default());
+    let marker = cfg.userspace_marker.clone();
+
+    let vm = Vm::boot(cfg).expect("microVM should boot to userspace under the jailer");
+    assert!(
+        vm.console().contains(&marker),
+        "jailed guest should reach userspace (marker {marker:?}); console:\n{}",
+        vm.console()
+    );
+    // Boot latency is still measured on the jailed path.
+    assert!(
+        vm.boot_latency() > Duration::ZERO,
+        "jailed boot latency should be measured"
+    );
+
+    // The confinement actually happened, not just "it booted": the jailed Firecracker runs as the
+    // dropped uid, not root. `/proc/<pid>/status` `Uid:` is real/effective/saved/fs; the effective
+    // uid is the second field.
+    let pid = vm.vmm_pid();
+    let status =
+        std::fs::read_to_string(format!("/proc/{pid}/status")).expect("read jailed VMM status");
+    let eff_uid = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Uid:"))
+        .and_then(|v| v.split_whitespace().nth(1))
+        .and_then(|u| u.parse::<u32>().ok())
+        .expect("parse jailed VMM effective uid");
+    assert_eq!(
+        eff_uid, DEFAULT_JAIL_UID,
+        "jailed Firecracker should run as the dropped uid {DEFAULT_JAIL_UID}, not root (got {eff_uid})"
+    );
+
+    vm.shutdown().expect("jailed shutdown should succeed");
+
+    // Teardown reclaims the chroot (it lives in the scratch dir) — no `/tmp/agent-<pid>-*` survives.
+    let prefix = format!("agent-{}-", std::process::id());
+    let scratch_leaks = std::fs::read_dir("/tmp")
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+                .count()
+        })
+        .unwrap_or(0);
+    assert_eq!(
+        scratch_leaks, 0,
+        "jailed boot leaked a scratch dir / chroot"
+    );
 }
 
 #[test]

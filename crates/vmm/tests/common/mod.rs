@@ -138,3 +138,30 @@ pub fn have_net_admin() -> bool {
         .and_then(|hex| u64::from_str_radix(&hex, 16).ok())
         .is_some_and(|caps| caps & (1 << 12) != 0)
 }
+
+/// Whether this process can run the **jailer**: effective uid 0 **in the initial user namespace**.
+/// The jailer `mknod`s device nodes, which `EPERM`s in a non-initial userns even with `CAP_MKNOD`, so
+/// the `unshare -Urn --map-root-user` trick that carries the other privileged tests is not enough —
+/// the jailer test needs real root (or a privileged container). Skips otherwise, like
+/// [`have_net_admin`].
+pub fn have_jailer_privileges() -> bool {
+    let euid0 = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Uid:").map(|v| v.trim().to_string()))
+        })
+        // `Uid:` is real/effective/saved/fs; the effective uid is the second field.
+        .and_then(|v| {
+            v.split_whitespace()
+                .nth(1)
+                .and_then(|e| e.parse::<u32>().ok())
+        })
+        .is_some_and(|euid| euid == 0);
+    // The initial user namespace maps the full uid range (`0 0 4294967295`); a `--map-root-user`
+    // userns maps a single id, so its map differs and this reads false.
+    let init_userns = std::fs::read_to_string("/proc/self/uid_map")
+        .ok()
+        .is_some_and(|m| m.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"]);
+    euid0 && init_userns
+}

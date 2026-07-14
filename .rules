@@ -108,6 +108,5 @@ The phase-by-phase plan is the single source of truth in **`ROADMAP.md`** (its *
 the state**). Work it per its §0.5 loop: first unchecked box in ID order, one item per
 iteration, and the box checked **together with the work** so they land in one commit. The
 **user** makes that commit. A phase isn't left until its **Exit gate** passes — *a working demo
-and a writeup.* The tree currently still holds the retired wasm-scanner crates; the reset to the
-new layout is Phase 0. Don't duplicate phase status here — update the roadmap. Hard-to-reverse
+and a writeup.* Don't duplicate phase status here — update the roadmap. Hard-to-reverse
 choices land as dated `(decision)` entries in `ARCHITECTURE.md`.

@@ -7,9 +7,10 @@
 //! or calling [`RunningVm::shutdown`] — kills the VMM and reclaims its scratch dir, so a run can
 //! never leak a process or socket.
 //!
-//! **Host path only, `unsafe`-free.** Firecracker wires the guest's `ttyS0` to its own stdout
-//! when unjailed, so "read the child's stdout" is "read the guest console" — a coupling the
-//! jailer (Phase 6) will break, hence the console capture sits behind [`Console`].
+//! **Host path only, `unsafe`-free.** Firecracker wires the guest's `ttyS0` to its own stdout, so
+//! "read the child's stdout" is "read the guest console". The jailer ([`Jail`],
+//! [`BootConfig::jail`]) preserves this: it is not run with `--daemonize`, so Firecracker keeps the
+//! piped stdout and the console still reaches [`Console`].
 
 use std::net::Ipv4Addr;
 use std::os::unix::fs::PermissionsExt;
@@ -31,6 +32,7 @@ use crate::firecracker::{
     Action, ApiClient, BootSource, Drive, MachineConfig, MemBackend, MemBackendType,
     NetworkInterface, SnapshotCreate, SnapshotLoad, SnapshotType, VmState, VmStateKind, Vsock,
 };
+use crate::jail::{read_cgroup_dir, remove_cgroup, spawn_jailer, stage_into_chroot, Chroot, Jail};
 use crate::net::{apply_guest_net_identity, Tap};
 use crate::{Limits, RunResult, VmmError};
 
@@ -49,7 +51,7 @@ const DEFAULT_USERSPACE_MARKER: &str = "login:";
 static VM_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Firecracker's own stderr, captured to a file in the scratch dir (see `Spawned::launch`).
-const FC_STDERR: &str = "fc.stderr";
+pub(crate) const FC_STDERR: &str = "fc.stderr";
 
 /// The vsock context id the guest gets (the host is always cid 2). The default when a boot enables
 /// the exec channel; overridable per-VM via [`BootConfig::guest_cid`].
@@ -134,6 +136,14 @@ pub struct BootConfig {
     /// adds no address, route, or masquerade (decision 008), so the guest reaches nothing until
     /// addressing lands. Needs `ip` (iproute2) on the host.
     pub enable_network: bool,
+    /// Run Firecracker under its **jailer** (P6.1): a chroot, a uid/gid drop, and the jailer's mount
+    /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
+    /// Firecracker directly. Setting it needs **real root** (the jailer `mknod`s device nodes, which
+    /// `EPERM` in a non-initial user namespace) and the `jailer` binary. This phase jails a plain
+    /// read-write cold boot only: combining `jail` with `guest_cid`, `enable_network`, `input_dir`,
+    /// `output_dir`, or `read_only_root` is a typed error for now (those need chroot staging / a netns
+    /// that later Phase-6 steps add).
+    pub jail: Option<Jail>,
 }
 
 impl BootConfig {
@@ -196,6 +206,7 @@ impl Default for BootConfig {
             input_dir: None,
             output_dir: None,
             enable_network: false,
+            jail: None,
         }
     }
 }
@@ -229,6 +240,10 @@ pub struct RunningVm {
     /// The per-VM host tap backing the guest's virtio-net, when the boot config set
     /// `enable_network`. Lives **outside** `workdir`, so teardown must delete it explicitly.
     tap: Option<Tap>,
+    /// The jail this VMM runs in, when the boot config set `jail` (P6.1). Its chroot lives under
+    /// `workdir` (reclaimed with it), but the jailer's cgroup is outside, so teardown removes it
+    /// explicitly, like the tap.
+    chroot: Option<Chroot>,
 }
 
 /// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
@@ -312,6 +327,23 @@ impl Vm {
         // on hosts without KVM (a fake "firecracker" needs no VM).
         if !Path::new("/dev/kvm").exists() {
             return Err(VmmError::NoKvm);
+        }
+        // P6.1 jails a plain read-write cold boot only. Combining the jailer with vsock, a NIC, the
+        // overlay, or bulk I/O devices needs staging those into the chroot / a per-VM netns, which are
+        // later Phase-6 steps — refuse it now rather than boot a half-confined VM (deny-by-default).
+        if config.jail.is_some()
+            && (config.guest_cid.is_some()
+                || config.enable_network
+                || config.input_dir.is_some()
+                || config.output_dir.is_some()
+                || config.read_only_root)
+        {
+            return Err(VmmError::Vmm(
+                "the jailer currently supports only a plain read-write boot; vsock, a NIC, the overlay \
+                 (read_only_root), and bulk input/output devices under the jailer are later Phase-6 \
+                 steps"
+                    .into(),
+            ));
         }
         let mut spawned = Spawned::launch(&config)?;
         let boot_latency = match spawned.run_boot(&config) {
@@ -572,6 +604,15 @@ impl RunningVm {
                     .into(),
             ));
         }
+        // A jailed VM's root disk lives inside the chroot (torn down with the scratch dir) and its
+        // path is chroot-relative, so a bundle would record an unrestorable backing. Jailed
+        // snapshot/restore is a later Phase-6 step.
+        if self.chroot.is_some() {
+            return Err(VmmError::Vmm(
+                "snapshot of a jailed VM is not yet supported (its disk lives in the chroot)"
+                    .into(),
+            ));
+        }
         // An output or input device carries a per-clone image a restore can't yet recreate (and the
         // input image lives at the gone source scratch path), so those stay refused. The vsock exec
         // channel is supported (restore re-binds its baked-in relative socket), and a NIC is supported
@@ -720,6 +761,7 @@ impl Drop for RunningVm {
             &mut self.console,
             &self.workdir,
             self.tap.as_ref(),
+            self.chroot.as_ref(),
         );
     }
 }
@@ -749,6 +791,9 @@ struct Spawned {
     /// The per-VM host tap backing the guest's virtio-net, when `enable_network` was set. Lives
     /// **outside** `workdir`, so every teardown path must delete it explicitly.
     tap: Option<Tap>,
+    /// The jail (chroot + dropped uid/gid + cgroup) when `jail` was set (P6.1); `None` for a direct
+    /// boot. Its cgroup lives outside `workdir`, so every teardown path removes it explicitly.
+    chroot: Option<Chroot>,
 }
 
 impl Drop for Spawned {
@@ -759,6 +804,7 @@ impl Drop for Spawned {
                 &mut self.console,
                 &self.workdir,
                 self.tap.as_ref(),
+                self.chroot.as_ref(),
             );
         }
     }
@@ -769,6 +815,13 @@ impl Spawned {
     fn launch(config: &BootConfig) -> Result<Self, VmmError> {
         require_file(&config.kernel, "kernel image")?;
         require_file(&config.rootfs, "rootfs image")?;
+
+        // Jailed boot spawns the jailer (not firecracker directly) and stages resources into the
+        // chroot later; the unjailed setup below is untouched. `Vm::boot` has already refused the
+        // feature combinations this phase doesn't jail.
+        if let Some(jail) = config.jail.as_ref() {
+            return Self::launch_jailed(config, jail);
+        }
 
         let workdir = create_workdir()?;
 
@@ -875,6 +928,51 @@ impl Spawned {
             input_image,
             output,
             tap,
+            chroot: None,
+        })
+    }
+
+    /// The jailed cold-boot counterpart of [`launch`](Self::launch) (P6.1): spawn the **jailer**,
+    /// which builds the chroot, `mknod`s the device nodes, places the VMM in a cgroup, and drops
+    /// privileges before `exec`ing Firecracker. Resources (kernel, rootfs) are staged into the chroot
+    /// in [`run_boot`](Self::run_boot), once the API socket proves the chroot exists — so no staging
+    /// races the jailer's construction. Scoped to a plain read-write boot; `Vm::boot` refuses `jail`
+    /// combined with vsock, a NIC, the overlay, or bulk I/O, so this sets none of those up.
+    fn launch_jailed(config: &BootConfig, jail: &Jail) -> Result<Self, VmmError> {
+        let workdir = create_workdir()?;
+        // The jail id is the scratch-dir name: unique per VM within this process and a valid jailer id
+        // (alphanumeric + `-`). The jailer nests the chroot under `<workdir>/firecracker/<id>/root`.
+        let id = workdir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "agent-vm".to_string());
+        let (child, console, socket, chroot_root) =
+            match spawn_jailer(jail, &config.firecracker, &workdir, &id) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            };
+        Ok(Self {
+            child: Some(child),
+            console,
+            workdir,
+            // Staged into the chroot in `run_boot` and named by its chroot-relative path; this
+            // placeholder is not a host device path (a jailed VM refuses snapshotting).
+            rootfs: PathBuf::from("/rootfs.ext4"),
+            restored: false,
+            api: ApiClient::new(socket),
+            vsock_uds: None,
+            input_image: None,
+            output: None,
+            tap: None,
+            chroot: Some(Chroot {
+                root: chroot_root,
+                uid: jail.uid,
+                gid: jail.gid,
+                cgroup_dir: None,
+            }),
         })
     }
 
@@ -930,6 +1028,7 @@ impl Spawned {
             input_image: None,
             output: None,
             tap,
+            chroot: None,
         })
     }
 
@@ -1099,11 +1198,34 @@ impl Spawned {
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 
-        // Absolute paths for Firecracker (its cwd is the scratch dir); `self.rootfs` is already
-        // absolute from `launch`.
-        let kernel = absolute(&config.kernel)?;
-        let kernel = path_str(&kernel)?;
-        let rootfs = path_str(&self.rootfs)?;
+        // Kernel + rootfs paths as Firecracker will name them. Unjailed: absolute host paths (its cwd
+        // is the scratch dir); `self.rootfs` is already absolute from `launch`. Jailed: stage each into
+        // the chroot (safe now that the API socket proved the chroot exists — no race with the jailer's
+        // construction) and name it by its chroot-relative path, and record the jailer's cgroup for
+        // teardown. `config.read_only_root` is false under a jail (`Vm::boot` refuses it), so the root
+        // drive is plain read-write either way here.
+        let kernel_arg: String;
+        let rootfs_arg: String;
+        if let Some(chroot) = self.chroot.as_ref() {
+            let (root, uid, gid) = (chroot.root.clone(), chroot.uid, chroot.gid);
+            // Read-only kernel (0444), read-write root disk (0600), both chowned to the jailed uid so
+            // the dropped-privilege Firecracker can open them.
+            kernel_arg = stage_into_chroot(&root, "kernel", &config.kernel, uid, gid, 0o444)?;
+            rootfs_arg = stage_into_chroot(&root, "rootfs.ext4", &config.rootfs, uid, gid, 0o600)?;
+            // Learn the cgroup the jailer placed the VMM in (from `/proc/<pid>/cgroup`, now that
+            // Firecracker is running in its final cgroup), so teardown can remove it.
+            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
+                if let Some(chroot) = self.chroot.as_mut() {
+                    chroot.cgroup_dir = read_cgroup_dir(pid);
+                }
+            }
+        } else {
+            let kernel = absolute(&config.kernel)?;
+            kernel_arg = path_str(&kernel)?.to_string();
+            rootfs_arg = path_str(&self.rootfs)?.to_string();
+        }
+        let kernel = kernel_arg.as_str();
+        let rootfs = rootfs_arg.as_str();
         // A read-only root hands off to the overlay init, which stacks a size-capped tmpfs over the
         // RO base so `/` is writable per-run. The cap is half of guest RAM — the guest has no swap,
         // so a tmpfs sized near RAM would OOM the guest rather than bound a runaway write. It rides
@@ -1272,6 +1394,14 @@ impl Spawned {
     /// last words are exactly what a pre-marker hang needs) — then reclaim the scratch dir, in
     /// that order, because the stderr log lives *in* the scratch dir.
     fn abort(mut self, cause: VmmError) -> VmmError {
+        // If jailed, learn the cgroup from the still-live child before killing it, so a boot that
+        // failed *after* the VMM came up (past `run_boot`'s cgroup read, or before it) still reaps the
+        // cgroup the jailer created — it lives outside the scratch dir `remove_dir_all` reclaims.
+        let cgroup = self.chroot.as_ref().and_then(|c| {
+            c.cgroup_dir
+                .clone()
+                .or_else(|| self.child.as_ref().and_then(|ch| read_cgroup_dir(ch.id())))
+        });
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -1280,6 +1410,9 @@ impl Spawned {
         // it explicitly (best-effort) on this boot-failure path too, or a failed boot leaks a tap.
         if let Some(tap) = self.tap.take() {
             tap.delete();
+        }
+        if let Some(cgroup) = cgroup {
+            remove_cgroup(&cgroup);
         }
         self.console.join();
         let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
@@ -1324,6 +1457,7 @@ impl Spawned {
             vsock_uds: self.vsock_uds.take(),
             output: self.output.take(),
             tap: self.tap.take(),
+            chroot: self.chroot.take(),
         })
     }
 }
@@ -1468,14 +1602,26 @@ fn create_workdir() -> Result<PathBuf, VmmError> {
 }
 
 /// Guaranteed, best-effort teardown shared by both `Drop`s: kill the VMM, join the console reader
-/// (which ends once the killed child's stdout closes), delete the per-VM tap (it lives outside the
-/// scratch dir, so `remove_dir_all` can't reclaim it), and remove the scratch dir.
-fn teardown(child: &mut Child, console: &mut Console, workdir: &Path, tap: Option<&Tap>) {
+/// (which ends once the killed child's stdout closes), delete the per-VM tap and the jailer's cgroup
+/// (both live outside the scratch dir, so `remove_dir_all` can't reclaim them), then remove the
+/// scratch dir (which reclaims the chroot, since its base is `workdir`).
+fn teardown(
+    child: &mut Child,
+    console: &mut Console,
+    workdir: &Path,
+    tap: Option<&Tap>,
+    chroot: Option<&Chroot>,
+) {
     let _ = child.kill();
     let _ = child.wait();
     console.join();
     if let Some(tap) = tap {
         tap.delete();
+    }
+    // The VMM is reaped above, so its cgroup is now empty and removable. Do this before the scratch
+    // dir so a slow `remove_dir_all` can't widen the window a leaked cgroup lives in.
+    if let Some(cgroup) = chroot.and_then(|c| c.cgroup_dir.as_deref()) {
+        remove_cgroup(cgroup);
     }
     let _ = std::fs::remove_dir_all(workdir);
 }
@@ -1491,7 +1637,7 @@ pub(crate) fn path_str(p: &Path) -> Result<&str, VmmError> {
 /// with its scratch dir as cwd (so a relative vsock socket resolves per-VM — see `spawn_fc`); a
 /// relative file path would otherwise resolve against that scratch dir instead. Lexical only (no
 /// symlink resolution, no existence requirement), so it's safe on a path that doesn't exist yet.
-fn absolute(p: &Path) -> Result<PathBuf, VmmError> {
+pub(crate) fn absolute(p: &Path) -> Result<PathBuf, VmmError> {
     if p.is_absolute() {
         Ok(p.to_path_buf())
     } else {
