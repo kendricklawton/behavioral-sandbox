@@ -10,6 +10,7 @@
 mod common;
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use agent_vmm::Vm;
 
@@ -333,4 +334,63 @@ fn collects_outputs_via_block_device() {
         std::fs::symlink_metadata(dir.path().join("lost+found")).is_err(),
         "lost+found must be pruned"
     );
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn reaps_the_whole_process_tree_so_a_daemon_cannot_wedge_exec() {
+    // P6.4 (closes the P2.6 gap): a command double-forks a `setsid` daemon that escapes the process
+    // group and inherits the command's stdout, then the parent exits 0. Before P6.4 that daemon kept
+    // the stdout pipe's write end open, so the agent's output pumps never saw EOF and the exec wedged
+    // until the daemon died (~30s here). Now the agent runs each command in its own cgroup and reaps
+    // the whole tree via `cgroup.kill`, so the exec returns immediately with the parent's exit code
+    // and the daemon is actually gone. `cgroup.kill` catches the `setsid` process a `killpg` would
+    // miss, which is the whole point of using the cgroup rather than the process group.
+    let vm = Vm::boot(agent_rootfs_config()).expect("agent microVM should boot");
+
+    // fork -> setsid -> exec `sleep 30` (so its comm is `sleep` and it holds the inherited stdout);
+    // the parent exits 0 straight away.
+    let daemon = "import os\n\
+                  if os.fork() == 0:\n    \
+                  os.setsid()\n    \
+                  os.execvp(\"sleep\", [\"sleep\", \"30\"])\n\
+                  else:\n    \
+                  os._exit(0)\n";
+    let started = Instant::now();
+    let out = vm
+        .exec(&["python3".into(), "-c".into(), daemon.into()], b"")
+        .expect("exec should return promptly, not wedge on the daemon");
+    let elapsed = started.elapsed();
+    assert_eq!(
+        out.exit_code, 0,
+        "the parent process exits 0; got {}",
+        out.exit_code
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "exec should return once the tree is reaped, not wait ~30s for the daemon (took {elapsed:?})"
+    );
+
+    // The daemon was killed, not merely detached: no `sleep` process survives in the guest. A working
+    // second exec also proves the connection wasn't wedged.
+    let survivors = vm
+        .exec(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "grep -l '^sleep$' /proc/[0-9]*/comm 2>/dev/null | wc -l".into(),
+            ],
+            b"",
+        )
+        .expect("liveness exec should work (agent not wedged)");
+    let n: i64 = String::from_utf8_lossy(&survivors.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(-1);
+    assert_eq!(
+        n, 0,
+        "the daemon's process tree should be reaped; found {n} `sleep` process(es)"
+    );
+
+    vm.shutdown().expect("shutdown should succeed");
 }

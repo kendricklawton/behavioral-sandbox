@@ -17,10 +17,14 @@
 //! don't mknod anything ourselves (the jailer does, which is why it needs real root — mknod of a
 //! device node is `EPERM` in a non-initial user namespace even with `CAP_MKNOD`).
 //!
-//! **Scope (P6.1).** This lands the jailed **cold boot** only. A jailed boot that also wants vsock,
-//! a NIC, the overlay, or bulk I/O devices is refused with a typed error (staging those into the
-//! chroot, and a per-VM netns for concurrent networked clones, are later Phase-6 steps). cgroup
-//! *limits* are P6.2; leak-proof, cgroup-owned teardown is P6.7.
+//! **Scope.** This confines a jailed **cold boot**: the chroot + uid/gid drop + the jailer's mount
+//! namespace, cgroup **cpu/memory limits** derived from the guest's envelope (applied when the host
+//! delegates the cgroup v2 controllers), and Firecracker's built-in **seccomp** filters (on by
+//! default; we never pass `--no-seccomp`). A jailed boot that also wants vsock, a NIC, the overlay,
+//! or bulk I/O devices is refused with a typed error (staging those into the chroot, and a per-VM
+//! netns for concurrent networked clones, are later steps). Leak-proof, cgroup-owned teardown lives
+//! in [`crate::lifetime`] (P6.7): the jailed VM's sentinel watches the jailer's cgroup at its
+//! precomputed path, so host death can't leak a jailed VMM either.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -40,6 +44,16 @@ pub const DEFAULT_JAIL_GID: u32 = 10_000;
 /// The chroot-relative path Firecracker binds its API socket at (its cwd is the chroot root). The
 /// host reaches the same socket at `<chroot_root>/run/firecracker.socket`.
 const JAILED_API_SOCKET: &str = "/run/firecracker.socket";
+
+/// The cgroup v2 `cpu.max` accounting period, in microseconds (the kernel default). A cpu quota of
+/// `n * CPU_PERIOD_US` per period means `n` cores' worth of CPU.
+const CPU_PERIOD_US: u64 = 100_000;
+
+/// Host-side memory headroom above the guest's RAM for the VMM's own footprint (heap, page tables,
+/// slack), in MiB. The guest RAM is the hard floor a full-guest workload needs; the rootfs page cache
+/// above it is reclaimable, so `mem_mib + this` caps the VMM without OOM-killing a legitimate boot.
+/// Measured: a 256 MiB guest booting to userspace peaks ~82 MiB, far under `mem_mib + overhead`.
+const MEMORY_OVERHEAD_MIB: u32 = 128;
 
 /// Confine the VMM under Firecracker's jailer. Opt-in via [`crate::BootConfig::jail`]; `None` (the
 /// default) boots Firecracker directly, as every phase before this one did.
@@ -104,6 +118,7 @@ pub(crate) fn spawn_jailer(
     firecracker: &Path,
     workdir: &Path,
     id: &str,
+    cgroup_args: &[String],
 ) -> Result<(Child, Console, PathBuf, PathBuf), VmmError> {
     // `--exec-file` must be an absolute path to a real binary: the jailer copies it into the chroot,
     // and derives the chroot subdir from its file name (so `.../firecracker/<id>/root`).
@@ -121,8 +136,8 @@ pub(crate) fn spawn_jailer(
 
     let fc_stderr = std::fs::File::create(workdir.join(FC_STDERR))
         .map_err(|e| VmmError::Vmm(format!("create firecracker stderr log: {e}")))?;
-    let mut child = Command::new(&jail.jailer)
-        .arg("--id")
+    let mut cmd = Command::new(&jail.jailer);
+    cmd.arg("--id")
         .arg(id)
         .arg("--exec-file")
         .arg(&exec)
@@ -133,26 +148,31 @@ pub(crate) fn spawn_jailer(
         .arg("--chroot-base-dir")
         .arg(workdir)
         // This host is cgroup v2 only; the jailer defaults to v1 and would fail to find the
-        // hierarchy. We set no cgroup *values* here — resource limits are P6.2 — but the jailer
-        // always creates the microVM's cgroup, which teardown removes.
+        // hierarchy. The jailer always creates the microVM's cgroup (teardown removes it).
         .arg("--cgroup-version")
-        .arg("2")
-        // Everything after `--` is Firecracker's. No `--daemonize`: we keep its stdout so the guest
-        // serial console still reaches the host.
-        .arg("--")
+        .arg("2");
+    // CPU/memory limits (P6.2): the jailer writes each `<file>=<value>` into that cgroup. Empty when
+    // the host doesn't delegate the cgroup v2 controllers (see `cgroup_limit_args`), so a jailed boot
+    // still runs there, just without limits.
+    for arg in cgroup_args {
+        cmd.arg("--cgroup").arg(arg);
+    }
+    // Everything after `--` is Firecracker's. No `--daemonize` (keep its stdout so the guest serial
+    // console still reaches the host) and no `--no-seccomp` (P6.3): Firecracker installs its built-in
+    // per-thread seccomp filters by default, and we deliberately never disable them.
+    cmd.arg("--")
         .arg("--api-sock")
         .arg(JAILED_API_SOCKET)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::from(fc_stderr))
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                VmmError::Artifact(format!("jailer not found: {}", jail.jailer.display()))
-            } else {
-                VmmError::Vmm(format!("spawn jailer: {e}"))
-            }
-        })?;
+        .stderr(Stdio::from(fc_stderr));
+    let mut child = cmd.spawn().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            VmmError::Artifact(format!("jailer not found: {}", jail.jailer.display()))
+        } else {
+            VmmError::Vmm(format!("spawn jailer: {e}"))
+        }
+    })?;
     let stdout = child.stdout.take();
     match Console::spawn(stdout) {
         Ok(console) => Ok((child, console, socket, chroot_root)),
@@ -222,6 +242,18 @@ fn resolve_exec(firecracker: &Path) -> Result<PathBuf, VmmError> {
     )))
 }
 
+/// The cgroup dir the jailer will create for a VM, computed **before** the jailer is spawned:
+/// `--cgroup-version 2` with no `--parent-cgroup` places the VMM at
+/// `<cgroup root>/<exec-file name>/<id>` (the jailer requires the exec-file name to contain
+/// "firecracker", so the component is stable). Precomputing it lets the lifetime sentinel (P6.7)
+/// watch the cgroup from the moment the jailer is spawned instead of after boot; `run_boot` still
+/// learns the *actual* dir from `/proc` and warns if they ever disagree.
+pub(crate) fn jailer_cgroup_dir(firecracker: &Path, id: &str) -> Option<PathBuf> {
+    let exec = resolve_exec(firecracker).ok()?;
+    let name = exec.file_name()?.to_owned();
+    Some(Path::new("/sys/fs/cgroup").join(name).join(id))
+}
+
 /// The cgroup dir the jailer placed `pid` in, read from `/proc/<pid>/cgroup` (version-independent, so
 /// no assumption about the jailer's parent-cgroup layout). Unified cgroup v2 shows one `0::<path>`
 /// line; the dir is `/sys/fs/cgroup<path>`. `None` for the root cgroup or an unreadable/empty entry.
@@ -246,4 +278,38 @@ pub(crate) fn remove_cgroup(dir: &Path) {
             let _ = std::fs::remove_dir(parent);
         }
     }
+}
+
+/// The `--cgroup <file>=<value>` limits (P6.2) that cap the jailed VMM at the guest's own resource
+/// envelope: `cpu.max` bounds total CPU to `vcpus` cores, and `memory.max` to the guest's RAM plus a
+/// fixed host-side overhead. Returns empty when the host can't apply them (see
+/// [`cgroup_limits_available`]), so the caller passes no `--cgroup` and the jailed boot still runs.
+pub(crate) fn cgroup_limit_args(vcpus: u32, mem_mib: u32) -> Vec<String> {
+    if !cgroup_limits_available() {
+        tracing::warn!(
+            "cgroup v2 cpu/memory controllers are not delegated to the cgroup root; the jailed \
+             microVM runs without CPU/memory limits (a systemd host delegates them by default)"
+        );
+        return Vec::new();
+    }
+    let quota = u64::from(vcpus) * CPU_PERIOD_US;
+    let memory_max = (u64::from(mem_mib) + u64::from(MEMORY_OVERHEAD_MIB)) * 1024 * 1024;
+    vec![
+        format!("memory.max={memory_max}"),
+        format!("cpu.max={quota} {CPU_PERIOD_US}"),
+    ]
+}
+
+/// Whether the jailer can set cgroup limits here: the cgroup v2 `cpu` and `memory` controllers must be
+/// enabled in the root's `subtree_control` (a systemd host does this out of the box). The jailer sets
+/// limits by enabling controllers down from the root, which only works when they're already delegated
+/// there and the root has no internal processes; if they aren't, passing `--cgroup` would make the
+/// jailer fail, so we detect and skip. A bare container (controllers not delegated) reads false.
+fn cgroup_limits_available() -> bool {
+    std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control")
+        .map(|s| {
+            let toks: Vec<&str> = s.split_whitespace().collect();
+            toks.contains(&"cpu") && toks.contains(&"memory")
+        })
+        .unwrap_or(false)
 }

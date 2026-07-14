@@ -51,6 +51,10 @@ fn rootfs_inittab() -> String {
 ::sysinit:/bin/mount -t devtmpfs dev /dev
 ::sysinit:/bin/mount -t proc proc /proc
 ::sysinit:/bin/mount -t sysfs sys /sys
+# cgroup v2 (P6.4): the agent runs each command in its own cgroup and reaps the whole process tree
+# via `cgroup.kill`, so a double-forked grandchild or `setsid` daemon can't outlive the command and
+# wedge the exec connection. `/sys/fs/cgroup` is provided by the sysfs mount above.
+::sysinit:/bin/mount -t cgroup2 cgroup2 /sys/fs/cgroup
 # Bulk input/output block devices (P3.4/P3.5): mount whichever the driver attached, by label — so
 # their /dev/vdX order doesn't matter. Best-effort: a missing device is skipped, so plain boots are
 # unaffected. Runs after devtmpfs/proc are up (findfs needs the device nodes + /proc/partitions).

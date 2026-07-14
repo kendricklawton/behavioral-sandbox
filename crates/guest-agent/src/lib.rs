@@ -156,8 +156,45 @@ where
     let budget = budget_from(timeout_ms);
     let started = Instant::now();
     let deadline = started + budget;
-    let mut child = match Command::new(program)
-        .args(args)
+    // Run the command in its own cgroup (P6.4) so its whole process tree can be reaped at once.
+    // Created before spawn; the child *enrolls itself* via the trampoline below, so every process
+    // the command ever forks inherits membership. Best-effort: `None` on a guest without cgroup v2,
+    // and the agent falls back to the direct-child kill (the pre-P6.4 behaviour).
+    let cgroup = ExecCgroup::create();
+
+    // Resolve the program up front so "no such binary" stays the typed spawn error the host knows
+    // (`Response::Error` → `VmmError::GuestExec`): with the trampoline, the real `execvp` happens
+    // inside the child, where a failure can only surface as a shell-style 127 on stderr.
+    if let Err(e) = resolve_program(program) {
+        let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
+        return Err(AgentError::Spawn(e));
+    }
+
+    // Spawn through the cgroup **trampoline**: a tiny `sh` leg that enrolls *itself* in the
+    // per-exec cgroup and then `exec`s the real command (same pid, so wait/kill are untouched).
+    // Self-placement, not a parent-side `cgroup.procs` write after `spawn`: that write raced the
+    // already-running child, and anything it forked before the write landed — a daemon, a fork
+    // storm; on one vCPU the child usually runs first — escaped the cgroup, survived `cgroup.kill`,
+    // and wedged the connection by holding the output pipes open. In the child, enrollment strictly
+    // precedes the `exec`, so the race cannot exist.
+    let mut cmd = match cgroup.as_ref() {
+        Some(cg) => {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c")
+                .arg(TRAMPOLINE_SCRIPT)
+                .arg("agent-exec-trampoline") // $0
+                .arg(&cg.path)
+                .arg(program)
+                .args(args);
+            cmd
+        }
+        None => {
+            let mut cmd = Command::new(program);
+            cmd.args(args);
+            cmd
+        }
+    };
+    let mut child = match cmd
         .current_dir(workdir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -200,7 +237,16 @@ where
         // Reap in the scope's own thread while the pumps drain in parallel — this is what keeps the
         // child from blocking on a full pipe. Bounded by the deadline: past it we SIGKILL the child
         // (which unblocks the pumps at EOF) and report a timeout instead of an exit.
-        wait_bounded(&mut child, deadline)
+        let result = wait_bounded(&mut child, deadline);
+        // Then reap the *whole tree* (P6.4): a double-forked grandchild or a `setsid` daemon that
+        // inherited the stdout/stderr pipe would otherwise keep its write end open, so the pumps
+        // never see EOF and this scope could not join them — wedging the agent on both the exit and
+        // timeout paths. `cgroup.kill` SIGKILLs every process in the cgroup at once, which the
+        // direct-child kill in `wait_bounded` (and even a `killpg`) cannot reach.
+        if let Some(cg) = cgroup.as_ref() {
+            cg.kill_all();
+        }
+        result
     });
 
     if let Some(e) = first_err
@@ -274,16 +320,13 @@ fn budget_from(timeout_ms: u32) -> Duration {
 }
 
 /// Wait for the child, but no longer than `deadline`. Polls `try_wait` (so the output pumps keep
-/// draining in parallel — a full pipe never wedges us), and past the deadline SIGKILLs the child
-/// (which unblocks the pumps at EOF) and reaps it, so a hung command is bounded and leaves no zombie.
+/// draining in parallel — a full pipe never wedges us), and past the deadline SIGKILLs the direct
+/// child and reaps it, so a hung command is bounded and leaves no zombie.
 ///
-/// **Known gap (deferred to the jailer/cgroup phase):** `kill` SIGKILLs only the *direct* child. A
-/// command that double-forks a grandchild which inherits the stdout/stderr pipe keeps that pipe's
-/// write end open, so the pumps never see EOF and `serve`'s `thread::scope` can't return — the
-/// agent wedges on that connection until the grandchild exits. The host is still bounded (its read
-/// deadline), but the definitive fix is killing the whole process tree via the guest's cgroup, which
-/// the confinement phase adds. A per-process-group `killpg` here would be a partial fix (a `setsid`
-/// daemon still escapes) and needs a signal dep in this `#![forbid(unsafe_code)]` binary.
+/// This kills only the *direct* child; the command's wider process tree (double-forked grandchildren,
+/// `setsid` daemons that would otherwise keep the output pipes open) is reaped by [`serve`] through
+/// the per-exec [`ExecCgroup`] after this returns, on both the exit and timeout paths (P6.4). So a
+/// hung or double-forking command can no longer wedge the agent's connection.
 fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited> {
     loop {
         if let Some(status) = child.try_wait()? {
@@ -295,6 +338,95 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited>
             return Ok(Waited::TimedOut);
         }
         std::thread::sleep(WAIT_POLL);
+    }
+}
+
+/// The cgroup v2 unified-hierarchy mount inside the guest (mounted by the rootfs `inittab`).
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// The trampoline `sh` leg that spawns a command *inside* its per-exec cgroup: enroll self
+/// (`$$` — the shell's own pid — into `$1/cgroup.procs`), drop the cgroup arg, then `exec` the
+/// real command, which keeps the same pid, so the agent's wait/kill handles are untouched. The
+/// command and its arguments arrive as real argv entries (`"$@"`), never interpolated into the
+/// script, so they can't inject into it. The enrollment is best-effort (`2>/dev/null`, matching
+/// the rest of the cgroup machinery) and, crucially, **sequenced before the `exec` in the child
+/// itself** — the property a parent-side `cgroup.procs` write can never have.
+const TRAMPOLINE_SCRIPT: &str = r#"{ echo $$ > "$1/cgroup.procs"; } 2>/dev/null; shift; exec "$@""#;
+
+/// Mirror `execvp`'s lookup (a path with a `/` as-is, else a `PATH` search) just enough to report a
+/// missing or non-executable program as the typed spawn error before the trampoline runs.
+/// TOCTOU-tolerant: a program that vanishes between this check and the child's `exec` surfaces as
+/// the trampoline's shell-style 127 instead.
+fn resolve_program(program: &str) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let executable = |p: &Path| {
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    };
+    let found = if program.contains('/') {
+        executable(Path::new(program))
+    } else {
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| executable(&dir.join(program))))
+            .unwrap_or(false)
+    };
+    if found {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory",
+        ))
+    }
+}
+
+/// Names the next per-exec cgroup uniquely within this agent process.
+static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns (P6.4).
+/// cgroup v2 membership is inherited by every child the command forks and cannot be escaped by
+/// `setsid`, so writing `cgroup.kill` SIGKILLs the entire tree at once — the definitive fix for the
+/// double-fork / daemon wedge that a direct-child `kill` (and even a `killpg`) miss.
+///
+/// Best-effort throughout: if the guest has no cgroup v2, [`create`](Self::create) returns `None` and
+/// the agent falls back to the direct-child kill (no worse than before). No controllers are enabled,
+/// so it works even though the guest's root cgroup holds processes (the no-internal-process rule only
+/// bites when enabling controllers in `subtree_control`), and it needs no host-side delegation.
+struct ExecCgroup {
+    path: PathBuf,
+}
+
+impl ExecCgroup {
+    /// Create a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a cgroup v2 mount.
+    fn create() -> Option<Self> {
+        let path = PathBuf::from(CGROUP_ROOT).join(format!(
+            "agent-exec-{}-{}",
+            std::process::id(),
+            CGROUP_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).ok()?;
+        Some(Self { path })
+    }
+
+    /// SIGKILL every process in the cgroup and its descendants, atomically (guest kernel >= 5.14).
+    fn kill_all(&self) {
+        let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
+    }
+}
+
+impl Drop for ExecCgroup {
+    fn drop(&mut self) {
+        // Ensure the tree is dead (idempotent with `serve`'s explicit kill), then remove the now-empty
+        // cgroup. `remove_dir` needs it empty, and SIGKILL'd processes are reaped by init
+        // asynchronously, so retry briefly rather than leak a dir on a long-lived guest (the warm pool).
+        self.kill_all();
+        for _ in 0..50 {
+            if std::fs::remove_dir(&self.path).is_ok() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }
 

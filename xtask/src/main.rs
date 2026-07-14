@@ -214,6 +214,10 @@ fn setup() -> Result<()> {
     );
     check("firecracker in PATH", in_path("firecracker"));
     check("jailer in PATH", in_path("jailer"));
+    check(
+        "cgroup v2 cpu+memory delegated (jailer resource limits)",
+        cgroup_controllers_delegated(),
+    );
     check("bpf-linker installed", in_path("bpf-linker"));
     check("mke2fs (rootfs + input block device)", in_path("mke2fs"));
     check(
@@ -300,6 +304,18 @@ fn in_path(bin: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|dir| dir.join(bin).is_file())
+}
+
+/// Whether the cgroup v2 `cpu`+`memory` controllers are delegated to the cgroup root, so the jailer
+/// can set a jailed VM's CPU/memory limits (P6.2). A systemd host enables these by default; where they
+/// aren't, jailed boots still run but without limits. Informational only.
+fn cgroup_controllers_delegated() -> bool {
+    std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control")
+        .map(|s| {
+            let toks: Vec<&str> = s.split_whitespace().collect();
+            toks.contains(&"cpu") && toks.contains(&"memory")
+        })
+        .unwrap_or(false)
 }
 
 fn cargo(args: &[&str]) -> Result<()> {

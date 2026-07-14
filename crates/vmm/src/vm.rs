@@ -32,7 +32,11 @@ use crate::firecracker::{
     Action, ApiClient, BootSource, Drive, MachineConfig, MemBackend, MemBackendType,
     NetworkInterface, SnapshotCreate, SnapshotLoad, SnapshotType, VmState, VmStateKind, Vsock,
 };
-use crate::jail::{read_cgroup_dir, remove_cgroup, spawn_jailer, stage_into_chroot, Chroot, Jail};
+use crate::jail::{
+    cgroup_limit_args, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup, spawn_jailer,
+    stage_into_chroot, Chroot, Jail,
+};
+use crate::lifetime::{KillHandle, VmLifetime};
 use crate::net::{apply_guest_net_identity, Tap};
 use crate::{Limits, RunResult, VmmError};
 
@@ -212,7 +216,9 @@ impl Default for BootConfig {
 }
 
 /// A booted-and-ready microVM: the `firecracker` child, its API socket, scratch dir, and the
-/// captured console. Guaranteed teardown lives in `Drop`, so losing this value can't leak the VMM.
+/// captured console. Guaranteed teardown lives in `Drop`, so losing this value can't leak the VMM —
+/// and the cgroup-owned lifetime (the sentinel behind [`KillHandle`], P6.7) covers the paths `Drop`
+/// can't: losing the whole *process* (Ctrl-C, SIGKILL, OOM) can't leak it either.
 #[derive(Debug)]
 #[must_use = "dropping a RunningVm kills its microVM"]
 pub struct RunningVm {
@@ -244,6 +250,10 @@ pub struct RunningVm {
     /// `workdir` (reclaimed with it), but the jailer's cgroup is outside, so teardown removes it
     /// explicitly, like the tap.
     chroot: Option<Chroot>,
+    /// The cgroup-owned lifetime machinery (P6.7): the VM's lifetime cgroup, the armed sentinel
+    /// that reaps the VM if this *process* dies, and the [`KillHandle`] state. Torn down with the
+    /// VM on every path.
+    lifetime: VmLifetime,
 }
 
 /// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
@@ -323,14 +333,12 @@ impl Vm {
     /// [`VmmError::Vmm`] for any Firecracker API or process failure. On any error the child is
     /// killed and the scratch dir removed before returning.
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
-        // Checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
-        // on hosts without KVM (a fake "firecracker" needs no VM).
-        if !Path::new("/dev/kvm").exists() {
-            return Err(VmmError::NoKvm);
-        }
-        // P6.1 jails a plain read-write cold boot only. Combining the jailer with vsock, a NIC, the
-        // overlay, or bulk I/O devices needs staging those into the chroot / a per-VM netns, which are
-        // later Phase-6 steps — refuse it now rather than boot a half-confined VM (deny-by-default).
+        // Config validation before environment probing, so this deny-by-default refusal is reachable
+        // (and unit-testable) on any host, with KVM or not. P6.1 jails a plain read-write cold boot
+        // only: combining the jailer with vsock, a NIC, the overlay, or bulk I/O needs staging those
+        // into the chroot / a per-VM netns (later Phase-6 steps), so refuse it rather than boot a
+        // half-confined VM. The isolation boundary never half-degrades (decision 013): a jail we can't
+        // fully build is a hard error, not a quiet drop to a weaker confinement.
         if config.jail.is_some()
             && (config.guest_cid.is_some()
                 || config.enable_network
@@ -344,6 +352,11 @@ impl Vm {
                  steps"
                     .into(),
             ));
+        }
+        // Checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
+        // on hosts without KVM (a fake "firecracker" needs no VM).
+        if !Path::new("/dev/kvm").exists() {
+            return Err(VmmError::NoKvm);
         }
         let mut spawned = Spawned::launch(&config)?;
         let boot_latency = match spawned.run_boot(&config) {
@@ -420,6 +433,17 @@ impl RunningVm {
     #[must_use]
     pub fn vmm_pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// A cheap, cloneable, `Send + Sync` [`KillHandle`] that force-kills this VM from any thread —
+    /// the **host-gave-up path** (P6.7). `exec` borrows `&self` and `shutdown` consumes `self`, so
+    /// a caller blocked in `exec` can't otherwise be stopped; killing through the handle makes the
+    /// VMM's vsock peer close, and the blocked call returns a typed error. The exec deadline covers
+    /// the common timeout case; this covers the host abandoning the run entirely. After a kill,
+    /// this VM's `Drop`/`shutdown` still reclaims all host residue, exactly as for a crashed guest.
+    #[must_use]
+    pub fn kill_handle(&self) -> KillHandle {
+        self.lifetime.kill_handle()
     }
 
     /// The host end of the per-VM point-to-point link, when booted with
@@ -762,6 +786,7 @@ impl Drop for RunningVm {
             &self.workdir,
             self.tap.as_ref(),
             self.chroot.as_ref(),
+            &mut self.lifetime,
         );
     }
 }
@@ -794,6 +819,9 @@ struct Spawned {
     /// The jail (chroot + dropped uid/gid + cgroup) when `jail` was set (P6.1); `None` for a direct
     /// boot. Its cgroup lives outside `workdir`, so every teardown path removes it explicitly.
     chroot: Option<Chroot>,
+    /// The cgroup-owned lifetime machinery (P6.7), armed at spawn so the crash-safety window is as
+    /// small as possible; moved onto the [`RunningVm`] by `into_running`.
+    lifetime: VmLifetime,
 }
 
 impl Drop for Spawned {
@@ -805,6 +833,7 @@ impl Drop for Spawned {
                 &self.workdir,
                 self.tap.as_ref(),
                 self.chroot.as_ref(),
+                &mut self.lifetime,
             );
         }
     }
@@ -915,6 +944,11 @@ impl Spawned {
             None
         };
 
+        // Cgroup-owned lifetime (P6.7): enroll the VMM in a per-VM lifetime cgroup and arm the
+        // sentinel, so from here even a SIGKILLed driver can't leak it. Named by the scratch dir,
+        // so a VM's cgroup and scratch identities match.
+        let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
+
         // Firecracker creates the vsock socket here on `PUT /vsock`; the host dials it post-boot.
         let vsock_uds = config.guest_cid.map(|_| workdir.join(VSOCK_UDS));
         Ok(Self {
@@ -929,6 +963,7 @@ impl Spawned {
             output,
             tap,
             chroot: None,
+            lifetime,
         })
     }
 
@@ -946,14 +981,28 @@ impl Spawned {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "agent-vm".to_string());
+        // CPU/memory limits (P6.2) derived from the guest's own resource envelope (vcpus, mem_mib);
+        // empty when the host doesn't delegate the cgroup controllers, so the jailed boot still runs.
+        let cgroup_args = cgroup_limit_args(config.vcpus, config.mem_mib);
         let (child, console, socket, chroot_root) =
-            match spawn_jailer(jail, &config.firecracker, &workdir, &id) {
+            match spawn_jailer(jail, &config.firecracker, &workdir, &id, &cgroup_args) {
                 Ok(t) => t,
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&workdir);
                     return Err(e);
                 }
             };
+        // Cgroup-owned lifetime (P6.7), jailed flavour: the jailer creates the VM's cgroup and
+        // moves the VMM into it itself, so enrolling the pid in a driver cgroup would race that
+        // placement (last write wins membership and could yank the VMM out of its limits). The
+        // sentinel instead watches the jailer's cgroup at its precomputed path; the unprotected
+        // window is spawn → the jailer's self-placement (milliseconds).
+        let lifetime = VmLifetime::watch(
+            child.id(),
+            jailer_cgroup_dir(&config.firecracker, &id)
+                .into_iter()
+                .collect(),
+        );
         Ok(Self {
             child: Some(child),
             console,
@@ -973,6 +1022,7 @@ impl Spawned {
                 gid: jail.gid,
                 cgroup_dir: None,
             }),
+            lifetime,
         })
     }
 
@@ -1014,6 +1064,9 @@ impl Spawned {
                 }
             },
         };
+        // Cgroup-owned lifetime (P6.7): a restored clone (and every warm-pool VM riding restore) is
+        // as leakable as a cold boot, so it gets the same enrollment + sentinel.
+        let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
         Ok(Self {
             child: Some(child),
             console,
@@ -1029,6 +1082,7 @@ impl Spawned {
             output: None,
             tap,
             chroot: None,
+            lifetime,
         })
     }
 
@@ -1036,11 +1090,7 @@ impl Spawned {
     /// VMs stay attributable. Shared by [`run_boot`](Self::run_boot) and
     /// [`run_restore`](Self::run_restore).
     fn vm_name(&self) -> String {
-        self.workdir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned()
+        workdir_name(&self.workdir)
     }
 
     /// Load `snapshot` on this fresh VMM and resume it, returning the restore latency (the load +
@@ -1213,10 +1263,22 @@ impl Spawned {
             kernel_arg = stage_into_chroot(&root, "kernel", &config.kernel, uid, gid, 0o444)?;
             rootfs_arg = stage_into_chroot(&root, "rootfs.ext4", &config.rootfs, uid, gid, 0o600)?;
             // Learn the cgroup the jailer placed the VMM in (from `/proc/<pid>/cgroup`, now that
-            // Firecracker is running in its final cgroup), so teardown can remove it.
+            // Firecracker is running in its final cgroup), so teardown can remove it. The lifetime
+            // sentinel (P6.7) watches the *precomputed* jailer cgroup path from spawn; if the
+            // jailer put the VMM somewhere else, the sentinel isn't guarding it — warn, don't hide.
             if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
+                let actual = read_cgroup_dir(pid);
+                if let Some(dir) = actual.as_deref() {
+                    if !self.lifetime.watches(dir) {
+                        tracing::warn!(
+                            cgroup = %dir.display(),
+                            "jailer placed the VMM outside the precomputed cgroup; the lifetime \
+                             sentinel is not guarding it (driver death would leak this VMM)"
+                        );
+                    }
+                }
                 if let Some(chroot) = self.chroot.as_mut() {
-                    chroot.cgroup_dir = read_cgroup_dir(pid);
+                    chroot.cgroup_dir = actual;
                 }
             }
         } else {
@@ -1402,6 +1464,8 @@ impl Spawned {
                 .clone()
                 .or_else(|| self.child.as_ref().and_then(|ch| read_cgroup_dir(ch.id())))
         });
+        // Flag before the reap, so an outstanding `KillHandle` can't signal a recycled pid.
+        self.lifetime.mark_down();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -1414,6 +1478,7 @@ impl Spawned {
         if let Some(cgroup) = cgroup {
             remove_cgroup(&cgroup);
         }
+        self.lifetime.teardown();
         self.console.join();
         let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
         let console = self.console.snapshot();
@@ -1458,6 +1523,9 @@ impl Spawned {
             output: self.output.take(),
             tap: self.tap.take(),
             chroot: self.chroot.take(),
+            // The armed machinery moves to the `RunningVm`; the guard keeps an inert placeholder
+            // (its `Drop` skips teardown anyway once `child` is `None`).
+            lifetime: std::mem::replace(&mut self.lifetime, VmLifetime::disarmed()),
         })
     }
 }
@@ -1601,6 +1669,16 @@ fn create_workdir() -> Result<PathBuf, VmmError> {
     ))
 }
 
+/// The scratch dir's basename — the VM's process-unique identity, shared by its tracing span, its
+/// jail id, and its lifetime cgroup, so one name finds all of a VM's residue.
+fn workdir_name(workdir: &Path) -> String {
+    workdir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Guaranteed, best-effort teardown shared by both `Drop`s: kill the VMM, join the console reader
 /// (which ends once the killed child's stdout closes), delete the per-VM tap and the jailer's cgroup
 /// (both live outside the scratch dir, so `remove_dir_all` can't reclaim them), then remove the
@@ -1611,7 +1689,11 @@ fn teardown(
     workdir: &Path,
     tap: Option<&Tap>,
     chroot: Option<&Chroot>,
+    lifetime: &mut VmLifetime,
 ) {
+    // Flag teardown *before* the reap: from here every outstanding `KillHandle` no-ops, so a
+    // late `kill` can never signal a pid the `wait` below has just made recyclable.
+    lifetime.mark_down();
     let _ = child.kill();
     let _ = child.wait();
     console.join();
@@ -1623,6 +1705,8 @@ fn teardown(
     if let Some(cgroup) = chroot.and_then(|c| c.cgroup_dir.as_deref()) {
         remove_cgroup(cgroup);
     }
+    // Reclaim the lifetime cgroup and disarm the sentinel (it wakes to already-gone dirs).
+    lifetime.teardown();
     let _ = std::fs::remove_dir_all(workdir);
 }
 
@@ -1692,6 +1776,34 @@ mod tests {
     fn missing_artifact_is_typed_error() {
         let err = require_file(Path::new("/no/such/vmlinux"), "kernel image").unwrap_err();
         assert!(matches!(err, VmmError::Artifact(_)));
+    }
+
+    #[test]
+    fn jail_refuses_half_confined_boots() {
+        // P6.6 deny-by-default: the jailer only supports a plain read-write cold boot, so any config
+        // that would run a *half*-jailed VM (a feature not yet staged into the chroot / a netns) is a
+        // typed error, never a quiet weaker confinement. This is a pure config check, refused before
+        // the /dev/kvm probe, so it holds on any host (no KVM, no root needed). Each mutation flips one
+        // not-yet-jailed feature on; all must be refused.
+        let mutations: [fn(&mut BootConfig); 5] = [
+            |c| c.guest_cid = Some(DEFAULT_GUEST_CID),
+            |c| c.enable_network = true,
+            |c| c.input_dir = Some(PathBuf::from("/tmp/in")),
+            |c| c.output_dir = Some(PathBuf::from("/tmp/out")),
+            |c| c.read_only_root = true,
+        ];
+        for (i, mutate) in mutations.iter().enumerate() {
+            let mut cfg = BootConfig {
+                jail: Some(Jail::default()),
+                ..BootConfig::default()
+            };
+            mutate(&mut cfg);
+            let err = Vm::boot(cfg).expect_err("a half-jailed config must be refused");
+            assert!(
+                matches!(err, VmmError::Vmm(_)),
+                "mutation {i} should be a typed refusal, got {err:?}"
+            );
+        }
     }
 
     #[test]

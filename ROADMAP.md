@@ -601,18 +601,75 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       jailed VM is refused: all later Phase-6 steps). **Needs real root** — the jailer's `mknod`
       `EPERM`s in a non-initial userns, so the `unshare -Urn` trick can't run it; `boots_under_the_jailer`
       gates on real root and skips otherwise. Proof: the full privileged suite (now **24 tests**) passes
-      as real root in a privileged container, jailed boot ~4 s. cgroup **limits** are P6.2, **seccomp**
-      P6.3, leak-proof cgroup-**owned** teardown P6.7.)*
-- [ ] **P6.2** Put each VMM in its own **cgroup**; set CPU/memory limits.
-- [ ] **P6.3** Apply Firecracker's **seccomp** filters; understand what syscalls it needs.
-- [ ] **P6.4** Resource caps enforced: a VM can't exceed its cgroup memory/CPU. *(Also closes the
-      P2.6 gap: killing the guest's cgroup reaps a command's whole process tree — grandchildren and
-      `setsid` daemons that a direct-child `kill` misses — so a double-forking command can't wedge
-      the guest agent's exec connection.)*
-- [ ] **P6.5** `(decision)` per-run resource policy shape (the knobs the engine exposes) →
-      `ARCHITECTURE.md`.
-- [ ] **P6.6** Verify isolation: a hostile guest + a hostile-ish workload can't escape the jail.
-- [ ] **P6.7** Clean cgroup/namespace teardown per run — and the leak-proofing this buys:
+      as real root in a privileged container, jailed boot ~4 s. Leak-proof cgroup-**owned** teardown
+      (host death can't leak a VM) is P6.7.)*
+- [x] **P6.2** Put each VMM in its own **cgroup**; set CPU/memory limits.
+      *(The jailer already puts each VMM in its own cgroup (P6.1); this sets the limits. The driver
+      derives them from the guest's own envelope and passes them via the jailer's `--cgroup`:
+      `cpu.max` caps total CPU at exactly `vcpus` cores (`vcpus × 100ms` quota per 100ms period), and
+      `memory.max` at the guest RAM plus a fixed 128 MiB host-side overhead. A 256 MiB guest booting to
+      userspace was **measured** at ~82 MiB (guests touch little of their RAM, and the rootfs page cache
+      above guest RAM is reclaimable), so the cap never OOMs a legitimate boot while still bounding a
+      runaway. Requires the cgroup v2 `cpu`+`memory` controllers delegated to the cgroup root (a systemd
+      host does this out of the box); where they aren't, the driver detects it, warns, and boots
+      **without** limits rather than failing (passing `--cgroup` would otherwise make the jailer fail).
+      Proof: `boots_under_the_jailer` asserts the VMM's cgroup carries a finite `memory.max` in the
+      guest-RAM-plus-overhead band and a `cpu.max` of exactly `vcpus` cores. These are hard cgroup
+      limits the kernel enforces by construction; the adversarial mem-hog / fork-bomb "host
+      unaffected" proof (a guest actually held to them under load) is P6.8.)*
+- [x] **P6.3** Apply Firecracker's **seccomp** filters; understand what syscalls it needs.
+      *(Firecracker installs its built-in per-thread seccomp filters by default (the "advanced" level:
+      a curated syscall allowlist per thread category — API, VMM, vCPU — with a `SIGSYS` kill on
+      anything else). We simply never pass `--no-seccomp`, so every boot (jailed or not) is filtered.
+      The filters install at `InstanceStart`: the idle pre-boot process shows `Seccomp: 0`, but a
+      running VM shows `Seccomp: 2` (filter mode) on **every** thread, **verified** by probing
+      `/proc/<pid>/task/*/status` (`firecracker`, `fc_api`, `fc_vcpu`). The lesson: the API thread needs
+      a broader set to configure the VM, the vCPU threads a narrow KVM-ioctl-centric set, and the filter
+      is the last line if the guest breaks into the VMM. Proof: `boots_under_the_jailer` asserts the
+      running VMM is in seccomp filter mode (`Seccomp: 2`).)*
+- [x] **P6.4** Resource caps enforced: a VM can't exceed its cgroup memory/CPU. *(Two halves.
+      **Memory/CPU** are the host VMM cgroup from P6.2 (`memory.max`/`cpu.max` on the jailed VMM):
+      cgroup v2 enforces them by construction, so a guest can't push the VMM past them (the
+      adversarial mem-hog / fork-bomb "host unaffected" proof is P6.8). **Process-tree reaping closes
+      the P2.6 gap** and is the concrete new code: the guest agent now runs each command in its **own
+      guest cgroup** (a `cgroup2` mount added to the rootfs init) and reaps the **whole tree** with
+      `cgroup.kill` after the command exits or times out. cgroup membership is inherited by every fork
+      and can't be escaped by `setsid`, so a double-forked grandchild or daemon that inherited the
+      stdout/stderr pipe is killed rather than left holding it open — which is exactly what used to
+      wedge the agent's exec connection (the output pumps never saw EOF), on **both** the exit and
+      timeout paths. `cgroup.kill` is what a direct-child `kill` and even a `killpg` (a `setsid`
+      daemon escapes the process group) miss. Best-effort: a guest without cgroup v2 falls back to the
+      old direct-child kill. Proof: `reaps_the_whole_process_tree_so_a_daemon_cannot_wedge_exec` runs
+      a `fork`→`setsid`→`exec sleep 30` daemon that inherits stdout while its parent exits 0; the exec
+      returns in well under the daemon's lifetime with exit 0, and no `sleep` survives in the guest.
+      Full privileged suite now **25 tests**, green.)*
+- [x] **P6.5** `(decision)` per-run resource policy shape (the knobs the engine exposes) →
+      `ARCHITECTURE.md`. *(Decision 013: the per-run policy is the one already-public, seam-pinned
+      `Limits` struct carrying **quantities** (`vcpus` → guest vCPUs + `cpu.max`; `mem_mib` → guest RAM
+      + `memory.max`; `wall` → boot deadline today, exec budget in P7.3) plus the exec **output cap**
+      (P7.3), never capabilities: network egress stays a separate eBPF-enforced concern (decision 008),
+      not a `Limits` field. Enforced at the **host VMM cgroup** (one choke point for guest + VMM), not
+      per-exec. **Fails open, recorded:** missing cgroup delegation logs a warning and boots uncapped,
+      because resource caps are DoS mitigation, not the isolation boundary (which never degrades: a jail
+      that can't be built is a hard error). Defaults stay a conservative, `seam:`-marked floor. So P7.3
+      is wiring, not design: no new type, no new enforcement point. A strict `require_limits` fail-closed
+      toggle is tombstoned for P7.3.)*
+- [x] **P6.6** Verify isolation: a hostile guest + a hostile-ish workload can't escape the jail.
+      *(Two proofs. **The confinement is in force, read off the live VMM:** `boots_under_the_jailer` now
+      asserts the running Firecracker is **chrooted** (its root's `(st_dev, st_ino)` differs from the
+      host root's; the `/proc/<pid>/root` link *text* renders as `/` after the jailer's pivot_root, so
+      identity is checked, not path), runs as the **dropped uid** (not root), holds **no effective capabilities**
+      (`CapEff` all zeros), runs under **`no_new_privs`** and **seccomp filter mode**, and lives in its
+      **own mount namespace** (on top of the existing cgroup-cap asserts). Layered with KVM this is the
+      second wall: a guest that breached hardware isolation into the VMM lands in that box, naming no host
+      path, holding no capability, making no out-of-filter syscall. **No half-confined escape hatch:**
+      `Vm::boot` refuses `jail` + any not-yet-jailed feature (vsock, NIC, overlay, bulk I/O) with a typed
+      error *before* the KVM probe, so the refusal is host-safe: a new `jail_refuses_half_confined_boots`
+      unit test runs in the everyday gate (the isolation boundary never half-degrades, decision 013).
+      Running a hostile workload *inside* a jailed guest waits on exec-under-jail (a later Phase-6
+      migration: jailed boot refuses vsock today), so the bar here is the VMM-side confinement matrix plus
+      the refusal.)*
+- [x] **P6.7** Clean cgroup/namespace teardown per run — and the leak-proofing this buys:
       **host-process death (Ctrl-C, SIGKILL, OOM) cannot leak a VM**, because the cgroup owns its
       lifetime from outside the driver. (Until here, teardown is `Drop`-based: killing the driver
       mid-run leaks the VMM — a signal handler would only paper over SIGINT, so we wait for the
@@ -623,7 +680,46 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       leak-free even if the embedder's own thread is wedged. The settable exec deadline (P7.3) covers
       the common timeout case; the token covers the host-abandons-the-run case. Surfaced on `Sandbox`
       in P7.)*
-- [ ] **P6.8** Test: a fork-bomb / mem-hog in the guest is bounded by the cgroup, host unaffected.
+      *(Decision 014, crash-only design. **Namespaces need no explicit teardown**: the jailer's mount
+      namespace (and every namespace a VMM holds) is reclaimed by the kernel with its last member
+      process, so killing the VM's cgroup *is* the namespace cleanup; cgroup dirs are the one part the
+      kernel won't reap for us. So: every directly-spawned VMM (cold boots, restores, warm-pool
+      clones) is enrolled at spawn in a per-VM **lifetime cgroup** under the driver's own cgroup (no
+      controllers, so no delegation needed), and a per-VM **sentinel** — a `sh` child in its own process
+      group, blocked reading a pipe only the driver holds — wakes on the EOF the kernel delivers at
+      *any* driver death, `cgroup.kill`s the VM's cgroup(s), and removes them; a jailed VMM's sentinel
+      watches the jailer's precomputed cgroup instead (enrolling would race the jailer's own placement).
+      Clean teardown removes the cgroup first, so the disarmed sentinel wakes to nothing and exits.
+      The **`KillHandle`** (public on `RunningVm`; `Sandbox` in P7) kills through the same `cgroup.kill`
+      file — cloneable, `Send + Sync`, no `unsafe` — with a pid fallback for cgroup-less hosts and a
+      torn-down flag set before the reap so a late kill can't signal a recycled pid. **Proof:** the
+      sentinel mechanism is unit-tested in the host gate (EOF → kill written, disarm → no action);
+      `driver_death_cannot_leak_a_vm` SIGKILLs a real subprocess driver mid-run and the VMM dies + its
+      cgroup vanishes in ~1 s; `kill_handle_unblocks_a_wedged_exec` frees a thread blocked in a 30 s
+      exec in ~2 s. Degradations recorded, not hidden: no writable cgroup v2 → warn + Drop-only teardown;
+      the spawn→enrollment window (μs) and a crashed driver's inert scratch/tap residue are documented
+      tombstones, not claims.)*
+- [x] **P6.8** Test: a fork-bomb / mem-hog in the guest is bounded by the cgroup, host unaffected.
+      *(Both run against the exec-capable agent rootfs with the VMM under the **engine-derived** caps
+      (`cpu.max` = vcpus cores, `memory.max` = guest RAM + 128 MiB — the P6.2 derivation, pinned by the
+      test since exec-under-jail is a later migration; real-root + delegation gated, skips elsewhere).
+      **Mem-hog** (Python allocating touched pages until the guest dies): the guest's *own* OOM killer
+      eats the hog (exit 137) inside the hardware boundary; the host cgroup **measured** peaking at
+      ~208 MiB against the 384 MiB cap, zero host-side `oom_kill` events (the 128 MiB overhead budget
+      held under worst-case load), and the VM stays exec-responsive. **Fork storm** (100 spinning
+      background shells for 3 s, deliberately bounded so the run is measurable — the unbounded classic
+      would starve the guest agent, a guest-availability non-goal): the VMM's host thread count stays
+      **4 → 4** (guest processes don't exist on the host: the hardware-isolation lesson, observed) and
+      the storm burned 3.79 s of host CPU against a 5.85 s quota-derived bound; the orphaned spinners
+      are then reaped by P6.4's tree kill and a follow-up exec answers immediately. **The adversarial
+      test earned its keep:** the storm exposed a real P6.4 race — the agent's parent-side
+      `cgroup.procs` write landed *after* the already-running command's first forks (on 1 vCPU the
+      child usually runs first), so pre-write forks escaped `cgroup.kill` and re-wedged the exec
+      connection. Fixed by a `sh` **trampoline**: the child enrolls *itself* in the cgroup, then
+      `exec`s the real command (same pid; argv passed as argv, never interpolated), making
+      enrollment-before-first-fork structural rather than lucky; the agent pre-resolves the program so
+      "no such binary" stays the typed `GuestExec` error. Full privileged suite now **30 tests**,
+      green; rootfs rebuilt, still byte-reproducible.)*
 - **Exit gate + lesson:** the VMM runs jailed + cgroup-limited; write up **namespaces, cgroups v2,
   seccomp, and capabilities** — the container-isolation primitives, seen through Firecracker.
 

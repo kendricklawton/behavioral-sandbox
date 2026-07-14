@@ -15,6 +15,7 @@ mod drives;
 mod exec;
 mod firecracker;
 mod jail;
+mod lifetime;
 mod net;
 mod pool;
 #[cfg(test)]
@@ -27,6 +28,7 @@ use agent_channel::ChannelError;
 
 pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID};
+pub use lifetime::KillHandle;
 pub use pool::Pool;
 pub use vm::{BootConfig, RunningVm, Snapshot, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 
@@ -240,7 +242,10 @@ impl From<ChannelError> for VmmError {
     }
 }
 
-/// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy.
+/// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy. This is
+/// the per-run resource-policy surface whose shape is fixed by ARCHITECTURE decision 013: quantities
+/// (vCPUs, memory, wall), not capabilities, enforced at the host VMM cgroup; P7.3 adds the exec-wall
+/// and output-cap knobs to it.
 ///
 /// The [`default`](Limits::default) values are **deliberately conservative and load-bearing for
 /// embedders**: they cap what a run gets by default, so an embedder that pins this crate and calls

@@ -1,20 +1,26 @@
 # agent *(working name)*
 
-**A self-hostable engine for running untrusted code — with a record of what it did that you
-can trust without trusting the code.** Untrusted code runs inside a **Firecracker** microVM
-(hardware isolation via KVM); **host-side eBPF** (**aya**) watches and enforces what it does —
-syscalls, its network, its cgroup — from *outside* the guest, where the code can't see or
-subvert you. Every run yields a tamper-resistant, host-observed **flight recorder** of exactly
-what happened.
+**A self-hostable engine for running untrusted code in hardware isolation, with a tamper-evident
+record of exactly what it did that you can trust without trusting the code.** The code runs inside
+a **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) watches and
+enforces what it does (syscalls, its network, its cgroup) from *outside* the guest, where the code
+can't see or subvert it. Every run yields a host-observed **flight recorder** of exactly what
+happened.
 
-Built in the open as a **Linux-internals deep-dive** — each milestone is a working demo and a
+Built in the open as a **Linux-internals deep-dive**: each milestone is a working demo and a
 writeup, from the hardware-isolation boundary up to the syscall/network boundary.
 
 ## Why
 
-Running untrusted or AI-generated code safely is a real problem, and the honest answers are
-heavy VMs (E2B/Firecracker in the cloud) or shared-kernel containers (weaker isolation). This
-is the **self-hostable engine** underneath that kind of product:
+Any time you run code you don't fully trust (a third-party binary, a CI job from a fork, a
+dependency's install script, an AI-generated snippet, a sample under analysis) you want two things
+at once: strong isolation, and a trustworthy account of what the code actually did. The
+off-the-shelf answers are a cloud sandbox (E2B and the like: someone else's infrastructure, network
+open by default) or a shared-kernel container (weaker isolation, and whatever is watching runs where
+the code can reach it). This is the **self-hostable engine** for the case those don't cover: the
+code stays on your own infrastructure (air-gapped or regulated is fine), and the watching and the
+policy live in the host kernel, outside the guest, so the record can't be forged by the code it is
+recording.
 
 - **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. The trust
   boundary is the CPU, not guest-side software.
@@ -30,11 +36,13 @@ is the **self-hostable engine** underneath that kind of product:
 
 ## Status
 
-**Early and learning-driven.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md) —
-its checkboxes are the state. So far a microVM boots, runs commands with captured
-stdout/stderr/exit, and runs real Python from a purpose-built rootfs (Phases 1–2 done, Phase 3 in
-progress); networking, snapshots, and the eBPF tracks are ahead. Nothing here is production yet —
-the point is depth, done in the open.
+**Early and learning-driven.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md);
+its checkboxes are the state. So far (Phases 1 through 6) a microVM boots to userspace, runs commands
+with captured stdout/stderr/exit, runs real Python, Node, and static binaries from a purpose-built
+rootfs, gets a per-VM deny-by-default network, snapshots and restores from a warm pool in
+milliseconds, and runs confined under the jailer (chroot, dropped privileges, cgroup limits,
+seccomp). The eBPF observability and the flight recorder (the host-side record of what a run did) are
+the next tracks. Nothing here is production yet; the point is depth, done in the open.
 
 ## How it fits together
 

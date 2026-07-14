@@ -62,10 +62,16 @@ fn boots_with_a_vsock_device() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn boots_under_the_jailer() {
-    // P6.1: the same plain rootfs boots to userspace, but Firecracker now runs under its jailer — in
-    // a chroot, dropped to an unprivileged uid/gid, inside the jailer's mount namespace. The jailer
-    // `mknod`s device nodes, which needs real root (the `unshare -Urn` trick used by the other
-    // privileged tests can't), so skip rather than fail on a box that can do KVM but not real root.
+    // The plain rootfs boots to userspace, but Firecracker now runs confined by its jailer: in a
+    // chroot, dropped to an unprivileged uid/gid, inside the jailer's mount namespace, under cgroup
+    // cpu/memory limits, with its built-in seccomp filters active. The jailer `mknod`s device nodes,
+    // which needs real root (the `unshare -Urn` trick the other privileged tests use can't), so skip
+    // rather than fail on a box that can do KVM but not real root.
+    //
+    // P6.6 verifies the confinement is actually *in force*, not merely configured: below we read the
+    // running VMM's `/proc` and assert each wall independently, so a guest that breached KVM into the
+    // VMM lands in a chroot, as an unprivileged uid, holding no capabilities, under `no_new_privs` and
+    // seccomp, in its own mount namespace and cgroup. None of these can be escaped from inside the VMM.
     if !have_jailer_privileges() {
         eprintln!(
             "skipping boots_under_the_jailer: needs real root (euid 0 in the initial user namespace)"
@@ -75,6 +81,7 @@ fn boots_under_the_jailer() {
     let mut cfg = config();
     cfg.jail = Some(Jail::default());
     let marker = cfg.userspace_marker.clone();
+    let (vcpus, mem_mib) = (cfg.vcpus, cfg.mem_mib);
 
     let vm = Vm::boot(cfg).expect("microVM should boot to userspace under the jailer");
     assert!(
@@ -82,32 +89,131 @@ fn boots_under_the_jailer() {
         "jailed guest should reach userspace (marker {marker:?}); console:\n{}",
         vm.console()
     );
-    // Boot latency is still measured on the jailed path.
     assert!(
         vm.boot_latency() > Duration::ZERO,
         "jailed boot latency should be measured"
     );
 
-    // The confinement actually happened, not just "it booted": the jailed Firecracker runs as the
-    // dropped uid, not root. `/proc/<pid>/status` `Uid:` is real/effective/saved/fs; the effective
-    // uid is the second field.
+    // Confinement actually happened, not just "it booted". Read the jailed Firecracker's /proc.
     let pid = vm.vmm_pid();
     let status =
         std::fs::read_to_string(format!("/proc/{pid}/status")).expect("read jailed VMM status");
-    let eff_uid = status
-        .lines()
-        .find_map(|l| l.strip_prefix("Uid:"))
-        .and_then(|v| v.split_whitespace().nth(1))
-        .and_then(|u| u.parse::<u32>().ok())
-        .expect("parse jailed VMM effective uid");
+    // The first numeric field of a `Name:\tv...` status line (uid's real id, seccomp's mode).
+    let field = |name: &str| -> Option<u32> {
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix(name))
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|u| u.parse::<u32>().ok())
+    };
+
+    // Uid drop: `Uid:` is real/effective/saved/fs, all the dropped id after the jailer's setuid.
+    let uid = field("Uid:").expect("parse jailed VMM uid");
     assert_eq!(
-        eff_uid, DEFAULT_JAIL_UID,
-        "jailed Firecracker should run as the dropped uid {DEFAULT_JAIL_UID}, not root (got {eff_uid})"
+        uid, DEFAULT_JAIL_UID,
+        "jailed Firecracker should run as the dropped uid {DEFAULT_JAIL_UID}, not root (got {uid})"
     );
+
+    // Seccomp: Firecracker installs its built-in per-thread filters at InstanceStart, so a running VM
+    // is in filter mode (`Seccomp: 2`). We never pass `--no-seccomp`.
+    let seccomp = field("Seccomp:").expect("parse jailed VMM seccomp mode");
+    assert_eq!(
+        seccomp, 2,
+        "jailed Firecracker should run in seccomp filter mode (Seccomp: 2), got {seccomp}"
+    );
+
+    // Capability drop: setuid from root to the jailed uid clears the cap sets, so the VMM holds no
+    // effective capabilities on the host, and a breach out of the guest gains no privileged operations.
+    let cap_eff = status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))
+        .map(str::trim)
+        .expect("parse jailed VMM CapEff");
+    assert_eq!(
+        cap_eff, "0000000000000000",
+        "jailed Firecracker should hold no effective capabilities, got {cap_eff}"
+    );
+
+    // no_new_privs: set before the seccomp install (and required by the kernel for an unprivileged
+    // process to install a filter at all), so the VMM can never regain privilege via a setuid binary.
+    let nnp = field("NoNewPrivs:").expect("parse jailed VMM NoNewPrivs");
+    assert_eq!(
+        nnp, 1,
+        "jailed Firecracker should run with no_new_privs, got {nnp}"
+    );
+
+    // Chroot: the jailer pivot_roots the VMM into its per-VM jail (`<scratch>/firecracker/<id>/root`),
+    // so the VMM's filesystem root is not the host `/` and it cannot name a host path. The link *text*
+    // of `/proc/<pid>/root` is useless here — after a pivot_root in the VMM's own mount namespace it
+    // renders as literally `/` (measured) — so compare filesystem *identity* instead: following the
+    // link stats the directory the VMM's root actually is, and its `(st_dev, st_ino)` must differ from
+    // this process's root. Same-inode would mean no chroot at all.
+    {
+        use std::os::unix::fs::MetadataExt;
+        let vmm_root =
+            std::fs::metadata(format!("/proc/{pid}/root/")).expect("stat jailed VMM root");
+        let host_root = std::fs::metadata("/").expect("stat host root");
+        assert_ne!(
+            (vmm_root.dev(), vmm_root.ino()),
+            (host_root.dev(), host_root.ino()),
+            "jailed Firecracker should be chrooted, not rooted at the host /"
+        );
+    }
+
+    // Mount namespace: the jailer builds the chroot in a private mount namespace, so the VMM's mount
+    // table is its own (a different namespace than this test process's).
+    let vmm_mnt =
+        std::fs::read_link(format!("/proc/{pid}/ns/mnt")).expect("read jailed VMM mnt ns");
+    let host_mnt = std::fs::read_link("/proc/self/ns/mnt").expect("read test mnt ns");
+    assert_ne!(
+        vmm_mnt, host_mnt,
+        "jailed Firecracker should run in its own mount namespace"
+    );
+
+    // cgroup limits: when the host delegates the cgroup v2 controllers (a systemd host and this
+    // test's environment do), the VMM's cgroup carries a finite memory.max (guest RAM + bounded
+    // overhead) and a cpu.max of exactly `vcpus` cores. Where they aren't delegated the jailed boot
+    // still runs without limits (memory.max stays "max"), so only assert when they're actually set.
+    let cg_rel = std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("0::").map(|p| p.trim().to_string()))
+        })
+        .expect("read jailed VMM cgroup path");
+    let cg = std::path::Path::new("/sys/fs/cgroup").join(cg_rel.trim_start_matches('/'));
+    let mem_max = std::fs::read_to_string(cg.join("memory.max")).unwrap_or_default();
+    let mem_max = mem_max.trim();
+    if mem_max != "max" && !mem_max.is_empty() {
+        let bytes: u64 = mem_max.parse().expect("parse memory.max");
+        let guest = u64::from(mem_mib) * 1024 * 1024;
+        assert!(
+            bytes >= guest && bytes <= guest + 512 * 1024 * 1024,
+            "memory.max {bytes} should be guest RAM plus a bounded overhead (guest {guest})"
+        );
+        let cpu_max = std::fs::read_to_string(cg.join("cpu.max")).expect("read cpu.max");
+        let mut it = cpu_max.split_whitespace();
+        let quota: u64 = it
+            .next()
+            .and_then(|q| q.parse().ok())
+            .expect("parse cpu.max quota");
+        let period: u64 = it
+            .next()
+            .and_then(|p| p.parse().ok())
+            .expect("parse cpu.max period");
+        assert_eq!(
+            quota,
+            u64::from(vcpus) * period,
+            "cpu.max quota should cap the VMM at {vcpus} core(s) ({quota} per {period}us)"
+        );
+    } else {
+        eprintln!("cgroup controllers not delegated here; jailed VM ran without cgroup limits");
+    }
 
     vm.shutdown().expect("jailed shutdown should succeed");
 
-    // Teardown reclaims the chroot (it lives in the scratch dir) — no `/tmp/agent-<pid>-*` survives.
+    // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup — no
+    // `/tmp/agent-<pid>-*` survives.
     let prefix = format!("agent-{}-", std::process::id());
     let scratch_leaks = std::fs::read_dir("/tmp")
         .map(|rd| {
