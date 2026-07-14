@@ -49,10 +49,10 @@ cgroups, seccomp) confines the VMM those snapshots run on; this entry is the gat
 
 ### 0. Host check
 
-- [ ] `cargo xtask setup` reports every item green (KVM writable, BTF, firecracker **and jailer**
+- [x] `cargo xtask setup` reports every item green (KVM writable, BTF, firecracker **and jailer**
       binaries, the rootfs tools, `ip`, fetched artifacts). The jailer line matters now: Phase 6
       starts with it.
-- [ ] Disk headroom for snapshot work: every full snapshot writes a memory file the size of guest
+- [x] Disk headroom for snapshot work: every full snapshot writes a memory file the size of guest
       RAM (256 MiB at `Limits::default().mem_mib`), plus a disk copy for read-write-root bundles.
       The bench and tests clean up after themselves, but check `df /tmp` is comfortable.
 
