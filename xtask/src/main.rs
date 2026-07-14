@@ -213,10 +213,18 @@ fn setup() -> Result<()> {
         Path::new("/sys/kernel/btf/vmlinux").exists(),
     );
     check("firecracker in PATH", in_path("firecracker"));
+    check(
+        "firecracker is the pinned v1.9 (API schema, decision 001)",
+        firecracker_version() == Some((1, 9)),
+    );
     check("jailer in PATH", in_path("jailer"));
     check(
         "cgroup v2 cpu+memory delegated (jailer resource limits)",
         cgroup_controllers_delegated(),
+    );
+    check(
+        "kernel >= 5.14 (cgroup.kill — crash-safe VM teardown)",
+        kernel_at_least(5, 14),
     );
     check("bpf-linker installed", in_path("bpf-linker"));
     check("mke2fs (rootfs + input block device)", in_path("mke2fs"));
@@ -233,8 +241,54 @@ fn setup() -> Result<()> {
         "guest kernel + rootfs (cargo xtask fetch-artifacts)",
         kernel_path().is_file() && boot_rootfs_path().is_file(),
     );
+
+    // The degradation matrix (P6.9b): what each missing capability above costs, in one place, so
+    // a mismatched host explains itself *before* the first boot discovers it. The split is decision
+    // 013's: resource caps and leak-proofing fail open (they're DoS mitigation), the isolation
+    // boundary never does.
+    println!("\nDegradation matrix — what a missing item above means at runtime:");
+    println!("  fails open (loud warning, still runs):");
+    println!(
+        "    cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (decision 013)"
+    );
+    println!("    cgroup v2 not writable       -> Drop-only teardown; a SIGKILLed driver can leak its VM (decision 014)");
+    println!("    kernel < 5.14 (no cgroup.kill) -> the lifetime sentinel cannot kill the VM tree (decision 014)");
+    println!("    firecracker not v1.9         -> boots continue with a warning; API bodies may not match (decision 001)");
+    println!("  hard errors (typed, never a silent half-measure):");
+    println!("    /dev/kvm missing/unwritable  -> every boot fails: NoKvm (isolation is hardware)");
+    println!("    jail cannot be built         -> jailed boot fails; never a half-confined VM (decision 013)");
+    println!("    host tool missing (ip, mke2fs, e2fsck/debugfs, firecracker) -> typed Artifact/Vmm error");
     println!("\nMissing items are covered in CONTRIBUTING.md → Prerequisites.");
     Ok(())
+}
+
+/// The `(major, minor)` of `firecracker --version` on PATH (first line `Firecracker v1.9.1`), or
+/// `None` when it's missing or unparseable. The same parse the driver runs once per process to
+/// warn on an unpinned binary; here it feeds the setup checklist.
+fn firecracker_version() -> Option<(u64, u64)> {
+    let out = Command::new("firecracker").arg("--version").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let rest = text.split("Firecracker v").nth(1)?;
+    let mut parts = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|t| !t.is_empty());
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.
+fn kernel_at_least(major: u64, minor: u64) -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .and_then(|s| {
+            let mut it = s
+                .split(|c: char| !c.is_ascii_digit())
+                .filter(|t| !t.is_empty());
+            Some((
+                it.next()?.parse::<u64>().ok()?,
+                it.next()?.parse::<u64>().ok()?,
+            ))
+        })
+        .is_some_and(|v| v >= (major, minor))
 }
 
 /// The workspace root (not the cwd), so the commands work from anywhere.

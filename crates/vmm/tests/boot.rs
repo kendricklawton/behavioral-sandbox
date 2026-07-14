@@ -343,3 +343,90 @@ fn repeated_boots_leave_no_leaks() {
         assert!(leaked.is_empty(), "leaked tap interfaces: {leaked:?}");
     }
 }
+
+/// Open fds in this process, counted through `/proc/self/fd`. The count includes the read itself
+/// (one transient fd), a constant bias that cancels in every delta below.
+fn open_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .map(|it| it.count())
+        .unwrap_or(0)
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
+    // P6.9c: each live VM costs the embedder driver-side fds; at the default 1024 soft ulimit an
+    // unstated budget fails as an illegible mid-boot EMFILE a few hundred VMs in. This pins the
+    // budget (`FDS_PER_VM`) per start path — cold, networked, warm restore — and, just as
+    // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any
+    // long-lived embedder into EMFILE regardless of the per-VM budget).
+    use agent_vmm::{sweep_orphans, FDS_PER_VM};
+
+    let baseline = open_fds();
+
+    // Cold boot, plus a second concurrent VM: the marginal cost is what a pool bound multiplies.
+    let vm = Vm::boot(config()).expect("cold microVM should boot");
+    let cold = open_fds().saturating_sub(baseline);
+    let vm2 = Vm::boot(config()).expect("second cold microVM should boot");
+    let marginal = open_fds().saturating_sub(baseline + cold);
+    eprintln!("fd footprint: cold {cold}, marginal second VM {marginal} (budget {FDS_PER_VM})");
+    assert!(
+        cold <= FDS_PER_VM,
+        "cold boot holds {cold} fds > budget {FDS_PER_VM}"
+    );
+    assert!(
+        marginal <= FDS_PER_VM,
+        "second VM holds {marginal} fds > budget {FDS_PER_VM}"
+    );
+    vm2.shutdown().expect("vm2 shutdown");
+    vm.shutdown().expect("vm shutdown");
+    assert_eq!(open_fds(), baseline, "cold teardown must return every fd");
+
+    // Networked boot (tap handling is shell-outs, so it should add no held fd).
+    if have_net_admin() {
+        let mut cfg = config();
+        cfg.enable_network = true;
+        let vm = Vm::boot(cfg).expect("networked microVM should boot");
+        let net = open_fds().saturating_sub(baseline);
+        eprintln!("fd footprint: networked {net} (budget {FDS_PER_VM})");
+        assert!(
+            net <= FDS_PER_VM,
+            "networked boot holds {net} fds > budget {FDS_PER_VM}"
+        );
+        vm.shutdown().expect("networked shutdown");
+        assert_eq!(
+            open_fds(),
+            baseline,
+            "networked teardown must return every fd"
+        );
+    } else {
+        eprintln!("fd footprint: skipping the networked leg (no CAP_NET_ADMIN)");
+    }
+
+    // Warm restore (the pool's start path — the one an embedder multiplies hardest).
+    let agent_rootfs =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
+    if agent_rootfs.is_file() {
+        let bundle = common::TmpDir::new("fd-warm");
+        let (snap, _cold_latency) = common::warm_python_snapshot(&bundle);
+        let warm_baseline = open_fds();
+        let clone = Vm::restore(&snap, &agent_rootfs_config()).expect("warm clone should restore");
+        let warm = open_fds().saturating_sub(warm_baseline);
+        eprintln!("fd footprint: warm clone {warm} (budget {FDS_PER_VM})");
+        assert!(
+            warm <= FDS_PER_VM,
+            "warm clone holds {warm} fds > budget {FDS_PER_VM}"
+        );
+        clone.shutdown().expect("clone shutdown");
+        assert_eq!(
+            open_fds(),
+            warm_baseline,
+            "warm teardown must return every fd"
+        );
+    } else {
+        eprintln!("fd footprint: skipping the warm leg (agent rootfs not built)");
+    }
+
+    // Keep the host tidy for the suite's other leak checks (and dogfood the sweep's live-skip).
+    let _ = sweep_orphans(&agent_vmm::BootConfig::from_env().scratch_dir);
+}

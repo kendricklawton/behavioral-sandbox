@@ -206,9 +206,10 @@ impl Tap {
 }
 
 /// `ip link del dev <name>`, best-effort: the tap has no `Drop` safety net, so every teardown and
-/// half-configured-boot cleanup routes through here, and a failure is logged (never propagated or
-/// panicked, per the no-panic host path) so an orphaned interface is at least visible.
-fn ip_link_del(name: &str) {
+/// half-configured-boot cleanup routes through here (and the orphan sweep, for a dead driver's
+/// recorded tap), and a failure is logged (never propagated or panicked, per the no-panic host
+/// path) so an orphaned interface is at least visible.
+pub(crate) fn ip_link_del(name: &str) {
     if let Err(e) = run_ip(&["link", "del", "dev", name]) {
         tracing::warn!(tap = %name, error = %e, "failed to delete tap");
     }
@@ -294,7 +295,7 @@ fn tap_add(name: &str) -> Result<TapAdd, VmmError> {
 /// Whether a network interface named `name` exists in the current network namespace, via
 /// `ip link show` (exit 0 = present). Netlink-based, so it's correct inside a network namespace where
 /// `/sys/class/net` may reflect a different one, and it keys on the exit code, not a localized string.
-fn iface_exists(name: &str) -> bool {
+pub(crate) fn iface_exists(name: &str) -> bool {
     Command::new("ip")
         .args(["link", "show", "dev", name])
         .output()

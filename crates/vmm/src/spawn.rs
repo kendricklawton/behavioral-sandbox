@@ -30,6 +30,7 @@ use crate::jail::{
 use crate::lifetime::VmLifetime;
 use crate::net::{apply_guest_net_identity, Tap};
 use crate::paths::{absolute, path_str, require_file};
+use crate::sweep::record_tap;
 use crate::vm::{
     teardown, BootConfig, RunningVm, Snapshot, FC_STDERR, IFACE_ID, VM_SEQ, VSOCK_UDS,
 };
@@ -88,6 +89,7 @@ impl Spawned {
     pub(crate) fn launch(config: &BootConfig) -> Result<Self, VmmError> {
         require_file(&config.kernel, "kernel image")?;
         require_file(&config.rootfs, "rootfs image")?;
+        warn_on_unpinned_firecracker(&config.firecracker);
 
         // Jailed boot spawns the jailer (not firecracker directly) and stages resources into the
         // chroot later; the unjailed setup below is untouched. `Vm::boot` has already refused the
@@ -187,6 +189,18 @@ impl Spawned {
         } else {
             None
         };
+        // Pair the tap with this dir's embedded owner pid so the orphan sweep can reclaim it if
+        // this driver dies without `Drop` — an unrecorded tap would hold its /30 forever. A failed
+        // record therefore fails the boot (same inline cleanup as a failed tap create).
+        if let Some(tap) = tap.as_ref() {
+            if let Err(e) = record_tap(&workdir, &tap.name) {
+                tap.delete();
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(e);
+            }
+        }
 
         // Cgroup-owned lifetime (P6.7): enroll the VMM in a per-VM lifetime cgroup and arm the
         // sentinel, so from here even a SIGKILLed driver can't leak it. Named by the scratch dir,
@@ -279,6 +293,7 @@ impl Spawned {
         config: &BootConfig,
         snapshot: &Snapshot,
     ) -> Result<Self, VmmError> {
+        warn_on_unpinned_firecracker(&config.firecracker);
         let workdir = create_workdir(&config.scratch_dir)?;
         let socket = workdir.join("fc.sock");
         let (child, console) = match spawn_fc(&config.firecracker, &workdir, &socket) {
@@ -311,6 +326,19 @@ impl Spawned {
                 }
             },
         };
+        // Record the recreated tap for the orphan sweep, as in `launch`. Load-bearing here
+        // specifically: this tap's *name* embeds the snapshot source's token, not this driver's,
+        // so the dir-plus-record pairing is the only truthful ownership trail a sweep can follow.
+        if let Some(tap) = tap.as_ref() {
+            if let Err(e) = record_tap(&workdir, &tap.name) {
+                tap.delete();
+                let mut child = child;
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(e);
+            }
+        }
         // Cgroup-owned lifetime (P6.7): a restored clone (and every warm-pool VM riding restore) is
         // as leakable as a cold boot, so it gets the same enrollment + sentinel.
         let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
@@ -834,6 +862,54 @@ fn unstage_restore_disk(backing: &Path) {
     }
 }
 
+/// The Firecracker `(major, minor)` the driver's API bodies are written against (decision 001).
+/// Field names have drifted across releases and behavior genuinely changes (v1.9 rejects
+/// `network_overrides` on snapshot load, decision 011), so an unexpected binary means cryptic
+/// mid-boot API errors or silently different semantics — the runtime-validates-its-VMM guard,
+/// the way containerd validates its runc (P6.9b).
+const PINNED_FC_VERSION: (u64, u64) = (1, 9);
+
+/// Arms [`warn_on_unpinned_firecracker`] exactly once per process: the pin is process-wide and the
+/// probe costs a child spawn, so one loud warning at the first boot is the right dose.
+static FC_VERSION_PROBE: std::sync::Once = std::sync::Once::new();
+
+/// Warn — once per process, loudly, but never refuse — when `firecracker --version` reports a
+/// different major/minor than [`PINNED_FC_VERSION`]. A warning rather than a typed error because an
+/// embedder may knowingly run a compatible build; a *missing* or unrunnable binary stays silent
+/// here, since the spawn itself fails with the legible typed error moments later.
+fn warn_on_unpinned_firecracker(firecracker: &Path) {
+    FC_VERSION_PROBE.call_once(|| {
+        let Ok(out) = Command::new(firecracker).arg("--version").output() else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let (pin_maj, pin_min) = PINNED_FC_VERSION;
+        match fc_version_of(&text) {
+            Some(v) if v == PINNED_FC_VERSION => {}
+            Some((maj, min)) => tracing::warn!(
+                found = %format!("v{maj}.{min}"),
+                pinned = %format!("v{pin_maj}.{pin_min}"),
+                "firecracker differs from the version the driver's API schema is pinned to \
+                 (decision 001): request bodies and snapshot semantics may not match"
+            ),
+            None => tracing::warn!(
+                binary = %firecracker.display(),
+                "could not parse `firecracker --version`; the driver's API schema is pinned to \
+                 v{pin_maj}.{pin_min} (decision 001)"
+            ),
+        }
+    });
+}
+
+/// The `(major, minor)` out of `firecracker --version` output (first line `Firecracker v1.9.1`).
+fn fc_version_of(text: &str) -> Option<(u64, u64)> {
+    let rest = text.split("Firecracker v").nth(1)?;
+    let mut parts = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|t| !t.is_empty());
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
 /// Spawn `firecracker --api-sock <socket>`, wiring its serial console to a [`Console`] and its stderr
 /// to `<workdir>/fc.stderr`. Shared by a cold boot ([`Spawned::launch`]) and a snapshot restore
 /// ([`Spawned::launch_for_restore`]).
@@ -969,6 +1045,24 @@ fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::fc_version_of;
+
+    #[test]
+    fn fc_version_parses_the_real_output_shape() {
+        assert_eq!(fc_version_of("Firecracker v1.9.1"), Some((1, 9)));
+        assert_eq!(
+            fc_version_of("Firecracker v1.9.1\nmore lines"),
+            Some((1, 9))
+        );
+        assert_eq!(fc_version_of("Firecracker v1.13.0"), Some((1, 13)));
+        for garbage in ["", "garbage", "Firecracker v", "Firecracker vX.Y"] {
+            assert_eq!(fc_version_of(garbage), None, "{garbage:?} must not parse");
+        }
+    }
 }
 
 #[cfg(test)]

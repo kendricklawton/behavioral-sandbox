@@ -26,6 +26,10 @@ use crate::{BootConfig, RunningVm, VmmError};
 /// only one live networked clone per snapshot on the pinned Firecracker (the tap name is baked in),
 /// so a pool over a networked snapshot is limited to `target <= 1`; prefilling deeper fails with the
 /// typed taken-name error.
+///
+/// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
+/// `target × FDS_PER_VM` must stay under the process's `ulimit -n` with headroom — state the bound,
+/// don't discover it via `EMFILE` (P6.9c).
 #[derive(Debug)]
 #[must_use = "dropping a Pool kills its pooled microVMs"]
 pub struct Pool {

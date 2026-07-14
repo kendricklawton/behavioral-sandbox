@@ -21,6 +21,7 @@ mod paths;
 mod pool;
 mod snapshot;
 mod spawn;
+mod sweep;
 #[cfg(test)]
 mod test_util;
 mod vm;
@@ -33,6 +34,7 @@ pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER}
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID};
 pub use lifetime::KillHandle;
 pub use pool::Pool;
+pub use sweep::{sweep_orphans, SweepReport};
 pub use vm::{BootConfig, RunningVm, Snapshot, Vm, AGENT_VSOCK_PORT, DEFAULT_GUEST_CID};
 
 #[cfg(test)]
@@ -244,6 +246,20 @@ impl From<ChannelError> for VmmError {
         VmmError::Channel(e)
     }
 }
+
+/// The driver-side file-descriptor budget of **one live microVM**, across every start path (cold
+/// boot, snapshot restore, warm-pool clone, networked) — the number to size concurrency against
+/// `ulimit -n`: N concurrent sandboxes hold up to `N × FDS_PER_VM` fds on top of the process
+/// baseline, and a bound (like [`Pool`]'s target) must keep that under the soft limit with
+/// headroom, or the failure is an illegible mid-boot `EMFILE` in whatever syscall lands first.
+///
+/// Measured steady state is **2 on every start path** — cold, networked, warm restore (dev box,
+/// pinned by `fd_footprint_per_vm_stays_within_budget_and_never_leaks`): the console reader's pipe
+/// and the lifetime sentinel's pipe write end; exec and API calls open and close transiently, and
+/// teardown returns to the exact baseline (no per-run fd leak). The budget is deliberately above
+/// the measurement — an fd added for cause is a visible bump of this constant (the pinning test
+/// fails otherwise), never silent growth.
+pub const FDS_PER_VM: usize = 8;
 
 /// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy. This is
 /// the per-run resource-policy surface whose shape is fixed by ARCHITECTURE decision 013: quantities

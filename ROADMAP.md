@@ -666,8 +666,8 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       `Vm::boot` refuses `jail` + any not-yet-jailed feature (vsock, NIC, overlay, bulk I/O) with a typed
       error *before* the KVM probe, so the refusal is host-safe: a new `jail_refuses_half_confined_boots`
       unit test runs in the everyday gate (the isolation boundary never half-degrades, decision 013).
-      Running a hostile workload *inside* a jailed guest waits on exec-under-jail (a later Phase-6
-      migration: jailed boot refuses vsock today), so the bar here is the VMM-side confinement matrix plus
+      Running a hostile workload *inside* a jailed guest waits on exec-under-jail (P7.0a, decision 015:
+      jailed boot refuses vsock today), so the bar here is the VMM-side confinement matrix plus
       the refusal.)*
 - [x] **P6.7** Clean cgroup/namespace teardown per run — and the leak-proofing this buys:
       **host-process death (Ctrl-C, SIGKILL, OOM) cannot leak a VM**, because the cgroup owns its
@@ -702,7 +702,8 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 - [x] **P6.8** Test: a fork-bomb / mem-hog in the guest is bounded by the cgroup, host unaffected.
       *(Both run against the exec-capable agent rootfs with the VMM under the **engine-derived** caps
       (`cpu.max` = vcpus cores, `memory.max` = guest RAM + 128 MiB — the P6.2 derivation, pinned by the
-      test since exec-under-jail is a later migration; real-root + delegation gated, skips elsewhere).
+      test since exec-under-jail is a later migration, P7.0a/decision 015; real-root + delegation gated,
+      skips elsewhere).
       **Mem-hog** (Python allocating touched pages until the guest dies): the guest's *own* OOM killer
       eats the hog (exit 137) inside the hardware boundary; the host cgroup **measured** peaking at
       ~208 MiB against the 384 MiB cap, zero host-side `oom_kill` events (the 128 MiB overhead budget
@@ -723,6 +724,113 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 - **Exit gate + lesson:** the VMM runs jailed + cgroup-limited; write up **namespaces, cgroups v2,
   seccomp, and capabilities** — the container-isolation primitives, seen through Firecracker.
 
+## Phase 6.9 — Field robustness (interphase: the engine survives long-lived hosts)
+
+An audit of Phases 0–6 found failure modes that live in none of the feature phases: residue that
+accumulates across embedder crashes until a *healthy* host refuses work, and dependency drift that
+fails cryptically instead of legibly. This is core **runtime** work, not platform creep — it is to
+this engine what image/container GC and runc-version validation are to kubelet/containerd: the
+boring janitorial contract a runtime owes a host that stays up for months. It lands **before**
+Phase 7 because the sweep and the guards become part of the operational contract the `Sandbox`
+surface freezes.
+
+- [x] **P6.9a** Orphan sweep (the runtime's GC). Decision 014 leaves a crashed driver's scratch dirs
+      and taps as residue for "a sweep" that nothing owns — and the tap half is **not** inert: an
+      orphaned `fc*` interface still holds its `/30` host-address reservation (the allocator's
+      atomicity, decision 009), so accumulated crashes clog the finite `10.200/16` pool until the
+      allocator's bounded retry exhausts and **every networked boot on a healthy host fails**. Land a
+      library sweep (public on the engine surface; `agent sweep` CLI wiring rides P7.4): enumerate
+      `fc*` interfaces and per-VM scratch dirs, reclaim only those whose owning driver is **dead**
+      (liveness keyed on the recorded pid via `/proc/<pid>` + comm, the same key the leak test uses)
+      — never a live sibling's resources (safe by ownership check, not locks). Caller-owned snapshot
+      bundle dirs are out of scope (the caller chose where to put them). **Exit:** SIGKILL a driver
+      mid-networked-run, sweep, and the tap + scratch dir are reclaimed while a concurrently *live*
+      VM's are untouched; the allocator stays healthy across a crash loop.
+      *(`agent_vmm::sweep_orphans(scratch_base) -> SweepReport` (`sweep.rs`). **Ownership is the
+      dir, never the tap name:** the driver records the tap into its scratch dir (`<workdir>/tap`)
+      at creation — the name itself lies about ownership, since a restored clone's tap carries the
+      possibly-dead *source's* token (decision 011) — and the dir's `agent-<pid>-<n>` name carries
+      the owner. Deliberately no comm check on the driver pid: the embedder's process name is
+      unknowable, so a recycled pid reads as alive and its dir is *kept* (the error direction is
+      always retained-too-long, reclaimed by a later sweep, never a live VM's resources). Three
+      conservative guards: a live pid's dirs are skipped wholesale; a dead dir's recorded tap is
+      left if any *live* dir records the same name; and a dead dir with a still-running VMM (the
+      degraded-sentinel corner) is skipped loudly — the sweep owns fs/net residue, processes stay
+      the sentinel's (decision 014), it never kills. The record is validated before it can reach
+      `ip link del` (`fc`+hex, ≤ IFNAMSIZ-1; parse, don't trust), VMM-liveness is `(st_dev,
+      st_ino)` identity through `/proc/<pid>/cwd` (the P6.6 lesson: link text lies after
+      pivot_root; unjailed cwd = workdir, jailed cwd = the chroot root), and per-entry failures
+      warn + continue (one undeletable dir can't shadow the sweep). Proof:
+      `sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir` SIGKILLs a subprocess driver
+      mid-networked-run and the sweep reclaims its tap + dir while a concurrently-live VM's stay
+      untouched and functional; `driver_death_cannot_leak_a_vm` now dogfoods the sweep for its
+      post-crash cleanup; the ownership/validation rules are unit-tested in the host gate. 32
+      privileged tests.)*
+- [x] **P6.9b** Dependency guards: make the pins legible. Decision 001 pins the driver to
+      Firecracker v1.9's API schema, but nothing checks the binary: a v1.13 on `PATH` fails
+      mid-boot with cryptic API errors (or silently different semantics — the class of drift the
+      `network_overrides` probe proved is real). Probe `firecracker --version` in `xtask setup`
+      **and** once per driver process at first spawn: an unexpected major/minor logs a loud, typed
+      warning naming the pin (warn, not refuse — an embedder may knowingly run a compatible build).
+      Alongside it, `setup` reports the host-kernel features the engine degrades on (`cgroup.kill`
+      needs ≥ 5.14; BTF and delegation are already checked) and prints the **degradation matrix** in
+      one place: what fails open with a warning (resource caps, sentinel teardown, decision 013/014)
+      vs what hard-errors (the jail, KVM). **Exit:** `setup` on a mismatched host names every
+      degradation before the first boot does.
+      *(Both halves. **Driver:** `warn_on_unpinned_firecracker` (`spawn.rs`) probes the configured
+      binary once per process (`std::sync::Once` — the pin is process-wide, the probe costs a child
+      spawn) at the head of `launch` and `launch_for_restore`, covering cold, jailed, and restore
+      paths; a non-1.9 major/minor or an unparseable banner is a loud `tracing::warn!` naming the
+      pin and decision 001, and a *missing* binary stays silent there because the spawn itself fails
+      typed and legible moments later. Warn-not-refuse per the box (a knowingly-compatible build is
+      the embedder's call). **Setup:** two new checklist lines — the pinned-v1.9 probe and
+      `kernel >= 5.14` (`cgroup.kill`, from `/proc/sys/kernel/osrelease`) — plus the printed
+      degradation matrix splitting fail-open (delegation → uncapped jailed VMs; unwritable cgroup2 →
+      Drop-only teardown; pre-5.14 → no sentinel kill; unpinned FC → warned boots) from hard-error
+      (no KVM, an unbuildable jail, missing host tools), the decision-013 line rendered as one
+      screen. Parse is shared-shape (`Firecracker vX.Y`), unit-tested against real and garbage
+      banners.)*
+- [x] **P6.9c** The per-sandbox fd budget, measured and stated. Each live VM holds several host fds
+      (child pipes, vsock UDS, the clones' mmap'd memory file, an API-socket connection per request);
+      at the default 1024 soft `ulimit -n`, a few hundred concurrent VMs hit `EMFILE` mid-boot in
+      whatever syscall lands first — typed, but illegible. Measure the footprint per start path
+      (cold, warm clone, networked), document it as the budget P7.6's pool bound must respect
+      (`pool_target × fds_per_vm < ulimit`, with headroom), and pin it with a test so it can't
+      silently grow. No new mechanism: this is a number, stated honestly (spine #4).
+      *(**Measured: 2 fds per live VM, on all three start paths** (cold, networked, warm restore;
+      dev box) — the console reader's pipe and the lifetime sentinel's pipe write end; the mmap'd
+      memory file and the API/vsock connections turn out to be Firecracker's fds or transient, not
+      held by the driver. Published as `agent_vmm::FDS_PER_VM = 8` (budget deliberately above the
+      measurement so an fd added for cause is a visible constant bump, never silent growth), with
+      the sizing rule on the `Pool` doc: `target × FDS_PER_VM` under `ulimit -n` with headroom.
+      Pinned by `fd_footprint_per_vm_stays_within_budget_and_never_leaks`, which also asserts the
+      other half — **teardown returns to the exact fd baseline** on every path, since a per-run
+      leak would walk a long-lived embedder into `EMFILE` regardless of the per-VM number. 33
+      privileged tests.)*
+- [x] **P6.9d** Record the un-vendored upstream inputs as a tombstone. A fresh host's
+      `fetch-artifacts`/`build-rootfs` depend on the Firecracker CI S3 bucket and the Alpine CDN:
+      sha256-pinned (tamper-safe) but **availability-fragile** — a deleted bucket bricks new-host
+      setup while existing artifact dirs keep working. Record the failure mode + the vendoring plan
+      (decision 007 already tombstones the `.apk` closure half; this adds the kernel/base-image
+      half), pointing at P18.1 where vendored artifacts ride the packaging work. Docs only.
+      *(Recorded as a decision-007 consequence bullet: the kernel/base-image half joins the `.apk`
+      half in the same availability class — loud failure (hash-checked fetches never silently
+      substitute), fresh-host-only blast radius, vendored as release artifacts at P18.1 where the
+      self-host bundle needs them offline anyway.)*
+- **Exit gate + lesson:** a crash-looped host stays serviceable (sweep demo) and a mismatched host
+  explains itself (`setup` demo); write up **why a runtime owes its host garbage collection** — the
+  kubelet/containerd analogy, and the difference between residue that is inert and residue that
+  holds a reservation.
+  *(Done. Demos: `sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir` (a real SIGKILLed driver,
+  its tap + dir reclaimed, a live sibling spared and still functional) and `cargo xtask setup`
+  (version/kernel checks + the printed degradation matrix). The lesson is recorded in the box
+  annotations above: GC is core runtime behavior because *not all residue is inert* — a scratch
+  dir merely holds disk, but an orphaned tap holds a **reservation** out of a finite pool, so
+  accumulation becomes denial-of-service against future work on a healthy host; and ownership
+  must key on **liveness** (the dir's embedded pid), never on resource names, because names can
+  outlive and betray their creators (a restored clone's tap carries the dead source's token).
+  Full suite: host gate + 33 privileged tests, green.)*
+
 ## Phase 7 — The sandbox lifecycle API (the engine surface)
 
 Wrap the FC track into a clean, self-hostable engine API.
@@ -735,8 +843,25 @@ Wrap the FC track into a clean, self-hostable engine API.
 > below knows who embeds it. `VmmError::kind()` (the bucket classifier) and the conservative,
 > documented `Limits::default()` contract already landed as out-of-band seam hardening.
 
+> **Jailed exec is a prerequisite (decision 015).** Phase 6 landed the jailer on a *codeless* boot: a
+> jailed VM refuses vsock/NIC/overlay/bulk-I/O (decisions 012/013), so today you get a code channel
+> **or** VMM confinement, never both. Before the `Sandbox` surface freezes on the unjailed exec path,
+> the convergence below composes the jail with the exec channel, and `Sandbox::exec` jails by default.
+
+- [ ] **P7.0a** Stage the vsock exec channel into the chroot (jailed-uid-owned, socket path
+      chroot-relative) so `jail` composes with vsock. Proof: a real-root `jailed_exec_runs_a_command`
+      boots jailed and returns `exec("echo hi") -> hi`, exit 0. Retires the P6.6 "exec-under-jail is a
+      later migration" annotation.
+- [ ] **P7.0b** Jailed overlay: read-only base + per-run tmpfs overlay under the chroot, so a jailed
+      boot runs on the density path, not a full rootfs copy.
+- [ ] **P7.0c** Jailed networking: stage the tap into the VM's netns under the jailer; retire the
+      one-live-networked-clone limit (decisions 009/011 tombstone).
+- [ ] **P7.0d** Jailed bulk I/O: input/output block devices staged chroot-relative and read back
+      post-teardown, or a recorded typed refusal if staging isn't worth it.
+- [ ] **P7.0e** Jailed snapshot/restore + warm pool: the bundle disk lives in the chroot (decision 010),
+      so restore stages it jailed. Unblocks a confined warm pool.
 - [ ] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`, with **inputs at
-      the seam**. *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
+      the seam**. *(Assumes the jailed exec path (P7.0a); `Sandbox::exec` jails by default, decision 015.)* *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
       `output_dir`/`RunningVm::collect_outputs` — onto the `Sandbox` surface, since P3.4/P3.5 keep them
       at the low-level `RunningVm` layer. **Embedder inputs:** promote `exec_with_files(argv, stdin,
       files, artifacts)` onto `Sandbox` so an embedder never reaches into `RunningVm`; add an **`env`**
@@ -761,7 +886,9 @@ Wrap the FC track into a clean, self-hostable engine API.
       with unchanged timeout semantics, and the output cap is settable.)*
 - [ ] **P7.4** `agent run <cmd>` / `agent shell` CLI over the lifecycle.
 - [ ] **P7.5** Structured run result (stdout/stderr/exit/artifacts/metrics).
-- [ ] **P7.6** Concurrency: many sandboxes at once; a bounded pool; no interference.
+- [ ] **P7.6** Concurrency: many sandboxes at once; a bounded pool; no interference. *(The pool
+      bound respects the measured per-sandbox fd budget from P6.9c: `target × fds_per_vm` stays
+      under `ulimit -n` with headroom, stated in the docs, not discovered via `EMFILE`.)*
 - [ ] **P7.7** Docs: the engine API and the explicit *non-goals* (no auth/billing/scheduler).
 - [ ] **P7.8** Test: two concurrent stateful sessions stay isolated and correct.
 - **Exit gate + lesson:** a clean `Sandbox` engine anyone can embed/self-host; write up **the
@@ -931,6 +1058,9 @@ Make the numbers real — the benchmarks that back every claim.
 Ship it as a thing others can run — and turn the journey into the career artifacts.
 
 - [ ] **P18.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
+      *(Includes vendoring the sha-pinned upstream inputs — the Firecracker CI kernel/rootfs and the
+      `.apk` closure (decision 007's tombstone, P6.9d's recording) — so a fresh host's setup no longer
+      depends on the FC S3 bucket or the Alpine CDN staying alive.)*
 - [ ] **P18.2** `curl | sh` / container / release binaries with checksums.
 - [ ] **P18.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
 - [ ] **P18.4** The **blog series** assembled from each phase's writeup (the visibility that promotes).
