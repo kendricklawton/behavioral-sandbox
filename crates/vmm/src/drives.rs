@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 /// in `agent-channel` — the one host↔guest contract both the driver and the rootfs build consume.
 use agent_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
-use crate::vm::path_str;
+use crate::paths::path_str;
 use crate::VmmError;
 
 /// Size of the blank writable output image (P3.5). A fixed cap for now — it's the natural bulk-output
@@ -274,10 +274,16 @@ fn rdump_capped(
 
     let deadline = Instant::now() + timeout;
     loop {
-        match child
-            .try_wait()
-            .map_err(|e| VmmError::Vmm(format!("wait on debugfs: {e}")))?
-        {
+        let waited = match child.try_wait() {
+            Ok(w) => w,
+            Err(e) => {
+                // Don't leak a live debugfs on a `wait` error: kill and reap before surfacing it.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(VmmError::Vmm(format!("wait on debugfs: {e}")));
+            }
+        };
+        match waited {
             Some(status) => {
                 return match status.code() {
                     Some(0) => Ok(()),

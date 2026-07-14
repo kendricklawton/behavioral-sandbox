@@ -111,10 +111,14 @@ impl KillHandle {
         if self.torn_down.load(Ordering::Acquire) {
             return Ok(());
         }
-        // Degraded-host fallback: signal the pid via `sh`'s builtin `kill` (the host path is
-        // `unsafe`-free, so no direct `kill(2)`; `sh` is already this module's dependency). The pid
-        // is safe to signal while `torn_down` is unset: the owning `RunningVm` hasn't reaped its
-        // child, so the kernel can't have recycled the pid.
+        // Degraded-host fallback (no cgroup accepted the kill): signal the pid via `sh`'s builtin
+        // `kill` (the host path is `unsafe`-free, so no direct `kill(2)` and no `pidfd`; `sh` is
+        // already this module's dependency). Best-effort, with a residual TOCTOU: `torn_down` was
+        // just checked, but a teardown racing between that check and the `kill` below could reap the
+        // child and let the kernel recycle its pid, so this could signal an unrelated process. The
+        // intended use (fire the handle to unblock a wedged `exec`, *then* let the owner tear down)
+        // doesn't overlap teardown, so the window is not hit in practice; closing it fully needs a
+        // `pidfd` captured at spawn, which the no-`unsafe` host path can't take without a new dep.
         let killed = Command::new("sh")
             .arg("-c")
             .arg(format!("kill -9 {}", self.pid))
@@ -233,6 +237,10 @@ impl VmLifetime {
     /// empty), then disarm the sentinel — dropping its stdin delivers the same EOF a driver death
     /// would, the sentinel finds the dirs already gone and exits, and a bounded reap keeps a
     /// wedged sentinel from ever hanging the driver (kill it instead; best-effort throughout).
+    ///
+    /// Idempotent: it takes both owned handles, so a second call (or the [`Drop`] net below) is a
+    /// no-op. Callers invoke it explicitly to get the bounded sentinel reap *before* the scratch dir
+    /// is removed; the `Drop` impl is only the safety net for a drop that skipped it.
     pub(crate) fn teardown(&mut self) {
         self.mark_down();
         if let Some(dir) = self.own_cgroup.take() {
@@ -256,6 +264,17 @@ impl VmLifetime {
                 }
             }
         }
+    }
+}
+
+impl Drop for VmLifetime {
+    /// The safety net that makes leak-freedom structural, not a manual invariant (mirroring
+    /// [`Spawned`](crate::vm)'s and [`RunningVm`](crate::RunningVm)'s own `Drop` guards): any path
+    /// that drops a live `VmLifetime` without an explicit [`teardown`](Self::teardown) still reaps
+    /// the sentinel `sh` and its cgroup, so a dropped-but-not-torn-down VM can never leak a zombie
+    /// sentinel or a cgroup dir. A no-op after an explicit teardown (both handles already taken).
+    fn drop(&mut self) {
+        self.teardown();
     }
 }
 
@@ -354,6 +373,43 @@ mod tests {
         lt.teardown();
         assert!(!cg.exists(), "teardown removes the lifetime cgroup");
         assert!(lt.sentinel.is_none(), "teardown reaps the sentinel");
+    }
+
+    /// The `Drop` safety net: a `VmLifetime` dropped *without* an explicit `teardown()` must still
+    /// reap its sentinel `sh` (no zombie), so no drop path can leak one. Capture the sentinel's pid,
+    /// drop the lifetime, and assert the process is gone — not lingering as our zombie child.
+    #[test]
+    fn drop_reaps_the_sentinel_without_an_explicit_teardown() {
+        let dir = TestDir::new("agent-sentinel-drop");
+        let cg = dir.path().join("cg");
+        std::fs::create_dir(&cg).expect("create fake cgroup");
+
+        let lt = VmLifetime {
+            own_cgroup: Some(cg.clone()),
+            watched: Arc::from([cg.clone()]),
+            sentinel: arm_sentinel(std::slice::from_ref(&cg)),
+            torn_down: Arc::new(AtomicBool::new(false)),
+            pid: 0,
+        };
+        let sentinel_pid = lt.sentinel.as_ref().expect("sentinel armed").id();
+        drop(lt); // no teardown() call — the Drop net must still reap.
+
+        // A reaped child leaves `/proc/<pid>` entirely; a leaked one lingers as a zombie (state `Z`).
+        // Poll briefly since the kernel removes the entry a hair after `wait()` returns.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let reaped = loop {
+            match std::fs::read_to_string(format!("/proc/{sentinel_pid}/stat")) {
+                Err(_) => break true, // gone: fully reaped
+                Ok(stat)
+                    if stat.split(") ").nth(1).and_then(|s| s.split(' ').next()) == Some("Z") =>
+                {
+                    break false; // still a zombie child of ours: leaked
+                }
+                Ok(_) if Instant::now() >= deadline => break false,
+                Ok(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        assert!(reaped, "Drop must reap the sentinel, leaving no zombie");
     }
 
     /// The kill handle's cgroup path: one write to `cgroup.kill`, observable on a stand-in dir.

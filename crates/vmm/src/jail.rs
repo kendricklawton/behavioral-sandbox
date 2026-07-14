@@ -30,7 +30,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use crate::console::Console;
-use crate::vm::{absolute, FC_STDERR};
+use crate::paths::absolute;
+use crate::spawn::check_sun_path;
+use crate::vm::FC_STDERR;
 use crate::VmmError;
 
 /// The default unprivileged uid/gid the jailer drops Firecracker to. Deliberately high and unlikely
@@ -133,6 +135,9 @@ pub(crate) fn spawn_jailer(
     // Firecracker binds `/run/firecracker.socket` relative to its cwd (the chroot root), so on the
     // host the socket is `<chroot_root>/run/firecracker.socket`.
     let socket = chroot_root.join("run/firecracker.socket");
+    // The jailer's chroot nests the socket deep under the scratch dir, so this is the path most
+    // likely to overflow `sun_path` — fail clearly now, not as a cryptic bind failure mid-boot.
+    check_sun_path(&socket)?;
 
     let fc_stderr = std::fs::File::create(workdir.join(FC_STDERR))
         .map_err(|e| VmmError::Vmm(format!("create firecracker stderr log: {e}")))?;

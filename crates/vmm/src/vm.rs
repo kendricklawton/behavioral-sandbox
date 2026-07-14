@@ -13,31 +13,25 @@
 //! piped stdout and the console still reaches [`Console`].
 
 use std::net::Ipv4Addr;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::Child;
+use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
 use agent_channel::ClientConnection;
 
-use crate::console::{last_lines, Console};
-use crate::drives::{build_input_image, build_output_image, collect_output_image, OutputDevice};
+use crate::console::Console;
+use crate::drives::{collect_output_image, OutputDevice};
 use crate::exec::{
     connect_agent_at, run_exec, ExecBounds, DEFAULT_EXEC_TIMEOUT, EXEC_KILL_SLACK, MAX_EXEC_OUTPUT,
     PROBE_TIMEOUT, VSOCK_TIMEOUT,
 };
-use crate::firecracker::{
-    Action, ApiClient, BootSource, Drive, MachineConfig, MemBackend, MemBackendType,
-    NetworkInterface, SnapshotCreate, SnapshotLoad, SnapshotType, VmState, VmStateKind, Vsock,
-};
-use crate::jail::{
-    cgroup_limit_args, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup, spawn_jailer,
-    stage_into_chroot, Chroot, Jail,
-};
+use crate::firecracker::{Action, ApiClient};
+use crate::jail::{remove_cgroup, Chroot, Jail};
 use crate::lifetime::{KillHandle, VmLifetime};
-use crate::net::{apply_guest_net_identity, Tap};
+use crate::net::Tap;
+use crate::spawn::Spawned;
 use crate::{Limits, RunResult, VmmError};
 
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
@@ -52,7 +46,7 @@ const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.t
 const DEFAULT_USERSPACE_MARKER: &str = "login:";
 
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
-static VM_SEQ: AtomicU64 = AtomicU64::new(0);
+pub(crate) static VM_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Firecracker's own stderr, captured to a file in the scratch dir (see `Spawned::launch`).
 pub(crate) const FC_STDERR: &str = "fc.stderr";
@@ -74,7 +68,7 @@ pub(crate) const VSOCK_UDS: &str = "v.sock";
 /// carry the same id in its path and body, so both come from here. (The guest kernel independently
 /// names the resulting NIC `eth0` by enumeration; that literal in the `ip=` boot arg is that other
 /// namespace, so it's intentionally not sourced from this constant.)
-const IFACE_ID: &str = "eth0";
+pub(crate) const IFACE_ID: &str = "eth0";
 
 /// How long a graceful `SendCtrlAltDel` power-off is given to land before teardown stops waiting
 /// (the guaranteed kill in `Drop`/`stop_and_reap` takes over), and how often that wait polls.
@@ -148,6 +142,15 @@ pub struct BootConfig {
     /// `output_dir`, or `read_only_root` is a typed error for now (those need chroot staging / a netns
     /// that later Phase-6 steps add).
     pub jail: Option<Jail>,
+    /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/agent-<pid>-<n>`), holding the
+    /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
+    /// (overridable via `AGENT_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
+    /// often `tmpfs` (host RAM), so a read-write boot's full-rootfs copy is charged to RAM — on a
+    /// small box that alone can exhaust memory (or `ENOSPC` a small tmpfs) and fail the boot. Point
+    /// this at real disk to bound RAM use, or prefer [`read_only_root`](BootConfig::read_only_root),
+    /// which shares the base with **no** copy. The base must already exist; each VM's own subdir is
+    /// created (and reclaimed) by the driver.
+    pub scratch_dir: PathBuf,
 }
 
 impl BootConfig {
@@ -176,6 +179,9 @@ impl BootConfig {
         // Strict UTF-8 like `env::var`: a non-UTF-8 marker can't be searched for anyway.
         if let Some(v) = lookup("AGENT_MARKER").and_then(|v| v.into_string().ok()) {
             cfg.userspace_marker = v;
+        }
+        if let Some(v) = lookup("AGENT_SCRATCH_DIR") {
+            cfg.scratch_dir = PathBuf::from(v);
         }
         cfg
     }
@@ -211,6 +217,7 @@ impl Default for BootConfig {
             output_dir: None,
             enable_network: false,
             jail: None,
+            scratch_dir: PathBuf::from("/tmp"),
         }
     }
 }
@@ -222,38 +229,38 @@ impl Default for BootConfig {
 #[derive(Debug)]
 #[must_use = "dropping a RunningVm kills its microVM"]
 pub struct RunningVm {
-    child: Child,
-    workdir: PathBuf,
-    console: Console,
-    api: ApiClient,
-    boot_latency: Duration,
+    pub(crate) child: Child,
+    pub(crate) workdir: PathBuf,
+    pub(crate) console: Console,
+    pub(crate) api: ApiClient,
+    pub(crate) boot_latency: Duration,
     /// The active root-disk backing file: a per-VM copy for a read-write boot, the shared read-only
     /// base for a `read_only_root` boot, or the snapshot bundle's private copy for a restore. Held so
     /// [`snapshot`](RunningVm::snapshot) can bundle it into a portable snapshot.
-    rootfs: PathBuf,
+    pub(crate) rootfs: PathBuf,
     /// This VM was produced by [`Vm::restore`], so [`rootfs`](Self::rootfs) is a placeholder (the live
     /// disk is an anonymous inode with no host path) and re-snapshotting it is refused.
-    restored: bool,
+    pub(crate) restored: bool,
     /// This VM has a bulk **input** block device (from `input_dir`), whose image lives in the scratch
     /// dir. A snapshot bakes in that path, but the scratch dir is gone after teardown, so the VM can't
     /// be restored — `snapshot` refuses it. (The input image itself is reclaimed with the workdir.)
-    has_input: bool,
+    pub(crate) has_input: bool,
     /// The vsock unix socket Firecracker created, if this VM was booted with a `guest_cid`.
-    vsock_uds: Option<PathBuf>,
+    pub(crate) vsock_uds: Option<PathBuf>,
     /// The writable output image (in `workdir`) and the host directory to extract it into, when the
     /// boot config set `output_dir`; `None` otherwise. Read back by [`RunningVm::collect_outputs`].
-    output: Option<OutputDevice>,
+    pub(crate) output: Option<OutputDevice>,
     /// The per-VM host tap backing the guest's virtio-net, when the boot config set
     /// `enable_network`. Lives **outside** `workdir`, so teardown must delete it explicitly.
-    tap: Option<Tap>,
+    pub(crate) tap: Option<Tap>,
     /// The jail this VMM runs in, when the boot config set `jail` (P6.1). Its chroot lives under
     /// `workdir` (reclaimed with it), but the jailer's cgroup is outside, so teardown removes it
     /// explicitly, like the tap.
-    chroot: Option<Chroot>,
+    pub(crate) chroot: Option<Chroot>,
     /// The cgroup-owned lifetime machinery (P6.7): the VM's lifetime cgroup, the armed sentinel
     /// that reaps the VM if this *process* dies, and the [`KillHandle`] state. Torn down with the
     /// VM on every path.
-    lifetime: VmLifetime,
+    pub(crate) lifetime: VmLifetime,
 }
 
 /// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
@@ -268,29 +275,29 @@ pub struct RunningVm {
 /// run code immediately.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
-    state: PathBuf,
-    mem: PathBuf,
+    pub(crate) state: PathBuf,
+    pub(crate) mem: PathBuf,
     /// The bundle's point-in-time copy of the root disk (a read-write boot), or the shared read-only
     /// base itself (a `read_only_root` boot, where [`shared_base`](Self::shared_base) is set).
-    root_drive: PathBuf,
+    pub(crate) root_drive: PathBuf,
     /// The host path the snapshot baked in for the root disk (where the source VM booted it).
     /// Firecracker opens the disk *here* during `PUT /snapshot/load`.
-    root_backing: PathBuf,
+    pub(crate) root_backing: PathBuf,
     /// The root disk is a **read-only shared base** at a persistent path (a `read_only_root` boot):
     /// restore references it in place (no copy, no staging), and many clones share it read-only. When
     /// unset, the disk is a private per-VM copy that restore stages at `root_backing`.
-    shared_base: bool,
+    pub(crate) shared_base: bool,
     /// The source ran the vsock exec channel, so restored clones can be `exec`'d. The socket path was
     /// baked in **relative** (`v.sock`), so Firecracker re-binds it in each restored VMM's own scratch
     /// dir (its cwd) rather than on one shared absolute path, letting concurrent clones coexist.
-    has_vsock: bool,
+    pub(crate) has_vsock: bool,
     /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
     /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
     /// restore must recreate a tap with **exactly this name** — which also means only one networked
     /// clone can be live at a time (two taps can't share a name; decision 011's tombstone). The
     /// recreated tap gets a fresh /30, and the guest's stale in-memory address is replaced by the
     /// agent over vsock after resume.
-    tap_name: Option<String>,
+    pub(crate) tap_name: Option<String>,
 }
 
 impl Snapshot {
@@ -364,52 +371,6 @@ impl Vm {
             Err(e) => return Err(spawned.abort(e)),
         };
         spawned.into_running(boot_latency)
-    }
-
-    /// Restore a microVM from a [`Snapshot`] on a fresh VMM and resume it, returning once it's
-    /// running and (if the snapshot carried the exec channel) exec-ready. Reuses only the
-    /// `firecracker` binary and `boot_timeout` from `config` (the guest's kernel, memory, and devices
-    /// all come from the snapshot).
-    ///
-    /// A **read-write** snapshot's private disk copy is staged at its baked-in path; a **read-only
-    /// shared base** is referenced in place, so many clones restored from one warm snapshot share it
-    /// (page-cache-deduped) while each gets its own in-RAM overlay. A **warm** snapshot (one taken with
-    /// the vsock exec channel) restores exec-ready: its socket was baked in relative, so each clone
-    /// re-binds its own socket in its own scratch dir and concurrent clones don't collide. If the
-    /// snapshot carried vsock, restore waits until the guest agent is reachable before returning, so
-    /// the VM can [`exec`](RunningVm::exec) immediately.
-    ///
-    /// A **networked** snapshot restores with a **fresh network identity** (decision 011): the driver
-    /// recreates the snapshot's recorded tap (the pinned Firecracker has no `network_overrides`, so
-    /// the name must match — which also means only one networked clone can be live at a time; a taken
-    /// name is a typed error), assigns its host end a fresh /30, and the guest agent replaces the
-    /// baked-in `eth0` address with the new one over vsock. Entropy is reseeded via VMGenID
-    /// (Firecracker bumps the generation on restore and the guest kernel reseeds its CRNG — proven by
-    /// test, not assumed), so clones don't share RNG state. The guest's **wall clock is not fixed
-    /// up**: it lags by the snapshot's age until the workload resyncs it.
-    ///
-    /// Restore latency (load + resume) is [`RunningVm::boot_latency`] on the returned VM, for the
-    /// cold-boot-vs-restore comparison.
-    ///
-    /// # Errors
-    /// [`VmmError::NoKvm`] without `/dev/kvm`; [`VmmError::Artifact`] if a bundle file is missing or
-    /// `firecracker` isn't found; [`VmmError::Timeout`] if the VMM never becomes ready; and
-    /// [`VmmError::Vmm`] on any load/rebase/resume failure. On error the VMM is killed and the fresh
-    /// scratch dir removed before returning.
-    pub fn restore(snapshot: &Snapshot, config: &BootConfig) -> Result<RunningVm, VmmError> {
-        if !Path::new("/dev/kvm").exists() {
-            return Err(VmmError::NoKvm);
-        }
-        require_file(&snapshot.state, "snapshot state file")?;
-        require_file(&snapshot.mem, "snapshot memory file")?;
-        require_file(&snapshot.root_drive, "snapshot root disk")?;
-
-        let mut spawned = Spawned::launch_for_restore(config, snapshot)?;
-        let latency = match spawned.run_restore(snapshot, config.boot_timeout) {
-            Ok(latency) => latency,
-            Err(e) => return Err(spawned.abort(e)),
-        };
-        spawned.into_running(latency)
     }
 }
 
@@ -598,141 +559,6 @@ impl RunningVm {
         collect_output_image(&output.image, &output.dest)
     }
 
-    /// Pause the VM, write a [`Snapshot`] bundle (device + vCPU state, guest memory, and the root
-    /// disk) into `dir`, then resume — the VM keeps running and can be shut down or snapshotted again.
-    ///
-    /// A **read-write** boot's disk is copied into the bundle **inside the paused window**, so the copy
-    /// agrees with the memory image; a **`read_only_root`** boot (a warm snapshot) references the shared
-    /// base in place (no copy). The **vsock exec channel is supported** — restore re-binds its socket —
-    /// so a warm snapshot restores exec-ready.
-    ///
-    /// Refused (a typed error, never an unrestorable bundle): a VM with an **output** or **input**
-    /// block device (per-clone images a restore can't yet recreate), a VM with a **NIC but no vsock**
-    /// (restore applies the clone's fresh network identity through the exec channel, so a networked
-    /// snapshot without one couldn't be re-addressed — decision 011), and an **already-restored** VM
-    /// (its `rootfs` is a placeholder; the live disk is an anonymous inode with no host path to
-    /// bundle). A NIC *with* vsock is supported: the bundle records the tap name and restore rebuilds
-    /// the link (see [`Vm::restore`]).
-    ///
-    /// # Errors
-    /// [`VmmError::Vmm`] if the VM is unsupported for snapshotting, or on any API or file-copy failure.
-    /// A create failure still falls through to the resume, so a failed snapshot never leaves the guest
-    /// frozen.
-    pub fn snapshot(&self, dir: &Path) -> Result<Snapshot, VmmError> {
-        // A restored VM's `rootfs` is a placeholder (its live disk is an anonymous inode), so the
-        // shared-base classifier below would misread it and bundle a stale, shared-writable disk.
-        // Refuse it outright, the way the pre-warm-snapshot guard did.
-        if self.restored {
-            return Err(VmmError::Vmm(
-                "snapshot of an already-restored VM is not supported (its live disk has no host path)"
-                    .into(),
-            ));
-        }
-        // A jailed VM's root disk lives inside the chroot (torn down with the scratch dir) and its
-        // path is chroot-relative, so a bundle would record an unrestorable backing. Jailed
-        // snapshot/restore is a later Phase-6 step.
-        if self.chroot.is_some() {
-            return Err(VmmError::Vmm(
-                "snapshot of a jailed VM is not yet supported (its disk lives in the chroot)"
-                    .into(),
-            ));
-        }
-        // An output or input device carries a per-clone image a restore can't yet recreate (and the
-        // input image lives at the gone source scratch path), so those stay refused. The vsock exec
-        // channel is supported (restore re-binds its baked-in relative socket), and a NIC is supported
-        // *through* it: restore recreates the recorded tap and the agent applies the clone's fresh
-        // address over vsock (decision 011) — so a networked snapshot without vsock is refused too,
-        // since its clone could never be re-addressed.
-        if self.output.is_some() || self.has_input {
-            return Err(VmmError::Vmm(
-                "snapshot of a VM with an input/output device is not yet supported (P5.4/P5.5)"
-                    .into(),
-            ));
-        }
-        if self.tap.is_some() && self.vsock_uds.is_none() {
-            return Err(VmmError::Vmm(
-                "snapshot of a networked VM requires the vsock exec channel (restore re-addresses the \
-                 clone through it); boot with BootConfig.guest_cid set"
-                    .into(),
-            ));
-        }
-        // The root disk is either a **private per-VM copy** (a read-write boot, whose backing lives
-        // inside this VM's scratch dir: the bundle owns a point-in-time copy that restore stages back)
-        // or a **read-only shared base** (a `read_only_root` boot: the base is a persistent pinned file
-        // outside the scratch dir, so the bundle references it in place and clones share it read-only).
-        // The structural test is which side of the scratch dir the backing lives on.
-        let shared_base = !self.rootfs.starts_with(&self.workdir);
-        std::fs::create_dir_all(dir)
-            .map_err(|e| VmmError::Vmm(format!("create snapshot dir {}: {e}", dir.display())))?;
-        // Absolute bundle paths: `restore` hands these to Firecracker, whose cwd is its own scratch
-        // dir, so a relative bundle path would resolve there instead of where the caller put it.
-        let dir = absolute(dir)?;
-        let state = dir.join("snapshot.state");
-        let mem = dir.join("snapshot.mem");
-        // A private copy is bundled under `dir`; a shared base is referenced at its own path.
-        let root_drive = if shared_base {
-            self.rootfs.clone()
-        } else {
-            dir.join("rootfs.ext4")
-        };
-
-        // Pause → create → copy the (now-quiescent) disk → resume. Pausing freezes the vCPUs so the
-        // memory image is a consistent point-in-time; copying the disk in the same window keeps it in
-        // step with that memory. `create` failing still falls through to `resume` below, so the guest
-        // is never left frozen.
-        self.api.patch(
-            "/vm",
-            &VmState {
-                state: VmStateKind::Paused,
-            },
-        )?;
-        let created = self.write_snapshot_bundle(&state, &mem, &root_drive, shared_base);
-        let resumed = self.api.patch(
-            "/vm",
-            &VmState {
-                state: VmStateKind::Resumed,
-            },
-        );
-        created?;
-        resumed?;
-        tracing::info!(dir = %dir.display(), shared_base, "wrote microVM snapshot bundle");
-        Ok(Snapshot {
-            state,
-            mem,
-            root_drive,
-            root_backing: self.rootfs.clone(),
-            shared_base,
-            has_vsock: self.vsock_uds.is_some(),
-            tap_name: self.tap.as_ref().map(|t| t.name.clone()),
-        })
-    }
-
-    /// Write the snapshot state + memory files, and (for a private-copy disk) copy the root disk into
-    /// the bundle. Split out so `snapshot` can run it between the pause and the guaranteed resume
-    /// without an early return skipping the resume. A shared read-only base is referenced in place, so
-    /// there is nothing to copy.
-    fn write_snapshot_bundle(
-        &self,
-        state: &Path,
-        mem: &Path,
-        root_drive: &Path,
-        shared_base: bool,
-    ) -> Result<(), VmmError> {
-        self.api.put(
-            "/snapshot/create",
-            &SnapshotCreate {
-                snapshot_type: SnapshotType::Full,
-                snapshot_path: path_str(state)?,
-                mem_file_path: path_str(mem)?,
-            },
-        )?;
-        if !shared_base {
-            std::fs::copy(&self.rootfs, root_drive)
-                .map_err(|e| VmmError::Vmm(format!("copy root disk into snapshot bundle: {e}")))?;
-        }
-        Ok(())
-    }
-
     /// Ask the guest to power off (best-effort `SendCtrlAltDel`, an x86 ACPI-ish nicety over i8042),
     /// then poll for the VMM to exit until `deadline`. Returns `true` if it exited on its own. The
     /// shared core of `shutdown` and `stop_and_reap`, so the action and the poll cadence live once;
@@ -791,899 +617,11 @@ impl Drop for RunningVm {
     }
 }
 
-/// A spawned-but-not-yet-ready VMM. Kept distinct from [`RunningVm`] so the boot sequence can fail
-/// and clean up without ever constructing a half-booted `RunningVm`. Its `Drop` is the panic
-/// safety net: if anything unwinds between `launch` and `abort`/`into_running` (a panicking
-/// `tracing` subscriber, a future bug), the VMM still dies and the scratch dir is still reclaimed.
-struct Spawned {
-    /// `Some` until `abort`/`into_running` disarm the guard by taking it.
-    child: Option<Child>,
-    console: Console,
-    workdir: PathBuf,
-    rootfs: PathBuf,
-    /// Set by [`launch_for_restore`](Spawned::launch_for_restore): the `rootfs` is a placeholder, so
-    /// the resulting VM is marked restored and can't be re-snapshotted.
-    restored: bool,
-    api: ApiClient,
-    /// The vsock socket path (in `workdir`) when the boot config enables vsock, else `None`.
-    vsock_uds: Option<PathBuf>,
-    /// The built bulk-input image (in `workdir`) when `input_dir` was set, attached read-only as a
-    /// second block device; `None` otherwise. Reclaimed with `workdir` on teardown.
-    input_image: Option<PathBuf>,
-    /// The blank writable output image (in `workdir`) + its host destination, when `output_dir` was
-    /// set; `None` otherwise. Attached read-write; extracted by `collect_outputs`, then reclaimed.
-    output: Option<OutputDevice>,
-    /// The per-VM host tap backing the guest's virtio-net, when `enable_network` was set. Lives
-    /// **outside** `workdir`, so every teardown path must delete it explicitly.
-    tap: Option<Tap>,
-    /// The jail (chroot + dropped uid/gid + cgroup) when `jail` was set (P6.1); `None` for a direct
-    /// boot. Its cgroup lives outside `workdir`, so every teardown path removes it explicitly.
-    chroot: Option<Chroot>,
-    /// The cgroup-owned lifetime machinery (P6.7), armed at spawn so the crash-safety window is as
-    /// small as possible; moved onto the [`RunningVm`] by `into_running`.
-    lifetime: VmLifetime,
-}
-
-impl Drop for Spawned {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            teardown(
-                &mut child,
-                &mut self.console,
-                &self.workdir,
-                self.tap.as_ref(),
-                self.chroot.as_ref(),
-                &mut self.lifetime,
-            );
-        }
-    }
-}
-
-impl Spawned {
-    /// Validate the inputs, lay out the scratch dir, and spawn `firecracker --api-sock`.
-    fn launch(config: &BootConfig) -> Result<Self, VmmError> {
-        require_file(&config.kernel, "kernel image")?;
-        require_file(&config.rootfs, "rootfs image")?;
-
-        // Jailed boot spawns the jailer (not firecracker directly) and stages resources into the
-        // chroot later; the unjailed setup below is untouched. `Vm::boot` has already refused the
-        // feature combinations this phase doesn't jail.
-        if let Some(jail) = config.jail.as_ref() {
-            return Self::launch_jailed(config, jail);
-        }
-
-        let workdir = create_workdir()?;
-
-        // Read-only boot shares the pinned base directly (no per-VM copy): Firecracker opens it
-        // `O_RDONLY` so the guest can't mutate it, and the writable layer comes from the guest's
-        // tmpfs overlay (see `BootConfig::read_only_root`). Read-write boot copies the base instead,
-        // so the guest's writes stay per-VM and the base stays pinned.
-        let rootfs = if config.read_only_root {
-            // The shared base is handed to Firecracker as-is and recorded as the snapshot's disk path,
-            // so resolve it to absolute now (each VMM's cwd is its scratch dir; a relative base path
-            // would resolve there instead).
-            match absolute(&config.rootfs) {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            }
-        } else {
-            let copy = workdir.join("rootfs.ext4");
-            if let Err(e) = std::fs::copy(&config.rootfs, &copy) {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(VmmError::Vmm(format!(
-                    "copy rootfs to {}: {e}",
-                    copy.display()
-                )));
-            }
-            // `fs::copy` propagates the source's mode; a read-only pinned base (0444) would make the
-            // read-write root drive unopenable. The copy is ours alone — force owner read-write.
-            if let Err(e) = std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600))
-            {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(VmmError::Vmm(format!("chmod rootfs copy: {e}")));
-            }
-            copy
-        };
-
-        // Bulk read-only input (P3.4): build an ext4 from the host `input_dir` and attach it as a
-        // second block device (`/dev/vdb`). Lives in the scratch dir, so teardown reclaims it too.
-        let input_image = match &config.input_dir {
-            None => None,
-            Some(dir) => match build_input_image(dir, &workdir) {
-                Ok(img) => Some(img),
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            },
-        };
-
-        // Bulk writable output (P3.5): build a blank ext4 the guest mounts read-write at `/output`,
-        // attached as another block device. Its host destination rides along for `collect_outputs`.
-        let output = match &config.output_dir {
-            None => None,
-            Some(dest) => match build_output_image(&workdir) {
-                Ok(image) => Some(OutputDevice {
-                    image,
-                    dest: dest.clone(),
-                }),
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            },
-        };
-
-        // Spawn `firecracker --api-sock`, wiring its serial console + stderr log (see `spawn_fc`). On
-        // any failure the child is already reaped; we still own the scratch dir, so reclaim it.
-        let socket = workdir.join("fc.sock");
-        let (mut child, console) = match spawn_fc(&config.firecracker, &workdir, &socket) {
-            Ok(pair) => pair,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(e);
-            }
-        };
-        // Per-VM tap for the guest's virtio-net (P4.1), when enabled. Created here — after the child
-        // is spawned but before `Spawned` owns it — with the same inline cleanup as its neighbours, so
-        // a failed create can't leak a tap; once `Spawned` holds it, every teardown path deletes it.
-        let tap = if config.enable_network {
-            match Tap::create() {
-                Ok(tap) => Some(tap),
-                Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            }
-        } else {
-            None
-        };
-
-        // Cgroup-owned lifetime (P6.7): enroll the VMM in a per-VM lifetime cgroup and arm the
-        // sentinel, so from here even a SIGKILLed driver can't leak it. Named by the scratch dir,
-        // so a VM's cgroup and scratch identities match.
-        let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
-
-        // Firecracker creates the vsock socket here on `PUT /vsock`; the host dials it post-boot.
-        let vsock_uds = config.guest_cid.map(|_| workdir.join(VSOCK_UDS));
-        Ok(Self {
-            child: Some(child),
-            console,
-            workdir,
-            rootfs,
-            restored: false,
-            api: ApiClient::new(socket),
-            vsock_uds,
-            input_image,
-            output,
-            tap,
-            chroot: None,
-            lifetime,
-        })
-    }
-
-    /// The jailed cold-boot counterpart of [`launch`](Self::launch) (P6.1): spawn the **jailer**,
-    /// which builds the chroot, `mknod`s the device nodes, places the VMM in a cgroup, and drops
-    /// privileges before `exec`ing Firecracker. Resources (kernel, rootfs) are staged into the chroot
-    /// in [`run_boot`](Self::run_boot), once the API socket proves the chroot exists — so no staging
-    /// races the jailer's construction. Scoped to a plain read-write boot; `Vm::boot` refuses `jail`
-    /// combined with vsock, a NIC, the overlay, or bulk I/O, so this sets none of those up.
-    fn launch_jailed(config: &BootConfig, jail: &Jail) -> Result<Self, VmmError> {
-        let workdir = create_workdir()?;
-        // The jail id is the scratch-dir name: unique per VM within this process and a valid jailer id
-        // (alphanumeric + `-`). The jailer nests the chroot under `<workdir>/firecracker/<id>/root`.
-        let id = workdir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "agent-vm".to_string());
-        // CPU/memory limits (P6.2) derived from the guest's own resource envelope (vcpus, mem_mib);
-        // empty when the host doesn't delegate the cgroup controllers, so the jailed boot still runs.
-        let cgroup_args = cgroup_limit_args(config.vcpus, config.mem_mib);
-        let (child, console, socket, chroot_root) =
-            match spawn_jailer(jail, &config.firecracker, &workdir, &id, &cgroup_args) {
-                Ok(t) => t,
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            };
-        // Cgroup-owned lifetime (P6.7), jailed flavour: the jailer creates the VM's cgroup and
-        // moves the VMM into it itself, so enrolling the pid in a driver cgroup would race that
-        // placement (last write wins membership and could yank the VMM out of its limits). The
-        // sentinel instead watches the jailer's cgroup at its precomputed path; the unprotected
-        // window is spawn → the jailer's self-placement (milliseconds).
-        let lifetime = VmLifetime::watch(
-            child.id(),
-            jailer_cgroup_dir(&config.firecracker, &id)
-                .into_iter()
-                .collect(),
-        );
-        Ok(Self {
-            child: Some(child),
-            console,
-            workdir,
-            // Staged into the chroot in `run_boot` and named by its chroot-relative path; this
-            // placeholder is not a host device path (a jailed VM refuses snapshotting).
-            rootfs: PathBuf::from("/rootfs.ext4"),
-            restored: false,
-            api: ApiClient::new(socket),
-            vsock_uds: None,
-            input_image: None,
-            output: None,
-            tap: None,
-            chroot: Some(Chroot {
-                root: chroot_root,
-                uid: jail.uid,
-                gid: jail.gid,
-                cgroup_dir: None,
-            }),
-            lifetime,
-        })
-    }
-
-    /// Spawn a bare `firecracker` for a snapshot restore: a fresh scratch dir + process + console,
-    /// with **no** boot-time device configuration (the guest's devices are recreated from the
-    /// snapshot on `PUT /snapshot/load`). The root drive is the bundle's private copy, held so the
-    /// restored VM's teardown accounting matches a cold boot. Reuses the same `Spawned` guard, so a
-    /// failed restore tears the VMM down through the same paths as a failed boot.
-    fn launch_for_restore(config: &BootConfig, snapshot: &Snapshot) -> Result<Self, VmmError> {
-        let workdir = create_workdir()?;
-        let socket = workdir.join("fc.sock");
-        let (child, console) = match spawn_fc(&config.firecracker, &workdir, &socket) {
-            Ok(pair) => pair,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(e);
-            }
-        };
-        // A warm snapshot carries the vsock exec channel. Its socket path was baked in relative, so
-        // Firecracker re-binds it in *this* restore's cwd (its scratch dir): the restored VM reaches
-        // the guest agent through its own `v.sock`, and concurrent clones don't collide. Computed
-        // before `workdir` is moved into the struct.
-        let vsock_uds = snapshot.has_vsock.then(|| workdir.join(VSOCK_UDS));
-        // A networked snapshot baked in its tap's `host_dev_name`, which Firecracker will open at
-        // load — so a tap with **that exact name** must exist first (v1.9 has no `network_overrides`;
-        // decision 011). Recreate it with a fresh /30 on the host end; the guest side is re-addressed
-        // by the agent after resume. Same inline-cleanup discipline as `launch`'s tap: once `Spawned`
-        // holds the handle, every teardown path deletes it.
-        let tap = match snapshot.tap_name.as_deref() {
-            None => None,
-            Some(name) => match Tap::create_named(name) {
-                Ok(tap) => Some(tap),
-                Err(e) => {
-                    let mut child = child;
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            },
-        };
-        // Cgroup-owned lifetime (P6.7): a restored clone (and every warm-pool VM riding restore) is
-        // as leakable as a cold boot, so it gets the same enrollment + sentinel.
-        let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
-        Ok(Self {
-            child: Some(child),
-            console,
-            workdir,
-            // The restored VM's live disk is an anonymous inode (a private copy is staged at load then
-            // unlinked; a shared base is referenced in place). This field holds the bundle path only as
-            // a placeholder — it isn't a device this scratch dir owns, and re-snapshotting is refused.
-            rootfs: snapshot.root_drive.clone(),
-            restored: true,
-            api: ApiClient::new(socket),
-            vsock_uds,
-            input_image: None,
-            output: None,
-            tap,
-            chroot: None,
-            lifetime,
-        })
-    }
-
-    /// The scratch-dir name, used to tag the per-VM tracing span so interleaved logs from concurrent
-    /// VMs stay attributable. Shared by [`run_boot`](Self::run_boot) and
-    /// [`run_restore`](Self::run_restore).
-    fn vm_name(&self) -> String {
-        workdir_name(&self.workdir)
-    }
-
-    /// Load `snapshot` on this fresh VMM and resume it, returning the restore latency (the load +
-    /// resume call). Firecracker opens the root disk **at load** from the path baked into the
-    /// snapshot, so we first stage the bundle's private copy there, then unlink it once the VMM holds
-    /// the fd: a restored clone gets its own disk inode (sharing no writable backing with its source),
-    /// and nothing lingers outside this VM's scratch dir.
-    fn run_restore(
-        &mut self,
-        snapshot: &Snapshot,
-        timeout: Duration,
-    ) -> Result<Duration, VmmError> {
-        let span = tracing::info_span!("restore", vm = %self.vm_name());
-        let _span = span.enter();
-
-        // `Instant + Duration` panics on overflow; a caller's `Duration::MAX` must stay a bounded
-        // wait, not a panic — clamp to a day (as `run_boot` does).
-        let now = Instant::now();
-        let deadline = now
-            .checked_add(timeout)
-            .unwrap_or_else(|| now + Duration::from_secs(86_400));
-        self.await_api_socket(deadline)?;
-        tracing::debug!("api socket ready");
-
-        // Resolve every fallible input (the deadline, the snapshot paths) *before* staging the disk,
-        // so that once the ~disk-sized copy is on disk there is no `?` between the stage and the
-        // matching unstage — a mid-restore early return can't leak the staged file outside our reach.
-        still_before(deadline, "PUT /snapshot/load")?;
-        let snapshot_path = path_str(&snapshot.state)?;
-        let mem_path = path_str(&snapshot.mem)?;
-
-        // The vsock socket path was baked in relative, so Firecracker re-binds it in this VMM's cwd
-        // (its scratch dir, which already exists): no host-side path recreation is needed, and the
-        // socket lands in our own workdir where teardown reclaims it.
-
-        // A private per-VM disk is staged at its baked-in path so Firecracker can open it at load; a
-        // read-only shared base already exists there (and is shared across clones), so it's left alone.
-        let staged = !snapshot.shared_base;
-        if staged {
-            stage_restore_disk(&snapshot.root_drive, &snapshot.root_backing)?;
-        }
-        let started = Instant::now();
-        let loaded = self.api.put(
-            "/snapshot/load",
-            &SnapshotLoad {
-                snapshot_path,
-                mem_backend: MemBackend {
-                    backend_type: MemBackendType::File,
-                    backend_path: mem_path,
-                },
-                resume_vm: true,
-            },
-        );
-        // The restore latency is the load + resume call itself, measured before host-side cleanup.
-        let latency = started.elapsed();
-        // Firecracker now holds the disk's fd (or the load failed); either way remove a staged copy so
-        // it never outlives this restore. The open fd keeps the inode alive for the VM's lifetime.
-        if staged {
-            unstage_restore_disk(&snapshot.root_backing);
-        }
-        loaded?;
-
-        // A snapshot that loads but immediately dies (a corrupt bundle, an incompatible host) must be
-        // a typed error, not a "successful" restore of a dead VMM.
-        if let Some(status) = self.exited()? {
-            return Err(VmmError::Vmm(format!(
-                "firecracker exited after restore ({status})"
-            )));
-        }
-
-        // If the snapshot carried the exec channel, the guest agent needs a brief moment after resume
-        // before Firecracker's vsock backend is forwarding to it again. Poll until a connect succeeds
-        // (bounded by the deadline), so `restore` hands back a VM that's actually ready to `exec`,
-        // never one mid-resume (this is restore's analogue of boot's userspace-marker wait).
-        if let Some(uds) = self.vsock_uds.clone() {
-            self.await_agent_ready(&uds, deadline)?;
-            // Fresh network identity (decision 011): the clone woke with the snapshot's baked-in
-            // address, which no longer matches the recreated tap's fresh /30 (and would collide with
-            // the source's if it were kept). The kernel `ip=` config ran once at the source's boot and
-            // can't re-fire, so the **agent** applies the new address through the exec channel — the
-            // runtime counterpart of boot-time `ip=`. Network *configuration* rides the agent; network
-            // *enforcement* stays host-side (decision 008/spine #2).
-            if let Some(guest_ip) = self.tap.as_ref().map(|t| t.guest_ip) {
-                apply_guest_net_identity(&uds, guest_ip)?;
-                tracing::debug!(%guest_ip, "restored clone re-addressed");
-            }
-        }
-
-        tracing::info!(
-            restore_ms = latency.as_millis() as u64,
-            "microVM restored from snapshot"
-        );
-        Ok(latency)
-    }
-
-    /// Poll the guest agent's vsock port until a connect + handshake succeeds, so a restored VM is
-    /// exec-ready when it's handed back. The probe connection is dropped immediately (the agent serves
-    /// one connection then loops back to accept, so a connect-and-close just cycles it).
-    fn await_agent_ready(&mut self, uds: &Path, deadline: Instant) -> Result<(), VmmError> {
-        loop {
-            match connect_agent_at(uds, AGENT_VSOCK_PORT, Duration::from_millis(200)) {
-                Ok(_probe) => return Ok(()),
-                Err(e) => {
-                    if let Some(status) = self.exited()? {
-                        return Err(VmmError::Vmm(format!(
-                            "firecracker exited after restore ({status})"
-                        )));
-                    }
-                    if Instant::now() >= deadline {
-                        return Err(e);
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-            }
-        }
-    }
-
-    /// `PUT /drives/{id}` — attach a virtio-block device, deriving the API path from `id` so the URL
-    /// and the body's `drive_id` are the same token and can't drift apart. `still_before` first, so a
-    /// boot already past its deadline fails fast with this drive named.
-    fn put_drive(
-        &self,
-        id: &str,
-        path_on_host: &str,
-        is_root_device: bool,
-        is_read_only: bool,
-        deadline: Instant,
-    ) -> Result<(), VmmError> {
-        still_before(deadline, &format!("PUT /drives/{id}"))?;
-        self.api.put(
-            &format!("/drives/{id}"),
-            &Drive {
-                drive_id: id,
-                path_on_host,
-                is_root_device,
-                is_read_only,
-            },
-        )
-    }
-
-    /// Drive the API through the boot sequence and wait for the userspace marker; returns the
-    /// boot-to-userspace latency.
-    fn run_boot(&mut self, config: &BootConfig) -> Result<Duration, VmmError> {
-        // One span per boot, keyed by the scratch-dir name, so interleaved logs from concurrent
-        // VMs (the warm pool, Phase 5) stay attributable to their sandbox.
-        let span = tracing::info_span!("boot", vm = %self.vm_name());
-        let _span = span.enter();
-
-        // `Instant + Duration` panics on overflow, and `boot_timeout` is caller-set (a
-        // `Duration::MAX` "no limit" must stay a *bounded* wait, not a panic) — clamp to a day.
-        let now = Instant::now();
-        let deadline = now
-            .checked_add(config.boot_timeout)
-            .unwrap_or_else(|| now + Duration::from_secs(86_400));
-        self.await_api_socket(deadline)?;
-        tracing::debug!("api socket ready");
-
-        // Kernel + rootfs paths as Firecracker will name them. Unjailed: absolute host paths (its cwd
-        // is the scratch dir); `self.rootfs` is already absolute from `launch`. Jailed: stage each into
-        // the chroot (safe now that the API socket proved the chroot exists — no race with the jailer's
-        // construction) and name it by its chroot-relative path, and record the jailer's cgroup for
-        // teardown. `config.read_only_root` is false under a jail (`Vm::boot` refuses it), so the root
-        // drive is plain read-write either way here.
-        let kernel_arg: String;
-        let rootfs_arg: String;
-        if let Some(chroot) = self.chroot.as_ref() {
-            let (root, uid, gid) = (chroot.root.clone(), chroot.uid, chroot.gid);
-            // Read-only kernel (0444), read-write root disk (0600), both chowned to the jailed uid so
-            // the dropped-privilege Firecracker can open them.
-            kernel_arg = stage_into_chroot(&root, "kernel", &config.kernel, uid, gid, 0o444)?;
-            rootfs_arg = stage_into_chroot(&root, "rootfs.ext4", &config.rootfs, uid, gid, 0o600)?;
-            // Learn the cgroup the jailer placed the VMM in (from `/proc/<pid>/cgroup`, now that
-            // Firecracker is running in its final cgroup), so teardown can remove it. The lifetime
-            // sentinel (P6.7) watches the *precomputed* jailer cgroup path from spawn; if the
-            // jailer put the VMM somewhere else, the sentinel isn't guarding it — warn, don't hide.
-            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
-                let actual = read_cgroup_dir(pid);
-                if let Some(dir) = actual.as_deref() {
-                    if !self.lifetime.watches(dir) {
-                        tracing::warn!(
-                            cgroup = %dir.display(),
-                            "jailer placed the VMM outside the precomputed cgroup; the lifetime \
-                             sentinel is not guarding it (driver death would leak this VMM)"
-                        );
-                    }
-                }
-                if let Some(chroot) = self.chroot.as_mut() {
-                    chroot.cgroup_dir = actual;
-                }
-            }
-        } else {
-            let kernel = absolute(&config.kernel)?;
-            kernel_arg = path_str(&kernel)?.to_string();
-            rootfs_arg = path_str(&self.rootfs)?.to_string();
-        }
-        let kernel = kernel_arg.as_str();
-        let rootfs = rootfs_arg.as_str();
-        // A read-only root hands off to the overlay init, which stacks a size-capped tmpfs over the
-        // RO base so `/` is writable per-run. The cap is half of guest RAM — the guest has no swap,
-        // so a tmpfs sized near RAM would OOM the guest rather than bound a runaway write. It rides
-        // the kernel command line as a `key=value` token, which the kernel routes into PID 1's
-        // environment (so `overlay-init` reads `$overlay_size` without mounting `/proc` first).
-        let mut boot_args = if config.read_only_root {
-            format!(
-                "{} init=/sbin/overlay-init overlay_size={}M",
-                config.boot_args,
-                config.mem_mib / 2
-            )
-        } else {
-            config.boot_args.clone()
-        };
-        // Static guest addressing (P4.2) when a NIC is attached: the kernel configures `eth0` before
-        // userspace via `CONFIG_IP_PNP`. The gateway field is **empty**, so the kernel installs only
-        // the connected /30 route (guest ⇄ host over the tap) and **no default route** — the guest
-        // reaches the host and nothing else (deny-by-default, decision 008). Netmask is a /30.
-        if let Some(tap) = self.tap.as_ref() {
-            boot_args = format!(
-                "{boot_args} ip={}:::255.255.255.252::eth0:off",
-                tap.guest_ip
-            );
-        }
-        still_before(deadline, "PUT /boot-source")?;
-        self.api.put(
-            "/boot-source",
-            &BootSource {
-                kernel_image_path: kernel,
-                boot_args: &boot_args,
-            },
-        )?;
-        self.put_drive("rootfs", rootfs, true, config.read_only_root, deadline)?;
-        // Bulk read-only input (P3.4): attach the built image as `/dev/vdb`. `is_read_only` is what
-        // makes the input provably immutable (Firecracker opens it `O_RDONLY`) and sidesteps the
-        // read-back-a-dirty-ext4 hazard that a writable device would carry into P3.5.
-        if let Some(image) = self.input_image.as_ref() {
-            let input = path_str(image)?;
-            self.put_drive("input", input, false, true, deadline)?;
-        }
-        // Bulk writable output (P3.5): attach the blank image read-write. The guest mounts it by
-        // label (`agent-output`), so the `/dev/vdX` letter this lands on doesn't matter — a boot may
-        // attach input, output, both, or neither. Durability of the guest's writes is the guest's
-        // `-o sync` mount plus a clean unmount on shutdown; `collect_outputs` reads it after the VMM
-        // exits (never while it holds the file open — see `RunningVm::collect_outputs`).
-        if let Some(out) = self.output.as_ref() {
-            let output = path_str(&out.image)?;
-            self.put_drive("output", output, false, false, deadline)?;
-        }
-        still_before(deadline, "PUT /machine-config")?;
-        self.api.put(
-            "/machine-config",
-            &MachineConfig {
-                vcpu_count: config.vcpus,
-                mem_size_mib: config.mem_mib,
-            },
-        )?;
-
-        if let Some(cid) = config.guest_cid {
-            still_before(deadline, "PUT /vsock")?;
-            // Bind the socket at the **relative** name `v.sock`, resolved against the VMM's cwd (its
-            // scratch dir — see `spawn_fc`). The host still connects via the absolute `self.vsock_uds`
-            // (same file), but baking a *relative* path into the snapshot is what lets warm clones
-            // restored from it each bind their own socket in their own scratch dir, instead of all
-            // colliding on one absolute path.
-            self.api.put(
-                "/vsock",
-                &Vsock {
-                    guest_cid: cid,
-                    uds_path: VSOCK_UDS,
-                },
-            )?;
-            tracing::debug!(guest_cid = cid, uds = VSOCK_UDS, "vsock device configured");
-        }
-
-        // Per-VM virtio-net (P4.1), backed by the host tap created in `launch`. Deny-by-default: the
-        // guest gets an *unconfigured* `eth0` (no `ip=` boot arg, no host route or masquerade), so it
-        // reaches nothing until addressing lands. The tap is deleted on every teardown path.
-        if let Some(tap) = self.tap.as_ref() {
-            still_before(deadline, "PUT /network-interfaces")?;
-            self.api.put(
-                &format!("/network-interfaces/{IFACE_ID}"),
-                &NetworkInterface {
-                    iface_id: IFACE_ID,
-                    host_dev_name: &tap.name,
-                    guest_mac: &tap.mac,
-                },
-            )?;
-            tracing::debug!(tap = %tap.name, mac = %tap.mac, "virtio-net device configured");
-        }
-
-        tracing::debug!(
-            vcpus = config.vcpus,
-            mem_mib = config.mem_mib,
-            "boot source, root drive, and machine config set"
-        );
-
-        still_before(deadline, "InstanceStart")?;
-        // The number that matters is measured from InstanceStart to the userspace marker.
-        let started = Instant::now();
-        self.api.put("/actions", &Action::InstanceStart)?;
-        self.await_userspace(&config.userspace_marker, deadline)?;
-        let latency = started.elapsed();
-        tracing::info!(
-            boot_ms = latency.as_millis() as u64,
-            "microVM reached userspace"
-        );
-        Ok(latency)
-    }
-
-    /// Poll `connect()` (not path-existence — the file can appear before `listen()`) until the API
-    /// answers, failing fast if Firecracker already exited.
-    fn await_api_socket(&mut self, deadline: Instant) -> Result<(), VmmError> {
-        loop {
-            if let Some(status) = self.exited()? {
-                return Err(VmmError::Vmm(format!(
-                    "firecracker exited before boot ({status})"
-                )));
-            }
-            if std::os::unix::net::UnixStream::connect(self.api.socket()).is_ok() {
-                return Ok(());
-            }
-            if Instant::now() >= deadline {
-                return Err(VmmError::Timeout(
-                    "firecracker API socket never became ready".into(),
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Wait for the console to show the userspace marker, bounded by `deadline` and by the child
-    /// exiting early (a guest that panics before userspace).
-    fn await_userspace(&mut self, marker: &str, deadline: Instant) -> Result<(), VmmError> {
-        loop {
-            if self.console.contains(marker) {
-                return Ok(());
-            }
-            if let Some(status) = self.exited()? {
-                return Err(VmmError::Vmm(format!(
-                    "firecracker exited before userspace ({status})"
-                )));
-            }
-            if Instant::now() >= deadline {
-                return Err(VmmError::Timeout(format!(
-                    "guest did not reach userspace (marker {marker:?}) within the boot deadline"
-                )));
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    /// `Some(status)` if the child has already exited, mapping the wait error to a typed value.
-    fn exited(&mut self) -> Result<Option<std::process::ExitStatus>, VmmError> {
-        match self.child.as_mut() {
-            Some(child) => child
-                .try_wait()
-                .map_err(|e| VmmError::Vmm(format!("wait on firecracker: {e}"))),
-            // Unreachable while the guard is armed; a typed error beats lying about liveness.
-            None => Err(VmmError::Vmm("VMM child already reclaimed".into())),
-        }
-    }
-
-    /// Boot failed: kill the VMM, then enrich the cause with the two diagnostics that explain
-    /// most boot failures — Firecracker's stderr tail and the guest console tail (the kernel's
-    /// last words are exactly what a pre-marker hang needs) — then reclaim the scratch dir, in
-    /// that order, because the stderr log lives *in* the scratch dir.
-    fn abort(mut self, cause: VmmError) -> VmmError {
-        // If jailed, learn the cgroup from the still-live child before killing it, so a boot that
-        // failed *after* the VMM came up (past `run_boot`'s cgroup read, or before it) still reaps the
-        // cgroup the jailer created — it lives outside the scratch dir `remove_dir_all` reclaims.
-        let cgroup = self.chroot.as_ref().and_then(|c| {
-            c.cgroup_dir
-                .clone()
-                .or_else(|| self.child.as_ref().and_then(|ch| read_cgroup_dir(ch.id())))
-        });
-        // Flag before the reap, so an outstanding `KillHandle` can't signal a recycled pid.
-        self.lifetime.mark_down();
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        // The tap lives outside the scratch dir, so `remove_dir_all` below won't reclaim it — delete
-        // it explicitly (best-effort) on this boot-failure path too, or a failed boot leaks a tap.
-        if let Some(tap) = self.tap.take() {
-            tap.delete();
-        }
-        if let Some(cgroup) = cgroup {
-            remove_cgroup(&cgroup);
-        }
-        self.lifetime.teardown();
-        self.console.join();
-        let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
-        let console = self.console.snapshot();
-        let _ = std::fs::remove_dir_all(&self.workdir);
-
-        let mut detail = String::new();
-        if let Some(tail) = last_lines(&fc_log, 3) {
-            detail.push_str(&format!(" [firecracker: {tail}]"));
-        }
-        if let Some(tail) = last_lines(&console, 3) {
-            detail.push_str(&format!(" [console: {tail}]"));
-        }
-        if detail.is_empty() {
-            return cause;
-        }
-        match cause {
-            VmmError::Vmm(m) => VmmError::Vmm(format!("{m}{detail}")),
-            VmmError::Timeout(m) => VmmError::Timeout(format!("{m}{detail}")),
-            other => other,
-        }
-    }
-
-    /// Promote a successfully-booted VMM to a [`RunningVm`], disarming this guard's `Drop`
-    /// (hence the `mem::take`s — a `Drop` type can't be destructured).
-    fn into_running(mut self, boot_latency: Duration) -> Result<RunningVm, VmmError> {
-        let Some(child) = self.child.take() else {
-            // Unreachable: `boot` only promotes a still-armed guard.
-            return Err(VmmError::Vmm("VMM child already reclaimed".into()));
-        };
-        Ok(RunningVm {
-            child,
-            workdir: std::mem::take(&mut self.workdir),
-            console: std::mem::take(&mut self.console),
-            // `ApiClient` is a cheap-to-clone handle (just the socket path); the other fields can't
-            // clone (a `Child`, owned buffers), so they `take()`. `self` still `Drop`s afterward.
-            api: self.api.clone(),
-            boot_latency,
-            rootfs: std::mem::take(&mut self.rootfs),
-            restored: self.restored,
-            has_input: self.input_image.is_some(),
-            vsock_uds: self.vsock_uds.take(),
-            output: self.output.take(),
-            tap: self.tap.take(),
-            chroot: self.chroot.take(),
-            // The armed machinery moves to the `RunningVm`; the guard keeps an inert placeholder
-            // (its `Drop` skips teardown anyway once `child` is `None`).
-            lifetime: std::mem::replace(&mut self.lifetime, VmLifetime::disarmed()),
-        })
-    }
-}
-
-/// Place the snapshot bundle's private root-disk copy at `backing` — the path Firecracker opens the
-/// drive from during `PUT /snapshot/load` — creating parent dirs as needed. Refuses to overwrite an
-/// existing file, so a still-live source VM's disk is never clobbered (drop the source first).
-fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
-    if let Some(parent) = backing.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            VmmError::Vmm(format!("stage restore disk dir {}: {e}", parent.display()))
-        })?;
-    }
-    // `create_new` reserves the path **atomically**: if it already exists (a still-live source's
-    // disk) the open fails rather than clobbering it — the "never overwrite" guarantee, race-free,
-    // not a check-then-copy TOCTOU. A missing parent or any other error is surfaced as-is.
-    let mut dst = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(backing)
-    {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(VmmError::Vmm(format!(
-                "root disk path {} already exists; drop the source VM before restoring its snapshot",
-                backing.display()
-            )));
-        }
-        Err(e) => {
-            return Err(VmmError::Vmm(format!(
-                "stage restore disk {}: {e}",
-                backing.display()
-            )));
-        }
-    };
-    let copy_bytes =
-        std::fs::File::open(copy).and_then(|mut src| std::io::copy(&mut src, &mut dst).map(|_| ()));
-    if let Err(e) = copy_bytes {
-        // A partial copy (e.g. disk full mid-write) must leave nothing behind: drop the handle and
-        // undo the file + the dir we may have just created, so staging is all-or-nothing.
-        drop(dst);
-        unstage_restore_disk(backing);
-        return Err(VmmError::Vmm(format!(
-            "stage restore disk {}: {e}",
-            backing.display()
-        )));
-    }
-    Ok(())
-}
-
-/// Remove the staged restore disk (and its parent dir if now empty), once Firecracker holds the fd.
-/// Best-effort: the open fd keeps the inode alive for the VM's lifetime, so a failure here leaks at
-/// most an empty file/dir under `/tmp`, never the VM's disk. `remove_dir` only succeeds on an empty
-/// dir, so it never touches a directory that still holds a live VM's files.
-fn unstage_restore_disk(backing: &Path) {
-    let _ = std::fs::remove_file(backing);
-    if let Some(parent) = backing.parent() {
-        let _ = std::fs::remove_dir(parent);
-    }
-}
-
-/// Spawn `firecracker --api-sock <socket>`, wiring its serial console to a [`Console`] and its stderr
-/// to `<workdir>/fc.stderr`. Shared by a cold boot ([`Spawned::launch`]) and a snapshot restore
-/// ([`Spawned::launch_for_restore`]).
-///
-/// Firecracker's own logs go to a *file* (not our stderr, which is the host's tracing; and not a
-/// pipe, which back-pressures a chatty VMM or feeds it EPIPE when dropped) — `abort` reads it back for
-/// diagnostics. On a spawn/console failure the child (if any) is reaped so nothing leaks; the caller
-/// owns `workdir` cleanup.
-fn spawn_fc(
-    firecracker: &Path,
-    workdir: &Path,
-    socket: &Path,
-) -> Result<(Child, Console), VmmError> {
-    let fc_stderr = std::fs::File::create(workdir.join(FC_STDERR))
-        .map_err(|e| VmmError::Vmm(format!("create firecracker stderr log: {e}")))?;
-    let mut child = Command::new(firecracker)
-        .arg("--api-sock")
-        .arg(socket)
-        // Run each VMM with its scratch dir as cwd, so a **relative** vsock socket path (`v.sock`)
-        // resolves per-VM. That's what lets N warm clones restored from one snapshot each bind their
-        // own socket instead of colliding on the source's absolute path (see `run_boot`'s `PUT /vsock`).
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped()) // guest serial console
-        .stderr(Stdio::from(fc_stderr))
-        .spawn()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                VmmError::Artifact(format!("firecracker not found: {}", firecracker.display()))
-            } else {
-                VmmError::Vmm(format!("spawn firecracker: {e}"))
-            }
-        })?;
-    let stdout = child.stdout.take();
-    match Console::spawn(stdout) {
-        Ok(console) => Ok((child, console)),
-        Err(e) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            Err(e)
-        }
-    }
-}
-
-/// Create the per-VM scratch dir. Two constraints shape it:
-/// - **Short path** (`/tmp/agent-<pid>-<n>`): the API socket lives here and
-///   `sockaddr_un.sun_path` caps at ~108 bytes, so a deep `TMPDIR`-based path would make
-///   Firecracker's `bind()` fail with EINVAL.
-/// - **Fail-if-exists, mode `0700`**: `/tmp` is world-writable and PIDs recycle, so a
-///   pre-existing path (squatted by another user, or stale from a killed run) must never be
-///   silently adopted — the rootfs copy and socket go here. A collision just advances to the
-///   next sequence number.
-fn create_workdir() -> Result<PathBuf, VmmError> {
-    use std::os::unix::fs::DirBuilderExt;
-    for _ in 0..1024 {
-        let workdir = PathBuf::from(format!(
-            "/tmp/agent-{}-{}",
-            std::process::id(),
-            VM_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        match std::fs::DirBuilder::new().mode(0o700).create(&workdir) {
-            Ok(()) => {
-                // mkdir's mode is masked by the umask; an explicit chmod after the
-                // fail-if-exists create makes 0700 unconditional (and race-free — the dir is
-                // already exclusively ours).
-                if let Err(e) =
-                    std::fs::set_permissions(&workdir, std::fs::Permissions::from_mode(0o700))
-                {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(VmmError::Vmm(format!("chmod {}: {e}", workdir.display())));
-                }
-                return Ok(workdir);
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(VmmError::Vmm(format!("create {}: {e}", workdir.display()))),
-        }
-    }
-    Err(VmmError::Vmm(
-        "no fresh scratch dir under /tmp after 1024 attempts (stale agent-* dirs?)".into(),
-    ))
-}
-
-/// The scratch dir's basename — the VM's process-unique identity, shared by its tracing span, its
-/// jail id, and its lifetime cgroup, so one name finds all of a VM's residue.
-fn workdir_name(workdir: &Path) -> String {
-    workdir
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned()
-}
-
 /// Guaranteed, best-effort teardown shared by both `Drop`s: kill the VMM, join the console reader
 /// (which ends once the killed child's stdout closes), delete the per-VM tap and the jailer's cgroup
 /// (both live outside the scratch dir, so `remove_dir_all` can't reclaim them), then remove the
 /// scratch dir (which reclaims the chroot, since its base is `workdir`).
-fn teardown(
+pub(crate) fn teardown(
     child: &mut Child,
     console: &mut Console,
     workdir: &Path,
@@ -1710,55 +648,9 @@ fn teardown(
     let _ = std::fs::remove_dir_all(workdir);
 }
 
-/// A path as `&str`, or a typed error — Firecracker's JSON API can't carry non-UTF-8 paths.
-pub(crate) fn path_str(p: &Path) -> Result<&str, VmmError> {
-    p.to_str()
-        .ok_or_else(|| VmmError::Vmm(format!("path is not valid UTF-8: {}", p.display())))
-}
-
-/// Resolve `p` to an absolute path against the **driver's** cwd (where a relative artifact path is
-/// meant to resolve). Every *file* path handed to Firecracker must be absolute, because each VMM runs
-/// with its scratch dir as cwd (so a relative vsock socket resolves per-VM — see `spawn_fc`); a
-/// relative file path would otherwise resolve against that scratch dir instead. Lexical only (no
-/// symlink resolution, no existence requirement), so it's safe on a path that doesn't exist yet.
-pub(crate) fn absolute(p: &Path) -> Result<PathBuf, VmmError> {
-    if p.is_absolute() {
-        Ok(p.to_path_buf())
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(p))
-            .map_err(|e| VmmError::Vmm(format!("resolve {}: {e}", p.display())))
-    }
-}
-
-/// Fail fast if the boot deadline has already passed before the next step (`what`). Each API call is
-/// individually time-capped by the client, but their *sum* must also respect the boot deadline, or a
-/// slow VMM could stretch `boot` well past `wall`.
-fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
-    if Instant::now() >= deadline {
-        return Err(VmmError::Timeout(format!(
-            "boot deadline expired before {what}"
-        )));
-    }
-    Ok(())
-}
-
-/// Require a file to exist, mapping absence to a clear [`VmmError::Artifact`].
-fn require_file(path: &Path, what: &str) -> Result<(), VmmError> {
-    if path.is_file() {
-        Ok(())
-    } else {
-        Err(VmmError::Artifact(format!(
-            "{what} not found at {} (run `cargo xtask fetch-artifacts`)",
-            path.display()
-        )))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TestDir;
 
     #[test]
     fn with_limits_folds_budget() {
@@ -1770,12 +662,6 @@ mod tests {
         assert_eq!(cfg.vcpus, 4);
         assert_eq!(cfg.mem_mib, 1024);
         assert_eq!(cfg.boot_timeout, Duration::from_secs(60));
-    }
-
-    #[test]
-    fn missing_artifact_is_typed_error() {
-        let err = require_file(Path::new("/no/such/vmlinux"), "kernel image").unwrap_err();
-        assert!(matches!(err, VmmError::Artifact(_)));
     }
 
     #[test]
@@ -1830,45 +716,11 @@ mod tests {
     }
 
     #[test]
-    fn dead_vmm_fails_fast_with_its_stderr_tail() {
-        // A "firecracker" that exits immediately, complaining on stderr: `sh --api-sock <path>`
-        // rejects the flag. Boot must fail fast with the exit surfaced — not wait out the whole
-        // deadline — and carry the stderr tail. Needs no KVM, so it runs in the host gate.
-        let dir = TestDir::new("agent-fake-fc");
-        let kernel = dir.path().join("vmlinux");
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
-        std::fs::write(&rootfs, b"not a rootfs").expect("fake rootfs");
-
-        let cfg = BootConfig {
-            firecracker: PathBuf::from("sh"),
-            kernel,
-            rootfs,
-            boot_timeout: Duration::from_secs(10),
-            ..BootConfig::default()
-        };
-        let started = Instant::now();
-        let mut spawned = Spawned::launch(&cfg).expect("launch the fake vmm");
-        let err = spawned.run_boot(&cfg).expect_err("a dead vmm cannot boot");
-        let msg = spawned.abort(err).to_string();
-
-        assert!(msg.contains("exited before boot"), "fail fast, got: {msg}");
-        assert!(msg.contains("[firecracker:"), "stderr tail attached: {msg}");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "must not wait out the boot deadline"
-        );
-    }
-
-    #[test]
-    fn workdirs_are_fresh_private_and_distinct() {
-        let a = TestDir::adopt(create_workdir().expect("first workdir"));
-        let b = TestDir::adopt(create_workdir().expect("second workdir"));
-        assert_ne!(a.path(), b.path(), "each VM gets its own scratch dir");
-        let mode = std::fs::metadata(a.path())
-            .expect("stat workdir")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o700, "scratch dir must be private to us");
+    fn scratch_dir_defaults_to_tmp_and_honors_the_env_override() {
+        assert_eq!(BootConfig::default().scratch_dir, PathBuf::from("/tmp"));
+        let cfg = BootConfig::from_env_with(|k| {
+            (k == "AGENT_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
+        });
+        assert_eq!(cfg.scratch_dir, PathBuf::from("/mnt/disk/scratch"));
     }
 }

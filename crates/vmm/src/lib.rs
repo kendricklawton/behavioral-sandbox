@@ -17,7 +17,10 @@ mod firecracker;
 mod jail;
 mod lifetime;
 mod net;
+mod paths;
 mod pool;
+mod snapshot;
+mod spawn;
 #[cfg(test)]
 mod test_util;
 mod vm;
