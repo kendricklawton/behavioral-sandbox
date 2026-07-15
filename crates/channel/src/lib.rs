@@ -32,8 +32,11 @@ use std::io::{Read, Write};
 pub(crate) const MAGIC: [u8; 4] = *b"AGCH";
 
 /// The wire-protocol version. Bump on any breaking framing/message change; the handshake rejects a
-/// peer that doesn't match.
-pub const PROTOCOL_VERSION: u16 = 1;
+/// peer that doesn't match. v2 added `env` to [`Request::Exec`] — a mismatched peer would otherwise
+/// silently run the command *without* its environment (an old agent's parser ignores trailing
+/// bytes), which for injected secrets/config is a correctness failure, so the skew must fail the
+/// handshake, not degrade.
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Upper bound on a single frame's payload. Output is streamed in chunks well under this; the cap
 /// exists so a broken `len` header is a typed error, not a huge allocation.
@@ -84,12 +87,16 @@ pub enum Request {
     PutFile { path: String, data: Vec<u8> },
     /// Run `argv` in the guest (`argv[0]` is the program), feeding `stdin` to it, then return the
     /// files named in `artifacts` (paths relative to the working dir). `stdin` is a bounded up-front
-    /// buffer — larger/streaming input goes via the block-device path. `timeout_ms` bounds the
+    /// buffer — larger/streaming input goes via the block-device path. `env` is set on the **spawned
+    /// command only**, never the agent's own process, and is bounded like `stdin` (the whole request
+    /// is one `≤ MAX_PAYLOAD` frame); values are secrets by presumption — neither peer may log one
+    /// or echo one into an error (an error may name a *key*). `timeout_ms` bounds the
     /// command's wall-clock runtime — the agent kills it and replies [`Response::TimedOut`] past
     /// the deadline; **`0` means "use the agent's ceiling"**, not "no time". Empty argv is rejected.
     Exec {
         argv: Vec<String>,
         stdin: Vec<u8>,
+        env: Vec<(String, String)>,
         artifacts: Vec<String>,
         timeout_ms: u32,
     },
@@ -272,11 +279,16 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
             let mut payload = Vec::new();
             put_blob(&mut payload, path.as_bytes());
             put_blob(&mut payload, data);
-            write_frame(w, TAG_PUTFILE, &payload)
+            let sent = write_frame(w, TAG_PUTFILE, &payload);
+            // Secret hygiene: this buffer held a full copy of the injected bytes; wipe it before it
+            // returns to the allocator (best-effort — the kernel's socket buffer is out of reach).
+            payload.fill(0);
+            sent
         }
         Request::Exec {
             argv,
             stdin,
+            env,
             artifacts,
             timeout_ms,
         } => {
@@ -291,7 +303,15 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
                 put_blob(&mut payload, path.as_bytes());
             }
             put_u32(&mut payload, *timeout_ms);
-            write_frame(w, TAG_EXEC, &payload)
+            put_u32(&mut payload, env.len() as u32);
+            for (key, value) in env {
+                put_blob(&mut payload, key.as_bytes());
+                put_blob(&mut payload, value.as_bytes());
+            }
+            let sent = write_frame(w, TAG_EXEC, &payload);
+            // Same hygiene as `PutFile`: the serialized stdin + env values are wiped, not just freed.
+            payload.fill(0);
+            sent
         }
         Request::Unknown { tag } => Err(ChannelError::Protocol(format!(
             "Request::Unknown (tag {tag}) is read-only and cannot be sent"
@@ -324,9 +344,15 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
                 artifacts.push(body.string()?);
             }
             let timeout_ms = body.u32()?;
+            let envc = body.u32()? as usize;
+            let mut env = Vec::new();
+            for _ in 0..envc {
+                env.push((body.string()?, body.string()?));
+            }
             Ok(Request::Exec {
                 argv,
                 stdin,
+                env,
                 artifacts,
                 timeout_ms,
             })
@@ -567,18 +593,25 @@ mod tests {
             Request::Exec {
                 argv: vec!["echo".into(), "hi".into()],
                 stdin: vec![],
+                env: vec![],
                 artifacts: vec![],
                 timeout_ms: 30_000,
             },
             Request::Exec {
                 argv: vec!["/bin/π".into(), "a b\tc".into(), String::new()],
                 stdin: b"piped input\n".to_vec(),
+                env: vec![
+                    ("API_KEY".into(), "s3cr3t=with=equals".into()),
+                    ("EMPTY".into(), String::new()),
+                    ("UNICODE_π".into(), "väl ue".into()),
+                ],
                 artifacts: vec!["out.txt".into(), "sub/dir.bin".into()],
                 timeout_ms: 1,
             },
             Request::Exec {
                 argv: vec![],
                 stdin: vec![0u8, 1, 2, 255],
+                env: vec![],
                 artifacts: vec![],
                 timeout_ms: 0,
             },
@@ -680,6 +713,7 @@ mod tests {
         let req = Request::Exec {
             argv: vec!["true".into()],
             stdin: vec![],
+            env: vec![("HOME".into(), "/tmp".into())],
             artifacts: vec![],
             timeout_ms: 30_000,
         };

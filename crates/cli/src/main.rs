@@ -9,7 +9,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use agent_vmm::{Limits, Sandbox, VmmError};
+use agent_vmm::{BootConfig, Limits, Sandbox, VmmError};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -38,6 +38,10 @@ struct RunArgs {
     /// Just boot a microVM and read its console — no command (the Phase 1 demo).
     #[arg(long)]
     demo_boot: bool,
+    /// Run the VMM without the jailer. The default is confined (jailed, which needs real root and
+    /// the `jailer` binary — decision 015); this is the explicit opt-out for hosts that can't jail.
+    #[arg(long)]
+    unjailed: bool,
     /// The command to run in the guest, after `--`.
     #[arg(trailing_var_arg = true)]
     argv: Vec<String>,
@@ -59,8 +63,14 @@ fn main() -> ExitCode {
 fn run(cmd: Cmd) -> Result<ExitCode, VmmError> {
     match cmd {
         Cmd::Run(args) => {
-            // Phase 1 boots the microVM; Phase 2 execs the argv and streams its output.
-            let sandbox = Sandbox::boot(Limits::default())?;
+            // Jailed by default (decision 015): `--unjailed` is the loud opt-out, mirroring the
+            // library's differently-named constructor rather than a defaulted flag.
+            let config = BootConfig::from_env().with_limits(Limits::default());
+            let sandbox = if args.unjailed {
+                Sandbox::open_unjailed(config)?
+            } else {
+                Sandbox::open(config)?
+            };
             if args.demo_boot {
                 // The run result goes to stdout (stderr is reserved for logs). Not `println!` —
                 // it panics on a closed pipe (`agent run … | head -0`), and a no-panic host path

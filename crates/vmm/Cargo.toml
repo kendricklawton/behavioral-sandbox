@@ -20,6 +20,8 @@ agent-channel = { path = "../channel" }
 [dev-dependencies]
 # The round-trip channel test runs the real guest agent behind a fake vsock socket — no VM needed.
 agent-guest = { path = "../guest-agent" }
+# The secret-hygiene leak test captures everything both sides log during an exec and greps it.
+tracing-subscriber = { workspace = true }
 
 [lints]
 workspace = true

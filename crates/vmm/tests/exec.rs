@@ -211,6 +211,7 @@ fn python_script_writes_a_file_and_we_capture_it() {
             &["python3".into(), "script.py".into()],
             b"",
             &[("script.py".into(), script.as_bytes().to_vec())],
+            &[],
             &["result.json".into()],
         )
         .expect("run the python script and capture its output file");
@@ -251,6 +252,7 @@ fn runs_node_a_second_interpreter() {
             &["node".into(), "script.js".into()],
             b"",
             &[("script.js".into(), script.as_bytes().to_vec())],
+            &[],
             &["result.json".into()],
         )
         .expect("run the node script and capture its output file");

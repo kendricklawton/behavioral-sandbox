@@ -480,13 +480,29 @@ impl RunningVm {
     /// flooded output. A command that merely exits non-zero (even by signal) is a normal
     /// [`RunResult`], not an error.
     pub fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
-        self.exec_with_files(argv, stdin, &[], &[])
+        self.exec_with_files(argv, stdin, &[], &[], &[])
     }
 
-    /// Run `argv` with `stdin`, first injecting `files_in` into the run's working directory, then
-    /// returning the files named in `artifacts` (paths relative to that directory) in
-    /// [`RunResult::files`]. The richer form of [`exec`](Self::exec); each file is bounded to the
-    /// channel's per-frame cap, and the total captured output+artifacts is bounded (16 MiB).
+    /// Run `argv` with `stdin`, first injecting `files_in` into the run's working directory and
+    /// `env` into the spawned command's environment, then returning the files named in `artifacts`
+    /// (paths relative to that directory) in [`RunResult::files`]. The richer form of
+    /// [`exec`](Self::exec); the injected files and env ride the exec request's frames, so each is
+    /// bounded by the channel's per-frame cap, and the total captured output+artifacts is bounded
+    /// (16 MiB).
+    ///
+    /// **Env scope.** The variables are set on the **spawned command only** — the guest agent
+    /// applies them via `Command::env`, never its own process — so one run's environment can't
+    /// bleed into the agent or a later run.
+    ///
+    /// **Secret hygiene (pinned contract).** Injected file contents and env *values* are treated as
+    /// secrets: they never appear in an engine log line, in any [`VmmError`]'s `Display`/`Debug`, or
+    /// on the serial console ([`console`](Self::console)) — an error path may name a file *path* or
+    /// an env *key*, never a value — and the wire copies the driver builds are zero-wiped after
+    /// send, not just freed (best-effort: the caller's own buffers and the kernel's socket buffers
+    /// are out of the engine's reach). What the *command* does with its inputs (echo them to stdout,
+    /// write them to `/output`) is the run's own data in [`RunResult`], not an engine surface. The
+    /// flight recorder (Phase 13) will record *that* inputs were injected — paths/keys/sizes or
+    /// hashes — never contents.
     ///
     /// # Errors
     /// As [`exec`](Self::exec).
@@ -495,6 +511,7 @@ impl RunningVm {
         argv: &[String],
         stdin: &[u8],
         files_in: &[(String, Vec<u8>)],
+        env: &[(String, String)],
         artifacts: &[String],
     ) -> Result<RunResult, VmmError> {
         let uds = self.require_vsock()?;
@@ -511,6 +528,7 @@ impl RunningVm {
             argv,
             stdin,
             files_in,
+            env,
             artifacts,
             ExecBounds {
                 timeout: budget,

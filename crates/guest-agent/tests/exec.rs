@@ -23,6 +23,7 @@ fn run(argv: &[&str]) -> (Vec<u8>, Vec<u8>, Result<i32, String>) {
         .send_request(&Request::Exec {
             argv,
             stdin: Vec::new(),
+            env: Vec::new(),
             artifacts: Vec::new(),
             timeout_ms: 30_000,
         })
@@ -102,6 +103,7 @@ fn stdin_is_fed_to_the_command() {
         .send_request(&Request::Exec {
             argv: vec!["cat".into()],
             stdin: b"piped input\n".to_vec(),
+            env: Vec::new(),
             artifacts: Vec::new(),
             timeout_ms: 30_000,
         })
@@ -118,6 +120,49 @@ fn stdin_is_fed_to_the_command() {
     assert_eq!(out, b"piped input\n");
     assert_eq!(code, 0);
     let _ = agent.join();
+}
+
+#[test]
+fn env_reaches_the_command_but_never_the_agents_own_process() {
+    // The two halves of the env contract in one run: the injected variable is visible to the
+    // spawned command, and it is set via `Command::env` only — `serve` runs in *this* process here,
+    // so if the agent ever `set_var`'d it, the assertion on our own environment would catch it.
+    let key = "AGENT_TEST_ENV_SCOPE";
+    assert!(
+        std::env::var_os(key).is_none(),
+        "test precondition: {key} must not be set"
+    );
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::Exec {
+            argv: vec!["sh".into(), "-c".into(), format!("printf '%s' \"${key}\"")],
+            stdin: Vec::new(),
+            env: vec![(key.to_string(), "from-the-host".into())],
+            artifacts: Vec::new(),
+            timeout_ms: 30_000,
+        })
+        .expect("send request");
+
+    let mut out = Vec::new();
+    let code = loop {
+        match client.recv_response().expect("read response") {
+            Response::Stdout(b) => out.extend_from_slice(&b),
+            Response::Exit { code } => break code,
+            other => panic!("unexpected response frame: {other:?}"),
+        }
+    };
+    assert_eq!(code, 0);
+    assert_eq!(
+        out, b"from-the-host",
+        "the command must see the injected env"
+    );
+    let _ = agent.join();
+    assert!(
+        std::env::var_os(key).is_none(),
+        "the agent process's own environment must stay untouched"
+    );
 }
 
 #[test]
@@ -140,6 +185,7 @@ fn injected_file_is_read_by_the_command_and_artifact_returned() {
                 "cat note.txt; cp note.txt copy.txt".into(),
             ],
             stdin: Vec::new(),
+            env: Vec::new(),
             artifacts: vec!["copy.txt".into()],
             timeout_ms: 30_000,
         })
@@ -174,6 +220,7 @@ fn hung_command_is_killed_at_its_deadline() {
         .send_request(&Request::Exec {
             argv: vec!["sleep".into(), "30".into()],
             stdin: Vec::new(),
+            env: Vec::new(),
             artifacts: Vec::new(),
             timeout_ms: 300,
         })
@@ -202,6 +249,7 @@ fn command_under_its_deadline_is_not_falsely_killed() {
         .send_request(&Request::Exec {
             argv: vec!["sh".into(), "-c".into(), "sleep 0.1; echo done".into()],
             stdin: Vec::new(),
+            env: Vec::new(),
             artifacts: Vec::new(),
             timeout_ms: 5_000,
         })
@@ -275,6 +323,7 @@ fn stalled_host_does_not_wedge_the_guest() {
         .send_request(&Request::Exec {
             argv: vec!["sh".into(), "-c".into(), "seq 1 200000".into()],
             stdin: Vec::new(),
+            env: Vec::new(),
             artifacts: Vec::new(),
             timeout_ms: 30_000,
         })

@@ -89,12 +89,14 @@ pub(crate) fn run_exec<S: Read + Write>(
     argv: &[String],
     stdin: &[u8],
     files_in: &[(String, Vec<u8>)],
+    env: &[(String, String)],
     artifacts: &[String],
     bounds: ExecBounds,
 ) -> Result<RunResult, VmmError> {
     // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
-    // operator's stderr), keyed by argv so `agent run` failures are diagnosable host-side.
-    let span = tracing::info_span!("exec", argv = ?argv);
+    // operator's stderr), keyed by argv so `agent run` failures are diagnosable host-side. The env
+    // *count* only — never a value, and not even the key list — per the secret-hygiene contract.
+    let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _span = span.enter();
     let started = Instant::now();
     // The host's own deadline, independent of the socket's per-read idle timeout. A `Duration::MAX`
@@ -104,20 +106,37 @@ pub(crate) fn run_exec<S: Read + Write>(
         .checked_add(bounds.wall)
         .unwrap_or_else(|| started + Duration::from_secs(86_400));
 
-    // Inject input files first, then the terminal exec request.
-    // `?` on channel calls yields `VmmError::Channel(..)`, preserving the `ChannelError` source.
+    // Inject input files first, then the terminal exec request. The injected bytes are secrets by
+    // presumption (the secret-hygiene contract on `RunningVm::exec_with_files`): the wire copies
+    // built here are wiped after each send, not just freed, and nothing on this path logs a file
+    // body or an env value. The wipe runs before the send result is checked so a failed write
+    // doesn't skip it. `?` on channel calls yields `VmmError::Channel(..)`, preserving the source.
     for (path, data) in files_in {
-        conn.send_request(&Request::PutFile {
+        let mut req = Request::PutFile {
             path: path.clone(),
             data: data.clone(),
-        })?;
+        };
+        let sent = conn.send_request(&req);
+        if let Request::PutFile { data, .. } = &mut req {
+            data.fill(0);
+        }
+        sent?;
     }
-    conn.send_request(&Request::Exec {
+    let mut req = Request::Exec {
         argv: argv.to_vec(),
         stdin: stdin.to_vec(),
+        env: env.to_vec(),
         artifacts: artifacts.to_vec(),
         timeout_ms: u32::try_from(bounds.timeout.as_millis()).unwrap_or(u32::MAX),
-    })?;
+    };
+    let sent = conn.send_request(&req);
+    if let Request::Exec { stdin, env, .. } = &mut req {
+        stdin.fill(0);
+        for (_, value) in env.iter_mut() {
+            wipe_string(value);
+        }
+    }
+    sent?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -194,6 +213,16 @@ pub(crate) fn run_exec<S: Read + Write>(
             });
         }
     }
+}
+
+/// Zero a `String`'s bytes in place before it's dropped — the env-value half of the wipe-after-send
+/// hygiene (a `Vec<u8>` is just `fill(0)`). `String` has no safe in-place byte mutation, so the
+/// value round-trips through its own buffer: `into_bytes` *moves* it (no copy), the zeroed bytes are
+/// trivially valid UTF-8, and the same buffer moves back — nothing secret is left in a freed page.
+fn wipe_string(s: &mut String) {
+    let mut bytes = std::mem::take(s).into_bytes();
+    bytes.fill(0);
+    *s = String::from_utf8(bytes).unwrap_or_default();
 }
 
 /// Connect to `uds` and perform Firecracker's host-initiated vsock handshake: send
@@ -321,6 +350,7 @@ mod tests {
             b"",
             &[],
             &[],
+            &[],
             ExecBounds {
                 timeout: Duration::from_secs(5),
                 wall: Duration::from_secs(30),
@@ -343,6 +373,7 @@ mod tests {
             &mut conn,
             &["cat".into()],
             b"from the host\n",
+            &[],
             &[],
             &[],
             ExecBounds {
@@ -373,6 +404,7 @@ mod tests {
             ],
             b"",
             &[("in.txt".into(), b"hello\n".to_vec())],
+            &[],
             &["out/up.txt".into(), "missing.txt".into()],
             ExecBounds {
                 timeout: Duration::from_secs(5),
@@ -390,6 +422,142 @@ mod tests {
         server.join().expect("server thread");
     }
 
+    /// A `Write` sink appending into a shared buffer — the capture target for the leak test's
+    /// tracing subscribers (`with_default` is thread-local, so each thread installs its own
+    /// subscriber over one shared buffer).
+    #[derive(Clone, Default)]
+    struct LogSink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl LogSink {
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+            let sink = self.clone();
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || sink.clone())
+                .finish()
+        }
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(
+                &self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner),
+            )
+            .into_owned()
+        }
+    }
+
+    #[test]
+    fn injected_secrets_reach_no_observable_surface() {
+        // The secret-hygiene leak test (P7.1 exit gate, host half): drive a succeeding exec whose
+        // env value and injected file hold a sentinel, and a failing injection whose *data* holds
+        // it, while capturing — at TRACE — every log line the driver and the in-process real agent
+        // emit. The sentinel may appear only in the RunResult (the caller's own data); never in a
+        // log line, never in an error's Display/Debug (which may name the *path*). The console
+        // surface needs a real VM; that half lives in the integration suite (tests/sandbox.rs).
+        use std::os::unix::net::UnixListener;
+        const SENTINEL: &str = "S3KR1T-canary-77f2c9e1";
+        let bounds = || ExecBounds {
+            timeout: Duration::from_secs(5),
+            wall: Duration::from_secs(30),
+            max_output: MAX_EXEC_OUTPUT,
+        };
+
+        let sink = LogSink::default();
+        let dir = TestDir::new("agent-vsock-leak");
+        let uds = dir.path().join(VSOCK_UDS);
+        let listener = UnixListener::bind(&uds).expect("bind fake vsock");
+        let agent_sink = sink.clone();
+        let server = std::thread::spawn(move || {
+            tracing::subscriber::with_default(agent_sink.subscriber(), || {
+                for _ in 0..2 {
+                    let (mut stream, _) = listener.accept().expect("accept");
+                    let mut b = [0u8; 1];
+                    loop {
+                        stream.read_exact(&mut b).expect("read CONNECT");
+                        if b[0] == b'\n' {
+                            break;
+                        }
+                    }
+                    stream.write_all(b"OK 10000\n").expect("write ack");
+                    let _ = agent_guest::serve(stream);
+                }
+            });
+        });
+
+        let (result, err) = tracing::subscriber::with_default(sink.subscriber(), || {
+            // Happy path: the env value and the file content must reach the command in-guest.
+            let mut conn =
+                connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            let result = run_exec(
+                &mut conn,
+                &[
+                    "sh".into(),
+                    "-c".into(),
+                    "printf '%s ' \"$LEAK_TEST_SECRET\"; cat leak.txt".into(),
+                ],
+                b"",
+                &[("leak.txt".into(), SENTINEL.as_bytes().to_vec())],
+                &[("LEAK_TEST_SECRET".into(), SENTINEL.into())],
+                &[],
+                bounds(),
+            )
+            .expect("exec");
+            // Failure path: an escaping path is rejected; the error may name the path, not the data.
+            let mut conn =
+                connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            let err = run_exec(
+                &mut conn,
+                &["true".into()],
+                b"",
+                &[("../escape.txt".into(), SENTINEL.as_bytes().to_vec())],
+                &[],
+                &[],
+                bounds(),
+            )
+            .unwrap_err();
+            (result, err)
+        });
+        server.join().expect("server thread");
+
+        // The run received both inputs — RunResult is the caller's data, the one allowed surface.
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert_eq!(stdout, format!("{SENTINEL} {SENTINEL}"));
+        // The failure is typed, names the path, and carries none of the data.
+        assert!(matches!(err, VmmError::GuestExec(_)), "got {err:?}");
+        let (display, debug) = (format!("{err}"), format!("{err:?}"));
+        assert!(
+            !display.contains(SENTINEL) && !debug.contains(SENTINEL),
+            "sentinel leaked into the error: {debug}"
+        );
+        assert!(
+            display.contains("escape.txt"),
+            "the error should still name the offending path: {display}"
+        );
+        // Every captured log line, both sides, at TRACE: non-empty (the capture worked — the two
+        // exec spans are in there) and sentinel-free.
+        let logs = sink.contents();
+        assert!(
+            logs.contains("exec"),
+            "expected captured spans, got {logs:?}"
+        );
+        assert!(
+            !logs.contains(SENTINEL),
+            "sentinel leaked into logs: {logs}"
+        );
+    }
+
     #[test]
     fn exec_crashing_command_is_a_typed_error() {
         // P2.8: a command the guest can't run ("crashing" in the agent-fault sense) comes back as a
@@ -402,6 +570,7 @@ mod tests {
             &mut conn,
             &["definitely-not-a-real-binary-zzz".into()],
             b"",
+            &[],
             &[],
             &[],
             ExecBounds {
@@ -428,6 +597,7 @@ mod tests {
             &mut conn,
             &["sh".into(), "-c".into(), "kill -9 $$".into()],
             b"",
+            &[],
             &[],
             &[],
             ExecBounds {
@@ -487,6 +657,7 @@ mod tests {
             b"",
             &[],
             &[],
+            &[],
             ExecBounds {
                 timeout: Duration::from_secs(5),
                 wall: Duration::from_secs(30),
@@ -515,6 +686,7 @@ mod tests {
             &mut conn,
             &["echo".into(), "hi".into()],
             b"",
+            &[],
             &[],
             &[],
             ExecBounds {
@@ -550,6 +722,7 @@ mod tests {
             b"",
             &[],
             &[],
+            &[],
             ExecBounds {
                 timeout: Duration::from_secs(5),
                 wall: Duration::from_secs(30),
@@ -580,6 +753,7 @@ mod tests {
             &mut conn,
             &["sleep".into()],
             b"",
+            &[],
             &[],
             &[],
             ExecBounds {
@@ -616,6 +790,7 @@ mod tests {
             b"",
             &[],
             &[],
+            &[],
             ExecBounds {
                 timeout: Duration::from_secs(5),
                 wall: Duration::from_secs(30),
@@ -650,6 +825,7 @@ mod tests {
             &mut conn,
             &["dribble".into()],
             b"",
+            &[],
             &[],
             &[],
             ExecBounds {

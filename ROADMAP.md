@@ -943,7 +943,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       `jail` on its config confines every pooled clone. Proof:
       `restores_warm_clones_under_the_jailer_and_pools_them` (real-root gated) — a direct jailed
       restore (dropped uid + warm Python exec) and a 2-deep jailed `Pool` whose taken clone execs.)*
-- [ ] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`, with **inputs at
+- [x] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`, with **inputs at
       the seam**. *(Assumes the jailed exec path (P7.0a); `Sandbox::exec` jails by default, decision 015.)* *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
       `output_dir`/`RunningVm::collect_outputs` — onto the `Sandbox` surface, since P3.4/P3.5 keep them
       at the low-level `RunningVm` layer. **Embedder inputs:** promote `exec_with_files(argv, stdin,
@@ -957,6 +957,27 @@ Wrap the FC track into a clean, self-hostable engine API.
       exposes an exec taking files + env; a run receives both in-guest; the call stays synchronous and
       returns the same `RunResult` shape; and a **leak test** greps an injected sentinel value out of
       every observable surface (logs, every `VmmError` Display, `console()`) and finds nothing.)*
+      *(Landed as `Sandbox::open(BootConfig)` — **jailed by default**: an unset `jail` becomes
+      `Jail::default()`, and the opt-out is the differently-named `Sandbox::open_unjailed` (plus the
+      CLI's `--unjailed`), so an unconfined sandbox is greppable, never a forgotten flag; `boot(limits)`
+      delegates to `open` and flips with it. Inputs: `exec_with_files(argv, stdin, files, env,
+      artifacts)` on `Sandbox` and `RunningVm`; `env` rides `Request::Exec` as **protocol v2** — the
+      handshake version gates the skew, because an old agent parses the new frame and silently runs
+      *without* the env, which for secrets/config is a correctness failure, not compat (decision 018) —
+      and the guest applies it via `Command::env` on the spawned command only, never its own process
+      (proven in-process by `env_reaches_the_command_but_never_the_agents_own_process` and against a
+      real guest by the per-exec-scope assertion in the leak test). `collect_outputs`, `snapshot`,
+      `kill_handle`, and `vmm_pid` are surfaced on `Sandbox`, so an embedder never reaches into
+      `RunningVm`. Secret hygiene pinned on `RunningVm::exec_with_files` and recorded as decision 018;
+      the wire copies (the channel's serialized payload, the driver's request clones) are zero-wiped
+      after send. Exit gate: `sandbox_opens_jailed_by_default` (real-root, self-skips) proves the
+      polarity flip; `lifecycle_runs_inputs_at_the_seam_and_collects_outputs` +
+      `snapshot_at_the_seam_yields_a_restorable_bundle` drive the full lifecycle; the leak test runs
+      twice — `injected_secrets_reach_no_observable_surface` (no VM: host logs at TRACE, the real
+      in-process agent's logs, every error's Display/Debug) and
+      `injected_secrets_never_reach_the_console_or_host_logs` (real VM: the serial console with a
+      positive control proving the agent's log lines do land there, host logs, the failing-injection
+      error path) — and finds the sentinel only in `RunResult`, the caller's own data.)*
 - [ ] **P7.2** Stateful sessions: multiple `exec`s against one VM with a persistent overlay.
 - [ ] **P7.3** Per-sandbox limits (cpu/mem/wall/net policy) as **one options struct**, its shape
       settled by the P6.5 resource-policy decision. *(Turns two fixed internal budgets into **knobs**:

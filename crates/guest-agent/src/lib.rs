@@ -119,7 +119,7 @@ where
     };
 
     // Zero or more `PutFile`s, then the terminal `Exec`.
-    let (argv, stdin, artifacts, timeout_ms) = loop {
+    let (argv, stdin, env, artifacts, timeout_ms) = loop {
         match conn.recv_request()? {
             Request::PutFile { path, data } => {
                 if let Err(e) = workdir.put(&path, &data) {
@@ -130,9 +130,10 @@ where
             Request::Exec {
                 argv,
                 stdin,
+                env,
                 artifacts,
                 timeout_ms,
-            } => break (argv, stdin, artifacts, timeout_ms),
+            } => break (argv, stdin, env, artifacts, timeout_ms),
             // A newer host's request type we don't implement — reply gracefully, don't drop the link.
             Request::Unknown { tag } => {
                 conn.send_response(&Response::Error(format!("unsupported request (tag {tag})")))?;
@@ -145,7 +146,10 @@ where
         }
     };
 
-    let span = tracing::info_span!("exec", argv = ?argv);
+    // The span carries argv and the env *count*, never an env value or key list — env values are
+    // secrets by presumption (the host's secret-hygiene contract), and this log reaches the serial
+    // console, which the host exposes verbatim.
+    let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _enter = span.enter();
 
     let Some((program, args)) = argv.split_first() else {
@@ -194,6 +198,12 @@ where
             cmd
         }
     };
+    // Injected environment lands on the **spawned command only** (`Command::env`, inherited across
+    // the trampoline's `exec`) — never `std::env::set_var`: the agent's own process outlives this
+    // run and serves the next connection, so mutating it would leak one run's secrets into another.
+    for (key, value) in &env {
+        cmd.env(key, value);
+    }
     let mut child = match cmd
         .current_dir(workdir.path())
         .stdin(Stdio::piped())

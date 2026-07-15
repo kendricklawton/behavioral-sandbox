@@ -2,12 +2,13 @@
 //! [`Sandbox`] lifecycle API.
 //!
 //! The host path is `unsafe`-free; a hostile or crashing guest is a typed [`VmmError`], never a
-//! panic, hang, or leak. Phase 1 makes [`Vm::boot`] real — it boots a Firecracker microVM and
-//! reads its serial console; [`exec`](Sandbox::exec) and networking land in later phases.
+//! panic, hang, or leak.
 //!
 //! Two layers:
-//! - [`Vm`] / [`RunningVm`] — the raw microVM: boot to userspace, read the console, shut down.
-//! - [`Sandbox`] — the CLI-facing lifecycle wrapper (grows `exec`/files/policy in later phases).
+//! - [`Vm`] / [`RunningVm`] — the raw microVM: boot/restore, exec over vsock, console, networking,
+//!   snapshots, teardown.
+//! - [`Sandbox`] — the embedder-facing lifecycle wrapper (`open → exec → outputs → snapshot →
+//!   close`), **jailed by default** (decision 015) with per-exec files + env at the seam.
 #![forbid(unsafe_code)]
 
 mod console;
@@ -311,8 +312,22 @@ pub struct RunResult {
     pub files: Vec<(String, Vec<u8>)>,
 }
 
-/// A microVM sandbox: the CLI-facing lifecycle type, backed by a [`RunningVm`]. Boots with the
-/// vsock exec channel enabled, so [`exec`](Sandbox::exec) can reach the in-guest agent.
+/// A microVM sandbox: the embedder-facing lifecycle type, backed by a [`RunningVm`]. The lifecycle
+/// is `open → exec (with files + env) → collect outputs → snapshot → close`, every step synchronous
+/// and every failure a typed [`VmmError`].
+///
+/// **Confined by default (decision 015).** [`open`](Sandbox::open) and [`boot`](Sandbox::boot) run
+/// the VMM **under the jailer** — chroot, uid/gid drop, seccomp, its own mount and network
+/// namespaces — on top of the KVM hardware boundary, so the headline "run untrusted code" path is
+/// the double-walled one. That needs real root and the `jailer` binary; the opt-out is
+/// [`open_unjailed`](Sandbox::open_unjailed), deliberately a *differently-named constructor* so an
+/// unconfined sandbox can never happen by a forgotten flag — only by writing "unjailed".
+///
+/// **Inputs at the seam.** Per-exec files and env ride [`exec_with_files`](Sandbox::exec_with_files)
+/// under the secret-hygiene contract pinned on [`RunningVm::exec_with_files`]; bulk directories ride
+/// [`BootConfig::input_dir`]/[`BootConfig::output_dir`] into [`open`](Sandbox::open), and
+/// [`collect_outputs`](Sandbox::collect_outputs) pulls the guest's `/output` tree back. An embedder
+/// never needs to reach the [`RunningVm`] layer.
 #[derive(Debug)]
 #[must_use = "dropping a Sandbox kills its microVM"]
 pub struct Sandbox {
@@ -320,27 +335,126 @@ pub struct Sandbox {
 }
 
 impl Sandbox {
-    /// Boot a microVM under `limits`, ready to run code (vsock exec channel enabled).
+    /// Open a sandbox on `config`, ready to run code — **jailed by default**: if `config.jail` is
+    /// unset it becomes [`Jail::default`], and the vsock exec channel is enabled (an unset
+    /// `config.guest_cid` becomes [`DEFAULT_GUEST_CID`]). Everything else in `config` — artifacts,
+    /// resource knobs (see [`BootConfig::with_limits`]), `input_dir`/`output_dir`, networking — is
+    /// honored as given.
+    ///
+    /// Needs real root and the `jailer` binary (the confinement is the point); a host that can't
+    /// jail gets a typed error, never a silently unconfined boot. The explicit opt-out for dev
+    /// hosts is [`open_unjailed`](Sandbox::open_unjailed).
     ///
     /// # Errors
-    /// [`VmmError`] on any boot failure (no KVM, a missing artifact, a Firecracker error, or a
-    /// boot-to-userspace timeout).
-    pub fn boot(limits: Limits) -> Result<Self, VmmError> {
-        let mut config = BootConfig::from_env().with_limits(limits);
-        config.guest_cid = Some(DEFAULT_GUEST_CID);
+    /// [`VmmError`] on any boot failure (no KVM, a missing artifact, a jailer/Firecracker error, or
+    /// a boot-to-userspace timeout).
+    pub fn open(mut config: BootConfig) -> Result<Self, VmmError> {
+        config.jail = Some(config.jail.unwrap_or_default());
+        Self::open_inner(config)
+    }
+
+    /// [`open`](Sandbox::open) **without the jailer** — the explicit opt-out (decision 015) for
+    /// hosts that can't run it (no root, no `jailer`): the guest still sits behind the KVM hardware
+    /// boundary, but the VMM process itself runs unconfined. The opt-out is this constructor's
+    /// *name* rather than a flag so it is greppable and can't be reached by accident; any `jail`
+    /// set on `config` is cleared (the name wins).
+    ///
+    /// # Errors
+    /// As [`open`](Sandbox::open).
+    pub fn open_unjailed(mut config: BootConfig) -> Result<Self, VmmError> {
+        config.jail = None;
+        Self::open_inner(config)
+    }
+
+    /// The shared tail of the constructors: force the exec channel on (a `Sandbox` is for running
+    /// code) and boot.
+    fn open_inner(mut config: BootConfig) -> Result<Self, VmmError> {
+        if config.guest_cid.is_none() {
+            config.guest_cid = Some(DEFAULT_GUEST_CID);
+        }
         let vm = Vm::boot(config)?;
         Ok(Self { vm })
     }
 
-    /// Run `argv` in the guest, feeding it `stdin`, and capture its stdout/stderr/exit.
+    /// Boot a sandbox under `limits` with the environment-layered defaults ([`BootConfig::from_env`])
+    /// — the convenience form of [`open`](Sandbox::open), and like it **jailed by default**.
     ///
-    /// Requires the in-guest agent to be listening on vsock; until it is baked into the rootfs the
-    /// call surfaces a clear "guest agent not listening" error.
+    /// # Errors
+    /// As [`open`](Sandbox::open).
+    pub fn boot(limits: Limits) -> Result<Self, VmmError> {
+        Self::open(BootConfig::from_env().with_limits(limits))
+    }
+
+    /// Run `argv` in the guest, feeding it `stdin`, and capture its stdout/stderr/exit.
     ///
     /// # Errors
     /// [`VmmError`] on any exec/channel failure (a non-zero command exit is a normal [`RunResult`]).
     pub fn exec(&self, argv: &[String], stdin: &[u8]) -> Result<RunResult, VmmError> {
         self.vm.exec(argv, stdin)
+    }
+
+    /// Run `argv` with per-exec **inputs**: `stdin`, `files_in` injected into the run's working
+    /// directory, and `env` set on the spawned command (only — never the guest agent's own process);
+    /// the files named in `artifacts` come back in [`RunResult::files`]. Synchronous, same
+    /// [`RunResult`] shape as [`exec`](Sandbox::exec).
+    ///
+    /// Injected file contents and env **values** are covered by the **secret-hygiene contract**
+    /// (they never reach an engine log, a [`VmmError`] rendering, or [`console`](Sandbox::console);
+    /// wire copies are wiped after send) — see [`RunningVm::exec_with_files`], which this wraps,
+    /// for the full statement.
+    ///
+    /// # Errors
+    /// As [`exec`](Sandbox::exec).
+    pub fn exec_with_files(
+        &self,
+        argv: &[String],
+        stdin: &[u8],
+        files_in: &[(String, Vec<u8>)],
+        env: &[(String, String)],
+        artifacts: &[String],
+    ) -> Result<RunResult, VmmError> {
+        self.vm
+            .exec_with_files(argv, stdin, files_in, env, artifacts)
+    }
+
+    /// Pull the guest's `/output` tree back to the host directory given as
+    /// [`BootConfig::output_dir`] at [`open`](Sandbox::open), returning the captured paths.
+    /// Consumes the sandbox — the VMM is stopped first so the image is quiescent (see
+    /// [`RunningVm::collect_outputs`], which this wraps).
+    ///
+    /// # Errors
+    /// [`VmmError::Vmm`] if the sandbox was opened without `output_dir`; otherwise as
+    /// [`RunningVm::collect_outputs`].
+    pub fn collect_outputs(self) -> Result<Vec<String>, VmmError> {
+        self.vm.collect_outputs()
+    }
+
+    /// Pause the microVM and write a portable [`Snapshot`] bundle into `dir`, then resume (see
+    /// [`RunningVm::snapshot`]). Note the interplay with the jailed default: snapshotting a
+    /// **jailed** sandbox is a typed refusal (its disk lives in the chroot) — take the snapshot
+    /// from an [`open_unjailed`](Sandbox::open_unjailed) warm source that runs only the embedder's
+    /// own warm-up, then [`Vm::restore`]/[`Pool`] the clones **with a jail**, which is where the
+    /// untrusted code runs.
+    ///
+    /// # Errors
+    /// As [`RunningVm::snapshot`].
+    pub fn snapshot(&self, dir: &std::path::Path) -> Result<Snapshot, VmmError> {
+        self.vm.snapshot(dir)
+    }
+
+    /// A cheap, cloneable [`KillHandle`] that force-kills this sandbox from any thread — the
+    /// host-gave-up path (see [`RunningVm::kill_handle`]): a caller blocked in
+    /// [`exec`](Sandbox::exec) gets a typed error and teardown still reclaims everything.
+    #[must_use]
+    pub fn kill_handle(&self) -> KillHandle {
+        self.vm.kill_handle()
+    }
+
+    /// The PID of the VMM process, for out-of-band supervision and the host-side observers (the
+    /// Phase-8 eBPF track); valid only while the sandbox lives. See [`RunningVm::vmm_pid`].
+    #[must_use]
+    pub fn vmm_pid(&self) -> u32 {
+        self.vm.vmm_pid()
     }
 
     /// Boot-to-userspace latency of this sandbox's microVM.
@@ -355,7 +469,7 @@ impl Sandbox {
         self.vm.console()
     }
 
-    /// Shut the microVM down and reclaim its resources.
+    /// Close the sandbox: shut the microVM down and reclaim its resources.
     ///
     /// # Errors
     /// Currently never returns `Err` — teardown is best-effort and the guarantee lives in `Drop`
