@@ -1,32 +1,25 @@
-//! Privileged integration tests for the eBPF `execve` counter (P8.3 attach+read, P8.4 lifetime).
+//! Privileged integration tests for the eBPF `execve` counter (P8.3 attach+read, P8.4 lifetime,
+//! P8.10 counter-moves).
 //!
-//! `#[ignore]`d: loading eBPF needs `CAP_BPF`/root, a BTF-capable kernel, and the built object
-//! (`cargo xtask build-probes`), so these run under `cargo xtask ci-privileged` (as root), not the
-//! everyday host gate. Each self-skips when its prerequisites are absent, so an unprivileged
-//! `cargo test -- --ignored` reports a clean skip rather than a spurious failure.
+//! `#[ignore]`d: loading eBPF needs `CAP_BPF`+`CAP_PERFMON` (or root), a BTF-capable kernel, and the
+//! built object (`cargo xtask build-probes`). Run them via `cargo xtask ci-privileged` (as root), or
+//! grant the two caps to the test binary and run it unprivileged:
+//! `cargo test -p agent-probes-loader --test counter --no-run` then
+//! `sudo setcap cap_bpf,cap_perfmon+ep <binary>` then `<binary> --ignored` (P8.8). Each self-skips
+//! when its prerequisites are absent, so an unprivileged run reports a clean skip, not a failure.
 #![allow(clippy::panic)]
 
 use std::process::Command;
 
-use agent_probes_loader::{ebpf_supported, object_path, ExecveCounter};
+use agent_probes_loader::{check_support, object_path, ExecveCounter};
 
-/// This process's effective uid (from `/proc/self/status`; the second `Uid:` field), like the
-/// vmm suite's privilege check. Loading eBPF here needs root (or `CAP_BPF`, which the privileged
-/// gate runs with); the everyday, unprivileged run self-skips on this.
-fn euid() -> Option<u32> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
-    line.split_whitespace().nth(1)?.parse().ok()
-}
-
-/// Whether this host can actually load the probe: root, a BTF kernel, and the object built. Returns
-/// a skip reason (`Some`) when it can't, so each test prints *why* it skipped.
+/// Whether this host can actually load the probe, as a skip reason (`Some`) when it can't, so each
+/// test prints *why* it skipped. Capability-aware (P8.8): `check_support` passes under
+/// `CAP_BPF`+`CAP_PERFMON`, not just full root, and names the missing BTF/caps legibly (P8.9); the
+/// built object is the remaining prerequisite.
 fn skip_reason() -> Option<String> {
-    if euid() != Some(0) {
-        return Some("needs root (CAP_BPF) to load eBPF".into());
-    }
-    if !ebpf_supported() {
-        return Some("kernel BTF (/sys/kernel/btf/vmlinux) not present".into());
+    if let Err(e) = check_support() {
+        return Some(e.to_string());
     }
     if !object_path().is_file() {
         return Some(format!(
@@ -59,6 +52,18 @@ fn execve_counter_counts_host_execve_events() {
     assert!(
         after >= before + SPAWNS,
         "the execve count must rise by at least the {SPAWNS} spawns (before {before}, after {after})"
+    );
+
+    // P8.6: the per-PID hash map recorded the execing processes too (lookup-or-init worked).
+    let by_pid = counter.counts_by_pid().expect("read the per-pid counts");
+    assert!(
+        !by_pid.is_empty(),
+        "the per-pid map must record the execing processes"
+    );
+    let by_pid_total: u64 = by_pid.iter().map(|(_, c)| c).sum();
+    assert!(
+        by_pid_total >= SPAWNS,
+        "per-pid counts should cover at least the {SPAWNS} spawns (got {by_pid_total})"
     );
 }
 

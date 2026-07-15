@@ -2,11 +2,15 @@
 //! moment, and print how much it moved. This is the eBPF on-ramp's "it works" demo — a Rust eBPF
 //! program loads, attaches, and reports from userspace.
 //!
-//! Needs `CAP_BPF`/root, a BTF kernel, and the built object (`cargo xtask build-probes`). Run:
+//! Needs `CAP_BPF`+`CAP_PERFMON` (or root), a BTF kernel, and the built object
+//! (`cargo xtask build-probes`). Either run as root, or grant just the two caps to the built binary
+//! (P8.8):
 //!
 //! ```console
 //! cargo xtask build-probes
-//! sudo -E $(rustup which cargo) run -p agent-probes-loader --example count_execve
+//! cargo build -p agent-probes-loader --example count_execve
+//! sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/count_execve
+//! target/debug/examples/count_execve        # unprivileged, with just the two caps
 //! ```
 //!
 //! Returning the typed `ProbeError` from `main` keeps this within the no-panic host discipline (no
@@ -27,5 +31,13 @@ fn main() -> Result<(), ProbeError> {
     sleep(Duration::from_millis(500));
     let after = counter.count()?;
     println!("after 500ms: {after} (+{})", after.saturating_sub(before));
+
+    // The per-PID breakdown (P8.6's hash map): the busiest execve'ers seen in the window.
+    let mut by_pid = counter.counts_by_pid()?;
+    by_pid.sort_by(|a, b| b.1.cmp(&a.1));
+    println!("top execve'ers by pid:");
+    for (pid, n) in by_pid.iter().take(5) {
+        println!("  pid {pid}: {n}");
+    }
     Ok(())
 }

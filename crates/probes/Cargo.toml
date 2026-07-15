@@ -25,16 +25,20 @@ path = "src/main.rs"
 
 # eBPF has no unwinder and the verifier rejects real panic paths, so both profiles abort on panic and
 # build optimized (the verifier rejects the un-optimized stack/spill patterns a debug build emits).
+# `debug = true` is deliberate and load-bearing: `bpf-linker` derives the object's **BTF** (the
+# `.BTF` section + BTF-defined maps) from DWARF debug info, and BTF is what makes the program
+# CO-RE-portable across kernels and lets aya relocate it at load (P8.5). Without it the object falls
+# back to legacy maps and carries no BTF.
 [profile.dev]
 opt-level = 3
-debug = false
+debug = true
 debug-assertions = false
 overflow-checks = false
 panic = "abort"
 
 [profile.release]
 opt-level = 3
-debug = false
+debug = true
 debug-assertions = false
 overflow-checks = false
 lto = true

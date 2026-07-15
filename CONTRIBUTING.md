@@ -30,8 +30,9 @@ This is **Linux-only** (it needs KVM). You'll need:
 - **`iproute2`** (`ip`): the driver creates and deletes the per-VM **tap** device backing the guest's
   virtio-net. A missing binary is a clear typed error; creating a tap itself needs `CAP_NET_ADMIN`.
 - **Elevated capabilities** for the parts that touch the kernel: creating **tap** devices
-  (`CAP_NET_ADMIN`) and loading eBPF (`CAP_BPF`/`CAP_PERFMON`, or root). Day-to-day dev uses an
-  `xtask`/`just` wrapper so it isn't `sudo cargo` roulette.
+  (`CAP_NET_ADMIN`) and loading/attaching eBPF (`CAP_BPF` + `CAP_PERFMON`, or root — not full root:
+  grant a loader binary just those two with `setcap cap_bpf,cap_perfmon+ep <binary>`). Day-to-day
+  dev uses an `xtask`/`just` wrapper so it isn't `sudo cargo` roulette.
 
 `cargo xtask setup` checks the host can do KVM + eBPF and reports what's missing.
 
@@ -65,8 +66,8 @@ cargo xtask ci                                    # fmt + clippy -D warnings + b
 
 `cargo xtask ci` runs the host-safe gate everywhere: fmt · clippy `-D warnings` · build · unit
 tests · docs · `cargo deny`. The **eBPF object build** is available now as its own host-safe step
-(`cargo xtask build-probes`, which skips cleanly when `bpf-linker`/nightly are absent) and folds
-**into** this gate at ROADMAP P8.6, so from then on verifier-breaking changes fail fast here.
+(`cargo xtask build-probes`, which skips cleanly when `bpf-linker`/nightly are absent) and is folded
+**into** this gate (P8.7), so a probe that won't compile or that drops its BTF fails fast here.
 
 **The privileged tests are separate.** Booting a microVM and loading/attaching eBPF need
 `/dev/kvm` and elevated caps, so the **integration tests** (VM boot, exec, tap networking,
@@ -78,9 +79,10 @@ Never gate the everyday loop on a privileged runner.
 
 1. **Unit / pure:** driver config assembly, protocol framing, policy-map encoding, error
    mapping — no VM, no root.
-2. **eBPF object build** (`cargo xtask build-probes`; *folds into the gate at ROADMAP P8.6*): the
-   probes compile for `bpfel-unknown-none` via `bpf-linker`; a program the verifier would reject
-   fails the build.
+2. **eBPF object build** (`cargo xtask build-probes`, *part of the `ci` gate* since P8.7): the probes
+   compile for `bpfel-unknown-none` via `bpf-linker` **with BTF**; a compile error or a dropped
+   `.BTF` section fails the gate. (The kernel *verifier* runs at load, so a verifier reject surfaces
+   in the privileged probe tests, not here.)
 3. **Privileged integration:** boot a real microVM → `exec` → tap networking → attach probes →
    assert the flight recorder shows exactly what the workload did. Needs KVM + caps.
 4. **Benchmarks:** cold boot, snapshot restore, warm-pool `exec` latency (p50/p99), density, and

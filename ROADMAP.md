@@ -1108,17 +1108,50 @@ The eBPF on-ramp: build, load, and read a map from a trivial program.
       is pinned (decision 020). Test: `counter_drops_without_pinned_residue` (privileged) asserts a
       load+drop leaves `/sys/fs/bpf` unchanged and a second load after the drop still succeeds. The
       privileged gate builds the object (`ci-privileged` calls `build-probes`) before these run.)*
-- [ ] **P8.5** CO-RE/BTF: build against BTF so it's portable across kernels.
-- [ ] **P8.6** Handle the verifier: bounded loops, map access patterns — learn its rules by hitting them.
-- [ ] **P8.7** `xtask` builds the eBPF object as part of the gate (separate target).
-- [ ] **P8.8** Caps: load with `CAP_BPF` (not full root) where possible; document what's needed.
-- [ ] **P8.9** Support probe: detect BTF (`/sys/kernel/btf/vmlinux`) and the kernel/verifier features
+- [x] **P8.5** CO-RE/BTF: build against BTF so it's portable across kernels.
+      *(Landed: the object now carries `.BTF`/`.BTF.ext` — `bpf-linker --btf` (passed via a
+      `[target.bpfel-unknown-none]` link-arg) plus `debug = true` in the profile, which the linker
+      derives BTF from. aya relocates the object against the running kernel's BTF at load, so one
+      compiled object is portable across kernels. `build-probes` asserts the `.BTF` section is present
+      (a regressed link-arg fails the build). The program reads no kernel struct fields yet, so it
+      needs no field-offset relocations — those arrive with Phase 9's struct reads; here BTF is the map
+      typing + load-time relocation path.)*
+- [x] **P8.6** Handle the verifier: bounded loops, map access patterns — learn its rules by hitting them.
+      *(Landed: `count_execve` gained a **bounded loop** (walk the fixed 16-byte `comm` to its NUL —
+      the bound is a compile-time const, so termination is provable; an unbounded `while` is rejected)
+      and a **map access pattern** (per-PID `HashMap` lookup-or-init, where the lookup result is only
+      dereferenced inside the `Option` null-check the verifier demands). Surfaced as
+      `ExecveCounter::counts_by_pid`; the privileged test asserts the per-PID counts cover the spawns.
+      The verifier runs at load, so the proof is the privileged test passing.)*
+- [x] **P8.7** `xtask` builds the eBPF object as part of the gate (separate target).
+      *(Landed: `ci` now calls `build_probes()` after `deny` — guarded, so a host without
+      `bpf-linker`/`rustup` skips it and the gate still runs everywhere, but a set-up dev box now fails
+      the gate on a probe that won't compile or that drops its BTF. `ci-privileged` already built it
+      before the probe tests.)*
+- [x] **P8.8** Caps: load with `CAP_BPF` (not full root) where possible; document what's needed.
+      *(Landed: loading + attaching needs only `CAP_BPF` + `CAP_PERFMON` (the two that split out of
+      `CAP_SYS_ADMIN` in 5.8), not full root. The loader reads its effective set from
+      `/proc/self/status` `CapEff` (no libc, no unsafe) and the tests/demo are capability-aware, so a
+      `setcap cap_bpf,cap_perfmon+ep` binary runs unprivileged. Documented in CONTRIBUTING, `setup`,
+      the demo, and PROBES.md.)*
+- [x] **P8.9** Support probe: detect BTF (`/sys/kernel/btf/vmlinux`) and the kernel/verifier features
       the probes need **at load**, and fail (or degrade) with a **legible typed error** naming the
       requirement rather than a cryptic verifier reject (the eBPF analogue of P6.9b's
       Firecracker-version guard, so a host that can't run the probes says so plainly).
-- [ ] **P8.10** Test: run a known program, assert the counter moved.
+      *(Landed: `check_support()` checks BTF then the caps and returns `ProbeError::Unsupported`
+      naming the first missing prerequisite; `ExecveCounter::load` runs it first, so a BTF-less or
+      under-privileged host gets a legible error, not an `EPERM`/verifier reject deep in the load.)*
+- [x] **P8.10** Test: run a known program, assert the counter moved.
+      *(Landed: `execve_counter_counts_host_execve_events` (privileged) spawns N processes and asserts
+      the per-CPU total rose by ≥ N and the per-PID map covered them; `counter_drops_without_pinned_residue`
+      covers P8.4. Both self-skip via the cap-aware `check_support`.)*
 - **Exit gate + lesson:** a Rust eBPF program loads and reports; write up **eBPF program types,
   maps, the verifier, and CO-RE/BTF.**
+  *(Passed: the demo is `agent-probes-loader`'s `count_execve` example (loads, attaches, reports the
+  host execve total + per-PID breakdown) and the privileged `counter` tests; the writeup is
+  [`PROBES.md`](PROBES.md), the host-observability counterpart to `ENGINE.md`, covering program types,
+  maps, the verifier, CO-RE/BTF, the no-pin lifetime, caps, and the hardware-isolation limit. Phase 8
+  is complete.)*
 
 ## Phase 9 — Syscall observability
 

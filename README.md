@@ -43,9 +43,11 @@ rootfs, gets a per-VM deny-by-default network, snapshots and restores from a war
 milliseconds, runs confined under the jailer (chroot, dropped privileges, cgroup limits, seccomp),
 and is wrapped in the embedder-facing `Sandbox` lifecycle: jailed by default, per-exec files + env
 under a tested secret-hygiene contract, stateful sessions (the VM is the session), budget knobs,
-and a structured result — the contract is written up in [`ENGINE.md`](ENGINE.md). The eBPF
-observability and the flight recorder (the host-side record of what a run did) are
-the next tracks. Nothing here is production yet; the point is depth, done in the open.
+and a structured result — the contract is written up in [`ENGINE.md`](ENGINE.md). The host-side
+eBPF observability has begun ([`PROBES.md`](PROBES.md): a Rust program loads, attaches, and reports
+from the host, out of the guest's reach); the flight recorder that fuses it with the driver into a
+per-run record of what a run did is the track that follows. Nothing here is production yet; the
+point is depth, done in the open.
 
 ## How it fits together
 

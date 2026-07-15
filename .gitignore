@@ -8,5 +8,6 @@
 # Built/downloaded VM images (guest kernel + rootfs) — fetched by `cargo xtask fetch-artifacts`,
 # never committed.
 /artifacts/
-# One Time Fix File
+# Local .md files
 FIX.md
+/review

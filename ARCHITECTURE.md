@@ -1326,3 +1326,7 @@ two halves of the engine teach the same discipline.
 - The `sys_enter_execve` counter is the host's footprint, not the guest's: a microVM services its own
   syscalls in-guest, so they never trap to these host tracepoints (the network + cgroup signals, not
   syscalls, are the strong cross-boundary ones — P10/P12).
+- **BTF is a build requirement, not a default** (P8.5): the object carries BTF (the CO-RE portability
+  path) only because the profile keeps `debug = true` *and* the target passes `bpf-linker`'s `--btf`
+  link-arg — both off by default would ship a legacy-only, non-portable object. `build-probes` asserts
+  the `.BTF` section is present so a regression fails the build, not a downstream kernel.

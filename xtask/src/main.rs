@@ -19,7 +19,8 @@
 //! gates and the shared plumbing (paths, `cargo`/tool runners) live here.
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
-//! workspace; `build-probes` builds its object now, and that step folds into `ci` at ROADMAP P8.6.
+//! workspace; `build-probes` builds its object (with BTF) and is folded **into** `ci` (guarded, so
+//! the gate still runs on hosts without the eBPF toolchain).
 #![forbid(unsafe_code)]
 
 mod artifacts;
@@ -142,6 +143,10 @@ fn ci() -> Result<()> {
         &[("RUSTDOCFLAGS", "-D warnings")],
     )?;
     cargo(&["deny", "check"])?;
+    // P8.7: the eBPF object build is part of the gate. Host-safe and guarded — it skips with a note
+    // when `bpf-linker`/`rustup` are absent, so `ci` still runs everywhere, but on a set-up dev box a
+    // probe that fails to compile (or drops its BTF) now fails here, not later at load.
+    build_probes()?;
     println!("\n✓ all checks passed");
     Ok(())
 }
@@ -295,6 +300,13 @@ fn setup() -> Result<()> {
         "                  across tenants (quota/fairness) is platform policy, above the engine"
     );
 
+    println!("\neBPF probes (Phase 8+): loading + attaching needs CAP_BPF + CAP_PERFMON, not full");
+    println!("             root — grant a loader binary just those with `setcap cap_bpf,cap_perfmon+ep`.");
+    println!(
+        "             A host without kernel BTF or those caps is named by a typed error, not a"
+    );
+    println!("             cryptic verifier reject (agent_probes_loader::check_support).");
+
     println!("\nMissing items are covered in CONTRIBUTING.md → Prerequisites.");
     Ok(())
 }
@@ -306,8 +318,8 @@ fn setup() -> Result<()> {
 ///
 /// Guarded so `cargo xtask` stays runnable everywhere: on a host without `bpf-linker` (or `rustup`),
 /// it prints a note and returns `Ok` instead of failing — the everyday host gate must not require the
-/// eBPF toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); the object build
-/// folds into the `ci` gate at ROADMAP P8.6, and the privileged gate can require it once programs load.
+/// eBPF toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); this step is folded
+/// into the `ci` gate (P8.7), and `ci-privileged` builds it before the probe tests.
 fn build_probes() -> Result<()> {
     if !in_path("bpf-linker") {
         println!(
@@ -340,11 +352,20 @@ fn build_probes() -> Result<()> {
              missing nightly toolchain / `rust-src` (see `cargo xtask setup`)"
         );
     }
-    println!(
-        "· eBPF object built: {}",
-        dir.join("target/bpfel-unknown-none/release/probes")
-            .display()
-    );
+    // P8.5: the object must carry BTF (`bpf-linker --btf`) — the CO-RE portability + BTF map typing
+    // that lets aya relocate it against the running kernel. A missing `.BTF` section means the linker
+    // arg regressed to a legacy-only, non-portable object; fail loudly rather than shipping it.
+    let obj = dir.join("target/bpfel-unknown-none/release/probes");
+    let bytes =
+        std::fs::read(&obj).with_context(|| format!("read built object {}", obj.display()))?;
+    if !bytes.windows(4).any(|w| w == b".BTF") {
+        bail!(
+            "built eBPF object {} carries no .BTF section — is `-C link-arg=--btf` still set in \
+             crates/probes/.cargo/config.toml (and `debug` kept in the profile)?",
+            obj.display()
+        );
+    }
+    println!("· eBPF object built (with BTF): {}", obj.display());
     Ok(())
 }
 
