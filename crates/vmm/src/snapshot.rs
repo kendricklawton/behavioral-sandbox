@@ -22,7 +22,12 @@ impl Vm {
     ///
     /// A **read-write** snapshot's private disk copy is staged at its baked-in path; a **read-only
     /// shared base** is referenced in place, so many clones restored from one warm snapshot share it
-    /// (page-cache-deduped) while each gets its own in-RAM overlay. A **warm** snapshot (one taken with
+    /// (page-cache-deduped) while each gets its own in-RAM overlay. Because an **unjailed** restore
+    /// stages that private copy at the one baked-in host path Firecracker reopens the disk from (v1.9
+    /// has no drive-path override on load), unjailed restores of a **read-write** snapshot are
+    /// **single-flight**: run them sequentially (the warm [`Pool`](crate::Pool) does), or use a
+    /// **jailed** restore (each stages inside its own chroot) or a **`read_only_root`** warm snapshot
+    /// (shared base, no staging) for concurrent clones. A **warm** snapshot (one taken with
     /// the vsock exec channel) restores exec-ready: its socket was baked in relative, so each clone
     /// re-binds its own socket in its own scratch dir and concurrent clones don't collide. If the
     /// snapshot carried vsock, restore waits until the guest agent is reachable before returning, so

@@ -12,6 +12,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use agent_vmm::{Limits, Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use common::{agent_rootfs_config, have_jailer_privileges, TmpDir};
 
@@ -95,6 +97,49 @@ fn lifecycle_runs_inputs_at_the_seam_and_collects_outputs() {
     assert_eq!(captured, vec!["mode.txt".to_string()]);
     let bulk = std::fs::read(out_dir.path().join("mode.txt")).expect("read captured output");
     assert_eq!(bulk, b"seam-test");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn kill_handle_stays_inert_during_output_readback() {
+    // `collect_outputs` reaps the VMM, then runs a multi-second `e2fsck`/`debugfs` readback before
+    // the sandbox drops into teardown. `power_off_and_wait` marks teardown down *before* that reap,
+    // so a `KillHandle` fired across the readback finds `torn_down` already set and no-ops — it can
+    // never signal the reaped (recyclable) pid (the degraded-host `kill -9 <pid>` fallback). Fire it
+    // hard from another thread for the whole call and assert the outputs still come back clean and
+    // every `kill()` is a no-op `Ok` (never the "could not reach VMM pid" error). On a cgroup host
+    // the handle takes the cgroup path; the ordering it guards is the same either way.
+    let out_dir = TmpDir::new("readback-killhandle");
+    let mut cfg = agent_rootfs_config();
+    cfg.output_dir = Some(out_dir.path().to_path_buf());
+    let sandbox = Sandbox::open_unjailed(cfg).expect("open");
+    sandbox
+        .exec(
+            &["sh".into(), "-c".into(), "printf ok > /output/f.txt".into()],
+            b"",
+        )
+        .expect("write a bulk output");
+
+    let handle = sandbox.kill_handle();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_worker = Arc::clone(&stop);
+    let worker = std::thread::spawn(move || {
+        while !stop_worker.load(Ordering::Relaxed) {
+            handle
+                .kill()
+                .expect("a fired kill handle is always Ok (cgroup write or a torn-down no-op)");
+        }
+    });
+
+    let captured = sandbox
+        .collect_outputs()
+        .expect("collect outputs under a concurrently-fired kill handle");
+    stop.store(true, Ordering::Relaxed);
+    worker.join().expect("kill-handle worker thread");
+
+    assert_eq!(captured, vec!["f.txt".to_string()]);
+    let bulk = std::fs::read(out_dir.path().join("f.txt")).expect("read captured output");
+    assert_eq!(bulk, b"ok");
 }
 
 #[test]

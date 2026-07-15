@@ -89,7 +89,9 @@ impl Pool {
     /// Hand out a ready, health-checked clone. Pops ready stock (microseconds, plus a fast probe);
     /// a pooled clone that fails its probe is discarded (logged, torn down) and the next is tried.
     /// If the pool is dry, falls back to restoring a fresh clone inline: milliseconds for a warm
-    /// snapshot, and the caller can't tell the difference except by latency.
+    /// snapshot, and the caller can't tell the difference except by latency. A snapshot without the
+    /// vsock exec channel has nothing to probe, so its clones are handed out directly (no health
+    /// check) rather than discarded on the structural no-vsock condition.
     ///
     /// Does **not** refill what it hands out: the caller decides when to pay restore time back via
     /// [`refill`](Pool::refill) (e.g. between requests, not on the hot path).
@@ -99,6 +101,13 @@ impl Pool {
     /// the discard-and-retry loop, not surfaced.
     pub fn take(&mut self) -> Result<RunningVm, VmmError> {
         while let Some(vm) = self.ready.pop() {
+            // The probe is a vsock health check. A snapshot without the exec channel has nothing to
+            // probe — `probe_agent` would return the *permanent* `require_vsock` error, a structural
+            // condition, not a dead-clone signal — so hand the popped clone out directly rather than
+            // reading that error as "unhealthy" and tearing down the whole pool on the first take.
+            if !self.snapshot.has_vsock {
+                return Ok(vm);
+            }
             match vm.probe_agent() {
                 Ok(()) => return Ok(vm),
                 Err(e) => {

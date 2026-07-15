@@ -469,6 +469,37 @@ fn pool_serves_warm_clones_and_discards_dead_ones() {
 }
 
 #[test]
+#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+fn pool_over_a_no_vsock_snapshot_keeps_its_stock() {
+    // A snapshot without the vsock exec channel has nothing to health-probe: `probe_agent` would
+    // return the permanent `require_vsock` error, a structural condition, not a dead clone. `take`
+    // must hand the popped clone out directly instead of reading that error as "unhealthy" and
+    // discarding the whole warm inventory (the pre-fix bug tore down every clone on the first take,
+    // then restored a fresh unprobed one, leaving `ready()` at 0). Prove the stock survives a take.
+    let cfg = config(); // plain rootfs, no `guest_cid` → the snapshot carries no vsock
+    let source = Vm::boot(cfg.clone()).expect("source microVM should boot");
+    let bundle = TmpDir::new("snap-novsock-pool");
+    let snap = source
+        .snapshot(bundle.path())
+        .expect("snapshot of a no-vsock VM should succeed");
+    source.shutdown().expect("source shutdown");
+
+    let mut pool = Pool::new(snap, cfg, 2).expect("prefill two no-vsock clones");
+    assert_eq!(pool.ready(), 2, "prefill should hit the target");
+    let vm = pool
+        .take()
+        .expect("take must hand out a clone, not discard the stock on the no-vsock condition");
+    assert!(vm.vmm_pid() > 0, "a live clone should be handed out");
+    assert_eq!(
+        pool.ready(),
+        1,
+        "take pops exactly one; the rest stay pooled (not torn down)"
+    );
+    vm.shutdown().expect("clone shutdown");
+    pool.shutdown();
+}
+
+#[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn warm_restore_returns_output_in_far_under_cold_boot() {
     // P5.8: the phase's payoff asserted, not eyeballed: from "restore a warm Python snapshot" to

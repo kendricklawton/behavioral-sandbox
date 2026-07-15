@@ -5,7 +5,7 @@
 > boundary (where the guest can't tamper with you). Run untrusted code in a microVM; watch and
 > enforce what it does from the kernel, outside the guest.
 >
-> **Why:** this is a **Linux-mastery vehicle** on the path to Principal Platform Engineer — not a
+> **Why:** this is a **Linux-mastery vehicle** on the path to Platform Engineer — not a
 > business. Firecracker + aya together teach Linux from the hardware-isolation boundary up to the
 > syscall/network boundary: the rarest, hardest-to-fake systems depth on a platform team. **Every
 > phase ships a working demo, a Linux-internals lesson worth a blog post, and a design-doc seed.**

@@ -113,12 +113,14 @@ impl KillHandle {
         }
         // Degraded-host fallback (no cgroup accepted the kill): signal the pid via `sh`'s builtin
         // `kill` (the host path is `unsafe`-free, so no direct `kill(2)` and no `pidfd`; `sh` is
-        // already this module's dependency). Best-effort, with a residual TOCTOU: `torn_down` was
-        // just checked, but a teardown racing between that check and the `kill` below could reap the
-        // child and let the kernel recycle its pid, so this could signal an unrelated process. The
-        // intended use (fire the handle to unblock a wedged `exec`, *then* let the owner tear down)
-        // doesn't overlap teardown, so the window is not hit in practice; closing it fully needs a
-        // `pidfd` captured at spawn, which the no-`unsafe` host path can't take without a new dep.
+        // already this module's dependency). Every reap path marks teardown down *before* it waits
+        // the child (`teardown`/`abort`, and `power_off_and_wait` for the `collect_outputs` readback,
+        // which reaps the VMM seconds before its owning `RunningVm` drops), so `torn_down` is already
+        // set by the time a pid could be recycled and the checks above short-circuit — the
+        // seconds-long readback window is closed. What remains is only the inherent microsecond
+        // check-then-act TOCTOU of an *actively racing* teardown between the re-check just above and
+        // the `kill` below; closing that fully needs a `pidfd` captured at spawn, which the
+        // no-`unsafe` host path can't take without a new dep. Best-effort by construction.
         let killed = Command::new("sh")
             .arg("-c")
             .arg(format!("kill -9 {}", self.pid))

@@ -314,10 +314,11 @@ pub struct Snapshot {
     pub(crate) has_vsock: bool,
     /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
     /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
-    /// restore must recreate a tap with **exactly this name** — which also means only one networked
-    /// clone can be live at a time (two taps can't share a name; decision 011's tombstone). The
-    /// recreated tap gets a fresh /30, and the guest's stale in-memory address is replaced by the
-    /// agent over vsock after resume.
+    /// restore must recreate a tap with **exactly this name** — trivially satisfied by the netns
+    /// model (decision 017): each clone recreates the fixed-name tap inside its **own per-VM network
+    /// namespace**, so any number of networked clones coexist (no name collision across namespaces)
+    /// and the snapshot's baked-in guest address/MAC/routes are already correct in each, with no
+    /// re-addressing needed. (This retired decision 011's one-live-networked-clone limit.)
     pub(crate) tap_name: Option<String>,
 }
 
@@ -603,6 +604,13 @@ impl RunningVm {
     /// shared core of `shutdown` and `stop_and_reap`, so the action and the poll cadence live once;
     /// the *guaranteed* kill is the caller's (or `Drop`'s), never this.
     fn power_off_and_wait(&mut self, deadline: Instant) -> bool {
+        // Flag teardown before any reap below (this loop's `try_wait`, or the caller's kill). A
+        // degraded-host `KillHandle` falls back to signalling a raw pid, and `collect_outputs` reaps
+        // the VMM here then runs a multi-second image readback before this VM drops into `teardown` —
+        // so without marking down now, the reaped (recyclable) pid stays "killable" for that whole
+        // window and a fired handle could `kill -9` an unrelated process. Idempotent with the later
+        // `teardown`/`abort` calls.
+        self.lifetime.mark_down();
         let _ = self.api.put("/actions", &Action::SendCtrlAltDel);
         loop {
             match self.child.try_wait() {
@@ -674,17 +682,6 @@ pub(crate) fn teardown(
     let _ = child.kill();
     let _ = child.wait();
     console.join();
-    // Delete the netns (cascading its tap away), then check it actually went. A transient
-    // `ip netns del` failure would otherwise leave a netns with no scratch dir — invisible to the
-    // dir-keyed orphan sweep, and a permanent `netns add` collision once the pid is recycled. So the
-    // scratch-dir reclaim below is gated on this: an undeleted netns keeps its dir and stays sweepable.
-    let netns_gone = match tap {
-        Some(tap) => {
-            tap.delete();
-            !tap.netns_exists()
-        }
-        None => true,
-    };
     // The VMM is reaped above, so its cgroup is now empty and removable. Do this before the scratch
     // dir so a slow `remove_dir_all` can't widen the window a leaked cgroup lives in.
     if let Some(cgroup) = chroot.and_then(|c| c.cgroup_dir.as_deref()) {
@@ -699,9 +696,24 @@ pub(crate) fn teardown(
     if let Some(chroot) = chroot {
         chroot.unmount_all();
     }
-    // Reclaim the scratch dir only if the netns is gone (or there was none). Keeping the dir when a
-    // netns lingers is deliberate: the orphan sweep keys on dead drivers' *dirs*, so the pair must
-    // stay together to be reclaimable rather than leak a dir-less netns forever.
+    // Delete the netns and reclaim the scratch dir, gated so a lingering netns keeps its dir.
+    reclaim_scratch(workdir, tap);
+}
+
+/// Delete the VM's netns (cascading its tap away), then reclaim the scratch dir **only once the netns
+/// is confirmed gone**. A transient `ip netns del` failure would otherwise leave a netns with no
+/// scratch dir: invisible to the dir-keyed orphan sweep, and a permanent `netns add` collision once
+/// the pid is recycled. Keeping the dir when the netns lingers keeps the pair together and sweepable.
+/// One home for the invariant, shared by [`teardown`] and [`Spawned::abort`](crate::spawn) so the two
+/// teardown paths reclaim identically (a failed boot must not leak a dir-less netns either).
+pub(crate) fn reclaim_scratch(workdir: &Path, tap: Option<&Tap>) {
+    let netns_gone = match tap {
+        Some(tap) => {
+            tap.delete();
+            !tap.netns_exists()
+        }
+        None => true,
+    };
     if netns_gone {
         let _ = std::fs::remove_dir_all(workdir);
     } else {
@@ -715,6 +727,23 @@ pub(crate) fn teardown(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::TestDir;
+
+    #[test]
+    fn reclaim_scratch_removes_the_dir_when_there_is_no_netns() {
+        // The no-tap path: nothing gates the reclaim, so the scratch dir goes. Both `teardown` and
+        // `abort` now route through this one helper, so a failed boot reclaims exactly as a drop does.
+        // (The netns-lingers branch needs CAP_NET_ADMIN to make `netns_exists` meaningful; the
+        // privileged suite covers the sweep reclaiming a stranded netns+dir pair.)
+        let base = TestDir::new("agent-reclaim");
+        let workdir = base.path().join("agent-1-0");
+        std::fs::create_dir(&workdir).expect("create workdir");
+        reclaim_scratch(&workdir, None);
+        assert!(
+            !workdir.exists(),
+            "no netns to gate on, so the dir is reclaimed"
+        );
+    }
 
     #[test]
     fn with_limits_folds_budget() {

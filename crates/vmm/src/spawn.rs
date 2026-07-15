@@ -31,7 +31,8 @@ use crate::lifetime::VmLifetime;
 use crate::net::Tap;
 use crate::paths::{absolute, path_str, require_file};
 use crate::vm::{
-    teardown, BootConfig, RunningVm, Snapshot, FC_STDERR, IFACE_ID, VM_SEQ, VSOCK_UDS,
+    reclaim_scratch, teardown, BootConfig, RunningVm, Snapshot, FC_STDERR, IFACE_ID, VM_SEQ,
+    VSOCK_UDS,
 };
 use crate::VmmError;
 
@@ -1000,11 +1001,6 @@ impl Spawned {
             let _ = child.kill();
             let _ = child.wait();
         }
-        // The tap lives outside the scratch dir, so `remove_dir_all` below won't reclaim it — delete
-        // it explicitly (best-effort) on this boot-failure path too, or a failed boot leaks a tap.
-        if let Some(tap) = self.tap.take() {
-            tap.delete();
-        }
         if let Some(cgroup) = cgroup {
             remove_cgroup(&cgroup);
         }
@@ -1018,7 +1014,10 @@ impl Spawned {
         if let Some(chroot) = self.chroot.as_ref() {
             chroot.unmount_all();
         }
-        let _ = std::fs::remove_dir_all(&self.workdir);
+        // Delete the tap/netns and reclaim the scratch dir through the *same* gated path as
+        // `teardown`: a transient `ip netns del` failure keeps the dir so the orphan sweep can
+        // reclaim the pair, instead of leaking a dir-less netns a failed boot could otherwise strand.
+        reclaim_scratch(&self.workdir, self.tap.as_ref());
 
         let mut detail = String::new();
         if let Some(tail) = last_lines(&fc_log, 3) {
@@ -1077,7 +1076,9 @@ impl Spawned {
 
 /// Place the snapshot bundle's private root-disk copy at `backing` — the path Firecracker opens the
 /// drive from during `PUT /snapshot/load` — creating parent dirs as needed. Refuses to overwrite an
-/// existing file, so a still-live source VM's disk is never clobbered (drop the source first).
+/// existing file, so a still-live source VM's disk (or a concurrent restore of the same snapshot,
+/// which would target the identical baked-in path) is never clobbered. This is why an unjailed
+/// read-write restore is single-flight; a jailed restore re-roots the path per chroot, so it isn't.
 fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
     if let Some(parent) = backing.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
@@ -1095,7 +1096,11 @@ fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
             return Err(VmmError::Vmm(format!(
-                "root disk path {} already exists; drop the source VM before restoring its snapshot",
+                "root disk path {} already exists: a concurrent restore of this snapshot, or a live \
+                 source VM still holding it. An unjailed restore of a read-write snapshot is \
+                 single-flight (v1.9 reopens the disk at this baked-in path); restore clones \
+                 sequentially, or use a jailed or read_only_root snapshot for concurrent clones, or \
+                 drop the source first.",
                 backing.display()
             )));
         }
