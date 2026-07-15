@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use agent_vmm::Vm;
 
 use common::{
-    agent_rootfs_config, have_jailer_privileges, jailed_agent_config, sha256_hex, TmpDir,
+    agent_rootfs_config, have_jailer_privileges, jailed_agent_config, jailed_overlay_config,
+    sha256_hex, TmpDir,
 };
 
 #[test]
@@ -80,6 +81,92 @@ fn jailed_exec_runs_a_command() {
     );
     assert_eq!(out.exit_code, 0, "`echo hi` should exit 0 under the jailer");
     vm.shutdown().expect("jailed shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
+fn jailed_bulk_io_round_trips_through_the_chroot() {
+    // P7.0d: the bulk input/output block devices compose with the jailer — the last boot feature to.
+    // The images are built in place *inside the chroot* (rootless mke2fs runs pointed at the chroot
+    // root, no copy or mount) and handed to the jailed uid, so the dropped-privilege Firecracker can
+    // open them. This drives the full jailed feature matrix at once: overlay (read_only_root) + vsock
+    // + input + output, and proves the whole inject → run confined → capture loop.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping jailed_bulk_io_round_trips_through_the_chroot: needs real root (euid 0)"
+        );
+        return;
+    }
+    let input = TmpDir::new("p70d-in");
+    let output = TmpDir::new("p70d-out");
+    std::fs::create_dir_all(input.path()).expect("create input dir");
+    // Larger than the 1 MiB channel frame cap, so this provably rides the block device, not vsock.
+    let payload: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(input.path().join("data.bin"), &payload).expect("write input payload");
+
+    let mut cfg = jailed_overlay_config();
+    cfg.input_dir = Some(input.path().to_path_buf());
+    cfg.output_dir = Some(output.path().to_path_buf());
+    let vm = Vm::boot(cfg).expect("jailed microVM with bulk I/O should boot to readiness");
+
+    // Still actually confined with the devices attached: the VMM runs as the dropped uid.
+    let pid = vm.vmm_pid();
+    let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Uid:"))
+                .and_then(|v| v.split_whitespace().next().map(str::to_string))
+        });
+    assert_eq!(
+        uid.as_deref(),
+        Some(agent_vmm::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        "the bulk-I/O VMM should be the dropped jail uid, proving the jail held"
+    );
+
+    // The guest sees the injected file on /input, transforms it onto /output (both label-mounted by
+    // the rootfs init, so their /dev/vdX order is irrelevant).
+    let out = vm
+        .exec(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "sha256sum /input/data.bin && cp /input/data.bin /output/copy.bin".into(),
+            ],
+            b"",
+        )
+        .expect("read the input and write the output in the jailed guest");
+    assert_eq!(
+        out.exit_code,
+        0,
+        "guest bulk round trip failed; console:\n{}",
+        vm.console()
+    );
+    let guest_hash = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .expect("guest sha256 hex")
+        .to_string();
+    assert_eq!(
+        guest_hash,
+        sha256_hex(&payload),
+        "guest should see the injected payload byte-for-byte"
+    );
+
+    // Consumes the VM: stops it, then reads the chroot-resident output image back.
+    let captured = vm
+        .collect_outputs()
+        .expect("pull the jailed output tree back");
+    assert!(
+        captured.iter().any(|p| p == "copy.bin"),
+        "copy.bin missing from {captured:?}"
+    );
+    let round_tripped = std::fs::read(output.path().join("copy.bin")).expect("read copy.bin back");
+    assert_eq!(
+        sha256_hex(&round_tripped),
+        sha256_hex(&payload),
+        "the captured output should match the injected input byte-for-byte"
+    );
 }
 
 #[test]

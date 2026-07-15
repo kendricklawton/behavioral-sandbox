@@ -24,8 +24,9 @@ use crate::firecracker::{
     NetworkInterface, SnapshotLoad, Vsock,
 };
 use crate::jail::{
-    cgroup_limit_args, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup, spawn_jailer,
-    stage_into_chroot, stage_ro_base_into_chroot, unmount_base, Chroot, Jail, JAILED_VSOCK_UDS,
+    cgroup_limit_args, give_to_jail, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup,
+    spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, unmount_base, Chroot, Jail,
+    JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::Tap;
@@ -91,8 +92,8 @@ impl Spawned {
         warn_on_unpinned_firecracker(&config.firecracker);
 
         // Jailed boot spawns the jailer (not firecracker directly) and stages resources into the
-        // chroot later; the unjailed setup below is untouched. `Vm::boot` has already refused the
-        // feature combinations this phase doesn't jail.
+        // chroot later; the unjailed setup below is untouched. Every boot feature composes with the
+        // jail (P7.0a-d), so there is no combination to refuse first.
         if let Some(jail) = config.jail.as_ref() {
             return Self::launch_jailed(config, jail);
         }
@@ -226,9 +227,9 @@ impl Spawned {
     /// privileges before `exec`ing Firecracker. Resources (kernel, rootfs) are staged into the chroot
     /// in [`run_boot`](Self::run_boot), once the API socket proves the chroot exists — so no staging
     /// races the jailer's construction. The vsock exec channel composes (its host-side socket path is
-    /// set here, the device configured in `run_boot`); the vsock exec channel and a NIC compose (the
-    /// tap lives in a per-VM netns the jailer joins via `--netns`); `Vm::boot` still refuses `jail`
-    /// combined with bulk I/O, so this sets that up for neither.
+    /// set here, the device configured in `run_boot`); a NIC composes (the tap lives in a per-VM
+    /// netns the jailer joins via `--netns`); and the bulk-I/O images are built in place **inside
+    /// the chroot** in `run_boot` (they can't exist before the jailer builds it).
     fn launch_jailed(config: &BootConfig, jail: &Jail) -> Result<Self, VmmError> {
         let workdir = create_workdir(&config.scratch_dir)?;
         // The jail id is the scratch-dir name: unique per VM within this process and a valid jailer id
@@ -309,8 +310,8 @@ impl Spawned {
                 uid: jail.uid,
                 gid: jail.gid,
                 cgroup_dir: None,
-                // Set in `run_boot` when a `read_only_root` jailed boot bind-mounts the shared base.
-                base_mount: None,
+                // Filled in `run_boot` when a `read_only_root` jailed boot bind-mounts the shared base.
+                mounts: Vec::new(),
             }),
             lifetime,
         })
@@ -326,14 +327,19 @@ impl Spawned {
         snapshot: &Snapshot,
     ) -> Result<Self, VmmError> {
         warn_on_unpinned_firecracker(&config.firecracker);
+        // Jailed restore (P7.0e) spawns the jailer instead, so a warm clone is confined from its
+        // first instruction; the unjailed path below is untouched.
+        if let Some(jail) = config.jail.as_ref() {
+            return Self::launch_jailed_for_restore(config, snapshot, jail);
+        }
         let workdir = create_workdir(&config.scratch_dir)?;
         // A networked snapshot baked in its tap's `host_dev_name` (v1.9 has no `network_overrides`), so
         // restore must present a tap with that name — trivially satisfied by the netns model: recreate
         // the fixed-name tap in a **fresh per-VM netns** (named after this restore's scratch dir). The
         // clone wakes with the snapshot's baked-in address/MAC/routes, which are already correct in its
         // own isolated netns, so no re-addressing is needed and any number of clones coexist (netns
-        // retires the v1.9 one-live-networked-clone limit). Restore runs unjailed for now (jailed
-        // restore is a later step), so the tap needs no per-uid owner. Created before Firecracker so it
+        // retires the v1.9 one-live-networked-clone limit). A direct boot runs Firecracker with the
+        // driver's own privilege, so the tap needs no per-uid owner. Created before Firecracker so it
         // can join the netns; a failed create reclaims its own netns, and we still own the workdir.
         let tap = if snapshot.tap_name.is_some() {
             match Tap::create(&workdir_name(&workdir), None) {
@@ -389,6 +395,99 @@ impl Spawned {
         })
     }
 
+    /// The jailed counterpart of [`launch_for_restore`](Self::launch_for_restore) (P7.0e): spawn the
+    /// **jailer** for a snapshot restore, so a warm clone runs confined from its first instruction.
+    /// The bundle (state, memory, disk) is staged into the chroot in
+    /// [`run_restore`](Self::run_restore), once the API socket proves the chroot exists. A networked
+    /// snapshot's baked-in tap is recreated in a fresh per-VM netns the jailer joins (decision 017),
+    /// owned by the jailed uid.
+    ///
+    /// No `--cgroup` limits are passed: the guest's resource envelope lives in the snapshot, not in
+    /// `config` (which contributes only the binary and timeout on restore), so deriving caps from
+    /// `config` could contradict the restored guest and OOM-kill a legitimate clone. The jailer still
+    /// creates the cgroup (the lifetime sentinel watches it; the kill handle works); the caps join
+    /// when P7.1's `Limits` ride the snapshot. A documented fail-open on the resource-cap side only
+    /// (decisions 013/014) — the isolation walls (chroot, uid drop, seccomp, netns) are all present.
+    fn launch_jailed_for_restore(
+        config: &BootConfig,
+        snapshot: &Snapshot,
+        jail: &Jail,
+    ) -> Result<Self, VmmError> {
+        let workdir = create_workdir(&config.scratch_dir)?;
+        // The jail id is the scratch-dir name, as in `launch_jailed`; the netns shares it.
+        let id = workdir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "agent-vm".to_string());
+        // Networked clone: the fixed-name tap in a fresh netns, owned by the jailed uid (an
+        // unprivileged Firecracker can only attach a tap it owns). The baked-in guest identity is
+        // already correct in the private netns — no re-addressing (decision 017).
+        let tap = if snapshot.tap_name.is_some() {
+            match Tap::create(&id, Some((jail.uid, jail.gid))) {
+                Ok(tap) => Some(tap),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
+        let netns = tap.as_ref().map(|t| t.netns_path());
+        let (child, console, socket, chroot_root) = match spawn_jailer(
+            jail,
+            &config.firecracker,
+            &workdir,
+            &id,
+            &[],
+            netns.as_deref(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(tap) = tap.as_ref() {
+                    tap.delete();
+                }
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(e);
+            }
+        };
+        // Cgroup-owned lifetime (P6.7), jailed flavour: the sentinel watches the jailer's cgroup at
+        // its precomputed path (enrolling the pid ourselves would race the jailer's own placement).
+        let lifetime = VmLifetime::watch(
+            child.id(),
+            jailer_cgroup_dir(&config.firecracker, &id)
+                .into_iter()
+                .collect(),
+        );
+        Ok(Self {
+            child: Some(child),
+            console,
+            workdir,
+            // Placeholder, as in `launch_for_restore`: a restored VM's live disk is an anonymous
+            // inode, and re-snapshotting is refused.
+            rootfs: snapshot.root_drive.clone(),
+            restored: true,
+            api: ApiClient::new(socket),
+            // A warm snapshot baked the **relative** `v.sock` (every snapshot source is unjailed —
+            // a jailed VM refuses snapshotting), and the jailed clone's cwd is the chroot root, so
+            // Firecracker re-binds it there; the host dials the same file at its absolute path under
+            // the chroot. Strictly shorter than the API socket the jailer bounds-checked.
+            vsock_uds: snapshot.has_vsock.then(|| chroot_root.join(VSOCK_UDS)),
+            input_image: None,
+            output: None,
+            tap,
+            chroot: Some(Chroot {
+                root: chroot_root,
+                uid: jail.uid,
+                gid: jail.gid,
+                cgroup_dir: None,
+                // Filled by `run_restore`'s staging (the memory file, and a shared base disk).
+                mounts: Vec::new(),
+            }),
+            lifetime,
+        })
+    }
+
     /// The scratch-dir name, used to tag the per-VM tracing span so interleaved logs from concurrent
     /// VMs stay attributable. Shared by [`run_boot`](Self::run_boot) and
     /// [`run_restore`](Self::run_restore).
@@ -420,39 +519,127 @@ impl Spawned {
 
         // Resolve every fallible input (the deadline, the snapshot paths) *before* staging the disk,
         // so that once the ~disk-sized copy is on disk there is no `?` between the stage and the
-        // matching unstage — a mid-restore early return can't leak the staged file outside our reach.
+        // matching unstage that could leak the staged file *outside our reach* — the unjailed baked
+        // path lives outside this VM's workdir. (Jailed staging is all inside the chroot, which the
+        // workdir's `remove_dir_all` reclaims on any abort, so the discipline holds structurally.)
         still_before(deadline, "PUT /snapshot/load")?;
-        let snapshot_path = path_str(&snapshot.state)?;
-        let mem_path = path_str(&snapshot.mem)?;
 
-        // The vsock socket path was baked in relative, so Firecracker re-binds it in this VMM's cwd
-        // (its scratch dir, which already exists): no host-side path recreation is needed, and the
-        // socket lands in our own workdir where teardown reclaims it.
+        // The vsock socket path was baked in relative, so Firecracker re-binds it in this VMM's cwd —
+        // its scratch dir unjailed, the chroot root jailed (`launch_jailed_for_restore` set
+        // `vsock_uds` to match): no host-side path recreation is needed, and the socket lands under
+        // our own workdir where teardown reclaims it.
 
-        // A private per-VM disk is staged at its baked-in path so Firecracker can open it at load; a
-        // read-only shared base already exists there (and is shared across clones), so it's left alone.
-        let staged = !snapshot.shared_base;
-        if staged {
-            stage_restore_disk(&snapshot.root_drive, &snapshot.root_backing)?;
+        // Stage the bundle where this VMM can open it, and name it for the load call. Unjailed: the
+        // bundle files are named by their absolute host paths, and only a private per-VM disk needs
+        // staging (at its baked-in path; a shared base already exists there). Jailed: everything is
+        // staged into the chroot — the state file copied in (small), the guest **memory bind-mounted
+        // read-only** (hundreds of MiB per clone; a copy would erase the warm-restore latency win and
+        // the clones' shared page cache), and the disk placed at the **baked-in path resolved inside
+        // the chroot** (Firecracker reopens the drive from the path recorded in the state file): a
+        // shared base is bind-mounted there read-only, a private copy staged and handed to the jailed
+        // uid. `disk_unstage` is the staged private copy to remove once Firecracker holds its fd.
+        let state_arg: String;
+        let mem_arg: String;
+        let mut disk_unstage: Option<PathBuf> = None;
+        if let Some(chroot) = self.chroot.as_ref() {
+            let (root, uid, gid) = (chroot.root.clone(), chroot.uid, chroot.gid);
+            let workdir = self.workdir.clone();
+            let mut mounts = Vec::new();
+            // The jailed Firecracker re-binds the baked-in relative `v.sock` at its cwd — the chroot
+            // root — so that dir must be writable by the dropped uid; chown it explicitly rather than
+            // relying on the jailer's own layout choices.
+            std::os::unix::fs::chown(&root, Some(uid), Some(gid))
+                .map_err(|e| VmmError::Vmm(format!("chown chroot root to {uid}:{gid}: {e}")))?;
+            state_arg =
+                stage_into_chroot(&root, "snapshot.state", &snapshot.state, uid, gid, 0o444)?;
+            let (mem_rel, mem_mount) = stage_ro_base_into_chroot(
+                &root,
+                "snapshot.mem",
+                &snapshot.mem,
+                &workdir,
+                uid,
+                gid,
+            )?;
+            mem_arg = mem_rel;
+            mounts.extend(mem_mount);
+            // The disk, at `<chroot>/<baked path>`. The baked path is absolute (the source resolved
+            // it), so re-rooting it is a strip + join; its parent dirs are created root-owned 0755,
+            // which the jailed uid can traverse.
+            let baked_rel = snapshot.root_backing.strip_prefix("/").map_err(|_| {
+                VmmError::Vmm(format!(
+                    "snapshot's baked-in disk path is not absolute: {}",
+                    snapshot.root_backing.display()
+                ))
+            })?;
+            let disk_target = root.join(baked_rel);
+            if let Some(parent) = disk_target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    VmmError::Vmm(format!("create chroot disk dirs {}: {e}", parent.display()))
+                })?;
+            }
+            if snapshot.shared_base {
+                let rel = baked_rel.to_string_lossy();
+                let (_, disk_mount) = stage_ro_base_into_chroot(
+                    &root,
+                    &rel,
+                    &snapshot.root_drive,
+                    &workdir,
+                    uid,
+                    gid,
+                )?;
+                mounts.extend(disk_mount);
+            } else {
+                stage_restore_disk(&snapshot.root_drive, &disk_target)?;
+                give_to_jail(&disk_target, uid, gid, 0o600)?;
+                disk_unstage = Some(disk_target);
+            }
+            // Record the mounts for teardown, and learn the jailer's cgroup (mirroring `run_boot`) so
+            // teardown can remove it too.
+            if let Some(chroot) = self.chroot.as_mut() {
+                chroot.mounts.extend(mounts);
+            }
+            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
+                let actual = read_cgroup_dir(pid);
+                if let Some(dir) = actual.as_deref() {
+                    if !self.lifetime.watches(dir) {
+                        tracing::warn!(
+                            cgroup = %dir.display(),
+                            "jailer placed the VMM outside the precomputed cgroup; the lifetime \
+                             sentinel is not guarding it (driver death would leak this VMM)"
+                        );
+                    }
+                }
+                if let Some(chroot) = self.chroot.as_mut() {
+                    chroot.cgroup_dir = actual;
+                }
+            }
+        } else {
+            state_arg = path_str(&snapshot.state)?.to_string();
+            mem_arg = path_str(&snapshot.mem)?.to_string();
+            if !snapshot.shared_base {
+                stage_restore_disk(&snapshot.root_drive, &snapshot.root_backing)?;
+                disk_unstage = Some(snapshot.root_backing.clone());
+            }
         }
         let started = Instant::now();
         let loaded = self.api.put(
             "/snapshot/load",
             &SnapshotLoad {
-                snapshot_path,
+                snapshot_path: &state_arg,
                 mem_backend: MemBackend {
                     backend_type: MemBackendType::File,
-                    backend_path: mem_path,
+                    backend_path: &mem_arg,
                 },
                 resume_vm: true,
             },
         );
         // The restore latency is the load + resume call itself, measured before host-side cleanup.
         let latency = started.elapsed();
-        // Firecracker now holds the disk's fd (or the load failed); either way remove a staged copy so
-        // it never outlives this restore. The open fd keeps the inode alive for the VM's lifetime.
-        if staged {
-            unstage_restore_disk(&snapshot.root_backing);
+        // Firecracker now holds the disk's fd (or the load failed); either way remove a staged private
+        // copy so it never outlives this restore. The open fd keeps the inode alive for the VM's
+        // lifetime.
+        if let Some(target) = disk_unstage {
+            unstage_restore_disk(&target);
         }
         loaded?;
 
@@ -561,7 +748,6 @@ impl Spawned {
             // The root disk: bind-mount the shared read-only base (density path) when `read_only_root`,
             // else a read-write private copy (0600). The bind mount, if made, is recorded on the chroot
             // so teardown unmounts it before reclaiming the scratch dir.
-            let base_mount;
             if config.read_only_root {
                 let (arg, mount) = stage_ro_base_into_chroot(
                     &root,
@@ -572,14 +758,33 @@ impl Spawned {
                     gid,
                 )?;
                 rootfs_arg = arg;
-                base_mount = mount;
+                if let (Some(chroot), Some(mount)) = (self.chroot.as_mut(), mount) {
+                    chroot.mounts.push(mount);
+                }
             } else {
                 rootfs_arg =
                     stage_into_chroot(&root, "rootfs.ext4", &config.rootfs, uid, gid, 0o600)?;
-                base_mount = None;
             }
-            if let Some(chroot) = self.chroot.as_mut() {
-                chroot.base_mount = base_mount;
+            // Bulk I/O under the jail (P7.0d): build the input/output ext4 images **in place inside
+            // the chroot** — the builders are rootless `mke2fs` runs that take a target dir, so no
+            // copy or mount is needed, just handing the finished image to the jailed uid. Built here
+            // (not in `launch_jailed`) because the chroot only exists once the jailer has run; the
+            // API socket answering above is the proof it does. Input is read-only (0444, Firecracker
+            // opens it `O_RDONLY`); output is read-write (0600). Both live under the workdir (the
+            // chroot nests in it), so teardown's `remove_dir_all` reclaims them as before, and
+            // `collect_outputs` reads the output image at its host-side path after the VMM exits.
+            if let Some(dir) = config.input_dir.as_ref() {
+                let image = build_input_image(dir, &root)?;
+                give_to_jail(&image, uid, gid, 0o444)?;
+                self.input_image = Some(image);
+            }
+            if let Some(dest) = config.output_dir.as_ref() {
+                let image = build_output_image(&root)?;
+                give_to_jail(&image, uid, gid, 0o600)?;
+                self.output = Some(OutputDevice {
+                    image,
+                    dest: dest.clone(),
+                });
             }
             // Learn the cgroup the jailer placed the VMM in (from `/proc/<pid>/cgroup`, now that
             // Firecracker is running in its final cgroup), so teardown can remove it. The lifetime
@@ -642,10 +847,16 @@ impl Spawned {
         self.put_drive("rootfs", rootfs, true, config.read_only_root, deadline)?;
         // Bulk read-only input (P3.4): attach the built image as `/dev/vdb`. `is_read_only` is what
         // makes the input provably immutable (Firecracker opens it `O_RDONLY`) and sidesteps the
-        // read-back-a-dirty-ext4 hazard that a writable device would carry into P3.5.
+        // read-back-a-dirty-ext4 hazard that a writable device would carry into P3.5. Jailed, the
+        // image sits at the chroot root, so its API name is the fixed chroot-relative path; unjailed
+        // it is the absolute workdir path (self.input_image holds the host-side path either way).
         if let Some(image) = self.input_image.as_ref() {
-            let input = path_str(image)?;
-            self.put_drive("input", input, false, true, deadline)?;
+            let input = if self.chroot.is_some() {
+                "/input.ext4".to_string()
+            } else {
+                path_str(image)?.to_string()
+            };
+            self.put_drive("input", &input, false, true, deadline)?;
         }
         // Bulk writable output (P3.5): attach the blank image read-write. The guest mounts it by
         // label (`agent-output`), so the `/dev/vdX` letter this lands on doesn't matter — a boot may
@@ -653,8 +864,12 @@ impl Spawned {
         // `-o sync` mount plus a clean unmount on shutdown; `collect_outputs` reads it after the VMM
         // exits (never while it holds the file open — see `RunningVm::collect_outputs`).
         if let Some(out) = self.output.as_ref() {
-            let output = path_str(&out.image)?;
-            self.put_drive("output", output, false, false, deadline)?;
+            let output = if self.chroot.is_some() {
+                "/output.ext4".to_string()
+            } else {
+                path_str(&out.image)?.to_string()
+            };
+            self.put_drive("output", &output, false, false, deadline)?;
         }
         still_before(deadline, "PUT /machine-config")?;
         self.api.put(
@@ -806,10 +1021,16 @@ impl Spawned {
         self.console.join();
         let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
         let console = self.console.snapshot();
-        // A `read_only_root` jailed boot bind-mounts the shared base into the chroot; unmount it
-        // (lazy) before reclaiming the scratch dir, or `remove_dir_all` `EBUSY`s on the mount point.
-        if let Some(base) = self.chroot.as_ref().and_then(|c| c.base_mount.as_deref()) {
-            unmount_base(base);
+        // A jailed VM may hold read-only bind mounts in its chroot (shared base, restore mem/disk);
+        // unmount each (lazy) before reclaiming the scratch dir, or `remove_dir_all` `EBUSY`s on the
+        // mount point.
+        for mount in self
+            .chroot
+            .as_ref()
+            .map(|c| c.mounts.as_slice())
+            .unwrap_or_default()
+        {
+            unmount_base(mount);
         }
         let _ = std::fs::remove_dir_all(&self.workdir);
 

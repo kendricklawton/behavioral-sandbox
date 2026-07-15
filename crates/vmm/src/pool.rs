@@ -22,10 +22,11 @@ use crate::{BootConfig, RunningVm, VmmError};
 /// restore, so `take` fails only when a *fresh* restore fails too.
 ///
 /// Dropping the pool tears down every pooled clone (each [`RunningVm`]'s own `Drop`);
-/// [`shutdown`](Pool::shutdown) is the graceful form. **Networked snapshots:** decision 011 allows
-/// only one live networked clone per snapshot on the pinned Firecracker (the tap name is baked in),
-/// so a pool over a networked snapshot is limited to `target <= 1`; prefilling deeper fails with the
-/// typed taken-name error.
+/// [`shutdown`](Pool::shutdown) is the graceful form. **Networked snapshots** pool without a
+/// concurrency limit: each clone recreates the baked-in tap in its own network namespace
+/// (decision 017). **Confined pool** (P7.0e): set [`jail`](crate::BootConfig::jail) on `config` and
+/// every pooled clone restores under the jailer — chroot, dropped uid, seccomp, its own netns —
+/// so warm starts and confinement compose (needs real root, like any jailed boot).
 ///
 /// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
 /// `target × FDS_PER_VM` must stay under the process's `ulimit -n` with headroom — state the bound,

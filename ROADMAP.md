@@ -907,10 +907,42 @@ Wrap the FC track into a clean, self-hostable engine API.
       gated. Tests reworked: `two_networked_vms_run_in_isolated_netns`,
       `restored_networked_clones_coexist_each_in_its_own_netns`,
       `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir`, and the in-netns host-endpoint listener.)*
-- [ ] **P7.0d** Jailed bulk I/O: input/output block devices staged chroot-relative and read back
+- [x] **P7.0d** Jailed bulk I/O: input/output block devices staged chroot-relative and read back
       post-teardown, or a recorded typed refusal if staging isn't worth it.
-- [ ] **P7.0e** Jailed snapshot/restore + warm pool: the bundle disk lives in the chroot (decision 010),
+      *(Done, staged — and cheaper than the box feared: the images are **built in place inside the
+      chroot** (the P3.4/P3.5 builders are rootless `mke2fs` runs that take a target dir, so pointing
+      them at the chroot root costs no copy and no mount), then handed to the jailed uid
+      (`give_to_jail`, input 0444 / output 0600) and named chroot-relative in the API. Built in
+      `run_boot`, not `launch` — the chroot only exists once the jailer has run, and the API socket
+      answering is the proof. `collect_outputs` is unchanged: the image's host-side path is under the
+      workdir (the chroot nests in it), read after the VMM exits. This was the **last refused
+      combination**, so `Vm::boot`'s deny-by-default refusal block and its
+      `jail_refuses_half_confined_boots` unit test retired with it: the jail now composes with every
+      boot feature (a future unjailed feature must reinstate the refusal, decision 013). Proof:
+      `jailed_bulk_io_round_trips_through_the_chroot` (real-root gated) drives the full jailed matrix
+      at once — overlay + vsock + input + output — injecting a 2 MiB payload (past the vsock frame
+      cap, so provably the block path) and capturing it back byte-for-byte from a confined VM.)*
+- [x] **P7.0e** Jailed snapshot/restore + warm pool: the bundle disk lives in the chroot (decision 010),
       so restore stages it jailed. Unblocks a confined warm pool.
+      *(Done. `Vm::restore` honors `BootConfig.jail`: the clone spawns under the jailer and the bundle
+      is staged into the chroot once the API socket proves it exists — the state file copied in
+      (small, 0444), the guest **memory bind-mounted read-only** (a per-clone copy would erase the
+      warm-restore latency win and the clones' shared page cache; the P7.0b bind-or-copy machinery is
+      reused, `Chroot.base_mount` generalized to a `mounts` vec), and the disk placed at the
+      **baked-in path resolved inside the chroot** (Firecracker reopens the drive from the path in the
+      state file): a shared base bind-mounted read-only there, a private copy staged, jailed-uid-owned,
+      and unstaged once the VMM holds the fd. The baked-in relative `v.sock` re-binds at the jailed
+      cwd (the chroot root, chowned to the jailed uid so the bind can't EPERM); a networked clone's
+      netns is joined via `--netns` (decision 017). **Snapshotting a jailed VM stays a typed
+      refusal**, deliberately: the clone story is snapshot an *unjailed* warm source (it runs only the
+      embedder's warm-up) and restore **jailed** clones — the untrusted code runs confined (decision
+      010 consequence). Cgroup **resource caps** are not applied on jailed restore (the guest's
+      envelope lives in the snapshot, not restore's config; a documented fail-open on the cap side
+      only, decisions 013/014 — caps join when P7.1's `Limits` ride the snapshot); every isolation
+      wall is present. The confined warm pool falls out: `Pool` restores through `Vm::restore`, so
+      `jail` on its config confines every pooled clone. Proof:
+      `restores_warm_clones_under_the_jailer_and_pools_them` (real-root gated) — a direct jailed
+      restore (dropped uid + warm Python exec) and a 2-deep jailed `Pool` whose taken clone execs.)*
 - [ ] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`, with **inputs at
       the seam**. *(Assumes the jailed exec path (P7.0a); `Sandbox::exec` jails by default, decision 015.)* *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
       `output_dir`/`RunningVm::collect_outputs` — onto the `Sandbox` surface, since P3.4/P3.5 keep them

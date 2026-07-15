@@ -17,18 +17,18 @@
 //! don't mknod anything ourselves (the jailer does, which is why it needs real root — mknod of a
 //! device node is `EPERM` in a non-initial user namespace even with `CAP_MKNOD`).
 //!
-//! **Scope.** This confines a jailed **cold boot**: the chroot + uid/gid drop + the jailer's mount
-//! namespace, cgroup **cpu/memory limits** derived from the guest's envelope (applied when the host
-//! delegates the cgroup v2 controllers), and Firecracker's built-in **seccomp** filters (on by
-//! default; we never pass `--no-seccomp`). The **vsock exec channel** composes with the jail (its
-//! unix socket is bound chroot-relative under the dropped uid, see [`JAILED_VSOCK_UDS`]), so a jailed
-//! VM runs code, and the **read-only overlay** composes too (the shared base is bind-mounted into the
-//! chroot, [`stage_ro_base_into_chroot`], so a jailed boot runs the density path, not a full rootfs
-//! copy); a jailed boot that also wants a NIC or bulk I/O devices is still refused with a typed error
-//! (staging those into the chroot, and a per-VM netns for concurrent networked clones, are later
-//! steps). Leak-proof, cgroup-owned teardown lives
-//! in [`crate::lifetime`] (P6.7): the jailed VM's sentinel watches the jailer's cgroup at its
-//! precomputed path, so host death can't leak a jailed VMM either.
+//! **Scope.** This confines both a jailed **cold boot** and a jailed **restore**: the chroot +
+//! uid/gid drop + the jailer's mount namespace, cgroup **cpu/memory limits** derived from the
+//! guest's envelope (applied on cold boot when the host delegates the cgroup v2 controllers), and
+//! Firecracker's built-in **seccomp** filters (on by default; we never pass `--no-seccomp`). Every
+//! boot feature composes with the jail (P7.0a-e): the **vsock exec channel** (its unix socket bound
+//! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
+//! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`] — the density path, not a
+//! full rootfs copy), a **NIC** (the tap lives in a per-VM netns the jailer joins via `--netns`,
+//! decision 017), **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
+//! (the bundle staged into the chroot; a confined warm pool falls out). Leak-proof, cgroup-owned
+//! teardown lives in [`crate::lifetime`] (P6.7): the jailed VM's sentinel watches the jailer's
+//! cgroup at its precomputed path, so host death can't leak a jailed VMM either.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -117,11 +117,12 @@ pub(crate) struct Chroot {
     /// The cgroup dir the jailer created for this VMM (`/sys/fs/cgroup/<...>`), learned from
     /// `/proc/<pid>/cgroup` once the VMM is up. Removed (best-effort) on teardown; `None` until read.
     pub(crate) cgroup_dir: Option<PathBuf>,
-    /// The host path of the read-only base **bind mount** staged into the chroot for a
-    /// `read_only_root` jailed boot (the density path, [`stage_ro_base_into_chroot`]). Must be
-    /// unmounted before the scratch dir's `remove_dir_all`, or the mount point `EBUSY`s and leaks the
-    /// chroot. `None` for a read-write boot (a plain copy) or the copy fallback on a non-shared scratch.
-    pub(crate) base_mount: Option<PathBuf>,
+    /// The host paths of the read-only **bind mounts** staged into the chroot
+    /// ([`stage_ro_base_into_chroot`]): the shared rootfs base for a `read_only_root` jailed boot,
+    /// and a jailed restore's snapshot memory file + shared base disk. Each must be unmounted before
+    /// the scratch dir's `remove_dir_all`, or the mount point `EBUSY`s and leaks the chroot. Empty
+    /// for a read-write boot (a plain copy) or the copy fallback on a non-shared scratch.
+    pub(crate) mounts: Vec<PathBuf>,
 }
 
 /// Spawn the **jailer**, which builds the chroot and `exec`s Firecracker inside it. Returns the child
@@ -229,22 +230,28 @@ pub(crate) fn stage_into_chroot(
     gid: u32,
     mode: u32,
 ) -> Result<String, VmmError> {
-    use std::os::unix::fs::PermissionsExt;
-
     let dst = root.join(name);
     std::fs::copy(src, &dst)
         .map_err(|e| VmmError::Vmm(format!("stage {} into jail: {e}", src.display())))?;
-    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(mode))
-        .map_err(|e| VmmError::Vmm(format!("chmod staged {}: {e}", dst.display())))?;
-    // `std::os::unix::fs::chown` is a safe wrapper (no `unsafe` on the host path). Firecracker runs
-    // as `uid:gid` after the drop, so a root-owned resource would be unreadable to it.
-    std::os::unix::fs::chown(&dst, Some(uid), Some(gid)).map_err(|e| {
+    give_to_jail(&dst, uid, gid, mode)?;
+    Ok(format!("/{name}"))
+}
+
+/// Hand a chroot-resident file to the jailed uid: set `mode` and chown to `uid:gid`, so the
+/// dropped-privilege Firecracker can open it. The shared tail of [`stage_into_chroot`] (copied
+/// resources) and the P7.0d bulk-I/O images (built in place inside the chroot, nothing to copy).
+/// `std::os::unix::fs::chown` is a safe wrapper (no `unsafe` on the host path).
+pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<(), VmmError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .map_err(|e| VmmError::Vmm(format!("chmod staged {}: {e}", path.display())))?;
+    std::os::unix::fs::chown(path, Some(uid), Some(gid)).map_err(|e| {
         VmmError::Vmm(format!(
             "chown staged {} to {uid}:{gid}: {e}",
-            dst.display()
+            path.display()
         ))
-    })?;
-    Ok(format!("/{name}"))
+    })
 }
 
 /// Stage the **read-only shared base** into the chroot for a `read_only_root` jailed boot — the

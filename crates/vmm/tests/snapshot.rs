@@ -12,9 +12,12 @@ mod common;
 
 use std::time::Duration;
 
-use agent_vmm::Vm;
+use agent_vmm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
 
-use common::{agent_rootfs_config, config, have_net_admin, warm_python_snapshot, TmpDir};
+use common::{
+    agent_rootfs_config, config, have_jailer_privileges, have_net_admin, warm_python_snapshot,
+    TmpDir,
+};
 
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
@@ -267,6 +270,78 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
 
     clone_a.shutdown().expect("clone A shutdown");
     clone_b.shutdown().expect("clone B shutdown");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
+fn restores_warm_clones_under_the_jailer_and_pools_them() {
+    // P7.0e: warm start and confinement compose. The warm source runs unjailed — it executes only
+    // the embedder's warm-up, and a jailed VM refuses snapshotting — and every *clone* restores
+    // under the jailer: the bundle is staged into the chroot (state copied in; the memory file and
+    // the shared base disk bind-mounted read-only, so clones keep sharing one page cache), vsock is
+    // re-bound inside the chroot, and the VMM runs as the dropped uid. This drives one direct jailed
+    // restore, then a jailed `Pool`, so the confined warm pool the box promises is the thing proven.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping restores_warm_clones_under_the_jailer_and_pools_them: needs real root (euid 0)"
+        );
+        return;
+    }
+    let bundle = TmpDir::new("snap-jailed");
+    let (snap, _cold) = warm_python_snapshot(&bundle);
+
+    let mut cfg = agent_rootfs_config();
+    cfg.jail = Some(Jail::default());
+
+    // The VMM behind `pid` runs as the dropped jail uid — the confinement actually holding.
+    let vmm_uid = |pid: u32| {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Uid:"))
+                    .and_then(|v| v.split_whitespace().next().map(str::to_string))
+            })
+    };
+
+    // Direct jailed restore: confined, exec-ready, and actually functional.
+    let clone = Vm::restore(&snap, &cfg).expect("jailed warm restore should resume");
+    assert_eq!(
+        vmm_uid(clone.vmm_pid()).as_deref(),
+        Some(DEFAULT_JAIL_UID.to_string()).as_deref(),
+        "the restored VMM should run as the dropped jail uid"
+    );
+    let out = clone
+        .exec(&["python3".into(), "-c".into(), "print(6 * 7)".into()], b"")
+        .expect("exec python on the jailed warm clone");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "42",
+        "jailed clone should run warm Python; console:\n{}",
+        clone.console()
+    );
+    assert_eq!(out.exit_code, 0);
+    clone.shutdown().expect("jailed clone shutdown");
+
+    // The confined warm pool: every pooled clone restored under the jailer, health-checked and
+    // exec-ready on take.
+    let mut pool = Pool::new(snap, cfg, 2).expect("jailed pool should prefill");
+    assert_eq!(pool.ready(), 2, "both confined clones should be pooled");
+    for pid in pool.vmm_pids() {
+        assert_eq!(
+            vmm_uid(pid).as_deref(),
+            Some(DEFAULT_JAIL_UID.to_string()).as_deref(),
+            "every pooled VMM should run as the dropped jail uid"
+        );
+    }
+    let vm = pool.take().expect("take a confined clone");
+    let out = vm
+        .exec(&["echo".into(), "confined".into()], b"")
+        .expect("exec on the pooled confined clone");
+    assert_eq!(out.stdout, b"confined\n");
+    assert_eq!(out.exit_code, 0);
+    vm.shutdown().expect("pooled clone shutdown");
+    pool.shutdown();
 }
 
 #[test]

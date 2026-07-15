@@ -637,6 +637,15 @@ backing file.
   images a restore can't yet recreate). A **NIC** is no longer deferred: decision 011 restores
   networked clones with a fresh identity. `ci-privileged` now runs the VM tests serially (they boot
   real microVMs and some assert on host-global leak state).
+- **Jailed restore stages the bundle into the chroot** *(2026-07-14, P7.0e)*: with `BootConfig.jail`
+  set, the clone spawns under the jailer and this decision's staging happens chroot-relative — the
+  state file copied in, the memory file and a shared base disk **bind-mounted read-only** (clones
+  keep sharing one page cache), a private disk copy staged at the baked-in path resolved inside the
+  chroot and unstaged once the VMM holds the fd. **Snapshotting a jailed VM is refused**, deliberately,
+  not just deferred: its disk lives at a chroot-relative path inside a torn-down-with-the-VM chroot,
+  so a bundle would record an unrestorable backing — and the clone story doesn't need it. Snapshot an
+  *unjailed* warm source (it runs only the embedder's warm-up), restore **jailed** clones from it:
+  the untrusted code runs confined, and the confined warm `Pool` falls out of the same seam.
 
 ### 011 — Restore identity: the agent re-addresses the clone; VMGenID reseeds it *(2026-07-12, P5.5)*
 
@@ -1020,14 +1029,18 @@ default run confined and avoids a retrofit under a pinned seam.
   tombstone) and jailed-by-default land together as the confined default surface.
 - Jailed snapshot/restore and the warm pool under the jailer remain downstream of exec under the jailer
   (a jailed VM's disk lives in the chroot, decision 010), tracked with the same boxes.
-- **Status: convergence steps P7.0a, P7.0b, P7.0c landed.** `jail` now composes with the vsock exec
-  channel, the read-only overlay, and a NIC. Vsock: under the jailer Firecracker binds the socket at the
-  chroot-relative `/run/v.sock` (`jailed_exec_runs_a_command`). Overlay: a `read_only_root` jailed boot
-  bind-mounts the shared base into the chroot (density path, propagated into the jailer's `MS_SLAVE` mount
-  namespace; `jailed_overlay_is_dense_and_base_is_untouched`). NIC: the tap lives in a per-VM network
-  namespace the jailer joins via `--netns` (decision 017). The mutual exclusion of the opening paragraph
-  is retired for vsock, the overlay, and the NIC; the jail still hard-errors on bulk I/O (P7.0d).
-  `Sandbox::exec`-jails-by-default and jailed snapshot/restore (P7.0e) are the remaining steps.
+- **Status: the P7.0a-e convergence is complete.** `jail` composes with every boot feature and with
+  restore. Vsock: the socket binds chroot-relative at `/run/v.sock` (`jailed_exec_runs_a_command`).
+  Overlay: the shared base bind-mounts into the chroot (density path, propagated into the jailer's
+  `MS_SLAVE` mount namespace; `jailed_overlay_is_dense_and_base_is_untouched`). NIC: the tap lives in a
+  per-VM netns the jailer joins via `--netns` (decision 017). Bulk I/O: the input/output images are
+  built in place inside the chroot (`jailed_bulk_io_round_trips_through_the_chroot`) — with it, the
+  mutual exclusion of the opening paragraph is fully retired and `Vm::boot`'s refusal block itself is
+  gone. Restore: the bundle stages into the chroot (state copied; memory + shared base disk
+  bind-mounted read-only), so warm clones and the `Pool` run confined
+  (`restores_warm_clones_under_the_jailer_and_pools_them`); snapshotting a *jailed* VM stays a typed
+  refusal — snapshot an unjailed warm source, restore jailed clones (decision 010 consequence). The
+  one remaining step is the flag-polarity flip itself: `Sandbox::exec` jails by default at P7.1.
 - The jailer's per-VM netns (decisions 009/011's tombstone for concurrent networked clones) rides the
   jailed-networking box: once the tap is staged into the jail, its netns removes the one-live-networked-
   clone limit.

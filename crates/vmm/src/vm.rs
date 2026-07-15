@@ -137,12 +137,11 @@ pub struct BootConfig {
     /// Run Firecracker under its **jailer** (P6.1): a chroot, a uid/gid drop, and the jailer's mount
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
     /// Firecracker directly. Setting it needs **real root** (the jailer `mknod`s device nodes, which
-    /// `EPERM` in a non-initial user namespace) and the `jailer` binary. Composes with `guest_cid`
-    /// (the vsock exec channel is staged chroot-relative under the dropped uid), `read_only_root` (the
-    /// shared base is bind-mounted into the chroot), and `enable_network` (the tap lives in a per-VM
-    /// netns the jailer joins via `--netns`), so a jailed VM can run networked code on the density
-    /// path; combining `jail` with `input_dir` or `output_dir` is still a typed error for now (those
-    /// need chroot staging a later step adds).
+    /// `EPERM` in a non-initial user namespace) and the `jailer` binary. Composes with every other
+    /// boot feature (P7.0a-d): `guest_cid` (the vsock exec channel is staged chroot-relative under
+    /// the dropped uid), `read_only_root` (the shared base is bind-mounted into the chroot),
+    /// `enable_network` (the tap lives in a per-VM netns the jailer joins via `--netns`), and
+    /// `input_dir`/`output_dir` (the images are built in place inside the chroot).
     pub jail: Option<Jail>,
     /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/agent-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
@@ -342,21 +341,14 @@ impl Vm {
     /// [`VmmError::Vmm`] for any Firecracker API or process failure. On any error the child is
     /// killed and the scratch dir removed before returning.
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
-        // Config validation before environment probing, so this deny-by-default refusal is reachable
-        // (and unit-testable) on any host, with KVM or not. The jailer now composes with the vsock
-        // exec channel (socket staged chroot-relative under the dropped uid), the read-only overlay
-        // (shared base bind-mounted into the chroot), and a NIC (the tap lives in a per-VM netns the
-        // jailer joins), but bulk I/O still needs staging into the chroot, so refuse it rather than
-        // boot a half-confined VM. The isolation boundary never half-degrades (decision 013): a jail we
-        // can't fully build is a hard error, not a quiet drop to a weaker confinement.
-        if config.jail.is_some() && (config.input_dir.is_some() || config.output_dir.is_some()) {
-            return Err(VmmError::Vmm(
-                "the jailer currently supports a read-write or read-only-overlay boot with the vsock \
-                 exec channel and a NIC; bulk input/output devices under the jailer are a later step"
-                    .into(),
-            ));
-        }
-        // Checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
+        // The jail composes with every boot feature now (P7.0a-d): vsock (socket staged
+        // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
+        // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
+        // (images built in place inside the chroot). The decision-013 deny-by-default refusal that
+        // stood here while combinations were unjailed retired with its last member; a new
+        // not-yet-jailed feature must reinstate it rather than boot half-confined.
+        //
+        // KVM checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
         // on hosts without KVM (a fake "firecracker" needs no VM).
         if !Path::new("/dev/kvm").exists() {
             return Err(VmmError::NoKvm);
@@ -650,11 +642,12 @@ pub(crate) fn teardown(
     }
     // Reclaim the lifetime cgroup and disarm the sentinel (it wakes to already-gone dirs).
     lifetime.teardown();
-    // A `read_only_root` jailed boot bind-mounts the shared base into the chroot; unmount it (lazy,
-    // so a still-open fd can't block us) before `remove_dir_all`, or the mount point `EBUSY`s and the
-    // whole chroot leaks. A read-write boot or the copy fallback records no mount, so this is a no-op.
-    if let Some(base) = chroot.and_then(|c| c.base_mount.as_deref()) {
-        unmount_base(base);
+    // A jailed VM may hold read-only bind mounts in its chroot (the shared rootfs base; a restore's
+    // memory file + base disk); unmount each (lazy, so a still-open fd can't block us) before
+    // `remove_dir_all`, or the mount point `EBUSY`s and the whole chroot leaks. A read-write boot or
+    // the copy fallback records no mounts, so this is a no-op.
+    for mount in chroot.map(|c| c.mounts.as_slice()).unwrap_or_default() {
+        unmount_base(mount);
     }
     let _ = std::fs::remove_dir_all(workdir);
 }
@@ -675,32 +668,9 @@ mod tests {
         assert_eq!(cfg.boot_timeout, Duration::from_secs(60));
     }
 
-    #[test]
-    fn jail_refuses_half_confined_boots() {
-        // Deny-by-default: the jailer supports a read-write or read-only-overlay boot plus the vsock
-        // exec channel and a NIC, so any config that would run a *half*-jailed VM (a feature not yet
-        // staged into the chroot) is a typed error, never a quiet weaker confinement. This is a pure
-        // config check, refused before the /dev/kvm probe, so it holds on any host (no KVM, no root
-        // needed). Each mutation flips one not-yet-jailed feature on; all must be refused. `guest_cid`,
-        // `read_only_root`, and `enable_network` are absent here on purpose: jail + vsock, jail +
-        // overlay, and jail + NIC are supported now (see the jailed integration tests).
-        let mutations: [fn(&mut BootConfig); 2] = [
-            |c| c.input_dir = Some(PathBuf::from("/tmp/in")),
-            |c| c.output_dir = Some(PathBuf::from("/tmp/out")),
-        ];
-        for (i, mutate) in mutations.iter().enumerate() {
-            let mut cfg = BootConfig {
-                jail: Some(Jail::default()),
-                ..BootConfig::default()
-            };
-            mutate(&mut cfg);
-            let err = Vm::boot(cfg).expect_err("a half-jailed config must be refused");
-            assert!(
-                matches!(err, VmmError::Vmm(_)),
-                "mutation {i} should be a typed refusal, got {err:?}"
-            );
-        }
-    }
+    // (`jail_refuses_half_confined_boots` lived here while some boot features were not yet jailed;
+    // it retired with P7.0d — the jail now composes with every feature, so there is nothing left to
+    // refuse. If a future feature ships unjailed, reinstate the refusal in `Vm::boot` and this test.)
 
     #[test]
     fn default_is_pure_and_matches_limits_defaults() {
