@@ -138,11 +138,11 @@ pub struct BootConfig {
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
     /// Firecracker directly. Setting it needs **real root** (the jailer `mknod`s device nodes, which
     /// `EPERM` in a non-initial user namespace) and the `jailer` binary. Composes with `guest_cid`
-    /// (the vsock exec channel is staged chroot-relative under the dropped uid) and `read_only_root`
-    /// (the shared base is bind-mounted into the chroot, so a jailed boot runs the density path), so a
-    /// jailed VM can run code on the density path; combining `jail` with `enable_network`, `input_dir`,
-    /// or `output_dir` is still a typed error for now (those need chroot staging / a netns that later
-    /// steps add).
+    /// (the vsock exec channel is staged chroot-relative under the dropped uid), `read_only_root` (the
+    /// shared base is bind-mounted into the chroot), and `enable_network` (the tap lives in a per-VM
+    /// netns the jailer joins via `--netns`), so a jailed VM can run networked code on the density
+    /// path; combining `jail` with `input_dir` or `output_dir` is still a typed error for now (those
+    /// need chroot staging a later step adds).
     pub jail: Option<Jail>,
     /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/agent-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
@@ -344,17 +344,15 @@ impl Vm {
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
         // Config validation before environment probing, so this deny-by-default refusal is reachable
         // (and unit-testable) on any host, with KVM or not. The jailer now composes with the vsock
-        // exec channel (socket staged chroot-relative under the dropped uid) and the read-only overlay
-        // (the shared base bind-mounted into the chroot), but a NIC or bulk I/O still need staging into
-        // the chroot / a per-VM netns, so refuse those rather than boot a half-confined VM. The
-        // isolation boundary never half-degrades (decision 013): a jail we can't fully build is a hard
-        // error, not a quiet drop to a weaker confinement.
-        if config.jail.is_some()
-            && (config.enable_network || config.input_dir.is_some() || config.output_dir.is_some())
-        {
+        // exec channel (socket staged chroot-relative under the dropped uid), the read-only overlay
+        // (shared base bind-mounted into the chroot), and a NIC (the tap lives in a per-VM netns the
+        // jailer joins), but bulk I/O still needs staging into the chroot, so refuse it rather than
+        // boot a half-confined VM. The isolation boundary never half-degrades (decision 013): a jail we
+        // can't fully build is a hard error, not a quiet drop to a weaker confinement.
+        if config.jail.is_some() && (config.input_dir.is_some() || config.output_dir.is_some()) {
             return Err(VmmError::Vmm(
                 "the jailer currently supports a read-write or read-only-overlay boot with the vsock \
-                 exec channel; a NIC and bulk input/output devices under the jailer are later steps"
+                 exec channel and a NIC; bulk input/output devices under the jailer are a later step"
                     .into(),
             ));
         }
@@ -420,15 +418,24 @@ impl RunningVm {
         self.tap.as_ref().map(|t| t.guest_ip)
     }
 
-    /// The host tap interface backing this VM's NIC (`fc<hex>`), when booted with
+    /// The host tap interface backing this VM's NIC, when booted with
     /// [`enable_network`](BootConfig::enable_network); `None` otherwise. This is the handle the
-    /// host-side eBPF track (Phase 8) binds policy to: the name is host-globally reserved for the VM's
-    /// lifetime, so the loader can resolve it to an ifindex (`if_nametoindex`) and attach `tc`/XDP
-    /// programs to *this* sandbox's traffic. Names, unlike ifindexes, don't churn if the interface is
-    /// recreated, so the driver hands out the name and lets the loader resolve the index at attach.
+    /// host-side eBPF track (Phase 8) binds policy to. The tap lives **inside** this VM's network
+    /// namespace ([`netns`](Self::netns)), so the loader resolves it to an ifindex and attaches
+    /// `tc`/XDP programs to *this* sandbox's traffic **within that netns** — pair it with `netns()`.
     #[must_use]
     pub fn tap_name(&self) -> Option<&str> {
         self.tap.as_ref().map(|t| t.name.as_str())
+    }
+
+    /// The per-VM **network namespace** name backing this VM's NIC, when booted with
+    /// [`enable_network`](BootConfig::enable_network); `None` otherwise. The tap the guest's virtio-net
+    /// rides ([`tap_name`](Self::tap_name)) lives inside it, isolated from the host and every other VM,
+    /// so the Phase-8 eBPF loader enters this netns (its handle is `/run/netns/<name>`) to attach to
+    /// the tap. Also the unit of isolation that replaces P4.4's per-VM /30 reservation.
+    #[must_use]
+    pub fn netns(&self) -> Option<&str> {
+        self.tap.as_ref().map(|t| t.netns.as_str())
     }
 
     /// Connect to the in-guest agent over vsock and complete the channel handshake, returning a
@@ -671,14 +678,13 @@ mod tests {
     #[test]
     fn jail_refuses_half_confined_boots() {
         // Deny-by-default: the jailer supports a read-write or read-only-overlay boot plus the vsock
-        // exec channel, so any config that would run a *half*-jailed VM (a feature not yet staged into
-        // the chroot / a netns) is a typed error, never a quiet weaker confinement. This is a pure
+        // exec channel and a NIC, so any config that would run a *half*-jailed VM (a feature not yet
+        // staged into the chroot) is a typed error, never a quiet weaker confinement. This is a pure
         // config check, refused before the /dev/kvm probe, so it holds on any host (no KVM, no root
-        // needed). Each mutation flips one not-yet-jailed feature on; all must be refused. `guest_cid`
-        // and `read_only_root` are absent here on purpose: jail + vsock (`jailed_exec_runs_a_command`)
-        // and jail + overlay (`jailed_overlay_is_dense_and_base_is_untouched`) are supported now.
-        let mutations: [fn(&mut BootConfig); 3] = [
-            |c| c.enable_network = true,
+        // needed). Each mutation flips one not-yet-jailed feature on; all must be refused. `guest_cid`,
+        // `read_only_root`, and `enable_network` are absent here on purpose: jail + vsock, jail +
+        // overlay, and jail + NIC are supported now (see the jailed integration tests).
+        let mutations: [fn(&mut BootConfig); 2] = [
             |c| c.input_dir = Some(PathBuf::from("/tmp/in")),
             |c| c.output_dir = Some(PathBuf::from("/tmp/out")),
         ];

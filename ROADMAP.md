@@ -886,8 +886,27 @@ Wrap the FC track into a clean, self-hostable engine API.
       read-only mount sharing the base's very inode (a bind mount, not a 256 MiB copy), the guest can
       write a normally-read-only path via the overlay, the base file is byte-for-byte untouched, and
       teardown left no mount behind. The `shared:`-tag parser has CI-safe unit tests.)*
-- [ ] **P7.0c** Jailed networking: stage the tap into the VM's netns under the jailer; retire the
+- [x] **P7.0c** Jailed networking: stage the tap into the VM's netns under the jailer; retire the
       one-live-networked-clone limit (decisions 009/011 tombstone).
+      *(Done, as the per-VM network-namespace model, decision 017 — supersedes the 009/011 netns
+      tombstones. Every networked VM now runs its tap in its **own netns** (`ip netns add`, named after
+      the scratch dir): the jailer joins it via `--netns` (it `setns`es as root before dropping
+      privileges), a direct boot via `ip netns exec <ns> firecracker` (the child pid is firecracker).
+      The jailed tap is created `user`/`group`-owned by the jailed uid, since a jailed Firecracker holds
+      no `CAP_NET_ADMIN` and can only attach a tap it owns. Because the tap is namespaced, the whole
+      host-global allocator collapses to a **fixed** name/MAC/`/30` (`fc0` / `10.200.0.1`/`.2`), and the
+      **one-live-clone limit is retired**: N clones recreate the same baked-in tap name in their own
+      netns, the baked-in guest identity is already correct there, so restore no longer re-addresses the
+      guest (`apply_guest_net_identity` deleted) and a networked snapshot no longer needs vsock.
+      Isolation is now kernel-enforced (separate stacks), replacing P4.4's unique-/30. Teardown is one
+      op (`ip netns del`); the orphan sweep reclaims an orphaned **netns** (dir-named, no `tap` record),
+      and the finite-/16-pool DoS it guarded against is *eliminated* (every netns reuses one /30).
+      `RunningVm::netns()` added for the Phase-8 loader to enter. Proof: the unjailed path (boot,
+      restore, **two concurrent networked clones**, isolation, the sweep, the leak test) is validated
+      end-to-end with real Firecracker VMs under `unshare -Urn`; the jailer `--netns` is real-root
+      gated. Tests reworked: `two_networked_vms_run_in_isolated_netns`,
+      `restored_networked_clones_coexist_each_in_its_own_netns`,
+      `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir`, and the in-netns host-endpoint listener.)*
 - [ ] **P7.0d** Jailed bulk I/O: input/output block devices staged chroot-relative and read back
       post-teardown, or a recorded typed refusal if staging isn't worth it.
 - [ ] **P7.0e** Jailed snapshot/restore + warm pool: the bundle disk lives in the chroot (decision 010),

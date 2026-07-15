@@ -28,9 +28,8 @@ use crate::jail::{
     stage_into_chroot, stage_ro_base_into_chroot, unmount_base, Chroot, Jail, JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
-use crate::net::{apply_guest_net_identity, Tap};
+use crate::net::Tap;
 use crate::paths::{absolute, path_str, require_file};
-use crate::sweep::record_tap;
 use crate::vm::{
     teardown, BootConfig, RunningVm, Snapshot, FC_STDERR, IFACE_ID, VM_SEQ, VSOCK_UDS,
 };
@@ -163,25 +162,15 @@ impl Spawned {
             },
         };
 
-        // Spawn `firecracker --api-sock`, wiring its serial console + stderr log (see `spawn_fc`). On
-        // any failure the child is already reaped; we still own the scratch dir, so reclaim it.
-        let socket = workdir.join("fc.sock");
-        let (mut child, console) = match spawn_fc(&config.firecracker, &workdir, &socket) {
-            Ok(pair) => pair,
-            Err(e) => {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(e);
-            }
-        };
-        // Per-VM tap for the guest's virtio-net (P4.1), when enabled. Created here — after the child
-        // is spawned but before `Spawned` owns it — with the same inline cleanup as its neighbours, so
-        // a failed create can't leak a tap; once `Spawned` holds it, every teardown path deletes it.
+        // Per-VM network namespace + tap for the guest's virtio-net (P4.1, netns model), when enabled.
+        // Created **before** Firecracker so it can join the netns; named after the scratch dir, so a
+        // crashed driver's netns is reclaimable by the same dir-keyed sweep. A direct boot runs
+        // Firecracker with the driver's own privilege, so the tap needs no per-uid owner. A failed
+        // create reclaims its own half-built netns; we still own the workdir, so reclaim it.
         let tap = if config.enable_network {
-            match Tap::create() {
+            match Tap::create(&workdir_name(&workdir), None) {
                 Ok(tap) => Some(tap),
                 Err(e) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
                     let _ = std::fs::remove_dir_all(&workdir);
                     return Err(e);
                 }
@@ -189,18 +178,25 @@ impl Spawned {
         } else {
             None
         };
-        // Pair the tap with this dir's embedded owner pid so the orphan sweep can reclaim it if
-        // this driver dies without `Drop` — an unrecorded tap would hold its /30 forever. A failed
-        // record therefore fails the boot (same inline cleanup as a failed tap create).
-        if let Some(tap) = tap.as_ref() {
-            if let Err(e) = record_tap(&workdir, &tap.name) {
-                tap.delete();
-                let _ = child.kill();
-                let _ = child.wait();
+        // Spawn `firecracker --api-sock`, inside the VM's netns when networked (`ip netns exec`), wiring
+        // its serial console + stderr log (see `spawn_fc`). On any failure the child is already reaped;
+        // delete the netns (best-effort) and reclaim the scratch dir.
+        let socket = workdir.join("fc.sock");
+        let (child, console) = match spawn_fc(
+            &config.firecracker,
+            &workdir,
+            &socket,
+            tap.as_ref().map(|t| t.netns.as_str()),
+        ) {
+            Ok(pair) => pair,
+            Err(e) => {
+                if let Some(tap) = tap.as_ref() {
+                    tap.delete();
+                }
                 let _ = std::fs::remove_dir_all(&workdir);
                 return Err(e);
             }
-        }
+        };
 
         // Cgroup-owned lifetime (P6.7): enroll the VMM in a per-VM lifetime cgroup and arm the
         // sentinel, so from here even a SIGKILLed driver can't leak it. Named by the scratch dir,
@@ -230,8 +226,9 @@ impl Spawned {
     /// privileges before `exec`ing Firecracker. Resources (kernel, rootfs) are staged into the chroot
     /// in [`run_boot`](Self::run_boot), once the API socket proves the chroot exists — so no staging
     /// races the jailer's construction. The vsock exec channel composes (its host-side socket path is
-    /// set here, the device configured in `run_boot`); `Vm::boot` still refuses `jail` combined with a
-    /// NIC, the overlay, or bulk I/O, so this sets none of those up.
+    /// set here, the device configured in `run_boot`); the vsock exec channel and a NIC compose (the
+    /// tap lives in a per-VM netns the jailer joins via `--netns`); `Vm::boot` still refuses `jail`
+    /// combined with bulk I/O, so this sets that up for neither.
     fn launch_jailed(config: &BootConfig, jail: &Jail) -> Result<Self, VmmError> {
         let workdir = create_workdir(&config.scratch_dir)?;
         // The jail id is the scratch-dir name: unique per VM within this process and a valid jailer id
@@ -240,17 +237,42 @@ impl Spawned {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "agent-vm".to_string());
-        // CPU/memory limits (P6.2) derived from the guest's own resource envelope (vcpus, mem_mib);
-        // empty when the host doesn't delegate the cgroup controllers, so the jailed boot still runs.
-        let cgroup_args = cgroup_limit_args(config.vcpus, config.mem_mib);
-        let (child, console, socket, chroot_root) =
-            match spawn_jailer(jail, &config.firecracker, &workdir, &id, &cgroup_args) {
-                Ok(t) => t,
+        // Networked jailed boot: create the per-VM netns + tap **before** the jailer, so the jailer can
+        // join it (`--netns`). The tap is owned by the jailed uid/gid because a jailed Firecracker is
+        // unprivileged (no `CAP_NET_ADMIN`) and can only attach a tap it owns. The netns is named after
+        // the scratch dir (= `id`). A failed create reclaims its own netns; we still own the workdir.
+        let tap = if config.enable_network {
+            match Tap::create(&id, Some((jail.uid, jail.gid))) {
+                Ok(tap) => Some(tap),
                 Err(e) => {
                     let _ = std::fs::remove_dir_all(&workdir);
                     return Err(e);
                 }
-            };
+            }
+        } else {
+            None
+        };
+        // CPU/memory limits (P6.2) derived from the guest's own resource envelope (vcpus, mem_mib);
+        // empty when the host doesn't delegate the cgroup controllers, so the jailed boot still runs.
+        let cgroup_args = cgroup_limit_args(config.vcpus, config.mem_mib);
+        let netns = tap.as_ref().map(|t| t.netns_path());
+        let (child, console, socket, chroot_root) = match spawn_jailer(
+            jail,
+            &config.firecracker,
+            &workdir,
+            &id,
+            &cgroup_args,
+            netns.as_deref(),
+        ) {
+            Ok(t) => t,
+            Err(e) => {
+                if let Some(tap) = tap.as_ref() {
+                    tap.delete();
+                }
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(e);
+            }
+        };
         // Cgroup-owned lifetime (P6.7), jailed flavour: the jailer creates the VM's cgroup and
         // moves the VMM into it itself, so enrolling the pid in a driver cgroup would race that
         // placement (last write wins membership and could yank the VMM out of its limits). The
@@ -281,7 +303,7 @@ impl Spawned {
                 .map(|_| chroot_root.join(JAILED_VSOCK_UDS.trim_start_matches('/'))),
             input_image: None,
             output: None,
-            tap: None,
+            tap,
             chroot: Some(Chroot {
                 root: chroot_root,
                 uid: jail.uid,
@@ -305,10 +327,37 @@ impl Spawned {
     ) -> Result<Self, VmmError> {
         warn_on_unpinned_firecracker(&config.firecracker);
         let workdir = create_workdir(&config.scratch_dir)?;
+        // A networked snapshot baked in its tap's `host_dev_name` (v1.9 has no `network_overrides`), so
+        // restore must present a tap with that name — trivially satisfied by the netns model: recreate
+        // the fixed-name tap in a **fresh per-VM netns** (named after this restore's scratch dir). The
+        // clone wakes with the snapshot's baked-in address/MAC/routes, which are already correct in its
+        // own isolated netns, so no re-addressing is needed and any number of clones coexist (netns
+        // retires the v1.9 one-live-networked-clone limit). Restore runs unjailed for now (jailed
+        // restore is a later step), so the tap needs no per-uid owner. Created before Firecracker so it
+        // can join the netns; a failed create reclaims its own netns, and we still own the workdir.
+        let tap = if snapshot.tap_name.is_some() {
+            match Tap::create(&workdir_name(&workdir), None) {
+                Ok(tap) => Some(tap),
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&workdir);
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
         let socket = workdir.join("fc.sock");
-        let (child, console) = match spawn_fc(&config.firecracker, &workdir, &socket) {
+        let (child, console) = match spawn_fc(
+            &config.firecracker,
+            &workdir,
+            &socket,
+            tap.as_ref().map(|t| t.netns.as_str()),
+        ) {
             Ok(pair) => pair,
             Err(e) => {
+                if let Some(tap) = tap.as_ref() {
+                    tap.delete();
+                }
                 let _ = std::fs::remove_dir_all(&workdir);
                 return Err(e);
             }
@@ -318,37 +367,6 @@ impl Spawned {
         // the guest agent through its own `v.sock`, and concurrent clones don't collide. Computed
         // before `workdir` is moved into the struct.
         let vsock_uds = snapshot.has_vsock.then(|| workdir.join(VSOCK_UDS));
-        // A networked snapshot baked in its tap's `host_dev_name`, which Firecracker will open at
-        // load — so a tap with **that exact name** must exist first (v1.9 has no `network_overrides`;
-        // decision 011). Recreate it with a fresh /30 on the host end; the guest side is re-addressed
-        // by the agent after resume. Same inline-cleanup discipline as `launch`'s tap: once `Spawned`
-        // holds the handle, every teardown path deletes it.
-        let tap = match snapshot.tap_name.as_deref() {
-            None => None,
-            Some(name) => match Tap::create_named(name) {
-                Ok(tap) => Some(tap),
-                Err(e) => {
-                    let mut child = child;
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            },
-        };
-        // Record the recreated tap for the orphan sweep, as in `launch`. Load-bearing here
-        // specifically: this tap's *name* embeds the snapshot source's token, not this driver's,
-        // so the dir-plus-record pairing is the only truthful ownership trail a sweep can follow.
-        if let Some(tap) = tap.as_ref() {
-            if let Err(e) = record_tap(&workdir, &tap.name) {
-                tap.delete();
-                let mut child = child;
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(e);
-            }
-        }
         // Cgroup-owned lifetime (P6.7): a restored clone (and every warm-pool VM riding restore) is
         // as leakable as a cold boot, so it gets the same enrollment + sentinel.
         let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
@@ -452,17 +470,11 @@ impl Spawned {
         // never one mid-resume (this is restore's analogue of boot's userspace-marker wait).
         if let Some(uds) = self.vsock_uds.clone() {
             self.await_agent_ready(&uds, deadline)?;
-            // Fresh network identity (decision 011): the clone woke with the snapshot's baked-in
-            // address, which no longer matches the recreated tap's fresh /30 (and would collide with
-            // the source's if it were kept). The kernel `ip=` config ran once at the source's boot and
-            // can't re-fire, so the **agent** applies the new address through the exec channel — the
-            // runtime counterpart of boot-time `ip=`. Network *configuration* rides the agent; network
-            // *enforcement* stays host-side (decision 008/spine #2).
-            if let Some(guest_ip) = self.tap.as_ref().map(|t| t.guest_ip) {
-                apply_guest_net_identity(&uds, guest_ip)?;
-                tracing::debug!(%guest_ip, "restored clone re-addressed");
-            }
         }
+        // No in-guest re-addressing on restore (was decision 011's `apply_guest_net_identity`): under
+        // the netns model each clone owns a private network namespace, so the snapshot's baked-in
+        // `eth0` address/MAC/routes are already correct and collision-free in it. The guest's network
+        // identity is untouched; the tap it enforces on stays host-side, in the clone's own netns.
 
         tracing::info!(
             restore_ms = latency.as_millis() as u64,
@@ -964,13 +976,25 @@ fn spawn_fc(
     firecracker: &Path,
     workdir: &Path,
     socket: &Path,
+    netns: Option<&str>,
 ) -> Result<(Child, Console), VmmError> {
     // Firecracker binds the API socket (and the relative `v.sock`) here; both live under `workdir`,
     // and the API socket is the longer of the two, so checking it up front covers both.
     check_sun_path(socket)?;
     let fc_stderr = std::fs::File::create(workdir.join(FC_STDERR))
         .map_err(|e| VmmError::Vmm(format!("create firecracker stderr log: {e}")))?;
-    let mut child = Command::new(firecracker)
+    // A networked VM runs Firecracker **inside its netns**: `ip netns exec <ns> firecracker …`
+    // `setns`es into the namespace then execs firecracker, so the child pid *is* firecracker (the
+    // piped stdout, cwd, and stderr redirect all carry through the exec) and its tap lives in the ns.
+    let mut cmd = match netns {
+        Some(ns) => {
+            let mut c = Command::new("ip");
+            c.arg("netns").arg("exec").arg(ns).arg(firecracker);
+            c
+        }
+        None => Command::new(firecracker),
+    };
+    let mut child = cmd
         .arg("--api-sock")
         .arg(socket)
         // Run each VMM with its scratch dir as cwd, so a **relative** vsock socket path (`v.sock`)
@@ -983,7 +1007,14 @@ fn spawn_fc(
         .spawn()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                VmmError::Artifact(format!("firecracker not found: {}", firecracker.display()))
+                // Without a netns the missing binary is firecracker; with one it's `ip` (already used
+                // to build the tap, so this is unlikely) — name the one actually invoked.
+                let missing = if netns.is_some() {
+                    "ip (iproute2)".to_string()
+                } else {
+                    firecracker.display().to_string()
+                };
+                VmmError::Artifact(format!("not found: {missing}"))
             } else {
                 VmmError::Vmm(format!("spawn firecracker: {e}"))
             }

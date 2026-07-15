@@ -2,30 +2,27 @@
 //!
 //! Teardown is `Drop`-based and the lifetime sentinel (decision 014) owns the VM *process tree*,
 //! but a driver that dies without `Drop` (SIGKILL, OOM) still leaves filesystem and network
-//! residue: its per-VM scratch dirs and — the part that is **not** inert — its taps. An orphaned
-//! `fc*` tap still holds its /30 host address, which is the allocator's atomic reservation
-//! (decision 009), so accumulated crashes clog the finite `10.200/16` pool until the allocator's
-//! bounded retry exhausts and every networked boot on a healthy host fails. [`sweep_orphans`]
-//! reclaims both, the way kubelet's image/container GC reclaims a crashed kubelet's leavings.
+//! residue: its per-VM scratch dirs and its per-VM **network namespaces** (each holding the VM's
+//! tap). The netns model retired the finite-`/30`-pool exhaustion an earlier tap-in-the-host-netns
+//! design risked — every netns reuses the same fixed `/30`, so there is no shared pool to clog — but
+//! an orphaned netns is still residue (a namespace, a tap, a `/run/netns/<name>` handle) worth
+//! reclaiming. [`sweep_orphans`] reclaims both dir and netns, the way kubelet's GC reclaims a crashed
+//! kubelet's leavings.
 //!
-//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`agent-<pid>-<n>`), plus a
-//! tap-name record the driver writes into the dir at tap creation ([`record_tap`]). The tap *name*
-//! is never trusted as an ownership key on its own: a restored clone's tap carries the snapshot's
-//! recorded name (decision 011), whose embedded token belongs to the — possibly dead — source
-//! driver, so only the dir-plus-record pairing says who owns what.
+//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`agent-<pid>-<n>`). The netns
+//! is named after the dir it belongs to, so no separate record is needed and no cross-ownership
+//! confusion arises (a restored clone's netns is named after *its own* dir, not the snapshot source's).
 //!
 //! Conservative by construction:
 //! - Only dirs **owned by the sweeping euid** are candidates. The scratch base (`/tmp` by
 //!   default) is world-writable, so a hostile local user could plant a dead-looking
-//!   `agent-<pid>-<n>` dir whose `tap` record names a *victim's* live tap; `create_workdir`
-//!   makes real per-VM dirs `0700`, driver-owned, so ownership is the authorship proof. The
-//!   flip side is deliberate: each uid sweeps its own residue (root sweeps root's jailed dirs,
-//!   a user sweeps their user-driver dirs), never another's.
+//!   `agent-<pid>-<n>` dir naming a *victim's* live netns; `create_workdir` makes real per-VM dirs
+//!   `0700`, driver-owned, so ownership is the authorship proof. The flip side is deliberate: each
+//!   uid sweeps its own residue (root sweeps root's jailed dirs, a user sweeps their user-driver
+//!   dirs), never another's.
 //! - A dir whose embedded pid is **alive** is skipped: a live driver, or a recycled pid we can't
 //!   tell from one (the orphan is reclaimed by a later sweep, once the pid frees). The error
 //!   direction is always "kept too long", never "reclaimed a live VM's resources".
-//! - A tap is deleted only when a **dead** dir records it *and* no live dir records the same name
-//!   (a name could be re-minted by a live driver after manual cleanup of the orphan tap).
 //! - A dead dir with a **still-running VMM** (only possible where the sentinel degraded: no
 //!   writable cgroup v2) is skipped with a warning. The sweep owns fs/net residue; processes are
 //!   the sentinel's (decision 014) — it never kills.
@@ -35,21 +32,8 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use crate::jail::unmount_base;
-use crate::net::{iface_exists, ip_link_del};
+use crate::net::{netns_del, netns_exists};
 use crate::VmmError;
-
-/// The file inside a per-VM scratch dir recording the name of the tap that VM owns, written at tap
-/// creation so the sweep can pair network residue with the dir's embedded owner pid.
-pub(crate) const TAP_RECORD: &str = "tap";
-
-/// Record `tap` as owned by the VM whose scratch dir is `workdir`. Called right after the tap is
-/// created, so the window in which a crash leaves an unrecorded (unsweepable) tap is one write —
-/// the same order-of-arming shape as the lifetime sentinel's spawn→enrollment window.
-pub(crate) fn record_tap(workdir: &Path, tap: &str) -> Result<(), VmmError> {
-    let path = workdir.join(TAP_RECORD);
-    std::fs::write(&path, tap)
-        .map_err(|e| VmmError::Vmm(format!("record tap {tap} in {}: {e}", path.display())))
-}
 
 /// What a [`sweep_orphans`] pass reclaimed and what it deliberately left alone.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -57,17 +41,17 @@ pub(crate) fn record_tap(workdir: &Path, tap: &str) -> Result<(), VmmError> {
 pub struct SweepReport {
     /// Dead drivers' scratch dirs removed.
     pub dirs_reclaimed: usize,
-    /// Orphaned taps deleted (their /30 reservations released back to the allocator).
-    pub taps_reclaimed: usize,
+    /// Orphaned per-VM network namespaces deleted (each cascading its tap away).
+    pub netns_reclaimed: usize,
     /// Scratch dirs skipped because their owner pid is alive (a live driver, or a recycled pid —
     /// indistinguishable, so both are kept).
     pub live_skipped: usize,
 }
 
 /// Reclaim the residue of **dead** drivers under `scratch_dir` (the [`BootConfig::scratch_dir`]
-/// base, `/tmp` by default): their per-VM scratch dirs, and the orphaned taps those dirs record —
-/// releasing the /30 reservations that would otherwise clog the allocator (decision 009). Never
-/// touches a live driver's resources; see the module doc for the ownership rules.
+/// base, `/tmp` by default): their per-VM scratch dirs, and the per-VM network namespaces named after
+/// them (each holding an orphaned tap). Never touches a live driver's resources; see the module doc
+/// for the ownership rules.
 ///
 /// Safe to run at any time — embedder startup is the natural moment (the analogue of a container
 /// runtime's boot-time GC) — and concurrently with live drivers: liveness is checked per dir, and
@@ -100,11 +84,10 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
         ));
     };
 
-    // Partition the per-VM dirs by owner liveness, and collect every tap name a *live* dir records
-    // so a dead dir's record can never delete a name a live driver has since re-minted.
+    // Partition the per-VM dirs by owner liveness. The netns a dir owns is named after the dir, so no
+    // separate record or live-name bookkeeping is needed: a dead dir's netns is unambiguously its own.
     let mut report = SweepReport::default();
-    let mut dead: Vec<(PathBuf, Option<String>)> = Vec::new();
-    let mut live_taps: BTreeSet<String> = BTreeSet::new();
+    let mut dead: Vec<PathBuf> = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let Some(pid) = owner_pid(&name) else {
@@ -115,19 +98,14 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
         if entry.metadata().map(|m| m.uid()).ok() != Some(me) {
             continue;
         }
-        let path = entry.path();
         if pid_alive(pid) {
             report.live_skipped += 1;
-            if let Some(tap) = recorded_tap(&path) {
-                live_taps.insert(tap);
-            }
         } else {
-            let tap = recorded_tap(&path);
-            dead.push((path, tap));
+            dead.push(entry.path());
         }
     }
 
-    for (dir, tap) in dead {
+    for dir in dead {
         // The one way a dead driver leaves a *running* VMM is a degraded sentinel (no writable
         // cgroup v2, decision 014). Deleting files under a live VMM would strand it on unlinked
         // inodes; processes are the sentinel's jurisdiction, so skip loudly instead.
@@ -140,17 +118,17 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
             report.live_skipped += 1;
             continue;
         }
-        if let Some(tap) = tap {
-            if live_taps.contains(&tap) {
-                tracing::warn!(%tap, dir = %dir.display(),
-                    "sweep: tap recorded by a dead dir is also recorded by a live one; leaving it");
-            } else if iface_exists(&tap) {
-                ip_link_del(&tap);
-                if iface_exists(&tap) {
-                    tracing::warn!(%tap, "sweep: failed to delete orphaned tap");
+        // The netns is named after the scratch dir; a networked VM whose driver died leaves it behind
+        // (holding the tap). Delete it (cascading the tap away). No ownership ambiguity: the dir is
+        // ours (checked above) and the netns carries its name.
+        if let Some(netns) = dir.file_name().and_then(|n| n.to_str()) {
+            if netns_exists(netns) {
+                netns_del(netns);
+                if netns_exists(netns) {
+                    tracing::warn!(%netns, "sweep: failed to delete orphaned netns");
                 } else {
-                    report.taps_reclaimed += 1;
-                    tracing::info!(%tap, "sweep: reclaimed orphaned tap (freed its /30)");
+                    report.netns_reclaimed += 1;
+                    tracing::info!(%netns, "sweep: reclaimed orphaned network namespace");
                 }
             }
         }
@@ -225,20 +203,6 @@ fn own_euid() -> Option<u32> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
     uid.split_whitespace().nth(1)?.parse().ok()
-}
-
-/// The tap name recorded in `dir`, validated hard before it can ever reach `ip link del`: the
-/// `fc<hex>` shape the allocator mints, nothing else. A scratch dir is `0700` and driver-written,
-/// but the sweep may run long after with no context — parse, don't trust.
-fn recorded_tap(dir: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(dir.join(TAP_RECORD)).ok()?;
-    let name = raw.trim();
-    let hex = name.strip_prefix("fc")?;
-    // IFNAMSIZ-1 = 15 bytes; the allocator emits `fc` + ≤12 hex digits.
-    if name.len() > 15 || hex.is_empty() || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(name.to_string())
 }
 
 /// The pid of a `firecracker`/`jailer` process whose cwd is inside `dir`, if one is running. An
@@ -318,10 +282,9 @@ mod tests {
         for d in [&dead, &live, &foreign] {
             std::fs::create_dir(d).expect("create test dir");
         }
-        // The dead dir records a valid-shaped tap that doesn't exist; deletion is skipped (no
-        // iface), but the dir itself must go.
-        record_tap(&dead, "fcdead0").expect("record tap");
-
+        // No netns exists for the dead dir here (creating one needs CAP_NET_ADMIN; the privileged
+        // `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir` test exercises that path). So the
+        // netns reclaim is a no-op and the dir itself must still go.
         let report = sweep_orphans(base.path()).expect("sweep");
         assert!(!dead.exists(), "dead driver's dir must be reclaimed");
         assert!(live.exists(), "live driver's dir must be spared");
@@ -331,7 +294,7 @@ mod tests {
         );
         assert_eq!(report.dirs_reclaimed, 1);
         assert_eq!(report.live_skipped, 1);
-        assert_eq!(report.taps_reclaimed, 0, "no such iface, nothing deleted");
+        assert_eq!(report.netns_reclaimed, 0, "no such netns, nothing deleted");
     }
 
     #[test]
@@ -348,30 +311,6 @@ mod tests {
         ] {
             assert_eq!(owner_pid(miss), None, "{miss} must not parse");
         }
-    }
-
-    #[test]
-    fn recorded_tap_rejects_hostile_or_malformed_names() {
-        let dir = TestDir::new("agent-sweep-rec");
-        let record = |content: &str| {
-            std::fs::write(dir.path().join(TAP_RECORD), content).expect("write record");
-            recorded_tap(dir.path())
-        };
-        assert_eq!(record("fcdeadbeef\n"), Some("fcdeadbeef".into()), "trimmed");
-        assert_eq!(record("fc0123456789abc"), Some("fc0123456789abc".into()));
-        for bad in [
-            "eth0",             // not ours
-            "fc",               // no token
-            "fczz",             // non-hex
-            "fc12/../../x",     // path traversal shape
-            "fc0123456789abcd", // 16 bytes: past IFNAMSIZ-1
-            "fc12 extra",       // embedded whitespace
-            "-fc12",            // could parse as a flag
-        ] {
-            assert_eq!(record(bad), None, "{bad:?} must be rejected");
-        }
-        std::fs::remove_file(dir.path().join(TAP_RECORD)).expect("rm record");
-        assert_eq!(recorded_tap(dir.path()), None, "missing record is None");
     }
 
     #[test]

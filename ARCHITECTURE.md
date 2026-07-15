@@ -542,7 +542,9 @@ exactly this). Shelling to `ip` keeps the driver dependency-light and `unsafe`-f
   match), and the loop reclaims the tap and retries with a fresh token (the same fail-if-taken pattern
   as the name). Two concurrent sandboxes therefore never share a subnet, which is what keeps one VM off
   another's tap (proven by `two_vms_cannot_reach_each_others_tap`).
-- **Per-VM network-namespace isolation is deferred, by design.** P4.4's bar is met at L3: with no
+- **Per-VM network-namespace isolation is deferred, by design.** ***(Resolved: decision 017 moved the
+  tap into a per-VM netns at P7.0c; the unique-/30 allocator below is retired — every VM now reuses one
+  fixed /30, isolated by its namespace.)*** P4.4's bar is met at L3: with no
   default route a guest can only address its own /30, so it can't even name another VM's tap, and the
   unique-/30 reservation removes the one way subnets could overlap. Putting each tap in its own netns
   (and running the VMM inside it) is stronger defence-in-depth but couples to running the VMM under the
@@ -669,13 +671,13 @@ matches.
 
 **The v1.9 constraint (probed, not assumed).** `PUT /snapshot/load` on the pinned Firecracker v1.9
 rejects `network_overrides` ("unknown field", probed against the real binary), so the snapshot's
-recorded `host_dev_name` is fixed: restore must present a tap with **exactly that name**, which the
-driver recreates via `Tap::create_named` (a taken name is a typed error, it means the source or an
-earlier clone is still alive, and restoring anyway would hijack its link). Consequence: **only one
-networked clone can be live at a time** on v1.9. Concurrent networked clones need either a Firecracker
-with `network_overrides` (a deliberate version bump, revisiting this decision) or per-VM network
-namespaces (the Phase-6 jailer), tombstoned to whichever lands first. Non-networked warm clones keep
-their unbounded concurrency (P5.4).
+recorded `host_dev_name` is fixed: restore must present a tap with **exactly that name**. Consequence at
+the time: **only one networked clone can be live at a time** on v1.9. ***(Resolved: decision 017 (P7.0c)
+gives each clone its own network namespace, so all recreate the same baked-in tap name without colliding
+— concurrent networked clones now run, and `Tap::create_named` + the in-guest re-addressing below are
+deleted.)*** Concurrent networked clones needed either a Firecracker with `network_overrides` (a
+deliberate version bump) or per-VM network namespaces (the Phase-6 jailer), tombstoned to whichever lands
+first — the netns route landed. Non-networked warm clones keep their unbounded concurrency (P5.4).
 
 **Decision (entropy): rely on VMGenID, and prove it.** Both halves are already in the pinned stack:
 Firecracker v1.9 ships the VMGenID device and bumps the generation on snapshot restore, and the
@@ -1018,15 +1020,14 @@ default run confined and avoids a retrofit under a pinned seam.
   tombstone) and jailed-by-default land together as the confined default surface.
 - Jailed snapshot/restore and the warm pool under the jailer remain downstream of exec under the jailer
   (a jailed VM's disk lives in the chroot, decision 010), tracked with the same boxes.
-- **Status: the first convergence steps (P7.0a, P7.0b) landed.** `jail` now composes with the vsock exec
-  channel and the read-only overlay. Vsock: under the jailer Firecracker binds the socket at the
-  chroot-relative `/run/v.sock` (cwd = chroot root, `/run` writable by the dropped uid), and the host dials
-  it at its absolute path under the chroot (`jailed_exec_runs_a_command`). Overlay: a `read_only_root` jailed
-  boot bind-mounts the shared base into the chroot (same inode, page-cache-deduped, propagated into the
-  jailer's `MS_SLAVE` mount namespace) so it runs the density path, not a per-VM copy, with a copy fallback
-  on a non-shared scratch mount (`jailed_overlay_is_dense_and_base_is_untouched`). The mutual exclusion of
-  the opening paragraph is retired for vsock and the overlay; the jail still hard-errors on a NIC / bulk I/O
-  (P7.0c, P7.0d). `Sandbox::exec`-jails-by-default and the tap/drive/snapshot staging are the remaining steps.
+- **Status: convergence steps P7.0a, P7.0b, P7.0c landed.** `jail` now composes with the vsock exec
+  channel, the read-only overlay, and a NIC. Vsock: under the jailer Firecracker binds the socket at the
+  chroot-relative `/run/v.sock` (`jailed_exec_runs_a_command`). Overlay: a `read_only_root` jailed boot
+  bind-mounts the shared base into the chroot (density path, propagated into the jailer's `MS_SLAVE` mount
+  namespace; `jailed_overlay_is_dense_and_base_is_untouched`). NIC: the tap lives in a per-VM network
+  namespace the jailer joins via `--netns` (decision 017). The mutual exclusion of the opening paragraph
+  is retired for vsock, the overlay, and the NIC; the jail still hard-errors on bulk I/O (P7.0d).
+  `Sandbox::exec`-jails-by-default and jailed snapshot/restore (P7.0e) are the remaining steps.
 - The jailer's per-VM netns (decisions 009/011's tombstone for concurrent networked clones) rides the
   jailed-networking box: once the tap is staged into the jail, its netns removes the one-live-networked-
   clone limit.
@@ -1092,3 +1093,59 @@ know who the tenants are.
 - The engine/hoster split now has a concrete precedent to reuse: any future privileged tool
   (a future `agent gc`, daemon-side reconcilers) inherits the same "authorship not policy, euid-scoped,
   refuse-without-identity" rule.
+
+### 017 — Per-VM network namespace: the tap lives in the VM's netns, not the host's *(2026-07-14, P7.0c; supersedes the 009/011 netns tombstones)*
+
+**Problem.** Two forces converged. (1) The jailer confines the VMM but a networked jailed boot needs its
+tap reachable from *inside* the jail's isolation, and the jailer runs the VMM unprivileged — it can't
+create or attach a host tap. (2) Decision 011's one-live-networked-clone limit: v1.9 has no
+`network_overrides`, so restore must present a tap with the snapshot's **baked-in name**, which in a
+single shared host netns can exist only once — so only one networked clone could ever be live. Both
+decisions 009 and 011 tombstoned the same fix: **per-VM network namespaces**.
+
+**Decision.** Every networked VM runs its tap in its **own network namespace**. The driver creates the
+netns (`ip netns add <name>`, named after the VM's scratch dir), creates the tap inside it, and the VMM
+joins it: the jailer via its `--netns` flag (it `setns`es as root before dropping privileges), a direct
+boot via `ip netns exec <ns> firecracker …` (which `setns`es then execs, so the child pid *is*
+firecracker). Teardown is one op: `ip netns del <name>` cascades the tap away.
+- **Fixed identity, no allocator.** Because the tap is namespaced, every VM reuses the *same* fixed tap
+  name (`fc0`), MAC, and `/30` (`10.200.0.1`/`.2`). The host-global name/MAC/subnet allocator, the
+  `ip addr add`-as-/30-reservation retry (old decision 009), and `Tap::create_named` all go away.
+- **The clone limit is retired.** N clones each recreate the baked-in `fc0` in their own netns; the
+  baked-in guest address/MAC/routes are already correct there, so **restore no longer re-addresses the
+  guest** (decision 011's `apply_guest_net_identity` is deleted) and a networked snapshot **no longer
+  requires vsock** (that requirement existed only to carry the re-addressing).
+- **Isolation is kernel-enforced.** Per-VM netns replaces P4.4's unique-/30-reservation with a stronger
+  boundary: two VMs holding identically-named taps on the same `/30` share no path, because each is its
+  own network stack. Deny-by-default is unchanged (empty `ip=` gateway → connected route only), and now
+  the host's *own* netns can't reach the guest either — the driver only ever talks to it over vsock.
+- **The jailed tap is uid-owned.** A jailed Firecracker holds no `CAP_NET_ADMIN`, so it can only attach
+  a tap it owns; the driver creates the jailed VM's tap with `user`/`group` set to the jailed uid.
+
+**The propagation fact this rests on (probed, not assumed).** The jailer runs the VMM in an `MS_SLAVE`
+mount namespace; `ip netns exec` and `--netns` both `setns` into a netns the driver created in the host
+netns. Verified locally: `ip netns` handles live at `/run/netns/<name>`, and two netns hold
+identically-named taps on one `/30` without collision. The whole unjailed path (boot, restore, two
+concurrent clones, the sweep) is proven end-to-end with real Firecracker VMs under `unshare -Urn`; the
+jailer's `--netns` (real root) is proven by the `ci-privileged` gate.
+
+**Alternatives considered.**
+- **Keep the tap in the host netns, bridge per-VM with veth + unique /30s.** Rejected: reintroduces the
+  host-global allocator and the clone-name collision, is weaker isolation (shared stack), and is more
+  moving parts than one netns per VM.
+- **Bump Firecracker for `network_overrides`.** Rejected as the sole fix: it addresses only the clone
+  limit, not jailed networking or kernel-level isolation, and a version bump is its own decision (011).
+- **Keep decision 011's re-addressing under netns.** Rejected: pointless work — the baked-in identity is
+  already collision-free in a private netns, so re-addressing would flush and re-add the same address.
+
+**Consequences / tombstones.**
+- Resolves the netns tombstones in decisions **009** ("per-VM network-namespace isolation is deferred")
+  and **011** ("only one networked clone can be live … per-VM network namespaces … tombstoned").
+- The orphan sweep (P6.9a) now reclaims an orphaned **netns** (named after the dead dir) instead of an
+  orphaned host tap; its `tap`-record file is gone (the netns name is derivable from the dir). The
+  finite-`/16`-pool DoS the sweep guarded against is *eliminated* (every netns reuses one `/30`), so the
+  sweep's network role is residue hygiene, not pool-exhaustion defence. `SweepReport.taps_reclaimed`
+  became `netns_reclaimed`.
+- `RunningVm` gains `netns()`; the Phase-8 eBPF loader must **enter the netns** to attach to the tap
+  (`tap_name()` resolves inside it, not the host netns).
+- Jailed snapshot/restore (P7.0e) inherits this: a jailed networked clone stages its netns the same way.

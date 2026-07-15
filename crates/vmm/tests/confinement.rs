@@ -1,7 +1,7 @@
 //! Privileged integration tests for Phase-6 confinement under adversity: driver death cannot leak
 //! a VM, the kill handle unblocks a wedged exec (P6.7), a guest fork bomb / mem-hog is bounded
 //! by the VMM's cgroup with the host unaffected (P6.8), and the orphan sweep reclaims a crashed
-//! driver's tap + scratch dir without touching a live sibling's (P6.9a).
+//! driver's netns + scratch dir without touching a live sibling's (P6.9a).
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
 //! `cargo xtask ci-privileged` or `cargo test -p agent-vmm -- --ignored`.
@@ -24,7 +24,7 @@ use common::{agent_rootfs_config, config, have_jailer_privileges, have_net_admin
 const HELPER_ENV: &str = "AGENT_CONFINEMENT_HELPER";
 
 /// The env var that turns `helper_boot_networked_and_park` into the P6.9a sweep test's victim: a
-/// **networked** boot, so the crash leaves the residue that matters — a tap holding its /30.
+/// **networked** boot, so the crash leaves the residue that matters — a per-VM netns holding a tap.
 const HELPER_NET_ENV: &str = "AGENT_CONFINEMENT_HELPER_NET";
 
 /// Whether `pid` is still a live `firecracker` process (same discipline as `boot.rs`: keyed on the
@@ -183,9 +183,9 @@ fn driver_death_cannot_leak_a_vm() {
 }
 
 /// The P6.9a crash-test victim: like [`helper_boot_and_park`], but a **networked** boot, so the
-/// crash leaves the residue the sweep exists for — a tap still holding its /30 reservation.
+/// crash leaves the residue the sweep exists for — a per-VM network namespace holding an orphan tap.
 #[test]
-#[ignore = "crash-test helper; only meaningful under sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir"]
+#[ignore = "crash-test helper; only meaningful under sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir"]
 fn helper_boot_networked_and_park() {
     if std::env::var_os(HELPER_NET_ENV).is_none() {
         return; // Not invoked as the victim: a no-op in the ordinary --ignored sweep.
@@ -194,19 +194,15 @@ fn helper_boot_networked_and_park() {
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("networked helper microVM should boot");
     println!("HELPER_VMM_PID={}", vm.vmm_pid());
-    println!("HELPER_TAP={}", vm.tap_name().unwrap_or("none"));
+    println!("HELPER_NETNS={}", vm.netns().unwrap_or("none"));
     loop {
         std::thread::sleep(Duration::from_secs(3600));
     }
 }
 
-/// Whether a host interface named `name` exists (`ip link show`, exit-code keyed).
-fn tap_exists(name: &str) -> bool {
-    std::process::Command::new("ip")
-        .args(["link", "show", "dev", name])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Whether a network namespace named `name` exists (its `/run/netns/<name>` handle is present).
+fn netns_exists(name: &str) -> bool {
+    Path::new("/run/netns").join(name).exists()
 }
 
 /// How many per-VM scratch dirs under `base` belong to driver `pid`.
@@ -223,15 +219,15 @@ fn scratch_dirs_of(base: &Path, pid: u32) -> usize {
 
 #[test]
 #[ignore = "needs /dev/kvm + artifacts + CAP_NET_ADMIN (run via `cargo xtask ci-privileged`)"]
-fn sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir() {
-    // P6.9a's headline claim: an orphaned tap is *not* inert residue — it holds its /30, which is
-    // the allocator's atomic reservation, so a crash-looped embedder eventually exhausts the
-    // allocator and a healthy host refuses every networked boot. The sweep must reclaim a dead
-    // driver's tap + scratch dir while sparing a concurrently-live driver's — ownership by
-    // liveness, not by pattern.
+fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
+    // P6.9a's claim under the netns model: a networked VM's residue is a per-VM network namespace
+    // (holding an orphan tap), left behind when its driver dies without teardown. It is no longer a
+    // finite-pool reservation (each netns reuses a fixed /30), but still residue worth reclaiming. The
+    // sweep must reclaim a dead driver's netns + scratch dir while sparing a concurrently-live
+    // driver's — ownership by liveness, not by pattern.
     if !have_net_admin() {
         eprintln!(
-            "skipping sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir: no CAP_NET_ADMIN"
+            "skipping sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir: no CAP_NET_ADMIN"
         );
         return;
     }
@@ -241,7 +237,7 @@ fn sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir() {
     let mut live_cfg = config();
     live_cfg.enable_network = true;
     let live = Vm::boot(live_cfg).expect("live networked microVM should boot");
-    let live_tap = live.tap_name().expect("live VM has a tap").to_string();
+    let live_netns = live.netns().expect("live VM has a netns").to_string();
 
     // The victim: a networked boot in a subprocess driver we SIGKILL mid-run (no Drop, no goodbye).
     let exe = std::env::current_exe().expect("current test binary");
@@ -265,27 +261,27 @@ fn sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir() {
         line.split_once(tag).map(|(_, v)| v.trim().to_string())
     };
     let stdout = child.stdout.take().expect("victim stdout piped");
-    let (mut vmm_pid, mut victim_tap) = (None::<u32>, None::<String>);
+    let (mut vmm_pid, mut victim_netns) = (None::<u32>, None::<String>);
     for line in BufReader::new(stdout).lines() {
         let line = line.expect("read victim stdout");
         if let Some(v) = tagged(&line, "HELPER_VMM_PID=") {
             vmm_pid = v.parse().ok();
-        } else if let Some(v) = tagged(&line, "HELPER_TAP=") {
-            victim_tap = Some(v);
+        } else if let Some(v) = tagged(&line, "HELPER_NETNS=") {
+            victim_netns = Some(v);
         }
-        if vmm_pid.is_some() && victim_tap.is_some() {
+        if vmm_pid.is_some() && victim_netns.is_some() {
             break;
         }
     }
-    let (Some(vmm_pid), Some(victim_tap)) = (vmm_pid, victim_tap) else {
+    let (Some(vmm_pid), Some(victim_netns)) = (vmm_pid, victim_netns) else {
         let _ = child.kill();
         let _ = child.wait();
-        panic!("victim never reported its VMM pid + tap (boot failed?)");
+        panic!("victim never reported its VMM pid + netns (boot failed?)");
     };
-    assert_ne!(victim_tap, "none", "networked victim must have a tap");
+    assert_ne!(victim_netns, "none", "networked victim must have a netns");
     assert_ne!(
-        victim_tap, live_tap,
-        "victim and live VM must own distinct taps"
+        victim_netns, live_netns,
+        "victim and live VM must own distinct netns"
     );
 
     // The crash.
@@ -307,8 +303,8 @@ fn sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir() {
 
     // The residue is really there before the sweep — otherwise the test would pass vacuously.
     assert!(
-        tap_exists(&victim_tap),
-        "the crashed driver's tap {victim_tap} should linger until swept"
+        netns_exists(&victim_netns),
+        "the crashed driver's netns {victim_netns} should linger until swept"
     );
     assert!(
         scratch_dirs_of(&scratch_base, victim_pid) > 0,
@@ -318,10 +314,10 @@ fn sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir() {
     let report = sweep_orphans(&scratch_base).expect("sweep should run");
     eprintln!("sweep report: {report:?}");
 
-    // The dead driver's residue is gone: the tap (its /30 back in the pool) and the dir.
+    // The dead driver's residue is gone: the netns (and its tap) and the dir.
     assert!(
-        !tap_exists(&victim_tap),
-        "sweep must reclaim the orphaned tap {victim_tap}"
+        !netns_exists(&victim_netns),
+        "sweep must reclaim the orphaned netns {victim_netns}"
     );
     assert_eq!(
         scratch_dirs_of(&scratch_base, victim_pid),
@@ -329,8 +325,8 @@ fn sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir() {
         "sweep must reclaim the victim's scratch dirs"
     );
     assert!(
-        report.taps_reclaimed >= 1,
-        "report counts the tap: {report:?}"
+        report.netns_reclaimed >= 1,
+        "report counts the netns: {report:?}"
     );
     assert!(
         report.dirs_reclaimed >= 1,
@@ -339,8 +335,8 @@ fn sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir() {
 
     // The live sibling is untouched — and still fully functional, not just present.
     assert!(
-        tap_exists(&live_tap),
-        "sweep must spare the live driver's tap {live_tap}"
+        netns_exists(&live_netns),
+        "sweep must spare the live driver's netns {live_netns}"
     );
     assert!(
         scratch_dirs_of(&scratch_base, std::process::id()) > 0,

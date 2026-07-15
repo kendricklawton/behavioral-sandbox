@@ -137,6 +137,7 @@ pub(crate) fn spawn_jailer(
     workdir: &Path,
     id: &str,
     cgroup_args: &[String],
+    netns: Option<&Path>,
 ) -> Result<(Child, Console, PathBuf, PathBuf), VmmError> {
     // `--exec-file` must be an absolute path to a real binary: the jailer copies it into the chroot,
     // and derives the chroot subdir from its file name (so `.../firecracker/<id>/root`).
@@ -177,6 +178,13 @@ pub(crate) fn spawn_jailer(
     // still runs there, just without limits.
     for arg in cgroup_args {
         cmd.arg("--cgroup").arg(arg);
+    }
+    // Networked boot (P7.0c): the jailer opens this netns handle and `setns`es into it (as root,
+    // before dropping privileges) so the confined Firecracker runs in the VM's own network namespace,
+    // where its tap lives. The tap was created owned by the jailed uid, so the unprivileged VMM can
+    // attach it.
+    if let Some(netns) = netns {
+        cmd.arg("--netns").arg(netns);
     }
     // Everything after `--` is Firecracker's. No `--daemonize` (keep its stdout so the guest serial
     // console still reaches the host) and no `--no-seccomp` (P6.3): Firecracker installs its built-in

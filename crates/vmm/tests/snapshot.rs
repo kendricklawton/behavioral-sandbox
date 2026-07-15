@@ -174,32 +174,20 @@ fn restores_concurrent_clones_from_one_warm_snapshot() {
 
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn restored_networked_clone_gets_a_fresh_identity() {
-    // P5.5 (decision 011), network identity: the kernel `ip=` config runs once at the source's boot
-    // and can't re-fire on restore, so the clone would wake with the snapshot's baked-in address on a
-    // link it no longer matches. The driver recreates the snapshot's tap (fresh /30 on the host end)
-    // and the agent applies the guest's fresh address over vsock — this proves the clone ends up on
-    // its NEW /30 (old address gone), reachable at the transport layer, still deny-by-default.
+fn restored_networked_clones_coexist_each_in_its_own_netns() {
+    // P7.0c retires decision 011's one-live-networked-clone limit. On v1.9 (no `network_overrides`)
+    // every clone must present the snapshot's baked-in tap name, which in a shared host netns could
+    // exist only once — so only one networked clone could be live. Under the netns model each clone
+    // recreates that tap in its **own** network namespace, where the baked-in identity is already
+    // correct, so N networked clones run at once. This proves two concurrent networked clones, each
+    // isolated in its own netns, each carrying the baked identity, each reaching its own host end.
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
 
-    // A networked snapshot without vsock has no channel to re-address the clone: refused, typed.
-    // (The stock rootfs config: it boots to `login:` with no vsock, exactly the shape under test —
-    // the agent rootfs can't boot vsock-less, since its readiness marker is the agent's post-bind.)
-    let mut no_vsock = config();
-    no_vsock.enable_network = true;
-    let vm = Vm::boot(no_vsock).expect("networked VM without vsock should still boot");
-    let refused = TmpDir::new("snap-net-novsock");
-    assert!(
-        vm.snapshot(refused.path()).is_err(),
-        "a networked snapshot without the vsock exec channel must be refused"
-    );
-    vm.shutdown().expect("no-vsock VM shutdown");
-
-    // Source: networked + vsock + warm. Snapshot it, remember its identity, then drop it (freeing
-    // its tap name and /30 — the recreated tap needs the name; the /30 must be provably re-allocated).
+    // Source: networked + vsock + warm. Snapshot it, then drop it — under the netns model neither the
+    // tap name nor the /30 is a shared reservation, so the source's lifetime doesn't gate the clones'.
     let mut cfg = agent_rootfs_config();
     cfg.enable_network = true;
     let source = Vm::boot(cfg.clone()).expect("networked agent microVM should boot");
@@ -211,87 +199,74 @@ fn restored_networked_clone_gets_a_fresh_identity() {
         .expect("networked warm snapshot should succeed");
     source.shutdown().expect("source shutdown");
 
-    let clone = Vm::restore(&snap, &cfg).expect("networked warm restore should resume");
+    // Two clones, live simultaneously — impossible before this box.
+    let clone_a = Vm::restore(&snap, &cfg).expect("networked clone A should resume");
+    let clone_b = Vm::restore(&snap, &cfg).expect("networked clone B should resume");
 
-    // Same tap name (the snapshot baked it in; v1.9 has no network_overrides), fresh /30.
-    assert_eq!(
-        clone.tap_name(),
-        Some(source_tap.as_str()),
-        "the clone must reuse the snapshot's recorded tap name"
-    );
-    let clone_guest_ip = clone.guest_ip().expect("clone guest ip");
+    // Each reuses the snapshot's baked identity (same tap name + guest IP — collision-free because
+    // each lives in its own netns), and the two netns are distinct (the isolation boundary).
+    for clone in [&clone_a, &clone_b] {
+        assert_eq!(
+            clone.tap_name(),
+            Some(source_tap.as_str()),
+            "each clone reuses the snapshot's recorded tap name"
+        );
+        assert_eq!(
+            clone.guest_ip(),
+            Some(source_guest_ip),
+            "each clone keeps the snapshot's baked-in /30 (correct in its own netns)"
+        );
+    }
     assert_ne!(
-        clone_guest_ip, source_guest_ip,
-        "the clone must get a fresh /30, not the source's baked-in one"
+        clone_a.netns(),
+        clone_b.netns(),
+        "the two live clones must run in distinct network namespaces"
     );
 
-    // In-guest: eth0 carries exactly the new address; the baked-in one is gone.
-    let addrs = clone
-        .exec(
-            &[
-                "ip".into(),
-                "-4".into(),
-                "addr".into(),
-                "show".into(),
-                "dev".into(),
-                "eth0".into(),
-            ],
-            b"",
-        )
-        .expect("read the clone's eth0 addresses");
-    let addrs = String::from_utf8_lossy(&addrs.stdout).into_owned();
-    assert!(
-        addrs.contains(&clone_guest_ip.to_string()),
-        "clone eth0 should carry its fresh address {clone_guest_ip}; got:\n{addrs}"
-    );
-    assert!(
-        !addrs.contains(&source_guest_ip.to_string()),
-        "clone eth0 must not keep the snapshot's baked-in address {source_guest_ip}; got:\n{addrs}"
-    );
+    // Both are actually functional at the same time: each guest reaches its own host end (proving the
+    // recreated tap in each netns is live), and stays deny-by-default (no default route).
+    for (label, clone) in [("A", &clone_a), ("B", &clone_b)] {
+        let host_ip = clone.host_ip().expect("clone host ip").to_string();
+        let ping = clone
+            .exec(
+                &[
+                    "ping".into(),
+                    "-c".into(),
+                    "1".into(),
+                    "-W".into(),
+                    "1".into(),
+                    host_ip.clone(),
+                ],
+                b"",
+            )
+            .expect("clone pings its host end");
+        assert_eq!(
+            ping.exit_code,
+            0,
+            "clone {label} should reach its host end {host_ip}; console:\n{}",
+            clone.console()
+        );
+        let off = clone
+            .exec(
+                &[
+                    "ping".into(),
+                    "-c".into(),
+                    "1".into(),
+                    "-W".into(),
+                    "1".into(),
+                    "192.0.2.1".into(),
+                ],
+                b"",
+            )
+            .expect("ping an off-subnet address");
+        assert_ne!(
+            off.exit_code, 0,
+            "clone {label} must stay deny-by-default (no default route)"
+        );
+    }
 
-    // Transport-layer proof on the NEW link: a real host listener on the fresh /30 is reachable.
-    let clone_host_ip = clone.host_ip().expect("clone host ip");
-    let listener = std::net::TcpListener::bind((clone_host_ip, 0)).expect("bind on the fresh /30");
-    let port = listener.local_addr().expect("local addr").port();
-    let connect = clone
-        .exec(
-            &[
-                "python3".into(),
-                "-c".into(),
-                format!(
-                    "import socket; socket.create_connection((\"{clone_host_ip}\", {port}), timeout=3).close()"
-                ),
-            ],
-            b"",
-        )
-        .expect("guest connect to the fresh host end");
-    assert_eq!(
-        connect.exit_code,
-        0,
-        "clone should reach a listener on its fresh /30; console:\n{}",
-        clone.console()
-    );
-
-    // Deny-by-default carried over the restore: still no default route.
-    let off = clone
-        .exec(
-            &[
-                "ping".into(),
-                "-c".into(),
-                "1".into(),
-                "-W".into(),
-                "1".into(),
-                "192.0.2.1".into(),
-            ],
-            b"",
-        )
-        .expect("ping an off-subnet address");
-    assert_ne!(
-        off.exit_code, 0,
-        "restored clone must stay deny-by-default (no default route)"
-    );
-
-    clone.shutdown().expect("clone shutdown");
+    clone_a.shutdown().expect("clone A shutdown");
+    clone_b.shutdown().expect("clone B shutdown");
 }
 
 #[test]

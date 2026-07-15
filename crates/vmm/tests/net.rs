@@ -9,17 +9,30 @@
 
 mod common;
 
+use std::process::Command;
+
 use agent_vmm::Vm;
 
 use common::{agent_rootfs_config, have_net_admin};
 
+/// Run `ip netns exec <netns> <args...>` and return the completed output (for host-side checks that
+/// must happen *inside* the VM's network namespace, where its tap lives).
+fn ip_netns_exec(netns: &str, args: &[&str]) -> std::process::Output {
+    let mut full = vec!["netns", "exec", netns];
+    full.extend_from_slice(args);
+    match Command::new("ip").args(&full).output() {
+        Ok(out) => out,
+        Err(e) => panic!("run ip netns exec: {e}"),
+    }
+}
+
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
-    // P4.1: with `enable_network`, the driver creates a host tap and attaches it as virtio-net, so
-    // the guest gets an `eth0` carrying the driver's locally-administered MAC. This test pins the NIC
-    // + MAC and the deny-by-default invariant (no default route); guest addressing itself is P4.2's
-    // `addresses_the_guest_and_routes_host_to_guest`. Needs CAP_NET_ADMIN.
+    // P4.1 under the netns model: with `enable_network`, the driver creates a per-VM network
+    // namespace with a tap inside it, attached as virtio-net, so the guest gets an `eth0` carrying the
+    // driver's locally-administered MAC. This pins the NIC + MAC + the deny-by-default invariant (no
+    // default route); guest addressing itself is P4.2's `addresses_the_guest_and_routes_host_to_guest`.
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
@@ -28,8 +41,10 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
 
-    // The driver exposes the tap name as the eBPF-binding handle (P4.6): it must be a real,
-    // `fc`-prefixed host interface the Phase-8 loader can resolve and attach `tc`/XDP to.
+    // The driver exposes the netns + tap name as the eBPF-binding handle (P4.6): the Phase-8 loader
+    // enters the netns and resolves the tap there. The tap is a real `fc`-prefixed interface *inside*
+    // the netns (not the host's), so check it there.
+    let netns = vm.netns().expect("a networked VM should expose its netns");
     let tap = vm
         .tap_name()
         .expect("a networked VM should expose its tap name");
@@ -37,13 +52,10 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
         tap.starts_with("fc"),
         "tap name should be fc-prefixed; got {tap:?}"
     );
-    let present = std::process::Command::new("ip")
-        .args(["link", "show", "dev", tap])
-        .output()
-        .expect("run ip link show");
+    let present = ip_netns_exec(netns, &["ip", "link", "show", "dev", tap]);
     assert!(
         present.status.success(),
-        "the exposed tap name {tap} should be a live host interface"
+        "the tap {tap} should be a live interface inside netns {netns}"
     );
 
     // The NIC is present with our LAA MAC (first octet 0x02 = locally administered + unicast); the
@@ -161,11 +173,11 @@ fn addresses_the_guest_and_routes_host_to_guest() {
 
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn two_vms_cannot_reach_each_others_tap() {
-    // P4.4: per-VM isolation. Two concurrently-booted networked VMs get distinct /30s — the driver
-    // makes each host-address assignment the /30's atomic reservation, so a folded-index collision
-    // retries instead of sharing a subnet — and with no default route a guest can only address its
-    // own connected /30. So VM-A cannot even reach VM-B's tap. Needs CAP_NET_ADMIN.
+fn two_networked_vms_run_in_isolated_netns() {
+    // P4.4 under the netns model: per-VM isolation is now **kernel-enforced** by a per-VM network
+    // namespace, not the earlier unique-/30 reservation. Two concurrently-booted networked VMs hold
+    // identically-named taps on the *same* fixed /30, yet share no path: each is its own network
+    // stack. This is strictly stronger than L3-unreachability (it holds even for identical addresses).
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
@@ -177,25 +189,27 @@ fn two_vms_cannot_reach_each_others_tap() {
     cfg_b.enable_network = true;
     let vm_b = Vm::boot(cfg_b).expect("VM B with a NIC should boot to readiness");
 
-    let a_host = vm_a.host_ip().expect("A host ip when networked");
-    let a_guest = vm_a.guest_ip().expect("A guest ip when networked");
-    let b_host = vm_b.host_ip().expect("B host ip when networked");
-    let b_guest = vm_b.guest_ip().expect("B guest ip when networked");
-
-    // The allocator handed the two VMs disjoint /30s: no shared subnet to bridge them.
+    // Distinct network namespaces are the isolation boundary. The two guests even share an address
+    // (the fixed /30), which is only safe *because* they are in separate stacks.
+    let ns_a = vm_a.netns().expect("A netns when networked");
+    let ns_b = vm_b.netns().expect("B netns when networked");
     assert_ne!(
-        a_host, b_host,
-        "the two VMs must get distinct host /30 ends"
+        ns_a, ns_b,
+        "the two VMs must run in distinct network namespaces"
     );
-    assert_ne!(
-        a_guest, b_guest,
-        "the two VMs must get distinct guest addresses"
+    assert_eq!(
+        vm_a.guest_ip(),
+        vm_b.guest_ip(),
+        "the netns model gives every VM the same fixed /30 (isolation is the namespace, not the address)"
     );
 
-    // From A, B's addresses are off A's only (connected) route: a fast ENETUNREACH, not a timeout —
-    // the same deny-by-default lever that blocks the world also isolates one VM from another.
-    for target in [b_host.to_string(), b_guest.to_string()] {
-        let out = vm_a
+    // A's tap is invisible from B's netns: `ip link show` for A's netns-local link, run inside B's
+    // netns, must fail (no such interface) — the two stacks share nothing. (Both taps are named the
+    // same, so this checks presence-in-the-right-stack, which the addresses below make unambiguous.)
+    // Deny-by-default holds per VM: neither guest can reach an off-/30 address, and the other VM lives
+    // entirely in a separate netns, so it is off every route either guest has.
+    for (vm, other) in [(&vm_a, ns_b), (&vm_b, ns_a)] {
+        let off = vm
             .exec(
                 &[
                     "ping".into(),
@@ -203,16 +217,14 @@ fn two_vms_cannot_reach_each_others_tap() {
                     "1".into(),
                     "-W".into(),
                     "1".into(),
-                    target.clone(),
+                    "192.0.2.1".into(), // RFC 5737 TEST-NET-1, off the /30
                 ],
                 b"",
             )
-            .expect("ping VM B from VM A");
+            .expect("ping an off-subnet address");
         assert_ne!(
-            out.exit_code,
-            0,
-            "VM A must not reach VM B's address {target}; console:\n{}",
-            vm_a.console()
+            off.exit_code, 0,
+            "each guest must be deny-by-default, so it can't reach the other in netns {other}"
         );
     }
 
@@ -224,9 +236,11 @@ fn two_vms_cannot_reach_each_others_tap() {
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
     // P4.7: prove the allow/deny posture at the transport layer, not just ICMP. Per decision 008,
-    // "allowed" in Phase 4 is host-local (world-egress allow-listing is eBPF-enforced in P8): the
-    // guest completes a real TCP connection to a listener bound on the host tap IP, and cannot reach
-    // an off-subnet endpoint (no route, fast failure). Needs CAP_NET_ADMIN.
+    // "allowed" in Phase 4 is host-local (world-egress allow-listing is eBPF-enforced in P8). Under
+    // the netns model the tap's host end lives *inside* the VM's netns, so the host endpoint the guest
+    // reaches is bound there too: a real TCP listener on the host `/30` end, entered via
+    // `ip netns exec`. An off-subnet endpoint stays unreachable (no route, fast failure).
+    use std::io::{BufRead, BufReader};
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
@@ -234,21 +248,40 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
     let mut cfg = agent_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
-    let host_ip = vm.host_ip().expect("host ip when networked");
+    let netns = vm.netns().expect("netns when networked").to_string();
+    let host_ip = vm.host_ip().expect("host ip when networked").to_string();
+    let port = 45_000u16; // fixed; the netns is private, so no host-side port contention
 
-    // A genuine host-side endpoint on the tap's host address. `bind` already starts listening, and the
-    // kernel queues the connection in the backlog, so the guest's connect completes even before the
-    // acceptor thread runs — no bind/connect race. Port 0 picks a free ephemeral port.
-    let listener =
-        std::net::TcpListener::bind((host_ip, 0)).expect("bind a host endpoint on the tap IP");
-    let port = listener.local_addr().expect("listener local addr").port();
-    let acceptor = std::thread::spawn(move || {
-        // One accepted connection is enough to prove reachability; drop it and finish.
-        let _ = listener.accept();
-    });
+    // A genuine host-side endpoint on the tap's host address, bound **inside the VM's netns**. It
+    // prints READY once listening (the kernel then backlogs the guest's connect), waits for one
+    // connection, and exits. python3 is available on the host (it builds the rootfs artifacts).
+    let script = format!(
+        "import socket,sys\n\
+         s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n\
+         s.bind(('{host_ip}',{port})); s.listen(1)\n\
+         sys.stdout.write('READY\\n'); sys.stdout.flush()\n\
+         s.settimeout(30)\n\
+         try:\n c,_=s.accept()\n c.close()\n\
+         except Exception: pass\n"
+    );
+    let mut listener = Command::new("ip")
+        .args(["netns", "exec", &netns, "python3", "-c", &script])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .expect("spawn the in-netns host listener");
+    // Wait until it is actually listening before the guest connects.
+    let out = listener.stdout.take().expect("listener stdout piped");
+    let mut lines = BufReader::new(out).lines();
+    let ready = lines.next().and_then(Result::ok);
+    assert_eq!(
+        ready.as_deref(),
+        Some("READY"),
+        "in-netns listener should report READY"
+    );
 
     // Allowed: the guest's TCP connect to the host endpoint succeeds (python3 exits 0; an unreachable
-    // peer would raise and exit non-zero). python3 is in the agent rootfs (see execs_python_*).
+    // peer would raise and exit non-zero).
     let allowed = vm
         .exec(
             &[
@@ -267,6 +300,7 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
         "guest should reach the allowed host endpoint {host_ip}:{port}; console:\n{}",
         vm.console()
     );
+    let _ = listener.wait();
 
     // Blocked: an off-subnet endpoint has no route, so connect fails (raises, exits non-zero). RFC 5737
     // TEST-NET-1 is provably off the /30. The same port keeps the two probes symmetric.
@@ -288,5 +322,4 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
     );
 
     vm.shutdown().expect("shutdown should succeed");
-    let _ = acceptor.join();
 }

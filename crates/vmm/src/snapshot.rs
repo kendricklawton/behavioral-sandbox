@@ -103,19 +103,12 @@ impl RunningVm {
         // An output or input device carries a per-clone image a restore can't yet recreate (and the
         // input image lives at the gone source scratch path), so those stay refused. The vsock exec
         // channel is supported (restore re-binds its baked-in relative socket), and a NIC is supported
-        // *through* it: restore recreates the recorded tap and the agent applies the clone's fresh
-        // address over vsock (decision 011) — so a networked snapshot without vsock is refused too,
-        // since its clone could never be re-addressed.
+        // too: under the netns model restore recreates the recorded tap in a fresh per-VM netns, where
+        // the snapshot's baked-in identity is already correct — no re-addressing, so a networked
+        // snapshot no longer needs vsock (that requirement was decision 011's, now retired).
         if self.output.is_some() || self.has_input {
             return Err(VmmError::Vmm(
                 "snapshot of a VM with an input/output device is not yet supported (P5.4/P5.5)"
-                    .into(),
-            ));
-        }
-        if self.tap.is_some() && self.vsock_uds.is_none() {
-            return Err(VmmError::Vmm(
-                "snapshot of a networked VM requires the vsock exec channel (restore re-addresses the \
-                 clone through it); boot with BootConfig.guest_cid set"
                     .into(),
             ));
         }

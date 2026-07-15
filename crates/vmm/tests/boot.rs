@@ -398,13 +398,16 @@ fn path_is_mounted(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Host tap interfaces currently present (`fc*`), for the leak assertion below.
-fn fc_interfaces() -> std::collections::BTreeSet<String> {
-    std::fs::read_dir("/sys/class/net")
+/// Per-VM network namespaces this process owns that are currently present (`/run/netns/agent-<pid>-*`),
+/// for the leak assertion below. Under the netns model the tap lives inside the netns, so a leaked
+/// *netns* — not a host `fc*` interface — is the network residue to check for.
+fn agent_netns() -> std::collections::BTreeSet<String> {
+    let prefix = format!("agent-{}-", std::process::id());
+    std::fs::read_dir("/run/netns")
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.file_name().to_string_lossy().into_owned())
-                .filter(|n| n.starts_with("fc"))
+                .filter(|n| n.starts_with(&prefix))
                 .collect()
         })
         .unwrap_or_default()
@@ -424,11 +427,11 @@ fn is_firecracker(pid: u32) -> bool {
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + artifacts (run via `cargo xtask ci-privileged`)"]
 fn repeated_boots_leave_no_leaks() {
     // After two boot/teardown cycles, nothing this test spawned may survive: no per-VM scratch dir,
-    // no orphaned firecracker VMM process, and (with CAP_NET_ADMIN) no per-VM tap. The tap is the
+    // no orphaned firecracker VMM process, and (with CAP_NET_ADMIN) no per-VM netns. The netns is the
     // one resource outside the scratch dir, so it's reclaimed separately from `remove_dir_all`;
     // without the capability, networking is off and this still covers the scratch-dir + process paths.
     let net = have_net_admin();
-    let taps_before = fc_interfaces();
+    let netns_before = agent_netns();
     let mut vmm_pids = Vec::new();
 
     // Two full cycles back to back; the second only works if the first was fully reclaimed.
@@ -462,10 +465,13 @@ fn repeated_boots_leave_no_leaks() {
         .collect();
     assert!(orphans.is_empty(), "orphaned firecracker VMMs: {orphans:?}");
 
-    // No tap interface survived the cycles either (only asserted when networking was enabled).
+    // No per-VM netns survived the cycles either (only asserted when networking was enabled).
     if net {
-        let leaked: Vec<_> = fc_interfaces().difference(&taps_before).cloned().collect();
-        assert!(leaked.is_empty(), "leaked tap interfaces: {leaked:?}");
+        let leaked: Vec<_> = agent_netns().difference(&netns_before).cloned().collect();
+        assert!(
+            leaked.is_empty(),
+            "leaked per-VM network namespaces: {leaked:?}"
+        );
     }
 }
 
