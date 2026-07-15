@@ -1,5 +1,8 @@
 # Standalone manifest — `crates/probes` is **excluded** from the workspace (root Cargo.toml), so it
-# can't inherit workspace fields. It builds for `bpfel-unknown-none`, not the host triple.
+# can't inherit workspace fields. It builds for `bpfel-unknown-none` (not the host triple) via
+# `bpf-linker`, under its own **nightly** toolchain (`rust-toolchain.toml`) with `build-std = ["core"]`
+# (`.cargo/config.toml`). The host workspace stays on stable and never compiles this crate; its object
+# is built separately by `cargo xtask build-probes`.
 [package]
 name = "agent-probes"
 version = "0.1.0"
@@ -8,8 +11,32 @@ license = "Apache-2.0"
 publish = false
 description = "The eBPF programs (no_std) — syscall tracepoints, tc/XDP on the tap, cgroup accounting."
 
-# Placeholder. ROADMAP Phase 8 converts this into the real `#![no_std]` aya-ebpf crate:
-#   - deps: aya-ebpf (+ aya-log-ebpf)
-#   - `[[bin]]` per program, built via `bpf-linker` for `bpfel-unknown-none`
-#   - `[profile.release] panic = "abort"` (eBPF has no unwinder)
 [dependencies]
+# The in-kernel eBPF side of aya: `#[tracepoint]`/`#[classifier]`/… macros, program contexts, and
+# map types. Its userspace counterpart (`aya`) lives in `crates/probes-loader`.
+aya-ebpf = "0.1"
+
+# One object per program set, linked by `bpf-linker` for `bpfel-unknown-none`. P8.1 ships one
+# placeholder program to prove the toolchain end to end; P8.2+ add the real tracepoints/tc/cgroup
+# programs (splitting into more `[[bin]]`s if it helps attach them independently).
+[[bin]]
+name = "probes"
+path = "src/main.rs"
+
+# eBPF has no unwinder and the verifier rejects real panic paths, so both profiles abort on panic and
+# build optimized (the verifier rejects the un-optimized stack/spill patterns a debug build emits).
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+panic = "abort"
+
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+codegen-units = 1

@@ -1,0 +1,8 @@
+# The eBPF crate builds for the BPF target, not the host triple; `bpf-linker` (on PATH) links the
+# LLVM bitcode rustc emits. `build-std = ["core"]` compiles `core` for `bpfel-unknown-none`, which
+# rustup ships no prebuilt std for — hence the nightly toolchain pinned in `rust-toolchain.toml`.
+[build]
+target = "bpfel-unknown-none"
+
+[unstable]
+build-std = ["core"]

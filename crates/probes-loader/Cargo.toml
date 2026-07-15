@@ -8,8 +8,10 @@ publish = false
 description = "Userspace loader — attach the eBPF probes to a sandbox, read their maps, stream events."
 
 [dependencies]
-# Skeleton has no deps yet. Phase 8+ adds `aya` (userspace) + tracing to load/attach the probes in
-# `crates/probes` and stream their maps into the flight recorder.
+# The userspace side of aya: load the object built from `crates/probes` (`cargo xtask build-probes`),
+# attach its programs, and read their maps — synchronously, no async runtime (P8.3). Added here now
+# that it is used; the load/attach for tc/XDP (P10) and cgroup-bpf (P12) build on this.
+aya = "0.13"
 
 [lints]
 workspace = true

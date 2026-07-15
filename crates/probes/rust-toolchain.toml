@@ -1,0 +1,8 @@
+# The eBPF crate needs **nightly** for `-Z build-std` (rustup has no prebuilt `core` for
+# `bpfel-unknown-none`), and `rust-src` to build it from source. This pins *only this crate* to
+# nightly — the host workspace stays on stable (`../../rust-toolchain.toml`), which is why
+# `crates/probes` is excluded from the workspace. `cargo` (the rustup proxy) reads this file when it
+# runs in this directory, so `cargo xtask build-probes` gets nightly here without touching the rest.
+[toolchain]
+channel = "nightly"
+components = ["rust-src"]

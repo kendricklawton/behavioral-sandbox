@@ -1076,15 +1076,47 @@ Wrap the FC track into a clean, self-hostable engine API.
 
 The eBPF on-ramp: build, load, and read a map from a trivial program.
 
-- [ ] **P8.1** `crates/probes` (`no_std`, `bpfel-unknown-none`) + `crates/probes-loader`
+- [x] **P8.1** `crates/probes` (`no_std`, `bpfel-unknown-none`) + `crates/probes-loader`
       (userspace, aya) scaffolding; `bpf-linker` wired into `xtask`.
-- [ ] **P8.2** A tracepoint/kprobe that **counts** an event (e.g. `sys_enter_execve`) into a map.
-- [ ] **P8.3** Loader attaches it, reads the map, prints counts.
-- [ ] **P8.4** CO-RE/BTF: build against BTF so it's portable across kernels.
-- [ ] **P8.5** Handle the verifier: bounded loops, map access patterns — learn its rules by hitting them.
-- [ ] **P8.6** `xtask` builds the eBPF object as part of the gate (separate target).
-- [ ] **P8.7** Caps: load with `CAP_BPF` (not full root) where possible; document what's needed.
-- [ ] **P8.8** Test: run a known program, assert the counter moved.
+      *(Landed: `crates/probes` is a real `#![no_std]`/`#![no_main]` aya-ebpf crate with its own
+      nightly toolchain + `.cargo/config.toml` (`build-std = ["core"]`), building a valid BPF ELF
+      via `bpf-linker` — one placeholder tracepoint proves a program section is emitted end to end;
+      the counter is P8.2. `cargo xtask build-probes` drives that build via `rustup run nightly`
+      (robust against the parent gate's `RUSTUP_TOOLCHAIN=stable`), guarded to skip cleanly when
+      `bpf-linker`/`rustup` are absent so `ci` still runs everywhere; it folds **into** `ci` at
+      P8.6. `setup` now reports the nightly+`rust-src` prereq. `crates/probes-loader` stays a
+      skeleton pointing at the now-real object; `aya` (userspace) is added when first used at P8.3,
+      not before — the supply-chain gate keeps the tree minimal. Host gate green.)*
+- [x] **P8.2** A tracepoint/kprobe that **counts** an event (e.g. `sys_enter_execve`) into a map.
+      *(Landed: `crates/probes` `count_execve` attaches to `syscalls/sys_enter_execve` and bumps a
+      single-slot **per-CPU** `PerCpuArray<u64>` — per-CPU so the increment needs no atomic. The
+      built object carries the `tracepoint` program section, the `maps` section (`EXECVE_COUNT`), and
+      the relocation linking them.)*
+- [x] **P8.3** Loader attaches it, reads the map, prints counts.
+      *(Landed: `agent-probes-loader`'s `ExecveCounter::{load, count}` (aya, userspace, sync) loads
+      the object, attaches the tracepoint, and sums the per-CPU slots; a typed `ProbeError` (the
+      loader's `VmmError`) on every failure. The object is a runtime-loaded build artifact found by
+      path (`AGENT_PROBES_OBJECT`, else the `build-probes` output), not `include_bytes`/`build.rs`, so
+      the host workspace stays on stable (decision 020). Demo: `examples/count_execve.rs` prints the
+      total and its delta. Test: `execve_counter_counts_host_execve_events` (privileged) spawns N
+      processes and asserts the count rose by ≥ N.)*
+- [x] **P8.4** Lifetime: the loader owns its programs/maps/links so they **drop with it** (no pinned
+      residue in `/sys/fs/bpf`, no dangling attachment) unless pinning is explicitly asked for. The
+      eBPF analogue of the FC track's no-leak teardown, set here in the on-ramp before Phase 10
+      attaches to the real per-VM taps whose netns teardown the driver already guards.
+      *(Landed: the aya `Ebpf` owns the program/map/link and its `Drop` detaches + frees them; nothing
+      is pinned (decision 020). Test: `counter_drops_without_pinned_residue` (privileged) asserts a
+      load+drop leaves `/sys/fs/bpf` unchanged and a second load after the drop still succeeds. The
+      privileged gate builds the object (`ci-privileged` calls `build-probes`) before these run.)*
+- [ ] **P8.5** CO-RE/BTF: build against BTF so it's portable across kernels.
+- [ ] **P8.6** Handle the verifier: bounded loops, map access patterns — learn its rules by hitting them.
+- [ ] **P8.7** `xtask` builds the eBPF object as part of the gate (separate target).
+- [ ] **P8.8** Caps: load with `CAP_BPF` (not full root) where possible; document what's needed.
+- [ ] **P8.9** Support probe: detect BTF (`/sys/kernel/btf/vmlinux`) and the kernel/verifier features
+      the probes need **at load**, and fail (or degrade) with a **legible typed error** naming the
+      requirement rather than a cryptic verifier reject (the eBPF analogue of P6.9b's
+      Firecracker-version guard, so a host that can't run the probes says so plainly).
+- [ ] **P8.10** Test: run a known program, assert the counter moved.
 - **Exit gate + lesson:** a Rust eBPF program loads and reports; write up **eBPF program types,
   maps, the verifier, and CO-RE/BTF.**
 

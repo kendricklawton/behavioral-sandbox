@@ -6,6 +6,9 @@
 //!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop. Builds the guest
 //!   agent + the agent rootfs first, so the in-VM exec test has something to boot.
 //! - **`setup`** — checks the host can do KVM + eBPF and reports what's missing.
+//! - **`build-probes`** — build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via
+//!   `bpf-linker`, under the crate's own nightly toolchain. Host-safe (no KVM); skips with a note
+//!   when `bpf-linker`/`rustup` are absent.
 //! - **`build-rootfs`** — assemble the reproducible guest rootfs (Alpine base + baked-in agent).
 //! - **`bench-boot`** — measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
 //! - **`bench-warm`** — time-to-first-result percentiles: cold boot vs warm-snapshot restore vs
@@ -16,7 +19,7 @@
 //! gates and the shared plumbing (paths, `cargo`/tool runners) live here.
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
-//! workspace; its object build folds into `ci` at ROADMAP Phase 8.
+//! workspace; `build-probes` builds its object now, and that step folds into `ci` at ROADMAP P8.6.
 #![forbid(unsafe_code)]
 
 mod artifacts;
@@ -49,6 +52,10 @@ enum Cmd {
     CiPrivileged,
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
+    /// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker`, under the
+    /// crate's own nightly toolchain (`build-std`). Host-safe; skips with a note when `bpf-linker` or
+    /// `rustup` is missing. The object lands at `crates/probes/target/bpfel-unknown-none/release/probes`.
+    BuildProbes,
     /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
     FetchArtifacts,
     /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
@@ -95,6 +102,7 @@ fn main() -> Result<()> {
         Cmd::Ci => ci(),
         Cmd::CiPrivileged => ci_privileged(),
         Cmd::Setup => setup(),
+        Cmd::BuildProbes => build_probes(),
         Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
         Cmd::BuildGuestAgent => guest_bins::build_guest_agent().map(|_| ()),
         Cmd::BuildGuestExample => guest_bins::build_guest_example().map(|_| ()),
@@ -187,6 +195,10 @@ fn ci_privileged() -> Result<()> {
     // agent — the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
     // not part of the image, so it's built separately, not baked into the rootfs.
     guest_bins::build_guest_example()?;
+    // The eBPF probe tests (P8.3/P8.4) load the object built from `crates/probes`; build it here (the
+    // same "don't shell a nightly `cargo build` from a `#[test]`" rule). Guarded, so a privileged host
+    // without `bpf-linker` skips the build and the probe tests then self-skip on the missing object.
+    build_probes()?;
     // Serial (`--test-threads=1`): these tests each boot a real microVM and some assert on
     // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent warm clones). Run
     // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
@@ -227,6 +239,10 @@ fn setup() -> Result<()> {
         kernel_at_least(5, 14),
     );
     check("bpf-linker installed", in_path("bpf-linker"));
+    check(
+        "nightly toolchain + rust-src (eBPF object build: `cargo xtask build-probes`)",
+        nightly_ebpf_ready(),
+    );
     check("mke2fs (rootfs + input block device)", in_path("mke2fs"));
     check(
         "e2fsck + debugfs (output readback)",
@@ -281,6 +297,70 @@ fn setup() -> Result<()> {
 
     println!("\nMissing items are covered in CONTRIBUTING.md → Prerequisites.");
     Ok(())
+}
+
+/// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker` (P8.1). The
+/// crate is **excluded** from the workspace and builds under its own nightly toolchain with
+/// `-Z build-std` (rustup ships no prebuilt `core` for the BPF target), so this drives its build
+/// directly rather than through the workspace `cargo`.
+///
+/// Guarded so `cargo xtask` stays runnable everywhere: on a host without `bpf-linker` (or `rustup`),
+/// it prints a note and returns `Ok` instead of failing — the everyday host gate must not require the
+/// eBPF toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); the object build
+/// folds into the `ci` gate at ROADMAP P8.6, and the privileged gate can require it once programs load.
+fn build_probes() -> Result<()> {
+    if !in_path("bpf-linker") {
+        println!(
+            "· skipping eBPF object build: bpf-linker not found \
+             (install it: `cargo install bpf-linker`; see `cargo xtask setup`)"
+        );
+        return Ok(());
+    }
+    if !in_path("rustup") {
+        println!(
+            "· skipping eBPF object build: rustup not found \
+             (crates/probes needs a nightly toolchain with `build-std`)"
+        );
+        return Ok(());
+    }
+    let dir = workspace_root().join("crates/probes");
+    // `rustup run nightly` forces the nightly toolchain the crate's `rust-toolchain.toml` pins: a
+    // parent `cargo xtask` leaks `RUSTUP_TOOLCHAIN=stable` into this child, which would otherwise
+    // override that file and fail `build-std`. The crate's `.cargo/config.toml` supplies the target +
+    // `build-std`; `bpf-linker` (on PATH) links the object. `--locked` holds the probes lockfile.
+    println!("$ rustup run nightly cargo build --release --locked  (in crates/probes → bpfel-unknown-none)");
+    let status = Command::new("rustup")
+        .args(["run", "nightly", "cargo", "build", "--release", "--locked"])
+        .current_dir(&dir)
+        .status()
+        .context("building crates/probes (eBPF object)")?;
+    if !status.success() {
+        bail!(
+            "eBPF object build failed (crates/probes) — a program the verifier would reject, or a \
+             missing nightly toolchain / `rust-src` (see `cargo xtask setup`)"
+        );
+    }
+    println!(
+        "· eBPF object built: {}",
+        dir.join("target/bpfel-unknown-none/release/probes")
+            .display()
+    );
+    Ok(())
+}
+
+/// Whether the nightly toolchain with the `rust-src` component (needed to build `crates/probes` with
+/// `-Z build-std`) is installed, via `rustup component list --installed`. Informational, for `setup`.
+fn nightly_ebpf_ready() -> bool {
+    Command::new("rustup")
+        .args(["component", "list", "--toolchain", "nightly", "--installed"])
+        .output()
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.trim().starts_with("rust-src"))
+        })
+        .unwrap_or(false)
 }
 
 /// The `(major, minor)` of `firecracker --version` on PATH (first line `Firecracker v1.9.1`), or

@@ -17,8 +17,11 @@ This is **Linux-only** (it needs KVM). You'll need:
 - **A Linux host with `/dev/kvm`** and your user in the `kvm` group (or root). A reasonably
   recent kernel with **BTF** is required for CO-RE eBPF (most modern distros ship it).
 - **Rust, stable** ([`rustup`](https://www.rust-lang.org/tools/install)) for the host/driver.
-  The eBPF programs additionally need **`bpf-linker`** and the aya build toolchain
-  (`cargo install bpf-linker`; the eBPF crate targets `bpfel-unknown-none`).
+  The eBPF programs (`crates/probes`) additionally need **`bpf-linker`** plus a **nightly**
+  toolchain with **`rust-src`** for `-Z build-std` (`cargo install bpf-linker`;
+  `rustup toolchain install nightly --component rust-src`). That crate is excluded from the
+  workspace and pins its own nightly, so the host/driver stays on stable; build its object with
+  `cargo xtask build-probes` (`bpfel-unknown-none`).
 - **`firecracker`** + its **jailer** binary (pinned version — see below), a guest **kernel
   image** (`vmlinux`), and the ability to build a minimal **rootfs**.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
@@ -61,8 +64,9 @@ cargo xtask ci                                    # fmt + clippy -D warnings + b
 ```
 
 `cargo xtask ci` runs the host-safe gate everywhere: fmt · clippy `-D warnings` · build · unit
-tests · docs · `cargo deny`. The **eBPF object build** joins this gate when the probes land
-(ROADMAP Phase 8), so verifier-breaking changes will fail fast from then on.
+tests · docs · `cargo deny`. The **eBPF object build** is available now as its own host-safe step
+(`cargo xtask build-probes`, which skips cleanly when `bpf-linker`/nightly are absent) and folds
+**into** this gate at ROADMAP P8.6, so from then on verifier-breaking changes fail fast here.
 
 **The privileged tests are separate.** Booting a microVM and loading/attaching eBPF need
 `/dev/kvm` and elevated caps, so the **integration tests** (VM boot, exec, tap networking,
@@ -74,8 +78,9 @@ Never gate the everyday loop on a privileged runner.
 
 1. **Unit / pure:** driver config assembly, protocol framing, policy-map encoding, error
    mapping — no VM, no root.
-2. **eBPF object build** *(joins the gate at ROADMAP Phase 8)*: the probes compile for
-   `bpfel-unknown-none`; a program the verifier would reject fails the build.
+2. **eBPF object build** (`cargo xtask build-probes`; *folds into the gate at ROADMAP P8.6*): the
+   probes compile for `bpfel-unknown-none` via `bpf-linker`; a program the verifier would reject
+   fails the build.
 3. **Privileged integration:** boot a real microVM → `exec` → tap networking → attach probes →
    assert the flight recorder shows exactly what the workload did. Needs KVM + caps.
 4. **Benchmarks:** cold boot, snapshot restore, warm-pool `exec` latency (p50/p99), density, and
