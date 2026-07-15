@@ -190,6 +190,104 @@ fn exec_budgets_are_per_sandbox_knobs() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn many_sandboxes_run_concurrently_without_interference() {
+    // Concurrency (P7.6): several sandboxes boot and exec *at the same time* — from threads, so
+    // the boots genuinely overlap — and each result is exactly its own: no cross-talk on the vsock
+    // channels, no scratch-dir or netns collisions, no wedge. (Concurrent *clones* are proven in
+    // tests/snapshot.rs; this is concurrent independent sandboxes, the embedder's fan-out shape.)
+    let workers: Vec<_> = (0..3)
+        .map(|i| {
+            std::thread::spawn(move || {
+                let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
+                let out = sandbox
+                    .exec(
+                        &[
+                            "sh".into(),
+                            "-c".into(),
+                            format!("echo {i} > mine.txt; printf 'sandbox-%s' \"$(cat mine.txt)\""),
+                        ],
+                        b"",
+                    )
+                    .expect("exec in a concurrent sandbox");
+                assert_eq!(out.exit_code, 0, "console:\n{}", sandbox.console());
+                // `$(…)` strips the trailing newline and the bare `printf` adds none back.
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout),
+                    format!("sandbox-{i}"),
+                    "each sandbox must see exactly its own state"
+                );
+                sandbox.shutdown().expect("shutdown");
+            })
+        })
+        .collect();
+    for worker in workers {
+        worker.join().expect("concurrent sandbox thread");
+    }
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn two_concurrent_stateful_sessions_stay_isolated() {
+    // Two stateful sessions at once (P7.8): session identity is VM identity (decision 019), so
+    // isolation between them is KVM, not agent bookkeeping. Both sandboxes are live together and
+    // their execs interleave A1 → B1 → A2 → B2 on the *same* relative filename; each session then
+    // reads back exactly its own accumulated state, and a file that exists only in B is absent
+    // in A.
+    let a = Sandbox::open_unjailed(agent_rootfs_config()).expect("open session A");
+    let b = Sandbox::open_unjailed(agent_rootfs_config()).expect("open session B");
+
+    let sh = |cmd: &str| vec!["sh".into(), "-c".into(), cmd.to_string()];
+    assert_eq!(
+        a.exec(&sh("echo A1 > state.txt"), b"")
+            .expect("A1")
+            .exit_code,
+        0
+    );
+    assert_eq!(
+        b.exec(&sh("echo B1 > state.txt; echo only-b > only_b.txt"), b"")
+            .expect("B1")
+            .exit_code,
+        0
+    );
+    assert_eq!(
+        a.exec(&sh("echo A2 >> state.txt"), b"")
+            .expect("A2")
+            .exit_code,
+        0
+    );
+    assert_eq!(
+        b.exec(&sh("echo B2 >> state.txt"), b"")
+            .expect("B2")
+            .exit_code,
+        0
+    );
+
+    let a_state = a.exec(&sh("cat state.txt"), b"").expect("read A");
+    assert_eq!(
+        a_state.stdout, b"A1\nA2\n",
+        "session A must hold exactly its own interleaved writes"
+    );
+    let b_state = b.exec(&sh("cat state.txt"), b"").expect("read B");
+    assert_eq!(
+        b_state.stdout, b"B1\nB2\n",
+        "session B must hold exactly its own interleaved writes"
+    );
+    // Negative half: B's private file never appears in A.
+    let leak = a
+        .exec(&sh("cat only_b.txt"), b"")
+        .expect("probe A for B's file");
+    assert_ne!(
+        leak.exit_code,
+        0,
+        "a file written in session B must not exist in session A; got {:?}",
+        String::from_utf8_lossy(&leak.stdout)
+    );
+    a.shutdown().expect("shutdown A");
+    b.shutdown().expect("shutdown B");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn snapshot_at_the_seam_yields_a_restorable_bundle() {
     // `Sandbox::snapshot` closes the lifecycle: a warm (unjailed, overlay) sandbox snapshots, and
     // the bundle restores to an exec-ready clone. (Jailed clones from such a bundle are P7.0e's

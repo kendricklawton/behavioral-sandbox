@@ -1033,13 +1033,40 @@ Wrap the FC track into a clean, self-hostable engine API.
       one JSON object on **stdout** (exit code, lossy stdout/stderr, artifact list with sizes,
       `boot_ms` + `exec_wall_ms`), making the "stdout carries a run's structured result" convention
       real; raw-relay stays the default.)*
-- [ ] **P7.6** Concurrency: many sandboxes at once; a bounded pool; no interference. *(The pool
+- [x] **P7.6** Concurrency: many sandboxes at once; a bounded pool; no interference. *(The pool
       bound respects the measured per-sandbox fd budget from P6.9c: `target × fds_per_vm` stays
       under `ulimit -n` with headroom, stated in the docs, not discovered via `EMFILE`.)*
-- [ ] **P7.7** Docs: the engine API and the explicit *non-goals* (no auth/billing/scheduler).
-- [ ] **P7.8** Test: two concurrent stateful sessions stay isolated and correct.
+      *(`many_sandboxes_run_concurrently_without_interference` boots three sandboxes from three
+      threads at once — genuinely overlapping boots, not sequential — and each exec's result is
+      exactly its own (concurrent *clones* were already proven in tests/snapshot.rs; this is the
+      embedder's independent-sandbox fan-out). The fd rule is now *stated by the engine, not just
+      the docs*: `Pool::new` reads the soft `ulimit -n` from `/proc/self/limits` (unsafe-free; the
+      pure parser is unit-tested) and logs one warning naming target, `FDS_PER_VM`, headroom, and
+      the fix when a target oversubscribes the budget — a warning, not a refusal, the decision-013
+      fail-open posture, since sizing is fairness hygiene, not the isolation boundary. The formula
+      also lives in the `Pool` rustdoc and ENGINE.md.)*
+- [x] **P7.7** Docs: the engine API and the explicit *non-goals* (no auth/billing/scheduler).
+      *(**`ENGINE.md`**, the embedder's document and this phase's writeup in one: the lifecycle
+      contract step by step against the real API (confined-by-default open and the named-constructor
+      opt-out, exec's result-vs-error semantics and bounds, the secret-hygiene contract, sessions,
+      the budget struct and its fail-open line, the three error buckets as a table, the no-leak
+      lifetime ladder, the unjailed-source→jailed-clones warm-start story, the fd sizing rule, the
+      CLI as reference embedder) and then the engine/PaaS line: the non-goals stated as design
+      refusals (no tenancy/auth, no billing, no fleet scheduling, no dashboard or network API), what
+      the engine *does* owe a long-lived host (decision 016's split), and what lives downstream of
+      the seam. README's Status and Scope sections link it.)*
+- [x] **P7.8** Test: two concurrent stateful sessions stay isolated and correct.
+      *(`two_concurrent_stateful_sessions_stay_isolated`: two sandboxes live simultaneously, execs
+      interleaved A1→B1→A2→B2 on the *same* relative filename, each session reads back exactly its
+      own accumulated state, and a file that exists only in B is absent in A — plus the negative
+      probe exits non-zero. Two sessions are two VMs by construction (decision 019), so the
+      isolation being pinned is KVM, not agent bookkeeping.)*
 - **Exit gate + lesson:** a clean `Sandbox` engine anyone can embed/self-host; write up **the
   sandbox-lifecycle contract** and where the engine/PaaS line sits.
+  *(Passed: the lifecycle demo is the CLI (`agent run` with stdin/files/env/knobs/`--json`,
+  `agent shell` as a held-open session) and the tests/sandbox.rs suite (open jailed by default,
+  inputs at the seam, sessions, budgets, snapshot, leak checks, concurrency, session isolation);
+  the writeup is [`ENGINE.md`](ENGINE.md). Phase 7 is complete.)*
 
 ---
 

@@ -37,11 +37,14 @@ recording.
 ## Status
 
 **Early and learning-driven.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md);
-its checkboxes are the state. So far (Phases 1 through 6) a microVM boots to userspace, runs commands
+its checkboxes are the state. So far (Phases 1 through 7) a microVM boots to userspace, runs commands
 with captured stdout/stderr/exit, runs real Python, Node, and static binaries from a purpose-built
 rootfs, gets a per-VM deny-by-default network, snapshots and restores from a warm pool in
-milliseconds, and runs confined under the jailer (chroot, dropped privileges, cgroup limits,
-seccomp). The eBPF observability and the flight recorder (the host-side record of what a run did) are
+milliseconds, runs confined under the jailer (chroot, dropped privileges, cgroup limits, seccomp),
+and is wrapped in the embedder-facing `Sandbox` lifecycle: jailed by default, per-exec files + env
+under a tested secret-hygiene contract, stateful sessions (the VM is the session), budget knobs,
+and a structured result — the contract is written up in [`ENGINE.md`](ENGINE.md). The eBPF
+observability and the flight recorder (the host-side record of what a run did) are
 the next tracks. Nothing here is production yet; the point is depth, done in the open.
 
 ## How it fits together
@@ -73,7 +76,8 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 **In scope:** the sandbox runtime (Firecracker), host-side observability + enforcement (eBPF),
 the sandbox lifecycle API, a self-hostable driver daemon, and the benchmarks that back the
 claims. **Out of scope, by design:** multi-tenant auth, billing, fleet scheduling, and a web
-dashboard — that's whatever *hosts* the engine. `containerd`, not Docker Cloud.
+dashboard — that's whatever *hosts* the engine. `containerd`, not Docker Cloud. The lifecycle
+contract and the full non-goals list live in [`ENGINE.md`](ENGINE.md).
 
 **Adjacent (separate repos, post-`v0.1.0`):** language SDKs (Go · Python · Node · C#) that drive
 the engine's wire API, and a Wasmtime-based *software-isolation* sibling built to compare both

@@ -11,7 +11,12 @@
 //! pool belongs to the daemon (Phase 16), not the library.
 
 use crate::vm::{Snapshot, Vm};
-use crate::{BootConfig, RunningVm, VmmError};
+use crate::{BootConfig, RunningVm, VmmError, FDS_PER_VM};
+
+/// Fd slack reserved for everything that is *not* a pooled clone: the process baseline (stdio,
+/// logging, the embedder's own files) plus the transient fds a boot/exec opens and closes. Part of
+/// the sizing rule [`Pool::new`] states: `target × FDS_PER_VM + POOL_FD_HEADROOM ≤ ulimit -n`.
+const POOL_FD_HEADROOM: usize = 64;
 
 /// A pool of pre-restored, exec-ready warm clones of one [`Snapshot`].
 ///
@@ -29,8 +34,12 @@ use crate::{BootConfig, RunningVm, VmmError};
 /// so warm starts and confinement compose (needs real root, like any jailed boot).
 ///
 /// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
-/// `target × FDS_PER_VM` must stay under the process's `ulimit -n` with headroom — state the bound,
-/// don't discover it via `EMFILE` (P6.9c).
+/// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n` — state
+/// the bound, don't discover it via `EMFILE` mid-restore (P6.9c). [`new`](Pool::new) enforces the
+/// *stating*: an over-budget target logs one `tracing::warn!` naming the numbers and the fix
+/// (raise `ulimit -n`, or shrink the target) before the prefill runs. A warning, not a refusal —
+/// like the cgroup caps (decision 013), sizing is fairness hygiene, not the isolation boundary,
+/// and the soft limit may be raised by the embedder after this process was probed.
 #[derive(Debug)]
 #[must_use = "dropping a Pool kills its pooled microVMs"]
 pub struct Pool {
@@ -53,6 +62,20 @@ impl Pool {
     /// Any [`Vm::restore`] failure during the prefill; already-restored clones are torn down by
     /// `Pool`'s drop on the error return, so a failed prefill leaks nothing.
     pub fn new(snapshot: Snapshot, config: BootConfig, target: usize) -> Result<Self, VmmError> {
+        // State the fd bound up front (P6.9c) rather than letting the prefill discover it as an
+        // illegible mid-restore `EMFILE` in whatever syscall lands first. Warn-only: sizing is
+        // fairness hygiene, not the isolation boundary (the decision-013 fail-open posture).
+        if let Some((need, soft)) = nofile_soft_limit().and_then(|s| fd_budget_excess(target, s)) {
+            tracing::warn!(
+                target,
+                fds_per_vm = FDS_PER_VM,
+                headroom = POOL_FD_HEADROOM,
+                need,
+                nofile_soft = soft,
+                "pool target exceeds the fd budget: raise `ulimit -n` or shrink the target, \
+                 or restores may fail with EMFILE"
+            );
+        }
         let mut pool = Self {
             snapshot,
             config,
@@ -127,6 +150,85 @@ impl Pool {
     pub fn shutdown(self) {
         for vm in self.ready {
             let _ = vm.shutdown();
+        }
+    }
+}
+
+/// The sizing rule [`Pool::new`] states, as a pure check: `Some((need, soft))` when `target`
+/// pooled clones (at [`FDS_PER_VM`] each, plus [`POOL_FD_HEADROOM`]) would oversubscribe the soft
+/// fd limit; `None` when the budget holds. Pure so the arithmetic is unit-testable without a
+/// snapshot to pool.
+fn fd_budget_excess(target: usize, soft: u64) -> Option<(usize, u64)> {
+    let need = target
+        .saturating_mul(FDS_PER_VM)
+        .saturating_add(POOL_FD_HEADROOM);
+    (need as u64 > soft).then_some((need, soft))
+}
+
+/// This process's soft `RLIMIT_NOFILE`, read from `/proc/self/limits` (the host path takes no
+/// `libc`, and `getrlimit` has no `unsafe`-free std surface). `None` if the file is missing or
+/// unparseable — the sizing warning is then simply skipped, never a boot failure.
+fn nofile_soft_limit() -> Option<u64> {
+    parse_nofile_soft(&std::fs::read_to_string("/proc/self/limits").ok()?)
+}
+
+/// The testable core of [`nofile_soft_limit`]: find the "Max open files" row and parse its **soft**
+/// column. The row's layout is `Max open files  <soft>  <hard>  files`; a soft limit of
+/// `unlimited` parses as `None` (no bound to warn against).
+fn parse_nofile_soft(limits: &str) -> Option<u64> {
+    let line = limits.lines().find(|l| l.starts_with("Max open files"))?;
+    line.trim_start_matches("Max open files")
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fd_budget_excess, parse_nofile_soft, POOL_FD_HEADROOM};
+    use crate::FDS_PER_VM;
+
+    #[test]
+    fn fd_budget_warns_only_past_the_bound() {
+        // Comfortably under a dev-box default: no warning.
+        assert_eq!(fd_budget_excess(2, 1024), None);
+        // A target that oversubscribes a small limit: the warning carries the arithmetic.
+        let need = 100 * FDS_PER_VM + POOL_FD_HEADROOM;
+        assert_eq!(fd_budget_excess(100, 256), Some((need, 256)));
+        // Exactly at the bound is still within budget ("stays under with headroom" — the headroom
+        // is already inside `need`, so equality holds the line).
+        let exact = (10 * FDS_PER_VM + POOL_FD_HEADROOM) as u64;
+        assert_eq!(fd_budget_excess(10, exact), None);
+        assert!(fd_budget_excess(10, exact - 1).is_some());
+    }
+
+    #[test]
+    fn nofile_soft_parses_the_proc_limits_shape() {
+        // The real /proc/self/limits layout: name column padded with spaces, then soft, hard, unit.
+        let limits = "Limit                     Soft Limit           Hard Limit           Units\n\
+                      Max cpu time              unlimited            unlimited            seconds\n\
+                      Max open files            1024                 524288               files\n\
+                      Max locked memory         8388608              8388608              bytes\n";
+        assert_eq!(parse_nofile_soft(limits), Some(1024));
+    }
+
+    #[test]
+    fn nofile_soft_is_none_for_unlimited_or_absent() {
+        // `unlimited` is not a number → no bound to warn against; a missing row likewise.
+        let unlimited =
+            "Max open files            unlimited            unlimited            files\n";
+        assert_eq!(parse_nofile_soft(unlimited), None);
+        assert_eq!(parse_nofile_soft("Max cpu time  1  2  seconds\n"), None);
+        assert_eq!(parse_nofile_soft(""), None);
+    }
+
+    #[test]
+    fn this_process_reports_a_soft_limit() {
+        // The /proc read itself: on any Linux dev box the row exists and is numeric or unlimited —
+        // either way the call must not panic; a numeric result must be nonzero.
+        if let Some(soft) = super::nofile_soft_limit() {
+            assert!(soft > 0);
         }
     }
 }
