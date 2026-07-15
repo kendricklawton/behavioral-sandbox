@@ -22,9 +22,11 @@
 //! delegates the cgroup v2 controllers), and Firecracker's built-in **seccomp** filters (on by
 //! default; we never pass `--no-seccomp`). The **vsock exec channel** composes with the jail (its
 //! unix socket is bound chroot-relative under the dropped uid, see [`JAILED_VSOCK_UDS`]), so a jailed
-//! VM runs code; a jailed boot that also wants a NIC, the overlay, or bulk I/O devices is still
-//! refused with a typed error (staging those into the chroot, and a per-VM netns for concurrent
-//! networked clones, are later steps). Leak-proof, cgroup-owned teardown lives
+//! VM runs code, and the **read-only overlay** composes too (the shared base is bind-mounted into the
+//! chroot, [`stage_ro_base_into_chroot`], so a jailed boot runs the density path, not a full rootfs
+//! copy); a jailed boot that also wants a NIC or bulk I/O devices is still refused with a typed error
+//! (staging those into the chroot, and a per-VM netns for concurrent networked clones, are later
+//! steps). Leak-proof, cgroup-owned teardown lives
 //! in [`crate::lifetime`] (P6.7): the jailed VM's sentinel watches the jailer's cgroup at its
 //! precomputed path, so host death can't leak a jailed VMM either.
 
@@ -115,6 +117,11 @@ pub(crate) struct Chroot {
     /// The cgroup dir the jailer created for this VMM (`/sys/fs/cgroup/<...>`), learned from
     /// `/proc/<pid>/cgroup` once the VMM is up. Removed (best-effort) on teardown; `None` until read.
     pub(crate) cgroup_dir: Option<PathBuf>,
+    /// The host path of the read-only base **bind mount** staged into the chroot for a
+    /// `read_only_root` jailed boot (the density path, [`stage_ro_base_into_chroot`]). Must be
+    /// unmounted before the scratch dir's `remove_dir_all`, or the mount point `EBUSY`s and leaks the
+    /// chroot. `None` for a read-write boot (a plain copy) or the copy fallback on a non-shared scratch.
+    pub(crate) base_mount: Option<PathBuf>,
 }
 
 /// Spawn the **jailer**, which builds the chroot and `exec`s Firecracker inside it. Returns the child
@@ -203,9 +210,9 @@ pub(crate) fn spawn_jailer(
 /// to name it by in the API. Called once the chroot exists (after the VMM's API socket is up), so it
 /// never races the jailer's chroot construction.
 ///
-/// The copy is the honest cost of the jail on this path: the kernel and rootfs live outside the
-/// chroot, and hardlinking across the `/tmp` (tmpfs) boundary would `EXDEV`. Zero-copy staging (a
-/// shared read-only base bind-mounted in) rides with the overlay under the jailer, a later step.
+/// The copy is the honest cost of the jail on a **read-write** boot: the kernel and rootfs live
+/// outside the chroot, and hardlinking across the `/tmp` (tmpfs) boundary would `EXDEV`. A
+/// `read_only_root` boot instead bind-mounts the shared base zero-copy ([`stage_ro_base_into_chroot`]).
 pub(crate) fn stage_into_chroot(
     root: &Path,
     name: &str,
@@ -230,6 +237,147 @@ pub(crate) fn stage_into_chroot(
         ))
     })?;
     Ok(format!("/{name}"))
+}
+
+/// Stage the **read-only shared base** into the chroot for a `read_only_root` jailed boot — the
+/// density path, the jailed counterpart of the unjailed read-only boot that references one base in
+/// place. Instead of a full per-VM copy ([`stage_into_chroot`]), **bind-mount** the one base file
+/// into the chroot, so every jailed VM shares its inode (and page cache); the guest layers a per-run
+/// tmpfs overlay over it (`overlay-init`), so `/` is writable but the base is never mutated.
+///
+/// The bind mount is made in the driver's (host) mount namespace, yet the jailer runs the VMM in an
+/// `MS_SLAVE` mount namespace: a mount created under a **shared** host mount propagates *in*, so the
+/// jailed Firecracker sees it. When the scratch base is **not** a shared mount (a hoster pointed
+/// `scratch_dir` at a private mount, so the propagation can't reach the slave namespace), fall back
+/// to a read-only **copy** — correct and still base-immutable, just not page-cache-deduped. Density is
+/// a best-effort property; the isolation is not (decision 013/014), and the copy confines identically.
+///
+/// Returns the chroot-relative path to name in the API, and `Some(host_mount_path)` when a bind mount
+/// was made — so teardown unmounts it before reclaiming the scratch dir (`None` for the copy fallback,
+/// which needs no unmount). Base perms must let the dropped uid read it (the pinned base is `0644`); a
+/// bind mount exposes the source's mode, so no chown is applied to a shared inode.
+pub(crate) fn stage_ro_base_into_chroot(
+    root: &Path,
+    name: &str,
+    src: &Path,
+    scratch_dir: &Path,
+    uid: u32,
+    gid: u32,
+) -> Result<(String, Option<PathBuf>), VmmError> {
+    let rel = format!("/{name}");
+    if !scratch_is_shared_mount(scratch_dir) {
+        tracing::warn!(
+            scratch = %scratch_dir.display(),
+            "jailed read-only base: the scratch dir is not a shared mount, so a bind mount would not \
+             reach the jailer's mount namespace; falling back to a per-VM read-only copy (correct, \
+             but not page-cache-deduped). Put the scratch dir on a shared mount for the density path."
+        );
+        // Read-only copy fallback (0444, chowned so the dropped uid can open it).
+        stage_into_chroot(root, name, src, uid, gid, 0o444)?;
+        return Ok((rel, None));
+    }
+    let src = absolute(src)?;
+    let dst = root.join(name);
+    // The bind-mount target must exist; create an empty placeholder the mount then shadows.
+    std::fs::File::create(&dst)
+        .map_err(|e| VmmError::Vmm(format!("create bind target {}: {e}", dst.display())))?;
+    bind_ro(&src, &dst)?;
+    Ok((rel, Some(dst)))
+}
+
+/// Bind-mount `src` onto `dst` **read-only**. Two steps on purpose: a bind mount is read-write
+/// regardless of a `-o ro` on the initial call, so a second `remount,ro,bind` is what actually drops
+/// write access — the base then can't be mutated through the chroot even before Firecracker opens it
+/// `O_RDONLY`. Shells out to `mount` (as the tap path shells out to `ip`), keeping the host path
+/// `unsafe`-free. If the remount fails, the half-made bind mount is detached before returning, so a
+/// failure never leaks a mount.
+fn bind_ro(src: &Path, dst: &Path) -> Result<(), VmmError> {
+    match Command::new("mount")
+        .arg("--bind")
+        .arg(src)
+        .arg(dst)
+        .status()
+    {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            return Err(VmmError::Vmm(format!(
+                "bind-mount {} -> {}: mount exited {s}",
+                src.display(),
+                dst.display()
+            )))
+        }
+        Err(e) => return Err(VmmError::Vmm(format!("spawn `mount --bind`: {e}"))),
+    }
+    match Command::new("mount")
+        .arg("-o")
+        .arg("remount,ro,bind")
+        .arg(dst)
+        .status()
+    {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => {
+            unmount_base(dst);
+            Err(VmmError::Vmm(format!(
+                "remount read-only {}: mount exited {s}",
+                dst.display()
+            )))
+        }
+        Err(e) => {
+            unmount_base(dst);
+            Err(VmmError::Vmm(format!(
+                "spawn `mount -o remount,ro,bind`: {e}"
+            )))
+        }
+    }
+}
+
+/// Detach a base bind mount (best-effort, **lazy**). `umount -l` never blocks on a busy mount: by
+/// teardown the VMM is already reaped, but a lazy detach also means a mount left by a crashed-mid-boot
+/// driver can always be cleared, so the scratch dir's `remove_dir_all` never `EBUSY`s. Failures are
+/// ignored: a path that isn't a mount (the copy fallback, or one already gone) is a harmless no-op.
+pub(crate) fn unmount_base(path: &Path) {
+    let _ = Command::new("umount").arg("-l").arg(path).status();
+}
+
+/// Whether the filesystem mount backing `path` is a **shared** mount (carries a `shared:N` peer-group
+/// tag in `/proc/self/mountinfo`). Only a mount made under a shared host mount propagates into the
+/// jailer's `MS_SLAVE` namespace, so this gates the bind-mount density path against the copy fallback.
+/// Resolves `path` to the longest mount point that is a path-prefix of it (the mount it lives on).
+fn scratch_is_shared_mount(path: &Path) -> bool {
+    let Ok(target) = absolute(path) else {
+        return false;
+    };
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return false;
+    };
+    mount_is_shared(&info, &target)
+}
+
+/// Whether the longest mount point that is a path-prefix of `target` carries a `shared:N` tag, given
+/// the raw `/proc/self/mountinfo` text. Split from the I/O so the field-walk is unit-testable: a
+/// mountinfo line is `id pid maj:min root MOUNTPOINT opts [optional tags...] - fstype src super`, and
+/// the optional tags (where `shared:N` lives) run from field 6 up to a standalone `-`.
+fn mount_is_shared(mountinfo: &str, target: &Path) -> bool {
+    let mut best: Option<(usize, bool)> = None;
+    for line in mountinfo.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        let mount_point = Path::new(fields[4]);
+        if !target.starts_with(mount_point) {
+            continue;
+        }
+        let shared = fields[6..]
+            .iter()
+            .take_while(|f| **f != "-")
+            .any(|f| f.starts_with("shared:"));
+        let depth = mount_point.components().count();
+        if best.map(|(d, _)| depth > d).unwrap_or(true) {
+            best = Some((depth, shared));
+        }
+    }
+    best.map(|(_, shared)| shared).unwrap_or(false)
 }
 
 /// Resolve `firecracker` to an absolute path for `--exec-file`: an absolute path as-is, a path with a
@@ -326,4 +474,53 @@ fn cgroup_limits_available() -> bool {
             toks.contains(&"cpu") && toks.contains(&"memory")
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // A slice of real `/proc/self/mountinfo`: `/` and `/tmp` are shared peers, `/mnt/private` is a
+    // private mount (no `shared:` tag), and `/mnt/slave` receives from a master but is not itself
+    // shared. Only a *shared* mount propagates a later bind mount into the jailer's slave namespace.
+    const MOUNTINFO: &str = "\
+21 1 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
+30 21 0:24 / /tmp rw,nosuid,nodev shared:128 - tmpfs tmpfs rw
+40 21 0:30 / /mnt/private rw,relatime - ext4 /dev/sdb rw
+50 21 0:31 / /mnt/slave rw,relatime master:9 - ext4 /dev/sdc rw
+";
+
+    #[test]
+    fn shared_mount_gates_the_density_path() {
+        // A scratch dir on a shared mount (`/tmp`, or nested under it) takes the bind-mount density
+        // path; the longest matching mount point wins, so a file under `/tmp` reads `/tmp`'s tag.
+        assert!(mount_is_shared(MOUNTINFO, Path::new("/tmp")));
+        assert!(mount_is_shared(
+            MOUNTINFO,
+            Path::new("/tmp/agent-42-0/firecracker")
+        ));
+        // The root is shared, so a path on no more-specific mount inherits its propagation.
+        assert!(mount_is_shared(MOUNTINFO, Path::new("/var/lib/agent")));
+    }
+
+    #[test]
+    fn private_or_slave_scratch_falls_back_to_copy() {
+        // Neither a private mount nor a pure slave propagates a later bind mount into the jailer's
+        // namespace, so both must read false (the copy fallback, not a broken density path).
+        assert!(!mount_is_shared(
+            MOUNTINFO,
+            Path::new("/mnt/private/scratch")
+        ));
+        assert!(!mount_is_shared(MOUNTINFO, Path::new("/mnt/slave/scratch")));
+    }
+
+    #[test]
+    fn unparseable_mountinfo_is_not_shared() {
+        // A truncated or empty table can't prove a mount is shared, so default to the safe copy path.
+        assert!(!mount_is_shared("", Path::new("/tmp")));
+        assert!(!mount_is_shared(
+            "garbage line with too few",
+            Path::new("/tmp")
+        ));
+    }
 }

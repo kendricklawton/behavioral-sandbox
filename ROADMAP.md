@@ -867,8 +867,25 @@ Wrap the FC track into a clean, self-hostable engine API.
       013). The `jailed_exec_runs_a_command` test asserts the exec'ing VMM runs as the dropped jail
       uid, so it proves confinement + code together, not a plain boot that happens to exec. The
       still-full-rootfs-copy under the jail is P7.0b's density concern, not a correctness gap here.)*
-- [ ] **P7.0b** Jailed overlay: read-only base + per-run tmpfs overlay under the chroot, so a jailed
+- [x] **P7.0b** Jailed overlay: read-only base + per-run tmpfs overlay under the chroot, so a jailed
       boot runs on the density path, not a full rootfs copy.
+      *(Done. `Vm::boot` no longer refuses `jail` + `read_only_root`. The overlay itself runs
+      guest-side (`overlay-init` over the virtio-blk root), so the host change is the staging: a
+      `read_only_root` jailed boot **bind-mounts** the shared base into the chroot (`stage_ro_base_into_chroot`)
+      instead of copying it, so every jailed VM shares the base's inode and page cache, exactly like
+      the unjailed density path. The bind mount is made in the host mount namespace; the jailer runs
+      the VMM in an `MS_SLAVE` namespace, so a mount under a **shared** host mount propagates in
+      (verified: `/` and `/tmp` are `shared`, and a post-unshare bind mount reaches a slave child).
+      When the scratch dir isn't a shared mount (a hoster pointed it at a private mount, so
+      propagation can't reach the jailer) it falls back to a read-only **copy**: correct and
+      base-immutable, just not page-cache-deduped (density is best-effort, isolation is not,
+      decision 013/014). The bind mount adds a teardown duty: a bind-mounted file `EBUSY`s
+      `remove_dir_all`, so `teardown`/`abort` unmount it (lazy) before reclaiming the scratch dir, and
+      the orphan sweep detaches any mount under a dead driver's dir first. Proof:
+      `jailed_overlay_is_dense_and_base_is_untouched` (real-root gated) asserts the chroot base is a
+      read-only mount sharing the base's very inode (a bind mount, not a 256 MiB copy), the guest can
+      write a normally-read-only path via the overlay, the base file is byte-for-byte untouched, and
+      teardown left no mount behind. The `shared:`-tag parser has CI-safe unit tests.)*
 - [ ] **P7.0c** Jailed networking: stage the tap into the VM's netns under the jailer; retire the
       one-live-networked-clone limit (decisions 009/011 tombstone).
 - [ ] **P7.0d** Jailed bulk I/O: input/output block devices staged chroot-relative and read back

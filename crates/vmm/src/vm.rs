@@ -28,7 +28,7 @@ use crate::exec::{
     PROBE_TIMEOUT, VSOCK_TIMEOUT,
 };
 use crate::firecracker::{Action, ApiClient};
-use crate::jail::{remove_cgroup, Chroot, Jail};
+use crate::jail::{remove_cgroup, unmount_base, Chroot, Jail};
 use crate::lifetime::{KillHandle, VmLifetime};
 use crate::net::Tap;
 use crate::spawn::Spawned;
@@ -138,10 +138,11 @@ pub struct BootConfig {
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
     /// Firecracker directly. Setting it needs **real root** (the jailer `mknod`s device nodes, which
     /// `EPERM` in a non-initial user namespace) and the `jailer` binary. Composes with `guest_cid`
-    /// (the vsock exec channel is staged chroot-relative under the dropped uid), so a jailed VM can
-    /// run code; combining `jail` with `enable_network`, `input_dir`, `output_dir`, or
-    /// `read_only_root` is still a typed error for now (those need chroot staging / a netns that
-    /// later steps add).
+    /// (the vsock exec channel is staged chroot-relative under the dropped uid) and `read_only_root`
+    /// (the shared base is bind-mounted into the chroot, so a jailed boot runs the density path), so a
+    /// jailed VM can run code on the density path; combining `jail` with `enable_network`, `input_dir`,
+    /// or `output_dir` is still a typed error for now (those need chroot staging / a netns that later
+    /// steps add).
     pub jail: Option<Jail>,
     /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/agent-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
@@ -343,21 +344,17 @@ impl Vm {
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
         // Config validation before environment probing, so this deny-by-default refusal is reachable
         // (and unit-testable) on any host, with KVM or not. The jailer now composes with the vsock
-        // exec channel (the socket is staged chroot-relative under the dropped uid), but a NIC, the
-        // overlay, or bulk I/O still need staging into the chroot / a per-VM netns, so refuse those
-        // rather than boot a half-confined VM. The isolation boundary never half-degrades
-        // (decision 013): a jail we can't fully build is a hard error, not a quiet drop to a weaker
-        // confinement.
+        // exec channel (socket staged chroot-relative under the dropped uid) and the read-only overlay
+        // (the shared base bind-mounted into the chroot), but a NIC or bulk I/O still need staging into
+        // the chroot / a per-VM netns, so refuse those rather than boot a half-confined VM. The
+        // isolation boundary never half-degrades (decision 013): a jail we can't fully build is a hard
+        // error, not a quiet drop to a weaker confinement.
         if config.jail.is_some()
-            && (config.enable_network
-                || config.input_dir.is_some()
-                || config.output_dir.is_some()
-                || config.read_only_root)
+            && (config.enable_network || config.input_dir.is_some() || config.output_dir.is_some())
         {
             return Err(VmmError::Vmm(
-                "the jailer currently supports a plain read-write boot with the vsock exec channel; \
-                 a NIC, the overlay (read_only_root), and bulk input/output devices under the jailer \
-                 are later steps"
+                "the jailer currently supports a read-write or read-only-overlay boot with the vsock \
+                 exec channel; a NIC and bulk input/output devices under the jailer are later steps"
                     .into(),
             ));
         }
@@ -646,6 +643,12 @@ pub(crate) fn teardown(
     }
     // Reclaim the lifetime cgroup and disarm the sentinel (it wakes to already-gone dirs).
     lifetime.teardown();
+    // A `read_only_root` jailed boot bind-mounts the shared base into the chroot; unmount it (lazy,
+    // so a still-open fd can't block us) before `remove_dir_all`, or the mount point `EBUSY`s and the
+    // whole chroot leaks. A read-write boot or the copy fallback records no mount, so this is a no-op.
+    if let Some(base) = chroot.and_then(|c| c.base_mount.as_deref()) {
+        unmount_base(base);
+    }
     let _ = std::fs::remove_dir_all(workdir);
 }
 
@@ -667,17 +670,17 @@ mod tests {
 
     #[test]
     fn jail_refuses_half_confined_boots() {
-        // Deny-by-default: the jailer supports a plain read-write boot plus the vsock exec channel,
-        // so any config that would run a *half*-jailed VM (a feature not yet staged into the chroot /
-        // a netns) is a typed error, never a quiet weaker confinement. This is a pure config check,
-        // refused before the /dev/kvm probe, so it holds on any host (no KVM, no root needed). Each
-        // mutation flips one not-yet-jailed feature on; all must be refused. `guest_cid` is absent
-        // here on purpose: jail + vsock is now a supported combination (`jailed_exec_runs_a_command`).
-        let mutations: [fn(&mut BootConfig); 4] = [
+        // Deny-by-default: the jailer supports a read-write or read-only-overlay boot plus the vsock
+        // exec channel, so any config that would run a *half*-jailed VM (a feature not yet staged into
+        // the chroot / a netns) is a typed error, never a quiet weaker confinement. This is a pure
+        // config check, refused before the /dev/kvm probe, so it holds on any host (no KVM, no root
+        // needed). Each mutation flips one not-yet-jailed feature on; all must be refused. `guest_cid`
+        // and `read_only_root` are absent here on purpose: jail + vsock (`jailed_exec_runs_a_command`)
+        // and jail + overlay (`jailed_overlay_is_dense_and_base_is_untouched`) are supported now.
+        let mutations: [fn(&mut BootConfig); 3] = [
             |c| c.enable_network = true,
             |c| c.input_dir = Some(PathBuf::from("/tmp/in")),
             |c| c.output_dir = Some(PathBuf::from("/tmp/out")),
-            |c| c.read_only_root = true,
         ];
         for (i, mutate) in mutations.iter().enumerate() {
             let mut cfg = BootConfig {

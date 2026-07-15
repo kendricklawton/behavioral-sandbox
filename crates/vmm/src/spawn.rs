@@ -25,7 +25,7 @@ use crate::firecracker::{
 };
 use crate::jail::{
     cgroup_limit_args, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup, spawn_jailer,
-    stage_into_chroot, Chroot, Jail, JAILED_VSOCK_UDS,
+    stage_into_chroot, stage_ro_base_into_chroot, unmount_base, Chroot, Jail, JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::{apply_guest_net_identity, Tap};
@@ -287,6 +287,8 @@ impl Spawned {
                 uid: jail.uid,
                 gid: jail.gid,
                 cgroup_dir: None,
+                // Set in `run_boot` when a `read_only_root` jailed boot bind-mounts the shared base.
+                base_mount: None,
             }),
             lifetime,
         })
@@ -535,16 +537,38 @@ impl Spawned {
         // is the scratch dir); `self.rootfs` is already absolute from `launch`. Jailed: stage each into
         // the chroot (safe now that the API socket proved the chroot exists — no race with the jailer's
         // construction) and name it by its chroot-relative path, and record the jailer's cgroup for
-        // teardown. `config.read_only_root` is false under a jail (`Vm::boot` refuses it), so the root
-        // drive is plain read-write either way here.
+        // teardown. A `read_only_root` jailed boot bind-mounts the shared base zero-copy (the density
+        // path); a read-write boot stages a private copy.
         let kernel_arg: String;
         let rootfs_arg: String;
         if let Some(chroot) = self.chroot.as_ref() {
             let (root, uid, gid) = (chroot.root.clone(), chroot.uid, chroot.gid);
-            // Read-only kernel (0444), read-write root disk (0600), both chowned to the jailed uid so
-            // the dropped-privilege Firecracker can open them.
+            // Read-only kernel (0444), chowned to the jailed uid so the dropped-privilege Firecracker
+            // can open it.
             kernel_arg = stage_into_chroot(&root, "kernel", &config.kernel, uid, gid, 0o444)?;
-            rootfs_arg = stage_into_chroot(&root, "rootfs.ext4", &config.rootfs, uid, gid, 0o600)?;
+            // The root disk: bind-mount the shared read-only base (density path) when `read_only_root`,
+            // else a read-write private copy (0600). The bind mount, if made, is recorded on the chroot
+            // so teardown unmounts it before reclaiming the scratch dir.
+            let base_mount;
+            if config.read_only_root {
+                let (arg, mount) = stage_ro_base_into_chroot(
+                    &root,
+                    "rootfs.ext4",
+                    &config.rootfs,
+                    &config.scratch_dir,
+                    uid,
+                    gid,
+                )?;
+                rootfs_arg = arg;
+                base_mount = mount;
+            } else {
+                rootfs_arg =
+                    stage_into_chroot(&root, "rootfs.ext4", &config.rootfs, uid, gid, 0o600)?;
+                base_mount = None;
+            }
+            if let Some(chroot) = self.chroot.as_mut() {
+                chroot.base_mount = base_mount;
+            }
             // Learn the cgroup the jailer placed the VMM in (from `/proc/<pid>/cgroup`, now that
             // Firecracker is running in its final cgroup), so teardown can remove it. The lifetime
             // sentinel (P6.7) watches the *precomputed* jailer cgroup path from spawn; if the
@@ -770,6 +794,11 @@ impl Spawned {
         self.console.join();
         let fc_log = std::fs::read_to_string(self.workdir.join(FC_STDERR)).unwrap_or_default();
         let console = self.console.snapshot();
+        // A `read_only_root` jailed boot bind-mounts the shared base into the chroot; unmount it
+        // (lazy) before reclaiming the scratch dir, or `remove_dir_all` `EBUSY`s on the mount point.
+        if let Some(base) = self.chroot.as_ref().and_then(|c| c.base_mount.as_deref()) {
+            unmount_base(base);
+        }
         let _ = std::fs::remove_dir_all(&self.workdir);
 
         let mut detail = String::new();

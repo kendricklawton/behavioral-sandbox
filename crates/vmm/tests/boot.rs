@@ -9,12 +9,14 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_vmm::{Jail, Vm, DEFAULT_GUEST_CID, DEFAULT_JAIL_UID};
 
-use common::{agent_rootfs_config, config, have_jailer_privileges, have_net_admin};
+use common::{
+    agent_rootfs_config, config, have_jailer_privileges, have_net_admin, jailed_overlay_config,
+};
 
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
@@ -271,6 +273,129 @@ fn overlay_is_writable_and_base_is_untouched() {
         before_mtime,
         "base image must not be rewritten"
     );
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
+fn jailed_overlay_is_dense_and_base_is_untouched() {
+    // P7.0b: a jailed boot runs the density path, not a full rootfs copy. The read-only shared base is
+    // *bind-mounted* into the chroot (same inode, page-cache-deduped across VMs), the guest overlays a
+    // per-run tmpfs so `/` is writable, and the base file is never mutated. Needs real root (the
+    // jailer `mknod`s device nodes); skip where KVM is available but real root isn't.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping jailed_overlay_is_dense_and_base_is_untouched: needs real root (euid 0, initial userns)"
+        );
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
+    let before = std::fs::metadata(&base).expect("stat base");
+    let (base_len, base_mtime, base_ino, base_dev) = (
+        before.len(),
+        before.modified().expect("base mtime"),
+        before.ino(),
+        before.dev(),
+    );
+
+    let vm = Vm::boot(jailed_overlay_config())
+        .expect("jailed overlay microVM should boot to the agent's readiness marker");
+
+    // Density, proven three ways: the chroot's root disk is a *mount* at all (a full copy would create
+    // none), it is mounted *read-only* (the base can't be mutated through the chroot), and it resolves
+    // to the *same inode* as the shared base (a bind mount, so one page cache is shared, not a per-VM
+    // 256 MiB copy).
+    let bind = jailed_base_mount().expect(
+        "a bind mount of the base should exist under the chroot (density path, not a copy)",
+    );
+    assert!(
+        bind.read_only,
+        "the staged base must be mounted read-only so it can never be mutated through the chroot"
+    );
+    let staged = std::fs::metadata(&bind.mount_point).expect("stat the bind-mounted base");
+    assert_eq!(
+        (staged.ino(), staged.dev()),
+        (base_ino, base_dev),
+        "the chroot base must be the same inode as the shared base (bind mount), not a per-VM copy"
+    );
+
+    // Overlay writable: writing a path that lives on the read-only base succeeds only via the tmpfs
+    // upper the guest's `overlay-init` stacks — the same overlay the unjailed density path uses.
+    let out = vm
+        .exec(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "echo overlaid > /etc/p7b && cat /etc/p7b".into(),
+            ],
+            b"",
+        )
+        .expect("write+read a normally-read-only path via the jailed overlay");
+    assert_eq!(
+        out.stdout,
+        b"overlaid\n",
+        "jailed overlay `/etc` should be writable; console:\n{}",
+        vm.console()
+    );
+    assert_eq!(out.exit_code, 0);
+
+    let mount_point = bind.mount_point.clone();
+    vm.shutdown()
+        .expect("jailed overlay shutdown should succeed");
+
+    // The base is byte-for-byte untouched, and teardown unmounted the bind mount — no leaked mount, so
+    // `remove_dir_all` reclaimed the chroot (a lingering mount would `EBUSY` and leak it).
+    let after = std::fs::metadata(&base).expect("stat base again");
+    assert_eq!(after.len(), base_len, "base image size must not change");
+    assert_eq!(
+        after.modified().expect("base mtime after"),
+        base_mtime,
+        "base image must not be rewritten"
+    );
+    assert!(
+        !path_is_mounted(&mount_point),
+        "teardown must unmount the base bind mount (else the chroot leaks on EBUSY)"
+    );
+}
+
+/// A read-only base bind mount found in `/proc/self/mountinfo`.
+struct BaseMount {
+    mount_point: PathBuf,
+    read_only: bool,
+}
+
+/// The read-only base bind mount a jailed overlay boot stages into its chroot, located in
+/// `/proc/self/mountinfo` by its `.../firecracker/<id>/root/rootfs.ext4` mount point (field 5). The
+/// per-mount options (field 6) carry `ro` for a read-only mount.
+fn jailed_base_mount() -> Option<BaseMount> {
+    let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    for line in info.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        let mount_point = fields[4];
+        if !(mount_point.contains("/firecracker/") && mount_point.ends_with("/root/rootfs.ext4")) {
+            continue;
+        }
+        let read_only = fields[5].split(',').any(|o| o == "ro");
+        return Some(BaseMount {
+            mount_point: PathBuf::from(mount_point),
+            read_only,
+        });
+    }
+    None
+}
+
+/// Whether `path` is currently a mount point (its exact path appears as field 5 of a
+/// `/proc/self/mountinfo` line). Used to assert teardown detached the base bind mount.
+fn path_is_mounted(path: &Path) -> bool {
+    let Some(target) = path.to_str() else {
+        return false;
+    };
+    std::fs::read_to_string("/proc/self/mountinfo")
+        .map(|info| info.lines().any(|l| l.split(' ').nth(4) == Some(target)))
+        .unwrap_or(false)
 }
 
 /// Host tap interfaces currently present (`fc*`), for the leak assertion below.

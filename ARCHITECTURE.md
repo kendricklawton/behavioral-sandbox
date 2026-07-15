@@ -1018,13 +1018,15 @@ default run confined and avoids a retrofit under a pinned seam.
   tombstone) and jailed-by-default land together as the confined default surface.
 - Jailed snapshot/restore and the warm pool under the jailer remain downstream of exec under the jailer
   (a jailed VM's disk lives in the chroot, decision 010), tracked with the same boxes.
-- **Status: the first convergence step (P7.0a) landed.** `jail` now composes with the vsock exec channel:
-  under the jailer Firecracker binds the socket at the chroot-relative `/run/v.sock` (cwd = chroot root,
-  `/run` writable by the dropped uid), and the host dials it at its absolute path under the chroot. The
-  mutual exclusion of the opening paragraph is retired for vsock specifically (`jailed_exec_runs_a_command`
-  proves a confined VMM running code); the jail still hard-errors on a NIC / overlay / bulk I/O (P7.0b to
-  P7.0e). `Sandbox::exec`-jails-by-default and the tap/overlay/drive/snapshot staging are the remaining
-  steps.
+- **Status: the first convergence steps (P7.0a, P7.0b) landed.** `jail` now composes with the vsock exec
+  channel and the read-only overlay. Vsock: under the jailer Firecracker binds the socket at the
+  chroot-relative `/run/v.sock` (cwd = chroot root, `/run` writable by the dropped uid), and the host dials
+  it at its absolute path under the chroot (`jailed_exec_runs_a_command`). Overlay: a `read_only_root` jailed
+  boot bind-mounts the shared base into the chroot (same inode, page-cache-deduped, propagated into the
+  jailer's `MS_SLAVE` mount namespace) so it runs the density path, not a per-VM copy, with a copy fallback
+  on a non-shared scratch mount (`jailed_overlay_is_dense_and_base_is_untouched`). The mutual exclusion of
+  the opening paragraph is retired for vsock and the overlay; the jail still hard-errors on a NIC / bulk I/O
+  (P7.0c, P7.0d). `Sandbox::exec`-jails-by-default and the tap/drive/snapshot staging are the remaining steps.
 - The jailer's per-VM netns (decisions 009/011's tombstone for concurrent networked clones) rides the
   jailed-networking box: once the tap is staged into the jail, its netns removes the one-live-networked-
   clone limit.

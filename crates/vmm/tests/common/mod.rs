@@ -109,6 +109,16 @@ pub fn jailed_agent_config() -> BootConfig {
     cfg
 }
 
+/// The agent rootfs booted **under the jailer** on the **density path**: `read_only_root` (the shared
+/// base bind-mounted into the chroot, guest tmpfs overlay) plus the vsock exec channel. This is the
+/// jailed counterpart of [`agent_rootfs_config`], which it inherits `read_only_root = true` from, only
+/// adding the jail. Needs real root (see [`have_jailer_privileges`]).
+pub fn jailed_overlay_config() -> BootConfig {
+    let mut cfg = agent_rootfs_config();
+    cfg.jail = Some(Jail::default());
+    cfg
+}
+
 /// Boot the agent rootfs, warm the Python runtime (so the interpreter + stdlib are page-cache-hot in
 /// the guest's memory), and take a snapshot of *that* warm state. Returns the source's cold-boot
 /// latency alongside the bundle so callers can compare it to restore.

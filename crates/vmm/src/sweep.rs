@@ -34,6 +34,7 @@ use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::jail::unmount_base;
 use crate::net::{iface_exists, ip_link_del};
 use crate::VmmError;
 
@@ -153,6 +154,11 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
                 }
             }
         }
+        // A crashed driver's jailed read-only boot leaves the shared base **bind-mounted** into its
+        // chroot; `remove_dir_all` would `EBUSY` on that mount point and leak the whole dir. Detach any
+        // mount under this dir first (lazy, best-effort), so reclamation is never blocked by a mount
+        // its owning driver died before unmounting.
+        detach_mounts_under(&dir);
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {
                 report.dirs_reclaimed += 1;
@@ -167,6 +173,29 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
         }
     }
     Ok(report)
+}
+
+/// Detach (lazy, best-effort) every mount whose mount point lies under `dir`, deepest first, so a
+/// following `remove_dir_all` can't `EBUSY` on a mount a crashed driver left behind — today that is
+/// the read-only base a jailed overlay boot bind-mounts into its chroot. Reads `/proc/self/mountinfo`
+/// (mount point is its 5th space-separated field); paths a self-hosted scratch dir carries have no
+/// spaces, so the octal-escape edge (`\040`) is not decoded. A no-op when `dir` holds no mounts.
+fn detach_mounts_under(dir: &Path) {
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return;
+    };
+    let mut points: Vec<PathBuf> = info
+        .lines()
+        .filter_map(|line| {
+            let mp = Path::new(line.split(' ').nth(4)?);
+            mp.starts_with(dir).then(|| mp.to_path_buf())
+        })
+        .collect();
+    // Deepest first: a child mount must be detached before its parent mount point.
+    points.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    for mp in points {
+        unmount_base(&mp);
+    }
 }
 
 /// The owner pid embedded in a per-VM scratch-dir name, iff `name` matches the exact
