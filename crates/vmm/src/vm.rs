@@ -27,7 +27,7 @@ use crate::exec::{
     connect_agent_at, run_exec, ExecBounds, EXEC_KILL_SLACK, PROBE_TIMEOUT, VSOCK_TIMEOUT,
 };
 use crate::firecracker::{Action, ApiClient};
-use crate::jail::{remove_cgroup, unmount_base, Chroot, Jail};
+use crate::jail::{remove_cgroup, Chroot, Jail};
 use crate::lifetime::{KillHandle, VmLifetime};
 use crate::net::Tap;
 use crate::spawn::Spawned;
@@ -674,9 +674,17 @@ pub(crate) fn teardown(
     let _ = child.kill();
     let _ = child.wait();
     console.join();
-    if let Some(tap) = tap {
-        tap.delete();
-    }
+    // Delete the netns (cascading its tap away), then check it actually went. A transient
+    // `ip netns del` failure would otherwise leave a netns with no scratch dir — invisible to the
+    // dir-keyed orphan sweep, and a permanent `netns add` collision once the pid is recycled. So the
+    // scratch-dir reclaim below is gated on this: an undeleted netns keeps its dir and stays sweepable.
+    let netns_gone = match tap {
+        Some(tap) => {
+            tap.delete();
+            !tap.netns_exists()
+        }
+        None => true,
+    };
     // The VMM is reaped above, so its cgroup is now empty and removable. Do this before the scratch
     // dir so a slow `remove_dir_all` can't widen the window a leaked cgroup lives in.
     if let Some(cgroup) = chroot.and_then(|c| c.cgroup_dir.as_deref()) {
@@ -688,10 +696,20 @@ pub(crate) fn teardown(
     // memory file + base disk); unmount each (lazy, so a still-open fd can't block us) before
     // `remove_dir_all`, or the mount point `EBUSY`s and the whole chroot leaks. A read-write boot or
     // the copy fallback records no mounts, so this is a no-op.
-    for mount in chroot.map(|c| c.mounts.as_slice()).unwrap_or_default() {
-        unmount_base(mount);
+    if let Some(chroot) = chroot {
+        chroot.unmount_all();
     }
-    let _ = std::fs::remove_dir_all(workdir);
+    // Reclaim the scratch dir only if the netns is gone (or there was none). Keeping the dir when a
+    // netns lingers is deliberate: the orphan sweep keys on dead drivers' *dirs*, so the pair must
+    // stay together to be reclaimable rather than leak a dir-less netns forever.
+    if netns_gone {
+        let _ = std::fs::remove_dir_all(workdir);
+    } else {
+        tracing::warn!(
+            workdir = %workdir.display(),
+            "netns outlived teardown; keeping the scratch dir so the orphan sweep can reclaim both"
+        );
+    }
 }
 
 #[cfg(test)]

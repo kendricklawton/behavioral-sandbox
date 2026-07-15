@@ -267,6 +267,14 @@ fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
     payload.extend_from_slice(bytes);
 }
 
+/// The encoded size of one [`put_blob`] (its 4-byte length prefix + the bytes). Used to size the
+/// payload buffer *exactly* up front (see [`write_exec`]/[`write_put_file`]): a secret-bearing
+/// payload must live in **one** buffer so the post-send `fill(0)` wipes every copy — a `Vec` that
+/// grew would strand unwiped plaintext prefixes in the reallocations it freed (decision 018).
+fn blob_len(bytes: &[u8]) -> usize {
+    4 + bytes.len()
+}
+
 /// Send a [`Request`].
 ///
 /// # Errors
@@ -275,48 +283,78 @@ fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
 /// [`ChannelError::Io`] on a write failure.
 pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ChannelError> {
     match req {
-        Request::PutFile { path, data } => {
-            let mut payload = Vec::new();
-            put_blob(&mut payload, path.as_bytes());
-            put_blob(&mut payload, data);
-            let sent = write_frame(w, TAG_PUTFILE, &payload);
-            // Secret hygiene: this buffer held a full copy of the injected bytes; wipe it before it
-            // returns to the allocator (best-effort — the kernel's socket buffer is out of reach).
-            payload.fill(0);
-            sent
-        }
+        Request::PutFile { path, data } => write_put_file(w, path, data),
         Request::Exec {
             argv,
             stdin,
             env,
             artifacts,
             timeout_ms,
-        } => {
-            let mut payload = Vec::new();
-            put_u32(&mut payload, argv.len() as u32);
-            for arg in argv {
-                put_blob(&mut payload, arg.as_bytes());
-            }
-            put_blob(&mut payload, stdin);
-            put_u32(&mut payload, artifacts.len() as u32);
-            for path in artifacts {
-                put_blob(&mut payload, path.as_bytes());
-            }
-            put_u32(&mut payload, *timeout_ms);
-            put_u32(&mut payload, env.len() as u32);
-            for (key, value) in env {
-                put_blob(&mut payload, key.as_bytes());
-                put_blob(&mut payload, value.as_bytes());
-            }
-            let sent = write_frame(w, TAG_EXEC, &payload);
-            // Same hygiene as `PutFile`: the serialized stdin + env values are wiped, not just freed.
-            payload.fill(0);
-            sent
-        }
+        } => write_exec(w, argv, stdin, env, artifacts, *timeout_ms),
         Request::Unknown { tag } => Err(ChannelError::Protocol(format!(
             "Request::Unknown (tag {tag}) is read-only and cannot be sent"
         ))),
     }
+}
+
+/// Serialize and send a `PutFile` from **borrowed** parts — no owned [`Request`] to clone the
+/// secret bytes into first. The payload is sized exactly (one buffer, no growth) so the post-send
+/// `fill(0)` wipes the engine's only copy of the injected bytes before it returns to the allocator
+/// (decision 018; the kernel socket buffer is out of reach, best-effort by design).
+pub(crate) fn write_put_file(
+    w: &mut impl Write,
+    path: &str,
+    data: &[u8],
+) -> Result<(), ChannelError> {
+    let mut payload = Vec::with_capacity(blob_len(path.as_bytes()) + blob_len(data));
+    put_blob(&mut payload, path.as_bytes());
+    put_blob(&mut payload, data);
+    let sent = write_frame(w, TAG_PUTFILE, &payload);
+    payload.fill(0);
+    sent
+}
+
+/// Serialize and send an `Exec` from **borrowed** parts. Like [`write_put_file`], the payload is
+/// preallocated to its exact encoded size so the serialized stdin + env values live in one buffer
+/// the post-send `fill(0)` fully wipes.
+pub(crate) fn write_exec(
+    w: &mut impl Write,
+    argv: &[String],
+    stdin: &[u8],
+    env: &[(String, String)],
+    artifacts: &[String],
+    timeout_ms: u32,
+) -> Result<(), ChannelError> {
+    let cap = 4 // argv count
+        + argv.iter().map(|a| blob_len(a.as_bytes())).sum::<usize>()
+        + blob_len(stdin)
+        + 4 // artifacts count
+        + artifacts.iter().map(|p| blob_len(p.as_bytes())).sum::<usize>()
+        + 4 // timeout_ms
+        + 4 // env count
+        + env
+            .iter()
+            .map(|(k, v)| blob_len(k.as_bytes()) + blob_len(v.as_bytes()))
+            .sum::<usize>();
+    let mut payload = Vec::with_capacity(cap);
+    put_u32(&mut payload, argv.len() as u32);
+    for arg in argv {
+        put_blob(&mut payload, arg.as_bytes());
+    }
+    put_blob(&mut payload, stdin);
+    put_u32(&mut payload, artifacts.len() as u32);
+    for path in artifacts {
+        put_blob(&mut payload, path.as_bytes());
+    }
+    put_u32(&mut payload, timeout_ms);
+    put_u32(&mut payload, env.len() as u32);
+    for (key, value) in env {
+        put_blob(&mut payload, key.as_bytes());
+        put_blob(&mut payload, value.as_bytes());
+    }
+    let sent = write_frame(w, TAG_EXEC, &payload);
+    payload.fill(0);
+    sent
 }
 
 /// Read a [`Request`]. An unknown-but-well-framed tag becomes [`Request::Unknown`] (not an error),
@@ -465,12 +503,40 @@ impl<S: Read + Write> ClientConnection<S> {
         Ok(Self { stream })
     }
 
-    /// Send the exec request.
+    /// Send a request, cloning the caller's data into an owned [`Request`] first. For secret-bearing
+    /// requests (`PutFile`/`Exec`) prefer [`send_put_file`](Self::send_put_file) /
+    /// [`send_exec`](Self::send_exec), which serialize from borrowed slices — no extra owned copy of
+    /// the secret to wipe.
     ///
     /// # Errors
     /// [`ChannelError`] on a framing or write failure.
     pub fn send_request(&mut self, req: &Request) -> Result<(), ChannelError> {
         write_request(&mut self.stream, req)
+    }
+
+    /// Send a `PutFile` from borrowed parts — the injected bytes are serialized (and the wire buffer
+    /// wiped) without an intermediate owned copy the caller would have to wipe too.
+    ///
+    /// # Errors
+    /// [`ChannelError`] on a framing or write failure.
+    pub fn send_put_file(&mut self, path: &str, data: &[u8]) -> Result<(), ChannelError> {
+        write_put_file(&mut self.stream, path, data)
+    }
+
+    /// Send an `Exec` from borrowed parts. Like [`send_put_file`](Self::send_put_file), the secret
+    /// stdin/env live only in the single wire buffer, which is wiped after the send.
+    ///
+    /// # Errors
+    /// [`ChannelError`] on a framing or write failure.
+    pub fn send_exec(
+        &mut self,
+        argv: &[String],
+        stdin: &[u8],
+        env: &[(String, String)],
+        artifacts: &[String],
+        timeout_ms: u32,
+    ) -> Result<(), ChannelError> {
+        write_exec(&mut self.stream, argv, stdin, env, artifacts, timeout_ms)
     }
 
     /// Read the next response frame.
@@ -727,6 +793,99 @@ mod tests {
         client.send_request(&req).unwrap();
         assert_eq!(client.recv_response().unwrap(), Response::Exit { code: 0 });
         server.join().unwrap();
+    }
+
+    #[test]
+    fn borrowed_send_matches_owned_and_round_trips() {
+        // The borrowed `send_exec`/`send_put_file` must serialize byte-identically to the owned
+        // `send_request` path (same wire protocol), and decode back to the same `Request`.
+        use std::os::unix::net::UnixStream;
+        let cases = [
+            Request::Exec {
+                argv: vec!["sh".into(), "-c".into(), "echo hi".into()],
+                stdin: b"input".to_vec(),
+                env: vec![("SECRET".into(), "s3kr1t".into())],
+                artifacts: vec!["out.txt".into()],
+                timeout_ms: 1234,
+            },
+            Request::PutFile {
+                path: "in.txt".into(),
+                data: b"file body".to_vec(),
+            },
+        ];
+        for req in cases {
+            let (host, guest) = UnixStream::pair().unwrap();
+            let expected = req.clone();
+            let server = std::thread::spawn(move || {
+                let mut conn = ServerConnection::accept(guest).unwrap();
+                conn.recv_request().unwrap()
+            });
+            let mut client = ClientConnection::connect(host).unwrap();
+            match &req {
+                Request::Exec {
+                    argv,
+                    stdin,
+                    env,
+                    artifacts,
+                    timeout_ms,
+                } => client
+                    .send_exec(argv, stdin, env, artifacts, *timeout_ms)
+                    .unwrap(),
+                Request::PutFile { path, data } => client.send_put_file(path, data).unwrap(),
+                _ => {} // no other variants in `cases`
+            }
+            drop(client);
+            assert_eq!(server.join().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn secret_payload_is_exactly_sized_so_one_buffer_holds_it() {
+        // Secret hygiene (decision 018): the payload must be preallocated to its exact encoded size,
+        // so it never reallocates and strands an unwiped plaintext prefix on the heap. Build the
+        // payloads the same way the serializers do and assert `len == capacity` (no growth headroom).
+        let path = "big.bin";
+        let data = vec![0xAB; 4096];
+        let mut payload = Vec::with_capacity(blob_len(path.as_bytes()) + blob_len(&data));
+        put_blob(&mut payload, path.as_bytes());
+        put_blob(&mut payload, &data);
+        assert_eq!(payload.len(), payload.capacity(), "PutFile payload grew");
+
+        let argv = [String::from("cat")];
+        let stdin = vec![0xCD; 8192];
+        let env = [(String::from("K"), "v".repeat(1000))];
+        let artifacts = [String::from("a"), String::from("b/c")];
+        let cap = 4
+            + argv.iter().map(|a| blob_len(a.as_bytes())).sum::<usize>()
+            + blob_len(&stdin)
+            + 4
+            + artifacts
+                .iter()
+                .map(|p| blob_len(p.as_bytes()))
+                .sum::<usize>()
+            + 4
+            + 4
+            + env
+                .iter()
+                .map(|(k, v)| blob_len(k.as_bytes()) + blob_len(v.as_bytes()))
+                .sum::<usize>();
+        let mut payload = Vec::with_capacity(cap);
+        put_u32(&mut payload, argv.len() as u32);
+        for a in &argv {
+            put_blob(&mut payload, a.as_bytes());
+        }
+        put_blob(&mut payload, &stdin);
+        put_u32(&mut payload, artifacts.len() as u32);
+        for p in &artifacts {
+            put_blob(&mut payload, p.as_bytes());
+        }
+        put_u32(&mut payload, 30_000);
+        put_u32(&mut payload, env.len() as u32);
+        for (k, v) in &env {
+            put_blob(&mut payload, k.as_bytes());
+            put_blob(&mut payload, v.as_bytes());
+        }
+        assert_eq!(payload.len(), payload.capacity(), "Exec payload grew");
     }
 
     #[test]

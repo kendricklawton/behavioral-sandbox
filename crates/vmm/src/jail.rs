@@ -125,6 +125,30 @@ pub(crate) struct Chroot {
     pub(crate) mounts: Vec<PathBuf>,
 }
 
+impl Chroot {
+    /// A fresh chroot record for a just-spawned jail: `root` on the host, the jail's dropped
+    /// uid/gid, no cgroup learned yet, and no mounts staged yet (`run_boot`/`run_restore` record
+    /// those as they bind them). One constructor so both jailed launch paths assemble it identically.
+    pub(crate) fn new(root: PathBuf, jail: &Jail) -> Self {
+        Self {
+            root,
+            uid: jail.uid,
+            gid: jail.gid,
+            cgroup_dir: None,
+            mounts: Vec::new(),
+        }
+    }
+
+    /// Detach every bind mount staged into this chroot (lazy, best-effort), the step that must run
+    /// before the scratch dir's `remove_dir_all` or the mount point `EBUSY`s and leaks the chroot.
+    /// One home for the invariant, shared by `teardown` and `abort`. A no-op when nothing was mounted.
+    pub(crate) fn unmount_all(&self) {
+        for mount in &self.mounts {
+            unmount_base(mount);
+        }
+    }
+}
+
 /// Spawn the **jailer**, which builds the chroot and `exec`s Firecracker inside it. Returns the child
 /// (whose pid is Firecracker's, since the jailer `exec`s rather than forks), its console, the host
 /// path of the API socket, and the chroot root (where resources are staged before boot).
@@ -388,7 +412,12 @@ fn mount_is_shared(mountinfo: &str, target: &Path) -> bool {
             .take_while(|f| **f != "-")
             .any(|f| f.starts_with("shared:"));
         let depth = mount_point.components().count();
-        if best.map(|(d, _)| depth > d).unwrap_or(true) {
+        // `>=`, not `>`: on an *overmount* (two mounts at the same point, so equal depth) the topmost
+        // — the **last** mountinfo line — governs what a later mount there inherits. Keeping the
+        // first-seen line would read a point listed `shared:` first then private-later as shared, take
+        // the bind path with no copy fallback, and hard-fail the jailed boot (the bind wouldn't
+        // propagate). Later same-depth line wins; a strictly deeper mount point still wins over both.
+        if best.map(|(d, _)| depth >= d).unwrap_or(true) {
             best = Some((depth, shared));
         }
     }
@@ -527,6 +556,31 @@ mod tests {
             Path::new("/mnt/private/scratch")
         ));
         assert!(!mount_is_shared(MOUNTINFO, Path::new("/mnt/slave/scratch")));
+    }
+
+    #[test]
+    fn overmount_is_governed_by_the_topmost_entry() {
+        // Two mounts at the *same* point (an overmount): the effective propagation is the topmost —
+        // the last line. A point shared-first then private-later must read *not* shared (so the copy
+        // fallback fires instead of a hard-failing bind); private-first then shared-later reads shared.
+        let shared_then_private = "\
+21 1 0:20 / / rw shared:1 - ext4 /dev/root rw
+30 21 0:24 / /scratch rw shared:128 - tmpfs a rw
+31 21 0:25 / /scratch rw - tmpfs b rw
+";
+        assert!(
+            !mount_is_shared(shared_then_private, Path::new("/scratch/x")),
+            "the topmost (private) overmount governs, so this is not shared"
+        );
+        let private_then_shared = "\
+21 1 0:20 / / rw shared:1 - ext4 /dev/root rw
+30 21 0:24 / /scratch rw - tmpfs a rw
+31 21 0:25 / /scratch rw shared:200 - tmpfs b rw
+";
+        assert!(
+            mount_is_shared(private_then_shared, Path::new("/scratch/x")),
+            "the topmost (shared) overmount governs"
+        );
     }
 
     #[test]

@@ -5,10 +5,10 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
-use agent_channel::{ClientConnection, Request, Response};
+use agent_channel::{ClientConnection, Response};
 
 use crate::{ExecMetrics, RunResult, VmmError};
 
@@ -86,6 +86,19 @@ pub(crate) struct ExecBounds {
     pub(crate) max_output: usize,
 }
 
+/// Encode a command budget as the wire `timeout_ms`, **floored at 1 ms**. The guest reads a
+/// `timeout_ms` of `0` as "no limit — use my 1 h `MAX_EXEC_TIMEOUT` ceiling" (`budget_from`), so a
+/// nonzero-but-sub-millisecond budget (e.g. `Duration::from_micros(500)`) must not truncate to `0`
+/// and silently become *unbounded*, inverting the timeout ladder — the host's `ExecUnresponsive`
+/// backstop would then be what cuts the run, not the cooperative `ExecTimeout`. The host never means
+/// "unlimited" (every exec carries a real budget), so the floor is unconditional: a real budget
+/// always encodes to a real, nonzero limit. Saturates rather than wraps for absurd budgets.
+fn wire_timeout_ms(timeout: Duration) -> u32 {
+    u32::try_from(timeout.as_millis())
+        .unwrap_or(u32::MAX)
+        .max(1)
+}
+
 pub(crate) fn run_exec<S: Read + Write>(
     conn: &mut ClientConnection<S>,
     argv: &[String],
@@ -109,36 +122,15 @@ pub(crate) fn run_exec<S: Read + Write>(
         .unwrap_or_else(|| started + Duration::from_secs(86_400));
 
     // Inject input files first, then the terminal exec request. The injected bytes are secrets by
-    // presumption (the secret-hygiene contract on `RunningVm::exec_with_files`): the wire copies
-    // built here are wiped after each send, not just freed, and nothing on this path logs a file
-    // body or an env value. The wipe runs before the send result is checked so a failed write
-    // doesn't skip it. `?` on channel calls yields `VmmError::Channel(..)`, preserving the source.
+    // presumption (the secret-hygiene contract on `RunningVm::exec_with_files`): the borrowed-send
+    // path serializes straight from the caller's slices into a single exact-sized wire buffer that
+    // the channel wipes after each send (decision 018), so the engine keeps no extra copy of a file
+    // body or env value to strand — and nothing on this path logs one. `?` yields
+    // `VmmError::Channel(..)`, preserving the source.
     for (path, data) in files_in {
-        let mut req = Request::PutFile {
-            path: path.clone(),
-            data: data.clone(),
-        };
-        let sent = conn.send_request(&req);
-        if let Request::PutFile { data, .. } = &mut req {
-            data.fill(0);
-        }
-        sent?;
+        conn.send_put_file(path, data)?;
     }
-    let mut req = Request::Exec {
-        argv: argv.to_vec(),
-        stdin: stdin.to_vec(),
-        env: env.to_vec(),
-        artifacts: artifacts.to_vec(),
-        timeout_ms: u32::try_from(bounds.timeout.as_millis()).unwrap_or(u32::MAX),
-    };
-    let sent = conn.send_request(&req);
-    if let Request::Exec { stdin, env, .. } = &mut req {
-        stdin.fill(0);
-        for (_, value) in env.iter_mut() {
-            wipe_string(value);
-        }
-    }
-    sent?;
+    conn.send_exec(argv, stdin, env, artifacts, wire_timeout_ms(bounds.timeout))?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -168,6 +160,17 @@ pub(crate) fn run_exec<S: Read + Write>(
                 stderr.extend_from_slice(&b);
             }
             Response::File { path, data } => {
+                // The guest names the artifact paths, and the guest agent is not the trust boundary
+                // (`guest-agent/src/lib.rs`): a hostile or buggy guest can return `/etc/passwd` or
+                // `../../etc/cron.d/x`. Reject anything that isn't a relative, non-climbing path
+                // *here*, at the seam, so every embedder that writes `RunResult.files` to disk (the
+                // pinned SDKs, not just the CLI) inherits the containment instead of re-deriving it.
+                if !artifact_path_is_safe(&path) {
+                    return Err(VmmError::GuestProtocol(format!(
+                        "guest returned artifact path {path:?} that is absolute or escapes the \
+                         working tree"
+                    )));
+                }
                 captured += path.len() + data.len() + FRAME_FLOOR;
                 files.push((path, data));
             }
@@ -206,8 +209,11 @@ pub(crate) fn run_exec<S: Read + Write>(
             }
             // A guest-side fault on a healthy channel — distinct from a transport failure.
             Response::Error(msg) => return Err(VmmError::GuestExec(msg)),
+            // A well-framed frame the exec loop never expects here (a stray `PutFile` echo, a
+            // second handshake): the channel is intact but the guest is off-script. A protocol
+            // violation, same bucket as a bad artifact path — the guest's fault, not the host's.
             _ => {
-                return Err(VmmError::Vmm(
+                return Err(VmmError::GuestProtocol(
                     "unexpected response frame from guest agent".into(),
                 ))
             }
@@ -220,14 +226,17 @@ pub(crate) fn run_exec<S: Read + Write>(
     }
 }
 
-/// Zero a `String`'s bytes in place before it's dropped — the env-value half of the wipe-after-send
-/// hygiene (a `Vec<u8>` is just `fill(0)`). `String` has no safe in-place byte mutation, so the
-/// value round-trips through its own buffer: `into_bytes` *moves* it (no copy), the zeroed bytes are
-/// trivially valid UTF-8, and the same buffer moves back — nothing secret is left in a freed page.
-fn wipe_string(s: &mut String) {
-    let mut bytes = std::mem::take(s).into_bytes();
-    bytes.fill(0);
-    *s = String::from_utf8(bytes).unwrap_or_default();
+/// Whether a guest-returned artifact path is safe to hand an embedder: a non-empty **relative** path
+/// whose every component is a plain name or `.` — no absolute root, no `..` climb. The guest names
+/// these paths and the guest agent is not the trust boundary, so this is the seam's containment
+/// guarantee: `RunResult.files` never carries a path that would write outside a caller's working
+/// tree. Mirrors the check the CLI's `write_artifacts` used to be the sole owner of, lifted here so
+/// every embedder is covered once.
+fn artifact_path_is_safe(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
 /// Connect to `uds` and perform Firecracker's host-initiated vsock handshake: send
@@ -427,6 +436,78 @@ mod tests {
             vec![("out/up.txt".to_string(), b"HELLO\n".to_vec())]
         );
         server.join().expect("server thread");
+    }
+
+    #[test]
+    fn wire_timeout_never_encodes_a_real_budget_as_unlimited() {
+        // The bug: a sub-millisecond budget truncates to 0 ms, which the guest reads as "unlimited".
+        // The floor keeps a real budget a real limit.
+        assert_eq!(wire_timeout_ms(Duration::from_micros(500)), 1);
+        assert_eq!(wire_timeout_ms(Duration::ZERO), 1);
+        // Whole-millisecond budgets pass through unchanged.
+        assert_eq!(wire_timeout_ms(Duration::from_millis(1)), 1);
+        assert_eq!(wire_timeout_ms(Duration::from_millis(1500)), 1500);
+        assert_eq!(wire_timeout_ms(Duration::from_secs(3600)), 3_600_000);
+        // An absurd budget saturates rather than wrapping back toward (or to) zero.
+        assert_eq!(wire_timeout_ms(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn artifact_path_is_safe_rejects_escaping_and_absolute_paths() {
+        // The seam's containment predicate: only relative, non-climbing paths survive.
+        for ok in ["a.txt", "out/up.txt", "./out/up.txt", "a/b/c"] {
+            assert!(artifact_path_is_safe(ok), "{ok:?} should be accepted");
+        }
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../escape.txt",
+            "../../etc/cron.d/x",
+            "out/../../etc/passwd",
+            "a/../../b",
+        ] {
+            assert!(!artifact_path_is_safe(bad), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn run_exec_rejects_a_guest_returned_escaping_artifact_path() {
+        // A *hostile* guest (not the real agent, which validates its own writes): the fake server
+        // speaks the channel protocol directly and returns a `File` whose path climbs out of the
+        // working tree. The seam must reject it as a `GuestProtocol` fault (bucket `Guest`) rather
+        // than pass the escaping path up in `RunResult.files` for an embedder to write to disk.
+        use agent_channel::ServerConnection;
+        let (client, server) = UnixStream::pair().expect("socketpair");
+        let hostile = std::thread::spawn(move || {
+            let mut srv = ServerConnection::accept(server).expect("accept");
+            let _req = srv.recv_request().expect("recv exec");
+            // Off-script: hand back an absolute-escaping artifact the caller never confined.
+            let _ = srv.send_response(&Response::File {
+                path: "../../etc/cron.d/pwn".into(),
+                data: b"* * * * * root sh".to_vec(),
+            });
+        });
+        let mut conn = ClientConnection::connect(client).expect("connect");
+        let err = run_exec(
+            &mut conn,
+            &["true".into()],
+            b"",
+            &[],
+            &[],
+            &[],
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
+        )
+        .expect_err("an escaping artifact path must be a typed error");
+        assert!(
+            matches!(err, VmmError::GuestProtocol(_)),
+            "want GuestProtocol, got {err:?}"
+        );
+        assert_eq!(err.kind(), crate::ErrorKind::Guest);
+        hostile.join().expect("hostile server thread");
     }
 
     /// A `Write` sink appending into a shared buffer — the capture target for the leak test's

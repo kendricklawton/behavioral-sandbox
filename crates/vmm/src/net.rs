@@ -114,6 +114,13 @@ impl Tap {
     pub(crate) fn delete(&self) {
         netns_del(&self.netns);
     }
+
+    /// Whether this VM's netns still exists — teardown checks it after [`delete`](Self::delete) so it
+    /// only reclaims the scratch dir once the netns is confirmed gone (an undeleted netns must keep
+    /// its dir to stay visible to the dir-keyed orphan sweep).
+    pub(crate) fn netns_exists(&self) -> bool {
+        netns_exists(&self.netns)
+    }
 }
 
 /// The `/run/netns/<name>` path `ip netns` bind-mounts a namespace handle at, and the jailer's
@@ -122,10 +129,36 @@ pub(crate) fn netns_path(name: &str) -> PathBuf {
     Path::new("/run/netns").join(name)
 }
 
-/// `ip netns add <name>`, creating the per-VM network namespace. A name collision (another VM, or a
-/// leaked netns from a crashed driver) is a typed error, not a retry: the name is the VM's unique
-/// scratch-dir name, so a collision means a real bug or unreclaimed residue, never normal contention.
+/// `ip netns add <name>`, creating the per-VM network namespace. The name is `agent-<pid>-<seq>` with
+/// **our own** pid (`std::process::id()`), so a collision can only be residue from a *prior* process
+/// that shared our pid — necessarily dead, since pids are unique among the living, and its teardown
+/// left the netns behind (e.g. a dir-less orphan the sweep never saw). So on collision we reclaim the
+/// stale namespace and retry once: this can never delete a live peer's netns (the name embeds our pid),
+/// and it stops an unreclaimed orphan from permanently blocking pid reuse with a "File exists". A
+/// second failure — or a failure that is *not* a collision (perms, missing `ip`) — is the typed error.
 fn netns_add(name: &str) -> Result<(), VmmError> {
+    match ip_netns_add(name) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            // Only a name collision is retryable; anything else (no `CAP_NET_ADMIN`, missing binary)
+            // is a real failure. `netns_exists` tells them apart without parsing `ip`'s message.
+            if !netns_exists(name) {
+                return Err(first);
+            }
+            tracing::warn!(
+                netns = %name,
+                "netns name already exists (residue from a dead prior incarnation of this pid); \
+                 reclaiming it and retrying"
+            );
+            netns_del(name);
+            ip_netns_add(name)
+        }
+    }
+}
+
+/// The raw `ip netns add <name>` command, mapping a spawn failure or nonzero exit to a typed error.
+/// Split from [`netns_add`] so the reclaim-and-retry policy lives in one place.
+fn ip_netns_add(name: &str) -> Result<(), VmmError> {
     let out = Command::new("ip")
         .args(["netns", "add", name])
         .output()

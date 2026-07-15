@@ -25,8 +25,7 @@ use crate::firecracker::{
 };
 use crate::jail::{
     cgroup_limit_args, give_to_jail, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup,
-    spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, unmount_base, Chroot, Jail,
-    JAILED_VSOCK_UDS,
+    spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, Chroot, Jail, JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::Tap;
@@ -66,6 +65,22 @@ pub(crate) struct Spawned {
     chroot: Option<Chroot>,
     /// The cgroup-owned lifetime machinery (P6.7), armed at spawn so the crash-safety window is as
     /// small as possible; moved onto the [`RunningVm`] by `into_running`.
+    lifetime: VmLifetime,
+}
+
+/// The common product of a jailed spawn — everything [`launch_jailed`](Spawned::launch_jailed) and
+/// [`launch_jailed_for_restore`](Spawned::launch_jailed_for_restore) build a [`Spawned`] from
+/// identically. Each caller adds only the values the two paths differ in (rootfs, `restored`, the
+/// vsock path); this carries the rest so [`spawn_jailed`](Spawned::spawn_jailed) owns the skeleton.
+struct JailedSpawn {
+    child: Child,
+    console: Console,
+    workdir: PathBuf,
+    /// The API socket path, for [`ApiClient::new`].
+    socket: PathBuf,
+    /// The chroot root the caller derives its vsock path from and moves into the [`Chroot`].
+    chroot_root: PathBuf,
+    tap: Option<Tap>,
     lifetime: VmLifetime,
 }
 
@@ -231,18 +246,58 @@ impl Spawned {
     /// netns the jailer joins via `--netns`); and the bulk-I/O images are built in place **inside
     /// the chroot** in `run_boot` (they can't exist before the jailer builds it).
     fn launch_jailed(config: &BootConfig, jail: &Jail) -> Result<Self, VmmError> {
+        // CPU/memory limits (P6.2) derived from the guest's own resource envelope (vcpus, mem_mib);
+        // empty when the host doesn't delegate the cgroup controllers, so the jailed boot still runs.
+        let cgroup_args = cgroup_limit_args(config.vcpus, config.mem_mib);
+        let s = Self::spawn_jailed(config, jail, config.enable_network, &cgroup_args)?;
+        // The exec channel's vsock socket, when enabled: Firecracker (cwd = chroot root after the
+        // jailer chroots) binds it at the chroot-relative `JAILED_VSOCK_UDS`, and the host dials the
+        // same file at its absolute path under the chroot. That path is strictly shorter than the API
+        // socket `spawn_jailer` already bounds-checked, so no separate `check_sun_path` is needed.
+        let vsock_uds = config
+            .guest_cid
+            .map(|_| s.chroot_root.join(JAILED_VSOCK_UDS.trim_start_matches('/')));
+        Ok(Self {
+            child: Some(s.child),
+            console: s.console,
+            workdir: s.workdir,
+            // Staged into the chroot in `run_boot` and named by its chroot-relative path; this
+            // placeholder is not a host device path (a jailed VM refuses snapshotting).
+            rootfs: PathBuf::from("/rootfs.ext4"),
+            restored: false,
+            api: ApiClient::new(s.socket),
+            vsock_uds,
+            input_image: None,
+            output: None,
+            tap: s.tap,
+            chroot: Some(Chroot::new(s.chroot_root, jail)),
+            lifetime: s.lifetime,
+        })
+    }
+
+    /// The shared skeleton of the two jailed launch paths ([`launch_jailed`](Self::launch_jailed) and
+    /// [`launch_jailed_for_restore`](Self::launch_jailed_for_restore)): a fresh scratch dir, the per-VM
+    /// netns + tap when `networked`, the **jailer** (whose `cgroup_args` differ — real caps on a cold
+    /// boot, none on a restore whose envelope rides the snapshot), and the cgroup-watching lifetime.
+    /// Owns the inline cleanup, so a failure at any step reclaims the tap and workdir. Each caller adds
+    /// only the three values the two paths differ in (rootfs, `restored`, and the vsock path), so a
+    /// change to jailed spawning is made once here rather than kept in sync across two copies.
+    fn spawn_jailed(
+        config: &BootConfig,
+        jail: &Jail,
+        networked: bool,
+        cgroup_args: &[String],
+    ) -> Result<JailedSpawn, VmmError> {
         let workdir = create_workdir(&config.scratch_dir)?;
-        // The jail id is the scratch-dir name: unique per VM within this process and a valid jailer id
-        // (alphanumeric + `-`). The jailer nests the chroot under `<workdir>/firecracker/<id>/root`.
-        let id = workdir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "agent-vm".to_string());
-        // Networked jailed boot: create the per-VM netns + tap **before** the jailer, so the jailer can
-        // join it (`--netns`). The tap is owned by the jailed uid/gid because a jailed Firecracker is
-        // unprivileged (no `CAP_NET_ADMIN`) and can only attach a tap it owns. The netns is named after
-        // the scratch dir (= `id`). A failed create reclaims its own netns; we still own the workdir.
-        let tap = if config.enable_network {
+        // The jail id is the scratch-dir name: process-unique, a valid jailer id (alphanumeric + `-`),
+        // and the netns name — one name finds all of a VM's residue. The jailer nests the chroot under
+        // `<workdir>/firecracker/<id>/root`.
+        let id = workdir_name(&workdir);
+        // Networked jailed VM: create the per-VM netns + tap **before** the jailer so it can join
+        // (`--netns`). The tap is owned by the jailed uid/gid because a jailed Firecracker is
+        // unprivileged (no `CAP_NET_ADMIN`) and can only attach a tap it owns. A failed create reclaims
+        // its own netns; we still own the workdir.
+        let tap = if networked {
             match Tap::create(&id, Some((jail.uid, jail.gid))) {
                 Ok(tap) => Some(tap),
                 Err(e) => {
@@ -253,16 +308,13 @@ impl Spawned {
         } else {
             None
         };
-        // CPU/memory limits (P6.2) derived from the guest's own resource envelope (vcpus, mem_mib);
-        // empty when the host doesn't delegate the cgroup controllers, so the jailed boot still runs.
-        let cgroup_args = cgroup_limit_args(config.vcpus, config.mem_mib);
         let netns = tap.as_ref().map(|t| t.netns_path());
         let (child, console, socket, chroot_root) = match spawn_jailer(
             jail,
             &config.firecracker,
             &workdir,
             &id,
-            &cgroup_args,
+            cgroup_args,
             netns.as_deref(),
         ) {
             Ok(t) => t,
@@ -274,45 +326,24 @@ impl Spawned {
                 return Err(e);
             }
         };
-        // Cgroup-owned lifetime (P6.7), jailed flavour: the jailer creates the VM's cgroup and
-        // moves the VMM into it itself, so enrolling the pid in a driver cgroup would race that
-        // placement (last write wins membership and could yank the VMM out of its limits). The
-        // sentinel instead watches the jailer's cgroup at its precomputed path; the unprotected
-        // window is spawn → the jailer's self-placement (milliseconds).
+        // Cgroup-owned lifetime (P6.7), jailed flavour: the jailer creates the VM's cgroup and moves
+        // the VMM into it itself, so enrolling the pid in a driver cgroup would race that placement
+        // (last write wins membership and could yank the VMM out of its limits). The sentinel instead
+        // watches the jailer's cgroup at its precomputed path; the unprotected window is
+        // spawn → the jailer's self-placement (milliseconds).
         let lifetime = VmLifetime::watch(
             child.id(),
             jailer_cgroup_dir(&config.firecracker, &id)
                 .into_iter()
                 .collect(),
         );
-        Ok(Self {
-            child: Some(child),
+        Ok(JailedSpawn {
+            child,
             console,
             workdir,
-            // Staged into the chroot in `run_boot` and named by its chroot-relative path; this
-            // placeholder is not a host device path (a jailed VM refuses snapshotting).
-            rootfs: PathBuf::from("/rootfs.ext4"),
-            restored: false,
-            api: ApiClient::new(socket),
-            // The exec channel's vsock socket, when enabled: Firecracker (cwd = chroot root after
-            // the jailer chroots) binds it at the chroot-relative `JAILED_VSOCK_UDS`, and the host
-            // dials the same file at its absolute path under the chroot. That path is strictly
-            // shorter than the API socket `spawn_jailer` already bounds-checked, so no separate
-            // `check_sun_path` is needed here.
-            vsock_uds: config
-                .guest_cid
-                .map(|_| chroot_root.join(JAILED_VSOCK_UDS.trim_start_matches('/'))),
-            input_image: None,
-            output: None,
+            socket,
+            chroot_root,
             tap,
-            chroot: Some(Chroot {
-                root: chroot_root,
-                uid: jail.uid,
-                gid: jail.gid,
-                cgroup_dir: None,
-                // Filled in `run_boot` when a `read_only_root` jailed boot bind-mounts the shared base.
-                mounts: Vec::new(),
-            }),
             lifetime,
         })
     }
@@ -413,78 +444,31 @@ impl Spawned {
         snapshot: &Snapshot,
         jail: &Jail,
     ) -> Result<Self, VmmError> {
-        let workdir = create_workdir(&config.scratch_dir)?;
-        // The jail id is the scratch-dir name, as in `launch_jailed`; the netns shares it.
-        let id = workdir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "agent-vm".to_string());
-        // Networked clone: the fixed-name tap in a fresh netns, owned by the jailed uid (an
-        // unprivileged Firecracker can only attach a tap it owns). The baked-in guest identity is
-        // already correct in the private netns — no re-addressing (decision 017).
-        let tap = if snapshot.tap_name.is_some() {
-            match Tap::create(&id, Some((jail.uid, jail.gid))) {
-                Ok(tap) => Some(tap),
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            }
-        } else {
-            None
-        };
-        let netns = tap.as_ref().map(|t| t.netns_path());
-        let (child, console, socket, chroot_root) = match spawn_jailer(
-            jail,
-            &config.firecracker,
-            &workdir,
-            &id,
-            &[],
-            netns.as_deref(),
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                if let Some(tap) = tap.as_ref() {
-                    tap.delete();
-                }
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(e);
-            }
-        };
-        // Cgroup-owned lifetime (P6.7), jailed flavour: the sentinel watches the jailer's cgroup at
-        // its precomputed path (enrolling the pid ourselves would race the jailer's own placement).
-        let lifetime = VmLifetime::watch(
-            child.id(),
-            jailer_cgroup_dir(&config.firecracker, &id)
-                .into_iter()
-                .collect(),
-        );
+        // No `--cgroup` caps here (empty `cgroup_args`): the guest's resource envelope lives in the
+        // snapshot, not `config`, so deriving caps from `config` could contradict the restored guest
+        // and OOM-kill a legitimate clone (see the fn doc). A networked clone gets the fixed-name tap
+        // in a fresh netns; its baked-in guest identity is already correct there (decision 017).
+        let s = Self::spawn_jailed(config, jail, snapshot.tap_name.is_some(), &[])?;
+        // A warm snapshot baked the **relative** `v.sock` (every snapshot source is unjailed — a
+        // jailed VM refuses snapshotting), and the jailed clone's cwd is the chroot root, so
+        // Firecracker re-binds it there; the host dials the same file at its absolute path under the
+        // chroot. Strictly shorter than the API socket the jailer bounds-checked.
+        let vsock_uds = snapshot.has_vsock.then(|| s.chroot_root.join(VSOCK_UDS));
         Ok(Self {
-            child: Some(child),
-            console,
-            workdir,
+            child: Some(s.child),
+            console: s.console,
+            workdir: s.workdir,
             // Placeholder, as in `launch_for_restore`: a restored VM's live disk is an anonymous
             // inode, and re-snapshotting is refused.
             rootfs: snapshot.root_drive.clone(),
             restored: true,
-            api: ApiClient::new(socket),
-            // A warm snapshot baked the **relative** `v.sock` (every snapshot source is unjailed —
-            // a jailed VM refuses snapshotting), and the jailed clone's cwd is the chroot root, so
-            // Firecracker re-binds it there; the host dials the same file at its absolute path under
-            // the chroot. Strictly shorter than the API socket the jailer bounds-checked.
-            vsock_uds: snapshot.has_vsock.then(|| chroot_root.join(VSOCK_UDS)),
+            api: ApiClient::new(s.socket),
+            vsock_uds,
             input_image: None,
             output: None,
-            tap,
-            chroot: Some(Chroot {
-                root: chroot_root,
-                uid: jail.uid,
-                gid: jail.gid,
-                cgroup_dir: None,
-                // Filled by `run_restore`'s staging (the memory file, and a shared base disk).
-                mounts: Vec::new(),
-            }),
-            lifetime,
+            tap: s.tap,
+            chroot: Some(Chroot::new(s.chroot_root, jail)),
+            lifetime: s.lifetime,
         })
     }
 
@@ -544,7 +528,6 @@ impl Spawned {
         if let Some(chroot) = self.chroot.as_ref() {
             let (root, uid, gid) = (chroot.root.clone(), chroot.uid, chroot.gid);
             let workdir = self.workdir.clone();
-            let mut mounts = Vec::new();
             // The jailed Firecracker re-binds the baked-in relative `v.sock` at its cwd — the chroot
             // root — so that dir must be writable by the dropped uid; chown it explicitly rather than
             // relying on the jailer's own layout choices.
@@ -561,7 +544,14 @@ impl Spawned {
                 gid,
             )?;
             mem_arg = mem_rel;
-            mounts.extend(mem_mount);
+            // Record the bind mount into `chroot.mounts` *now*, before the fallible steps below: an
+            // early error (a strip/create_dir_all/disk-stage failure) returns straight to `abort`,
+            // which unmounts only what `chroot.mounts` holds — a mount recorded lazily at the end
+            // would be orphaned, and `remove_dir_all(workdir)` would then `EBUSY` and leak the chroot.
+            // (`run_boot` records each mount the same eager way.)
+            if let Some(chroot) = self.chroot.as_mut() {
+                chroot.mounts.extend(mem_mount);
+            }
             // The disk, at `<chroot>/<baked path>`. The baked path is absolute (the source resolved
             // it), so re-rooting it is a strip + join; its parent dirs are created root-owned 0755,
             // which the jailed uid can traverse.
@@ -587,17 +577,18 @@ impl Spawned {
                     uid,
                     gid,
                 )?;
-                mounts.extend(disk_mount);
+                // Same eager recording as the memory mount above: the shared-base disk bind must be
+                // detachable by teardown/abort the instant it exists, not only if we reach the end.
+                if let Some(chroot) = self.chroot.as_mut() {
+                    chroot.mounts.extend(disk_mount);
+                }
             } else {
                 stage_restore_disk(&snapshot.root_drive, &disk_target)?;
                 give_to_jail(&disk_target, uid, gid, 0o600)?;
                 disk_unstage = Some(disk_target);
             }
-            // Record the mounts for teardown, and learn the jailer's cgroup (mirroring `run_boot`) so
-            // teardown can remove it too.
-            if let Some(chroot) = self.chroot.as_mut() {
-                chroot.mounts.extend(mounts);
-            }
+            // Mounts were recorded eagerly above; here just learn the jailer's cgroup (mirroring
+            // `run_boot`) so teardown can remove it too.
             if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
                 let actual = read_cgroup_dir(pid);
                 if let Some(dir) = actual.as_deref() {
@@ -1024,13 +1015,8 @@ impl Spawned {
         // A jailed VM may hold read-only bind mounts in its chroot (shared base, restore mem/disk);
         // unmount each (lazy) before reclaiming the scratch dir, or `remove_dir_all` `EBUSY`s on the
         // mount point.
-        for mount in self
-            .chroot
-            .as_ref()
-            .map(|c| c.mounts.as_slice())
-            .unwrap_or_default()
-        {
-            unmount_base(mount);
+        if let Some(chroot) = self.chroot.as_ref() {
+            chroot.unmount_all();
         }
         let _ = std::fs::remove_dir_all(&self.workdir);
 

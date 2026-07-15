@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use agent_channel::ChannelError;
 
-pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER};
+pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID};
 pub use lifetime::KillHandle;
 pub use pool::Pool;
@@ -63,6 +63,7 @@ mod tests {
                 ErrorKind::Transport,
             ),
             (VmmError::GuestExec("x".into()), ErrorKind::Guest),
+            (VmmError::GuestProtocol("x".into()), ErrorKind::Guest),
             (VmmError::OutputCap { limit: 1 }, ErrorKind::Guest),
             (
                 VmmError::ExecTimeout {
@@ -146,6 +147,12 @@ pub enum VmmError {
     /// The **guest agent** could not run the command (e.g. no such binary in the guest, permission
     /// denied) — a user fault on a healthy channel, not an infra failure.
     GuestExec(String),
+    /// The guest **violated the wire contract** on an otherwise-healthy channel: a returned artifact
+    /// path that is absolute or climbs out of the working tree, or a well-framed response the exec
+    /// loop never expects there. The guest agent is not the trust boundary, so the host rejects the
+    /// misbehaving guest rather than trusting it — a guest fault, distinct from a command that merely
+    /// failed to run ([`GuestExec`](VmmError::GuestExec)) or a transport-level [`Channel`](VmmError::Channel) break.
+    GuestProtocol(String),
     /// A command's captured output exceeded the host's `limit`-byte cap.
     OutputCap { limit: usize },
     /// A command exceeded its exec wall-clock budget and was killed by the guest — a *user* fault
@@ -171,6 +178,7 @@ impl std::fmt::Display for VmmError {
             VmmError::GuestUnavailable(e) => write!(f, "guest agent unavailable: {e}"),
             VmmError::Channel(e) => write!(f, "exec channel: {e}"),
             VmmError::GuestExec(e) => write!(f, "guest could not run the command: {e}"),
+            VmmError::GuestProtocol(e) => write!(f, "guest violated the exec protocol: {e}"),
             VmmError::OutputCap { limit } => {
                 write!(f, "guest output exceeded the {limit}-byte cap")
             }
@@ -235,6 +243,7 @@ impl VmmError {
             | VmmError::Vmm(_) => ErrorKind::Infra,
             VmmError::Channel(_) => ErrorKind::Transport,
             VmmError::GuestExec(_)
+            | VmmError::GuestProtocol(_)
             | VmmError::OutputCap { .. }
             | VmmError::ExecTimeout { .. }
             | VmmError::ExecUnresponsive { .. } => ErrorKind::Guest,
@@ -286,10 +295,12 @@ pub struct Limits {
     /// [`ExecTimeout`](VmmError::ExecTimeout)); the host's own give-up deadline — the
     /// [`ExecUnresponsive`](VmmError::ExecUnresponsive) liveness backstop — is derived from it
     /// (budget + kill slack), so raising the budget moves both together and a long quiet command is
-    /// never cut off by the transport. Must be nonzero: the wire encodes zero as "use the agent's
-    /// 1 h ceiling", which the host backstop (kill slack past *zero*) would then undercut. (A
-    /// caller that genuinely needs different boot and exec ceilings sets
-    /// [`BootConfig::boot_timeout`] / [`BootConfig::exec_wall`] under the seam.)
+    /// never cut off by the transport. Should be a realistic duration: it is also the boot deadline,
+    /// and on the exec side a zero or sub-millisecond wall is floored to a **1 ms** command budget on
+    /// the wire (the guest reads a truncated-to-zero `timeout_ms` as its 1 h ceiling, so the floor
+    /// keeps a tiny wall meaning "very short", never "unlimited"). (A caller that genuinely needs
+    /// different boot and exec ceilings sets [`BootConfig::boot_timeout`] / [`BootConfig::exec_wall`]
+    /// under the seam.)
     pub wall: Duration,
     /// Aggregate cap, in bytes, on what the host buffers for one exec — stdout + stderr + returned
     /// artifacts (plus a small per-frame accounting floor) — so a flooding guest can't grow host
