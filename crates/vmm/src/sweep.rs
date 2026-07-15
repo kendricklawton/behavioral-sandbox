@@ -15,6 +15,12 @@
 //! driver, so only the dir-plus-record pairing says who owns what.
 //!
 //! Conservative by construction:
+//! - Only dirs **owned by the sweeping euid** are candidates. The scratch base (`/tmp` by
+//!   default) is world-writable, so a hostile local user could plant a dead-looking
+//!   `agent-<pid>-<n>` dir whose `tap` record names a *victim's* live tap; `create_workdir`
+//!   makes real per-VM dirs `0700`, driver-owned, so ownership is the authorship proof. The
+//!   flip side is deliberate: each uid sweeps its own residue (root sweeps root's jailed dirs,
+//!   a user sweeps their user-driver dirs), never another's.
 //! - A dir whose embedded pid is **alive** is skipped: a live driver, or a recycled pid we can't
 //!   tell from one (the orphan is reclaimed by a later sweep, once the pid frees). The error
 //!   direction is always "kept too long", never "reclaimed a live VM's resources".
@@ -67,6 +73,17 @@ pub struct SweepReport {
 /// everything a live pid owns is skipped. Per-entry failures are logged and skipped, never fatal,
 /// so one undeletable dir can't shadow the rest of the sweep.
 ///
+/// **The hoster's half (decision 016).** The engine guarantees this call can't be weaponized (it
+/// only ever reclaims dirs the calling euid owns), but *deploying* it is the caller's:
+/// - **Schedule it.** Nothing calls this for you — a self-refilling janitor daemon is platform
+///   territory (Phase 16). Run it at startup and periodically.
+/// - **One per identity.** It reclaims only what the calling euid owns, so if drivers run as
+///   several users, each must run its own sweep; one root sweep does **not** cover a user driver's
+///   residue (nor should it — that would be the weaponization the ownership check prevents).
+/// - **Harden the base.** Prefer a scratch base only the engine user can write (via
+///   [`BootConfig::scratch_dir`]) over the world-writable `/tmp` default, so no other local user
+///   can even plant a decoy for the ownership check to reject.
+///
 /// [`BootConfig::scratch_dir`]: crate::BootConfig::scratch_dir
 ///
 /// # Errors
@@ -74,6 +91,13 @@ pub struct SweepReport {
 pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
     let entries = std::fs::read_dir(scratch_dir)
         .map_err(|e| VmmError::Vmm(format!("read scratch base {}: {e}", scratch_dir.display())))?;
+    // Refusing to sweep at all beats sweeping without the ownership proof (see the module doc):
+    // on a world-writable base, an unowned candidate set is an attacker-writable kill list.
+    let Some(me) = own_euid() else {
+        return Err(VmmError::Vmm(
+            "cannot read own euid from /proc/self/status; refusing to sweep without it".into(),
+        ));
+    };
 
     // Partition the per-VM dirs by owner liveness, and collect every tap name a *live* dir records
     // so a dead dir's record can never delete a name a live driver has since re-minted.
@@ -85,6 +109,11 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
         let Some(pid) = owner_pid(&name) else {
             continue; // Not a per-VM scratch dir; never touched.
         };
+        // Not ours: another uid's residue (their sweep's job), or a planted decoy on the
+        // world-writable base (see the module doc). Either way, not a candidate.
+        if entry.metadata().map(|m| m.uid()).ok() != Some(me) {
+            continue;
+        }
         let path = entry.path();
         if pid_alive(pid) {
             report.live_skipped += 1;
@@ -157,6 +186,16 @@ fn owner_pid(name: &str) -> Option<u32> {
 /// (the conservative direction; a later sweep gets it).
 fn pid_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
+}
+
+/// This process's **effective** uid, from `/proc/self/status` (`Uid:` is real/effective/saved/fs;
+/// effective is the second field) — no `unsafe`, no libc, the same read the test helpers use.
+/// The euid is what names the files this process creates, so it's the identity `create_workdir`'s
+/// dirs carry and the one the candidate filter must match.
+fn own_euid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
+    uid.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// The tap name recorded in `dir`, validated hard before it can ever reach `ip link del`: the
@@ -311,5 +350,16 @@ mod tests {
         let err = sweep_orphans(Path::new("/nonexistent-sweep-base"))
             .expect_err("missing base is a typed error");
         assert!(matches!(err, VmmError::Vmm(_)));
+    }
+
+    #[test]
+    fn own_euid_matches_what_our_files_carry() {
+        // The candidate filter compares dir ownership against this value, so the two must agree:
+        // a dir this process creates (like every real workdir) must pass the filter. (The
+        // rejection side — a foreign-uid decoy — needs a second uid, so it can't be unit-tested
+        // unprivileged; the filter's equality is the whole mechanism.)
+        let dir = TestDir::new("agent-sweep-uid");
+        let dir_uid = std::fs::metadata(dir.path()).expect("stat test dir").uid();
+        assert_eq!(own_euid(), Some(dir_uid));
     }
 }

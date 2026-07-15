@@ -258,6 +258,27 @@ fn setup() -> Result<()> {
     println!("    /dev/kvm missing/unwritable  -> every boot fails: NoKvm (isolation is hardware)");
     println!("    jail cannot be built         -> jailed boot fails; never a half-confined VM (decision 013)");
     println!("    host tool missing (ip, mke2fs, e2fsck/debugfs, firecracker) -> typed Artifact/Vmm error");
+
+    // The engine/hoster line (decision 016): the engine guarantees its own privileged tools can't
+    // be weaponized; *deploying* them — as whom, when, over what directory — is the hoster's, and
+    // these are the four calls only they can make. Surfaced here, in the host-check tool, because
+    // that's the one place a self-hoster looks before standing the engine up.
+    println!("\nHardening — the hoster's responsibility (the engine can't decide these for you):");
+    println!(
+        "    scratch base: point AGENT_SCRATCH_DIR at a dir only the engine user owns (not the"
+    );
+    println!(
+        "                  world-writable /tmp default), so no other local user can plant residue"
+    );
+    println!("    run the sweep: schedule agent_vmm::sweep_orphans() (boot-time + periodic) — the");
+    println!("                  engine exposes it; when/how often it runs is your ops call");
+    println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
+    println!("                  run drivers as several users, each user must run its own sweep");
+    println!("    the /16 pool: 10.200.0.0/16 is one finite, shared reservation pool; dividing it");
+    println!(
+        "                  across tenants (quota/fairness) is platform policy, above the engine"
+    );
+
     println!("\nMissing items are covered in CONTRIBUTING.md → Prerequisites.");
     Ok(())
 }

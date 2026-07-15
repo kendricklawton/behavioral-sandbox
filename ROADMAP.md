@@ -752,11 +752,16 @@ surface freezes.
       possibly-dead *source's* token (decision 011) — and the dir's `agent-<pid>-<n>` name carries
       the owner. Deliberately no comm check on the driver pid: the embedder's process name is
       unknowable, so a recycled pid reads as alive and its dir is *kept* (the error direction is
-      always retained-too-long, reclaimed by a later sweep, never a live VM's resources). Three
-      conservative guards: a live pid's dirs are skipped wholesale; a dead dir's recorded tap is
-      left if any *live* dir records the same name; and a dead dir with a still-running VMM (the
-      degraded-sentinel corner) is skipped loudly — the sweep owns fs/net residue, processes stay
-      the sentinel's (decision 014), it never kills. The record is validated before it can reach
+      always retained-too-long, reclaimed by a later sweep, never a live VM's resources). Four
+      conservative guards: only dirs **owned by the sweeping euid** are candidates at all — the
+      scratch base is world-writable, so an unowned candidate set would be an attacker-writable
+      kill list (a hostile local user plants a dead-looking dir whose record names a victim's
+      live tap); `create_workdir`'s `0700` driver-owned dirs make ownership the authorship proof,
+      at the deliberate cost that each uid sweeps only its own residue. Then: a live pid's dirs
+      are skipped wholesale; a dead dir's recorded tap is left if any *live* dir records the same
+      name; and a dead dir with a still-running VMM (the degraded-sentinel corner) is skipped
+      loudly — the sweep owns fs/net residue, processes stay the sentinel's (decision 014), it
+      never kills. The record is validated before it can reach
       `ip link del` (`fc`+hex, ≤ IFNAMSIZ-1; parse, don't trust), VMM-liveness is `(st_dev,
       st_ino)` identity through `/proc/<pid>/cwd` (the P6.6 lesson: link text lies after
       pivot_root; unjailed cwd = workdir, jailed cwd = the chroot root), and per-entry failures
@@ -1015,7 +1020,12 @@ Prove the isolation + observation claims hold under adversarial workloads.
 - [ ] **P15.3** Resource-exhaustion, fork-bomb, network-flood → bounded by cgroup + egress policy.
 - [ ] **P15.4** Snapshot-restore correctness under load (no state bleed between clones).
 - [ ] **P15.5** Document the **threat model**: what's trusted (CPU/KVM/host kernel), what isn't.
-- [ ] **P15.6** `(decision)` the security boundary + assumptions → `ARCHITECTURE.md`.
+- [ ] **P15.6** `(decision)` the security boundary + assumptions → `ARCHITECTURE.md`. *(Partially
+      seeded early by decision 016, the engine/hoster line the P6.9a sweep forced: the engine
+      guarantees its privileged tools can't be weaponized (euid-scoped, authorship not policy), the
+      hoster owns deployment (scheduling, per-identity sweeps, base hardening, dividing the /16
+      pool). This box closes the *whole* boundary — what's trusted vs not — behind the Phase-15
+      adversarial suite; decision 016 is one worked facet, not the closure.)*
 - **Exit gate + lesson:** the isolation + observability claims survive an adversary; write up the
   **threat model** — a genuine Principal-level design doc.
 
