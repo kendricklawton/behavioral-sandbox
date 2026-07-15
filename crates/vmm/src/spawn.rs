@@ -25,7 +25,7 @@ use crate::firecracker::{
 };
 use crate::jail::{
     cgroup_limit_args, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup, spawn_jailer,
-    stage_into_chroot, Chroot, Jail,
+    stage_into_chroot, Chroot, Jail, JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::{apply_guest_net_identity, Tap};
@@ -229,8 +229,9 @@ impl Spawned {
     /// which builds the chroot, `mknod`s the device nodes, places the VMM in a cgroup, and drops
     /// privileges before `exec`ing Firecracker. Resources (kernel, rootfs) are staged into the chroot
     /// in [`run_boot`](Self::run_boot), once the API socket proves the chroot exists — so no staging
-    /// races the jailer's construction. Scoped to a plain read-write boot; `Vm::boot` refuses `jail`
-    /// combined with vsock, a NIC, the overlay, or bulk I/O, so this sets none of those up.
+    /// races the jailer's construction. The vsock exec channel composes (its host-side socket path is
+    /// set here, the device configured in `run_boot`); `Vm::boot` still refuses `jail` combined with a
+    /// NIC, the overlay, or bulk I/O, so this sets none of those up.
     fn launch_jailed(config: &BootConfig, jail: &Jail) -> Result<Self, VmmError> {
         let workdir = create_workdir(&config.scratch_dir)?;
         // The jail id is the scratch-dir name: unique per VM within this process and a valid jailer id
@@ -270,7 +271,14 @@ impl Spawned {
             rootfs: PathBuf::from("/rootfs.ext4"),
             restored: false,
             api: ApiClient::new(socket),
-            vsock_uds: None,
+            // The exec channel's vsock socket, when enabled: Firecracker (cwd = chroot root after
+            // the jailer chroots) binds it at the chroot-relative `JAILED_VSOCK_UDS`, and the host
+            // dials the same file at its absolute path under the chroot. That path is strictly
+            // shorter than the API socket `spawn_jailer` already bounds-checked, so no separate
+            // `check_sun_path` is needed here.
+            vsock_uds: config
+                .guest_cid
+                .map(|_| chroot_root.join(JAILED_VSOCK_UDS.trim_start_matches('/'))),
             input_image: None,
             output: None,
             tap: None,
@@ -623,19 +631,24 @@ impl Spawned {
 
         if let Some(cid) = config.guest_cid {
             still_before(deadline, "PUT /vsock")?;
-            // Bind the socket at the **relative** name `v.sock`, resolved against the VMM's cwd (its
-            // scratch dir — see `spawn_fc`). The host still connects via the absolute `self.vsock_uds`
-            // (same file), but baking a *relative* path into the snapshot is what lets warm clones
-            // restored from it each bind their own socket in their own scratch dir, instead of all
-            // colliding on one absolute path.
+            // Bind the socket relative to the VMM's cwd. Unjailed: the **relative** name `v.sock` in
+            // the scratch dir — baking a relative path into the snapshot is what lets warm clones
+            // restored from it each bind their own socket instead of colliding on one absolute path.
+            // Jailed: `/run/v.sock` inside the chroot (cwd = chroot root, `/run` writable by the
+            // dropped uid). Either way the host dials the same file via the absolute `self.vsock_uds`.
+            let uds_path = if self.chroot.is_some() {
+                JAILED_VSOCK_UDS
+            } else {
+                VSOCK_UDS
+            };
             self.api.put(
                 "/vsock",
                 &Vsock {
                     guest_cid: cid,
-                    uds_path: VSOCK_UDS,
+                    uds_path,
                 },
             )?;
-            tracing::debug!(guest_cid = cid, uds = VSOCK_UDS, "vsock device configured");
+            tracing::debug!(guest_cid = cid, uds = uds_path, "vsock device configured");
         }
 
         // Per-VM virtio-net (P4.1), backed by the host tap created in `launch`. Deny-by-default: the

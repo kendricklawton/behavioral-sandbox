@@ -840,11 +840,11 @@ privilege) and **seccomp filter mode**, and lives in its **own mount namespace**
 with KVM this is the second wall: a guest that breached hardware isolation into the VMM would land in
 that box, able to name no host path, hold no capability, and make no syscall outside the filter. The
 **deny-by-default** complement is verified host-safe: `Vm::boot` **refuses** `jail` combined with any
-not-yet-jailed feature (vsock, a NIC, the overlay, bulk I/O) with a typed error before it probes for
+not-yet-jailed feature (a NIC, the overlay, bulk I/O) with a typed error before it probes for
 KVM, so there is no half-confined escape hatch (a `jail_refuses_half_confined_boots` unit test in the
 everyday gate; decision 013's "the isolation boundary never half-degrades"). Running a *hostile workload
-inside* a jailed guest waits on exec-under-jail (a later Phase-6 migration; jailed boot refuses vsock
-today), so P6.6's bar is the VMM-side confinement matrix plus the refusal, not an in-guest exploit.
+inside* a jailed guest waited on exec-under-jail, since landed (P7.0a composed the jail with the vsock
+exec channel), so P6.6's bar was the VMM-side confinement matrix plus the refusal, not an in-guest exploit.
 
 ### 013 — Per-run resource policy: one `Limits` struct of quantities, enforced at the host cgroup, failing open *(2026-07-14, P6.5)*
 
@@ -1018,6 +1018,13 @@ default run confined and avoids a retrofit under a pinned seam.
   tombstone) and jailed-by-default land together as the confined default surface.
 - Jailed snapshot/restore and the warm pool under the jailer remain downstream of exec under the jailer
   (a jailed VM's disk lives in the chroot, decision 010), tracked with the same boxes.
+- **Status: the first convergence step (P7.0a) landed.** `jail` now composes with the vsock exec channel:
+  under the jailer Firecracker binds the socket at the chroot-relative `/run/v.sock` (cwd = chroot root,
+  `/run` writable by the dropped uid), and the host dials it at its absolute path under the chroot. The
+  mutual exclusion of the opening paragraph is retired for vsock specifically (`jailed_exec_runs_a_command`
+  proves a confined VMM running code); the jail still hard-errors on a NIC / overlay / bulk I/O (P7.0b to
+  P7.0e). `Sandbox::exec`-jails-by-default and the tap/overlay/drive/snapshot staging are the remaining
+  steps.
 - The jailer's per-VM netns (decisions 009/011's tombstone for concurrent networked clones) rides the
   jailed-networking box: once the tap is staged into the jail, its netns removes the one-live-networked-
   clone limit.

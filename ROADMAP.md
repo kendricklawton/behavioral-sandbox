@@ -663,12 +663,12 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       **own mount namespace** (on top of the existing cgroup-cap asserts). Layered with KVM this is the
       second wall: a guest that breached hardware isolation into the VMM lands in that box, naming no host
       path, holding no capability, making no out-of-filter syscall. **No half-confined escape hatch:**
-      `Vm::boot` refuses `jail` + any not-yet-jailed feature (vsock, NIC, overlay, bulk I/O) with a typed
-      error *before* the KVM probe, so the refusal is host-safe: a new `jail_refuses_half_confined_boots`
+      `Vm::boot` refuses `jail` + any not-yet-jailed feature (NIC, overlay, bulk I/O) with a typed
+      error *before* the KVM probe, so the refusal is host-safe: a `jail_refuses_half_confined_boots`
       unit test runs in the everyday gate (the isolation boundary never half-degrades, decision 013).
-      Running a hostile workload *inside* a jailed guest waits on exec-under-jail (P7.0a, decision 015:
-      jailed boot refuses vsock today), so the bar here is the VMM-side confinement matrix plus
-      the refusal.)*
+      Running a hostile workload *inside* a jailed guest is now possible (P7.0a composed the jail with
+      the vsock exec channel, `jailed_exec_runs_a_command`); at the time this box landed that waited on
+      exec-under-jail, so the bar here was the VMM-side confinement matrix plus the refusal.)*
 - [x] **P6.7** Clean cgroup/namespace teardown per run — and the leak-proofing this buys:
       **host-process death (Ctrl-C, SIGKILL, OOM) cannot leak a VM**, because the cgroup owns its
       lifetime from outside the driver. (Until here, teardown is `Drop`-based: killing the driver
@@ -702,7 +702,7 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 - [x] **P6.8** Test: a fork-bomb / mem-hog in the guest is bounded by the cgroup, host unaffected.
       *(Both run against the exec-capable agent rootfs with the VMM under the **engine-derived** caps
       (`cpu.max` = vcpus cores, `memory.max` = guest RAM + 128 MiB — the P6.2 derivation, pinned by the
-      test since exec-under-jail is a later migration, P7.0a/decision 015; real-root + delegation gated,
+      test since exec-under-jail was then a later migration, P7.0a/decision 015; real-root + delegation gated,
       skips elsewhere).
       **Mem-hog** (Python allocating touched pages until the guest dies): the guest's *own* OOM killer
       eats the hog (exit 137) inside the hardware boundary; the host cgroup **measured** peaking at
@@ -853,10 +853,20 @@ Wrap the FC track into a clean, self-hostable engine API.
 > **or** VMM confinement, never both. Before the `Sandbox` surface freezes on the unjailed exec path,
 > the convergence below composes the jail with the exec channel, and `Sandbox::exec` jails by default.
 
-- [ ] **P7.0a** Stage the vsock exec channel into the chroot (jailed-uid-owned, socket path
+- [x] **P7.0a** Stage the vsock exec channel into the chroot (jailed-uid-owned, socket path
       chroot-relative) so `jail` composes with vsock. Proof: a real-root `jailed_exec_runs_a_command`
       boots jailed and returns `exec("echo hi") -> hi`, exit 0. Retires the P6.6 "exec-under-jail is a
       later migration" annotation.
+      *(Done. `Vm::boot` no longer refuses `jail` + `guest_cid`: under the jailer Firecracker binds
+      the vsock unix socket at the chroot-relative `/run/v.sock` (cwd = chroot root, `/run` writable by
+      the dropped uid, and that path is shorter than the API socket already bounds-checked, so no
+      extra `check_sun_path`); the host dials the same file at its absolute path under the chroot.
+      `launch_jailed` sets `vsock_uds` when `guest_cid` is set, `run_boot` picks the jailed vs scratch
+      relative socket name by whether a chroot is present, and the deny-by-default refusal still hard-
+      errors on a NIC / overlay / bulk I/O under the jail (isolation never half-degrades, decision
+      013). The `jailed_exec_runs_a_command` test asserts the exec'ing VMM runs as the dropped jail
+      uid, so it proves confinement + code together, not a plain boot that happens to exec. The
+      still-full-rootfs-copy under the jail is P7.0b's density concern, not a correctness gap here.)*
 - [ ] **P7.0b** Jailed overlay: read-only base + per-run tmpfs overlay under the chroot, so a jailed
       boot runs on the density path, not a full rootfs copy.
 - [ ] **P7.0c** Jailed networking: stage the tap into the VM's netns under the jailer; retire the

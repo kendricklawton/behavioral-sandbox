@@ -14,7 +14,9 @@ use std::time::{Duration, Instant};
 
 use agent_vmm::Vm;
 
-use common::{agent_rootfs_config, sha256_hex, TmpDir};
+use common::{
+    agent_rootfs_config, have_jailer_privileges, jailed_agent_config, sha256_hex, TmpDir,
+};
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
@@ -36,6 +38,48 @@ fn execs_a_command_in_the_microvm() {
     );
     assert_eq!(out.exit_code, 0, "`echo hi` should exit 0");
     vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
+fn jailed_exec_runs_a_command() {
+    // The convergence proof: a VM confined by the jailer (chroot + dropped uid/gid + mount namespace
+    // + cgroup limits + seccomp) can *also* run code. Before this, the exec channel (vsock) and the
+    // jail were mutually exclusive — you got a code channel or VMM confinement, never both. Now the
+    // vsock unix socket is bound chroot-relative under the dropped uid, so `exec` round-trips through
+    // the same jailed VMM. Needs real root (the jailer `mknod`s device nodes); skip rather than fail
+    // where KVM is available but real root isn't (the `unshare -Urn` trick can't `mknod`).
+    if !have_jailer_privileges() {
+        eprintln!("skipping jailed_exec_runs_a_command: needs real root (euid 0, initial userns)");
+        return;
+    }
+    let vm = Vm::boot(jailed_agent_config())
+        .expect("jailed agent microVM should boot and announce readiness");
+    // The VMM really is jailed (not a plain boot that happens to exec): it runs as the dropped uid.
+    let pid = vm.vmm_pid();
+    let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Uid:"))
+                .and_then(|v| v.split_whitespace().next().map(str::to_string))
+        });
+    assert_eq!(
+        uid.as_deref(),
+        Some(agent_vmm::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        "the exec'ing VMM should be the dropped jail uid, proving it is confined"
+    );
+    let out = vm
+        .exec(&["echo".into(), "hi".into()], b"")
+        .expect("exec `echo hi` in the jailed guest");
+    assert_eq!(
+        out.stdout,
+        b"hi\n",
+        "jailed guest stdout should be `hi`; console:\n{}",
+        vm.console()
+    );
+    assert_eq!(out.exit_code, 0, "`echo hi` should exit 0 under the jailer");
+    vm.shutdown().expect("jailed shutdown should succeed");
 }
 
 #[test]

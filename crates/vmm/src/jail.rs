@@ -20,9 +20,11 @@
 //! **Scope.** This confines a jailed **cold boot**: the chroot + uid/gid drop + the jailer's mount
 //! namespace, cgroup **cpu/memory limits** derived from the guest's envelope (applied when the host
 //! delegates the cgroup v2 controllers), and Firecracker's built-in **seccomp** filters (on by
-//! default; we never pass `--no-seccomp`). A jailed boot that also wants vsock, a NIC, the overlay,
-//! or bulk I/O devices is refused with a typed error (staging those into the chroot, and a per-VM
-//! netns for concurrent networked clones, are later steps). Leak-proof, cgroup-owned teardown lives
+//! default; we never pass `--no-seccomp`). The **vsock exec channel** composes with the jail (its
+//! unix socket is bound chroot-relative under the dropped uid, see [`JAILED_VSOCK_UDS`]), so a jailed
+//! VM runs code; a jailed boot that also wants a NIC, the overlay, or bulk I/O devices is still
+//! refused with a typed error (staging those into the chroot, and a per-VM netns for concurrent
+//! networked clones, are later steps). Leak-proof, cgroup-owned teardown lives
 //! in [`crate::lifetime`] (P6.7): the jailed VM's sentinel watches the jailer's cgroup at its
 //! precomputed path, so host death can't leak a jailed VMM either.
 
@@ -46,6 +48,13 @@ pub const DEFAULT_JAIL_GID: u32 = 10_000;
 /// The chroot-relative path Firecracker binds its API socket at (its cwd is the chroot root). The
 /// host reaches the same socket at `<chroot_root>/run/firecracker.socket`.
 const JAILED_API_SOCKET: &str = "/run/firecracker.socket";
+
+/// The chroot-relative path Firecracker binds the **vsock** exec-channel socket at, placed under
+/// `/run` beside the API socket because the jailer makes that dir writable by the dropped uid (so the
+/// unprivileged VMM can create the socket there). The host dials the same file at its absolute path
+/// `<chroot_root>/run/v.sock`. Strictly shorter than [`JAILED_API_SOCKET`], so if that path cleared
+/// `check_sun_path` in [`spawn_jailer`], this one does too.
+pub(crate) const JAILED_VSOCK_UDS: &str = "/run/v.sock";
 
 /// The cgroup v2 `cpu.max` accounting period, in microseconds (the kernel default). A cpu quota of
 /// `n * CPU_PERIOD_US` per period means `n` cores' worth of CPU.

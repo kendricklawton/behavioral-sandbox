@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use agent_vmm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 /// A host scratch dir removed on drop, so a panicking assertion can't leak it. (The unit tests have
 /// their own copy; the integration crate is separate, so it needs one too.)
@@ -93,6 +93,19 @@ pub fn agent_rootfs_config() -> BootConfig {
     // tests below exercise the overlay end to end.
     cfg.read_only_root = true;
     cfg.boot_timeout = Duration::from_secs(30);
+    cfg
+}
+
+/// The agent rootfs booted **under the jailer**, with the vsock exec channel: the convergence of
+/// the jail with a code channel (a jailed VM that can actually run code). Deliberately *not*
+/// `read_only_root` — the jailer refuses the overlay for now (a later step stages a read-only base +
+/// per-run tmpfs into the chroot), so this boots a plain read-write rootfs copy inside the chroot,
+/// which is enough to reach the agent's readiness marker and serve an exec. Needs real root (see
+/// [`have_jailer_privileges`]).
+pub fn jailed_agent_config() -> BootConfig {
+    let mut cfg = agent_rootfs_config();
+    cfg.read_only_root = false;
+    cfg.jail = Some(Jail::default());
     cfg
 }
 

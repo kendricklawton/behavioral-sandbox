@@ -137,10 +137,11 @@ pub struct BootConfig {
     /// Run Firecracker under its **jailer** (P6.1): a chroot, a uid/gid drop, and the jailer's mount
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
     /// Firecracker directly. Setting it needs **real root** (the jailer `mknod`s device nodes, which
-    /// `EPERM` in a non-initial user namespace) and the `jailer` binary. This phase jails a plain
-    /// read-write cold boot only: combining `jail` with `guest_cid`, `enable_network`, `input_dir`,
-    /// `output_dir`, or `read_only_root` is a typed error for now (those need chroot staging / a netns
-    /// that later Phase-6 steps add).
+    /// `EPERM` in a non-initial user namespace) and the `jailer` binary. Composes with `guest_cid`
+    /// (the vsock exec channel is staged chroot-relative under the dropped uid), so a jailed VM can
+    /// run code; combining `jail` with `enable_network`, `input_dir`, `output_dir`, or
+    /// `read_only_root` is still a typed error for now (those need chroot staging / a netns that
+    /// later steps add).
     pub jail: Option<Jail>,
     /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/agent-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
@@ -341,22 +342,22 @@ impl Vm {
     /// killed and the scratch dir removed before returning.
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
         // Config validation before environment probing, so this deny-by-default refusal is reachable
-        // (and unit-testable) on any host, with KVM or not. P6.1 jails a plain read-write cold boot
-        // only: combining the jailer with vsock, a NIC, the overlay, or bulk I/O needs staging those
-        // into the chroot / a per-VM netns (later Phase-6 steps), so refuse it rather than boot a
-        // half-confined VM. The isolation boundary never half-degrades (decision 013): a jail we can't
-        // fully build is a hard error, not a quiet drop to a weaker confinement.
+        // (and unit-testable) on any host, with KVM or not. The jailer now composes with the vsock
+        // exec channel (the socket is staged chroot-relative under the dropped uid), but a NIC, the
+        // overlay, or bulk I/O still need staging into the chroot / a per-VM netns, so refuse those
+        // rather than boot a half-confined VM. The isolation boundary never half-degrades
+        // (decision 013): a jail we can't fully build is a hard error, not a quiet drop to a weaker
+        // confinement.
         if config.jail.is_some()
-            && (config.guest_cid.is_some()
-                || config.enable_network
+            && (config.enable_network
                 || config.input_dir.is_some()
                 || config.output_dir.is_some()
                 || config.read_only_root)
         {
             return Err(VmmError::Vmm(
-                "the jailer currently supports only a plain read-write boot; vsock, a NIC, the overlay \
-                 (read_only_root), and bulk input/output devices under the jailer are later Phase-6 \
-                 steps"
+                "the jailer currently supports a plain read-write boot with the vsock exec channel; \
+                 a NIC, the overlay (read_only_root), and bulk input/output devices under the jailer \
+                 are later steps"
                     .into(),
             ));
         }
@@ -666,13 +667,13 @@ mod tests {
 
     #[test]
     fn jail_refuses_half_confined_boots() {
-        // P6.6 deny-by-default: the jailer only supports a plain read-write cold boot, so any config
-        // that would run a *half*-jailed VM (a feature not yet staged into the chroot / a netns) is a
-        // typed error, never a quiet weaker confinement. This is a pure config check, refused before
-        // the /dev/kvm probe, so it holds on any host (no KVM, no root needed). Each mutation flips one
-        // not-yet-jailed feature on; all must be refused.
-        let mutations: [fn(&mut BootConfig); 5] = [
-            |c| c.guest_cid = Some(DEFAULT_GUEST_CID),
+        // Deny-by-default: the jailer supports a plain read-write boot plus the vsock exec channel,
+        // so any config that would run a *half*-jailed VM (a feature not yet staged into the chroot /
+        // a netns) is a typed error, never a quiet weaker confinement. This is a pure config check,
+        // refused before the /dev/kvm probe, so it holds on any host (no KVM, no root needed). Each
+        // mutation flips one not-yet-jailed feature on; all must be refused. `guest_cid` is absent
+        // here on purpose: jail + vsock is now a supported combination (`jailed_exec_runs_a_command`).
+        let mutations: [fn(&mut BootConfig); 4] = [
             |c| c.enable_network = true,
             |c| c.input_dir = Some(PathBuf::from("/tmp/in")),
             |c| c.output_dir = Some(PathBuf::from("/tmp/out")),
