@@ -978,8 +978,18 @@ Wrap the FC track into a clean, self-hostable engine API.
       `injected_secrets_never_reach_the_console_or_host_logs` (real VM: the serial console with a
       positive control proving the agent's log lines do land there, host logs, the failing-injection
       error path) — and finds the sentinel only in `RunResult`, the caller's own data.)*
-- [ ] **P7.2** Stateful sessions: multiple `exec`s against one VM with a persistent overlay.
-- [ ] **P7.3** Per-sandbox limits (cpu/mem/wall/net policy) as **one options struct**, its shape
+- [x] **P7.2** Stateful sessions: multiple `exec`s against one VM with a persistent overlay.
+      *(The VM **is** the session (decision 019): the in-guest agent now serves every connection
+      from **one persistent working directory** (`serve_session`, a stable dir the in-VM binary
+      passes for its whole life) instead of a fresh-and-removed per-exec dir, so a file injected or
+      written by one exec is visible to the next — and the boot's tmpfs overlay already made the
+      wider guest filesystem accumulate. State's lifetime is the VM's: teardown discards the
+      overlay, and snapshot clones each get their own copy-on-write view of the source's state. The
+      library `serve` keeps the fresh-dir one-shot semantics for harness/test callers. Proven at the
+      agent layer (`session_state_persists_across_connections`, no VM) and against a real guest
+      (`session_state_persists_across_execs`: injected file + written file + `/root` state all
+      visible to a later exec).)*
+- [x] **P7.3** Per-sandbox limits (cpu/mem/wall/net policy) as **one options struct**, its shape
       settled by the P6.5 resource-policy decision. *(Turns two fixed internal budgets into **knobs**:
       the **exec wall-clock budget** (today the internal `DEFAULT_EXEC_TIMEOUT`; make it settable per
       call or on the struct so a host's run budget is enforced end to end, so `Limits.wall` stops
@@ -988,8 +998,41 @@ Wrap the FC track into a clean, self-hostable engine API.
       `ExecUnresponsive` as the liveness backstop. `Limits::default()` stays conservative and its
       load-bearing-defaults doc already landed. **Exit gate:** the exec deadline is settable per run
       with unchanged timeout semantics, and the output cap is settable.)*
-- [ ] **P7.4** `agent run <cmd>` / `agent shell` CLI over the lifecycle.
-- [ ] **P7.5** Structured run result (stdout/stderr/exit/artifacts/metrics).
+      *(Landed on the struct, in decision 013's exact shape: `Limits.wall` now means the **whole
+      run** — `with_limits` folds it into both the boot deadline and the per-exec budget — and
+      `Limits` gains `output_cap` as the fourth knob; both ride the existing fold (`Limits` →
+      `BootConfig` → `RunningVm`), so every exec on that sandbox enforces them, and the restore path
+      takes them from the restoring caller's config (the budgets are the host's, not the
+      snapshot's). `BootConfig` keeps a driver-level `boot_timeout`/`exec_wall` split beneath the
+      seam for a caller who needs different ceilings. Both the socket idle timeout and the host's
+      `ExecUnresponsive` give-up deadline derive from the configured budget plus kill slack, exactly
+      as the old const's doc demanded, so a raised budget moves the whole ladder and timeout
+      semantics are unchanged (guest-cooperative `ExecTimeout` first, host backstop after). Defaults
+      are the old constants (30 s, 16 MiB): no default run got more or less. The CLI exposes both as
+      `--wall` / `--output-cap`. Proven by `exec_budgets_are_per_sandbox_knobs`: a 2 s wall turns
+      `sleep 30` into `ExecTimeout{2s}` promptly, a 4 KiB cap turns a `seq` flood into
+      `OutputCap{4096}`, and a modest exec passes both.)*
+- [x] **P7.4** `agent run <cmd>` / `agent shell` CLI over the lifecycle.
+      *(`agent run` now drives the whole seam from flags: piped **stdin** is forwarded (terminal
+      stdin stays empty so an interactive run doesn't block), `--env KEY=VALUE` (repeatable,
+      clap-validated, values never logged), `--put <file>` injects host files, `--get <path>`
+      requests artifacts and writes them under the cwd (absolute/`..` names refused), and
+      `--wall` / `--output-cap` surface the P7.3 knobs; jailed by default with `--unjailed` as
+      the loud opt-out, and exec still needs the agent rootfs (`AGENT_ROOTFS`/`AGENT_MARKER`).
+      `agent shell` replaces its "not implemented" stub with an interactive **stateful session** on
+      one held-open sandbox: one `sh -c` exec per line, prompt and diagnostics on stderr, command
+      output on stdout, files persisting across lines (P7.2; shell *process* state like `cd` does
+      not — each line is its own exec, stated in the help). A guest fault (timeout, cap,
+      unrunnable) belongs to its line and the session survives; an infra/transport fault ends the
+      session with the typed error, branching on `VmmError::kind()`.)*
+- [x] **P7.5** Structured run result (stdout/stderr/exit/artifacts/metrics).
+      *(`RunResult` gains the missing leg: a `metrics: ExecMetrics` field — host-measured, so a
+      hostile guest can't lie about it — starting with `wall`, the request-to-terminal-frame time
+      an embedder can bill on; `#[non_exhaustive]`, so cgroup cpu time and the flight recorder's
+      numbers land as fields, not breaks. `agent run --json` emits the whole structured result as
+      one JSON object on **stdout** (exit code, lossy stdout/stderr, artifact list with sizes,
+      `boot_ms` + `exec_wall_ms`), making the "stdout carries a run's structured result" convention
+      real; raw-relay stays the default.)*
 - [ ] **P7.6** Concurrency: many sandboxes at once; a bounded pool; no interference. *(The pool
       bound respects the measured per-sandbox fd budget from P6.9c: `target × fds_per_vm` stays
       under `ulimit -n` with headroom, stated in the docs, not discovered via `EMFILE`.)*

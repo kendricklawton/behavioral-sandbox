@@ -210,6 +210,75 @@ fn injected_file_is_read_by_the_command_and_artifact_returned() {
 }
 
 #[test]
+fn session_state_persists_across_connections() {
+    // The stateful-session contract at the agent layer: two connections served with the same
+    // session dir see one working directory — a file injected before the first exec, and a file
+    // that exec writes, are both still there for the second. (One-shot `serve` keeps its
+    // fresh-and-removed semantics; this is the `serve_session` path the in-VM binary runs.)
+    let dir = std::env::temp_dir().join(format!("agent-session-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // Exec 1: read the injected file, append to it, and write a new one.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let session = dir.clone();
+    let agent = std::thread::spawn(move || agent_guest::serve_session(guest, &session));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::PutFile {
+            path: "seed.txt".into(),
+            data: b"one\n".to_vec(),
+        })
+        .expect("put file");
+    client
+        .send_request(&Request::Exec {
+            argv: vec!["sh".into(), "-c".into(), "echo two >> seed.txt".into()],
+            stdin: Vec::new(),
+            env: Vec::new(),
+            artifacts: Vec::new(),
+            timeout_ms: 30_000,
+        })
+        .expect("exec 1");
+    loop {
+        match client.recv_response().expect("recv") {
+            Response::Exit { code } => break assert_eq!(code, 0),
+            Response::Stdout(_) | Response::Stderr(_) => {}
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    agent.join().expect("agent 1").expect("serve 1");
+
+    // Exec 2, a fresh connection on the same session dir: the accumulated file is still there.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    let session = dir.clone();
+    let agent = std::thread::spawn(move || agent_guest::serve_session(guest, &session));
+    let mut client = ClientConnection::connect(host).expect("client handshake");
+    client
+        .send_request(&Request::Exec {
+            argv: vec!["cat".into(), "seed.txt".into()],
+            stdin: Vec::new(),
+            env: Vec::new(),
+            artifacts: Vec::new(),
+            timeout_ms: 30_000,
+        })
+        .expect("exec 2");
+    let mut out = Vec::new();
+    loop {
+        match client.recv_response().expect("recv") {
+            Response::Stdout(b) => out.extend_from_slice(&b),
+            Response::Exit { code } => break assert_eq!(code, 0),
+            Response::Stderr(_) => {}
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+    assert_eq!(
+        out, b"one\ntwo\n",
+        "state written by exec 1 must be visible to exec 2"
+    );
+    agent.join().expect("agent 2").expect("serve 2");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn hung_command_is_killed_at_its_deadline() {
     // A command that would run far longer than its timeout must be killed and reported as TimedOut,
     // not hang the agent. A short timeout keeps the test fast.

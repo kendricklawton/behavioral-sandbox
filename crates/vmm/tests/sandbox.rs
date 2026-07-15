@@ -11,7 +11,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use agent_vmm::{Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
+use agent_vmm::{Limits, Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
 
 use common::{agent_rootfs_config, have_jailer_privileges, TmpDir};
 
@@ -95,6 +95,97 @@ fn lifecycle_runs_inputs_at_the_seam_and_collects_outputs() {
     assert_eq!(captured, vec!["mode.txt".to_string()]);
     let bulk = std::fs::read(out_dir.path().join("mode.txt")).expect("read captured output");
     assert_eq!(bulk, b"seam-test");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn session_state_persists_across_execs() {
+    // Stateful sessions (P7.2) against a real guest: the VM is the session. Every exec serves
+    // from the agent's one persistent working directory, so a file injected before exec 1 and a
+    // file exec 1 writes are both visible to exec 2 — and the guest filesystem beyond the workdir
+    // (here /root, on the boot's tmpfs overlay) accumulates too. State's lifetime is the VM's:
+    // teardown discards the overlay, so nothing outlives the session.
+    let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
+
+    let first = sandbox
+        .exec_with_files(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "cat seed.txt > grown.txt && echo second >> grown.txt && echo root > /root/state"
+                    .into(),
+            ],
+            b"",
+            &[("seed.txt".into(), b"first\n".to_vec())],
+            &[],
+            &[],
+        )
+        .expect("exec 1");
+    assert_eq!(first.exit_code, 0, "console:\n{}", sandbox.console());
+
+    // A later exec, a fresh vsock connection: the injected file, the written file, and the
+    // out-of-workdir state are all still there.
+    let second = sandbox
+        .exec(
+            &[
+                "sh".into(),
+                "-c".into(),
+                "cat seed.txt grown.txt /root/state".into(),
+            ],
+            b"",
+        )
+        .expect("exec 2");
+    assert_eq!(second.exit_code, 0);
+    assert_eq!(
+        second.stdout, b"first\nfirst\nsecond\nroot\n",
+        "state from exec 1 must be visible to exec 2"
+    );
+    sandbox.shutdown().expect("shutdown");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn exec_budgets_are_per_sandbox_knobs() {
+    // The two budgets as knobs (P7.3), driven end to end through Limits → BootConfig → every exec:
+    // a 2 s wall makes a long sleep the cooperative ExecTimeout (the guest killed it — the
+    // unchanged semantics), and a 4 KiB output cap makes a flood the typed OutputCap. Same
+    // sandbox, both knobs, plus a within-budget exec proving the knobs don't false-positive.
+    let mut limits = Limits::default();
+    limits.wall = Duration::from_secs(2);
+    limits.output_cap = 4096;
+    let mut cfg = agent_rootfs_config().with_limits(limits);
+    // One `wall` covers boot and exec at the seam (decision 013); this test wants a tight *exec*
+    // budget without gambling on a 2 s boot, so it uses the driver-level split beneath the seam.
+    cfg.boot_timeout = Duration::from_secs(30);
+    let sandbox = Sandbox::open_unjailed(cfg).expect("open");
+
+    let ok = sandbox
+        .exec(&["echo".into(), "within budget".into()], b"")
+        .expect("a modest exec passes both knobs");
+    assert_eq!(ok.stdout, b"within budget\n");
+
+    let started = Instant::now();
+    let err = sandbox
+        .exec(&["sleep".into(), "30".into()], b"")
+        .expect_err("a 30 s sleep must trip the 2 s exec wall");
+    assert!(
+        matches!(err, VmmError::ExecTimeout { limit } if limit == Duration::from_secs(2)),
+        "got {err:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the guest must kill at the budget, not wait the sleep out (took {:?})",
+        started.elapsed()
+    );
+
+    let err = sandbox
+        .exec(&["seq".into(), "1".into(), "100000".into()], b"")
+        .expect_err("a flood must trip the 4 KiB output cap");
+    assert!(
+        matches!(err, VmmError::OutputCap { limit: 4096 }),
+        "got {err:?}"
+    );
+    sandbox.shutdown().expect("shutdown");
 }
 
 #[test]

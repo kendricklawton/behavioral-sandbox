@@ -15,8 +15,10 @@ use crate::VmmError;
 impl Vm {
     /// Restore a microVM from a [`Snapshot`] on a fresh VMM and resume it, returning once it's
     /// running and (if the snapshot carried the exec channel) exec-ready. Reuses only the
-    /// `firecracker` binary, `boot_timeout`, and [`jail`](BootConfig::jail) from `config` (the
-    /// guest's kernel, memory, and devices all come from the snapshot).
+    /// `firecracker` binary, `boot_timeout`, the per-exec budgets
+    /// ([`exec_wall`](BootConfig::exec_wall)/[`output_cap`](BootConfig::output_cap) — they are the
+    /// restoring host's bounds, not the source's), and [`jail`](BootConfig::jail) from `config`
+    /// (the guest's kernel, memory, and devices all come from the snapshot).
     ///
     /// A **read-write** snapshot's private disk copy is staged at its baked-in path; a **read-only
     /// shared base** is referenced in place, so many clones restored from one warm snapshot share it
@@ -62,7 +64,7 @@ impl Vm {
             Ok(latency) => latency,
             Err(e) => return Err(spawned.abort(e)),
         };
-        spawned.into_running(latency)
+        spawned.into_running(latency, config)
     }
 }
 

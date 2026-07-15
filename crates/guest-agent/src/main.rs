@@ -9,7 +9,9 @@
 //! `tracing` goes to stderr. The agent writes exactly one line to **stdout** — the readiness
 //! sentinel ([`GUEST_READY_MARKER`](agent_channel::GUEST_READY_MARKER)) emitted once its vsock
 //! listener is bound — because the guest's stdout is the serial console the host scans to learn the
-//! agent is up. One connection = one command, so the loop just accepts, serves, logs, and continues.
+//! agent is up. One connection = one command, so the loop just accepts, serves, logs, and continues;
+//! every connection serves from the same working directory ([`session_dir`]), so repeated execs
+//! against one VM compose into a **stateful session**.
 #![forbid(unsafe_code)]
 
 use std::io::Write as _;
@@ -116,10 +118,23 @@ fn run_unix(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The one working directory every connection this process serves runs in — which is what makes a
+/// sequence of execs against one agent a **stateful session**: a file injected or written by one
+/// command is visible to the next, and the state's lifetime is the VM's (its overlay discards
+/// everything at teardown). One agent process per VM, so the VM *is* the session; snapshot clones
+/// each get their own copy-on-write view of whatever state the source had accumulated. The pid in
+/// the name is for the host-side `unix:` dev transport, where several agent processes may share
+/// one `/tmp` — in a guest it changes nothing (and a snapshot clone keeps its pid, so the path is
+/// stable across restore).
+fn session_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("agent-session-{}", std::process::id()))
+}
+
 /// Serve one connection, logging (not propagating) a failure so one bad peer never ends the loop.
-/// `serve` emits its own `exec` span with the command + exit; only failures need a line here.
+/// `serve_session` emits its own `exec` span with the command + exit; only failures need a line
+/// here.
 fn serve_one<S: std::io::Read + std::io::Write + Send>(stream: S) {
-    if let Err(e) = agent_guest::serve(stream) {
+    if let Err(e) = agent_guest::serve_session(stream, &session_dir()) {
         tracing::warn!("connection failed: {e}");
     }
 }

@@ -263,9 +263,9 @@ impl From<ChannelError> for VmmError {
 pub const FDS_PER_VM: usize = 8;
 
 /// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy. This is
-/// the per-run resource-policy surface whose shape is fixed by ARCHITECTURE decision 013: quantities
-/// (vCPUs, memory, wall), not capabilities, enforced at the host VMM cgroup; P7.3 adds the exec-wall
-/// and output-cap knobs to it.
+/// the per-run resource-policy surface whose shape is fixed by ARCHITECTURE decision 013: one
+/// options struct of **quantities** (vCPUs, memory, deadlines, an output cap), not capabilities,
+/// enforced host-side (the VMM cgroup for cpu/memory; the exec channel's bounds for the rest).
 ///
 /// The [`default`](Limits::default) values are **deliberately conservative and load-bearing for
 /// embedders**: they cap what a run gets by default, so an embedder that pins this crate and calls
@@ -280,19 +280,33 @@ pub struct Limits {
     pub vcpus: u32,
     /// Guest memory, MiB.
     pub mem_mib: u32,
-    /// The boot-to-userspace deadline. (It does **not** yet bound a command's exec runtime — that
-    /// has its own default budget until the per-run resource policy makes it a knob.)
+    /// The wall-clock budget: the boot-to-userspace deadline **and** each command's exec budget —
+    /// one `wall` for the whole run, not just boot (decision 013). On the exec side it is sent to
+    /// the guest agent, which kills the command past it (the cooperative
+    /// [`ExecTimeout`](VmmError::ExecTimeout)); the host's own give-up deadline — the
+    /// [`ExecUnresponsive`](VmmError::ExecUnresponsive) liveness backstop — is derived from it
+    /// (budget + kill slack), so raising the budget moves both together and a long quiet command is
+    /// never cut off by the transport. Must be nonzero: the wire encodes zero as "use the agent's
+    /// 1 h ceiling", which the host backstop (kill slack past *zero*) would then undercut. (A
+    /// caller that genuinely needs different boot and exec ceilings sets
+    /// [`BootConfig::boot_timeout`] / [`BootConfig::exec_wall`] under the seam.)
     pub wall: Duration,
+    /// Aggregate cap, in bytes, on what the host buffers for one exec — stdout + stderr + returned
+    /// artifacts (plus a small per-frame accounting floor) — so a flooding guest can't grow host
+    /// memory without bound. Breach is the typed [`OutputCap`](VmmError::OutputCap).
+    pub output_cap: usize,
 }
 
 impl Default for Limits {
-    /// Conservative defaults (see the type doc): 1 vCPU, 256 MiB, a 30 s boot deadline. Treat these
-    /// as a stable floor, raising any of them is a breaking change for embedders.
+    /// Conservative defaults (see the type doc): 1 vCPU, 256 MiB, a 30 s wall (boot deadline and
+    /// exec budget alike — 30 s was both fixed values before they were knobs), a 16 MiB output
+    /// cap. Treat these as a stable floor, raising any of them is a breaking change for embedders.
     fn default() -> Self {
         Self {
             vcpus: 1,
             mem_mib: 256,
-            wall: Duration::from_secs(30),
+            wall: exec::DEFAULT_EXEC_TIMEOUT,
+            output_cap: exec::MAX_EXEC_OUTPUT,
         }
     }
 }
@@ -310,11 +324,28 @@ pub struct RunResult {
     /// Requested artifact files the guest returned, as `(path, contents)`. A requested artifact
     /// that didn't exist is simply absent.
     pub files: Vec<(String, Vec<u8>)>,
+    /// What the run cost, host-measured (see [`ExecMetrics`]).
+    pub metrics: ExecMetrics,
+}
+
+/// Host-measured metrics for one exec — the **metrics** leg of the structured run result. Measured
+/// by the driver, not reported by the guest, so a hostile guest can't lie about them.
+/// `#[non_exhaustive]`: richer measurements (guest cpu time from the cgroup, per-stream byte
+/// counts, the flight recorder's numbers) land as new fields without a breaking change.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct ExecMetrics {
+    /// Wall-clock time of the exec as the host observed it: request sent to terminal frame
+    /// received. Includes guest spawn/teardown overhead, so it is an embedder's billing-grade
+    /// number, not the command's own runtime.
+    pub wall: Duration,
 }
 
 /// A microVM sandbox: the embedder-facing lifecycle type, backed by a [`RunningVm`]. The lifecycle
 /// is `open → exec (with files + env) → collect outputs → snapshot → close`, every step synchronous
-/// and every failure a typed [`VmmError`].
+/// and every failure a typed [`VmmError`]. Repeated `exec`s form a **stateful session** (decision
+/// 019): the VM is the session, every exec shares its persistent working directory and overlay, and
+/// closing the sandbox discards the state.
 ///
 /// **Confined by default (decision 015).** [`open`](Sandbox::open) and [`boot`](Sandbox::boot) run
 /// the VMM **under the jailer** — chroot, uid/gid drop, seccomp, its own mount and network

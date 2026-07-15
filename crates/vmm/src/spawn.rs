@@ -1052,13 +1052,22 @@ impl Spawned {
     }
 
     /// Promote a successfully-booted VMM to a [`RunningVm`], disarming this guard's `Drop`
-    /// (hence the `mem::take`s — a `Drop` type can't be destructured).
-    pub(crate) fn into_running(mut self, boot_latency: Duration) -> Result<RunningVm, VmmError> {
+    /// (hence the `mem::take`s — a `Drop` type can't be destructured). `config` supplies the
+    /// host-side per-exec budgets (`exec_wall`, `output_cap`) the VM will enforce — on the restore
+    /// path too, where everything guest-side comes from the snapshot but these bounds are the
+    /// *host's*, so they follow the restoring caller's config, not the source's.
+    pub(crate) fn into_running(
+        mut self,
+        boot_latency: Duration,
+        config: &BootConfig,
+    ) -> Result<RunningVm, VmmError> {
         let Some(child) = self.child.take() else {
             // Unreachable: `boot` only promotes a still-armed guard.
             return Err(VmmError::Vmm("VMM child already reclaimed".into()));
         };
         Ok(RunningVm {
+            exec_wall: config.exec_wall,
+            output_cap: config.output_cap,
             child,
             workdir: std::mem::take(&mut self.workdir),
             console: std::mem::take(&mut self.console),

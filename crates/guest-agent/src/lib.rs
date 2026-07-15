@@ -4,7 +4,9 @@
 //! [`Request::Exec`], runs the command, streams its `stdout`/`stderr` back as they arrive, and ends
 //! with the exit code. It is generic over the byte stream, so the same logic runs over **vsock** in
 //! a real guest (P2.3) and over a **unix socket** in tests and the `main` harness here — the driver
-//! is unit-testable without a VM.
+//! is unit-testable without a VM. [`serve_session`] is the same one-command-per-connection loop
+//! body with a **stable working directory**, which is what turns a sequence of execs against one
+//! agent into a stateful session (the in-VM binary uses it; the VM is the session).
 //!
 //! **The load-bearing subtlety** (the Phase-1 pipe-deadlock lesson, again): the child's `stdout`
 //! and `stderr` are drained by two threads that keep reading **even after forwarding to the host
@@ -88,7 +90,9 @@ impl From<ChannelError> for AgentError {
     }
 }
 
-/// Serve one exec request over `stream` and return the command's exit code.
+/// Serve one exec request over `stream` and return the command's exit code. The run gets a
+/// **fresh working directory**, removed afterwards — the stateless one-shot form; a stateful
+/// session server uses [`serve_session`].
 ///
 /// The handshake is done by [`ServerConnection::accept`]; on a spawn failure the agent sends a
 /// terminal [`Response::Error`] to the host *and* returns [`AgentError::Spawn`], so both sides learn
@@ -106,11 +110,36 @@ pub fn serve<S>(stream: S) -> Result<i32, AgentError>
 where
     S: Read + Write + Send,
 {
+    serve_with(stream, RunDir::fresh())
+}
+
+/// [`serve`], but with the run's working directory at `dir` — **created if missing, kept
+/// afterwards**. This is the building block for **stateful sessions**: a server that passes the
+/// same `dir` to every connection gives a sequence of execs one shared, persistent working
+/// directory, so a file injected or written by one command is visible to the next. The in-VM
+/// binary does exactly that with a single per-process dir — the VM *is* the session, and its
+/// lifetime (or its overlay's) bounds the state.
+///
+/// # Errors
+/// As [`serve`].
+pub fn serve_session<S>(stream: S, dir: &Path) -> Result<i32, AgentError>
+where
+    S: Read + Write + Send,
+{
+    serve_with(stream, RunDir::at(dir))
+}
+
+/// The shared body of [`serve`]/[`serve_session`]: `workdir` is where injected files land, the
+/// command's cwd, and where artifacts are read back from — the two entry points differ only in how
+/// it was made (fresh-and-removed vs. stable-and-kept). Taken as a `Result` so a creation failure
+/// is still reported to the host over the accepted connection.
+fn serve_with<S>(stream: S, workdir: std::io::Result<RunDir>) -> Result<i32, AgentError>
+where
+    S: Read + Write + Send,
+{
     let mut conn = ServerConnection::accept(stream)?;
 
-    // A per-run working directory: injected files land here, the command runs with this as its cwd,
-    // and requested artifacts are read back from here. Removed on drop.
-    let workdir = match RunDir::new() {
+    let workdir = match workdir {
         Ok(dir) => dir,
         Err(e) => {
             let _ = conn.send_response(&Response::Error(format!("create working dir: {e}")));
@@ -443,21 +472,36 @@ impl Drop for ExecCgroup {
 /// Names the next per-run working dir uniquely within this agent process.
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A per-run working directory under `/tmp`, removed on drop. Injected files are written in and
-/// artifacts read out through path-checked helpers so a host path can't escape the directory.
+/// The run's working directory. Injected files are written in and artifacts read out through
+/// path-checked helpers so a host path can't escape the directory. Two shapes: a
+/// [`fresh`](RunDir::fresh) one is private to its run and removed on drop; an [`at`](RunDir::at)
+/// one is the caller's stable **session** dir, created if missing and deliberately kept — session
+/// state belongs to the session, not to any one exec.
 struct RunDir {
     path: PathBuf,
+    /// `false` for a fresh per-run dir (removed on drop); `true` for a session dir (kept).
+    keep: bool,
 }
 
 impl RunDir {
-    fn new() -> std::io::Result<Self> {
+    /// A fresh, uniquely-named per-run dir under `/tmp`, removed on drop.
+    fn fresh() -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!(
             "agent-run-{}-{}",
             std::process::id(),
             RUN_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&path)?;
-        Ok(Self { path })
+        Ok(Self { path, keep: false })
+    }
+
+    /// The caller's stable session dir: created if missing, never removed by this handle.
+    fn at(dir: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        Ok(Self {
+            path: dir.to_path_buf(),
+            keep: true,
+        })
     }
 
     fn path(&self) -> &Path {
@@ -513,7 +557,9 @@ impl RunDir {
 
 impl Drop for RunDir {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+        if !self.keep {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
 

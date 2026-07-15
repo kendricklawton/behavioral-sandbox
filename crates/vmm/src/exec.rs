@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use agent_channel::{ClientConnection, Request, Response};
 
-use crate::{RunResult, VmmError};
+use crate::{ExecMetrics, RunResult, VmmError};
 
 /// Deadline for the vsock connect + `CONNECT` handshake, and the read/write timeout the exec
 /// connection carries — so a dead-or-stalled guest is a typed timeout, never a host hang
@@ -22,22 +22,24 @@ pub(crate) const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// clone before discarding it and serving the next.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Cap on the stdout+stderr+artifacts the host buffers for one `exec`. Each frame is already
+/// Default cap on the stdout+stderr+artifacts the host buffers for one `exec` — the
+/// [`Limits::output_cap`](crate::Limits::output_cap) default. Each frame is already
 /// `≤ MAX_PAYLOAD`, but a guest can send *unboundedly many* frames (`yes`), so the aggregate is
 /// capped too — a hostile guest never grows host memory without bound. (A command's *runtime* is a
-/// separate axis, bounded by the exec wall-timeout below.) A fixed default for now — it joins the
-/// hoster-tunable per-run resource policy (cpu/mem/wall/output) once that shape is decided.
+/// separate axis, bounded by the exec wall budget below.) The knob is per-sandbox: it rides
+/// `Limits` → `BootConfig` → `RunningVm` and every exec on that VM enforces it.
 pub(crate) const MAX_EXEC_OUTPUT: usize = 16 << 20; // 16 MiB
 
 /// Per-frame overhead charged toward the output cap, so a flood of empty (or all-`path`, no-`data`)
 /// frames can't spin the collect loop or grow the artifact list without advancing the cap.
 const FRAME_FLOOR: usize = 64;
 
-/// Default wall-clock budget for one command, sent to the guest agent, which kills the command past
-/// it. A fixed default for now — it joins the hoster-tunable per-run resource policy later. (The
-/// guest clamps a host-sent budget to its own 1 h ceiling. When the budget becomes a policy knob,
-/// both the socket idle timeout *and* the host deadline must be derived from the *requested* value —
-/// `budget + EXEC_KILL_SLACK` — not from this const, or a long quiet command is cut off early.)
+/// Default wall-clock budget for one command — the [`Limits::exec_wall`](crate::Limits::exec_wall)
+/// default. Sent to the guest agent, which kills the command past it (and clamps any request to its
+/// own 1 h ceiling). The knob is per-sandbox (`Limits` → `BootConfig` → `RunningVm`), and both the
+/// socket idle timeout *and* the host give-up deadline are derived from the *configured* value —
+/// `budget + EXEC_KILL_SLACK`, see `RunningVm::exec_with_files` — never from this const, so a raised
+/// budget can't leave a long quiet command cut off by the transport.
 pub(crate) const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Slack past a command's own budget before the *host* gives up on the exec connection: the margin
@@ -183,6 +185,9 @@ pub(crate) fn run_exec<S: Read + Write>(
                     stdout,
                     stderr,
                     files,
+                    metrics: ExecMetrics {
+                        wall: started.elapsed(),
+                    },
                 });
             }
             // The guest killed the command at its wall-clock deadline. Distinct typed error, and
@@ -361,6 +366,8 @@ mod tests {
         assert_eq!(result.stdout, b"hi\n");
         assert!(result.stderr.is_empty());
         assert_eq!(result.exit_code, 0);
+        // The structured result's metrics leg (P7.5): a real exec took nonzero host-observed time.
+        assert!(result.metrics.wall > Duration::ZERO);
         server.join().expect("server thread");
     }
 

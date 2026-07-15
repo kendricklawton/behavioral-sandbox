@@ -24,8 +24,7 @@ use agent_channel::ClientConnection;
 use crate::console::Console;
 use crate::drives::{collect_output_image, OutputDevice};
 use crate::exec::{
-    connect_agent_at, run_exec, ExecBounds, DEFAULT_EXEC_TIMEOUT, EXEC_KILL_SLACK, MAX_EXEC_OUTPUT,
-    PROBE_TIMEOUT, VSOCK_TIMEOUT,
+    connect_agent_at, run_exec, ExecBounds, EXEC_KILL_SLACK, PROBE_TIMEOUT, VSOCK_TIMEOUT,
 };
 use crate::firecracker::{Action, ApiClient};
 use crate::jail::{remove_cgroup, unmount_base, Chroot, Jail};
@@ -101,6 +100,16 @@ pub struct BootConfig {
     pub userspace_marker: String,
     /// Upper bound on boot-to-userspace before the boot is a typed timeout.
     pub boot_timeout: Duration,
+    /// Wall-clock budget for each command run through this VM's `exec`: the guest agent kills the
+    /// command past it, and the host's own give-up deadline is derived from it. At the seam this is
+    /// [`Limits::wall`] — one wall for the whole run (decision 013), which
+    /// [`with_limits`](BootConfig::with_limits) folds into both `boot_timeout` and this; the split
+    /// exists at this layer so a driver-level caller can give boot and exec different ceilings.
+    /// See [`Limits::wall`] for the semantics (including the nonzero requirement).
+    pub exec_wall: Duration,
+    /// Aggregate byte cap on what the host buffers per exec (stdout + stderr + artifacts), folded
+    /// from [`Limits::output_cap`]. See [`Limits::output_cap`].
+    pub output_cap: usize,
     /// Configure a virtio-vsock device with this guest context id, enabling the exec channel
     /// ([`RunningVm::connect_agent`]). `None` (the default) boots with no vsock — the Phase 1
     /// demo path. Set to `Some(`[`DEFAULT_GUEST_CID`]`)` to enable exec.
@@ -187,12 +196,16 @@ impl BootConfig {
         cfg
     }
 
-    /// Fold a per-sandbox [`Limits`] budget onto the config (vCPUs, memory, and the boot deadline).
+    /// Fold a per-sandbox [`Limits`] budget onto the config: vCPUs, memory, the wall (one wall for
+    /// the whole run, decision 013 — it becomes both the boot deadline *and* the per-exec budget),
+    /// and the output cap.
     #[must_use]
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.vcpus = limits.vcpus;
         self.mem_mib = limits.mem_mib;
         self.boot_timeout = limits.wall;
+        self.exec_wall = limits.wall;
+        self.output_cap = limits.output_cap;
         self
     }
 }
@@ -212,6 +225,8 @@ impl Default for BootConfig {
             boot_args: DEFAULT_BOOT_ARGS.to_string(),
             userspace_marker: DEFAULT_USERSPACE_MARKER.to_string(),
             boot_timeout: limits.wall,
+            exec_wall: limits.wall,
+            output_cap: limits.output_cap,
             guest_cid: None,
             read_only_root: false,
             input_dir: None,
@@ -262,6 +277,11 @@ pub struct RunningVm {
     /// that reaps the VM if this *process* dies, and the [`KillHandle`] state. Torn down with the
     /// VM on every path.
     pub(crate) lifetime: VmLifetime,
+    /// Per-exec wall-clock budget, from [`BootConfig::exec_wall`] at boot/restore time; every
+    /// `exec` on this VM runs under it (the host backstop is derived from it plus kill slack).
+    pub(crate) exec_wall: Duration,
+    /// Per-exec aggregate output cap in bytes, from [`BootConfig::output_cap`].
+    pub(crate) output_cap: usize,
 }
 
 /// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
@@ -358,7 +378,7 @@ impl Vm {
             Ok(latency) => latency,
             Err(e) => return Err(spawned.abort(e)),
         };
-        spawned.into_running(boot_latency)
+        spawned.into_running(boot_latency, &config)
     }
 }
 
@@ -466,9 +486,12 @@ impl RunningVm {
     /// Run `argv` in the guest, feeding it `stdin`, and collect its stdout/stderr/exit.
     ///
     /// Connects to the in-guest agent over vsock ([`connect_agent`](Self::connect_agent)) and speaks
-    /// the exec protocol. The captured output is bounded (16 MiB); a command that exits non-zero is
-    /// a normal [`RunResult`], not an error. Each call opens a fresh connection (the guest agent
-    /// serves one command per connection and loops), so repeated `exec` calls are fine.
+    /// the exec protocol. The captured output is bounded ([`BootConfig::output_cap`]); a command
+    /// that exits non-zero is a normal [`RunResult`], not an error. Each call opens a fresh
+    /// connection (the guest agent serves one command per connection and loops), and repeated
+    /// `exec`s **compose into a stateful session** (decision 019): the agent serves every one from
+    /// the same persistent working directory, so files injected or written by one command are
+    /// visible to the next, until the VM (and its overlay) is torn down.
     ///
     /// # Errors
     /// A typed [`VmmError`] across the taxonomy's three buckets: **establishment** —
@@ -488,7 +511,7 @@ impl RunningVm {
     /// (paths relative to that directory) in [`RunResult::files`]. The richer form of
     /// [`exec`](Self::exec); the injected files and env ride the exec request's frames, so each is
     /// bounded by the channel's per-frame cap, and the total captured output+artifacts is bounded
-    /// (16 MiB).
+    /// by this VM's [`BootConfig::output_cap`] (default 16 MiB).
     ///
     /// **Env scope.** The variables are set on the **spawned command only** — the guest agent
     /// applies them via `Command::env`, never its own process — so one run's environment can't
@@ -515,12 +538,13 @@ impl RunningVm {
         artifacts: &[String],
     ) -> Result<RunResult, VmmError> {
         let uds = self.require_vsock()?;
-        // The host's total patience: the command's own budget plus the agent's kill+report margin.
-        // Derived from the *actual* budget (not a fixed const) so raising the budget later can't
-        // leave the socket idle timeout cutting off a long quiet command. Used both as the socket's
-        // per-read idle timeout and, inside `run_exec`, as the wall-clock deadline on the loop — so
-        // the agent's `TimedOut` (at `budget`) reaches us first, and a silent guest can't park us.
-        let budget = DEFAULT_EXEC_TIMEOUT;
+        // The host's total patience: the command's own budget (the `Limits::exec_wall` knob this VM
+        // booted with) plus the agent's kill+report margin. Derived from the *actual* budget so a
+        // raised budget can't leave the socket idle timeout cutting off a long quiet command. Used
+        // both as the socket's per-read idle timeout and, inside `run_exec`, as the wall-clock
+        // deadline on the loop — so the agent's `TimedOut` (at `budget`) reaches us first, and a
+        // silent guest can't park us.
+        let budget = self.exec_wall;
         let wall = budget.saturating_add(EXEC_KILL_SLACK);
         let mut conn = connect_agent_at(uds, AGENT_VSOCK_PORT, wall)?;
         run_exec(
@@ -533,7 +557,7 @@ impl RunningVm {
             ExecBounds {
                 timeout: budget,
                 wall,
-                max_output: MAX_EXEC_OUTPUT,
+                max_output: self.output_cap,
             },
         )
     }
@@ -680,10 +704,15 @@ mod tests {
             vcpus: 4,
             mem_mib: 1024,
             wall: Duration::from_secs(60),
+            output_cap: 4096,
         });
         assert_eq!(cfg.vcpus, 4);
         assert_eq!(cfg.mem_mib, 1024);
+        // One wall for the whole run (decision 013): the fold sets the boot deadline *and* the
+        // per-exec budget from it; the output cap rides alongside.
         assert_eq!(cfg.boot_timeout, Duration::from_secs(60));
+        assert_eq!(cfg.exec_wall, Duration::from_secs(60));
+        assert_eq!(cfg.output_cap, 4096);
     }
 
     // (`jail_refuses_half_confined_boots` lived here while some boot features were not yet jailed;
@@ -696,6 +725,8 @@ mod tests {
         assert_eq!(cfg.vcpus, limits.vcpus);
         assert_eq!(cfg.mem_mib, limits.mem_mib);
         assert_eq!(cfg.boot_timeout, limits.wall);
+        assert_eq!(cfg.exec_wall, limits.wall);
+        assert_eq!(cfg.output_cap, limits.output_cap);
     }
 
     #[test]
