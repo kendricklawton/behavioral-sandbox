@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::SyscallTracer;
+use agent_probes_loader::{ResourceMeter, SyscallTracer};
 use agent_vmm::{BootConfig, Pool, RunningVm, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use anyhow::{bail, Context, Result};
 
@@ -345,6 +345,140 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
          for unwatched processes and pays the full event write only for the one sandbox you watch. A\n\
          microVM's own syscalls never trap here (they stay in-guest), so this bounds the cost on the\n\
          VMM's host footprint, not on guest code."
+    );
+    Ok(())
+}
+
+/// A cross-thread **ping-pong** for a fixed number of round-trips, returning the wall-clock elapsed.
+/// Two rendezvous channels (`sync_channel(0)`, so a send blocks until the peer receives) hand a unit
+/// back and forth: each round-trip is one handoff each way, ~2 context switches — a reliable, portable
+/// way to drive the scheduler (and thus the `sched_switch` tracepoint the meter hooks) without pinning
+/// threads or touching `unsafe`. A channel failure (the worker died) is a typed error, so a broken run
+/// can't masquerade as a fast one.
+fn pingpong(rounds: usize) -> Result<Duration> {
+    use std::sync::mpsc::sync_channel;
+    let (to_b, b_rx) = sync_channel::<()>(0);
+    let (to_a, a_rx) = sync_channel::<()>(0);
+    let worker = std::thread::spawn(move || {
+        // Mirror the driver: receive, then send back, until the sender hangs up (channel closed).
+        while b_rx.recv().is_ok() {
+            if to_a.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    let t0 = Instant::now();
+    for _ in 0..rounds {
+        to_b.send(())
+            .map_err(|_| anyhow::anyhow!("ping-pong worker went away mid-burst"))?;
+        a_rx.recv()
+            .map_err(|_| anyhow::anyhow!("ping-pong worker went away mid-burst"))?;
+    }
+    let elapsed = t0.elapsed();
+    drop(to_b); // close the channel so the worker's `recv` returns `Err` and it exits
+    let _ = worker.join();
+    Ok(elapsed)
+}
+
+/// Mean nanoseconds per **context switch** over one `rounds`-sized ping-pong burst (~2 switches per
+/// round-trip) — the per-sample unit `bench_meter` feeds to [`report_percentiles`].
+fn ns_per_switch(rounds: usize) -> Result<u64> {
+    let elapsed = pingpong(rounds)?;
+    Ok((elapsed.as_nanos() / (rounds as u128 * 2)) as u64)
+}
+
+/// Measure the **resource-metering overhead** (P12.4): the added per-context-switch cost of the attached
+/// `sched_switch` accounting probe, in three conditions on the same ping-pong micro-workload (mirroring
+/// `bench-trace`'s baseline/unwatched/watched shape):
+///
+/// 1. **baseline** — no meter attached;
+/// 2. **attached, not metering us** — the probe is live but our cgroup isn't a target, so every switch
+///    is a target-set lookup that misses and returns: the cost every *other* workload on the box pays
+///    just for the meter being attached;
+/// 3. **attached, metering us** — our cgroup is a target, so every switch does the lookup **and**
+///    accumulates our on-CPU time: the cost the *one sandbox you meter* pays.
+///
+/// The delta of (2)/(3) over (1) is the honest, measured overhead — "measured, not marketed", and the
+/// evidence for the "bounded, sane under many sandboxes" claim: one shared program, a hash lookup per
+/// switch, independent of how many cgroups are metered. Needs `CAP_BPF`+`CAP_PERFMON` and the built
+/// object (not KVM), so it runs on any eBPF-capable host.
+pub(crate) fn bench_meter(runs: usize) -> Result<()> {
+    if let Err(e) = agent_probes_loader::check_support() {
+        bail!("bench-meter needs eBPF support: {e}");
+    }
+    let object = agent_probes_loader::object_path();
+    if !object.is_file() {
+        bail!(
+            "bench-meter needs the built probe object ({}) — run `cargo xtask build-probes`",
+            object.display()
+        );
+    }
+    if runs == 0 {
+        bail!("--runs must be >= 1");
+    }
+
+    // Round-trips per timed burst. Large enough to average out scheduler jitter, small enough to stay
+    // sub-second per burst.
+    const ROUNDS: usize = 2000;
+    println!(
+        "bench-meter: {runs} bursts x {ROUNDS} ping-pong round-trips (~2 ctx switches each) per condition\n"
+    );
+
+    // 1. Baseline: nothing attached.
+    let mut baseline = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        baseline.push(ns_per_switch(ROUNDS)?);
+    }
+
+    // Attach the meter once; the two remaining conditions differ only in whether our cgroup is a target.
+    let mut meter = ResourceMeter::load().context("load + attach the resource meter")?;
+
+    // 2. Attached but not metering us: register a cgroup id that can't match a real one, so our switches
+    // are pure lookup-misses (the meter is live, but nothing accumulates for us).
+    meter
+        .add_target(u64::MAX)
+        .context("register a never-matching target")?;
+    let mut untargeted = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        untargeted.push(ns_per_switch(ROUNDS)?);
+    }
+
+    // 3. Attached and metering us: add our own cgroup, so every one of our switches accumulates.
+    let me = agent_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
+    meter.add_target(me).context("register our cgroup")?;
+    meter.reset(me).context("zero our CPU baseline")?;
+    let mut targeted = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        targeted.push(ns_per_switch(ROUNDS)?);
+    }
+    let charged = meter.cpu_time(me).context("read our accumulated CPU")?;
+    drop(meter); // detach before printing (nothing pinned; explicit for legibility)
+
+    report_percentiles("baseline (no meter)", &mut baseline, "ns/ctx-switch");
+    report_percentiles(
+        "attached (not metering us)",
+        &mut untargeted,
+        "ns/ctx-switch",
+    );
+    report_percentiles("attached (metering us)", &mut targeted, "ns/ctx-switch");
+
+    // Deltas from the p50s, the same nearest-rank formula `report_percentiles` printed above.
+    let p50 = |v: &[u64]| {
+        let n = v.len();
+        v[(50 * n).div_ceil(100).clamp(1, n) - 1]
+    };
+    let base = p50(&baseline);
+    let untargeted_cost = p50(&untargeted).saturating_sub(base);
+    let targeted_cost = p50(&targeted).saturating_sub(base);
+    println!(
+        "\nAdded cost per context switch (p50 vs baseline): not-metering-us +{untargeted_cost} ns, \
+         metering-us +{targeted_cost} ns. The meter charged {charged:?} of CPU to our cgroup while \
+         targeted."
+    );
+    println!(
+        "One shared program is attached to the global `sched_switch`, so the per-switch cost is a single\n\
+         hash lookup regardless of how many cgroups are metered — the accounting stays bounded under many\n\
+         concurrent sandboxes (each is one more entry in the target set, not one more attached program)."
     );
     Ok(())
 }

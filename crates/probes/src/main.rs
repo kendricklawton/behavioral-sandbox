@@ -50,6 +50,15 @@
 //! never sets `ENFORCE` stays observe-only (both hooks accept, the Phase 10 behavior). ARP is always
 //! allowed so the guest can resolve its gateway; the egress hook (reply → guest) always accepts.
 //!
+//! **P12.1 — per-cgroup resource accounting from the scheduler.** [`account_sched_switch`] attaches
+//! **once** to the `sched/sched_switch` tracepoint and accumulates each cgroup's on-CPU **nanoseconds**
+//! into the [`CPU_NS`] map, keyed by cgroup id, for the cgroups the loader registered in
+//! [`METER_TARGETS`] (a *set*, so one shared program stays O(1) per switch no matter how many sandboxes
+//! are metered — P12.4). This is the host CPU a sandbox's VMM burns running the guest's vCPUs, attributed
+//! to the sandbox's own cgroup — the metering primitive (the engine measures; the hoster bills). Memory
+//! and IO ride the kernel's native cgroup v2 counters on the loader side, so this eBPF half is the CPU
+//! axis where per-event timing earns its keep.
+//!
 //! `unsafe` lives here (raw map-pointer derefs), not on the host path: this crate builds for the BPF
 //! target, and the driver/host code stays `#![forbid(unsafe_code)]`. The program/map/link *lifetime*
 //! is the loader's (aya drops links on `Drop`; nothing is pinned), so a crashed loader leaves no
@@ -60,7 +69,7 @@
 use aya_ebpf::{
     helpers::{
         bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
-        bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
+        bpf_ktime_get_ns, bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
     },
     macros::{classifier, map, tracepoint},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
@@ -448,6 +457,106 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
         dst_port = u16::from_be(ctx.load::<u16>(l4 + 2).ok()?);
     }
     Some(FlowKey::new(src, dst, src_port, dst_port, proto))
+}
+
+// ---------------------------------------------------------------------------
+// Resource accounting (P12.1): per-cgroup on-CPU time from the scheduler, the metering primitive
+// (the engine measures; the hoster bills). Unlike the syscall/network probes this reads no packet or
+// argument — it times how long each cgroup's tasks hold a CPU, which is exactly the VMM's host CPU
+// footprint (running the guest vCPUs), attributed to the sandbox's own cgroup (P12.2 correlates it
+// with the Firecracker track's per-VM cgroup). Memory/IO come from the kernel's native cgroup v2
+// counters on the loader side (`memory.peak`, `io.stat`), the "or cgroup" half of the P12.1 box.
+// ---------------------------------------------------------------------------
+
+/// Per-cgroup accumulated on-CPU time in **nanoseconds** (P12.1), keyed by cgroup id
+/// (`bpf_get_current_cgroup_id`) — the same id [`agent_probes_loader::cgroup_id_of_pid`] resolves from
+/// a VMM pid, so the loader reads exactly the sandbox it means. Bounded at [`MAX_CGROUPS`]; with a
+/// target cgroup set (the common case, one sandbox) it holds a single entry. Best-effort like the flow
+/// counters: the read-modify-write is per-CPU-serialized by the scheduler hook but the add across CPUs
+/// isn't atomic, so a heavily-parallel cgroup can undercount by a hair — fine for a metering signal.
+#[map]
+static CPU_NS: HashMap<u64, u64> = HashMap::with_max_entries(MAX_CGROUPS, 0);
+
+/// Cap on the per-cgroup CPU map — a fixed load-time bound. One entry per metered cgroup; comfortably
+/// covers a host's live cgroups when metering-all, and is trivially enough for the targeted case.
+const MAX_CGROUPS: u32 = 1024;
+
+/// This CPU's timestamp at its **last** `sched_switch`, so the slice a task just ran is `now -
+/// LAST_SWITCH[cpu]`. A [`PerCpuArray`] (one slot, per-CPU): each CPU reads and writes only its own
+/// copy, so no cross-CPU atomic and no key math — the natural home for a per-CPU cursor. Zero-init at
+/// load, so the first switch on a CPU has no prior stamp and is skipped (the guard below).
+#[map]
+static LAST_SWITCH: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// The set of cgroup ids to meter (`cgroup_id -> 1`), written by the loader as sandboxes come and go.
+/// **One shared program, a target *set*** is what keeps this sane under many concurrent sandboxes
+/// (P12.4): the `sched_switch` tracepoint is global, so a program-per-sandbox would run every attached
+/// program on *every* context switch (O(sandboxes) per switch). Instead one program is attached once and
+/// consults this set — the hot path is a single hash lookup, and [`CPU_NS`] only ever holds the
+/// registered cgroups (not every cgroup on the box). Empty by default; a cgroup is metered when it is in
+/// this set **or** [`METER_ALL`] is on.
+#[map]
+static METER_TARGETS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_CGROUPS, 0);
+
+/// A meter-**everything** toggle (slot 0), for a whole-host view or a test: `0` (the load-time default)
+/// meters only the [`METER_TARGETS`] set, `1` meters every cgroup (so [`CPU_NS`] then grows toward one
+/// entry per live cgroup, bounded by [`MAX_CGROUPS`]). The targeted set is the multi-sandbox path; this
+/// is the escape hatch, not the default.
+#[map]
+static METER_ALL: Array<u32> = Array::with_max_entries(1, 0);
+
+/// `tracepoint/sched/sched_switch` (P12.1): close the on-CPU interval for the task leaving the CPU and
+/// add it to that task's cgroup total. At this tracepoint the *current* task is still `prev` (the
+/// scheduler fires it before `context_switch` swaps `current`), so `bpf_get_current_cgroup_id` is the
+/// cgroup whose CPU slice just ended — exactly what to charge. `LAST_SWITCH[cpu]` is **always**
+/// restamped (the next interval is measured from here regardless of who ran), but the delta is added
+/// only when the ended cgroup is a registered target (or [`METER_ALL`] is on). A tracepoint returns 0.
+#[tracepoint]
+pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
+    // SAFETY: both are plain BPF helper calls (a monotonic clock read and the current task's cgroup
+    // id) — no pointers, nothing to bound; `current` is still `prev` here (see the fn doc).
+    let now = unsafe { bpf_ktime_get_ns() };
+    let cgroup = unsafe { bpf_get_current_cgroup_id() };
+
+    // Read this CPU's last-switch stamp and restamp it to now, through one per-CPU pointer. Always
+    // restamp: the cursor tracks "when this CPU last switched", independent of which cgroup is metered.
+    // SAFETY: `get_ptr_mut(0)` returns this CPU's own slot of the one-element per-CPU array; the
+    // program is its sole writer on this CPU and the pointer is only used inside the null-check.
+    let last = match LAST_SWITCH.get_ptr_mut(0) {
+        Some(slot) => unsafe {
+            let prev = *slot;
+            *slot = now;
+            prev
+        },
+        None => return 0,
+    };
+    // No prior stamp (first switch on this CPU), or a non-monotonic reading: nothing to charge yet.
+    if last == 0 || now <= last {
+        return 0;
+    }
+    let delta = now - last;
+
+    // Meter this cgroup only if it is a registered target (the multi-sandbox hot path: one hash lookup),
+    // or if the meter-all toggle is on. A non-metered cgroup's slice is dropped here — the cursor above
+    // was already advanced, so the *next* interval stays exact. `get_ptr` obtains the lookup pointer
+    // without dereferencing it (a safe presence check), so no `unsafe` is needed for the membership test.
+    let all = METER_ALL.get(0).copied().unwrap_or(0) != 0;
+    if !all && METER_TARGETS.get_ptr(&cgroup).is_none() {
+        return 0;
+    }
+
+    // Lookup-or-init add (the verifier's mandatory null-check on the map pointer), the same best-effort
+    // accumulation pattern as the flow counters.
+    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
+    // only inside the `Some` arm and never held across a helper call.
+    unsafe {
+        if let Some(acc) = CPU_NS.get_ptr_mut(&cgroup) {
+            *acc += delta;
+        } else {
+            let _ = CPU_NS.insert(&cgroup, &delta, 0);
+        }
+    }
+    0
 }
 
 /// eBPF has no unwinder and the verifier rejects a real panic path, so a program that panics is a

@@ -13,7 +13,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::{cgroup_id_of_pid, EgressPolicy, Protocol, SyscallTracer, TapMonitor};
+use agent_probes_loader::{
+    cgroup_id_of_pid, EgressPolicy, Protocol, ResourceMeter, SyscallTracer, TapMonitor,
+};
 use agent_vmm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use anyhow::{bail, Context, Result};
 
@@ -404,4 +406,167 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
         "# was dropped at the tap by the host-side eBPF and recorded — kernel-enforced per-sandbox egress."
     );
     Ok(())
+}
+
+/// The Phase 12 exit-gate demo (`meter-sandbox`): **per-sandbox resource metrics from eBPF**. Boot a
+/// real sandbox, meter its cgroup with the `sched_switch` accounting probe, and show an idle guest
+/// charging near-zero host CPU while a CPU-heavy guest charges most of a core — the engine *measures*,
+/// the hoster *bills*. Prints the full `ResourceSummary` (CPU from eBPF, memory/IO from the kernel's
+/// cgroup v2 counters) for the busy run.
+///
+/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object — a
+/// privileged, user-run demo like `trace-sandbox`.
+pub(crate) fn meter_sandbox() -> Result<()> {
+    if !Path::new("/dev/kvm").exists() {
+        bail!("meter-sandbox needs /dev/kvm (run on a KVM-capable host)");
+    }
+    if let Err(e) = agent_probes_loader::check_support() {
+        bail!("meter-sandbox needs eBPF support: {e}");
+    }
+    let object = agent_probes_loader::object_path();
+    if !object.is_file() {
+        bail!(
+            "meter-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
+            object.display()
+        );
+    }
+    let kernel = kernel_path();
+    let rootfs = agent_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+        if !p.is_file() {
+            bail!(
+                "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
+                p.display()
+            );
+        }
+    }
+
+    // Boot a sandbox on the agent rootfs (jailed as root, else the unjailed opt-out so a dev host still
+    // runs it). Its VMM runs in a per-VM lifetime cgroup (P6.7) — the cgroup the meter attributes to.
+    let mut cfg = BootConfig::from_env();
+    cfg.kernel = kernel.clone();
+    cfg.rootfs = rootfs.clone();
+    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
+    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+    cfg.read_only_root = false;
+    cfg.boot_timeout = Duration::from_secs(30);
+    let sandbox = if effective_uid() == Some(0) {
+        Sandbox::open(cfg).context("boot the sandbox (jailed)")?
+    } else {
+        println!(
+            "# not root: booting unjailed (Sandbox::open_unjailed) — the accounting is the same"
+        );
+        Sandbox::open_unjailed(cfg).context("boot the sandbox (unjailed)")?
+    };
+
+    let vmm_pid = sandbox.vmm_pid();
+    let cgroup = cgroup_id_of_pid(vmm_pid).context("resolve the sandbox's cgroup id")?;
+    println!(
+        "# sandbox up: VMM pid {vmm_pid}, cgroup id {cgroup}, booted in {} ms",
+        sandbox.boot_latency().as_millis()
+    );
+
+    // Attach the meter and target this sandbox's cgroup (the P12.2 bridge: VMM pid -> cgroup id). One
+    // shared program on the global sched_switch would meter many sandboxes; here we register just one.
+    let mut meter = ResourceMeter::load().context("load + attach the resource meter")?;
+    meter
+        .add_target(cgroup)
+        .context("meter the sandbox cgroup")?;
+    let window = Duration::from_millis(1500);
+    let secs = window.as_secs_f64();
+    // Charges post at **switch-out** (when `sched_switch` fires): a pegged vCPU's whole slice lands only
+    // once the guest idles and the vCPU thread blocks, so give that chain a moment before each read.
+    let settle = Duration::from_millis(300);
+
+    // Idle: the guest sleeps, the VMM parks its vCPU — near-zero host CPU charged to the cgroup. Python
+    // for both phases (same interpreter, only the workload differs), not busybox `sleep`, whose float
+    // support is a build option.
+    meter.reset(cgroup).context("zero the idle baseline")?;
+    let idle = sandbox
+        .exec(
+            &[
+                "python3".into(),
+                "-c".into(),
+                format!("import time; time.sleep({secs})"),
+            ],
+            b"",
+        )
+        .context("run the idle guest command")?;
+    if idle.exit_code != 0 {
+        bail!("idle command exited {}", idle.exit_code);
+    }
+    std::thread::sleep(settle);
+    let idle_cpu = meter.cpu_time(cgroup).context("read idle CPU")?;
+    println!("# idle guest (time.sleep({secs})): charged {idle_cpu:?} of host CPU to the sandbox");
+
+    // Busy: a Python loop pegs a vCPU flat out for the same wall time — the VMM's vCPU thread runs hot.
+    meter.reset(cgroup).context("zero the busy baseline")?;
+    let busy_src = format!(
+        "import time\nend = time.monotonic() + {secs}\nwhile time.monotonic() < end:\n    pass\n"
+    );
+    let busy = sandbox
+        .exec(&["python3".into(), "-c".into(), busy_src], b"")
+        .context("run the CPU-heavy guest command")?;
+    if busy.exit_code != 0 {
+        bail!("busy command exited {}", busy.exit_code);
+    }
+    std::thread::sleep(settle);
+
+    // The full per-run summary: CPU from the eBPF meter, memory/IO from the kernel's cgroup v2 counters.
+    let summary = meter
+        .summary_for_pid(vmm_pid)
+        .context("assemble the resource summary")?;
+    println!(
+        "# busy guest (spin {secs}s): charged {:?} of host CPU to the sandbox",
+        summary.cpu_time
+    );
+    println!("#");
+    println!("# per-run ResourceSummary for this sandbox:");
+    println!("#   cpu_time (eBPF sched_switch) : {:?}", summary.cpu_time);
+    let cg = summary.cgroup;
+    println!(
+        "#   cpu.stat usage_usec (x-check): {}",
+        cg.cpu_usage_usec
+            .map_or("n/a".into(), |u| format!("{u} us"))
+    );
+    println!(
+        "#   memory.current / peak        : {} / {}",
+        cg.memory_current.map_or("n/a".into(), fmt_bytes),
+        cg.memory_peak.map_or("n/a".into(), fmt_bytes)
+    );
+    println!(
+        "#   io rbytes / wbytes           : {} / {}",
+        cg.io_rbytes.map_or("n/a".into(), fmt_bytes),
+        cg.io_wbytes.map_or("n/a".into(), fmt_bytes)
+    );
+    println!("#");
+    if summary.cpu_time > idle_cpu {
+        println!(
+            "# the CPU-heavy run charged {}x the idle run — measured from the host scheduler,",
+            (summary.cpu_time.as_millis().max(1) / idle_cpu.as_millis().max(1)).max(1)
+        );
+        println!(
+            "# attributed to exactly this sandbox's cgroup. The engine measures; the hoster bills."
+        );
+    }
+
+    drop(meter);
+    sandbox.shutdown().context("shut the sandbox down")?;
+    Ok(())
+}
+
+/// A byte count as a short human string (`B`/`KiB`/`MiB`/`GiB`), for the demo's summary lines only.
+fn fmt_bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[u])
+    }
 }

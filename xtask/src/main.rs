@@ -23,6 +23,12 @@
 //! - **`enforce-sandbox`** — the Phase 11 exit-gate demo: boot a real networked sandbox, arm a
 //!   deny-by-default egress policy allowing one endpoint, and show the allow-listed traffic passing while
 //!   everything else is dropped at the tap and logged. Same needs as `watch-sandbox`.
+//! - **`bench-meter`** — the resource-metering overhead (P12.4): per-context-switch cost with no meter vs
+//!   attached-but-not-metering-us vs attached-and-metering-us. Needs `CAP_BPF`+`CAP_PERFMON` + the built
+//!   object (not KVM).
+//! - **`meter-sandbox`** — the Phase 12 exit-gate demo: boot a real sandbox, meter its cgroup, and show an
+//!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
+//!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch); the
@@ -117,6 +123,17 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
+    /// Measure the resource-metering overhead (P12.4): the added per-context-switch cost of the attached
+    /// `sched_switch` accounting probe, with no meter vs attached-but-not-metering-us vs
+    /// attached-and-metering-us, on a ping-pong micro-workload. The delta is the honest cost; one shared
+    /// program means it stays bounded under many sandboxes. Needs `CAP_BPF`+`CAP_PERFMON` + `cargo xtask
+    /// build-probes` (not KVM).
+    BenchMeter {
+        /// How many bursts to time per condition (more → tighter tail percentiles). Default 100, the
+        /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
+        #[arg(long, default_value_t = 100)]
+        runs: usize,
+    },
     /// The Phase 9 exit-gate demo: boot a real sandbox and stream its host syscall footprint,
     /// attributed to the sandbox's cgroup (the VMM's host syscalls — the guest's stay in-guest).
     /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
@@ -139,6 +156,11 @@ enum Cmd {
     /// allowing one endpoint, and show the allow-listed traffic passing while everything else is dropped
     /// at the tap and recorded. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
     EnforceSandbox,
+    /// The Phase 12 exit-gate demo: boot a real sandbox, meter its cgroup with the `sched_switch`
+    /// accounting probe, and show an idle guest charging near-zero host CPU while a CPU-heavy guest charges
+    /// most of a core — plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
+    /// `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
+    MeterSandbox,
 }
 
 fn main() -> Result<()> {
@@ -157,9 +179,11 @@ fn main() -> Result<()> {
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchWarm { runs } => bench::bench_warm(runs),
         Cmd::BenchTrace { runs } => bench::bench_trace(runs),
+        Cmd::BenchMeter { runs } => bench::bench_meter(runs),
         Cmd::TraceSandbox { seconds } => demo::trace_sandbox(seconds),
         Cmd::WatchSandbox { rounds } => demo::watch_sandbox(rounds),
         Cmd::EnforceSandbox => demo::enforce_sandbox(),
+        Cmd::MeterSandbox => demo::meter_sandbox(),
     }
 }
 

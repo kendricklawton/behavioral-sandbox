@@ -1327,12 +1327,57 @@ Turn observation into control — deny-by-default egress, allow-listed, enforced
 
 Per-sandbox CPU/mem/IO accounting from the kernel — the metering primitive (engine, not billing).
 
-- [ ] **P12.1** cgroup-attached eBPF (or cgroup + tracepoints) for per-sandbox CPU/mem/IO.
-- [ ] **P12.2** Correlate with the FC track's per-VM cgroup.
-- [ ] **P12.3** Expose a per-run resource summary in the run result.
-- [ ] **P12.4** Bounded overhead; sane under many concurrent sandboxes.
-- [ ] **P12.5** Test: a CPU-heavy run reports higher CPU than an idle one, attributed correctly.
+- [x] **P12.1** cgroup-attached eBPF (or cgroup + tracepoints) for per-sandbox CPU/mem/IO.
+      *(Landed: the CPU axis is eBPF — `account_sched_switch` attaches to the `sched/sched_switch`
+      tracepoint and charges each context switch's on-CPU nanoseconds to the outgoing task's cgroup in a
+      `CPU_NS` map (keyed by cgroup id). It's correct because at that tracepoint the scheduler hasn't yet
+      swapped `current` (still `prev`), so `bpf_get_current_cgroup_id` is the cgroup whose slice just
+      ended; a per-CPU `LAST_SWITCH` cursor is always restamped so intervals stay exact, and a
+      `METER_TARGETS` *set* scopes accounting to the registered sandboxes — one shared program on the
+      global tracepoint, a hash lookup per switch regardless of sandbox count (P12.4). The loader's
+      `ResourceMeter` loads/attaches it, `add_target(id)` registers a sandbox, and `cpu_time(id)` reads
+      the total; `id` is exactly what `cgroup_id_of_pid(vmm_pid)` resolves. Memory/IO ride the kernel's native cgroup v2
+      counters (`CgroupStats::read`: `memory.peak`/`memory.current`, `io.stat` rbytes/wbytes, `cpu.stat`
+      usage_usec as a cross-check), best-effort/`Option` so a missing controller fails open (decision
+      013) — the "or cgroup + tracepoints" half the box allows. The cgroup-file parsers are host-unit-
+      tested (`cpu.stat`/`io.stat`/single-int + a synthetic-dir `CgroupStats::read`); the live per-cgroup
+      CPU accounting needs a privileged runner (P12.5). Correlating to the FC per-VM cgroup is P12.2, the
+      run-result summary P12.3.)*
+- [x] **P12.2** Correlate with the FC track's per-VM cgroup.
+      *(Landed: `cgroup_dir_of_pid(pid)` joins the existing `cgroup_id_of_pid(pid)` so a sandbox's VMM
+      pid (the FC track's `vmm_pid`, its VMM in the per-VM lifetime cgroup, P6.7) resolves to both the
+      cgroup **id** the eBPF CPU meter keys on and the cgroup **dir** the native memory/IO counters are
+      read from. `ResourceMeter::add_target(cgroup_id_of_pid(vmm_pid))` scopes the CPU accounting to that
+      one sandbox; the id equals the `bpf_get_current_cgroup_id` the kernel program records, so the two
+      tracks line up exactly. `probes-loader` stays decoupled from `vmm` (bridged by plain values).)*
+- [x] **P12.3** Expose a per-run resource summary in the run result.
+      *(Landed: `ResourceSummary { cpu_time, cgroup: CgroupStats }` — the eBPF-measured CPU plus the
+      kernel's cgroup v2 memory/IO — assembled by `ResourceMeter::summary_for_pid(vmm_pid)`. It is the
+      per-run summary a caller ships with the run; folding it into the *persisted* per-run audit record
+      (fused with the network denials and syscall trace) is Phase 13's convergence, kept out of
+      `agent-vmm` so the driver stays independent of the eBPF loader. Decision 026.)*
+- [x] **P12.4** Bounded overhead; sane under many concurrent sandboxes.
+      *(Landed by design + measurement: **one** program attached to the global `sched_switch`, metering a
+      *set* (`METER_TARGETS`), so the per-switch cost is a single hash lookup regardless of how many
+      sandboxes are metered — a program-per-sandbox would run every program on every switch (O(N)).
+      `CPU_NS` holds only the registered cgroups. `cargo xtask bench-meter` measures the honest
+      per-context-switch overhead in three conditions (no meter / attached-not-metering-us /
+      attached-metering-us) on a ping-pong micro-workload, mirroring `bench-trace`. Decision 026.)*
+- [x] **P12.5** Test: a CPU-heavy run reports higher CPU than an idle one, attributed correctly.
+      *(Landed: the `#[ignore]`d `a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox`
+      (`resource_meter.rs`) boots a sandbox, meters its cgroup, and runs an idle guest then a CPU-heavy
+      one (both Python — `time.sleep` vs a vCPU-pegging loop — so only the workload differs) over equal
+      windows, reading each total after a short settle (a slice posts at **switch-out**, when
+      `sched_switch` fires, so a pegged vCPU's whole window lands only once the guest idles and the vCPU
+      thread blocks). Asserts the busy run charged far more host CPU (≥ half the wall window, > 3× idle)
+      and that the CPU map holds **exactly one** entry — this sandbox's cgroup, carrying the charge: the
+      exclusivity is the attribution proof. `agent-vmm` a dev-dependency only.)*
 - **Exit gate:** per-sandbox resource metrics from eBPF (the engine *measures*, the hoster *bills*).
+  *(Demo: `cargo xtask meter-sandbox` boots a real sandbox (jailed as root, else the unjailed opt-out),
+  meters its cgroup, and shows an idle guest charging near-zero host CPU while a CPU-heavy guest charges
+  most of a core, then prints the per-run `ResourceSummary` (CPU from the eBPF sched_switch meter,
+  memory/IO from the kernel's cgroup v2 counters) — per-sandbox resource metrics, host-measured. Run on a
+  KVM + `CAP_BPF`+`CAP_PERFMON` host.)*
 
 ---
 

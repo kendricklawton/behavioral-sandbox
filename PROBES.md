@@ -164,6 +164,41 @@ schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is decision 02
 (P11.7); and `cargo xtask enforce-sandbox` is the live exit-gate demo. Folding attach-and-enforce into
 `Sandbox::open` at launch is Phase 13's convergence.
 
+## Resource accounting from the cgroup (Phase 12)
+
+Where Phases 10/11 watch the tap, Phase 12 meters the **cgroup**: how much host CPU, memory, and IO a
+sandbox's VMM consumes running the guest. The CPU axis is the eBPF part — `account_sched_switch`
+attaches to the `sched/sched_switch` tracepoint and, on every context switch, charges the on-CPU
+nanoseconds the outgoing task just ran to that task's cgroup id in the `CPU_NS` map. It works because at
+that tracepoint the scheduler has not yet swapped `current` (it still points at the task leaving the
+CPU), so `bpf_get_current_cgroup_id()` is exactly the cgroup whose CPU slice just ended. A per-CPU
+`LAST_SWITCH` cursor is always restamped so intervals stay exact. One consequence to know: a slice
+**posts at switch-out**, so a still-running task's current slice is pending — a pegged vCPU can hold a
+whole busy window un-posted until the guest idles and the thread blocks. Read after the run quiesces for
+run-scoped totals; a mid-run read is a floor.
+
+**One program, many sandboxes.** `sched_switch` is a *global* tracepoint, so the probe is attached
+**once** and meters a *set* of cgroups (`METER_TARGETS`), not one program per sandbox — a
+program-per-sandbox would run every attached program on every context switch (O(sandboxes) per switch).
+`ResourceMeter::add_target(id)` registers a sandbox's cgroup, `remove_target` unregisters it, and the hot
+path stays a single hash lookup no matter how many sandboxes are metered; `CPU_NS` holds only the
+registered cgroups. `ResourceMeter::cpu_time(id)` reads the total back, and `cargo xtask bench-meter`
+measures the honest per-context-switch cost (no meter vs attached-not-metering-us vs
+attached-metering-us). That is the "bounded, sane under many concurrent sandboxes" property, measured.
+
+**Correlated to the sandbox, all three axes.** The `id` is exactly what `cgroup_id_of_pid(vmm_pid)`
+resolves, so the CPU track lines up with the Firecracker per-VM cgroup; `cgroup_dir_of_pid(vmm_pid)` gives
+the dir for the other two axes. Memory and IO don't need a probe — cgroup v2 already maintains them per
+cgroup, so `CgroupStats::read` reads `memory.peak`/`memory.current`, `io.stat` (rbytes/wbytes summed), and
+`cpu.stat`'s `usage_usec` (an independent cross-check on the eBPF CPU total) straight from the cgroup dir,
+best-effort (every field an `Option`, so a missing controller or older kernel is a `None`, never an error
+— accounting fails open, decision 013). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
+`ResourceSummary` for one sandbox. That is the "cgroup-bpf **or** cgroup + tracepoints" the phase allows:
+eBPF where per-event timing earns its keep (CPU), the kernel's own counters where they already exist
+(memory, IO). The whole mechanism is decision 026; `resource_meter.rs` (ignored/privileged) proves a
+CPU-heavy run reports more CPU than an idle one attributed to the sandbox (P12.5); `cargo xtask
+meter-sandbox` is the live exit-gate demo. The engine *measures*; the hoster *bills*.
+
 ## The hardware-isolation consequence (the honest limit)
 
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so
@@ -188,6 +223,17 @@ leaves no pinned residue:
 ```console
 cargo test -p agent-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
+```
+
+The per-phase exit-gate demos each boot a real sandbox and show one probe end to end (all need
+`/dev/kvm` + the agent rootfs + the built object, run as root or with the named caps):
+
+```console
+cargo xtask trace-sandbox      # P9:  the sandbox's host syscall footprint, by cgroup
+cargo xtask watch-sandbox      # P10: the guest's per-VM network flows on its tap
+cargo xtask enforce-sandbox    # P11: deny-by-default egress, allow-listed, enforced at the tap
+cargo xtask meter-sandbox      # P12: per-sandbox CPU (eBPF) + memory/IO (cgroup v2)
+cargo xtask bench-meter        # P12.4: the metering overhead, measured (no KVM needed)
 ```
 
 ## Beyond the counter: a per-event syscall trace (Phase 9, in progress)
