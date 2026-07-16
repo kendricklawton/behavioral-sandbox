@@ -35,6 +35,13 @@
 //! means "don't filter on this axis"), so you can watch exactly one Firecracker worker's host
 //! footprint instead of the whole machine's.
 //!
+//! **P10.1/P10.2 — network flows on the tap.** [`tap_ingress`]/[`tap_egress`] are `tc`/clsact
+//! classifiers on a VM's tap device: each parses the frame's IPv4 5-tuple and adds the packet to that
+//! flow's per-direction byte/packet counters in the [`FLOWS`] map. Unlike the syscall tracepoints, this
+//! *is* the guest's own traffic — a microVM's packets cross its tap on the host, so the host sees every
+//! one (the strong cross-boundary signal core property 1 leaves intact). Observe-only: the classifiers
+//! return `TC_ACT_OK` (accept); Phase 11 returns `TC_ACT_SHOT` to drop a denied flow.
+//!
 //! `unsafe` lives here (raw map-pointer derefs), not on the host path: this crate builds for the BPF
 //! target, and the driver/host code stays `#![forbid(unsafe_code)]`. The program/map/link *lifetime*
 //! is the loader's (aya drops links on `Drop`; nothing is pinned), so a crashed loader leaves no
@@ -47,11 +54,14 @@ use aya_ebpf::{
         bpf_get_current_cgroup_id, bpf_get_current_comm, bpf_get_current_pid_tgid,
         bpf_probe_read_user_buf, bpf_probe_read_user_str_bytes,
     },
-    macros::{map, tracepoint},
+    macros::{classifier, map, tracepoint},
     maps::{Array, HashMap, PerCpuArray, RingBuf},
-    programs::TracePointContext,
+    programs::{TcContext, TracePointContext},
 };
-use agent_probes_common::{SyscallEvent, Syscall, DETAIL_CAP, SOCKADDR_SNAP};
+use agent_probes_common::{
+    FlowCounts, FlowKey, Syscall, SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_IP,
+    IPPROTO_TCP, IPPROTO_UDP, SOCKADDR_SNAP,
+};
 
 /// A single-slot **per-CPU** counter of `sys_enter_execve` events. Per-CPU means each CPU increments
 /// its own copy of slot 0 with no cross-CPU atomic; the loader sums the per-CPU values when it reads.
@@ -210,6 +220,115 @@ pub fn trace_openat(ctx: TracePointContext) -> u32 {
 #[tracepoint]
 pub fn trace_connect(ctx: TracePointContext) -> u32 {
     record(&ctx, Syscall::Connect, 24, false)
+}
+
+/// Per-flow byte/packet counters (P10.2), keyed by the directional IPv4 [`FlowKey`]. Bounded at
+/// [`MAX_FLOWS`] (maps are sized at load); a full map drops new flows, the counts already recorded stay
+/// live. Best-effort like [`EXECVE_BY_PID`]: a flow's read-modify-write is not atomic across CPUs, so a
+/// burst racing two CPUs on one flow can lose an update (a slight undercount). Fine for observability; a
+/// per-CPU map is the accuracy upgrade if a later phase needs exactness.
+#[map]
+static FLOWS: HashMap<FlowKey, FlowCounts> = HashMap::with_max_entries(MAX_FLOWS, 0);
+
+/// Cap on the flow map — a fixed load-time bound, comfortably covering the distinct 5-tuples one
+/// sandbox's tap sees in an observation window; overflow drops new flows, never faults.
+const MAX_FLOWS: u32 = 4096;
+
+/// A `tc` classifier's "accept this packet" verdict. P10 is **observe-only** (both hooks always accept);
+/// Phase 11 (enforcement) returns `TC_ACT_SHOT` to drop a denied flow. A literal so the classifier's
+/// return type is unambiguously `i32`, independent of the binding constant's width.
+const TC_ACT_OK: i32 = 0;
+
+/// Which way a frame crossed the tap, from the tap's perspective (matching [`FlowCounts`]): `Ingress`
+/// is a frame the guest sent (arriving at the tap), `Egress` a frame delivered to the guest.
+#[derive(Clone, Copy)]
+enum Direction {
+    Ingress,
+    Egress,
+}
+
+/// `tc`/clsact **ingress** on a VM's tap — a frame the guest sent. Counts it against its flow, then
+/// accepts. Attached by the userspace loader's `TapMonitor` after it adds the clsact qdisc.
+#[classifier]
+pub fn tap_ingress(ctx: TcContext) -> i32 {
+    count(&ctx, Direction::Ingress);
+    TC_ACT_OK
+}
+
+/// `tc`/clsact **egress** on a VM's tap — a frame delivered to the guest.
+#[classifier]
+pub fn tap_egress(ctx: TcContext) -> i32 {
+    count(&ctx, Direction::Egress);
+    TC_ACT_OK
+}
+
+/// Add one packet to its flow's per-direction counters. A non-IPv4 or truncated frame is skipped (the
+/// caller still accepts it). `#[inline(always)]` so each classifier stays one self-contained program
+/// (no BPF-to-BPF call), the verifier profile P8/P9 established.
+#[inline(always)]
+fn count(ctx: &TcContext, dir: Direction) {
+    let Some(key) = parse(ctx) else {
+        return;
+    };
+    // `skb->len` is the full frame length — counts a GSO super-frame's real bytes, which `data_end -
+    // data` (only the linear head) would undercount.
+    let bytes = u64::from(ctx.skb.len());
+    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
+    // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
+    unsafe {
+        if let Some(counts) = FLOWS.get_ptr_mut(&key) {
+            match dir {
+                Direction::Ingress => {
+                    (*counts).ingress_packets += 1;
+                    (*counts).ingress_bytes += bytes;
+                }
+                Direction::Egress => {
+                    (*counts).egress_packets += 1;
+                    (*counts).egress_bytes += bytes;
+                }
+            }
+        } else {
+            let mut init = FlowCounts::default();
+            match dir {
+                Direction::Ingress => {
+                    init.ingress_packets = 1;
+                    init.ingress_bytes = bytes;
+                }
+                Direction::Egress => {
+                    init.egress_packets = 1;
+                    init.egress_bytes = bytes;
+                }
+            }
+            let _ = FLOWS.insert(&key, &init, 0);
+        }
+    }
+}
+
+/// Read the frame's IPv4 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes` at a
+/// constant, or `ihl`-bounded, offset), or `None` if it is not IPv4-over-Ethernet or a read runs off
+/// the packet. Mirrors [`agent_probes_common::parse_ipv4_5tuple`] at the same shared offsets, so the
+/// in-kernel reader and the host-tested pure parser can't drift.
+#[inline(always)]
+fn parse(ctx: &TcContext) -> Option<FlowKey> {
+    let ethertype = u16::from_be(ctx.load::<u16>(ETHERTYPE_OFFSET).ok()?);
+    if ethertype != ETH_P_IP {
+        return None;
+    }
+    let version_ihl: u8 = ctx.load(ETH_HLEN).ok()?;
+    let ihl = ((version_ihl & 0x0f) as usize) * 4;
+    if ihl < 20 {
+        return None;
+    }
+    let proto: u8 = ctx.load(ETH_HLEN + 9).ok()?;
+    let src = u32::from_be(ctx.load::<u32>(ETH_HLEN + 12).ok()?);
+    let dst = u32::from_be(ctx.load::<u32>(ETH_HLEN + 16).ok()?);
+    let (mut src_port, mut dst_port) = (0u16, 0u16);
+    if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+        let l4 = ETH_HLEN + ihl;
+        src_port = u16::from_be(ctx.load::<u16>(l4).ok()?);
+        dst_port = u16::from_be(ctx.load::<u16>(l4 + 2).ok()?);
+    }
+    Some(FlowKey::new(src, dst, src_port, dst_port, proto))
 }
 
 /// eBPF has no unwinder and the verifier rejects a real panic path, so a program that panics is a

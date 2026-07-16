@@ -39,6 +39,12 @@
 //! trace is scoped to exactly that sandbox (the `bpf_get_current_cgroup_id` a program reads equals the
 //! inode of the cgroup dir the jailer placed the VMM in).
 //!
+//! **P10.1/P10.2 — network flows on the tap.** [`TapMonitor`] attaches the two `tc`/clsact classifiers
+//! (`tap_ingress`/`tap_egress`) to a VM's tap and reads their per-flow byte/packet counters with
+//! [`flows`](TapMonitor::flows). This is the guest's *own* traffic (every packet crosses the tap on the
+//! host), the strong cross-boundary signal syscalls can't be. Attaches by interface name; entering a
+//! sandbox's netns to bind its `fc0` (decision 017) is P10.4.
+//!
 //! **P8.8/P8.9 — caps + a legible support probe.** Loading needs only `CAP_BPF`+`CAP_PERFMON`, not
 //! full root; [`check_support`] names a missing prerequisite (kernel BTF, or those caps) up front as a
 //! typed [`ProbeError::Unsupported`], so a host that can't run the probes says so plainly instead of
@@ -51,10 +57,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
-use aya::programs::TracePoint;
+use aya::programs::{tc, SchedClassifier, TcAttachType, TracePoint};
 use aya::Ebpf;
 
-pub use agent_probes_common::{Syscall, SyscallEvent};
+pub use agent_probes_common::{FlowCounts, FlowKey, Syscall, SyscallEvent};
+use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE};
 
 /// Env override for the compiled BPF object's location — for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
@@ -375,6 +382,111 @@ impl SyscallTracer {
             }
         }
         Ok(total)
+    }
+}
+
+/// The two `tc` classifier programs [`TapMonitor`] attaches (their `#[classifier] fn` symbols in
+/// `crates/probes`), one per clsact hook.
+const CLS_INGRESS: &str = "tap_ingress";
+const CLS_EGRESS: &str = "tap_egress";
+/// The per-flow counter map the classifiers write (`#[map] static FLOWS`).
+const FLOWS_MAP: &str = "FLOWS";
+/// `EEXIST`: a clsact qdisc already on the interface is not an error (the attach is idempotent).
+const EEXIST: i32 = 17;
+
+/// A loaded, attached network-flow monitor (P10.1/P10.2): `tc`/clsact classifiers on a VM's tap that
+/// count bytes/packets per IPv4 flow per direction into a map [`flows`](Self::flows) reads. Owns the
+/// aya [`Ebpf`] (programs, map, live attachments); dropping it detaches both classifiers and pins
+/// nothing, like [`SyscallTracer`]. Attaches by **interface name in the current netns**; binding to the
+/// specific `fc0` inside a sandbox's own netns (decision 017) is P10.4's netns-entering step.
+#[must_use = "dropping a TapMonitor detaches the tc programs"]
+pub struct TapMonitor {
+    ebpf: Ebpf,
+}
+
+impl TapMonitor {
+    /// Load the object and attach both classifiers to `interface`, first adding a **clsact** qdisc
+    /// (which gives the device its `tc` ingress and egress hooks). From here every IPv4 frame crossing
+    /// the tap is counted against its flow until this is dropped.
+    ///
+    /// # Errors
+    /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps); [`ProbeError::Object`] if the
+    /// object can't be read (build it: `cargo xtask build-probes`); [`ProbeError::Load`] if the kernel
+    /// rejects the object/a program; [`ProbeError::Attach`] if adding the qdisc or a classifier attach
+    /// fails (the clsact qdisc needs `CAP_NET_ADMIN`, and `interface` must exist).
+    pub fn attach(interface: &str) -> Result<Self, ProbeError> {
+        check_support()?;
+        let path = object_path();
+        let bytes = std::fs::read(&path).map_err(|e| {
+            ProbeError::Object(format!(
+                "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
+                path.display()
+            ))
+        })?;
+        let mut ebpf =
+            Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+
+        // clsact is the qdisc that gives a device both a `tc` ingress and egress hook. Idempotent: an
+        // already-present clsact (EEXIST) is fine; any other failure (no CAP_NET_ADMIN, or the interface
+        // is gone) is a typed attach error rather than a panic.
+        if let Err(e) = tc::qdisc_add_clsact(interface) {
+            if e.raw_os_error() != Some(EEXIST) {
+                return Err(ProbeError::Attach(format!(
+                    "add clsact qdisc on {interface}: {e}"
+                )));
+            }
+        }
+
+        for (program, attach_type) in [
+            (CLS_INGRESS, TcAttachType::Ingress),
+            (CLS_EGRESS, TcAttachType::Egress),
+        ] {
+            let cls: &mut SchedClassifier = ebpf
+                .program_mut(program)
+                .ok_or_else(|| {
+                    ProbeError::Load(format!("program `{program}` not found in object"))
+                })?
+                .try_into()
+                .map_err(|e| {
+                    ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
+                })?;
+            cls.load()
+                .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
+            cls.attach(interface, attach_type).map_err(|e| {
+                ProbeError::Attach(format!(
+                    "attach `{program}` to {interface} ({attach_type:?}): {e}"
+                ))
+            })?;
+        }
+
+        Ok(Self { ebpf })
+    }
+
+    /// The current per-flow counters as `(FlowKey, FlowCounts)` pairs, read from the `FLOWS` map. Order
+    /// is unspecified (hash-map iteration). The map is read as raw key/value byte arrays and decoded
+    /// with the shared `FlowKey::from_bytes` / `FlowCounts::from_bytes`, so the loader needs no `unsafe`
+    /// map-type binding and the record stays single-sourced with the kernel writer.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
+    pub fn flows(&self) -> Result<Vec<(FlowKey, FlowCounts)>, ProbeError> {
+        let map = self
+            .ebpf
+            .map(FLOWS_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{FLOWS_MAP}` not found")))?;
+        let flows: AyaHashMap<_, [u8; FLOW_KEY_SIZE], [u8; FLOW_COUNTS_SIZE]> =
+            AyaHashMap::try_from(map)
+                .map_err(|e| ProbeError::Map(format!("open `{FLOWS_MAP}` as a hash map: {e}")))?;
+        let mut out = Vec::new();
+        for entry in flows.iter() {
+            let (k, v) =
+                entry.map_err(|e| ProbeError::Map(format!("iterate `{FLOWS_MAP}`: {e}")))?;
+            if let (Some(key), Some(counts)) = (FlowKey::from_bytes(&k), FlowCounts::from_bytes(&v))
+            {
+                out.push((key, counts));
+            }
+        }
+        Ok(out)
     }
 }
 

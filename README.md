@@ -34,16 +34,19 @@ the record can't be forged by the code it is recording.
 ## Status
 
 **Early, under active development.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md);
-its checkboxes are the state. So far (Phases 1 through 7) a microVM boots to userspace, runs commands
+its checkboxes are the state. So far (Phases 1 through 9) a microVM boots to userspace, runs commands
 with captured stdout/stderr/exit, runs real Python, Node, and static binaries from a purpose-built
 rootfs, gets a per-VM deny-by-default network, snapshots and restores from a pre-warmed pool in
 milliseconds, runs confined under the jailer (chroot, dropped privileges, cgroup limits, seccomp),
 and is wrapped in the embedder-facing `Sandbox` lifecycle: jailed by default, per-exec files + env
 under a tested secret-hygiene contract, stateful sessions (the VM is the session), budget knobs,
 and a structured result — the contract is written up in [`ENGINE.md`](ENGINE.md). The host-side
-eBPF observability has begun ([`PROBES.md`](PROBES.md): a Rust program loads, attaches, and reports
-from the host, out of the guest's reach); the audit log that fuses it with the driver into a
-per-run record of what a run did is the track that follows. Nothing here is production yet; the
+eBPF observability is now live ([`PROBES.md`](PROBES.md)): the loader attaches
+`execve`/`openat`/`connect` tracepoints and streams a per-event syscall trace scoped in-kernel to one
+sandbox's cgroup (its host footprint, since a microVM's own syscalls stay in-guest), with the
+per-syscall overhead measured (`cargo xtask bench-trace`) and a live trace of a running sandbox as the
+demo (`cargo xtask trace-sandbox`). The audit log that fuses this with the driver into a per-run
+record of what a run did is the track that follows. Nothing here is production yet; the
 point is depth, done in the open.
 
 ## How it fits together

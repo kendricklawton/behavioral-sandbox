@@ -13,9 +13,6 @@ measured, not marketed.*
 
 Decisions queued by the (sandbox) roadmap, to be recorded here as they're made:
 
-- **P4.3** — the egress model: NAT-to-the-world vs **deny-by-default** with an explicit allow-list
-  (enforced in the eBPF track).
-- **P6.5** — the per-run resource-policy shape (the cpu/mem/wall/net knobs the engine exposes).
 - **P11.6** — where egress policy lives and its schema (engine *mechanism*, not org policy).
 - **P15.6** — the security boundary and its trust assumptions (what's trusted: CPU/KVM/host
   kernel; what isn't: the guest).
@@ -23,8 +20,8 @@ Decisions queued by the (sandbox) roadmap, to be recorded here as they're made:
 - **P19.1** — freeze + version the wire API as the language-agnostic **SDK contract** (schema,
   error taxonomy, semver compat policy). *(vNext; the SDKs live in their own repos — see roadmap
   Phase 19.)*
-- **P20.1** — the **Wasmtime sibling** is a separate repo that reuses the driver API + flight-
-  recorder format, **not a plug-in backend** here (so *isolation is hardware* is never traded in
+- **P20.1** — the **Wasmtime sibling** is a separate repo that reuses the driver API + audit-log
+  format, **not a plug-in backend** here (so *isolation is hardware* is never traded in
   this engine). *(vNext — see roadmap Phase 20.)*
 
 ---
@@ -1396,8 +1393,11 @@ smallest that shows all three record shapes (a program path, a file path, a sock
   `channel` protocol + audit-log format); it can change without an `api:` marker.
 - The `detail` blob is bounded (128 bytes): long paths truncate, and a `connect` captures only the
   leading sockaddr bytes (a full IPv4 address; IPv6 partially) to avoid over-reading a short user
-  buffer. Measured overhead and the full sandbox-attributed workload test are the remaining Phase 9
-  boxes (P9.5/P9.6).
+  buffer. Phase 9 is now complete: the streaming consumer (P9.3, a poll-with-sleep [`SyscallTracer::stream`]
+  rather than the `epoll` wait sketched above, keeping the crate sync + `unsafe`-free), cgroup
+  attribution (P9.4, `cgroup_id_of_pid`), the measured per-syscall overhead (`cargo xtask bench-trace`,
+  P9.5), and the attributed-workload test (P9.6) all landed, with `cargo xtask trace-sandbox` (boot a
+  real sandbox, stream its cgroup-attributed host footprint) as the exit-gate demo.
 
 ### 022 — Multi-tenant safety is airtight per-run isolation, proven by the containment suite *(2026-07-15, Phase 15)*
 
@@ -1450,3 +1450,61 @@ rather than asserted.
 - **Expose `pids`/`io` as `Limits` knobs now.** Deferred: a hard internal default contains the host
   without a public-API change; a caller-tunable knob can be added additively later if a real need
   appears.
+
+### 023 — Network observation: `tc`/clsact on the tap, a per-flow 5-tuple map, observe-only *(2026-07-16, P10.1/P10.2)*
+
+**Problem.** Phase 10 needs per-microVM network visibility: every packet a guest sends or receives,
+counted at the host. Three shapes must be chosen together (as decisions 020/021 did for the loader and
+the syscall record): the attach mechanism, the per-flow record the kernel writes and the loader reads,
+and where the "watch one sandbox" scoping lives.
+
+**Decision.** Three coupled choices, extending decision 020's loader.
+- **`tc`/clsact, not XDP.** The guest's traffic crosses its tap on the host, so a `tc` classifier on the
+  tap sees it. clsact is chosen because it gives one device **both** an ingress and an egress hook
+  uniformly (`tap_ingress`/`tap_egress`), on any device and any BPF-capable kernel (no driver XDP
+  support needed); generic XDP is RX/ingress-only, so it can't see egress-to-guest and would need `tc`
+  for that half anyway. `tc` is also the natural home for Phase 11 enforcement (a denied flow returns
+  `TC_ACT_SHOT`); P10 is **observe-only**, both hooks return `TC_ACT_OK`.
+- **The record is a shared, dependency-free POD, read as raw bytes.** `crates/probes-common` gains
+  `FlowKey` (the IPv4 5-tuple, host byte order, `#[repr(C)]` and padding-free with an explicit zeroed
+  `_pad`, because it is a hash-map **key**: uninitialized padding would make two identical flows hash
+  apart) and `FlowCounts` (per-direction packets + bytes), single-sourced across the kernel writer and
+  the loader like `SyscallEvent`. The loader opens the map as raw `[u8; N]` key/value arrays and decodes
+  them with `FlowKey::from_bytes`/`FlowCounts::from_bytes`, so it needs no `unsafe impl aya::Pod` and
+  both crates keep `#![forbid(unsafe_code)]`. The header offsets are shared consts, and a pure
+  `parse_ipv4_5tuple` (host-unit-tested) is mirrored in-kernel by `ctx.load` at those same offsets, so
+  the two parsers can't drift.
+- **Scoping is by interface, and (later) by netns.** P10.1/P10.2 attach by interface **name in the
+  current netns**. Because a sandbox's tap lives in its **own** netns (decision 017), binding to the
+  specific `fc0` for one sandbox means entering that netns — deferred to **P10.4**; the clean
+  attach/detach on sandbox open/close is **P10.5**.
+
+**Alternatives considered.**
+- **XDP instead of `tc`.** Rejected: generic XDP is ingress-only and driver-dependent, so it can't
+  count egress-to-guest and buys no portability over `tc` here; `tc`/clsact covers both directions on
+  every device and is where enforcement will live.
+- **A `PerCpuHashMap` for contention-free exact counts.** Deferred: the plain `HashMap` with a
+  best-effort non-atomic read-modify-write matches `EXECVE_BY_PID` and is fine for observability; a
+  per-CPU map is the accuracy upgrade if a later phase needs exactness.
+- **Fold direction into the key** (`(flow, dir) -> {pkts, bytes}`). Rejected: rx/tx on the value is the
+  more useful shape (one lookup gives a flow's both directions), and a directional 5-tuple already
+  encodes its direction by which hook it crossed.
+- **`unsafe impl aya::Pod` for `FlowKey`/`FlowCounts`** (so the loader could type the map directly).
+  Rejected: it needs `unsafe` in one of the two `forbid(unsafe_code)` crates (the orphan rule forbids it
+  in the loader); reading the map as `[u8; N]` and decoding with the shared `from_bytes` is unsafe-free
+  and keeps the record single-sourced.
+
+**Consequences and notes.**
+- **IPv4 only for now.** A non-IPv4 (or truncated) frame is skipped, counted nowhere; IPv6 is a later,
+  additive widening of `FlowKey` and the parser.
+- **This is the guest's own traffic**, unlike the syscall tracepoints (decision 021's honest limit): a
+  microVM's packets cross its tap on the host, so network is the strong cross-boundary signal core
+  property 1 leaves intact.
+- **No leaked filter.** The classifier links are drop-owned (decision 020, nothing pinned), and a
+  sandbox's netns teardown (`ip netns del`, decision 017) cascades the tap, its clsact qdisc, and the
+  filters away — so a torn-down sandbox leaves no dangling `tc` program even if the loader is gone.
+- **`FlowKey`/`FlowCounts` are an internal kernel↔loader contract**, not the frozen public wire API, so
+  they can change without an `api:` marker (like `SyscallEvent`).
+- P10.3 (export the per-VM stats), P10.4 (bind to the sandbox's netns tap), P10.5 (attach/detach on
+  open/close), and P10.6 (the live guest-traffic test) build on this; the exit gate is live per-microVM
+  network visibility.

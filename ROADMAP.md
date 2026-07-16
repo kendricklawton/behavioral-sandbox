@@ -1214,8 +1214,22 @@ Trace what a process (a firecracker/vhost worker, or the guest-adjacent host sid
 
 Watch every packet a microVM sends/receives — at its tap device, in the kernel.
 
-- [ ] **P10.1** Attach a **tc** (or XDP) program to a VM's tap device.
-- [ ] **P10.2** Parse L3/L4 headers; count bytes/packets per direction, per flow.
+- [x] **P10.1** Attach a **tc** (or XDP) program to a VM's tap device.
+      *(Landed: `TapMonitor::attach(interface)` adds a **clsact** qdisc and attaches two `tc`
+      classifiers — `tap_ingress`/`tap_egress`, the ingress and egress hooks clsact provides — to a tap
+      via aya `SchedClassifier`. `tc`/clsact over XDP so both directions are covered uniformly and
+      Phase 11 enforcement can live at the same hook (decision 023). Drop-owned links, nothing pinned
+      (decision 020); attaches by interface name in the current netns, with binding to a sandbox's own
+      netns `fc0` (decision 017) deferred to P10.4. Proven by the `#[ignore]`d
+      `attaches_to_a_tap_and_reads_the_flow_map` (create a tap, attach both hooks, read the map back).)*
+- [x] **P10.2** Parse L3/L4 headers; count bytes/packets per direction, per flow.
+      *(Landed: each classifier reads the frame's IPv4 5-tuple with `ctx.load` and adds `skb->len` to
+      that flow's per-direction counters in the `FLOWS` map, keyed by `FlowKey` (5-tuple) → `FlowCounts`
+      (ingress/egress packets+bytes), single-sourced in `crates/probes-common`. The parse is mirrored by
+      a pure `parse_ipv4_5tuple` at the same shared offsets, host-unit-tested on crafted TCP/UDP/ARP/
+      truncated frames; the loader reads the map as raw bytes and decodes with the shared `from_bytes`,
+      so both crates stay `unsafe`-free. IPv4 only for now; best-effort counters like `EXECVE_BY_PID`.
+      The live "guest traffic shows up in the counters" proof is P10.6.)*
 - [ ] **P10.3** Export per-VM network stats to userspace via a map.
 - [ ] **P10.4** Bind the program to the *specific* tap the FC track named for a sandbox.
 - [ ] **P10.5** Handle attach/detach cleanly on sandbox open/close.

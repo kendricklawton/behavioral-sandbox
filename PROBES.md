@@ -109,6 +109,20 @@ probe): before a load it checks kernel BTF and the two capabilities and, if eith
 a **legible typed error naming the requirement** (`ProbeError::Unsupported`) rather than letting the
 load fail with a cryptic verifier reject or `EPERM`. A host that can't run the probes says so plainly.
 
+## Network observation on the tap (Phase 10)
+
+`count_execve` sees only the *host's* syscalls, but a microVM's **network** is different: every packet
+the guest sends or receives crosses its **tap** device on the host, so a program on the tap sees the
+guest's own traffic directly. `TapMonitor` attaches two `tc`/clsact classifiers — `tap_ingress` and
+`tap_egress`, the two hooks clsact adds to a device — and each parses the frame's IPv4 5-tuple and adds
+the packet to that flow's per-direction byte/packet counters in the `FLOWS` map. `tc` (not XDP) because
+clsact gives *both* directions uniformly on any device, and because Phase 11 enforcement (drop a denied
+flow) lives at the same hook; P10 is observe-only (both hooks return `TC_ACT_OK`). The flow record
+(`FlowKey` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
+the loader stays `#![forbid(unsafe_code)]` (decision 023). A sandbox's tap lives in its own network
+namespace (decision 017), so scoping the monitor to one sandbox's `fc0` means entering that netns —
+that binding, and the clean attach/detach on open/close, are the next Phase-10 steps.
+
 ## The hardware-isolation consequence (the honest limit)
 
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so
