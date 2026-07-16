@@ -1,4 +1,4 @@
-//! Integration tests for the [`Sandbox`] seam (P7.1): the lifecycle `open → exec (files + env) →
+//! Integration tests for the [`Sandbox`] public API (P7.1): the lifecycle `open → exec (files + env) →
 //! outputs → snapshot → close`, the jailed-by-default polarity (decision 015), and the VM half of
 //! the secret-hygiene leak check (the host-log/error half runs without a VM in `src/exec.rs`).
 //!
@@ -31,7 +31,7 @@ fn vmm_uid(pid: u32) -> Option<String> {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn sandbox_opens_jailed_by_default() {
-    // The decision-015 polarity flip, proven at the seam: the config sets *no* jail, and `open`
+    // The decision-015 polarity flip, proven at the public API: the config sets *no* jail, and `open`
     // confines anyway — the VMM runs as the dropped uid and still serves an exec. The unjailed
     // path below is only reachable by writing `open_unjailed`.
     if !have_jailer_privileges() {
@@ -58,9 +58,9 @@ fn sandbox_opens_jailed_by_default() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn lifecycle_runs_inputs_at_the_seam_and_collects_outputs() {
+fn lifecycle_runs_inputs_and_collects_outputs() {
     // The embedder's whole loop without ever touching `RunningVm`: open (with a bulk output dir),
-    // one exec carrying every input the seam takes — stdin, an injected file, env, an artifact
+    // one exec carrying every input the public API takes — stdin, an injected file, env, an artifact
     // request — and a bulk write to `/output`, then collect the outputs on close.
     // (`open_unjailed`: the explicit dev-host opt-out; the jailed default is proven root-gated
     // above, and the two differ only in confinement, not in this surface.)
@@ -81,7 +81,7 @@ fn lifecycle_runs_inputs_at_the_seam_and_collects_outputs() {
             ],
             b"from stdin\n",
             &[("in.txt".into(), b"from a file".to_vec())],
-            &[("RUN_MODE".into(), "seam-test".into())],
+            &[("RUN_MODE".into(), "api-test".into())],
             &["art.txt".into()],
         )
         .expect("exec with the full input set");
@@ -89,14 +89,14 @@ fn lifecycle_runs_inputs_at_the_seam_and_collects_outputs() {
     assert_eq!(result.stdout, b"from stdin\n");
     assert_eq!(
         result.files,
-        vec![("art.txt".to_string(), b"seam-test=from a file".to_vec())],
+        vec![("art.txt".to_string(), b"api-test=from a file".to_vec())],
         "the artifact must hold the env value and the injected file, combined in-guest"
     );
 
     let captured = sandbox.collect_outputs().expect("collect bulk outputs");
     assert_eq!(captured, vec!["mode.txt".to_string()]);
     let bulk = std::fs::read(out_dir.path().join("mode.txt")).expect("read captured output");
-    assert_eq!(bulk, b"seam-test");
+    assert_eq!(bulk, b"api-test");
 }
 
 #[test]
@@ -199,8 +199,8 @@ fn exec_budgets_are_per_sandbox_knobs() {
     limits.wall = Duration::from_secs(2);
     limits.output_cap = 4096;
     let mut cfg = agent_rootfs_config().with_limits(limits);
-    // One `wall` covers boot and exec at the seam (decision 013); this test wants a tight *exec*
-    // budget without gambling on a 2 s boot, so it uses the driver-level split beneath the seam.
+    // One `wall` covers boot and exec at the public API (decision 013); this test wants a tight *exec*
+    // budget without gambling on a 2 s boot, so it uses the driver-level split beneath the public API.
     cfg.boot_timeout = Duration::from_secs(30);
     let sandbox = Sandbox::open_unjailed(cfg).expect("open");
 
@@ -333,7 +333,7 @@ fn two_concurrent_stateful_sessions_stay_isolated() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn snapshot_at_the_seam_yields_a_restorable_bundle() {
+fn snapshot_yields_a_restorable_bundle() {
     // `Sandbox::snapshot` closes the lifecycle: a warm (unjailed, overlay) sandbox snapshots, and
     // the bundle restores to an exec-ready clone. (Jailed clones from such a bundle are P7.0e's
     // proof in tests/snapshot.rs; snapshotting a *jailed* sandbox stays a typed refusal.)

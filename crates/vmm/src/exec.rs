@@ -163,7 +163,7 @@ pub(crate) fn run_exec<S: Read + Write>(
                 // The guest names the artifact paths, and the guest agent is not the trust boundary
                 // (`guest-agent/src/lib.rs`): a hostile or buggy guest can return `/etc/passwd` or
                 // `../../etc/cron.d/x`. Reject anything that isn't a relative, non-climbing path
-                // *here*, at the seam, so every embedder that writes `RunResult.files` to disk (the
+                // *here*, at the public API, so every embedder that writes `RunResult.files` to disk (the
                 // pinned SDKs, not just the CLI) inherits the containment instead of re-deriving it.
                 if !artifact_path_is_safe(&path) {
                     return Err(VmmError::GuestProtocol(format!(
@@ -228,7 +228,7 @@ pub(crate) fn run_exec<S: Read + Write>(
 
 /// Whether a guest-returned artifact path is safe to hand an embedder: a non-empty **relative** path
 /// whose every component is a plain name or `.` — no absolute root, no `..` climb. The guest names
-/// these paths and the guest agent is not the trust boundary, so this is the seam's containment
+/// these paths and the guest agent is not the trust boundary, so this is the public API's containment
 /// guarantee: `RunResult.files` never carries a path that would write outside a caller's working
 /// tree. Mirrors the check the CLI's `write_artifacts` used to be the sole owner of, lifted here so
 /// every embedder is covered once.
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn artifact_path_is_safe_rejects_escaping_and_absolute_paths() {
-        // The seam's containment predicate: only relative, non-climbing paths survive.
+        // The public API's containment predicate: only relative, non-climbing paths survive.
         for ok in ["a.txt", "out/up.txt", "./out/up.txt", "a/b/c"] {
             assert!(artifact_path_is_safe(ok), "{ok:?} should be accepted");
         }
@@ -474,7 +474,7 @@ mod tests {
     fn run_exec_rejects_a_guest_returned_escaping_artifact_path() {
         // A *hostile* guest (not the real agent, which validates its own writes): the fake server
         // speaks the channel protocol directly and returns a `File` whose path climbs out of the
-        // working tree. The seam must reject it as a `GuestProtocol` fault (bucket `Guest`) rather
+        // working tree. The public API must reject it as a `GuestProtocol` fault (bucket `Guest`) rather
         // than pass the escaping path up in `RunResult.files` for an embedder to write to disk.
         use agent_channel::ServerConnection;
         let (client, server) = UnixStream::pair().expect("socketpair");

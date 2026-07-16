@@ -70,7 +70,7 @@ capabilities: network egress is a separate deny-by-default concern (008), enforc
 layer. The cgroup caps **fail open** — a host without delegated controllers boots uncapped, with a
 warning — because caps are fairness/DoS hygiene; the **isolation walls never degrade**: a jail that
 can't be built is a hard error, never a silent half-confinement. Defaults are conservative and
-load-bearing (1 vCPU, 256 MiB, 30 s, 16 MiB); raising one is a breaking, `seam:`-marked change.
+load-bearing (1 vCPU, 256 MiB, 30 s, 16 MiB); raising one is a breaking, `api:`-marked change.
 
 ### Errors: three buckets you can branch on
 
@@ -139,7 +139,7 @@ non-goals — these belong to whatever hosts the engine, and PRs adding them are
   the cluster).
 - **No dashboard, no network API.** The surface is a Rust library and a CLI. A daemon that speaks
   HTTP is a *hoster* even when this repo later ships one (`agentd` is scoped as exactly that: a
-  thin host of the same library seam).
+  thin host of the same library's public API).
 
 The line is a security boundary too (016): everything the engine ships is inert without host
 privileges the *deployer* grants — it self-limits (deny-by-default network, dropped-uid jail,
@@ -151,8 +151,8 @@ fail legibly (`xtask setup`'s degradation matrix, the pinned Firecracker probe),
 (fd, boot, restore, density), and a wire protocol whose version handshake makes skew a typed error
 instead of a silent misbehavior.
 
-Downstream of the seam, in separate repos, live the language SDKs (Go/Python/Node/C#) and the
+Downstream of the public API, in separate repos, live the language SDKs (Go/Python/Node/C#) and the
 Wasmtime *sibling* (a sibling, not a backend — "isolation is hardware" holds here without
-exception). They pin this crate's git rev; that is why public-seam changes carry a `seam:` marker
+exception). They pin this crate's git rev; that is why public-API changes carry an `api:` marker
 in the commit subject, and why `Limits`/`RunResult`/`VmmError`/`Sandbox` and the channel protocol
 move deliberately or not at all.

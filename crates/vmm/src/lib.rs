@@ -8,7 +8,7 @@
 //! - [`Vm`] / [`RunningVm`] — the raw microVM: boot/restore, exec over vsock, console, networking,
 //!   snapshots, teardown.
 //! - [`Sandbox`] — the embedder-facing lifecycle wrapper (`open → exec → outputs → snapshot →
-//!   close`), **jailed by default** (decision 015) with per-exec files + env at the seam.
+//!   close`), **jailed by default** (decision 015) with per-exec files + env at the public API.
 #![forbid(unsafe_code)]
 
 mod console;
@@ -280,7 +280,7 @@ pub const FDS_PER_VM: usize = 8;
 /// embedders**: they cap what a run gets by default, so an embedder that pins this crate and calls
 /// `Limits::default()` relies on them staying small. Raising one (more vCPUs, more memory, a longer
 /// wall) hands every default run more resource and is a **breaking change worth a changelog line and
-/// a public-seam commit subject**, not a quiet bump. Lowering one, or adding a new field (the struct
+/// a public-API commit subject**, not a quiet bump. Lowering one, or adding a new field (the struct
 /// is `#[non_exhaustive]`), is safe.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
@@ -300,7 +300,7 @@ pub struct Limits {
     /// the wire (the guest reads a truncated-to-zero `timeout_ms` as its 1 h ceiling, so the floor
     /// keeps a tiny wall meaning "very short", never "unlimited"). (A caller that genuinely needs
     /// different boot and exec ceilings sets [`BootConfig::boot_timeout`] / [`BootConfig::exec_wall`]
-    /// under the seam.)
+    /// under the public API.)
     pub wall: Duration,
     /// Aggregate cap, in bytes, on what the host buffers for one exec — stdout + stderr + returned
     /// artifacts (plus a small per-frame accounting floor) — so a flooding guest can't grow host
@@ -365,7 +365,7 @@ pub struct ExecMetrics {
 /// [`open_unjailed`](Sandbox::open_unjailed), deliberately a *differently-named constructor* so an
 /// unconfined sandbox can never happen by a forgotten flag — only by writing "unjailed".
 ///
-/// **Inputs at the seam.** Per-exec files and env ride [`exec_with_files`](Sandbox::exec_with_files)
+/// **Inputs at the public API.** Per-exec files and env ride [`exec_with_files`](Sandbox::exec_with_files)
 /// under the secret-hygiene contract pinned on [`RunningVm::exec_with_files`]; bulk directories ride
 /// [`BootConfig::input_dir`]/[`BootConfig::output_dir`] into [`open`](Sandbox::open), and
 /// [`collect_outputs`](Sandbox::collect_outputs) pulls the guest's `/output` tree back. An embedder

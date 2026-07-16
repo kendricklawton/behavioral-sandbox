@@ -32,7 +32,7 @@ Decisions queued by the (sandbox) roadmap, to be recorded here as they're made:
 ## Repo layout
 
 One Cargo workspace; each crate has a single job, split along the isolation/observability/driver
-seams:
+boundaries:
 
 - `crates/vmm` — the **Firecracker driver**: microVM lifecycle (boot/exec/shutdown), rootfs and
   networking (tap), snapshots and the warm pool, jailer/cgroup confinement, and the `Sandbox`
@@ -85,7 +85,7 @@ Linux lesson.
   bodies in `crates/vmm/src/firecracker.rs`.
 - **Serial-console-on-stdout is an unjailed convenience.** We read the guest console from the
   `firecracker` child's stdout. The jailer (Phase 6) changes that wiring, so console capture sits
-  behind a small internal seam to swap later.
+  behind a small internal boundary to swap later.
 - **`SendCtrlAltDel` graceful shutdown is x86-only** (i8042); the guaranteed teardown is
   `kill()` + scratch-dir removal, so no leak depends on the guest cooperating.
 
@@ -645,7 +645,7 @@ backing file.
   not just deferred: its disk lives at a chroot-relative path inside a torn-down-with-the-VM chroot,
   so a bundle would record an unrestorable backing — and the clone story doesn't need it. Snapshot an
   *unjailed* warm source (it runs only the embedder's warm-up), restore **jailed** clones from it:
-  the untrusted code runs confined, and the confined warm `Pool` falls out of the same seam.
+  the untrusted code runs confined, and the confined warm `Pool` falls out of the same approach.
 
 ### 011 — Restore identity: the agent re-addresses the clone; VMGenID reseeds it *(2026-07-12, P5.5)*
 
@@ -791,7 +791,7 @@ lands the mechanism on the simplest boot; the rest migrates behind it.
 - **The jailer's netns is the sanctioned path to concurrent networked clones** (decisions 009/011's
   tombstone): once networking is jailed, each VM's tap in its own netns removes the one-live-networked-
   clone limit. Kept on the Phase-6 radar.
-- **`BootConfig` gained a public field**, but it is not one of the seam-pinned types (`Sandbox`,
+- **`BootConfig` gained a public field**, but it is not one of the API-pinned types (`Sandbox`,
   `Limits`, `RunResult`, `VmmError`, the channel wire), and the jailer path is opt-in, so no downstream
   pin bump is forced.
 
@@ -865,7 +865,7 @@ the knobs are scattered: [`Limits`] `{ vcpus, mem_mib, wall }` rides the boot pa
 as **one options struct**"; this decision fixes the *shape* that struct commits to, so P7.3 is wiring,
 not design.
 
-**Decision.** The per-run resource policy is the one already-public, seam-pinned, `#[non_exhaustive]`
+**Decision.** The per-run resource policy is the one already-public, API-pinned, `#[non_exhaustive]`
 struct [`Limits`], carrying **resource quantities**, never mechanism. Its knobs:
 - **`vcpus: u32`** sets the guest's vCPU count *and* the host cgroup `cpu.max` (exactly `vcpus` cores:
   `vcpus × 100000` per 100000us period). One number caps both what the guest sees and what the VMM may
@@ -897,13 +897,13 @@ future `require_limits`-style toggle, tombstoned here, not built.
 
 **Defaults are a load-bearing floor.** `Limits::default()` (1 vCPU, 256 MiB, 30 s) is conservative on
 purpose: an embedder pinning this crate relies on a default run staying small. **Raising** a default (or
-the fixed output cap) hands every default run more resource and is a breaking, `seam:`-marked change;
+the fixed output cap) hands every default run more resource and is a breaking, `api:`-marked change;
 **lowering** one, or adding a field (the struct is `#[non_exhaustive]`), is safe.
 
 **Alternatives considered.**
 - **A separate `ResourcePolicy` type distinct from `Limits`.** Rejected: `Limits` already *is* the
-  per-run budget the seam pins and embedders read; a parallel type would split one concept in two and
-  force a second seam surface. Grow the one struct.
+  per-run budget the public API pins and embedders read; a parallel type would split one concept in two and
+  force a second public API surface. Grow the one struct.
 - **Fold network egress into the same struct.** Rejected: a quantity struct that also carries a
   capability flag invites "set `mem_mib` and `net` in one call" ergonomics that blur the deny-by-default
   line; egress is enforced in a different layer (eBPF), on a different schedule (Phase 11).
@@ -917,7 +917,7 @@ semantics (cooperative `ExecTimeout`, `ExecUnresponsive` as the liveness backsto
 enforcement point. The `require_limits` strict toggle and any per-knob validation ride P7.3.
 **Done** *(2026-07-15, P7.3)*: `wall` extended to the exec budget (`with_limits` folds it into both
 the boot deadline and each exec's budget; `BootConfig` keeps a `boot_timeout`/`exec_wall` split
-beneath the seam), `output_cap` added as the fourth knob, defaults unchanged (30 s / 16 MiB), the
+beneath the public API), `output_cap` added as the fourth knob, defaults unchanged (30 s / 16 MiB), the
 whole timeout ladder (socket idle, guest kill, host backstop) derived from the configured value.
 `require_limits` was **not** built: no embedder has asked to fail closed yet, so its tombstone stands.
 
@@ -991,7 +991,7 @@ You get either a code channel (unjailed) or VMM confinement (codeless), never bo
 P6.x box is checked, so the migration that unifies them ("exec under the jailer") is tracked only in
 prose annotations (ROADMAP P6.6/P6.8) with no box or decision owning it. Left there it can quietly
 evaporate, and worse, Phase 7 would build the public `Sandbox` lifecycle surface on the **unjailed**
-exec path and then have to retrofit confinement under a frozen, seam-pinned API.
+exec path and then have to retrofit confinement under a frozen, pinned public API.
 
 **Decision.** Jailed exec is a **Phase 7 prerequisite**, and the public surface jails by default.
 - **Convergence lands as explicit boxes, not prose.** Staging the vsock UDS, the tap, the overlay, and
@@ -1014,7 +1014,7 @@ exec path and then have to retrofit confinement under a frozen, seam-pinned API.
   the silent-omission failure this class of review flags. It evaporates, and Phase 7 inherits an unjailed
   default by accident rather than by decision.
 - **Build Phase 7's `Sandbox` on the unjailed exec path and jail later.** Rejected: retrofitting
-  confinement under a frozen public API (the seam-pinned `Sandbox`) is the expensive, one-way-door
+  confinement under a frozen public API (the API-pinned `Sandbox`) is the expensive, one-way-door
   version. Ordering the jailer into Phase 6 was meant precisely to have confinement in hand before the
   surface is drawn.
 - **Make jailed exec its own full phase.** Rejected as over-scoped: it is a staging and ownership
@@ -1025,7 +1025,7 @@ exec path and then have to retrofit confinement under a frozen, seam-pinned API.
 isolation (KVM) and host-side VMM confinement (the jailer). Demonstrating each wall alone (KVM in P1 to
 P5, the jailer in P6 on a codeless boot) is real progress, but the product claim is the two **composed**,
 on the path a real workload takes. Sequencing the convergence before the `Sandbox` API freeze keeps the
-default run confined and avoids a retrofit under a pinned seam.
+default run confined and avoids a retrofit under a pinned public API.
 
 **Consequences / tombstones.**
 - ROADMAP gains explicit convergence boxes (P7.0a to P7.0e); the P6.6/P6.8 annotations that say "a later
@@ -1212,10 +1212,10 @@ into its own telemetry, so "we probably don't log it" is not a contract an SDK c
   tolerance is exactly the silent-degradation path — the command runs without its env and nobody is
   told. The handshake exists to make skew loud.
 - **A zeroizing-buffer crate.** Rejected for now: `fill(0)` at the two sites the engine owns covers
-  the promise as stated; a compiler-elision-proof `zeroize` can be revisited if the seam ever
+  the promise as stated; a compiler-elision-proof `zeroize` can be revisited if the public API ever
   carries higher-assurance requirements.
 
-**Why.** The seam is embedder-driven: every SDK-shaped caller passes files + env, and the engine's
+**Why.** The public API is embedder-driven: every SDK-shaped caller passes files + env, and the engine's
 observable surfaces are precisely where a hoster's log pipeline would exfiltrate a leaked value.
 Making non-leakage a *tested contract* — a sentinel grepped out of every surface, with a positive
 control proving the console capture is real — is what lets a downstream pin this crate and pass

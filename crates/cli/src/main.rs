@@ -265,7 +265,7 @@ fn read_put_files(puts: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, VmmError> 
 /// Write the guest's returned artifacts under the current directory, refusing anything the run
 /// didn't explicitly ask for. Deny-by-default (`.rules` guardrail 3): the operator's `--get` set is
 /// the *only* allowance, so a returned path that wasn't requested (a planted `.git/config`,
-/// `Makefile`) is refused, never written. The exec seam already guarantees each path is relative and
+/// `Makefile`) is refused, never written. The exec API already guarantees each path is relative and
 /// non-climbing (`run_exec`); here we additionally resolve every component without following a
 /// symlink, so a pre-existing symlinked directory in the cwd (`out -> /etc`) can't turn a
 /// `Normal`-component path into an escape the string check alone is blind to.
@@ -291,7 +291,7 @@ fn write_artifacts_in(
                 "refusing artifact {path:?}: not requested with --get"
             )));
         }
-        // Backstop the seam's own check, and require the path to actually name a file.
+        // Backstop the public API's own check, and require the path to actually name a file.
         let rel = Path::new(path);
         let named = rel.file_name().is_some()
             && rel
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn artifact_writes_refuse_escaping_paths() {
-        // Absolute and climbing paths are refused (backstopping the seam); the error names the path
+        // Absolute and climbing paths are refused (backstopping the public API); the error names the path
         // (allowed) and carries none of the data. Requested here so the escape check, not the
         // deny-by-default check, is what fires.
         let base = TestDir::new("escape");

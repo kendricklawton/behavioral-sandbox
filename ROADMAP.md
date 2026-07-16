@@ -644,14 +644,14 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       returns in well under the daemon's lifetime with exit 0, and no `sleep` survives in the guest.
       Full privileged suite now **25 tests**, green.)*
 - [x] **P6.5** `(decision)` per-run resource policy shape (the knobs the engine exposes) →
-      `ARCHITECTURE.md`. *(Decision 013: the per-run policy is the one already-public, seam-pinned
+      `ARCHITECTURE.md`. *(Decision 013: the per-run policy is the one already-public, API-pinned
       `Limits` struct carrying **quantities** (`vcpus` → guest vCPUs + `cpu.max`; `mem_mib` → guest RAM
       + `memory.max`; `wall` → boot deadline today, exec budget in P7.3) plus the exec **output cap**
       (P7.3), never capabilities: network egress stays a separate eBPF-enforced concern (decision 008),
       not a `Limits` field. Enforced at the **host VMM cgroup** (one choke point for guest + VMM), not
       per-exec. **Fails open, recorded:** missing cgroup delegation logs a warning and boots uncapped,
       because resource caps are DoS mitigation, not the isolation boundary (which never degrades: a jail
-      that can't be built is a hard error). Defaults stay a conservative, `seam:`-marked floor. So P7.3
+      that can't be built is a hard error). Defaults stay a conservative, `api:`-marked floor. So P7.3
       is wiring, not design: no new type, no new enforcement point. A strict `require_limits` fail-closed
       toggle is tombstoned for P7.3.)*
 - [x] **P6.6** Verify isolation: a hostile guest + a hostile-ish workload can't escape the jail.
@@ -840,13 +840,13 @@ surface freezes.
 
 Wrap the FC track into a clean, self-hostable engine API.
 
-> **Downstream seam (a real embedder pins `vmm` by git rev).** This phase lands the embedder-driven
-> seam capabilities, each with the embedder's acceptance criteria as its exit gate: per-exec **inputs**
+> **Downstream public API (a real embedder pins `vmm` by git rev).** This phase lands the embedder-driven
+> public API capabilities, each with the embedder's acceptance criteria as its exit gate: per-exec **inputs**
 > (files + `env`) with a **secret-hygiene contract** (P7.1), the exec **wall-clock and output-cap
 > budgets as knobs** (P7.3), and a **kill handle** for the host-gave-up path (P6.7, surfaced on
 > `Sandbox` here). Every addition stays a generic library capability (engine, not platform): nothing
 > below knows who embeds it. `VmmError::kind()` (the bucket classifier) and the conservative,
-> documented `Limits::default()` contract already landed as out-of-band seam hardening.
+> documented `Limits::default()` contract already landed as out-of-band public API hardening.
 
 > **Jailed exec is a prerequisite (decision 015).** Phase 6 landed the jailer on a *codeless* boot: a
 > jailed VM refuses vsock/NIC/overlay/bulk-I/O (decisions 012/013), so today you get a code channel
@@ -944,7 +944,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       `restores_warm_clones_under_the_jailer_and_pools_them` (real-root gated) — a direct jailed
       restore (dropped uid + warm Python exec) and a 2-deep jailed `Pool` whose taken clone execs.)*
 - [x] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`, with **inputs at
-      the seam**. *(Assumes the jailed exec path (P7.0a); `Sandbox::exec` jails by default, decision 015.)* *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
+      the public API**. *(Assumes the jailed exec path (P7.0a); `Sandbox::exec` jails by default, decision 015.)* *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
       `output_dir`/`RunningVm::collect_outputs` — onto the `Sandbox` surface, since P3.4/P3.5 keep them
       at the low-level `RunningVm` layer. **Embedder inputs:** promote `exec_with_files(argv, stdin,
       files, artifacts)` onto `Sandbox` so an embedder never reaches into `RunningVm`; add an **`env`**
@@ -971,8 +971,8 @@ Wrap the FC track into a clean, self-hostable engine API.
       `RunningVm`. Secret hygiene pinned on `RunningVm::exec_with_files` and recorded as decision 018;
       the wire copies (the channel's serialized payload, the driver's request clones) are zero-wiped
       after send. Exit gate: `sandbox_opens_jailed_by_default` (real-root, self-skips) proves the
-      polarity flip; `lifecycle_runs_inputs_at_the_seam_and_collects_outputs` +
-      `snapshot_at_the_seam_yields_a_restorable_bundle` drive the full lifecycle; the leak test runs
+      polarity flip; `lifecycle_runs_inputs_and_collects_outputs` +
+      `snapshot_yields_a_restorable_bundle` drive the full lifecycle; the leak test runs
       twice — `injected_secrets_reach_no_observable_surface` (no VM: host logs at TRACE, the real
       in-process agent's logs, every error's Display/Debug) and
       `injected_secrets_never_reach_the_console_or_host_logs` (real VM: the serial console with a
@@ -1004,7 +1004,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       `BootConfig` → `RunningVm`), so every exec on that sandbox enforces them, and the restore path
       takes them from the restoring caller's config (the budgets are the host's, not the
       snapshot's). `BootConfig` keeps a driver-level `boot_timeout`/`exec_wall` split beneath the
-      seam for a caller who needs different ceilings. Both the socket idle timeout and the host's
+      public API for a caller who needs different ceilings. Both the socket idle timeout and the host's
       `ExecUnresponsive` give-up deadline derive from the configured budget plus kill slack, exactly
       as the old const's doc demanded, so a raised budget moves the whole ladder and timeout
       semantics are unchanged (guest-cooperative `ExecTimeout` first, host backstop after). Defaults
@@ -1013,7 +1013,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       `sleep 30` into `ExecTimeout{2s}` promptly, a 4 KiB cap turns a `seq` flood into
       `OutputCap{4096}`, and a modest exec passes both.)*
 - [x] **P7.4** `agent run <cmd>` / `agent shell` CLI over the lifecycle.
-      *(`agent run` now drives the whole seam from flags: piped **stdin** is forwarded (terminal
+      *(`agent run` now drives the whole public API from flags: piped **stdin** is forwarded (terminal
       stdin stays empty so an interactive run doesn't block), `--env KEY=VALUE` (repeatable,
       clap-validated, values never logged), `--put <file>` injects host files, `--get <path>`
       requests artifacts and writes them under the cwd (absolute/`..` names refused), and
@@ -1054,7 +1054,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       CLI as reference embedder) and then the engine/PaaS line: the non-goals stated as design
       refusals (no tenancy/auth, no billing, no fleet scheduling, no dashboard or network API), what
       the engine *does* owe a long-lived host (decision 016's split), and what lives downstream of
-      the seam. README's Status and Scope sections link it.)*
+      the public API. README's Status and Scope sections link it.)*
 - [x] **P7.8** Test: two concurrent stateful sessions stay isolated and correct.
       *(`two_concurrent_stateful_sessions_stay_isolated`: two sandboxes live simultaneously, execs
       interleaved A1→B1→A2→B2 on the *same* relative filename, each session reads back exactly its
@@ -1065,7 +1065,7 @@ Wrap the FC track into a clean, self-hostable engine API.
   sandbox-lifecycle contract** and where the engine/PaaS line sits.
   *(Passed: the lifecycle demo is the CLI (`agent run` with stdin/files/env/knobs/`--json`,
   `agent shell` as a held-open session) and the tests/sandbox.rs suite (open jailed by default,
-  inputs at the seam, sessions, budgets, snapshot, leak checks, concurrency, session isolation);
+  inputs at the public API, sessions, budgets, snapshot, leak checks, concurrency, session isolation);
   the writeup is [`ENGINE.md`](ENGINE.md). Phase 7 is complete.)*
 
 ---

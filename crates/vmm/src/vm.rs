@@ -101,7 +101,7 @@ pub struct BootConfig {
     /// Upper bound on boot-to-userspace before the boot is a typed timeout.
     pub boot_timeout: Duration,
     /// Wall-clock budget for each command run through this VM's `exec`: the guest agent kills the
-    /// command past it, and the host's own give-up deadline is derived from it. At the seam this is
+    /// command past it, and the host's own give-up deadline is derived from it. At the public API this is
     /// [`Limits::wall`] — one wall for the whole run (decision 013), which
     /// [`with_limits`](BootConfig::with_limits) folds into both `boot_timeout` and this; the split
     /// exists at this layer so a driver-level caller can give boot and exec different ceilings.
