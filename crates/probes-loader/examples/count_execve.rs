@@ -34,7 +34,7 @@ fn main() -> Result<(), ProbeError> {
 
     // The per-PID breakdown (P8.6's hash map): the busiest execve'ers seen in the window.
     let mut by_pid = counter.counts_by_pid()?;
-    by_pid.sort_by(|a, b| b.1.cmp(&a.1));
+    by_pid.sort_by_key(|b| std::cmp::Reverse(b.1));
     println!("top execve'ers by pid:");
     for (pid, n) in by_pid.iter().take(5) {
         println!("  pid {pid}: {n}");
