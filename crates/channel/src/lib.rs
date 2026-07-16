@@ -2,7 +2,7 @@
 //!
 //! One command in, its `stdout`/`stderr`/exit out, over a single bidirectional byte stream (vsock
 //! in the guest, a unix socket in tests — the protocol doesn't care). The transport is chosen in
-//! [`ARCHITECTURE.md` decision 002]; this crate is only the framing, so it stays dependency-free
+//! `docs/architecture.md` decision 002; this crate is only the framing, so it stays dependency-free
 //! and unit-testable without a VM.
 //!
 //! **Shape (why it's built this way).**

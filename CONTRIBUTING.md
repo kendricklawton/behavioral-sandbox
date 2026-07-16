@@ -1,126 +1,19 @@
-# Contributing
+# Contributing to agent
 
-Thanks for your interest. **agent** (working name) is a self-hostable, isolated
-**code-execution sandbox**: untrusted code runs in a **Firecracker** microVM (KVM hardware
-isolation), and **host-side eBPF** (**aya**) observes and enforces what it does — syscalls, its
-network, its cgroup — from outside the guest. It's built in the open, and every phase ships a
-working demo so each capability is proven running.
+Thanks for your interest — contributions are welcome. This project follows the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
-> Read [**`.rules`**](./.rules) first — the operating manual and the invariants that must never
-> be traded away (`CLAUDE.md` and `AGENTS.md` both point there). The staged plan is in
-> [**`ROADMAP.md`**](./ROADMAP.md); its checkboxes are the state.
+Everything you need lives in the [contributing chapters of the documentation](docs/contributing.md):
 
-## Prerequisites
+- [Contributing](docs/contributing.md) — how the work is organized (the roadmap's phases, the
+  decision log), the invariants, and the commit/PR conventions.
+- [Building](docs/contributing-building.md) — the toolchain, `cargo xtask ci` (the host-safe gate
+  every PR must pass), and `cargo xtask ci-privileged` (the KVM + eBPF integration gate).
+- [Testing](docs/contributing-testing.md) — the four-layer testing approach and the benchmarks.
 
-This is **Linux-only** (it needs KVM). You'll need:
-
-- **A Linux host with `/dev/kvm`** and your user in the `kvm` group (or root). A reasonably
-  recent kernel with **BTF** is required for CO-RE eBPF (most modern distros ship it).
-- **Rust, stable** ([`rustup`](https://www.rust-lang.org/tools/install)) for the host/driver.
-  The eBPF programs (`crates/probes`) additionally need **`bpf-linker`** plus a **nightly**
-  toolchain with **`rust-src`** for `-Z build-std` (`cargo install bpf-linker`;
-  `rustup toolchain install nightly --component rust-src`). That crate is excluded from the
-  workspace and pins its own nightly, so the host/driver stays on stable; build its object with
-  `cargo xtask build-probes` (`bpfel-unknown-none`).
-- **`firecracker`** + its **jailer** binary (pinned version — see below), a guest **kernel
-  image** (`vmlinux`), and the ability to build a minimal **rootfs**.
-- **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
-  rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
-  loopback, no `sudo`). A missing tool is a clear typed error.
-- **`iproute2`** (`ip`): the driver creates and deletes the per-VM **tap** device backing the guest's
-  virtio-net. A missing binary is a clear typed error; creating a tap itself needs `CAP_NET_ADMIN`.
-- **Elevated capabilities** for the parts that touch the kernel: creating **tap** devices
-  (`CAP_NET_ADMIN`) and loading/attaching eBPF (`CAP_BPF` + `CAP_PERFMON`, or root — not full root:
-  grant a loader binary just those two with `setcap cap_bpf,cap_perfmon+ep <binary>`). Day-to-day
-  dev uses an `xtask`/`just` wrapper so it isn't `sudo cargo` roulette.
-
-`cargo xtask setup` checks the host can do KVM + eBPF and reports what's missing.
-
-## Quick start
-
-```console
-git clone <repo> && cd <repo>
-cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps
-cargo build
-
-# Boot a microVM and read its console (ROADMAP Phase 1):
-cargo run -p agent-cli -- run --demo-boot
-
-# Run code inside a real microVM (ROADMAP Phase 3): build the agent rootfs, then exec.
-cargo xtask build-rootfs   # pinned Alpine + python3 + the static agent, via mke2fs -d (no root)
-AGENT_ROOTFS=artifacts/rootfs-agent.ext4 AGENT_MARKER=AGENT-GUEST-READY \
-  cargo run -p agent-cli -- run -- python3 -c 'print(2 + 2)'
-# (The default rootfs stays the pinned boot image until the agent rootfs replaces it later in P3.)
-
-# Later: run it and print the eBPF-observed audit log (Phase 13+):
-cargo run -p agent-cli -- run --trace -- <cmd>
-```
-
-## Before you push — the local gate
-
-```console
-cargo install bpf-linker cargo-deny               # one-time
-cargo xtask ci                                    # fmt + clippy -D warnings + build + test
-                                                  # + docs + deny
-```
-
-`cargo xtask ci` runs the host-safe gate everywhere: fmt · clippy `-D warnings` · build · unit
-tests · docs · `cargo deny`. The **eBPF object build** is available now as its own host-safe step
-(`cargo xtask build-probes`, which skips cleanly when `bpf-linker`/nightly are absent) and is folded
-**into** this gate (P8.7), so a probe that won't compile or that drops its BTF fails fast here.
-
-**The privileged tests are separate.** Booting a microVM and loading/attaching eBPF need
-`/dev/kvm` and elevated caps, so the **integration tests** (VM boot, exec, tap networking,
-probe attach) are marked and run under `cargo xtask ci-privileged` on a machine that has them
-(your dev box, or a bare-metal/nested-virt CI runner — a stock cloud VM usually can't nest KVM).
-Never gate the everyday loop on a privileged runner.
-
-## The testing approach
-
-1. **Unit / pure:** driver config assembly, protocol framing, policy-map encoding, error
-   mapping — no VM, no root.
-2. **eBPF object build** (`cargo xtask build-probes`, *part of the `ci` gate* since P8.7): the probes
-   compile for `bpfel-unknown-none` via `bpf-linker` **with BTF**; a compile error or a dropped
-   `.BTF` section fails the CI gate. (The kernel *verifier* runs at load, so a verifier reject surfaces
-   in the privileged probe tests, not here.)
-3. **Privileged integration:** boot a real microVM → `exec` → tap networking → attach probes →
-   assert the audit log shows exactly what the workload did. Needs KVM + caps.
-4. **Benchmarks:** cold boot, snapshot restore, pre-warmed-pool `exec` latency (p50/p99), memory-sharing, and
-   probe overhead — reported with percentiles, tracked over time.
-
-## The invariants (never trade these away)
-
-- **Isolation is hardware.** Untrusted code runs in a KVM microVM; the trust boundary is the
-  CPU, not guest-side software.
-- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF the guest
-  can't reach; in-guest agents are for convenience (exec/IO), never for security.
-- **Engine, not platform.** A self-hostable runtime + a driver API. Auth, billing, fleet
-  scheduling, and dashboards are **out of scope** — the hoster's job.
-- **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
-  capability; every allowance is explicit and recorded.
-- **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken
-  channel is a typed error — never a host panic, hang, or leak.
-- **Measured, not marketed.** Boot/restore/memory-sharing/overhead are benchmarked with percentiles.
-
-## Phases & decisions
-
-Work is organized into sequentially-gated phases in [`ROADMAP.md`](./ROADMAP.md) — the **single
-source of truth for progress**. Work the first unchecked box in ID order, one item per
-iteration; a phase isn't left until its **Exit gate** passes (a working demo). Items tagged
-`(decision)` record the hard-to-reverse choice in `ARCHITECTURE.md` so the reasoning outlives the
-diff.
-
-## Commit & PR conventions
-
-- One logical change per commit; **imperative** subject describing **what was done** ("Boot a
-  microVM from the driver", not "added VM boot"). Don't reference roadmap phase IDs — the
-  roadmap can change.
-- **Never add an AI co-author or attribution trailer** — no `Co-Authored-By: Claude …` or
-  similar. Never commit built rootfs/kernel images or generated eBPF objects.
-- Every PR must pass the host-safe gate (`cargo xtask ci`); privileged integration runs where
-  KVM + caps exist.
-
-## License
+Host prerequisites and first-run instructions are in
+[Installation](docs/cli-install.md). The operating manual — the rules read every session — is
+[`.rules`](.rules); the staged plan is [`ROADMAP.md`](ROADMAP.md).
 
 By contributing you agree your contributions are licensed under **Apache-2.0**, the project's
-license (see [`LICENSE`](./LICENSE)).
+license (see [`LICENSE`](LICENSE)).

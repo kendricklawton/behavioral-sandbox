@@ -1,0 +1,9 @@
+[book]
+authors = ["The agent developers"]
+multilingual = false
+src = "."
+title = "agent"
+
+[output.html]
+git-repository-url = "https://github.com/kendricklawton/agent"
+edit-url-template = "https://github.com/kendricklawton/agent/edit/main/docs/{path}"

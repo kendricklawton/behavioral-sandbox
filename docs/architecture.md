@@ -1,8 +1,9 @@
 # Architecture decisions
 
-The record [`ROADMAP.md`](./ROADMAP.md) references: every roadmap item tagged `(decision)`
+The record [`ROADMAP.md`](../ROADMAP.md) references: every roadmap item tagged `(decision)`
 produces a dated, numbered entry here — the decision, the alternatives considered, and the why —
-so the reasoning outlives the diff. Entries are append-only; reversing one is a new entry, not an
+so the reasoning outlives the diff. Each entry is keyed by its own number and date (not a phase),
+so it stands on its own as the roadmap evolves. Entries are append-only; reversing one is a new entry, not an
 edit. (Roadmap *re-scopes* — cut phases and why — live in the roadmap's notes, not here.)
 
 **The Firecracker + aya sandbox engine.** This decision log covers the self-hostable, isolated
@@ -52,7 +53,7 @@ boundaries:
 
 ## Recorded decisions
 
-### 001 — Drive Firecracker via its HTTP API over a unix socket *(2026-07-10, P1.1)*
+### 001 — Drive Firecracker via its HTTP API over a unix socket *(2026-07-10)*
 
 **Decision.** The `vmm` driver spawns a `firecracker` child with `--api-sock` and configures the
 boot over that socket's **HTTP/1.1 REST API** — `PUT /boot-source`, `/drives/{id}`,
@@ -85,7 +86,7 @@ keeps us dependency-light and `unsafe`-free, and the raw request/response framin
 - **`SendCtrlAltDel` graceful shutdown is x86-only** (i8042); the guaranteed teardown is
   `kill()` + scratch-dir removal, so no leak depends on the guest cooperating.
 
-### 002 — Host↔guest channel: vsock + a tiny guest agent *(2026-07-10, P2.1)*
+### 002 — Host↔guest channel: vsock + a tiny guest agent *(2026-07-10)*
 
 **Decision.** `exec` talks to the guest over **virtio-vsock**: a minimal, statically-linked
 **guest agent** (started by the guest's init) listens on a vsock port, runs the requested command,
@@ -166,7 +167,7 @@ the transport pick:
   unconditional pipe-drain only bounds the guest *given* that write deadline. A silent hung *command*
   is a separate axis, bounded by the exec wall-timeout (P2.6).
 
-### 003 — The guest rootfs: a pinned Alpine base, assembled with the agent baked in *(2026-07-12, P3.1)*
+### 003 — The guest rootfs: a pinned Alpine base, assembled with the agent baked in *(2026-07-12)*
 
 **Decision.** The guest rootfs is **built, not fetched**: `cargo xtask build-rootfs` extracts a
 **sha256-pinned Alpine minirootfs** (a real musl + busybox userland), bakes the static guest agent
@@ -223,7 +224,7 @@ round trip.
 - **A default-rootfs flip (Alpine replaces Ubuntu as the boot default) is a separate future change**,
   touching the default marker, the `ci-privileged` guard, and the Phase-1 boot test together.
 
-### 004 — Read-only base rootfs + a per-run tmpfs overlay *(2026-07-12, P3.3)*
+### 004 — Read-only base rootfs + a per-run tmpfs overlay *(2026-07-12)*
 
 **Decision.** When `BootConfig.read_only_root` is set, the driver attaches the base rootfs
 **read-only and shared** (no per-VM copy — Firecracker opens it `O_RDONLY`, so the guest can't mutate
@@ -267,7 +268,7 @@ when `overlay-init` runs — you can't `mkdir` a mountpoint on a read-only `/`.
   `build-rootfs`); pointing `read_only_root` at an image without them is a bounded boot failure (typed
   `VmmError`, `panic=1` → Firecracker exits → console tail), not a hang.
 
-### 005 — Bulk input via a read-only second block device *(2026-07-12, P3.4)*
+### 005 — Bulk input via a read-only second block device *(2026-07-12)*
 
 **Decision.** When `BootConfig.input_dir` is set, the driver builds a **read-only** ext4 from that
 host directory (rootless `mke2fs -d` into the per-VM scratch dir) and attaches it as a second block
@@ -310,7 +311,7 @@ the *guest's* filesystem, never the host's — no traversal escape.
 - **The image is sized generously** from the input's byte total + a `-N` inode count (many tiny files
   exhaust inodes, not bytes); an input past a 2 GiB ceiling is a typed error, not a giant image.
 
-### 006 — Bulk output via a read-after-death writable block device *(2026-07-12, P3.5)*
+### 006 — Bulk output via a read-after-death writable block device *(2026-07-12)*
 
 **Decision.** When `BootConfig.output_dir` is set, the driver attaches a **blank, writable** ext4 as
 a third block device (labelled `agent-output`, `is_read_only: false`); the guest mounts it read-write
@@ -370,7 +371,7 @@ link targets, not the metadata `e2fsck`/`debugfs` parse.
   `RunningVm` layer for now; a `Sandbox::collect_outputs` + `agent run --output-dir` follow-up is
   noted in the roadmap.
 
-### 007 — A byte-for-byte reproducible rootfs build *(2026-07-12, P3.6)*
+### 007 — A byte-for-byte reproducible rootfs build *(2026-07-12)*
 
 **Decision.** `cargo xtask build-rootfs` is **deterministic**: two builds from the same inputs produce
 a byte-identical `rootfs-agent.ext4`. Three non-determinism sources are pinned:
@@ -436,7 +437,7 @@ makes package drift *visible* without making the build *brittle*.
   is what catches an accidental non-determinism regression. Cross-host reproducibility (normalize
   ownership to `0:0`, `--remap-path-prefix` the binary) is a separate, deferred hardening.
 
-### 008 — Guest networking is deny-by-default: a tap with no route to the world *(2026-07-12, P4.3)*
+### 008 — Guest networking is deny-by-default: a tap with no route to the world *(2026-07-12)*
 
 **Decision.** When Phase 4 gives the guest a NIC, the per-VM tap device defaults to **no route to the
 outside world** — host-local reachability only (host↔guest over the tap's own subnet), with any egress
@@ -484,7 +485,7 @@ connected /30 route and **no default route**, and the driver installs no masquer
 address, reaches the host tap IP, and gets a fast `ENETUNREACH` (not a timeout) for an off-subnet
 address. So this decision is realized, not just intended.
 
-### 009 — The per-VM tap: shelled out to `ip`, deleted on every teardown path *(2026-07-12, P4.1)*
+### 009 — The per-VM tap: shelled out to `ip`, deleted on every teardown path *(2026-07-12)*
 
 **Decision.** With `BootConfig.enable_network`, the driver gives the guest a virtio-net `eth0` backed
 by a per-VM host **tap**. Mechanism:
@@ -559,7 +560,7 @@ exactly this). Shelling to `ip` keeps the driver dependency-light and `unsafe`-f
   cold-boot mechanism; if the runtime path ever proves cleaner for cold boot too, unify then, with
   evidence.
 
-### 010 — Snapshots are self-contained bundles restored by staging the disk *(2026-07-12, P5.1/P5.2)*
+### 010 — Snapshots are self-contained bundles restored by staging the disk *(2026-07-12)*
 
 **Decision.** A microVM snapshot is a **self-contained bundle** in one directory: the vCPU/device
 **state** file, the full guest **memory** file, and a **point-in-time copy of the root disk**.
@@ -643,7 +644,7 @@ backing file.
   *unjailed* pre-warmed source (it runs only the embedder's warm-up), restore **jailed** clones from it:
   the untrusted code runs confined, and the confined pre-warmed `Pool` falls out of the same approach.
 
-### 011 — Restore identity: the agent re-addresses the clone; VMGenID reseeds it *(2026-07-12, P5.5)*
+### 011 — Restore identity: the agent re-addresses the clone; VMGenID reseeds it *(2026-07-12)*
 
 **Problem.** Restore hands every clone a byte-identical copy of one guest memory image, so anything
 that must be unique per VM but was frozen into that image is now shared: the guest's **network
@@ -724,7 +725,7 @@ wall-clock time (TLS validity windows, token expiry) can misbehave in a clone un
   decision's runtime path. If that runtime path ever proves cleaner for cold boot too, unify then,
   with evidence, not speculatively.
 
-### 012 — Confine the VMM: run Firecracker under its jailer *(2026-07-14, P6.1)*
+### 012 — Confine the VMM: run Firecracker under its jailer *(2026-07-14)*
 
 **Problem.** Hardware isolation (KVM) contains the *guest*, but the *VMM process* still runs on the
 host with the driver's privileges. A Firecracker bug, or a guest that breaks out into the VMM, would
@@ -853,7 +854,7 @@ everyday gate; decision 013's "the isolation boundary never half-degrades"). Run
 inside* a jailed guest waited on exec-under-jail, since landed (P7.0a composed the jail with the vsock
 exec channel), so P6.6's bar was the VMM-side confinement layers plus the refusal, not an in-guest exploit.
 
-### 013 — Per-run resource policy: one `Limits` struct of quantities, enforced at the host cgroup, failing open *(2026-07-14, P6.5)*
+### 013 — Per-run resource policy: one `Limits` struct of quantities, enforced at the host cgroup, failing open *(2026-07-14)*
 
 **Problem.** P6.1–P6.4 gave each VMM a cgroup with `cpu.max`/`memory.max` and a boot deadline, but
 the knobs are scattered: [`Limits`] `{ vcpus, mem_mib, wall }` rides the boot path while a fixed
@@ -925,7 +926,7 @@ not — fail-open *per controller*, so a host with cpu/memory but not pids keeps
 hypervisor-level exploit forking *host* processes. The arg builder was made pure (`cgroup_args_for`)
 so the per-controller fail-open is host-gate unit-tested; the remaining IO-bandwidth leg is P15.7.
 
-### 014 — Cgroup-owned VM lifetime: a sentinel that outlives the driver, and a file-based kill handle *(2026-07-14, P6.7)*
+### 014 — Cgroup-owned VM lifetime: a sentinel that outlives the driver, and a file-based kill handle *(2026-07-14)*
 
 **Problem.** Teardown was `Drop`-based: correct on every path the driver survives, but a `SIGKILL`ed,
 OOM-killed, or Ctrl-C'd driver never runs `Drop`, and its Firecracker children lived on as orphans
@@ -985,7 +986,7 @@ all built from the cgroup the VM already has.
 - The host now needs `sh` at runtime (the sentinel, and the kill handle's pid fallback). Precedent: the
   driver already shells out to `ip` for taps.
 
-### 015 — Jailed execution is the convergence target; the Sandbox surface jails by default *(2026-07-14, P7 prerequisite)*
+### 015 — Jailed execution is the convergence target; the Sandbox surface jails by default *(2026-07-14)*
 
 **Problem.** P6.1 landed the jailer on a plain read-write cold boot, and decisions 012/013 make a
 jailed boot **refuse** vsock, a NIC, the overlay, and bulk I/O with a typed error. So the confinement
@@ -1057,7 +1058,7 @@ default run confined and avoids a retrofit under a pinned public API.
   jailed-networking box: once the tap is staged into the jail, its netns removes the one-live-networked-
   clone limit.
 
-### 016 — The engine/hoster security line: the engine's tools can't be weaponized; deploying them is the hoster's *(2026-07-14, P6.9a; seeds P15.6)*
+### 016 — The engine/hoster security line: the engine's tools can't be weaponized; deploying them is the hoster's *(2026-07-14)*
 
 **Problem.** The orphan sweep (P6.9a, decision 014's GC) is the engine's first **privileged tool that
 acts on a shared, world-writable surface**: it runs with `CAP_NET_ADMIN`/root and deletes host
@@ -1119,7 +1120,7 @@ know who the tenants are.
   (a future `agent gc`, daemon-side reconcilers) inherits the same "authorship not policy, euid-scoped,
   refuse-without-identity" rule.
 
-### 017 — Per-VM network namespace: the tap lives in the VM's netns, not the host's *(2026-07-14, P7.0c; supersedes the 009/011 netns notes)*
+### 017 — Per-VM network namespace: the tap lives in the VM's netns, not the host's *(2026-07-14; supersedes the 009/011 netns notes)*
 
 **Problem.** Two forces converged. (1) The jailer confines the VMM but a networked jailed boot needs its
 tap reachable from *inside* the jail's isolation, and the jailer runs the VMM unprivileged — it can't
@@ -1175,7 +1176,7 @@ jailer's `--netns` (real root) is proven by the `ci-privileged` gate.
   (`tap_name()` resolves inside it, not the host netns).
 - Jailed snapshot/restore (P7.0e) inherits this: a jailed networked clone stages its netns the same way.
 
-### 018 — Per-exec inputs (files + env) ride the exec channel under a pinned secret-hygiene contract *(2026-07-14, P7.1)*
+### 018 — Per-exec inputs (files + env) ride the exec channel under a pinned secret-hygiene contract *(2026-07-14)*
 
 **Problem.** A real workload needs configuration and credentials in the guest: input files (landed
 P2.5) and environment variables (new at P7.1). Env could ride several paths — baked into the rootfs,
@@ -1238,7 +1239,7 @@ production credentials through it.
   only file contents and env values are promised); widening the promise to stdin is a doc-plus-test
   change, not a design change.
 
-### 019 — The VM is the session: one persistent in-guest working directory per agent process *(2026-07-15, P7.2)*
+### 019 — The VM is the session: one persistent in-guest working directory per agent process *(2026-07-15)*
 
 **Problem.** A stateful session — install a package, write a file, use both three execs later — needs
 somewhere for state to live and a rule for when it dies. The guest filesystem already persists for
@@ -1280,7 +1281,7 @@ pooled clone *is* a pre-warmed session.
   session state by the overlay's size (`overlay_size` ≈ half guest RAM) — bulk data still belongs on
   the block-device paths.
 
-### 020 — The eBPF loader: aya, an object loaded from a path, and links that drop with the loader *(2026-07-15, P8.2/P8.3/P8.4)*
+### 020 — The eBPF loader: aya, an object loaded from a path, and links that drop with the loader *(2026-07-15)*
 
 **Problem.** The eBPF track needs a shape for three things at once: what library builds and loads the
 programs, how the compiled object reaches the loader, and who owns the in-kernel objects' lifetime.
@@ -1335,7 +1336,7 @@ two halves of the engine share the same discipline.
   link-arg — both off by default would ship a legacy-only, non-portable object. `build-probes` asserts
   the `.BTF` section is present so a regression fails the build, not a downstream kernel.
 
-### 021 — Syscall observability: a ring buffer of per-event records, a shared POD type, and an in-kernel filter *(2026-07-15, P9.1/P9.2)*
+### 021 — Syscall observability: a ring buffer of per-event records, a shared POD type, and an in-kernel filter *(2026-07-15)*
 
 **Problem.** Phase 8's counter answers "how many `execve`s"; Phase 9 needs "which syscall, by whom,
 on what" — a **stream of per-event records** (pid, cgroup, `comm`, the opened path / connected
@@ -1399,7 +1400,7 @@ smallest that shows all three record shapes (a program path, a file path, a sock
   P9.5), and the attributed-workload test (P9.6) all landed, with `cargo xtask trace-sandbox` (boot a
   real sandbox, stream its cgroup-attributed host footprint) as the exit-gate demo.
 
-### 022 — Multi-tenant safety is airtight per-run isolation, proven by the containment suite *(2026-07-15, Phase 15)*
+### 022 — Multi-tenant safety is airtight per-run isolation, proven by the containment suite *(2026-07-15)*
 
 **Problem.** A hoster wants to place untrusted code from mutually-distrusting callers on one shared
 host. The engine must make that safe **without ever learning about tenants**: no team / account /
@@ -1451,7 +1452,7 @@ rather than asserted.
   without a public-API change; a caller-tunable knob can be added additively later if a real need
   appears.
 
-### 023 — Network observation: `tc`/clsact on the tap, a per-flow 5-tuple map, observe-only *(2026-07-16, P10.1/P10.2)*
+### 023 — Network observation: `tc`/clsact on the tap, a per-flow 5-tuple map, observe-only *(2026-07-16)*
 
 **Problem.** Phase 10 needs per-microVM network visibility: every packet a guest sends or receives,
 counted at the host. Three shapes must be chosen together (as decisions 020/021 did for the loader and
@@ -1509,7 +1510,7 @@ and where the "watch one sandbox" scoping lives.
   open/close), and P10.6 (the live guest-traffic test) build on this; the exit gate is live per-microVM
   network visibility.
 
-### 024 — Bind the tap monitor to a sandbox by entering its network namespace *(2026-07-16, P10.4)*
+### 024 — Bind the tap monitor to a sandbox by entering its network namespace *(2026-07-16)*
 
 **Problem.** P10.1/P10.2's `TapMonitor` attaches to an interface *in the current netns*, but a
 sandbox's tap (`fc0`) lives inside that sandbox's **own** network namespace (decision 017). To bind the
@@ -1567,7 +1568,7 @@ attachment the loader then reads a map from.
   rollup); P10.5 is this attach-on-open / teardown-on-close lifecycle; P10.6 proves guest traffic lands
   in the counters, and `cargo xtask watch-sandbox` is the live exit-gate demo.
 
-### 025 — Egress policy: a per-VM allow-list in an eBPF map, deny-by-default, enforced at the tap *(2026-07-16, P11.6)*
+### 025 — Egress policy: a per-VM allow-list in an eBPF map, deny-by-default, enforced at the tap *(2026-07-16)*
 
 **Problem.** Phase 11 turns the tap observation (decision 023) into **enforcement**: which world
 endpoints a sandbox may reach. This needs a place the policy *lives*, a *schema* for it, and a rule for
@@ -1638,7 +1639,7 @@ ingress classifier, deny-by-default, opt-in per monitor**.
 - P11.7 (`net_enforce.rs`, ignored/privileged) proves a guest reaches an allow-listed endpoint and is
   denied every other, and `cargo xtask enforce-sandbox` is the live exit-gate demo.
 
-### 026 — Resource accounting: one shared `sched_switch` program metering a cgroup set, CPU from eBPF, memory/IO from cgroup v2 *(2026-07-16, Phase 12)*
+### 026 — Resource accounting: one shared `sched_switch` program metering a cgroup set, CPU from eBPF, memory/IO from cgroup v2 *(2026-07-16)*
 
 **Problem.** Phase 12 meters what a sandbox *costs* — host CPU, memory, IO — as the metering primitive
 the hoster bills on (the engine measures; billing is the hoster's, guardrail 4/3). A microVM services

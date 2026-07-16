@@ -378,7 +378,7 @@ fn setup() -> Result<()> {
     );
     println!("             cryptic verifier reject (agent_probes_loader::check_support).");
 
-    println!("\nMissing items are covered in CONTRIBUTING.md → Prerequisites.");
+    println!("\nMissing items are covered in docs/cli-install.md → Prerequisites.");
     Ok(())
 }
 

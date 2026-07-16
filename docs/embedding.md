@@ -1,13 +1,14 @@
-# The engine API — the sandbox-lifecycle contract, and where the engine ends
+# Using the engine API
 
-This is the embedder's document: what the `agent-vmm` library promises when you pin it and build
-on it, stated once, against the real API. The rustdoc on each item is the reference; this is the
-contract's shape and the reasoning. The second half draws the line this project refuses to cross —
-what the engine deliberately is **not** — because a runtime that quietly grows platform features
-stops being embeddable.
+The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
+the `agent-vmm` library promises when you pin it and build on it, stated once, against the real
+API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
+The second half draws the line this project refuses to cross — what the engine deliberately is
+**not** — because a runtime that quietly grows platform features stops being embeddable.
 
 Numbers in parentheses (013, 015, …) are dated decision entries in
-[`ARCHITECTURE.md`](ARCHITECTURE.md); each records the rationale and the alternatives that lost.
+[Architecture decisions](./architecture.md); each records the rationale and the alternatives that
+lost.
 
 ## The lifecycle
 

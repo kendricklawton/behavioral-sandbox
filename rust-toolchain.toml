@@ -1,6 +1,6 @@
 # Pin the whole workspace to stable Rust (no nightly — see .rules) with fmt/clippy installed.
 # The eBPF crate (`crates/probes`) targets `bpfel-unknown-none`, which rustup has no std for —
-# it builds via `bpf-linker` (see CONTRIBUTING.md) — so no `targets` entry is needed here.
+# it builds via `bpf-linker` (see docs/contributing-building.md) — so no `targets` entry is needed here.
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]

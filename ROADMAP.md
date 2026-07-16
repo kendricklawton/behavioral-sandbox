@@ -45,8 +45,8 @@ Four properties every phase must protect:
 - **Two tracks, one core.** **FC** (Firecracker) and **BPF** (aya/eBPF) can be worked somewhat
   in parallel, but the **Convergence** phases need both, so the gate order still holds.
 - **Every phase exits on a demo.** The exit gate is "I can show it running." Design notes are
-  recorded in the root `.md` files: the box annotations here + `ARCHITECTURE.md`'s decision log.
-- **Hard-to-reverse choices** (tagged `(decision)`) land as dated entries in `ARCHITECTURE.md`.
+  recorded in the root `.md` files: the box annotations here + `docs/architecture.md`'s decision log.
+- **Hard-to-reverse choices** (tagged `(decision)`) land as dated entries in `docs/architecture.md`.
 - **Git is human-driven.** The user makes every commit/branch/push; the coding agent's job ends at
   changes made, demo working, box checked in the working tree.
 
@@ -65,7 +65,7 @@ Four properties every phase must protect:
   patch as they land. These are checkpoints, not releases — no stability promise.
 - Tags are a **human git step** (§0.5): the coding agent checks boxes; the user cuts the tag.
 - **No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the roadmap checkboxes and
-  `ARCHITECTURE.md`'s decision log *are* the change record; a curated
+  `docs/architecture.md`'s decision log *are* the change record; a curated
   changelog is written once, for the first real release, rather than churned every `v0.0.x`.
 
 ## §0.75 Dev environment (one-time)
@@ -87,7 +87,7 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
 - [x] **P0.2** New workspace layout: `crates/vmm` (Firecracker driver), `crates/probes` (aya
       eBPF programs, `no_std`, excluded), `crates/probes-loader` (userspace loader), `crates/cli`
       (`agent`), `xtask`.
-- [x] **P0.3** Rewrite `.rules` / `README.md` / `CONTRIBUTING.md` / `ARCHITECTURE.md` to the
+- [x] **P0.3** Rewrite `.rules` / `README.md` / `CONTRIBUTING.md` / `docs/architecture.md` to the
       sandbox-engine identity and the four core properties.
 - [x] **P0.4** Prerequisites pinned in `CONTRIBUTING.md` (KVM, BTF, `firecracker`+jailer, aya
       toolchain, caps); `cargo xtask setup` checks the host and reports what's missing.
@@ -113,7 +113,7 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
 The "hello, KVM" moment: a program that boots a real Linux microVM and reads its console.
 
 - [x] **P1.1** `(decision)` how to drive Firecracker: its **HTTP API over a unix socket** vs the
-      `firecracker` binary vs embedding `rust-vmm` crates → `ARCHITECTURE.md`. (Default: API socket.)
+      `firecracker` binary vs embedding `rust-vmm` crates → `docs/architecture.md`. (Default: API socket.)
       *(Recorded as decision 001: API socket, hand-rolled HTTP/1.1 over `UnixStream`, `unsafe`-free.)*
 - [x] **P1.2** Fetch/pin a guest kernel (`vmlinux`) and a minimal rootfs image for first boot.
       *(Firecracker v1.9 CI artifacts, sha256-pinned; `cargo xtask fetch-artifacts`, gitignored.)*
@@ -139,7 +139,7 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
 Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
 
 - [x] **P2.1** `(decision)` host↔guest channel: **vsock** vs a serial protocol vs a guest agent →
-      `ARCHITECTURE.md`. (Default: vsock + a tiny guest agent.)
+      `docs/architecture.md`. (Default: vsock + a tiny guest agent.)
       *(Recorded as decision 002: vsock + a statically-linked guest agent, a versioned
       length-prefixed protocol over Firecracker's vsock UDS; serial kept as a fallback, network/SSH
       rejected to preserve deny-by-default. Agent is exec/IO convenience, never containment.)*
@@ -386,7 +386,7 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge setu
       `10.200/16` dodges the common host defaults; making it a hoster knob and per-VM netns isolation
       are P4.3/P4.4.)*
 - [x] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
-      `ARCHITECTURE.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
+      `docs/architecture.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
       *(Direction **pre-recorded as decision 008** (2026-07-12): deny-by-default, tap has no world
       route, no default masquerade until eBPF enforcement (P8) — so this **blocks P4.1** (build denying,
       not opened-then-restricted). Closed here: decision 008 gained an "As shipped" note pinning the
@@ -503,7 +503,7 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one pr
       computation on each concurrently-alive clone, getting each clone's own answer. `ci-privileged` now runs the VM tests serially
       (real-VM integration is boot-I/O-bound and some assert on host-global leak state).)*
 - [x] **P5.5** `(decision)` Handle the uniqueness problems restore creates (network identity,
-      entropy, clocks) → `ARCHITECTURE.md`.
+      entropy, clocks) → `docs/architecture.md`.
       *(Recorded as **decision 011**, all three implemented-or-measured. **Network identity** (the
       load-bearing one): keep `ip=` as the zero-overhead cold-boot path, and on restore the **guest
       agent applies the clone's fresh address over vsock** (flush the baked-in `eth0` addr, add the
@@ -637,7 +637,7 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       returns in well under the daemon's lifetime with exit 0, and no `sleep` survives in the guest.
       Full privileged suite now **25 tests**, green.)*
 - [x] **P6.5** `(decision)` per-run resource policy shape (the knobs the engine exposes) →
-      `ARCHITECTURE.md`. *(Decision 013: the per-run policy is the one already-public, API-pinned
+      `docs/architecture.md`. *(Decision 013: the per-run policy is the one already-public, API-pinned
       `Limits` struct carrying **quantities** (`vcpus` → guest vCPUs + `cpu.max`; `mem_mib` → guest RAM
       + `memory.max`; `wall` → boot deadline today, exec budget in P7.3) plus the exec **output cap**
       (P7.3), never capabilities: network egress stays a separate eBPF-enforced concern (decision 008),
@@ -1035,9 +1035,9 @@ Wrap the FC track into a clean, self-hostable engine API.
       pure parser is unit-tested) and logs one warning naming target, `FDS_PER_VM`, headroom, and
       the fix when a target oversubscribes the budget — a warning, not a refusal, the decision-013
       fail-open posture, since sizing is fairness hygiene, not the isolation boundary. The formula
-      also lives in the `Pool` rustdoc and ENGINE.md.)*
+      also lives in the `Pool` rustdoc and `docs/embedding.md`.)*
 - [x] **P7.7** Docs: the engine API and the explicit *non-goals* (no auth/billing/scheduler).
-      *(**`ENGINE.md`**, the embedder's document and this phase's design doc in one: the lifecycle
+      *(**`docs/embedding.md`**, the embedder's document and this phase's design doc in one: the lifecycle
       contract step by step against the real API (confined-by-default open and the named-constructor
       opt-out, exec's result-vs-error semantics and bounds, the secret-hygiene contract, sessions,
       the budget struct and its fail-open line, the three error buckets as a table, the no-leak
@@ -1056,7 +1056,7 @@ Wrap the FC track into a clean, self-hostable engine API.
   *(Passed: the lifecycle demo is the CLI (`agent run` with stdin/files/env/knobs/`--json`,
   `agent shell` as a held-open session) and the tests/sandbox.rs suite (open jailed by default,
   inputs at the public API, sessions, budgets, snapshot, leak checks, concurrency, session isolation);
-  documented in [`ENGINE.md`](ENGINE.md). Phase 7 is complete.)*
+  documented in [`docs/embedding.md`](docs/embedding.md). Phase 7 is complete.)*
 
 ---
 
@@ -1126,7 +1126,7 @@ The eBPF foundation: build, load, and read a map from a trivial program.
       are a pure `parse_cap_eff`/`mask_has_load_caps` pair, unit-tested on the host gate; the
       end-to-end unprivileged load is verified by the `setcap` run (the privileged CI tests run as
       root, whose mask has every bit, so they can't prove "not root" by themselves). Documented in
-      CONTRIBUTING, `setup`, the demo, and PROBES.md.)*
+      the docs (`docs/cli-install.md`, `docs/probes.md`), `setup`, and the demo.)*
 - [x] **P8.9** Support probe: detect BTF (`/sys/kernel/btf/vmlinux`) and the kernel/verifier features
       the probes need **at load**, and fail (or degrade) with a **legible typed error** naming the
       requirement rather than a cryptic verifier reject (the eBPF analogue of P6.9b's
@@ -1141,7 +1141,7 @@ The eBPF foundation: build, load, and read a map from a trivial program.
 - **Exit gate:** a Rust eBPF program loads and reports.
   *(Passed: the demo is `agent-probes-loader`'s `count_execve` example (loads, attaches, reports the
   host execve total + per-PID breakdown) and the privileged `counter` tests; documented in
-  [`PROBES.md`](PROBES.md), the host-observability counterpart to `ENGINE.md`, covering program types,
+  [`docs/probes.md`](docs/probes.md), the host-observability counterpart to `docs/embedding.md`, covering program types,
   maps, the verifier, CO-RE/BTF, the no-pin lifetime, caps, and the hardware-isolation limit. Phase 8
   is complete.)*
 
@@ -1302,7 +1302,7 @@ Turn observation into control — deny-by-default egress, allow-listed, enforced
       empty until enforcement drops something. Non-IPv4/truncated drops have no 5-tuple to key on, so the
       denial log is the meaningful policy-miss case. Phase 13 folds this into the per-run record.)*
 - [x] **P11.6** `(decision)` where policy lives + its schema (still *engine* mechanism, not org
-      policy) → `ARCHITECTURE.md`.
+      policy) → `docs/architecture.md`.
       *(Landed: decision 025. Policy is a per-VM allow-list in two eBPF maps (`POLICY` array of
       `PolicyRule` + `ENFORCE` toggle), schema = destination CIDR + optional port/proto (deny-by-default,
       an explicit `active` byte so a zeroed map is deny-all not allow-all), consulted at the ingress
@@ -1425,7 +1425,7 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
 - [ ] **P15.3** Resource-exhaustion, fork-bomb, network-flood → bounded by cgroup + egress policy.
 - [ ] **P15.4** Snapshot-restore correctness under load (no state bleed between clones).
 - [ ] **P15.5** Document the **threat model**: what's trusted (CPU/KVM/host kernel), what isn't.
-- [ ] **P15.6** `(decision)` the security boundary + assumptions → `ARCHITECTURE.md`. *(Partially
+- [ ] **P15.6** `(decision)` the security boundary + assumptions → `docs/architecture.md`. *(Partially
       seeded early by decision 016, the engine/hoster line the P6.9a sweep forced: the engine
       guarantees its privileged tools can't be weaponized (euid-scoped, authorship not policy), the
       hoster owns deployment (scheduling, per-identity sweeps, base hardening, dividing the /16
@@ -1523,7 +1523,7 @@ Thin, idiomatic clients so non-Rust callers can drive `agentd` — a client-SDK 
 **engine, not platform**.
 
 - [ ] **P19.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
-      SDK contract): message schema, the error taxonomy, and a semver compat policy → `ARCHITECTURE.md`.
+      SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/architecture.md`.
 - [ ] **P19.2** A **cross-language conformance suite** (golden request/response + audit-log
       round-trips) every SDK must pass — the single source of SDK correctness, run in CI.
 - [ ] **P19.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
@@ -1547,7 +1547,7 @@ option, not a replacement for this repo.
 - [ ] **P20.1** `(decision)` **Sibling repo, not a backend here.** Core property 1 (*isolation is
       hardware*) is never traded in this engine; the wasm variant carries a **different, weaker**
       guarantee, so it's a distinct artifact that *shares the API*, not a plug-in backend →
-      `ARCHITECTURE.md`.
+      `docs/architecture.md`.
 - [ ] **P20.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
       a `ResourceLimiter` (memory) → typed limits, mirroring the FC engine's no-hang/no-leak contract.
 - [ ] **P20.3** The **host-function (WASI) shim layer** = capabilities + policy + audit log:

@@ -10,6 +10,5 @@
 /artifacts/
 # Local .md files
 FIX.md
-/review
-/learn
-GOAL.md
+# mdBook output (`mdbook build docs`) — the book renders from the committed docs/*.md
+/docs/book/

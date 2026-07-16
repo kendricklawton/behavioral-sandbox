@@ -31,23 +31,36 @@ the record can't be forged by the code it is recording.
 - **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
   benchmarked with percentiles — never hand-waved.
 
+## Documentation
+
+The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook — `mdbook serve docs`, or read the
+Markdown in place):
+
+- **[Introduction](docs/introduction.md)** — what this is and how the pieces fit.
+- **[Using the agent CLI](docs/cli.md)** — how to run the engine:
+  [installation](docs/cli-install.md), building the guest artifacts, `agent run`, `agent shell`.
+- **[Using the engine API](docs/embedding.md)** — the embedder's contract: the `Sandbox`
+  lifecycle, budgets, typed errors, snapshots/pool, and the engine's deliberate non-goals.
+- **[Host-side observability & enforcement](docs/probes.md)** — the eBPF half: syscall tracing,
+  per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
+- **[Architecture decisions](docs/architecture.md)** — the dated, numbered decision log: every
+  hard-to-reverse choice, its rationale, and the alternatives that lost.
+- **[Contributing](docs/contributing.md)** — orientation, [building](docs/contributing-building.md),
+  [testing](docs/contributing-testing.md).
+
 ## Status
 
-**Early, under active development.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md);
-its checkboxes are the state. So far (Phases 1 through 9) a microVM boots to userspace, runs commands
-with captured stdout/stderr/exit, runs real Python, Node, and static binaries from a purpose-built
-rootfs, gets a per-VM deny-by-default network, snapshots and restores from a pre-warmed pool in
-milliseconds, runs confined under the jailer (chroot, dropped privileges, cgroup limits, seccomp),
-and is wrapped in the embedder-facing `Sandbox` lifecycle: jailed by default, per-exec files + env
-under a tested secret-hygiene contract, stateful sessions (the VM is the session), budget knobs,
-and a structured result — the contract is written up in [`ENGINE.md`](ENGINE.md). The host-side
-eBPF observability is now live ([`PROBES.md`](PROBES.md)): the loader attaches
-`execve`/`openat`/`connect` tracepoints and streams a per-event syscall trace scoped in-kernel to one
-sandbox's cgroup (its host footprint, since a microVM's own syscalls stay in-guest), with the
-per-syscall overhead measured (`cargo xtask bench-trace`) and a live trace of a running sandbox as the
-demo (`cargo xtask trace-sandbox`). The audit log that fuses this with the driver into a per-run
-record of what a run did is the track that follows. Nothing here is production yet; the
-point is depth, done in the open.
+**Early, under active development — nothing here is production yet.** The staged plan and live
+progress are in [`ROADMAP.md`](ROADMAP.md); its checkboxes are the state. So far: a microVM boots
+to userspace and runs real Python, Node, and static binaries from a purpose-built rootfs with
+captured stdout/stderr/exit; gets a per-VM deny-by-default network; snapshots and restores from a
+pre-warmed pool in milliseconds; runs confined under the jailer (chroot, dropped privileges,
+cgroup limits, seccomp); and is wrapped in the embedder-facing `Sandbox` lifecycle
+([docs/embedding.md](docs/embedding.md)). The host-side eBPF track observes a running sandbox's
+host syscall footprint and its per-VM network flows, enforces deny-by-default egress in the
+kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)) — each with a
+measured overhead and a live demo. The audit log that fuses these into one per-run record is the
+track that follows.
 
 ## How it fits together
 
@@ -69,8 +82,10 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 | `crates/channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
 | `crates/guest-agent` | The in-guest agent (`agent-guest`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, never the trust boundary. |
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
+| `crates/probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
 | `crates/cli` | The `agent` binary (`run`, `shell`, `--log`) and later the `agentd` daemon. |
+| `docs` | This documentation, as an mdBook. |
 | `xtask` | Dev orchestration — `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 
 ## Scope — engine, not platform
@@ -79,7 +94,7 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 the sandbox lifecycle API, a self-hostable driver daemon, and the benchmarks that back the
 claims. **Out of scope, by design:** multi-tenant auth, billing, fleet scheduling, and a web
 dashboard — that's whatever *hosts* the engine. The lifecycle
-contract and the full non-goals list live in [`ENGINE.md`](ENGINE.md).
+contract and the full non-goals list live in [docs/embedding.md](docs/embedding.md).
 
 **Adjacent (separate repos, post-`v0.1.0`):** language SDKs (Go · Python · Node · C#) that drive
 the engine's wire API, and a Wasmtime-based *software-isolation* sibling built to compare both
@@ -89,9 +104,9 @@ never part of its trust boundary, and never traded against the hardware-isolatio
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) — the prerequisites (KVM, `firecracker`, the aya
-toolchain), the local gate, the testing approach, and the invariants. The operating manual is
-[`.rules`](.rules); the staged plan is [`ROADMAP.md`](ROADMAP.md).
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
+[documentation](docs/contributing.md). The operating manual is [`.rules`](.rules); the staged
+plan is [`ROADMAP.md`](ROADMAP.md); decisions are recorded in [docs/architecture.md](docs/architecture.md).
 
 ## License
 
