@@ -1,0 +1,25 @@
+# The plain-old-data types shared across the eBPF boundary: the kernel programs in `crates/probes`
+# (the ring-buffer *writer*) and the userspace loader in `crates/probes-loader` (the *reader*) both
+# depend on this one crate, so the wire record between them is single-sourced and can't silently drift
+# (a mismatched field order/size would read garbage). `#![no_std]`, **zero dependencies**, so it
+# compiles unchanged for the BPF target (via `crates/probes`, build-std) *and* the host triple. It is
+# a normal workspace member on the host side, so `cargo xtask ci` builds, clippies, and unit-tests the
+# parser everywhere (`#![cfg_attr(not(test), no_std)]` lets its own tests use `std`).
+[package]
+name = "agent-probes-common"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "Plain-old-data types shared across the eBPF boundary (kernel writer ↔ userspace reader)."
+
+[dependencies]
+
+# `std` opts the crate back into `std` (it is `#![no_std]` by default, for the BPF target) so the
+# userspace loader gets `comm_lossy`. The BPF side (`crates/probes`) leaves it off.
+[features]
+std = []
+
+[lints]
+workspace = true

@@ -1,11 +1,11 @@
-# PROBES.md — host-side eBPF observability (Phase 8 writeup)
+# PROBES.md — host-side eBPF observability
 
 The engine has two halves. `ENGINE.md` documents the Firecracker driver: the hardware-isolation
 boundary that *contains* untrusted code. This document is the other half: the host-side eBPF that
-*observes and enforces* what that code does, from outside the guest where it can't be reached (spine
-property 2). Phase 8 is the on-ramp: build, load, attach, and read one trivial program end to end,
-and learn the machinery the later phases lean on (syscalls P9, tap network P10/P11, cgroup P12, fused
-into the flight recorder P13).
+*observes and enforces* what that code does, from outside the guest where it can't be reached (core
+property 2). Phase 8 establishes the foundation the later phases build on: build, load, attach, and
+read one program end to end (syscalls P9, tap network P10/P11, cgroup P12, fused into the audit
+log P13).
 
 The worked example is a counter: `count_execve` attaches to the `sys_enter_execve` tracepoint and
 tallies how many `execve`s the host does, into two maps. It is deliberately small; the point is the
@@ -50,8 +50,8 @@ aya validates them at load.
 
 ## The verifier
 
-Before the kernel runs a BPF program it *verifies* it: every path must be safe and terminate. You
-learn its rules by hitting them. Two the counter demonstrates on purpose:
+Before the kernel runs a BPF program it *verifies* it: every path must be safe and terminate. Two
+of its rules the counter hits on purpose:
 
 - **Bounded loops.** Walking the fixed 16-byte `comm` buffer to its NUL terminator is a loop whose
   bound is a compile-time constant, so the verifier can prove it terminates even with a data-dependent
@@ -113,7 +113,7 @@ load fail with a cryptic verifier reject or `EPERM`. A host that can't run the p
 
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so
 untrusted code's syscalls are serviced *in-guest* and never trap to a host tracepoint. This is the
-price of spine property 1 (isolation is hardware): host-side syscall visibility is inherently coarse
+price of core property 1 (isolation is hardware): host-side syscall visibility is inherently coarse
 for a microVM. The strong cross-boundary signals are **network** (the tap, P10/P11) and **resources**
 (the cgroup, P12), which the host observes directly. We say this plainly rather than promise in-guest
 syscall introspection the boundary can't deliver.
@@ -133,4 +133,34 @@ leaves no pinned residue:
 ```console
 cargo test -p agent-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
+```
+
+## Beyond the counter: a per-event syscall trace (Phase 9, in progress)
+
+Phase 8's counter proves the load→attach→read→drop path with the smallest possible payload. Phase 9
+turns that into a real **stream of per-event records** (this section is extended as the phase
+completes; here is the shape so far):
+
+- **A ring buffer, not a counter (P9.1).** Three tracepoint programs (`trace_execve` / `trace_openat`
+  / `trace_connect`, on the matching `sys_enter_*` hooks) push a whole `SyscallEvent` — pid, tid,
+  cgroup id, `comm`, and the opened path or connected sockaddr — into one `BPF_MAP_TYPE_RINGBUF`. The
+  ring buffer is the modern (5.8+) replacement for the per-CPU perf array: a single ordered MPSC queue
+  the loader drains with one consumer (`SyscallTracer::drain`). Reading the syscall's pointer argument
+  (a user `char *` path, a `sockaddr *`) uses `bpf_probe_read_user_*`.
+- **A shared, single-sourced record.** `SyscallEvent` lives in one dependency-free `#![no_std]` crate
+  (`crates/probes-common`) that both the kernel writer and the userspace reader depend on, so the
+  `#[repr(C)]` layout can't drift between them — the reader parses it field by field, no `unsafe`.
+- **Filter to one sandbox (P9.2).** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
+  don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
+  ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
+  the default watches the whole host. See ARCHITECTURE decision 021.
+
+The honest limit is unchanged (isolation is hardware): these are the **host's** syscalls — a
+Firecracker worker's `execve`/`openat`/`connect` — never the guest's, which are serviced in-guest and
+never trap here.
+
+```console
+cargo build -p agent-probes-loader --example trace_syscalls
+sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/trace_syscalls
+target/debug/examples/trace_syscalls           # a filtered trace, then an unfiltered one
 ```

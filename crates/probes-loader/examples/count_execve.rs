@@ -1,5 +1,5 @@
 //! Demo (P8.3): load the `sys_enter_execve` counter, print the running total, sample again after a
-//! moment, and print how much it moved. This is the eBPF on-ramp's "it works" demo — a Rust eBPF
+//! moment, and print how much it moved. This is the eBPF introduction's "it works" demo — a Rust eBPF
 //! program loads, attaches, and reports from userspace.
 //!
 //! Needs `CAP_BPF`+`CAP_PERFMON` (or root), a BTF kernel, and the built object

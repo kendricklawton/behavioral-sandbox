@@ -284,7 +284,7 @@ struct RootfsBuild {
 /// assembles the deterministic image, prints its sha256, and warns if the package closure drifted
 /// from the committed lockfile. `--update-lock` re-records that lockfile (the "re-pin" after an
 /// upstream bump); `--verify` proves reproducibility — a second build must be byte-identical — and
-/// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the gate.
+/// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the CI gate.
 pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     let out = agent_rootfs_path();
     let build = assemble_rootfs(&out)?;

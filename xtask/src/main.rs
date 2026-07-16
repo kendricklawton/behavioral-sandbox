@@ -11,8 +11,8 @@
 //!   when `bpf-linker`/`rustup` are absent.
 //! - **`build-rootfs`** — assemble the reproducible guest rootfs (Alpine base + baked-in agent).
 //! - **`bench-boot`** — measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
-//! - **`bench-warm`** — time-to-first-result percentiles: cold boot vs warm-snapshot restore vs
-//!   warm-pool take. Needs KVM + the built agent rootfs.
+//! - **`bench-warm`** — time-to-first-result percentiles: cold boot vs prewarmed-snapshot restore vs
+//!   prewarmed-pool take. Needs KVM + the built agent rootfs.
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch); the
@@ -20,7 +20,7 @@
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
 //! workspace; `build-probes` builds its object (with BTF) and is folded **into** `ci` (guarded, so
-//! the gate still runs on hosts without the eBPF toolchain).
+//! the CI gate still runs on hosts without the eBPF toolchain).
 #![forbid(unsafe_code)]
 
 mod artifacts;
@@ -87,7 +87,7 @@ enum Cmd {
         runs: usize,
     },
     /// Measure time-to-first-result (percentiles) of the three start paths: a cold boot (per-VM
-    /// rootfs copy, the Phase-1-style baseline), a warm-snapshot restore, and a warm-pool take,
+    /// rootfs copy, the Phase-1-style baseline), a prewarmed-snapshot restore, and a prewarmed-pool take,
     /// each timed from "start a sandbox" to "a Python one-liner's output is back on the host"
     /// (P5.7). Needs `/dev/kvm` + the built agent rootfs.
     BenchWarm {
@@ -143,7 +143,7 @@ fn ci() -> Result<()> {
         &[("RUSTDOCFLAGS", "-D warnings")],
     )?;
     cargo(&["deny", "check"])?;
-    // P8.7: the eBPF object build is part of the gate. Host-safe and guarded — it skips with a note
+    // P8.7: the eBPF object build is part of the CI gate. Host-safe and guarded — it skips with a note
     // when `bpf-linker`/`rustup` are absent, so `ci` still runs everywhere, but on a set-up dev box a
     // probe that fails to compile (or drops its BTF) now fails here, not later at load.
     build_probes()?;
@@ -160,7 +160,7 @@ fn ci_privileged() -> Result<()> {
     // This gate builds and verifies the static guest agent (below), and that verification is the
     // *only* thing standing between a silently-reintroduced dynamic dependency and a confusing
     // in-guest loader failure. `verify_static` soft-skips when `readelf` is absent (so ad-hoc
-    // `build-rootfs` still works), so require it *here* — a missing binutils must fail the gate
+    // `build-rootfs` still works), so require it *here* — a missing binutils must fail the CI gate
     // loudly, not quietly disarm the check.
     if !in_path("readelf") {
         bail!(
@@ -205,7 +205,7 @@ fn ci_privileged() -> Result<()> {
     // without `bpf-linker` skips the build and the probe tests then self-skip on the missing object.
     build_probes()?;
     // Serial (`--test-threads=1`): these tests each boot a real microVM and some assert on
-    // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent warm clones). Run
+    // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent prewarmed clones). Run
     // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
     // leak check. Real-VM integration is I/O-bound on boot anyway, so serial costs little.
     cargo(&[

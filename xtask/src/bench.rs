@@ -64,7 +64,7 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     println!(
         "\nBoth paths boot in well under a second. The {used_mib} MiB base is cheap to duplicate (the\n\
          host page cache serves the copy), so its size barely moves boot latency here — keeping the\n\
-         base small mainly buys density (page-cache dedup across VMs + disk), not boot time."
+         base small mainly buys memory-sharing (page-cache dedup across VMs + disk), not boot time."
     );
     Ok(())
 }
@@ -77,8 +77,8 @@ impl Drop for ScratchDir {
     }
 }
 
-/// The agent-rootfs boot config the warm bench uses: vsock (the exec channel) plus the agent's
-/// readiness marker. `read_only_root` is the shared-base switch: `true` is what a warm snapshot
+/// The agent-rootfs boot config the prewarmed bench uses: vsock (the exec channel) plus the agent's
+/// readiness marker. `read_only_root` is the shared-base switch: `true` is what a prewarmed snapshot
 /// requires (the bundle references the base in place, clones share its page cache), `false` is the
 /// Phase-1-style baseline that duplicates the whole image per VM.
 fn warm_bench_config(kernel: &Path, rootfs: &Path, read_only_root: bool) -> BootConfig {
@@ -108,10 +108,10 @@ fn timed_python(vm: &RunningVm) -> Result<()> {
 }
 
 /// Measure time-to-first-result of the three start paths (P5.7): a **cold boot** (per-VM rootfs
-/// copy, the Phase-1-style baseline), a **warm-snapshot restore**, and a **warm-pool take**, each
-/// timed from "start a sandbox" to "a Python one-liner's output is back on the host". One warm
+/// copy, the Phase-1-style baseline), a **prewarmed-snapshot restore**, and a **prewarmed-pool take**, each
+/// timed from "start a sandbox" to "a Python one-liner's output is back on the host". One prewarmed
 /// snapshot (Python imported, then paused) feeds the restore and pool paths, the way an embedder
-/// would hold one warm image per runtime. Teardown and pool refill happen off the clock: they're
+/// would hold one prewarmed image per runtime. Teardown and pool refill happen off the clock: they're
 /// the cost a caller pays between requests, not on the request path.
 pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
@@ -134,14 +134,14 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
     println!("bench-warm: agent rootfs {used_mib} MiB, {runs} runs per path\n");
 
-    // One warm snapshot feeds the restore and pool paths: boot the shared read-only base, load
+    // One prewarmed snapshot feeds the restore and pool paths: boot the shared read-only base, load
     // Python once (interpreter + imports resident in guest memory), pause + snapshot, drop the
     // source.
     let bundle =
         ScratchDir(std::env::temp_dir().join(format!("agent-bench-warm-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&bundle.0);
     let source =
-        Vm::boot(warm_bench_config(&kernel, &rootfs, true)).context("boot the warm source")?;
+        Vm::boot(warm_bench_config(&kernel, &rootfs, true)).context("boot the prewarmed source")?;
     let warm_up = ["python3", "-c", "import json, os, sys"].map(String::from);
     let out = source.exec(&warm_up, &[]).context("warm-up exec")?;
     if out.exit_code != 0 {
@@ -149,7 +149,7 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     }
     let snapshot = source
         .snapshot(&bundle.0)
-        .context("take the warm snapshot")?;
+        .context("take the prewarmed snapshot")?;
     source.shutdown().ok();
     let mem_mib = image_used_bytes(snapshot.mem_path())? / (1024 * 1024);
 
@@ -165,7 +165,7 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
         vm.shutdown().ok();
     }
 
-    // Path 2: restore a fresh clone from the warm snapshot + exec.
+    // Path 2: restore a fresh clone from the prewarmed snapshot + exec.
     let restore_cfg = warm_bench_config(&kernel, &rootfs, true);
     let mut restore = Vec::with_capacity(runs);
     for i in 0..runs {
@@ -179,7 +179,7 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     // Path 3: pool take + exec. The take pops prefilled stock (plus a health probe); the refill
     // that pays the restore back runs off the clock, per the pool's caller-chooses-when contract.
     let mut pool = Pool::new(snapshot, warm_bench_config(&kernel, &rootfs, true), 1)
-        .context("prefill the warm pool")?;
+        .context("prefill the prewarmed pool")?;
     let mut take = Vec::with_capacity(runs);
     for i in 0..runs {
         let t0 = std::time::Instant::now();
@@ -192,11 +192,11 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     pool.shutdown();
 
     report_percentiles("cold boot + exec", &mut cold);
-    report_percentiles("warm restore + exec", &mut restore);
+    report_percentiles("prewarmed restore + exec", &mut restore);
     report_percentiles("pool take + exec", &mut take);
     println!(
         "\nFootprint per sandbox: the cold path copies the whole {used_mib} MiB image per VM (on a\n\
-         tmpfs /tmp that's host RAM); a warm clone copies nothing: it references the read-only base\n\
+         tmpfs /tmp that's host RAM); a prewarmed clone copies nothing: it references the read-only base\n\
          in place and maps the bundle's one {mem_mib} MiB memory file, both shared by every clone\n\
          through the page cache, so a clone's private cost is its copy-on-write dirty pages."
     );

@@ -16,6 +16,10 @@ description = "The eBPF programs (no_std) — syscall tracepoints, tc/XDP on the
 # map types. Its userspace counterpart (`aya`) lives in `crates/probes-loader`.
 aya-ebpf = "0.1"
 
+# The wire record written into the ring buffer (`SyscallEvent`), shared with the userspace reader so
+# the two sides can't drift. `no_std`, no default features — the BPF side never wants `std`.
+agent-probes-common = { path = "../probes-common", default-features = false }
+
 # One object per program set, linked by `bpf-linker` for `bpfel-unknown-none`. P8.1 ships one
 # placeholder program to prove the toolchain end to end; P8.2+ add the real tracepoints/tc/cgroup
 # programs (splitting into more `[[bin]]`s if it helps attach them independently).

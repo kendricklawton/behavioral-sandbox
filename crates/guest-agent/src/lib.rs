@@ -8,7 +8,7 @@
 //! body with a **stable working directory**, which is what turns a sequence of execs against one
 //! agent into a stateful session (the in-VM binary uses it; the VM is the session).
 //!
-//! **The load-bearing subtlety** (the Phase-1 pipe-deadlock lesson, again): the child's `stdout`
+//! **The load-bearing subtlety** (the Phase-1 pipe-deadlock hazard, again): the child's `stdout`
 //! and `stderr` are drained by two threads that keep reading **even after forwarding to the host
 //! fails** — on the first forward error they switch to read-and-discard, so the child's ~64 KiB
 //! pipe can never fill and block `wait()`. This is what stops a *dead* host from wedging a live
@@ -18,7 +18,7 @@
 //! see [`ServerConnection`]), any dead-or-stalled host is a bounded, typed error, never a hang.
 //!
 //! The agent carries exec/IO only — it is a convenience inside the isolation boundary, never part of
-//! the trust boundary (spine property 2). Containment is the microVM, not this code.
+//! the trust boundary (core property 2). Containment is the microVM, not this code.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
@@ -458,7 +458,7 @@ impl Drop for ExecCgroup {
     fn drop(&mut self) {
         // Ensure the tree is dead (idempotent with `serve`'s explicit kill), then remove the now-empty
         // cgroup. `remove_dir` needs it empty, and SIGKILL'd processes are reaped by init
-        // asynchronously, so retry briefly rather than leak a dir on a long-lived guest (the warm pool).
+        // asynchronously, so retry briefly rather than leak a dir on a long-lived guest (the prewarmed pool).
         self.kill_all();
         for _ in 0..50 {
             if std::fs::remove_dir(&self.path).is_ok() {

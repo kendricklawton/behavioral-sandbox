@@ -10,7 +10,7 @@ yanked = "deny"
 version = 2
 # Minimal permissive set — only the licenses actually present in the tree today, so `cargo deny`
 # runs warning-clean. Add to this list deliberately (with a reason) when a new dependency needs
-# it: a missing license fails the gate and names the offending crate.
+# it: a missing license fails the CI gate and names the offending crate.
 allow = [
     "MIT",
     "Apache-2.0",

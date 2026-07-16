@@ -16,7 +16,7 @@ Sandbox::open(config)            confined by default: KVM + the jailer
     .exec(argv, stdin)           synchronous; RunResult, never a panic/hang/leak
     .exec_with_files(argv, stdin, files, env, artifacts)
     …repeated execs = one stateful session (the VM is the session)
-    .snapshot(dir)               a portable warm bundle (unjailed sources only)
+    .snapshot(dir)               a portable pre-warmed bundle (unjailed sources only)
     .collect_outputs()           the bulk /output tree, back on the host
     .shutdown()                  guaranteed reclamation — also on Drop, also on SIGKILL
 ```
@@ -94,12 +94,12 @@ force-kills a sandbox whose `exec` some other thread is blocked in — the host-
 Residue from crashed embedders is reclaimed by `sweep_orphans` (ownership keyed on liveness, never
 on names; only your own euid's residue), so a crash-looping host stays serviceable (016).
 
-### Warm starts: snapshot an unjailed source, restore jailed clones
+### Pre-warmed starts: snapshot an unjailed source, restore jailed clones
 
 `snapshot(dir)` pauses the VM and writes a portable bundle; `Vm::restore` (and the `Pool` built on
 it) brings up exec-ready clones in milliseconds, sharing the base disk and memory file read-only
 across clones. The confinement story is deliberate (010, 015): a *jailed* VM refuses snapshotting
-(its disk lives in the chroot) — you snapshot an **unjailed warm source** that runs only your own
+(its disk lives in the chroot) — you snapshot an **unjailed pre-warmed source** that runs only your own
 warm-up, and restore **jailed clones** from it, which is where the untrusted code runs. A pooled
 clone is a pre-warmed session; entropy is reseeded per clone (VMGenID), and networked clones each
 recreate their tap in a private netns (017), so any number coexist.
@@ -148,7 +148,7 @@ own-euid sweep), and turning its tools into a multi-tenant service safely is the
 What the engine *does* owe a long-lived host, and ships: typed errors instead of panics on every
 hostile-guest path, GC for crashed embedders' residue (`sweep_orphans`), dependency guards that
 fail legibly (`xtask setup`'s degradation matrix, the pinned Firecracker probe), measured budgets
-(fd, boot, restore, density), and a wire protocol whose version handshake makes skew a typed error
+(fd, boot, restore, memory-sharing), and a wire protocol whose version handshake makes skew a typed error
 instead of a silent misbehavior.
 
 Downstream of the public API, in separate repos, live the language SDKs (Go/Python/Node/C#) and the

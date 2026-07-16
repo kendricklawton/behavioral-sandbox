@@ -1,5 +1,5 @@
-//! Privileged integration tests for snapshots and warm start: the self-contained bundle, restore,
-//! concurrent warm clones, the restore fix-ups (network identity, entropy, clocks), the warm
+//! Privileged integration tests for snapshots and prewarmed start: the self-contained bundle, restore,
+//! concurrent prewarmed clones, the restore fix-ups (network identity, entropy, clocks), the prewarmed
 //! `Pool`, and the restore-beats-cold-boot payoff.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
@@ -15,7 +15,7 @@ use std::time::Duration;
 use agent_vmm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
 
 use common::{
-    agent_rootfs_config, config, have_jailer_privileges, have_net_admin, warm_python_snapshot,
+    agent_rootfs_config, config, have_jailer_privileges, have_net_admin, prewarmed_python_snapshot,
     TmpDir,
 };
 
@@ -92,30 +92,31 @@ fn restores_a_snapshot_onto_a_fresh_vmm() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn warm_snapshot_restores_and_runs_code() {
-    // P5.3: snapshot a warm agent VM (runtime loaded), throw the source away, restore a clone off the
+fn prewarmed_snapshot_restores_and_runs_code() {
+    // P5.3: snapshot a prewarmed agent VM (runtime loaded), throw the source away, restore a clone off the
     // shared read-only base, and run Python on it — the exec channel survives the snapshot (Firecracker
-    // re-binds vsock on restore), so a warm clone runs code without paying the cold boot.
+    // re-binds vsock on restore), so a prewarmed clone runs code without paying the cold boot.
     let bundle = TmpDir::new("snap-warm");
-    let (snap, cold_boot) = warm_python_snapshot(&bundle);
-    // A warm (read_only_root) snapshot references the shared base in place, so the bundle carries no
+    let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
+    // A prewarmed (read_only_root) snapshot references the shared base in place, so the bundle carries no
     // root-disk copy: the disk path points outside the bundle dir, not at a copy within it.
     assert!(
         !snap.root_drive_path().starts_with(bundle.path()),
         "a read_only_root snapshot should reference the shared base, not copy it into the bundle"
     );
 
-    let restored = Vm::restore(&snap, &agent_rootfs_config()).expect("warm restore should resume");
+    let restored =
+        Vm::restore(&snap, &agent_rootfs_config()).expect("prewarmed restore should resume");
     let restore_latency = restored.boot_latency();
     let argv = ["python3", "-c", "print(2 + 2)"].map(String::from);
     let out = restored
         .exec(&argv, &[])
-        .expect("exec on the restored warm clone should succeed");
+        .expect("exec on the restored prewarmed clone should succeed");
     assert_eq!(out.exit_code, 0, "python should exit 0");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "4",
-        "restored warm clone should run Python and return 4"
+        "restored prewarmed clone should run Python and return 4"
     );
     // A restored VM's live disk is an anonymous inode with no host path, so re-snapshotting it must be
     // refused, not silently bundle a stale / shared-writable disk.
@@ -125,7 +126,7 @@ fn warm_snapshot_restores_and_runs_code() {
         "re-snapshotting a restored VM should be refused"
     );
 
-    eprintln!("warm: cold boot {cold_boot:?} vs restore {restore_latency:?} + exec");
+    eprintln!("prewarmed: cold boot {cold_boot:?} vs restore {restore_latency:?} + exec");
     restored
         .shutdown()
         .expect("restored shutdown should succeed");
@@ -133,14 +134,14 @@ fn warm_snapshot_restores_and_runs_code() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn restores_concurrent_clones_from_one_warm_snapshot() {
-    // P5.4: restore several clones from one warm snapshot and keep them all alive at once. Each shares
-    // the read-only base (density) but is an independent VM — its own vsock socket (bound relative to
+fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
+    // P5.4: restore several clones from one prewarmed snapshot and keep them all alive at once. Each shares
+    // the read-only base (memory-sharing) but is an independent VM — its own vsock socket (bound relative to
     // its own scratch dir, so no collision) and its own in-RAM overlay. Prove it by running a distinct
     // computation on each concurrently-alive clone and getting each clone's own answer back.
     const N: usize = 3;
     let bundle = TmpDir::new("snap-warm-clones");
-    let (snap, _cold) = warm_python_snapshot(&bundle);
+    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
     let clones: Vec<_> = (0..N)
         .map(|i| {
@@ -189,7 +190,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
         return;
     }
 
-    // Source: networked + vsock + warm. Snapshot it, then drop it — under the netns model neither the
+    // Source: networked + vsock + prewarmed. Snapshot it, then drop it — under the netns model neither the
     // tap name nor the /30 is a shared reservation, so the source's lifetime doesn't gate the clones'.
     let mut cfg = agent_rootfs_config();
     cfg.enable_network = true;
@@ -199,7 +200,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
     let bundle = TmpDir::new("snap-net-warm");
     let snap = source
         .snapshot(bundle.path())
-        .expect("networked warm snapshot should succeed");
+        .expect("networked prewarmed snapshot should succeed");
     source.shutdown().expect("source shutdown");
 
     // Two clones, live simultaneously — impossible before this box.
@@ -274,21 +275,21 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
 
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
-fn restores_warm_clones_under_the_jailer_and_pools_them() {
-    // P7.0e: warm start and confinement compose. The warm source runs unjailed — it executes only
+fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
+    // P7.0e: prewarmed start and confinement compose. The prewarmed source runs unjailed — it executes only
     // the embedder's warm-up, and a jailed VM refuses snapshotting — and every *clone* restores
     // under the jailer: the bundle is staged into the chroot (state copied in; the memory file and
     // the shared base disk bind-mounted read-only, so clones keep sharing one page cache), vsock is
     // re-bound inside the chroot, and the VMM runs as the dropped uid. This drives one direct jailed
-    // restore, then a jailed `Pool`, so the confined warm pool the box promises is the thing proven.
+    // restore, then a jailed `Pool`, so the confined prewarmed pool the box promises is the thing proven.
     if !have_jailer_privileges() {
         eprintln!(
-            "skipping restores_warm_clones_under_the_jailer_and_pools_them: needs real root (euid 0)"
+            "skipping restores_prewarmed_clones_under_the_jailer_and_pools_them: needs real root (euid 0)"
         );
         return;
     }
     let bundle = TmpDir::new("snap-jailed");
-    let (snap, _cold) = warm_python_snapshot(&bundle);
+    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
     let mut cfg = agent_rootfs_config();
     cfg.jail = Some(Jail::default());
@@ -305,7 +306,7 @@ fn restores_warm_clones_under_the_jailer_and_pools_them() {
     };
 
     // Direct jailed restore: confined, exec-ready, and actually functional.
-    let clone = Vm::restore(&snap, &cfg).expect("jailed warm restore should resume");
+    let clone = Vm::restore(&snap, &cfg).expect("jailed prewarmed restore should resume");
     assert_eq!(
         vmm_uid(clone.vmm_pid()).as_deref(),
         Some(DEFAULT_JAIL_UID.to_string()).as_deref(),
@@ -313,17 +314,17 @@ fn restores_warm_clones_under_the_jailer_and_pools_them() {
     );
     let out = clone
         .exec(&["python3".into(), "-c".into(), "print(6 * 7)".into()], b"")
-        .expect("exec python on the jailed warm clone");
+        .expect("exec python on the jailed prewarmed clone");
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
         "42",
-        "jailed clone should run warm Python; console:\n{}",
+        "jailed clone should run prewarmed Python; console:\n{}",
         clone.console()
     );
     assert_eq!(out.exit_code, 0);
     clone.shutdown().expect("jailed clone shutdown");
 
-    // The confined warm pool: every pooled clone restored under the jailer, health-checked and
+    // The confined prewarmed pool: every pooled clone restored under the jailer, health-checked and
     // exec-ready on take.
     let mut pool = Pool::new(snap, cfg, 2).expect("jailed pool should prefill");
     assert_eq!(pool.ready(), 2, "both confined clones should be pooled");
@@ -354,7 +355,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     // which reseeds the CRNG on a generation bump): this proves it end to end. Clock skew is
     // measured and reported, not asserted (decision 011 records the posture).
     let bundle = TmpDir::new("snap-entropy");
-    let (snap, _cold) = warm_python_snapshot(&bundle);
+    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
     let draw = |label: &str| {
         let clone = Vm::restore(&snap, &agent_rootfs_config())
@@ -408,18 +409,18 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn pool_serves_warm_clones_and_discards_dead_ones() {
-    // P5.6: the warm Pool. Prefill keeps clones exec-ready so `take` is a pop (µs) plus a fast
+fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
+    // P5.6: the prewarmed Pool. Prefill keeps clones exec-ready so `take` is a pop (µs) plus a fast
     // health probe — not a cold boot. A clone that died while pooled is a typed GuestUnavailable
     // from the probe, so `take` discards it and serves the next (or restores inline when dry)
     // instead of surfacing an infra failure — the retry semantics the P2.7 deferral promised.
     use agent_vmm::Pool;
 
     let bundle = TmpDir::new("snap-pool");
-    let (snap, cold_boot) = warm_python_snapshot(&bundle);
+    let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
 
-    let mut pool =
-        Pool::new(snap, agent_rootfs_config(), 2).expect("pool should prefill two warm clones");
+    let mut pool = Pool::new(snap, agent_rootfs_config(), 2)
+        .expect("pool should prefill two prewarmed clones");
     assert_eq!(pool.ready(), 2, "prefill should hit the target");
 
     // Fast path: take a ready clone and run code on it. The take is a pop + probe, so it must come
@@ -474,7 +475,7 @@ fn pool_over_a_no_vsock_snapshot_keeps_its_stock() {
     // A snapshot without the vsock exec channel has nothing to health-probe: `probe_agent` would
     // return the permanent `require_vsock` error, a structural condition, not a dead clone. `take`
     // must hand the popped clone out directly instead of reading that error as "unhealthy" and
-    // discarding the whole warm inventory (the pre-fix bug tore down every clone on the first take,
+    // discarding the whole prewarmed inventory (the pre-fix bug tore down every clone on the first take,
     // then restored a fresh unprobed one, leaving `ready()` at 0). Prove the stock survives a take.
     let cfg = config(); // plain rootfs, no `guest_cid` → the snapshot carries no vsock
     let source = Vm::boot(cfg.clone()).expect("source microVM should boot");
@@ -501,21 +502,22 @@ fn pool_over_a_no_vsock_snapshot_keeps_its_stock() {
 
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn warm_restore_returns_output_in_far_under_cold_boot() {
-    // P5.8: the phase's payoff asserted, not eyeballed: from "restore a warm Python snapshot" to
+fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
+    // P5.8: the phase's payoff asserted, not eyeballed: from "restore a prewarmed Python snapshot" to
     // "the code's output is back on the host" in well under the source's cold-boot latency. The
     // bound is generous twofold: the asserted 2x margin is far inside the measured ~6.6x (P5.7's
     // bench, n=100: restore-to-output p50 105 ms vs cold boot + exec p50 689 ms), and `cold_boot`
     // itself understates the cold path, which pays boot *plus* this same exec.
     let bundle = TmpDir::new("snap-warm-fast");
-    let (snap, cold_boot) = warm_python_snapshot(&bundle);
+    let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
 
     let t0 = std::time::Instant::now();
-    let restored = Vm::restore(&snap, &agent_rootfs_config()).expect("warm restore should resume");
+    let restored =
+        Vm::restore(&snap, &agent_rootfs_config()).expect("prewarmed restore should resume");
     let argv = ["python3", "-c", "print(6 * 7)"].map(String::from);
     let out = restored
         .exec(&argv, &[])
-        .expect("exec on the restored warm clone should succeed");
+        .expect("exec on the restored prewarmed clone should succeed");
     let to_output = t0.elapsed();
 
     assert_eq!(out.exit_code, 0, "python should exit 0");
@@ -528,7 +530,7 @@ fn warm_restore_returns_output_in_far_under_cold_boot() {
         to_output * 2 < cold_boot,
         "restore-to-output ({to_output:?}) should be far under a cold boot ({cold_boot:?})"
     );
-    eprintln!("warm restore to output {to_output:?} vs cold boot {cold_boot:?}");
+    eprintln!("prewarmed restore to output {to_output:?} vs cold boot {cold_boot:?}");
     restored
         .shutdown()
         .expect("restored shutdown should succeed");

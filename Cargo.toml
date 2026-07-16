@@ -4,6 +4,7 @@ members = [
     "crates/vmm",
     "crates/channel",
     "crates/guest-agent",
+    "crates/probes-common",
     "crates/probes-loader",
     "crates/cli",
     "xtask",
@@ -26,7 +27,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Structured logging to stderr; stdout stays reserved for a run's result / flight recorder.
+# Structured logging to stderr; stdout stays reserved for a run's result / audit log.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

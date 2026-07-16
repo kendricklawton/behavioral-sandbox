@@ -1,11 +1,11 @@
-//! The warm [`Pool`]: pre-restored clones of one warm [`Snapshot`], handed out ready to
+//! The prewarmed [`Pool`]: pre-restored clones of one prewarmed [`Snapshot`], handed out ready to
 //! [`exec`](crate::RunningVm::exec), so a run starts in milliseconds instead of a cold boot.
 //!
 //! **Synchronous by design.** The engine has no async runtime and no background threads on the host
 //! path (the console reader is the one exception), and the pool doesn't smuggle one in: restores
 //! happen inline, in [`new`](Pool::new) (the prefill), in [`refill`](Pool::refill) (explicit
 //! top-up, at the *caller's* chosen moment), and in [`take`](Pool::take) only as the
-//! pool-ran-dry fallback. A warm restore is milliseconds, so even the fallback path keeps the
+//! pool-ran-dry fallback. A prewarmed restore is milliseconds, so even the fallback path keeps the
 //! "starts in ms" property; what the pool buys over restore-on-demand is the **µs pop** when stock
 //! is ready, and a place to put the health/discard policy. A self-refilling, concurrency-managed
 //! pool belongs to the daemon (Phase 16), not the library.
@@ -18,7 +18,7 @@ use crate::{BootConfig, RunningVm, VmmError, FDS_PER_VM};
 /// the sizing rule [`Pool::new`] states: `target × FDS_PER_VM + POOL_FD_HEADROOM ≤ ulimit -n`.
 const POOL_FD_HEADROOM: usize = 64;
 
-/// A pool of pre-restored, exec-ready warm clones of one [`Snapshot`].
+/// A pool of pre-restored, exec-ready prewarmed clones of one [`Snapshot`].
 ///
 /// [`take`](Pool::take) health-checks each candidate before handing it out: a clone that died or
 /// wedged while pooled (a typed probe failure, most specifically
@@ -31,7 +31,7 @@ const POOL_FD_HEADROOM: usize = 64;
 /// concurrency limit: each clone recreates the baked-in tap in its own network namespace
 /// (decision 017). **Confined pool** (P7.0e): set [`jail`](crate::BootConfig::jail) on `config` and
 /// every pooled clone restores under the jailer — chroot, dropped uid, seccomp, its own netns —
-/// so warm starts and confinement compose (needs real root, like any jailed boot).
+/// so prewarmed starts and confinement compose (needs real root, like any jailed boot).
 ///
 /// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
 /// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n` — state
@@ -88,7 +88,7 @@ impl Pool {
 
     /// Hand out a ready, health-checked clone. Pops ready stock (microseconds, plus a fast probe);
     /// a pooled clone that fails its probe is discarded (logged, torn down) and the next is tried.
-    /// If the pool is dry, falls back to restoring a fresh clone inline: milliseconds for a warm
+    /// If the pool is dry, falls back to restoring a fresh clone inline: milliseconds for a prewarmed
     /// snapshot, and the caller can't tell the difference except by latency. A snapshot without the
     /// vsock exec channel has nothing to probe, so its clones are handed out directly (no health
     /// check) rather than discarded on the structural no-vsock condition.

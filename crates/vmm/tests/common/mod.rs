@@ -1,5 +1,5 @@
 //! Helpers shared by the privileged integration-test binaries (each declares `mod common;`):
-//! scratch dirs, the boot configs pointed at the pinned artifacts, and the warm-snapshot builder.
+//! scratch dirs, the boot configs pointed at the pinned artifacts, and the prewarmed-snapshot builder.
 // Each test binary compiles this whole module but uses only the helpers it needs, so the unused
 // remainder must not fail the `-D warnings` gate.
 #![allow(dead_code)]
@@ -109,7 +109,7 @@ pub fn jailed_agent_config() -> BootConfig {
     cfg
 }
 
-/// The agent rootfs booted **under the jailer** on the **density path**: `read_only_root` (the shared
+/// The agent rootfs booted **under the jailer** on the **shared-base path**: `read_only_root` (the shared
 /// base bind-mounted into the chroot, guest tmpfs overlay) plus the vsock exec channel. This is the
 /// jailed counterpart of [`agent_rootfs_config`], which it inherits `read_only_root = true` from, only
 /// adding the jail. Needs real root (see [`have_jailer_privileges`]).
@@ -119,12 +119,12 @@ pub fn jailed_overlay_config() -> BootConfig {
     cfg
 }
 
-/// Boot the agent rootfs, warm the Python runtime (so the interpreter + stdlib are page-cache-hot in
-/// the guest's memory), and take a snapshot of *that* warm state. Returns the source's cold-boot
+/// Boot the agent rootfs, prewarmed the Python runtime (so the interpreter + stdlib are page-cache-hot in
+/// the guest's memory), and take a snapshot of *that* prewarmed state. Returns the source's cold-boot
 /// latency alongside the bundle so callers can compare it to restore.
 // A free helper (not a `#[test]` fn), so it uses explicit `panic!` rather than `.expect()`, which the
 // workspace lints only re-allow inside test functions.
-pub fn warm_python_snapshot(bundle: &TmpDir) -> (agent_vmm::Snapshot, Duration) {
+pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (agent_vmm::Snapshot, Duration) {
     let source = match Vm::boot(agent_rootfs_config()) {
         Ok(vm) => vm,
         Err(e) => panic!("agent microVM should boot: {e}"),
@@ -132,15 +132,15 @@ pub fn warm_python_snapshot(bundle: &TmpDir) -> (agent_vmm::Snapshot, Duration) 
     let cold_boot = source.boot_latency();
     // "Runtime loaded": run Python once so the snapshot captures a guest with the interpreter and its
     // imports already resident, not a bare boot.
-    let warm = ["python3", "-c", "import json, os, sys"].map(String::from);
-    match source.exec(&warm, &[]) {
+    let prewarmed = ["python3", "-c", "import json, os, sys"].map(String::from);
+    match source.exec(&prewarmed, &[]) {
         Ok(out) if out.exit_code == 0 => {}
         Ok(out) => panic!("warm-up python should exit 0, got {}", out.exit_code),
         Err(e) => panic!("warm-up exec should run: {e}"),
     }
     let snap = match source.snapshot(bundle.path()) {
         Ok(s) => s,
-        Err(e) => panic!("warm snapshot (read_only_root + vsock) should succeed: {e}"),
+        Err(e) => panic!("prewarmed snapshot (read_only_root + vsock) should succeed: {e}"),
     };
     if let Err(e) = source.shutdown() {
         panic!("source shutdown should succeed: {e}");

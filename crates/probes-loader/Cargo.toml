@@ -13,5 +13,9 @@ description = "Userspace loader — attach the eBPF probes to a sandbox, read th
 # that it is used; the load/attach for tc/XDP (P10) and cgroup-bpf (P12) build on this.
 aya = "0.13"
 
+# The wire record read out of the ring buffer (`SyscallEvent`), shared with the kernel writer in
+# `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
+agent-probes-common = { path = "../probes-common", features = ["std"] }
+
 [lints]
 workspace = true

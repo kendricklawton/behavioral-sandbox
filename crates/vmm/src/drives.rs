@@ -226,7 +226,7 @@ fn fsck_output_image(image: &Path) -> Result<(), VmmError> {
         Some(0) => Ok(()),
         // Errors were found and corrected (1) or corrected + reboot-advised (2): the tree is now
         // consistent, but a hard-killed guest's in-flight writes may have been rolled back with the
-        // journal. Record it so a recovered output shows up in the flight recorder, not as pristine.
+        // journal. Record it so a recovered output shows up in the audit log, not as pristine.
         Some(code) if code < 4 => {
             tracing::warn!(
                 exit = code,

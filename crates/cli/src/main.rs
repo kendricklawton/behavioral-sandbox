@@ -2,7 +2,7 @@
 //! or hold it open as an interactive stateful session (`shell`).
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
-//! or the `--json` structured result / flight recorder), so `agent run … 2>/dev/null` stays
+//! or the `--json` structured result / audit log), so `agent run … 2>/dev/null` stays
 //! pipe-clean. Log filter resolves flags > env (`AGENT_LOG`) > default. Both subcommands run
 //! **jailed by default** (decision 015) with `--unjailed` as the explicit opt-out, and both point
 //! at the env-layered artifacts (`AGENT_ROOTFS`/`AGENT_KERNEL`/`AGENT_MARKER` — exec needs the

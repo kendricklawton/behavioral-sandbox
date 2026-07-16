@@ -334,14 +334,14 @@ fn two_concurrent_stateful_sessions_stay_isolated() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn snapshot_yields_a_restorable_bundle() {
-    // `Sandbox::snapshot` closes the lifecycle: a warm (unjailed, overlay) sandbox snapshots, and
+    // `Sandbox::snapshot` closes the lifecycle: a prewarmed (unjailed, overlay) sandbox snapshots, and
     // the bundle restores to an exec-ready clone. (Jailed clones from such a bundle are P7.0e's
     // proof in tests/snapshot.rs; snapshotting a *jailed* sandbox stays a typed refusal.)
     let bundle = TmpDir::new("sandbox-bundle");
     let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
-    let warm = ["python3", "-c", "import json"].map(String::from);
+    let prewarmed = ["python3", "-c", "import json"].map(String::from);
     assert_eq!(
-        sandbox.exec(&warm, b"").expect("warm-up").exit_code,
+        sandbox.exec(&prewarmed, b"").expect("warm-up").exit_code,
         0,
         "warm-up should succeed"
     );

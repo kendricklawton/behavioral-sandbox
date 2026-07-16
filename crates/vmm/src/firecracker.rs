@@ -3,7 +3,7 @@
 //! Firecracker exposes a REST API on a unix domain socket (`--api-sock`); we drive a boot with a
 //! handful of `PUT`s. Rather than pull in an async runtime or an HTTP crate, we hand-roll the
 //! sliver of HTTP/1.1 those calls need — it keeps the driver dependency-light and `unsafe`-free,
-//! and the raw request/response framing is itself the lesson.
+//! and the raw request/response framing stays small.
 //!
 //! Framing rules that matter (a naive client hangs on each):
 //! - **One fresh connection per request.** HTTP/1.1 defaults to keep-alive, so "read to EOF"
@@ -237,7 +237,7 @@ pub(crate) enum VmStateKind {
 
 /// `PUT /snapshot/create` — write a snapshot of a **paused** VM: `snapshot_path` receives the vCPU
 /// and device state, `mem_file_path` the full guest memory. Only a `Full` snapshot is taken today;
-/// diff snapshots ride the warm pool later.
+/// diff snapshots ride the prewarmed pool later.
 #[derive(Serialize)]
 pub(crate) struct SnapshotCreate<'a> {
     pub snapshot_type: SnapshotType,

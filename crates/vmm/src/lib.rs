@@ -119,7 +119,7 @@ mod tests {
 /// guest fault to the user) use [`kind`](VmmError::kind), whose mapping is a pinned public contract.
 /// (The `GuestUnavailable` variant and `kind()` were both deferred at first — "add them for the first
 /// caller that needs them" — and landed with that caller: the classifier for the embedder that
-/// branches on bucket, the variant for the warm [`Pool`], which discards a dead pooled clone and
+/// branches on bucket, the variant for the prewarmed [`Pool`], which discards a dead pooled clone and
 /// serves the next instead of surfacing an infra failure.)
 #[derive(Debug)]
 #[non_exhaustive]
@@ -258,12 +258,12 @@ impl From<ChannelError> for VmmError {
 }
 
 /// The driver-side file-descriptor budget of **one live microVM**, across every start path (cold
-/// boot, snapshot restore, warm-pool clone, networked) — the number to size concurrency against
+/// boot, snapshot restore, prewarmed-pool clone, networked) — the number to size concurrency against
 /// `ulimit -n`: N concurrent sandboxes hold up to `N × FDS_PER_VM` fds on top of the process
 /// baseline, and a bound (like [`Pool`]'s target) must keep that under the soft limit with
 /// headroom, or the failure is an illegible mid-boot `EMFILE` in whatever syscall lands first.
 ///
-/// Measured steady state is **2 on every start path** — cold, networked, warm restore (dev box,
+/// Measured steady state is **2 on every start path** — cold, networked, prewarmed restore (dev box,
 /// pinned by `fd_footprint_per_vm_stays_within_budget_and_never_leaks`): the console reader's pipe
 /// and the lifetime sentinel's pipe write end; exec and API calls open and close transiently, and
 /// teardown returns to the exact baseline (no per-run fd leak). The budget is deliberately above
@@ -342,7 +342,7 @@ pub struct RunResult {
 /// Host-measured metrics for one exec — the **metrics** leg of the structured run result. Measured
 /// by the driver, not reported by the guest, so a hostile guest can't lie about them.
 /// `#[non_exhaustive]`: richer measurements (guest cpu time from the cgroup, per-stream byte
-/// counts, the flight recorder's numbers) land as new fields without a breaking change.
+/// counts, the audit log's numbers) land as new fields without a breaking change.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct ExecMetrics {
@@ -474,7 +474,7 @@ impl Sandbox {
     /// Pause the microVM and write a portable [`Snapshot`] bundle into `dir`, then resume (see
     /// [`RunningVm::snapshot`]). Note the interplay with the jailed default: snapshotting a
     /// **jailed** sandbox is a typed refusal (its disk lives in the chroot) — take the snapshot
-    /// from an [`open_unjailed`](Sandbox::open_unjailed) warm source that runs only the embedder's
+    /// from an [`open_unjailed`](Sandbox::open_unjailed) prewarmed source that runs only the embedder's
     /// own warm-up, then [`Vm::restore`]/[`Pool`] the clones **with a jail**, which is where the
     /// untrusted code runs.
     ///

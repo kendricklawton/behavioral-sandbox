@@ -3,8 +3,8 @@
 Thanks for your interest. **agent** (working name) is a self-hostable, isolated
 **code-execution sandbox**: untrusted code runs in a **Firecracker** microVM (KVM hardware
 isolation), and **host-side eBPF** (**aya**) observes and enforces what it does — syscalls, its
-network, its cgroup — from outside the guest. It's built in the open as a **Linux-internals
-deep-dive**: every phase ships a working demo and a writeup.
+network, its cgroup — from outside the guest. It's built in the open, and every phase ships a
+working demo so each capability is proven running.
 
 > Read [**`.rules`**](./.rules) first — the operating manual and the invariants that must never
 > be traded away (`CLAUDE.md` and `AGENTS.md` both point there). The staged plan is in
@@ -52,7 +52,7 @@ AGENT_ROOTFS=artifacts/rootfs-agent.ext4 AGENT_MARKER=AGENT-GUEST-READY \
   cargo run -p agent-cli -- run -- python3 -c 'print(2 + 2)'
 # (The default rootfs stays the pinned boot image until the agent rootfs replaces it later in P3.)
 
-# Later: run it and print the eBPF-observed flight recorder (Phase 13+):
+# Later: run it and print the eBPF-observed audit log (Phase 13+):
 cargo run -p agent-cli -- run --trace -- <cmd>
 ```
 
@@ -81,11 +81,11 @@ Never gate the everyday loop on a privileged runner.
    mapping — no VM, no root.
 2. **eBPF object build** (`cargo xtask build-probes`, *part of the `ci` gate* since P8.7): the probes
    compile for `bpfel-unknown-none` via `bpf-linker` **with BTF**; a compile error or a dropped
-   `.BTF` section fails the gate. (The kernel *verifier* runs at load, so a verifier reject surfaces
+   `.BTF` section fails the CI gate. (The kernel *verifier* runs at load, so a verifier reject surfaces
    in the privileged probe tests, not here.)
 3. **Privileged integration:** boot a real microVM → `exec` → tap networking → attach probes →
-   assert the flight recorder shows exactly what the workload did. Needs KVM + caps.
-4. **Benchmarks:** cold boot, snapshot restore, warm-pool `exec` latency (p50/p99), density, and
+   assert the audit log shows exactly what the workload did. Needs KVM + caps.
+4. **Benchmarks:** cold boot, snapshot restore, pre-warmed-pool `exec` latency (p50/p99), memory-sharing, and
    probe overhead — reported with percentiles, tracked over time.
 
 ## The invariants (never trade these away)
@@ -100,16 +100,15 @@ Never gate the everyday loop on a privileged runner.
   capability; every allowance is explicit and recorded.
 - **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken
   channel is a typed error — never a host panic, hang, or leak.
-- **Measured, not marketed.** Boot/restore/density/overhead are benchmarked with percentiles.
-- **Teach as you go.** Every phase ships a writeup; the *why* is a first-class deliverable.
+- **Measured, not marketed.** Boot/restore/memory-sharing/overhead are benchmarked with percentiles.
 
 ## Phases & decisions
 
 Work is organized into sequentially-gated phases in [`ROADMAP.md`](./ROADMAP.md) — the **single
 source of truth for progress**. Work the first unchecked box in ID order, one item per
-iteration; a phase isn't left until its **Exit gate** passes (a working demo *and* a writeup).
-Items tagged `(decision)` record the hard-to-reverse choice in `ARCHITECTURE.md` so the *why*
-outlives the diff.
+iteration; a phase isn't left until its **Exit gate** passes (a working demo). Items tagged
+`(decision)` record the hard-to-reverse choice in `ARCHITECTURE.md` so the reasoning outlives the
+diff.
 
 ## Commit & PR conventions
 

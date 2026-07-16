@@ -21,13 +21,13 @@ impl Vm {
     /// (the guest's kernel, memory, and devices all come from the snapshot).
     ///
     /// A **read-write** snapshot's private disk copy is staged at its baked-in path; a **read-only
-    /// shared base** is referenced in place, so many clones restored from one warm snapshot share it
+    /// shared base** is referenced in place, so many clones restored from one prewarmed snapshot share it
     /// (page-cache-deduped) while each gets its own in-RAM overlay. Because an **unjailed** restore
     /// stages that private copy at the one baked-in host path Firecracker reopens the disk from (v1.9
     /// has no drive-path override on load), unjailed restores of a **read-write** snapshot are
-    /// **single-flight**: run them sequentially (the warm [`Pool`](crate::Pool) does), or use a
-    /// **jailed** restore (each stages inside its own chroot) or a **`read_only_root`** warm snapshot
-    /// (shared base, no staging) for concurrent clones. A **warm** snapshot (one taken with
+    /// **single-flight**: run them sequentially (the prewarmed [`Pool`](crate::Pool) does), or use a
+    /// **jailed** restore (each stages inside its own chroot) or a **`read_only_root`** prewarmed snapshot
+    /// (shared base, no staging) for concurrent clones. A **prewarmed** snapshot (one taken with
     /// the vsock exec channel) restores exec-ready: its socket was baked in relative, so each clone
     /// re-binds its own socket in its own scratch dir and concurrent clones don't collide. If the
     /// snapshot carried vsock, restore waits until the guest agent is reachable before returning, so
@@ -78,14 +78,14 @@ impl RunningVm {
     /// disk) into `dir`, then resume — the VM keeps running and can be shut down or snapshotted again.
     ///
     /// A **read-write** boot's disk is copied into the bundle **inside the paused window**, so the copy
-    /// agrees with the memory image; a **`read_only_root`** boot (a warm snapshot) references the shared
+    /// agrees with the memory image; a **`read_only_root`** boot (a prewarmed snapshot) references the shared
     /// base in place (no copy). The **vsock exec channel is supported** — restore re-binds its socket —
-    /// so a warm snapshot restores exec-ready.
+    /// so a prewarmed snapshot restores exec-ready.
     ///
     /// Refused (a typed error, never an unrestorable bundle): a VM with an **output** or **input**
     /// block device (per-clone images a restore can't yet recreate), a **jailed** VM (its disk lives
     /// inside the chroot at a chroot-relative path, so a bundle would record an unrestorable backing
-    /// — snapshot an *unjailed* warm source, then restore **jailed** clones from it, which is where
+    /// — snapshot an *unjailed* prewarmed source, then restore **jailed** clones from it, which is where
     /// the untrusted code runs), and an **already-restored** VM (its `rootfs` is a placeholder; the
     /// live disk is an anonymous inode with no host path to bundle). A NIC is supported: the bundle
     /// records the tap name and restore recreates it in each clone's own netns (see [`Vm::restore`]).
@@ -97,7 +97,7 @@ impl RunningVm {
     pub fn snapshot(&self, dir: &Path) -> Result<Snapshot, VmmError> {
         // A restored VM's `rootfs` is a placeholder (its live disk is an anonymous inode), so the
         // shared-base classifier below would misread it and bundle a stale, shared-writable disk.
-        // Refuse it outright, the way the pre-warm-snapshot guard did.
+        // Refuse it outright, the way the prewarmed-snapshot guard did.
         if self.restored {
             return Err(VmmError::Vmm(
                 "snapshot of an already-restored VM is not supported (its live disk has no host path)"
@@ -106,13 +106,13 @@ impl RunningVm {
         }
         // A jailed VM's root disk lives inside the chroot (torn down with the scratch dir) and its
         // path is chroot-relative, so a bundle would record an unrestorable backing. Deliberate, not
-        // just deferred (P7.0e): the clone story is snapshot an *unjailed* warm source (it runs only
+        // just deferred (P7.0e): the clone story is snapshot an *unjailed* prewarmed source (it runs only
         // the embedder's warm-up), then restore **jailed** clones from it — the untrusted code runs
         // confined; the source needs no jail to protect the host from itself.
         if self.chroot.is_some() {
             return Err(VmmError::Vmm(
                 "snapshot of a jailed VM is not supported (its disk lives in the chroot); snapshot \
-                 an unjailed warm source and restore jailed clones from it"
+                 an unjailed prewarmed source and restore jailed clones from it"
                     .into(),
             ));
         }

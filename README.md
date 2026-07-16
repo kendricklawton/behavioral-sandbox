@@ -4,11 +4,11 @@
 record of exactly what it did that you can trust without trusting the code.** The code runs inside
 a **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) watches and
 enforces what it does (syscalls, its network, its cgroup) from *outside* the guest, where the code
-can't see or subvert it. Every run yields a host-observed **flight recorder** of exactly what
+can't see or subvert it. Every run yields a host-observed **audit log** of exactly what
 happened.
 
-Built in the open as a **Linux-internals deep-dive**: each milestone is a working demo and a
-writeup, from the hardware-isolation boundary up to the syscall/network boundary.
+Built in the open, milestone by milestone: each one ships as a working demo, from the
+hardware-isolation boundary up to the syscall/network boundary.
 
 ## Why
 
@@ -31,21 +31,21 @@ recording.
   capability; every allowance is explicit and recorded.
 - **Engine, not platform.** A runtime + a clean driver API you self-host. *Kubernetes is not a
   PaaS, and neither is this.*
-- **Measured, not marketed.** Boot, snapshot-restore, density, and eBPF overhead are
+- **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
   benchmarked with percentiles — never hand-waved.
 
 ## Status
 
-**Early and learning-driven.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md);
+**Early, under active development.** The staged plan and live progress are in [`ROADMAP.md`](ROADMAP.md);
 its checkboxes are the state. So far (Phases 1 through 7) a microVM boots to userspace, runs commands
 with captured stdout/stderr/exit, runs real Python, Node, and static binaries from a purpose-built
-rootfs, gets a per-VM deny-by-default network, snapshots and restores from a warm pool in
+rootfs, gets a per-VM deny-by-default network, snapshots and restores from a pre-warmed pool in
 milliseconds, runs confined under the jailer (chroot, dropped privileges, cgroup limits, seccomp),
 and is wrapped in the embedder-facing `Sandbox` lifecycle: jailed by default, per-exec files + env
 under a tested secret-hygiene contract, stateful sessions (the VM is the session), budget knobs,
 and a structured result — the contract is written up in [`ENGINE.md`](ENGINE.md). The host-side
 eBPF observability has begun ([`PROBES.md`](PROBES.md): a Rust program loads, attaches, and reports
-from the host, out of the guest's reach); the flight recorder that fuses it with the driver into a
+from the host, out of the guest's reach); the audit log that fuses it with the driver into a
 per-run record of what a run did is the track that follows. Nothing here is production yet; the
 point is depth, done in the open.
 
@@ -55,7 +55,7 @@ point is depth, done in the open.
 untrusted code
       → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
       → host-side eBPF (aya): syscalls · the VM's tap device (tc/XDP) · its cgroup
-      → per-run flight recorder (network flows · notable syscalls · resources · denials)
+      → per-run audit log (network flows · notable syscalls · resources · denials)
 ```
 
 The guest runs the code; the **host kernel** sees and governs it. That split — hardware
@@ -84,7 +84,7 @@ contract and the full non-goals list live in [`ENGINE.md`](ENGINE.md).
 **Adjacent (separate repos, post-`v0.1.0`):** language SDKs (Go · Python · Node · C#) that drive
 the engine's wire API, and a Wasmtime-based *software-isolation* sibling built to compare both
 boundaries. Each is its own repo built on this engine's frozen wire API — thin clients / a sibling,
-never part of its trust boundary, and never traded against the hardware-isolation spine. See
+never part of its trust boundary, and never traded against the hardware-isolation guarantee. See
 [`ROADMAP.md`](ROADMAP.md) Phases 19–20.
 
 ## Contributing

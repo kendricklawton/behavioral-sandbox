@@ -209,7 +209,7 @@ fn own_euid() -> Option<u32> {
 /// unjailed VMM's cwd *is* its scratch dir (`spawn_fc` sets it for the relative vsock path); a
 /// jailed VMM's cwd is its chroot root, `<dir>/<exec-name>/<id>/root`. Identity is compared by
 /// `(st_dev, st_ino)` through the `/proc/<pid>/cwd` magic link — the link *text* is
-/// namespace-relative after a pivot_root (the P6.6 lesson), but `metadata` resolves through it.
+/// namespace-relative after a pivot_root (the P6.6 finding), but `metadata` resolves through it.
 /// Processes whose cwd we can't stat (another user's) are ignored; jailed boots need root, so a
 /// sweep of jailed residue runs as root and can see them.
 fn vmm_running_in(dir: &Path) -> Option<u32> {

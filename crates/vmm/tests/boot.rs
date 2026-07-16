@@ -278,7 +278,7 @@ fn overlay_is_writable_and_base_is_untouched() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn jailed_overlay_is_dense_and_base_is_untouched() {
-    // P7.0b: a jailed boot runs the density path, not a full rootfs copy. The read-only shared base is
+    // P7.0b: a jailed boot runs the shared-base path, not a full rootfs copy. The read-only shared base is
     // *bind-mounted* into the chroot (same inode, page-cache-deduped across VMs), the guest overlays a
     // per-run tmpfs so `/` is writable, and the base file is never mutated. Needs real root (the
     // jailer `mknod`s device nodes); skip where KVM is available but real root isn't.
@@ -301,12 +301,12 @@ fn jailed_overlay_is_dense_and_base_is_untouched() {
     let vm = Vm::boot(jailed_overlay_config())
         .expect("jailed overlay microVM should boot to the agent's readiness marker");
 
-    // Density, proven three ways: the chroot's root disk is a *mount* at all (a full copy would create
+    // Memory-sharing, proven three ways: the chroot's root disk is a *mount* at all (a full copy would create
     // none), it is mounted *read-only* (the base can't be mutated through the chroot), and it resolves
     // to the *same inode* as the shared base (a bind mount, so one page cache is shared, not a per-VM
     // 256 MiB copy).
     let bind = jailed_base_mount().expect(
-        "a bind mount of the base should exist under the chroot (density path, not a copy)",
+        "a bind mount of the base should exist under the chroot (shared-base path, not a copy)",
     );
     assert!(
         bind.read_only,
@@ -320,7 +320,7 @@ fn jailed_overlay_is_dense_and_base_is_untouched() {
     );
 
     // Overlay writable: writing a path that lives on the read-only base succeeds only via the tmpfs
-    // upper the guest's `overlay-init` stacks — the same overlay the unjailed density path uses.
+    // upper the guest's `overlay-init` stacks — the same overlay the unjailed shared-base path uses.
     let out = vm
         .exec(
             &[
@@ -488,7 +488,7 @@ fn open_fds() -> usize {
 fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     // P6.9c: each live VM costs the embedder driver-side fds; at the default 1024 soft ulimit an
     // unstated budget fails as an illegible mid-boot EMFILE a few hundred VMs in. This pins the
-    // budget (`FDS_PER_VM`) per start path — cold, networked, warm restore — and, just as
+    // budget (`FDS_PER_VM`) per start path — cold, networked, prewarmed restore — and, just as
     // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any
     // long-lived embedder into EMFILE regardless of the per-VM budget).
     use agent_vmm::{sweep_orphans, FDS_PER_VM};
@@ -534,28 +534,29 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
         eprintln!("fd footprint: skipping the networked leg (no CAP_NET_ADMIN)");
     }
 
-    // Warm restore (the pool's start path — the one an embedder multiplies hardest).
+    // Pre-warmed restore (the pool's start path — the one an embedder multiplies hardest).
     let agent_rootfs =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
     if agent_rootfs.is_file() {
         let bundle = common::TmpDir::new("fd-warm");
-        let (snap, _cold_latency) = common::warm_python_snapshot(&bundle);
+        let (snap, _cold_latency) = common::prewarmed_python_snapshot(&bundle);
         let warm_baseline = open_fds();
-        let clone = Vm::restore(&snap, &agent_rootfs_config()).expect("warm clone should restore");
-        let warm = open_fds().saturating_sub(warm_baseline);
-        eprintln!("fd footprint: warm clone {warm} (budget {FDS_PER_VM})");
+        let clone =
+            Vm::restore(&snap, &agent_rootfs_config()).expect("prewarmed clone should restore");
+        let prewarmed = open_fds().saturating_sub(warm_baseline);
+        eprintln!("fd footprint: prewarmed clone {prewarmed} (budget {FDS_PER_VM})");
         assert!(
-            warm <= FDS_PER_VM,
-            "warm clone holds {warm} fds > budget {FDS_PER_VM}"
+            prewarmed <= FDS_PER_VM,
+            "prewarmed clone holds {prewarmed} fds > budget {FDS_PER_VM}"
         );
         clone.shutdown().expect("clone shutdown");
         assert_eq!(
             open_fds(),
             warm_baseline,
-            "warm teardown must return every fd"
+            "prewarmed teardown must return every fd"
         );
     } else {
-        eprintln!("fd footprint: skipping the warm leg (agent rootfs not built)");
+        eprintln!("fd footprint: skipping the prewarmed leg (agent rootfs not built)");
     }
 
     // Keep the host tidy for the suite's other leak checks (and dogfood the sweep's live-skip).

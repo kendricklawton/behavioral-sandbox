@@ -359,7 +359,7 @@ impl Spawned {
         snapshot: &Snapshot,
     ) -> Result<Self, VmmError> {
         warn_on_unpinned_firecracker(&config.firecracker);
-        // Jailed restore (P7.0e) spawns the jailer instead, so a warm clone is confined from its
+        // Jailed restore (P7.0e) spawns the jailer instead, so a prewarmed clone is confined from its
         // first instruction; the unjailed path below is untouched.
         if let Some(jail) = config.jail.as_ref() {
             return Self::launch_jailed_for_restore(config, snapshot, jail);
@@ -400,12 +400,12 @@ impl Spawned {
                 return Err(e);
             }
         };
-        // A warm snapshot carries the vsock exec channel. Its socket path was baked in relative, so
+        // A prewarmed snapshot carries the vsock exec channel. Its socket path was baked in relative, so
         // Firecracker re-binds it in *this* restore's cwd (its scratch dir): the restored VM reaches
         // the guest agent through its own `v.sock`, and concurrent clones don't collide. Computed
         // before `workdir` is moved into the struct.
         let vsock_uds = snapshot.has_vsock.then(|| workdir.join(VSOCK_UDS));
-        // Cgroup-owned lifetime (P6.7): a restored clone (and every warm-pool VM riding restore) is
+        // Cgroup-owned lifetime (P6.7): a restored clone (and every prewarmed-pool VM riding restore) is
         // as leakable as a cold boot, so it gets the same enrollment + sentinel.
         let lifetime = VmLifetime::adopt(child.id(), &workdir_name(&workdir));
         Ok(Self {
@@ -428,7 +428,7 @@ impl Spawned {
     }
 
     /// The jailed counterpart of [`launch_for_restore`](Self::launch_for_restore) (P7.0e): spawn the
-    /// **jailer** for a snapshot restore, so a warm clone runs confined from its first instruction.
+    /// **jailer** for a snapshot restore, so a prewarmed clone runs confined from its first instruction.
     /// The bundle (state, memory, disk) is staged into the chroot in
     /// [`run_restore`](Self::run_restore), once the API socket proves the chroot exists. A networked
     /// snapshot's baked-in tap is recreated in a fresh per-VM netns the jailer joins (decision 017),
@@ -450,7 +450,7 @@ impl Spawned {
         // and OOM-kill a legitimate clone (see the fn doc). A networked clone gets the fixed-name tap
         // in a fresh netns; its baked-in guest identity is already correct there (decision 017).
         let s = Self::spawn_jailed(config, jail, snapshot.tap_name.is_some(), &[])?;
-        // A warm snapshot baked the **relative** `v.sock` (every snapshot source is unjailed — a
+        // A prewarmed snapshot baked the **relative** `v.sock` (every snapshot source is unjailed — a
         // jailed VM refuses snapshotting), and the jailed clone's cwd is the chroot root, so
         // Firecracker re-binds it there; the host dials the same file at its absolute path under the
         // chroot. Strictly shorter than the API socket the jailer bounds-checked.
@@ -518,7 +518,7 @@ impl Spawned {
         // bundle files are named by their absolute host paths, and only a private per-VM disk needs
         // staging (at its baked-in path; a shared base already exists there). Jailed: everything is
         // staged into the chroot — the state file copied in (small), the guest **memory bind-mounted
-        // read-only** (hundreds of MiB per clone; a copy would erase the warm-restore latency win and
+        // read-only** (hundreds of MiB per clone; a copy would erase the prewarmed-restore latency win and
         // the clones' shared page cache), and the disk placed at the **baked-in path resolved inside
         // the chroot** (Firecracker reopens the drive from the path recorded in the state file): a
         // shared base is bind-mounted there read-only, a private copy staged and handed to the jailed
@@ -711,7 +711,7 @@ impl Spawned {
     /// boot-to-userspace latency.
     pub(crate) fn run_boot(&mut self, config: &BootConfig) -> Result<Duration, VmmError> {
         // One span per boot, keyed by the scratch-dir name, so interleaved logs from concurrent
-        // VMs (the warm pool, Phase 5) stay attributable to their sandbox.
+        // VMs (the prewarmed pool, Phase 5) stay attributable to their sandbox.
         let span = tracing::info_span!("boot", vm = %self.vm_name());
         let _span = span.enter();
 
@@ -728,7 +728,7 @@ impl Spawned {
         // is the scratch dir); `self.rootfs` is already absolute from `launch`. Jailed: stage each into
         // the chroot (safe now that the API socket proved the chroot exists — no race with the jailer's
         // construction) and name it by its chroot-relative path, and record the jailer's cgroup for
-        // teardown. A `read_only_root` jailed boot bind-mounts the shared base zero-copy (the density
+        // teardown. A `read_only_root` jailed boot bind-mounts the shared base zero-copy (the memory-sharing
         // path); a read-write boot stages a private copy.
         let kernel_arg: String;
         let rootfs_arg: String;
@@ -737,7 +737,7 @@ impl Spawned {
             // Read-only kernel (0444), chowned to the jailed uid so the dropped-privilege Firecracker
             // can open it.
             kernel_arg = stage_into_chroot(&root, "kernel", &config.kernel, uid, gid, 0o444)?;
-            // The root disk: bind-mount the shared read-only base (density path) when `read_only_root`,
+            // The root disk: bind-mount the shared read-only base (shared-base path) when `read_only_root`,
             // else a read-write private copy (0600). The bind mount, if made, is recorded on the chroot
             // so teardown unmounts it before reclaiming the scratch dir.
             if config.read_only_root {
@@ -875,7 +875,7 @@ impl Spawned {
         if let Some(cid) = config.guest_cid {
             still_before(deadline, "PUT /vsock")?;
             // Bind the socket relative to the VMM's cwd. Unjailed: the **relative** name `v.sock` in
-            // the scratch dir — baking a relative path into the snapshot is what lets warm clones
+            // the scratch dir — baking a relative path into the snapshot is what lets prewarmed clones
             // restored from it each bind their own socket instead of colliding on one absolute path.
             // Jailed: `/run/v.sock` inside the chroot (cwd = chroot root, `/run` writable by the
             // dropped uid). Either way the host dials the same file via the absolute `self.vsock_uds`.
@@ -1219,7 +1219,7 @@ fn spawn_fc(
         .arg("--api-sock")
         .arg(socket)
         // Run each VMM with its scratch dir as cwd, so a **relative** vsock socket path (`v.sock`)
-        // resolves per-VM. That's what lets N warm clones restored from one snapshot each bind their
+        // resolves per-VM. That's what lets N prewarmed clones restored from one snapshot each bind their
         // own socket instead of colliding on the source's absolute path (see `run_boot`'s `PUT /vsock`).
         .current_dir(workdir)
         .stdin(Stdio::null())

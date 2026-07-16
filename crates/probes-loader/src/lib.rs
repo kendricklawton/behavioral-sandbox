@@ -1,5 +1,5 @@
 //! `agent-probes-loader` — the userspace side of the eBPF story: load and attach the probes from
-//! `crates/probes`, read their maps, and stream events into the flight recorder. Phase 8 attaches the
+//! `crates/probes`, read their maps, and stream events into the audit log. Phase 8 attaches the
 //! one host-global `sys_enter_execve` tracepoint (scoped to nothing); binding a program to a
 //! *specific* sandbox (its cgroup, its tap device) arrives with the per-VM taps in Phase 10.
 //!
@@ -7,7 +7,7 @@
 //! `count_execve` tracepoint to `syscalls/sys_enter_execve`, and reads its per-CPU counter map,
 //! summing the slots into one total. Synchronous by design: aya's load/attach/array-read path takes
 //! no async runtime, matching the driver's no-background-threads posture. This counts the **host's**
-//! `execve` footprint (a microVM's own syscalls never trap here; see ROADMAP Phase 9) — the on-ramp
+//! `execve` footprint (a microVM's own syscalls never trap here; see ROADMAP Phase 9) — the introduction
 //! that proves the load → attach → read → drop path before Phase 10 binds programs to real taps.
 //!
 //! **P8.5/P8.6 — CO-RE and the verifier.** The object is built against BTF, so aya relocates it
@@ -22,6 +22,16 @@
 //! attachment, the eBPF analogue of the driver's no-leak teardown. Pinning stays opt-in, added only
 //! where a program must outlive its loader (not here).
 //!
+//! **P9.1/P9.2 — a per-event syscall trace, filtered to one sandbox.** [`SyscallTracer`] loads the
+//! same object but attaches the three `sys_enter_{execve,openat,connect}` tracepoints, each of which
+//! streams a whole [`SyscallEvent`] (pid, tid, cgroup id, `comm`, and the path or sockaddr bytes) into
+//! a **ring buffer** the tracer drains with [`drain`](SyscallTracer::drain). Where [`ExecveCounter`]
+//! answers "how many", the tracer answers "which, by whom, on what". Point it at one Firecracker
+//! worker with [`watch_pid`](SyscallTracer::watch_pid) /
+//! [`watch_cgroup`](SyscallTracer::watch_cgroup) so it records that sandbox's host footprint and not
+//! the whole machine's. Still the host's footprint, not the guest's (a microVM's syscalls stay
+//! in-guest; see ROADMAP Phase 9).
+//!
 //! **P8.8/P8.9 — caps + a legible support probe.** Loading needs only `CAP_BPF`+`CAP_PERFMON`, not
 //! full root; [`check_support`] names a missing prerequisite (kernel BTF, or those caps) up front as a
 //! typed [`ProbeError::Unsupported`], so a host that can't run the probes says so plainly instead of
@@ -31,9 +41,11 @@
 
 use std::path::{Path, PathBuf};
 
-use aya::maps::{HashMap as AyaHashMap, PerCpuArray};
+use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
 use aya::Ebpf;
+
+pub use agent_probes_common::{Syscall, SyscallEvent};
 
 /// Env override for the compiled BPF object's location — for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
@@ -173,6 +185,157 @@ impl ExecveCounter {
             out.push((pid, count));
         }
         Ok(out)
+    }
+}
+
+/// The tracepoint programs the syscall tracer attaches, paired with the `syscalls` event each hooks.
+/// One entry per `sys_enter_*` of interest; the program names are the `#[tracepoint] fn` symbols in
+/// `crates/probes`.
+const TRACERS: [(&str, &str); 3] = [
+    ("trace_execve", "sys_enter_execve"),
+    ("trace_openat", "sys_enter_openat"),
+    ("trace_connect", "sys_enter_connect"),
+];
+/// The `syscalls` tracepoint category all of [`TRACERS`] live under.
+const TP_SYSCALLS: &str = "syscalls";
+/// The ring buffer the programs stream [`SyscallEvent`]s into (`#[map] static EVENTS`).
+const EVENTS_MAP: &str = "EVENTS";
+/// The target filter the programs consult (`#[map] static FILTER`): slot 0 tgid, slot 1 cgroup id.
+const FILTER_MAP: &str = "FILTER";
+const FILTER_TGID: u32 = 0;
+const FILTER_CGROUP: u32 = 1;
+
+/// A loaded, attached syscall tracer (P9.1/P9.2): the `sys_enter_{execve,openat,connect}` tracepoints
+/// stream per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the
+/// aya [`Ebpf`] (programs, maps, live attachments); dropping it detaches everything and pins nothing,
+/// like [`ExecveCounter`]. Narrow the stream to one sandbox with [`watch_pid`](Self::watch_pid) /
+/// [`watch_cgroup`](Self::watch_cgroup); the default (nothing set) observes the whole host.
+#[must_use = "dropping a SyscallTracer detaches the probes"]
+pub struct SyscallTracer {
+    ebpf: Ebpf,
+    /// The ring-buffer consumer, built **once** at load and reused by every [`drain`](Self::drain).
+    /// This is load-bearing, not an optimization: aya tracks the consumer position and a producer-
+    /// position cache *inside* this value, so a fresh `RingBuf` per drain (its cache reset to 0 while
+    /// the kernel-side consumer offset is already advanced) would defeat the "caught up?" check and
+    /// spin forever. Its `MapData` owns the map fd, taken out of `ebpf`; the attached programs keep
+    /// writing to the same kernel map.
+    events: RingBuf<MapData>,
+}
+
+impl SyscallTracer {
+    /// Load the compiled object and load + attach all three `sys_enter_*` tracepoints. From here every
+    /// matching host syscall that passes the filter is streamed into the ring buffer until this is
+    /// dropped. Attaches unfiltered; call a `watch_*` before or after to narrow it.
+    ///
+    /// # Errors
+    /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps, via [`check_support`]);
+    /// [`ProbeError::Object`] if the object can't be read (build it: `cargo xtask build-probes`);
+    /// [`ProbeError::Load`] if the kernel rejects the object/a program; [`ProbeError::Attach`] if a
+    /// tracepoint attach fails.
+    pub fn load() -> Result<Self, ProbeError> {
+        check_support()?;
+        let path = object_path();
+        let bytes = std::fs::read(&path).map_err(|e| {
+            ProbeError::Object(format!(
+                "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
+                path.display()
+            ))
+        })?;
+        let mut ebpf =
+            Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+
+        for (program, event) in TRACERS {
+            let tp: &mut TracePoint = ebpf
+                .program_mut(program)
+                .ok_or_else(|| {
+                    ProbeError::Load(format!("program `{program}` not found in object"))
+                })?
+                .try_into()
+                .map_err(|e| {
+                    ProbeError::Load(format!("program `{program}` is not a tracepoint: {e}"))
+                })?;
+            tp.load()
+                .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
+            tp.attach(TP_SYSCALLS, event).map_err(|e| {
+                ProbeError::Attach(format!("attach `{program}` to {TP_SYSCALLS}/{event}: {e}"))
+            })?;
+        }
+
+        // Build the ring-buffer consumer once (see the field doc). `take_map` moves the map's owned
+        // handle out of `ebpf`; the kernel map stays alive (this `RingBuf` holds its fd) and the
+        // attached programs keep writing to it. `FILTER` stays in `ebpf` for the `watch_*` setters.
+        let events_map = ebpf
+            .take_map(EVENTS_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{EVENTS_MAP}` not found")))?;
+        let events = RingBuf::try_from(events_map)
+            .map_err(|e| ProbeError::Map(format!("open `{EVENTS_MAP}` as a ring buffer: {e}")))?;
+
+        Ok(Self { ebpf, events })
+    }
+
+    /// Watch only the process tree with this **tgid** (the userspace pid): the programs drop events
+    /// from any other tgid. Pass `0` to stop filtering on tgid. Composes with
+    /// [`watch_cgroup`](Self::watch_cgroup) (both configured axes must match).
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the filter map is missing or unwritable.
+    pub fn watch_pid(&mut self, pid: u32) -> Result<(), ProbeError> {
+        self.set_filter(FILTER_TGID, u64::from(pid))
+    }
+
+    /// Watch only the process in this **cgroup id** (`bpf_get_current_cgroup_id`): the axis a
+    /// sandbox's host workers are attributed on. Pass `0` to stop filtering on cgroup.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the filter map is missing or unwritable.
+    pub fn watch_cgroup(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
+        self.set_filter(FILTER_CGROUP, cgroup_id)
+    }
+
+    /// Clear both filter axes: observe every process on the host again (the load-time default).
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the filter map is missing or unwritable.
+    pub fn watch_all(&mut self) -> Result<(), ProbeError> {
+        self.set_filter(FILTER_TGID, 0)?;
+        self.set_filter(FILTER_CGROUP, 0)
+    }
+
+    /// Write one slot of the `FILTER` array (0 = tgid, 1 = cgroup id; 0 disables that axis).
+    fn set_filter(&mut self, slot: u32, value: u64) -> Result<(), ProbeError> {
+        let map = self
+            .ebpf
+            .map_mut(FILTER_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{FILTER_MAP}` not found")))?;
+        let mut filter: Array<_, u64> = Array::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{FILTER_MAP}` as an array: {e}")))?;
+        filter
+            .set(slot, value, 0)
+            .map_err(|e| ProbeError::Map(format!("set `{FILTER_MAP}`[{slot}]: {e}")))
+    }
+
+    /// Drain every event currently in the ring buffer, calling `on_event` for each, and return how
+    /// many were delivered. **Non-blocking**: it returns 0 when the buffer is empty rather than
+    /// waiting, so a live trace calls it in a loop (a blocking `epoll`-backed wait on the ring buffer's
+    /// fd is the P9.3 consumer's job). A record too short to parse is skipped, not an error.
+    ///
+    /// # Errors
+    /// Currently infallible (the consumer was opened once at [`load`](Self::load)); the `Result` is
+    /// kept for uniformity with the fallible probe surface, so the P9.3 blocking consumer can add an
+    /// error path without breaking callers.
+    pub fn drain(&mut self, mut on_event: impl FnMut(SyscallEvent)) -> Result<usize, ProbeError> {
+        let mut delivered = 0;
+        // One `RingBufItem` is outstanding at a time; each is consumed (parsed to an owned, `Copy`
+        // event) before the next `next()`, so the loop never holds two. `self.events` is the same
+        // consumer every call, so its position/cache stay coherent (a fresh one would spin — see the
+        // field doc).
+        while let Some(item) = self.events.next() {
+            if let Some(event) = SyscallEvent::from_bytes(&item) {
+                on_event(event);
+                delivered += 1;
+            }
+        }
+        Ok(delivered)
     }
 }
 

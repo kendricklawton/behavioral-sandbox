@@ -290,9 +290,9 @@ pub struct RunningVm {
 ///
 /// The disk is one of two shapes. A **read-write** boot bundles a private, point-in-time copy that
 /// restore stages back, so the clone shares no writable backing with its source (which may be gone). A
-/// **`read_only_root`** boot (a "warm" snapshot) references the shared, persistent base in place, so N
+/// **`read_only_root`** boot (a "prewarmed" snapshot) references the shared, persistent base in place, so N
 /// clones restored from one bundle share it read-only (page-cache-deduped) while each gets its own
-/// in-RAM overlay. A **warm** snapshot also carries the vsock exec channel, so a restored clone can
+/// in-RAM overlay. A **prewarmed** snapshot also carries the vsock exec channel, so a restored clone can
 /// run code immediately.
 #[derive(Debug, Clone)]
 pub struct Snapshot {
@@ -336,7 +336,7 @@ impl Snapshot {
     }
 
     /// The root disk restore uses: the bundle's private copy (a read-write snapshot), or the shared
-    /// read-only base referenced in place (a `read_only_root` warm snapshot).
+    /// read-only base referenced in place (a `read_only_root` prewarmed snapshot).
     #[must_use]
     pub fn root_drive_path(&self) -> &Path {
         &self.root_drive
@@ -467,7 +467,7 @@ impl RunningVm {
 
     /// Probe the exec channel: connect to the guest agent and complete the handshakes, discarding
     /// the connection (the agent serves one connection then loops back to accept, so a
-    /// connect-and-close just cycles it). The warm [`Pool`](crate::Pool)'s health check on a clone
+    /// connect-and-close just cycles it). The prewarmed [`Pool`](crate::Pool)'s health check on a clone
     /// that has been sitting idle: a dead or wedged clone surfaces as a typed error — most
     /// specifically [`VmmError::GuestUnavailable`] — so the pool can discard it and serve another.
     /// Deliberately short-deadlined: an idle, healthy agent accepts immediately.
@@ -525,7 +525,7 @@ impl RunningVm {
     /// send, not just freed (best-effort: the caller's own buffers and the kernel's socket buffers
     /// are out of the engine's reach). What the *command* does with its inputs (echo them to stdout,
     /// write them to `/output`) is the run's own data in [`RunResult`], not an engine surface. The
-    /// flight recorder (Phase 13) will record *that* inputs were injected — paths/keys/sizes or
+    /// audit log (Phase 13) will record *that* inputs were injected — paths/keys/sizes or
     /// hashes — never contents.
     ///
     /// # Errors
