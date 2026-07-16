@@ -1140,8 +1140,8 @@ fn unstage_restore_disk(backing: &Path) {
 /// The Firecracker `(major, minor)` the driver's API bodies are written against (decision 001).
 /// Field names have drifted across releases and behavior genuinely changes (v1.9 rejects
 /// `network_overrides` on snapshot load, decision 011), so an unexpected binary means cryptic
-/// mid-boot API errors or silently different semantics — the runtime-validates-its-VMM guard,
-/// the way containerd validates its runc (P6.9b).
+/// mid-boot API errors or silently different semantics — the runtime-validates-its-VMM guard: a
+/// runtime pinning and checking the version of the lower-level binary it drives (P6.9b).
 const PINNED_FC_VERSION: (u64, u64) = (1, 9);
 
 /// Arms [`warn_on_unpinned_firecracker`] exactly once per process: the pin is process-wide and the

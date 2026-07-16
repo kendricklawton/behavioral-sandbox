@@ -6,14 +6,13 @@
 > enforce what it does from the kernel, outside the guest.
 >
 > **Why:** any time you run code you don't fully trust, you want two things at once: strong
-> isolation, and a trustworthy account of what it did. The off-the-shelf answers are a cloud sandbox
-> (someone else's infrastructure) or a shared-kernel container (weaker isolation, watcher in reach of
-> the code). This is the self-hostable, embeddable core for the case those don't cover. **Every phase
-> ships a working demo, so each capability is proven running.**
+> isolation, and a trustworthy account of what it did. This is the self-hostable, embeddable core for
+> exactly that: hardware isolation plus a host-observed audit log the code can't forge, run on your
+> own infrastructure. **Every phase ships a working demo, so each capability is proven running.**
 >
-> **The line (K8s is not a PaaS, and neither is this):** we build the **engine** — a runtime you
-> self-host. Multi-tenant auth, billing, scheduling across a fleet, a web dashboard — **out of
-> scope**, the hoster's job. `containerd`, not Docker Cloud.
+> **The line (an engine, not a PaaS):** we build the **engine**, a runtime you self-host.
+> Multi-tenant auth, billing, scheduling across a fleet, a web dashboard: **out of scope**, the
+> hoster's job.
 >
 > **Scope of this repo:** the **core engine** — the Firecracker + eBPF sandbox of **Phases 0–18**,
 > defined by the four core properties (§0). The **vNext tracks** (Phases 19–20: the polyglot SDKs
@@ -722,9 +721,9 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 
 An audit of Phases 0–6 found failure modes that live in none of the feature phases: residue that
 accumulates across embedder crashes until a *healthy* host refuses work, and dependency drift that
-fails cryptically instead of legibly. This is core **runtime** work, not platform creep — it is to
-this engine what image/container GC and runc-version validation are to kubelet/containerd: the
-boring janitorial contract a runtime owes a host that stays up for months. It lands **before**
+fails cryptically instead of legibly. This is core **runtime** work, not platform creep: the
+garbage collection and dependency-version validation any long-running runtime owes a host, the
+boring janitorial contract for a host that stays up for months. It lands **before**
 Phase 7 because the sweep and the guards become part of the operational contract the `Sandbox`
 surface freezes.
 
@@ -1172,8 +1171,22 @@ Trace what a process (a firecracker/vhost worker, or the guest-adjacent host sid
       ring buffer; `SyscallTracer::watch_pid`/`watch_cgroup`/`watch_all` set it, default observes the
       whole host. Proven by the `#[ignore]`d `tracer` integration tests (per-event path capture, the
       connect sockaddr decode, filter exclude-then-include) and the `trace_syscalls` example.)*
-- [ ] **P9.3** Userspace consumer: stream events, decode, print a live trace.
-- [ ] **P9.4** Attribute events to a sandbox (via cgroup id / PID from the FC track).
+- [x] **P9.3** Userspace consumer: stream events, decode, print a live trace.
+      *(Landed: `SyscallTracer::stream(idle, keep_going, on_event)` loops, draining greedily and
+      sleeping `idle` only when the buffer is empty, until the caller predicate stops it (a deadline or
+      a Ctrl-C flag). The decode is centralized on the event — `SyscallEvent::describe` /
+      `detail_display` / `syscall_name` render a path (execve/openat) or an `a.b.c.d:port` sockaddr
+      (connect) — so a consumer prints one line each. The `trace_syscalls` example is now the live
+      trace. Poll-with-sleep, not `epoll`, keeps the crate sync + `unsafe`-free + dependency-light; the
+      fd is on `AsRawFd` for a zero-idle-latency consumer later.)*
+- [x] **P9.4** Attribute events to a sandbox (via cgroup id / PID from the FC track).
+      *(Landed: `cgroup_id_of_pid(pid)` reads the process's unified cgroup path from
+      `/proc/<pid>/cgroup` and returns the inode of `/sys/fs/cgroup/<path>` — for cgroup v2 that inode
+      *is* the `bpf_get_current_cgroup_id` a program stamps on events. Hand it the Firecracker track's
+      VMM pid, `watch_cgroup` the result, and the trace is scoped to exactly that sandbox. Pure `std`
+      fs, no crate coupling to `vmm` (plain `u32`/`u64` bridge the two tracks). Proven by a host-gate
+      unit test (the resolver returns a real id on a v2 host) and a privileged test asserting our own
+      cgroup's events come back carrying that id.)*
 - [ ] **P9.5** Bounded overhead: measure the tracing cost.
 - [ ] **P9.6** Test: launch a workload, assert its `execve`/`open` events show up attributed.
 - **Exit gate:** a live syscall trace of a running sandbox.
@@ -1270,7 +1283,7 @@ Prove the isolation + observation claims hold under adversarial workloads.
 
 ## Phase 16 — The driver daemon + wire API (the engine's interface)
 
-The containerd-style boundary: a local daemon others drive — still engine, not PaaS.
+A local daemon others drive over a socket: still engine, not PaaS.
 
 - [ ] **P16.1** `agentd`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
 - [ ] **P16.2** A **versioned** wire API (JSON/gRPC — `(decision)`): open/exec/put/get/snapshot/
@@ -1333,7 +1346,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 ## Phase 19 — Polyglot SDKs (Go · Python · C# · Node.js)
 
-Thin, idiomatic clients so non-Rust callers can drive `agentd` — the E2B-style surface, still
+Thin, idiomatic clients so non-Rust callers can drive `agentd` — a client-SDK surface, still
 **engine, not platform**.
 
 - [ ] **P19.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the

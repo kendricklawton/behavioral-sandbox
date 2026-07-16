@@ -32,6 +32,13 @@
 //! the whole machine's. Still the host's footprint, not the guest's (a microVM's syscalls stay
 //! in-guest; see ROADMAP Phase 9).
 //!
+//! **P9.3/P9.4 — a live trace, attributed to a sandbox.** [`stream`](SyscallTracer::stream) is the
+//! streaming consumer: it loops, decoding each event with [`SyscallEvent::describe`] and handing it to
+//! a callback as it arrives, until a caller predicate says stop. [`cgroup_id_of_pid`] closes the loop
+//! with the Firecracker track: hand it a sandbox's VMM pid, `watch_cgroup` the id it returns, and the
+//! trace is scoped to exactly that sandbox (the `bpf_get_current_cgroup_id` a program reads equals the
+//! inode of the cgroup dir the jailer placed the VMM in).
+//!
 //! **P8.8/P8.9 — caps + a legible support probe.** Loading needs only `CAP_BPF`+`CAP_PERFMON`, not
 //! full root; [`check_support`] names a missing prerequisite (kernel BTF, or those caps) up front as a
 //! typed [`ProbeError::Unsupported`], so a host that can't run the probes says so plainly instead of
@@ -39,7 +46,9 @@
 //! guards, P6.9b).
 #![forbid(unsafe_code)]
 
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
@@ -316,8 +325,8 @@ impl SyscallTracer {
 
     /// Drain every event currently in the ring buffer, calling `on_event` for each, and return how
     /// many were delivered. **Non-blocking**: it returns 0 when the buffer is empty rather than
-    /// waiting, so a live trace calls it in a loop (a blocking `epoll`-backed wait on the ring buffer's
-    /// fd is the P9.3 consumer's job). A record too short to parse is skipped, not an error.
+    /// waiting; [`stream`](Self::stream) wraps it in the live-trace loop. A record too short to parse
+    /// is skipped, not an error.
     ///
     /// # Errors
     /// Currently infallible (the consumer was opened once at [`load`](Self::load)); the `Result` is
@@ -337,6 +346,36 @@ impl SyscallTracer {
         }
         Ok(delivered)
     }
+
+    /// Stream a **live trace** (P9.3): loop, calling `on_event` for each event as it arrives, until
+    /// `keep_going` returns `false`; return the total delivered. When the buffer is momentarily empty
+    /// it sleeps `idle` before polling again (so an idle tracer doesn't spin), but drains greedily
+    /// while events are flowing, so latency is bounded by `idle`. Decode + print with
+    /// [`SyscallEvent::describe`].
+    ///
+    /// Kept a poll-with-sleep loop deliberately: the ring buffer's fd is available via `AsRawFd` for a
+    /// zero-idle-latency `epoll` wait, but that needs an event loop or an extra dependency; this stays
+    /// sync, `unsafe`-free, and dependency-light, matching the driver. `keep_going` is where a caller
+    /// wires a deadline or a Ctrl-C flag.
+    ///
+    /// # Errors
+    /// Propagates a [`drain`](Self::drain) error (currently none in practice).
+    pub fn stream(
+        &mut self,
+        idle: Duration,
+        mut keep_going: impl FnMut() -> bool,
+        mut on_event: impl FnMut(SyscallEvent),
+    ) -> Result<usize, ProbeError> {
+        let mut total = 0;
+        while keep_going() {
+            let n = self.drain(&mut on_event)?;
+            total += n;
+            if n == 0 {
+                std::thread::sleep(idle);
+            }
+        }
+        Ok(total)
+    }
 }
 
 /// Where the compiled BPF object lives: the `AGENT_PROBES_OBJECT` override if set, else the
@@ -349,6 +388,48 @@ pub fn object_path() -> PathBuf {
         return PathBuf::from(p);
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../probes/target/bpfel-unknown-none/release/probes")
+}
+
+/// The cgroup v2 id of process `pid` — the same `u64` `bpf_get_current_cgroup_id` reports for tasks in
+/// that cgroup, so it is exactly what [`SyscallTracer::watch_cgroup`] filters on. This is the **P9.4
+/// bridge**: take a sandbox's VMM pid from the Firecracker track, resolve its cgroup id here, and
+/// [`watch_cgroup`](SyscallTracer::watch_cgroup) it so the trace shows only that sandbox's host
+/// footprint (the whole cgroup: the VMM and its threads, not just one tgid).
+///
+/// It reads the process's **unified** cgroup path from `/proc/<pid>/cgroup` (the `0::/…` line), then
+/// returns the inode number of `/sys/fs/cgroup/<path>` — for cgroup v2 that inode *is* the kernel's
+/// cgroup id. Pure `std` fs, no `unsafe`.
+///
+/// # Errors
+/// [`ProbeError::Map`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
+/// cgroup-v1-only host), or the cgroup dir can't be stat'd.
+pub fn cgroup_id_of_pid(pid: u32) -> Result<u64, ProbeError> {
+    let proc_path = format!("/proc/{pid}/cgroup");
+    let text = std::fs::read_to_string(&proc_path)
+        .map_err(|e| ProbeError::Map(format!("read {proc_path}: {e}")))?;
+    // The cgroup v2 unified controller is the `0::<path>` line; `<path>` is rooted at the cgroup mount.
+    let rel = text
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .ok_or_else(|| {
+            ProbeError::Map(format!(
+                "{proc_path} has no unified (0::) cgroup line — a cgroup v2 host is required"
+            ))
+        })?
+        .trim();
+    let dir = format!("/sys/fs/cgroup{rel}");
+    let meta = std::fs::metadata(&dir)
+        .map_err(|e| ProbeError::Map(format!("stat cgroup dir {dir}: {e}")))?;
+    Ok(meta.ino())
+}
+
+/// The cgroup id of the current process ([`cgroup_id_of_pid`] of `std::process::id()`) — for a
+/// self-trace or a test.
+///
+/// # Errors
+/// As [`cgroup_id_of_pid`].
+pub fn cgroup_id_of_self() -> Result<u64, ProbeError> {
+    cgroup_id_of_pid(std::process::id())
 }
 
 /// Whether the host can load eBPF at all — a cheap pre-flight the CLI/`setup` can call before it
@@ -487,5 +568,21 @@ mod tests {
         assert!(mask_has_load_caps(
             parse_cap_eff(&status).expect("parse the crafted CapEff line")
         ));
+    }
+
+    #[test]
+    fn cgroup_id_of_self_resolves_or_reports_v1() {
+        // Host-safe (no eBPF): the P9.4 resolver reads `/proc/self/cgroup` + the cgroup dir's inode.
+        // On a cgroup v2 host it returns a real (nonzero) id; on a v1-only host it errors legibly.
+        match cgroup_id_of_self() {
+            Ok(id) => assert!(id > 0, "a real cgroup id is nonzero (got {id})"),
+            Err(e) => {
+                let s = e.to_string();
+                assert!(
+                    s.contains("cgroup v2") || s.contains("0::"),
+                    "a resolver failure must name the v2 requirement, got: {s}"
+                );
+            }
+        }
     }
 }

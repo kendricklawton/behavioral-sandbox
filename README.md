@@ -14,13 +14,10 @@ hardware-isolation boundary up to the syscall/network boundary.
 
 Any time you run code you don't fully trust (a third-party binary, a CI job from a fork, a
 dependency's install script, an AI-generated snippet, a sample under analysis) you want two things
-at once: strong isolation, and a trustworthy account of what the code actually did. The
-off-the-shelf answers are a cloud sandbox (E2B and the like: someone else's infrastructure, network
-open by default) or a shared-kernel container (weaker isolation, and whatever is watching runs where
-the code can reach it). This is the **self-hostable engine** for the case those don't cover: the
-code stays on your own infrastructure (air-gapped or regulated is fine), and the watching and the
-policy live in the host kernel, outside the guest, so the record can't be forged by the code it is
-recording.
+at once: strong isolation, and a trustworthy account of what the code actually did. This is the
+**self-hostable engine** for exactly that: the code stays on your own infrastructure (air-gapped or
+regulated is fine), and the watching and the policy live in the host kernel, outside the guest, so
+the record can't be forged by the code it is recording.
 
 - **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. The trust
   boundary is the CPU, not guest-side software.
@@ -29,8 +26,8 @@ recording.
   for security.
 - **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
   capability; every allowance is explicit and recorded.
-- **Engine, not platform.** A runtime + a clean driver API you self-host. *Kubernetes is not a
-  PaaS, and neither is this.*
+- **Engine, not platform.** A runtime + a clean driver API you self-host. *It's an engine, not a
+  PaaS.*
 - **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
   benchmarked with percentiles — never hand-waved.
 
@@ -78,7 +75,7 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 **In scope:** the sandbox runtime (Firecracker), host-side observability + enforcement (eBPF),
 the sandbox lifecycle API, a self-hostable driver daemon, and the benchmarks that back the
 claims. **Out of scope, by design:** multi-tenant auth, billing, fleet scheduling, and a web
-dashboard — that's whatever *hosts* the engine. `containerd`, not Docker Cloud. The lifecycle
+dashboard — that's whatever *hosts* the engine. The lifecycle
 contract and the full non-goals list live in [`ENGINE.md`](ENGINE.md).
 
 **Adjacent (separate repos, post-`v0.1.0`):** language SDKs (Go · Python · Node · C#) that drive

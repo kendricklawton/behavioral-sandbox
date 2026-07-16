@@ -1380,8 +1380,10 @@ smallest that shows all three record shapes (a program path, a file path, a sock
 
 **Consequences and notes.**
 - This is still the **host's** footprint, not the guest's (decision 020's honest limit stands): a
-  microVM services its syscalls in-guest. The filter's cgroup axis is what P9.4 will use to attribute
-  events to a specific sandbox from the Firecracker track.
+  microVM services its syscalls in-guest. The filter's cgroup axis is how P9.4 attributes events to a
+  specific sandbox: `cgroup_id_of_pid` resolves a VMM pid to its cgroup id (the inode of the cgroup
+  dir, which equals `bpf_get_current_cgroup_id`), and `watch_cgroup` scopes the trace to it. The bridge
+  to the Firecracker track is plain `u32`/`u64` values, so `probes-loader` stays independent of `vmm`.
 - `SyscallEvent` is an **internal** kernel↔loader contract, *not* the frozen public wire API (the
   `channel` protocol + audit-log format); it can change without an `api:` marker.
 - The `detail` blob is bounded (128 bytes): long paths truncate, and a `connect` captures only the

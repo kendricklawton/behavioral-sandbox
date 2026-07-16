@@ -129,6 +129,62 @@ impl SyscallEvent {
         let end = self.comm.iter().position(|&b| b == 0).unwrap_or(COMM_CAP);
         String::from_utf8_lossy(&self.comm[..end])
     }
+
+    /// The short syscall name (`execve`/`openat`/`connect`, or `?` for an unknown discriminant), for a
+    /// trace line. `no_std`-friendly (all string literals).
+    #[must_use]
+    pub fn syscall_name(&self) -> &'static str {
+        match self.kind() {
+            Some(Syscall::Execve) => "execve",
+            Some(Syscall::Openat) => "openat",
+            Some(Syscall::Connect) => "connect",
+            None => "?",
+        }
+    }
+
+    /// The event's detail blob decoded for display: the path (`execve`/`openat`, lossy UTF-8) or the
+    /// `connect` address (`AF_INET` as `a.b.c.d:port`, other families by number). Centralized here so
+    /// every consumer decodes the same way (`std`-only).
+    #[cfg(any(feature = "std", test))]
+    #[must_use]
+    pub fn detail_display(&self) -> String {
+        let d = self.detail();
+        match self.kind() {
+            Some(Syscall::Connect) => describe_sockaddr(d),
+            _ => String::from_utf8_lossy(d).into_owned(),
+        }
+    }
+
+    /// One decoded trace line: `pid=<pid> comm=<comm> <syscall> <detail>` (`std`-only). The streaming
+    /// consumer prints this directly.
+    #[cfg(any(feature = "std", test))]
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "pid={} comm={} {} {}",
+            self.pid,
+            self.comm_lossy(),
+            self.syscall_name(),
+            self.detail_display()
+        )
+    }
+}
+
+/// A best-effort human form of the leading sockaddr bytes: `AF_INET` yields `a.b.c.d:port`, other
+/// families name the family number, and a too-short capture says so.
+#[cfg(any(feature = "std", test))]
+fn describe_sockaddr(bytes: &[u8]) -> String {
+    // sa_family is a native-endian u16; AF_INET == 2, its sockaddr_in is family, be16 port, 4-byte ip.
+    const AF_INET: u16 = 2;
+    if bytes.len() >= 8 {
+        let family = u16::from_ne_bytes([bytes[0], bytes[1]]);
+        if family == AF_INET {
+            let port = u16::from_be_bytes([bytes[2], bytes[3]]);
+            return format!("{}.{}.{}.{}:{port}", bytes[4], bytes[5], bytes[6], bytes[7]);
+        }
+        return format!("<sockaddr family {family}>");
+    }
+    "<sockaddr: too short>".to_string()
 }
 
 #[cfg(test)]
@@ -172,6 +228,38 @@ mod tests {
     fn short_slice_is_none_not_a_panic() {
         assert!(SyscallEvent::from_bytes(&[0u8; EVENT_SIZE - 1]).is_none());
         assert!(SyscallEvent::from_bytes(&[]).is_none());
+    }
+
+    #[test]
+    fn decodes_a_trace_line_for_each_syscall() {
+        let ev = |syscall: Syscall, detail: &[u8]| {
+            let mut d = [0u8; DETAIL_CAP];
+            d[..detail.len()].copy_from_slice(detail);
+            let mut comm = [0u8; COMM_CAP];
+            comm[..2].copy_from_slice(b"sh");
+            SyscallEvent {
+                cgroup_id: 0,
+                pid: 7,
+                tid: 7,
+                syscall: syscall as u32,
+                detail_len: detail.len() as u32,
+                comm,
+                detail: d,
+            }
+        };
+        assert_eq!(
+            ev(Syscall::Openat, b"/etc/hostname").detail_display(),
+            "/etc/hostname"
+        );
+        // A 127.0.0.1:9 sockaddr_in: AF_INET (native u16 = 2), be16 port 9, then 127.0.0.1.
+        let mut sa = vec![2u8, 0, 0, 9, 127, 0, 0, 1];
+        sa.resize(16, 0);
+        assert_eq!(ev(Syscall::Connect, &sa).detail_display(), "127.0.0.1:9");
+        assert_eq!(
+            ev(Syscall::Execve, b"/bin/true").describe(),
+            "pid=7 comm=sh execve /bin/true"
+        );
+        assert_eq!(ev(Syscall::Connect, &sa).syscall_name(), "connect");
     }
 
     #[test]

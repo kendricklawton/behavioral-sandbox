@@ -154,6 +154,12 @@ completes; here is the shape so far):
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
   the default watches the whole host. See ARCHITECTURE decision 021.
+- **A live trace, attributed to a sandbox (P9.3/P9.4).** `SyscallTracer::stream` loops the drain,
+  decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` sockaddr) and handing
+  it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop
+  with the Firecracker track: it resolves a VMM pid to its cgroup id (the inode of the cgroup dir,
+  which equals `bpf_get_current_cgroup_id`), so `watch_cgroup(cgroup_id_of_pid(vmm_pid)?)` scopes the
+  trace to exactly one sandbox. The bridge is plain values, so `probes-loader` never depends on `vmm`.
 
 The honest limit is unchanged (isolation is hardware): these are the **host's** syscalls — a
 Firecracker worker's `execve`/`openat`/`connect` — never the guest's, which are serviced in-guest and

@@ -125,7 +125,7 @@ open as an interactive stateful session. If you're writing an SDK, its shape is 
 
 ## Where the engine ends (the engine/PaaS line)
 
-**Kubernetes is not a PaaS, and neither is this.** The engine is the boring, embeddable core:
+**This is an engine, not a PaaS.** The engine is the boring, embeddable core:
 a runtime plus a clean driver API you self-host. The moment it grows opinions about *whose* code
 runs and *who pays*, it stops being embeddable in anything with its own opinions. So, explicit
 non-goals — these belong to whatever hosts the engine, and PRs adding them are wrong by design:
@@ -135,8 +135,8 @@ non-goals — these belong to whatever hosts the engine, and PRs adding them are
 - **No billing or metering policy.** The engine *measures* (host-observed metrics, benchmarked
   percentiles); charging for it is the hoster's.
 - **No fleet scheduling.** One engine drives sandboxes on one host. Bin-packing across hosts,
-  queues, and autoscaling are the hoster's (the analogy: kubelet runs pods; it doesn't schedule
-  the cluster).
+  queues, and autoscaling are the hoster's: the engine runs sandboxes on its host; it doesn't
+  schedule a cluster.
 - **No dashboard, no network API.** The surface is a Rust library and a CLI. A daemon that speaks
   HTTP is a *hoster* even when this repo later ships one (`agentd` is scoped as exactly that: a
   thin host of the same library's public API).

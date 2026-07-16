@@ -10,10 +10,12 @@
 
 use std::net::{SocketAddr, TcpStream};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use agent_probes_loader::{check_support, object_path, Syscall, SyscallTracer};
+use agent_probes_loader::{cgroup_id_of_self, check_support, object_path, Syscall, SyscallTracer};
 
 /// Why this host can't load the probe (a skip reason), or `None` when it can — so each test prints
 /// *why* it skipped. Same gate the counter tests use.
@@ -162,4 +164,96 @@ fn sockaddr_is_ipv4(bytes: &[u8], ip: [u8; 4], port: u16) -> bool {
         && u16::from_ne_bytes([bytes[0], bytes[1]]) == AF_INET
         && u16::from_be_bytes([bytes[2], bytes[3]]) == port
         && bytes[4..8] == ip
+}
+
+#[test]
+#[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
+fn attributes_events_to_this_process_cgroup() {
+    // P9.4: `cgroup_id_of_self` (the inode of our cgroup dir) must equal the `bpf_get_current_cgroup_id`
+    // the programs stamp on our events — the whole attribution bridge. Watch that cgroup and prove our
+    // own openat comes back carrying it; an empty capture would mean the two ids disagree on this host.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping attributes_events_to_this_process_cgroup: {why}");
+        return;
+    }
+    let my_cgroup = match cgroup_id_of_self() {
+        Ok(id) => id,
+        // A cgroup-v1-only host has no unified `0::` line; skip rather than fail.
+        Err(e) => {
+            eprintln!("skipping attributes_events_to_this_process_cgroup: {e}");
+            return;
+        }
+    };
+    let mut tracer = SyscallTracer::load().expect("load + attach the syscall tracer");
+    tracer
+        .watch_cgroup(my_cgroup)
+        .expect("filter to this cgroup");
+    tracer.drain(|_| {}).expect("clear the baseline");
+
+    let marker = format!("/tmp/agent-p94-cgroup-{}-marker", std::process::id());
+    let _ = std::fs::File::open(&marker);
+    sleep(Duration::from_millis(50));
+
+    let mut events = Vec::new();
+    tracer.drain(|ev| events.push(ev)).expect("drain");
+    assert!(
+        !events.is_empty(),
+        "watching our own cgroup id {my_cgroup} must capture our events (an empty capture means the \
+         cgroup-dir inode and bpf_get_current_cgroup_id disagree on this host)"
+    );
+    assert!(
+        events.iter().all(|e| e.cgroup_id == my_cgroup),
+        "every captured event must carry the watched cgroup id {my_cgroup}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind() == Some(Syscall::Openat) && e.detail() == marker.as_bytes()),
+        "the marker openat must appear, attributed to our cgroup"
+    );
+}
+
+#[test]
+#[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
+fn stream_delivers_a_live_trace_over_a_window() {
+    // P9.3: `stream` must deliver events live and stop on the predicate. Filter to us, keep opening a
+    // file from a background thread (same pid, so it passes the filter), stream for a short window, and
+    // assert the callback saw events and the returned count matches.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping stream_delivers_a_live_trace_over_a_window: {why}");
+        return;
+    }
+    let me = std::process::id();
+    let mut tracer = SyscallTracer::load().expect("load + attach the syscall tracer");
+    tracer.watch_pid(me).expect("filter to this pid");
+    tracer.drain(|_| {}).expect("clear the baseline");
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker = {
+        let stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let _ = std::fs::File::open("/tmp/agent-p93-stream-probe");
+                sleep(Duration::from_millis(5));
+            }
+        })
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(300);
+    let mut seen = 0usize;
+    let count = tracer
+        .stream(
+            Duration::from_millis(2),
+            || Instant::now() < deadline,
+            |_| seen += 1,
+        )
+        .expect("stream");
+    stop.store(true, Ordering::Relaxed);
+    worker.join().ok();
+
+    assert_eq!(count, seen, "stream's return must match the callback count");
+    assert!(
+        seen > 0,
+        "the live stream must deliver the background thread's openats"
+    );
 }

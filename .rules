@@ -5,11 +5,10 @@
 enforces what it does — syscalls, its network, its cgroup — from *outside* the guest, where the
 code can't see or subvert you. Every run yields a tamper-resistant, host-observed **audit log** of exactly what happened. This file is the operating manual — read it every session.
 
-**Scope: the engine, not the platform.** A runtime + a clean driver API you self-host. Running
-untrusted code safely is otherwise a heavy cloud VM (E2B) or a shared-kernel container (weaker
-isolation); this is the boring, embeddable, self-hostable core underneath. **Kubernetes is not
-a PaaS, and neither is this** — multi-tenant auth, billing, fleet scheduling, and a dashboard
-are the *hoster's* job, out of scope. If a change pulls tenancy/billing/scheduling into this
+**Scope: the engine, not the platform.** A runtime + a clean driver API you self-host: the boring,
+embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed
+audit log. **This is an engine, not a PaaS** — multi-tenant auth, billing, fleet scheduling, and a
+dashboard are the *hoster's* job, out of scope. If a change pulls tenancy/billing/scheduling into this
 repo, or moves the security boundary into the guest, the design is wrong.
 
 The **language SDKs** (Go/Python/Node/C#) and the **Wasmtime sibling** are separate repos built on
@@ -17,10 +16,10 @@ this engine's frozen wire API + audit-log format — thin clients / a sibling, n
 repo. The Wasmtime variant is a *sibling, not a backend*, so *isolation is hardware* holds here
 without exception. (They're a forward map in `ROADMAP.md` Phases 19–20; their code lives elsewhere.)
 
-**Why this exists.** Self-hostable, hardware-isolated code execution with a trustworthy, host-observed
-audit log isn't available off the shelf as an embeddable engine: the alternatives are a heavy cloud VM
-or a shared-kernel container. This fills that gap. Every phase ships a **working demo**, so each
-capability is proven running end to end, not just asserted.
+**Why this exists.** A self-hostable, embeddable engine for running untrusted code with hardware
+isolation and a trustworthy, host-observed audit log isn't something you can pull off the shelf. This
+fills that gap. Every phase ships a **working demo**, so each capability is proven running end to end,
+not just asserted.
 
 ## The core properties (every change protects all four)
 

@@ -6,8 +6,8 @@
 //! tap). The netns model retired the finite-`/30`-pool exhaustion an earlier tap-in-the-host-netns
 //! design risked — every netns reuses the same fixed `/30`, so there is no shared pool to clog — but
 //! an orphaned netns is still residue (a namespace, a tap, a `/run/netns/<name>` handle) worth
-//! reclaiming. [`sweep_orphans`] reclaims both dir and netns, the way kubelet's GC reclaims a crashed
-//! kubelet's leavings.
+//! reclaiming. [`sweep_orphans`] reclaims both dir and netns, the garbage collection a long-running
+//! runtime owes its host for the residue a crashed sibling leaves behind.
 //!
 //! **Ownership is keyed on the pid embedded in the scratch-dir name** (`agent-<pid>-<n>`). The netns
 //! is named after the dir it belongs to, so no separate record is needed and no cross-ownership
