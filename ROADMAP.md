@@ -1187,9 +1187,28 @@ Trace what a process (a firecracker/vhost worker, or the guest-adjacent host sid
       fs, no crate coupling to `vmm` (plain `u32`/`u64` bridge the two tracks). Proven by a host-gate
       unit test (the resolver returns a real id on a v2 host) and a privileged test asserting our own
       cgroup's events come back carrying that id.)*
-- [ ] **P9.5** Bounded overhead: measure the tracing cost.
-- [ ] **P9.6** Test: launch a workload, assert its `execve`/`open` events show up attributed.
+- [x] **P9.5** Bounded overhead: measure the tracing cost.
+      *(Landed: `cargo xtask bench-trace` times the same `openat` micro-workload in three conditions:
+      **baseline** (no probes), **unwatched** (probes attached but the `FILTER` excludes us, so the
+      programs fire and drop ours in-kernel: the cost every other process pays), and **watched** (the
+      filter includes us, so each `openat` writes a whole `SyscallEvent` to the ring buffer, drained
+      off the timed path so it never overflows mid-burst). It reports ns/openat percentiles for each
+      and the p50 delta over baseline: the measured, per-syscall overhead the attached tracepoint adds,
+      small for unwatched processes and paid in full only for the one sandbox you watch. Needs
+      `CAP_BPF`+`CAP_PERFMON` + the built object, not KVM.)*
+- [x] **P9.6** Test: launch a workload, assert its `execve`/`open` events show up attributed.
+      *(Landed: the `#[ignore]`d `a_workload_child_shows_up_attributed_to_its_cgroup` spawns a `cat`
+      workload (one child that `execve`s itself and `openat`s a known path) under a `watch_cgroup` of
+      our cgroup id, then asserts every captured event carries that id, the child's execve (a pid other
+      than ours) shows up, and its `openat` of the marker path shows up: the whole P9.4 attribution
+      bridge proven end to end on a real subprocess.)*
 - **Exit gate:** a live syscall trace of a running sandbox.
+  *(Demo: `cargo xtask trace-sandbox` boots a real sandbox (jailed as root, else the unjailed opt-out),
+  resolves its VMM cgroup id via the Firecracker track's `vmm_pid`, and streams that sandbox's
+  cgroup-attributed host syscall footprint (the jailer/Firecracker execve, the drive/tap/socket
+  openats), honestly labeled as the VMM's host footprint since the guest's own syscalls never trap to
+  the host. The `trace_syscalls` example (point it at a booted VMM's pid) and the P9.6 test are the
+  other two faces of the same demo. Run on a KVM + `CAP_BPF` host.)*
 
 ## Phase 10 — Network observability on the tap (tc/XDP)
 
@@ -1259,9 +1278,15 @@ Make what a run did *legible* — the payoff demo.
 - [ ] **P14.5** Test/demo: run something interesting, watch it live, read the trace after.
 - **Exit gate:** a compelling live view of hardware-isolated runs; the demo you show people.
 
-## Phase 15 — Hardening & the trust story
+## Phase 15 — Hardening & the trust story (multi-tenant safety)
 
-Prove the isolation + observation claims hold under adversarial workloads.
+Prove the isolation + observation claims hold under adversarial workloads: that **any run is fully
+contained from every other run and from the host**, so a hoster can place mutually-distrusting callers
+on one shared host. This is the *consolidated* adversarial suite. Its constituents already pass
+individually — jail escape (P6.6), fork-bomb / mem-hog bounded by the cgroup (P6.8), deny-by-default
+egress with an allow-listed exception (P4.7), no-leak teardown of a killed/crashed run (P6.7, P6.9a) —
+and this phase runs them as one hostile guest and closes the last gaps. Tenant-agnostic throughout: the
+engine guarantees per-run containment; whose run is whose is the hoster's (decisions 016, 022).
 
 - [ ] **P15.1** Adversarial suite: guest tries to escape/DoS/exfiltrate → contained + recorded.
 - [ ] **P15.2** Confirm the guest cannot see or disable the host-side probes.
@@ -1274,8 +1299,24 @@ Prove the isolation + observation claims hold under adversarial workloads.
       hoster owns deployment (scheduling, per-identity sweeps, base hardening, dividing the /16
       pool). This box closes the *whole* boundary — what's trusted vs not — behind the Phase-15
       adversarial suite; decision 016 is one worked facet, not the closure.)*
-- **Exit gate:** the isolation + observability claims survive an adversary; the **threat model** is
-  documented.
+- [ ] **P15.7** Close the cgroup matrix. **`pids.max` is done** (`jail.rs`, added to the per-VM cgroup
+      alongside `cpu.max`/`memory.max`, fail-open per controller, host-gate unit-tested; a privileged
+      readback stays pending). It is host-side *defense in depth*: a guest fork-bomb is already bounded
+      by `memory.max` and never reaches the host (P6.8), but a hypervisor-level exploit that forked
+      *host* processes is now capped. **Remaining:** bound guest **IO bandwidth** so a disk-thrashing
+      guest can't starve a co-resident run — via Firecracker's per-drive **virtio-blk rate limiter**
+      (the engine-native control) or host `io.max`. Internal, derived defaults — **not** new `Limits`
+      knobs — so the public contract is unchanged; surfacing them as `Limits` fields later would be an
+      additive, marked `api:` change.
+- [ ] **P15.8** **Co-resident interference test:** launch a hostile run (cpu/mem/pid/io/network storm)
+      alongside a well-behaved run on the same host and assert the victim run is not starved, slowed
+      past a bound, or observable by the attacker — the explicitly multi-tenant assertion the hoster
+      gates on (still tenant-agnostic: two *runs*, no tenant concept).
+- **Exit gate:** the **containment suite is green** — one hostile guest tries to escape the VM, reach
+  the network, exceed its cpu/mem/pid/io caps, exhaust the host, and interfere with a co-resident run,
+  and **each attempt fails** — so the engine is safe to host mutually-distrusting callers on a shared
+  host; the **threat model** is documented. ("Safe for multi-tenant hosting" means exactly this suite
+  green, nothing less.)
 
 ---
 

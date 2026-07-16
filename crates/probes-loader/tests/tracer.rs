@@ -215,6 +215,68 @@ fn attributes_events_to_this_process_cgroup() {
 
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
+fn a_workload_child_shows_up_attributed_to_its_cgroup() {
+    // P9.6 (the Phase 9 exit gate in miniature): launch a *workload* — a child process standing in for
+    // a sandbox's VMM — and assert its own `execve` and `openat` come back attributed to a cgroup id,
+    // the P9.4 sandbox-attribution axis. The child inherits our cgroup, so watching that id captures
+    // the whole process tree (us + the workload) the way `watch_cgroup(vmm_cgroup)` captures a
+    // sandbox's host footprint.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping a_workload_child_shows_up_attributed_to_its_cgroup: {why}");
+        return;
+    }
+    let my_cgroup = match cgroup_id_of_self() {
+        Ok(id) => id,
+        // A cgroup-v1-only host has no unified `0::` line; skip rather than fail (as the P9.4 test).
+        Err(e) => {
+            eprintln!("skipping a_workload_child_shows_up_attributed_to_its_cgroup: {e}");
+            return;
+        }
+    };
+    let me = std::process::id();
+    let mut tracer = SyscallTracer::load().expect("load + attach the syscall tracer");
+    tracer
+        .watch_cgroup(my_cgroup)
+        .expect("filter to this cgroup");
+    tracer.drain(|_| {}).expect("clear the baseline");
+
+    // The workload: `cat <missing>` is one child that both `execve`s (itself) and `openat`s a known
+    // path (the file it tries to read). The path never exists, so the open just fails ENOENT — but
+    // `sys_enter_openat` fires regardless, carrying the path, and nothing is created or left behind.
+    let marker = format!("/tmp/agent-p96-workload-{me}-missing");
+    let status = Command::new("cat")
+        .arg(&marker)
+        .status()
+        .expect("spawn the `cat` workload");
+    assert!(!status.success(), "cat of a missing path should fail"); // sanity: it really ran the open
+    sleep(Duration::from_millis(50));
+
+    let mut events = Vec::new();
+    tracer.drain(|ev| events.push(ev)).expect("drain");
+    // Attribution invariant: everything captured carries the watched cgroup id.
+    assert!(
+        events.iter().all(|e| e.cgroup_id == my_cgroup),
+        "every captured event must carry the watched cgroup id {my_cgroup}"
+    );
+    // The workload's own execve (a child, so a pid other than ours) is attributed to the cgroup.
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind() == Some(Syscall::Execve) && e.pid != me),
+        "the workload child's execve must show up under the watched cgroup (saw pids {:?})",
+        events.iter().map(|e| e.pid).collect::<Vec<_>>()
+    );
+    // ...and its openat of the marker path, proving per-event data survives the whole attribution path.
+    assert!(
+        events
+            .iter()
+            .any(|e| e.kind() == Some(Syscall::Openat) && e.detail() == marker.as_bytes()),
+        "the workload's openat of {marker:?} must show up attributed to the cgroup"
+    );
+}
+
+#[test]
+#[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn stream_delivers_a_live_trace_over_a_window() {
     // P9.3: `stream` must deliver events live and stop on the predicate. Filter to us, keep opening a
     // file from a background thread (same pid, so it passes the filter), stream for a short window, and

@@ -15,6 +15,10 @@ agent-channel = { path = "../crates/channel" }
 # The driver, for `bench-boot` — it boots real microVMs and reads `boot_latency` (P3.7). A dev-only
 # dep on a never-shipped crate; the everyday `ci` gate doesn't invoke it (booting needs KVM).
 agent-vmm = { path = "../crates/vmm" }
+# The probe loader, for `bench-trace` — it attaches the syscall tracepoints and measures their
+# per-syscall overhead (P9.5). Dev-only; the everyday `ci` gate doesn't invoke it (loading eBPF
+# needs CAP_BPF/CAP_PERFMON).
+agent-probes-loader = { path = "../crates/probes-loader" }
 
 [lints]
 workspace = true

@@ -658,6 +658,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "agent-channel",
+ "agent-probes-loader",
  "agent-vmm",
  "anyhow",
  "clap",

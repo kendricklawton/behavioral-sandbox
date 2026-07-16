@@ -19,8 +19,9 @@
 //!
 //! **Scope.** This confines both a jailed **cold boot** and a jailed **restore**: the chroot +
 //! uid/gid drop + the jailer's mount namespace, cgroup **cpu/memory limits** derived from the
-//! guest's envelope (applied on cold boot when the host delegates the cgroup v2 controllers), and
-//! Firecracker's built-in **seccomp** filters (on by default; we never pass `--no-seccomp`). Every
+//! guest's envelope plus a fixed host-side **`pids.max`** cap (applied on cold boot when the host
+//! delegates the cgroup v2 controllers, each fail-open on its own), and Firecracker's built-in
+//! **seccomp** filters (on by default; we never pass `--no-seccomp`). Every
 //! boot feature composes with the jail (P7.0a-e): the **vsock exec channel** (its unix socket bound
 //! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
 //! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`] — the shared-base path, not a
@@ -486,38 +487,76 @@ pub(crate) fn remove_cgroup(dir: &Path) {
     }
 }
 
-/// The `--cgroup <file>=<value>` limits (P6.2) that cap the jailed VMM at the guest's own resource
-/// envelope: `cpu.max` bounds total CPU to `vcpus` cores, and `memory.max` to the guest's RAM plus a
-/// fixed host-side overhead. Returns empty when the host can't apply them (see
-/// [`cgroup_limits_available`]), so the caller passes no `--cgroup` and the jailed boot still runs.
-pub(crate) fn cgroup_limit_args(vcpus: u32, mem_mib: u32) -> Vec<String> {
-    if !cgroup_limits_available() {
-        tracing::warn!(
-            "cgroup v2 cpu/memory controllers are not delegated to the cgroup root; the jailed \
-             microVM runs without CPU/memory limits (a systemd host delegates them by default)"
-        );
+/// Host-side cap on the number of tasks (processes + threads) the jailed VMM's cgroup may hold
+/// (`pids.max`). A guest fork-bomb is already bounded by `memory.max` and never reaches the host (its
+/// processes live in the guest's own kernel — P6.8); this is **defense in depth** for the narrow case
+/// of a hypervisor-level exploit that tries to fork *host* processes. Firecracker itself holds only a
+/// handful of tasks (an API + VMM thread and one per vCPU), so 1024 is enormous headroom that never
+/// trips a legitimate boot while still capping a runaway.
+const VMM_PIDS_MAX: u64 = 1024;
+
+/// The cgroup v2 controllers the root delegates in `cgroup.subtree_control` (a systemd host delegates
+/// cpu/memory/pids out of the box). Each is gated independently: the jailer sets a limit by enabling
+/// its controller down from the root, which only works when that controller is already delegated there,
+/// so passing `--cgroup <file>` for an undelegated controller would make the jailer *fail* the boot.
+struct Delegated {
+    cpu: bool,
+    memory: bool,
+    pids: bool,
+}
+
+/// Read which controllers the cgroup root delegates. Absent/unreadable (a bare container) reads all
+/// false, so the caller passes no `--cgroup` and the jailed boot still runs (fail-open, decision 013).
+fn read_delegated() -> Delegated {
+    let subtree =
+        std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control").unwrap_or_default();
+    let toks: Vec<&str> = subtree.split_whitespace().collect();
+    Delegated {
+        cpu: toks.contains(&"cpu"),
+        memory: toks.contains(&"memory"),
+        pids: toks.contains(&"pids"),
+    }
+}
+
+/// Build the `--cgroup <file>=<value>` limits (P6.2, P15.7) from the delegation state — pure, so the
+/// per-controller fail-open logic is unit-tested without a live cgroup fs. `cpu.max` bounds total CPU
+/// to `vcpus` cores and `memory.max` to the guest's RAM plus a fixed host-side overhead; both require
+/// the cpu **and** memory controllers, so a host missing either gets no limits at all (empty). The
+/// host-side `pids.max` cap is added only when the `pids` controller is *also* delegated, so a host
+/// with cpu/memory but not pids keeps its cpu/memory caps (each controller fails open on its own).
+fn cgroup_args_for(d: &Delegated, vcpus: u32, mem_mib: u32) -> Vec<String> {
+    if !(d.cpu && d.memory) {
         return Vec::new();
     }
     let quota = u64::from(vcpus) * CPU_PERIOD_US;
     let memory_max = (u64::from(mem_mib) + u64::from(MEMORY_OVERHEAD_MIB)) * 1024 * 1024;
-    vec![
+    let mut args = vec![
         format!("memory.max={memory_max}"),
         format!("cpu.max={quota} {CPU_PERIOD_US}"),
-    ]
+    ];
+    if d.pids {
+        args.push(format!("pids.max={VMM_PIDS_MAX}"));
+    }
+    args
 }
 
-/// Whether the jailer can set cgroup limits here: the cgroup v2 `cpu` and `memory` controllers must be
-/// enabled in the root's `subtree_control` (a systemd host does this out of the box). The jailer sets
-/// limits by enabling controllers down from the root, which only works when they're already delegated
-/// there and the root has no internal processes; if they aren't, passing `--cgroup` would make the
-/// jailer fail, so we detect and skip. A bare container (controllers not delegated) reads false.
-fn cgroup_limits_available() -> bool {
-    std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control")
-        .map(|s| {
-            let toks: Vec<&str> = s.split_whitespace().collect();
-            toks.contains(&"cpu") && toks.contains(&"memory")
-        })
-        .unwrap_or(false)
+/// The `--cgroup <file>=<value>` limits that cap the jailed VMM at the guest's own resource envelope
+/// (see [`cgroup_args_for`]). Returns empty when the cpu/memory controllers aren't delegated, so the
+/// caller passes no `--cgroup` and the jailed boot still runs; warns on each fail-open path.
+pub(crate) fn cgroup_limit_args(vcpus: u32, mem_mib: u32) -> Vec<String> {
+    let delegated = read_delegated();
+    if !(delegated.cpu && delegated.memory) {
+        tracing::warn!(
+            "cgroup v2 cpu/memory controllers are not delegated to the cgroup root; the jailed \
+             microVM runs without CPU/memory limits (a systemd host delegates them by default)"
+        );
+    } else if !delegated.pids {
+        tracing::warn!(
+            "cgroup v2 pids controller is not delegated to the cgroup root; the jailed microVM runs \
+             without a host-side PID cap (cpu/memory limits still apply)"
+        );
+    }
+    cgroup_args_for(&delegated, vcpus, mem_mib)
 }
 
 #[cfg(test)]
@@ -556,6 +595,47 @@ mod tests {
             Path::new("/mnt/private/scratch")
         ));
         assert!(!mount_is_shared(MOUNTINFO, Path::new("/mnt/slave/scratch")));
+    }
+
+    #[test]
+    fn cgroup_args_fail_open_per_controller() {
+        let has = |args: &[String], p: &str| args.iter().any(|s| s.starts_with(p));
+
+        // Everything delegated: cpu + memory + the host-side pid cap.
+        let all = Delegated {
+            cpu: true,
+            memory: true,
+            pids: true,
+        };
+        let a = cgroup_args_for(&all, 2, 256);
+        assert!(has(&a, "cpu.max=") && has(&a, "memory.max="));
+        assert!(a.contains(&format!("pids.max={VMM_PIDS_MAX}")));
+
+        // cpu + memory but no pids: keep the cpu/memory caps, drop only the pid cap.
+        let no_pids = Delegated {
+            cpu: true,
+            memory: true,
+            pids: false,
+        };
+        let b = cgroup_args_for(&no_pids, 2, 256);
+        assert!(has(&b, "cpu.max=") && has(&b, "memory.max="));
+        assert!(!has(&b, "pids.max="));
+
+        // Missing cpu or memory: the whole set fails open (empty), never a partial `--cgroup`.
+        for d in [
+            Delegated {
+                cpu: true,
+                memory: false,
+                pids: true,
+            },
+            Delegated {
+                cpu: false,
+                memory: false,
+                pids: false,
+            },
+        ] {
+            assert!(cgroup_args_for(&d, 2, 256).is_empty());
+        }
     }
 
     #[test]

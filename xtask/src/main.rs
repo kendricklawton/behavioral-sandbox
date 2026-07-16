@@ -13,6 +13,11 @@
 //! - **`bench-boot`** — measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
 //! - **`bench-warm`** — time-to-first-result percentiles: cold boot vs prewarmed-snapshot restore vs
 //!   prewarmed-pool take. Needs KVM + the built agent rootfs.
+//! - **`bench-trace`** — the syscall-tracing overhead (P9.5): per-`openat` cost with no probes vs
+//!   attached-but-filtered-out vs attached-and-capturing. Needs `CAP_BPF`+`CAP_PERFMON` + the built
+//!   object (not KVM).
+//! - **`trace-sandbox`** — the Phase 9 exit-gate demo: boot a real sandbox and stream its
+//!   cgroup-attributed host syscall footprint. Needs KVM + the agent rootfs + `CAP_BPF` + the object.
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch); the
@@ -25,6 +30,7 @@
 
 mod artifacts;
 mod bench;
+mod demo;
 mod guest_bins;
 mod rootfs;
 
@@ -96,6 +102,25 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
+    /// Measure the syscall-tracing overhead (P9.5): the per-`openat` cost with no probes attached, vs
+    /// probes attached but filtered out, vs probes attached and writing each event to the ring buffer.
+    /// The delta is the honest cost of tracing. Needs `CAP_BPF`+`CAP_PERFMON` + `cargo xtask
+    /// build-probes` (not KVM).
+    BenchTrace {
+        /// How many bursts to time per condition (more → tighter tail percentiles). Default 100, the
+        /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
+        #[arg(long, default_value_t = 100)]
+        runs: usize,
+    },
+    /// The Phase 9 exit-gate demo: boot a real sandbox and stream its host syscall footprint,
+    /// attributed to the sandbox's cgroup (the VMM's host syscalls — the guest's stay in-guest).
+    /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
+    TraceSandbox {
+        /// Seconds to keep streaming the live trace after the boot+exec window is printed (`0` = just
+        /// the boot+exec footprint).
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -113,6 +138,8 @@ fn main() -> Result<()> {
         } => rootfs::build_rootfs(verify, update_lock),
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchWarm { runs } => bench::bench_warm(runs),
+        Cmd::BenchTrace { runs } => bench::bench_trace(runs),
+        Cmd::TraceSandbox { seconds } => demo::trace_sandbox(seconds),
     }
 }
 
