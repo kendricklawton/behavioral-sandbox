@@ -273,7 +273,7 @@ impl From<ChannelError> for VmmError {
 pub const FDS_PER_VM: usize = 8;
 
 /// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy. This is
-/// the per-run resource-policy surface whose shape is fixed by docs/architecture.md decision 013: one
+/// the per-run resource-policy surface whose shape is fixed by docs/contributing-architecture.md decision 013: one
 /// options struct of **quantities** (vCPUs, memory, deadlines, an output cap), not capabilities,
 /// enforced host-side (the VMM cgroup for cpu/memory; the exec channel's bounds for the rest).
 ///

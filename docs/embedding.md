@@ -7,7 +7,7 @@ The second half draws the line this project refuses to cross — what the engine
 **not** — because a runtime that quietly grows platform features stops being embeddable.
 
 Numbers in parentheses (013, 015, …) are dated decision entries in
-[Architecture decisions](./architecture.md); each records the rationale and the alternatives that
+[Architecture decisions](./contributing-architecture.md); each records the rationale and the alternatives that
 lost.
 
 ## The lifecycle

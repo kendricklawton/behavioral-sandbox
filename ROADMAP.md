@@ -45,8 +45,8 @@ Four properties every phase must protect:
 - **Two tracks, one core.** **FC** (Firecracker) and **BPF** (aya/eBPF) can be worked somewhat
   in parallel, but the **Convergence** phases need both, so the gate order still holds.
 - **Every phase exits on a demo.** The exit gate is "I can show it running." Design notes are
-  recorded in the root `.md` files: the box annotations here + `docs/architecture.md`'s decision log.
-- **Hard-to-reverse choices** (tagged `(decision)`) land as dated entries in `docs/architecture.md`.
+  recorded in the root `.md` files: the box annotations here + `docs/contributing-architecture.md`'s decision log.
+- **Hard-to-reverse choices** (tagged `(decision)`) land as dated entries in `docs/contributing-architecture.md`.
 - **Git is human-driven.** The user makes every commit/branch/push; the coding agent's job ends at
   changes made, demo working, box checked in the working tree.
 
@@ -65,7 +65,7 @@ Four properties every phase must protect:
   patch as they land. These are checkpoints, not releases — no stability promise.
 - Tags are a **human git step** (§0.5): the coding agent checks boxes; the user cuts the tag.
 - **No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the roadmap checkboxes and
-  `docs/architecture.md`'s decision log *are* the change record; a curated
+  `docs/contributing-architecture.md`'s decision log *are* the change record; a curated
   changelog is written once, for the first real release, rather than churned every `v0.0.x`.
 
 ## §0.75 Dev environment (one-time)
@@ -87,7 +87,7 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
 - [x] **P0.2** New workspace layout: `crates/vmm` (Firecracker driver), `crates/probes` (aya
       eBPF programs, `no_std`, excluded), `crates/probes-loader` (userspace loader), `crates/cli`
       (`agent`), `xtask`.
-- [x] **P0.3** Rewrite `.rules` / `README.md` / `CONTRIBUTING.md` / `docs/architecture.md` to the
+- [x] **P0.3** Rewrite `.rules` / `README.md` / `CONTRIBUTING.md` / `docs/contributing-architecture.md` to the
       sandbox-engine identity and the four core properties.
 - [x] **P0.4** Prerequisites pinned in `CONTRIBUTING.md` (KVM, BTF, `firecracker`+jailer, aya
       toolchain, caps); `cargo xtask setup` checks the host and reports what's missing.
@@ -113,7 +113,7 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
 The "hello, KVM" moment: a program that boots a real Linux microVM and reads its console.
 
 - [x] **P1.1** `(decision)` how to drive Firecracker: its **HTTP API over a unix socket** vs the
-      `firecracker` binary vs embedding `rust-vmm` crates → `docs/architecture.md`. (Default: API socket.)
+      `firecracker` binary vs embedding `rust-vmm` crates → `docs/contributing-architecture.md`. (Default: API socket.)
       *(Recorded as decision 001: API socket, hand-rolled HTTP/1.1 over `UnixStream`, `unsafe`-free.)*
 - [x] **P1.2** Fetch/pin a guest kernel (`vmlinux`) and a minimal rootfs image for first boot.
       *(Firecracker v1.9 CI artifacts, sha256-pinned; `cargo xtask fetch-artifacts`, gitignored.)*
@@ -139,7 +139,7 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
 Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
 
 - [x] **P2.1** `(decision)` host↔guest channel: **vsock** vs a serial protocol vs a guest agent →
-      `docs/architecture.md`. (Default: vsock + a tiny guest agent.)
+      `docs/contributing-architecture.md`. (Default: vsock + a tiny guest agent.)
       *(Recorded as decision 002: vsock + a statically-linked guest agent, a versioned
       length-prefixed protocol over Firecracker's vsock UDS; serial kept as a fallback, network/SSH
       rejected to preserve deny-by-default. Agent is exec/IO convenience, never containment.)*
@@ -386,7 +386,7 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge setu
       `10.200/16` dodges the common host defaults; making it a hoster knob and per-VM netns isolation
       are P4.3/P4.4.)*
 - [x] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
-      `docs/architecture.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
+      `docs/contributing-architecture.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
       *(Direction **pre-recorded as decision 008** (2026-07-12): deny-by-default, tap has no world
       route, no default masquerade until eBPF enforcement (P8) — so this **blocks P4.1** (build denying,
       not opened-then-restricted). Closed here: decision 008 gained an "As shipped" note pinning the
@@ -503,7 +503,7 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one pr
       computation on each concurrently-alive clone, getting each clone's own answer. `ci-privileged` now runs the VM tests serially
       (real-VM integration is boot-I/O-bound and some assert on host-global leak state).)*
 - [x] **P5.5** `(decision)` Handle the uniqueness problems restore creates (network identity,
-      entropy, clocks) → `docs/architecture.md`.
+      entropy, clocks) → `docs/contributing-architecture.md`.
       *(Recorded as **decision 011**, all three implemented-or-measured. **Network identity** (the
       load-bearing one): keep `ip=` as the zero-overhead cold-boot path, and on restore the **guest
       agent applies the clone's fresh address over vsock** (flush the baked-in `eth0` addr, add the
@@ -637,7 +637,7 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       returns in well under the daemon's lifetime with exit 0, and no `sleep` survives in the guest.
       Full privileged suite now **25 tests**, green.)*
 - [x] **P6.5** `(decision)` per-run resource policy shape (the knobs the engine exposes) →
-      `docs/architecture.md`. *(Decision 013: the per-run policy is the one already-public, API-pinned
+      `docs/contributing-architecture.md`. *(Decision 013: the per-run policy is the one already-public, API-pinned
       `Limits` struct carrying **quantities** (`vcpus` → guest vCPUs + `cpu.max`; `mem_mib` → guest RAM
       + `memory.max`; `wall` → boot deadline today, exec budget in P7.3) plus the exec **output cap**
       (P7.3), never capabilities: network egress stays a separate eBPF-enforced concern (decision 008),
@@ -1302,7 +1302,7 @@ Turn observation into control — deny-by-default egress, allow-listed, enforced
       empty until enforcement drops something. Non-IPv4/truncated drops have no 5-tuple to key on, so the
       denial log is the meaningful policy-miss case. Phase 13 folds this into the per-run record.)*
 - [x] **P11.6** `(decision)` where policy lives + its schema (still *engine* mechanism, not org
-      policy) → `docs/architecture.md`.
+      policy) → `docs/contributing-architecture.md`.
       *(Landed: decision 025. Policy is a per-VM allow-list in two eBPF maps (`POLICY` array of
       `PolicyRule` + `ENFORCE` toggle), schema = destination CIDR + optional port/proto (deny-by-default,
       an explicit `active` byte so a zeroed map is deny-all not allow-all), consulted at the ingress
@@ -1425,7 +1425,7 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
 - [ ] **P15.3** Resource-exhaustion, fork-bomb, network-flood → bounded by cgroup + egress policy.
 - [ ] **P15.4** Snapshot-restore correctness under load (no state bleed between clones).
 - [ ] **P15.5** Document the **threat model**: what's trusted (CPU/KVM/host kernel), what isn't.
-- [ ] **P15.6** `(decision)` the security boundary + assumptions → `docs/architecture.md`. *(Partially
+- [ ] **P15.6** `(decision)` the security boundary + assumptions → `docs/contributing-architecture.md`. *(Partially
       seeded early by decision 016, the engine/hoster line the P6.9a sweep forced: the engine
       guarantees its privileged tools can't be weaponized (euid-scoped, authorship not policy), the
       hoster owns deployment (scheduling, per-identity sweeps, base hardening, dividing the /16
@@ -1444,6 +1444,15 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       alongside a well-behaved run on the same host and assert the victim run is not starved, slowed
       past a bound, or observable by the attacker — the explicitly multi-tenant assertion the hoster
       gates on (still tenant-agnostic: two *runs*, no tenant concept).
+- [x] **P15.9** **Fuzz the untrusted-input boundary:** the host↔guest channel decoders, where a hostile
+      guest chooses the bytes the host parses. *(Landed early as a Phase-15 constituent, like the jail/
+      cgroup/egress checks the intro lists. Two tiers: a **dependency-free property harness in the `ci`
+      gate** (`crates/channel` `fuzz_tests`: arbitrary bytes, well-framed random bodies, encode/decode
+      round-trips, and every truncation of a valid frame, asserting the decoders never panic, hang, or
+      allocate past `MAX_PAYLOAD` — guardrail 5, on stable, deterministic seeds so it can't flake); and
+      a **`cargo fuzz` (libFuzzer) harness** in the workspace-excluded `fuzz/` crate for deep nightly
+      runs (`cargo xtask fuzz`), reaching the decoders via the channel crate's off-by-default `fuzzing`
+      feature so the wire crate stays dependency-free. Documented in `docs/contributing-fuzzing.md`.)*
 - **Exit gate:** the **containment suite is green** — one hostile guest tries to escape the VM, reach
   the network, exceed its cpu/mem/pid/io caps, exhaust the host, and interfere with a co-resident run,
   and **each attempt fails** — so the engine is safe to host mutually-distrusting callers on a shared
@@ -1523,7 +1532,7 @@ Thin, idiomatic clients so non-Rust callers can drive `agentd` — a client-SDK 
 **engine, not platform**.
 
 - [ ] **P19.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
-      SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/architecture.md`.
+      SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/contributing-architecture.md`.
 - [ ] **P19.2** A **cross-language conformance suite** (golden request/response + audit-log
       round-trips) every SDK must pass — the single source of SDK correctness, run in CI.
 - [ ] **P19.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
@@ -1547,7 +1556,7 @@ option, not a replacement for this repo.
 - [ ] **P20.1** `(decision)` **Sibling repo, not a backend here.** Core property 1 (*isolation is
       hardware*) is never traded in this engine; the wasm variant carries a **different, weaker**
       guarantee, so it's a distinct artifact that *shares the API*, not a plug-in backend →
-      `docs/architecture.md`.
+      `docs/contributing-architecture.md`.
 - [ ] **P20.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
       a `ResourceLimiter` (memory) → typed limits, mirroring the FC engine's no-hang/no-leak contract.
 - [ ] **P20.3** The **host-function (WASI) shim layer** = capabilities + policy + audit log:

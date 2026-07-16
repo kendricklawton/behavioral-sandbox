@@ -48,9 +48,14 @@ the engine — the full non-goals list is in [Using the engine API](./embedding.
 - **[Using the engine API](./embedding.md)** — the embedder's contract: the `Sandbox` lifecycle,
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
+- **[Examples](./examples.md)** — worked, end-to-end walkthroughs: [running untrusted
+  code](./examples-untrusted-code.md) and [observing a run from the
+  host](./examples-observe-a-run.md).
 - **[Host-side observability & enforcement](./probes.md)** — the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each with a live demo.
+- **[Security](./security.md)** — what is trusted, what counts as a security bug, and how to report
+  one.
 - **[Contributing](./contributing.md)** — how the work is organized, [building](./contributing-building.md),
   [testing](./contributing-testing.md), and the invariants.
 
@@ -59,6 +64,6 @@ the engine — the full non-goals list is in [Using the engine API](./embedding.
 Early, under active development — nothing here is production yet. The staged plan and live
 progress live in [`ROADMAP.md`](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md)
 (its checkboxes are the state); hard-to-reverse choices are recorded as dated decisions in
-[Architecture decisions](./architecture.md). Every
+[Architecture decisions](./contributing-architecture.md). Every
 completed phase ships a working demo, so each capability documented in this book is proven
 running end to end, not just asserted.

@@ -1,0 +1,48 @@
+# `cargo fuzz` harness for the host↔guest wire decoders. Kept OUT of the main workspace on purpose:
+# it needs a nightly toolchain and libFuzzer, so it must never be pulled into `cargo build` or
+# `cargo xtask ci`. Its own `[workspace]` table below detaches it; run it with `cargo xtask fuzz`
+# (or `cargo fuzz run <target>`). See `docs/contributing-fuzzing.md`.
+[package]
+name = "agent-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.agent-channel]
+path = "../crates/channel"
+features = ["fuzzing"]
+
+# A separate one-crate workspace: detaches this crate from the repo's workspace so the everyday
+# stable gate never tries to build it.
+[workspace]
+
+# libFuzzer wants some debug info even in release for useful crash traces.
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "channel_response"
+path = "fuzz_targets/channel_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_request"
+path = "fuzz_targets/channel_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "channel_frame"
+path = "fuzz_targets/channel_frame.rs"
+test = false
+doc = false
+bench = false

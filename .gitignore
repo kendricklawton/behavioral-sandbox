@@ -12,3 +12,8 @@
 FIX.md
 # mdBook output (`mdbook build docs`) — the book renders from the committed docs/*.md
 /docs/book/
+# cargo-fuzz working data (the `fuzz/` crate is excluded from the workspace; `fuzz/target` is already
+# covered by `**/target/` above). Corpora and crash artifacts are generated, not committed.
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/

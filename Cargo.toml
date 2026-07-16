@@ -13,7 +13,11 @@ members = [
 # triple) via `bpf-linker`, so excluding them keeps the everyday host gate (clippy --all-targets,
 # test) host-only and green; the eBPF object is built separately for its own target. See
 # `.rules`, `ROADMAP.md` (Phase 8), and `docs/contributing-building.md`.
-exclude = ["crates/probes"]
+#
+# `fuzz` is the `cargo fuzz` harness: nightly + libFuzzer, its own detached workspace, never part of
+# the everyday stable gate. Excluded here too so `cargo build --workspace` ignores it. See
+# `docs/contributing-fuzzing.md`.
+exclude = ["crates/probes", "fuzz"]
 
 [workspace.package]
 edition = "2021"

@@ -12,7 +12,7 @@ Work is organized into sequentially-gated phases in
 of truth for progress** (its checkboxes are the state). Work the first unchecked box in ID order,
 one item per iteration; a phase isn't left until its **Exit gate** passes (a working demo). Items
 tagged `(decision)` record the hard-to-reverse choice as a dated, numbered entry in
-[Architecture decisions](./architecture.md), so the reasoning outlives the diff.
+[Architecture decisions](./contributing-architecture.md), so the reasoning outlives the diff.
 
 ## The invariants (never trade these away)
 

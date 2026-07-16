@@ -29,6 +29,9 @@
 //! - **`meter-sandbox`** — the Phase 12 exit-gate demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
+//! - **`fuzz`** — deep `cargo fuzz` (libFuzzer) runs against the host↔guest channel decoders (the
+//!   guest→host untrusted-input boundary). Nightly + `cargo install cargo-fuzz`; never part of `ci`
+//!   (the in-gate coverage is `crates/channel`'s dependency-free `fuzz_tests`).
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch); the
@@ -161,6 +164,18 @@ enum Cmd {
     /// most of a core — plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
     /// `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
     MeterSandbox,
+    /// Fuzz the host↔guest channel decoders with `cargo fuzz` (libFuzzer) — the deep, nightly-only
+    /// counterpart to the channel crate's in-gate `fuzz_tests`. Needs `cargo install cargo-fuzz` + a
+    /// nightly toolchain; never part of `ci`. Targets: `channel_response` (default), `channel_request`,
+    /// `channel_frame`.
+    Fuzz {
+        /// The libFuzzer target to run.
+        #[arg(default_value = "channel_response")]
+        target: String,
+        /// Wall-clock seconds to fuzz before stopping (`0` runs until it finds a crash or you Ctrl-C).
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -184,7 +199,43 @@ fn main() -> Result<()> {
         Cmd::WatchSandbox { rounds } => demo::watch_sandbox(rounds),
         Cmd::EnforceSandbox => demo::enforce_sandbox(),
         Cmd::MeterSandbox => demo::meter_sandbox(),
+        Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
     }
+}
+
+/// Run a `cargo fuzz` (libFuzzer) target against the channel decoders. cargo-fuzz drives libFuzzer
+/// under a nightly toolchain, both opt-in installs, so this bails with guidance rather than
+/// pretending — and it is never wired into `ci` (the in-gate coverage is the channel crate's
+/// dependency-free `fuzz_tests`). See `docs/contributing-fuzzing.md`.
+fn fuzz(target: &str, seconds: u64) -> Result<()> {
+    if !cargo_fuzz_available() {
+        bail!(
+            "cargo-fuzz not found — install it with `cargo install cargo-fuzz` and add a nightly \
+             toolchain (`rustup toolchain install nightly`). See docs/contributing-fuzzing.md."
+        );
+    }
+    // cargo-fuzz discovers the `fuzz/` crate from the repo root. `-max_total_time=0` means run until
+    // a crash or Ctrl-C; any positive value bounds the run (handy for CI or a quick local pass).
+    let max_time = format!("-max_total_time={seconds}");
+    println!("$ cargo fuzz run {target} -- {max_time}");
+    let status = Command::new("cargo")
+        .args(["fuzz", "run", target, "--", &max_time])
+        .current_dir(workspace_root())
+        .status()
+        .context("running cargo fuzz")?;
+    if !status.success() {
+        bail!("cargo fuzz reported a failure — inspect the crash artifact it printed under fuzz/artifacts/");
+    }
+    Ok(())
+}
+
+/// Is `cargo fuzz` installed? (Probed once, cheaply, so a missing tool is a clear message.)
+fn cargo_fuzz_available() -> bool {
+    Command::new("cargo")
+        .args(["fuzz", "--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.

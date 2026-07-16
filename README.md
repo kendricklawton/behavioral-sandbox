@@ -41,12 +41,17 @@ Markdown in place):
   [installation](docs/cli-install.md), building the guest artifacts, `agent run`, `agent shell`.
 - **[Using the engine API](docs/embedding.md)** — the embedder's contract: the `Sandbox`
   lifecycle, budgets, typed errors, snapshots/pool, and the engine's deliberate non-goals.
+- **[Examples](docs/examples.md)** — worked walkthroughs: [running untrusted
+  code](docs/examples-untrusted-code.md), [observing a run](docs/examples-observe-a-run.md).
 - **[Host-side observability & enforcement](docs/probes.md)** — the eBPF half: syscall tracing,
   per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
-- **[Architecture decisions](docs/architecture.md)** — the dated, numbered decision log: every
-  hard-to-reverse choice, its rationale, and the alternatives that lost.
-- **[Contributing](docs/contributing.md)** — orientation, [building](docs/contributing-building.md),
-  [testing](docs/contributing-testing.md).
+- **[Security](docs/security.md)** — the security model: what's trusted, what counts as a bug,
+  how to report one.
+- **[Contributing](docs/contributing.md)** — orientation,
+  [architecture & the decision log](docs/contributing-architecture.md) (every hard-to-reverse
+  choice, its rationale, and the alternatives that lost),
+  [building](docs/contributing-building.md), [testing](docs/contributing-testing.md),
+  [fuzzing](docs/contributing-fuzzing.md).
 
 ## Status
 
@@ -106,7 +111,7 @@ never part of its trust boundary, and never traded against the hardware-isolatio
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
 [documentation](docs/contributing.md). The operating manual is [`.rules`](.rules); the staged
-plan is [`ROADMAP.md`](ROADMAP.md); decisions are recorded in [docs/architecture.md](docs/architecture.md).
+plan is [`ROADMAP.md`](ROADMAP.md); decisions are recorded in [docs/contributing-architecture.md](docs/contributing-architecture.md).
 
 ## License
 

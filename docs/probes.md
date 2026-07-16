@@ -255,7 +255,7 @@ completes; here is the shape so far):
 - **Filter to one sandbox (P9.2).** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
-  the default watches the whole host. See `docs/architecture.md` decision 021.
+  the default watches the whole host. See `docs/contributing-architecture.md` decision 021.
 - **A live trace, attributed to a sandbox (P9.3/P9.4).** `SyscallTracer::stream` loops the drain,
   decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` sockaddr) and handing
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop

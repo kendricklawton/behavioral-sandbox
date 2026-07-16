@@ -41,7 +41,7 @@ crates/
                  `Sandbox` lifecycle API. No `unsafe` on the host path; a hostile guest is a
                  typed error, never a panic/hang/leak.
   channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
-                 shared by the driver and the guest agent. See `docs/architecture.md` decision 002.
+                 shared by the driver and the guest agent. See `docs/contributing-architecture.md` decision 002.
   guest-agent/   the in-guest agent (`agent-guest`): runs one command per connection and streams
                  stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at
                  Phase 3. Exec/IO convenience only — never the security boundary.
@@ -56,7 +56,8 @@ crates/
   cli/           the `agent` binary (`run`, `shell`, `--log`); later the `agentd` daemon.
 docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): running the engine
                  (`cli*.md`), the embedder contract (`embedding.md`), the eBPF half (`probes.md`),
-                 the decision log (`architecture.md`), and the contributing chapters. Root keeps
+                 and the contributing chapters (incl. `contributing-architecture.md`, the decision
+                 log). Root keeps
                  only the standard meta files (README/CONTRIBUTING/SECURITY/…) plus ROADMAP.md.
 xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF build at P8),
                  `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
@@ -113,5 +114,5 @@ the state**). Work it per its §0.5 loop: first unchecked box in ID order, one i
 iteration, and the box checked **together with the work** so they land in one commit. The
 **user** makes that commit. A phase isn't left until its **Exit gate** passes — *a working demo.*
 Don't duplicate phase status here — update the roadmap. Hard-to-reverse
-choices land as `(decision)` entries in `docs/architecture.md`, keyed by their own sequential
+choices land as `(decision)` entries in `docs/contributing-architecture.md`, keyed by their own sequential
 number and date (never a phase ID, so each entry stands on its own as the roadmap evolves).

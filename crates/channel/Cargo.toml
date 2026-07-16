@@ -5,12 +5,18 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 publish = false
-description = "The host↔guest wire protocol for the sandbox exec channel (docs/architecture.md decision 002)."
+description = "The host↔guest wire protocol for the sandbox exec channel (docs/contributing-architecture.md decision 002)."
 
 # Dependency-free by design: the protocol is hand-rolled over `std::io::{Read, Write}` so it stays
 # tiny and transport-agnostic (vsock in the guest, a unix socket in tests), and both the host driver
 # and the guest agent can depend on it without pulling a serialization stack into a static binary.
 [dependencies]
+
+# Off by default. Exposes the internal wire decoders (module `fuzz`) so the `cargo fuzz` targets in
+# `fuzz/` can drive them; never enabled in the normal build, so the crate stays dependency-free and
+# the wire contract is unchanged. See `docs/contributing-fuzzing.md`.
+[features]
+fuzzing = []
 
 [lints]
 workspace = true
