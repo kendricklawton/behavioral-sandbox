@@ -18,6 +18,8 @@
 //!   object (not KVM).
 //! - **`trace-sandbox`** — the Phase 9 exit-gate demo: boot a real sandbox and stream its
 //!   cgroup-attributed host syscall footprint. Needs KVM + the agent rootfs + `CAP_BPF` + the object.
+//! - **`watch-sandbox`** — the Phase 10 exit-gate demo: boot a real networked sandbox and watch its
+//!   per-VM network flows on the tap. Needs KVM + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch); the
@@ -121,6 +123,14 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         seconds: u64,
     },
+    /// The Phase 10 exit-gate demo: boot a real networked sandbox, attach a `tc` monitor to its tap
+    /// inside its netns, drive guest traffic, and print the per-VM network flows and totals it counts.
+    /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + `cargo xtask build-probes`.
+    WatchSandbox {
+        /// How many guest-traffic bursts to send, watching the per-VM counters climb each one.
+        #[arg(long, default_value_t = 3)]
+        rounds: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -140,6 +150,7 @@ fn main() -> Result<()> {
         Cmd::BenchWarm { runs } => bench::bench_warm(runs),
         Cmd::BenchTrace { runs } => bench::bench_trace(runs),
         Cmd::TraceSandbox { seconds } => demo::trace_sandbox(seconds),
+        Cmd::WatchSandbox { rounds } => demo::watch_sandbox(rounds),
     }
 }
 

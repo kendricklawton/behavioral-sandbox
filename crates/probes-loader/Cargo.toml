@@ -17,5 +17,18 @@ aya = "0.13"
 # `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
 agent-probes-common = { path = "../probes-common", features = ["std"] }
 
+# Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (P10.4, decision 024).
+# `setns` has no `std` wrapper; nix's is a *safe* function, so the loader stays
+# `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
+# Pinned to the same 0.31 the workspace already carries (via `vsock` under `agent-vmm`) so the build
+# links one copy of nix, not two.
+nix = { version = "0.31", default-features = false, features = ["sched"] }
+
+[dev-dependencies]
+# The Firecracker driver, for the P10.6 end-to-end test only (boot a real sandbox, attach the tap
+# monitor to its netns tap, prove guest traffic shows up). A dev-dependency so the loader library
+# stays independent of `vmm`: the eBPF track and the driver track bridge only by plain values.
+agent-vmm = { path = "../vmm" }
+
 [lints]
 workspace = true

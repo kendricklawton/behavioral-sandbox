@@ -120,8 +120,12 @@ clsact gives *both* directions uniformly on any device, and because Phase 11 enf
 flow) lives at the same hook; P10 is observe-only (both hooks return `TC_ACT_OK`). The flow record
 (`FlowKey` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
 the loader stays `#![forbid(unsafe_code)]` (decision 023). A sandbox's tap lives in its own network
-namespace (decision 017), so scoping the monitor to one sandbox's `fc0` means entering that netns —
-that binding, and the clean attach/detach on open/close, are the next Phase-10 steps.
+namespace (decision 017), so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
+safe wrapper, decision 024) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
+into a per-VM rollup. Dropping the monitor frees its userspace handles; the sandbox's netns teardown
+reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host residue. `cargo xtask
+watch-sandbox` boots a real networked sandbox and prints the per-VM flows its guest actually generated
+— Phase 10's live view.
 
 ## The hardware-isolation consequence (the honest limit)
 

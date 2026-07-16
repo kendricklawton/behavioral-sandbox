@@ -36,7 +36,9 @@ name = "agent-probes-loader"
 version = "0.1.0"
 dependencies = [
  "agent-probes-common",
+ "agent-vmm",
  "aya",
+ "nix",
 ]
 
 [[package]]

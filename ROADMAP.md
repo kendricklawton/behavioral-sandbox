@@ -1230,11 +1230,32 @@ Watch every packet a microVM sends/receives — at its tap device, in the kernel
       truncated frames; the loader reads the map as raw bytes and decodes with the shared `from_bytes`,
       so both crates stay `unsafe`-free. IPv4 only for now; best-effort counters like `EXECVE_BY_PID`.
       The live "guest traffic shows up in the counters" proof is P10.6.)*
-- [ ] **P10.3** Export per-VM network stats to userspace via a map.
-- [ ] **P10.4** Bind the program to the *specific* tap the FC track named for a sandbox.
-- [ ] **P10.5** Handle attach/detach cleanly on sandbox open/close.
-- [ ] **P10.6** Test: traffic from a guest shows up in the per-VM counters.
+- [x] **P10.3** Export per-VM network stats to userspace via a map.
+      *(Landed: `TapMonitor::flows` reads the `FLOWS` map into `(FlowKey, FlowCounts)` pairs (per
+      5-tuple), and `totals` sums them into a per-VM `NetStats` rollup (ingress/egress packets+bytes) —
+      the two userspace export surfaces, per-flow detail and the sandbox-level summary a caller ships.)*
+- [x] **P10.4** Bind the program to the *specific* tap the FC track named for a sandbox.
+      *(Landed: `TapMonitor::attach_in_netns(netns, iface)` enters the sandbox's own network namespace
+      (decision 017) via `setns` (nix's safe wrapper, so the loader stays `#![forbid(unsafe_code)]`),
+      attaches the classifiers to its `fc0` there, and returns the thread to the caller's netns; the map
+      is read back from the host netns (map fds aren't namespace-scoped). The driver hands over the netns
+      and tap names via the new `Sandbox::netns`/`Sandbox::tap_name` (additive `api:`), keeping
+      `probes-loader` independent of `vmm`. Decision 024.)*
+- [x] **P10.5** Handle attach/detach cleanly on sandbox open/close.
+      *(Landed: attach-on-open is `attach_in_netns`; on close, dropping the monitor frees its userspace
+      handles and the sandbox's netns teardown (`ip netns del`, decision 017) cascades the tap, clsact
+      qdisc, and `tc` filters away — no pinned residue (decision 020/023), no dangling filter even if the
+      loader died first. Proven by the P10.6 test's clean shutdown.)*
+- [x] **P10.6** Test: traffic from a guest shows up in the per-VM counters.
+      *(Landed: the `#[ignore]`d `guest_traffic_shows_up_in_the_per_vm_counters` boots a networked agent
+      microVM, attaches the monitor to its netns tap, has the guest fire UDP at its host end
+      (`10.200.0.1:9999`), and asserts that flow's ingress packets and the per-VM ingress total are both
+      nonzero. Uses `agent-vmm` as a dev-dependency only, so the loader library stays decoupled.)*
 - **Exit gate:** live per-microVM network visibility.
+  *(Demo: `cargo xtask watch-sandbox` boots a real networked sandbox (jailed as root, else the unjailed
+  opt-out), attaches a `tc` monitor to its tap inside its netns, drives guest traffic in rounds, and
+  prints the per-VM totals climbing plus the per-flow breakdown — the guest's own packets, observed at
+  its tap from the host and scoped by netns. Run on a KVM + `CAP_BPF`+`CAP_NET_ADMIN` host.)*
 
 ## Phase 11 — Enforcement: egress policy in the kernel
 

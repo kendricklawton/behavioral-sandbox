@@ -499,6 +499,25 @@ impl Sandbox {
         self.vm.vmm_pid()
     }
 
+    /// The host **tap** interface backing this sandbox's NIC, or `None` if it was opened without
+    /// networking ([`BootConfig::enable_network`]). Paired with [`netns`](Sandbox::netns), this is what
+    /// the host-side eBPF network track binds to: the tap lives *inside* the sandbox's netns, so a
+    /// loader attaches its `tc` programs to this interface **within that namespace**. See
+    /// [`RunningVm::tap_name`].
+    #[must_use]
+    pub fn tap_name(&self) -> Option<&str> {
+        self.vm.tap_name()
+    }
+
+    /// The per-VM **network namespace** name backing this sandbox's NIC, or `None` without networking.
+    /// Its handle is `/run/netns/<name>`; a host-side network observer enters it to reach
+    /// [`tap_name`](Sandbox::tap_name), which is isolated from the host and every other VM. See
+    /// [`RunningVm::netns`].
+    #[must_use]
+    pub fn netns(&self) -> Option<&str> {
+        self.vm.netns()
+    }
+
     /// Boot-to-userspace latency of this sandbox's microVM.
     #[must_use]
     pub fn boot_latency(&self) -> Duration {

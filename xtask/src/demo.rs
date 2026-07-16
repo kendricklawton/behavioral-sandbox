@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::{cgroup_id_of_pid, SyscallTracer};
+use agent_probes_loader::{cgroup_id_of_pid, SyscallTracer, TapMonitor};
 use agent_vmm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use anyhow::{bail, Context, Result};
 
@@ -150,6 +150,125 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
     );
     println!(
         "# trapped here: they stayed in-guest, behind the KVM boundary (Phase 9's opening note)."
+    );
+    Ok(())
+}
+
+/// The Phase 10 exit-gate demo (`watch-sandbox`): **live per-microVM network visibility**. Boot a real
+/// networked sandbox and watch the guest's own traffic on its tap, per flow and as a per-VM rollup,
+/// scoped to the sandbox's own netns (decision 017). Unlike the syscall trace, this is the guest's
+/// *own* packets: they cross the tap on the host, so the host sees every one.
+///
+/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object — a
+/// privileged, user-run demo like `trace-sandbox`. `rounds` is how many guest-traffic bursts to send
+/// (watching the counters climb each one).
+pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
+    if !Path::new("/dev/kvm").exists() {
+        bail!("watch-sandbox needs /dev/kvm (run on a KVM-capable host)");
+    }
+    if let Err(e) = agent_probes_loader::check_support() {
+        bail!("watch-sandbox needs eBPF support: {e}");
+    }
+    let object = agent_probes_loader::object_path();
+    if !object.is_file() {
+        bail!(
+            "watch-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
+            object.display()
+        );
+    }
+    let kernel = kernel_path();
+    let rootfs = agent_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+        if !p.is_file() {
+            bail!(
+                "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
+                p.display()
+            );
+        }
+    }
+
+    // Boot a networked sandbox: jailed when we're root (the confinement is the point), else the
+    // explicit unjailed opt-out so the demo still runs on a dev host.
+    let mut cfg = BootConfig::from_env();
+    cfg.kernel = kernel.clone();
+    cfg.rootfs = rootfs.clone();
+    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
+    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+    cfg.read_only_root = true;
+    cfg.enable_network = true;
+    cfg.boot_timeout = Duration::from_secs(30);
+    let sandbox = if effective_uid() == Some(0) {
+        Sandbox::open(cfg).context("boot the sandbox (jailed)")?
+    } else {
+        println!("# not root: booting unjailed (Sandbox::open_unjailed)");
+        Sandbox::open_unjailed(cfg).context("boot the sandbox (unjailed)")?
+    };
+
+    let netns = sandbox
+        .netns()
+        .context("the sandbox has no netns (networking should be on)")?
+        .to_string();
+    let tap = sandbox
+        .tap_name()
+        .context("the sandbox has no tap (networking should be on)")?
+        .to_string();
+    println!(
+        "# sandbox up: booted in {} ms, watching tap {tap} in netns {netns}",
+        sandbox.boot_latency().as_millis()
+    );
+
+    // Bind the monitor to *this* sandbox's tap, inside its own netns (P10.4).
+    let monitor =
+        TapMonitor::attach_in_netns(&netns, &tap).context("attach the tap monitor in the netns")?;
+
+    // The guest can reach only the host end of its point-to-point /30 (deny-by-default); under the
+    // netns model that end is the fixed 10.200.0.1 (decision 017). Have the guest fire UDP at it each
+    // round and watch the per-VM counters climb: live network visibility.
+    let sender = "import socket, time\n\
+                  s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
+                  for _ in range(10):\n    s.sendto(b'agent-p10-watch', ('10.200.0.1', 9999)); time.sleep(0.02)\n";
+    let rounds = rounds.max(1);
+    for round in 1..=rounds {
+        let out = sandbox
+            .exec(&["python3".into(), "-c".into(), sender.into()], b"")
+            .context("run the guest traffic generator")?;
+        if out.exit_code != 0 {
+            bail!(
+                "guest traffic generator exited {}: {}",
+                out.exit_code,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        let t = monitor.totals().context("read the per-VM totals")?;
+        println!(
+            "# round {round}/{rounds}: guest sent {} pkt / {} B, received {} pkt / {} B",
+            t.ingress_packets, t.ingress_bytes, t.egress_packets, t.egress_bytes
+        );
+    }
+
+    // The per-flow breakdown: which conversations the guest actually had.
+    let flows = monitor.flows().context("read the flow map")?;
+    println!(
+        "\n# {} flow(s) attributed to this sandbox's tap:",
+        flows.len()
+    );
+    for (key, counts) in &flows {
+        println!(
+            "  {key}  |  in {} pkt / {} B   out {} pkt / {} B",
+            counts.ingress_packets,
+            counts.ingress_bytes,
+            counts.egress_packets,
+            counts.egress_bytes
+        );
+    }
+
+    drop(monitor);
+    sandbox.shutdown().context("shut the sandbox down")?;
+    println!(
+        "\n# sandbox shut down; its netns teardown reclaimed the tap and the tc filter (decision 023)."
+    );
+    println!(
+        "# This was the guest's OWN traffic, observed at its tap from the host and scoped by netns."
     );
     Ok(())
 }

@@ -39,11 +39,13 @@
 //! trace is scoped to exactly that sandbox (the `bpf_get_current_cgroup_id` a program reads equals the
 //! inode of the cgroup dir the jailer placed the VMM in).
 //!
-//! **P10.1/P10.2 — network flows on the tap.** [`TapMonitor`] attaches the two `tc`/clsact classifiers
+//! **P10 — network flows on the tap.** [`TapMonitor`] attaches the two `tc`/clsact classifiers
 //! (`tap_ingress`/`tap_egress`) to a VM's tap and reads their per-flow byte/packet counters with
-//! [`flows`](TapMonitor::flows). This is the guest's *own* traffic (every packet crosses the tap on the
-//! host), the strong cross-boundary signal syscalls can't be. Attaches by interface name; entering a
-//! sandbox's netns to bind its `fc0` (decision 017) is P10.4.
+//! [`flows`](TapMonitor::flows), or the per-VM rollup with [`totals`](TapMonitor::totals) (P10.3). This
+//! is the guest's *own* traffic (every packet crosses the tap on the host), the strong cross-boundary
+//! signal syscalls can't be. [`attach_in_netns`](TapMonitor::attach_in_netns) binds the *specific* tap
+//! the driver named for one sandbox by entering that sandbox's netns (P10.4, decision 017/024);
+//! [`attach`](TapMonitor::attach) takes an interface in the current netns.
 //!
 //! **P8.8/P8.9 — caps + a legible support probe.** Loading needs only `CAP_BPF`+`CAP_PERFMON`, not
 //! full root; [`check_support`] names a missing prerequisite (kernel BTF, or those caps) up front as a
@@ -52,6 +54,7 @@
 //! guards, P6.9b).
 #![forbid(unsafe_code)]
 
+use std::fs::File;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -393,21 +396,47 @@ const CLS_EGRESS: &str = "tap_egress";
 const FLOWS_MAP: &str = "FLOWS";
 /// `EEXIST`: a clsact qdisc already on the interface is not an error (the attach is idempotent).
 const EEXIST: i32 = 17;
+/// Where `ip netns` bind-mounts a named network namespace's handle (matches the driver's own
+/// `netns_path`), so [`TapMonitor::attach_in_netns`] can open a sandbox's netns by name.
+const NETNS_DIR: &str = "/run/netns";
 
-/// A loaded, attached network-flow monitor (P10.1/P10.2): `tc`/clsact classifiers on a VM's tap that
-/// count bytes/packets per IPv4 flow per direction into a map [`flows`](Self::flows) reads. Owns the
-/// aya [`Ebpf`] (programs, map, live attachments); dropping it detaches both classifiers and pins
-/// nothing, like [`SyscallTracer`]. Attaches by **interface name in the current netns**; binding to the
-/// specific `fc0` inside a sandbox's own netns (decision 017) is P10.4's netns-entering step.
-#[must_use = "dropping a TapMonitor detaches the tc programs"]
+/// Per-VM network **totals** (P10.3): one sandbox's traffic summed across all its flows, from the tap's
+/// perspective — **ingress** is what the guest sent, **egress** what it received. The sandbox-level
+/// rollup a caller exports, above the per-flow detail [`TapMonitor::flows`] gives.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NetStats {
+    /// Packets the guest sent (tap ingress), summed over flows.
+    pub ingress_packets: u64,
+    /// Bytes the guest sent, summed over flows.
+    pub ingress_bytes: u64,
+    /// Packets the guest received (tap egress), summed over flows.
+    pub egress_packets: u64,
+    /// Bytes the guest received, summed over flows.
+    pub egress_bytes: u64,
+}
+
+/// A loaded, attached network-flow monitor (P10): `tc`/clsact classifiers on a VM's tap that count
+/// bytes/packets per IPv4 flow per direction into a map [`flows`](Self::flows) / [`totals`](Self::totals)
+/// read. Owns the aya [`Ebpf`] (programs, map, live attachments). Bind it to the *specific* tap the
+/// driver named for one sandbox with [`attach_in_netns`](Self::attach_in_netns) (its `fc0` inside its
+/// netns, decision 017), or to an interface in the current netns with [`attach`](Self::attach).
+///
+/// **Lifetime.** Dropping the monitor frees its userspace handles (the map and program fds). The
+/// in-kernel `tc` filter it left on the tap is reclaimed by the sandbox's **netns teardown** (`ip netns
+/// del` cascades the tap, its clsact qdisc, and the filters away, decision 017/023) — so a torn-down
+/// sandbox leaves no dangling program even if the loader is gone, and nothing is pinned (decision 020).
+#[must_use = "dropping a TapMonitor frees its userspace handles and stops observing (for an interface \
+              in the current netns it also detaches; a netns-attached filter goes with the netns teardown)"]
 pub struct TapMonitor {
     ebpf: Ebpf,
 }
 
 impl TapMonitor {
-    /// Load the object and attach both classifiers to `interface`, first adding a **clsact** qdisc
-    /// (which gives the device its `tc` ingress and egress hooks). From here every IPv4 frame crossing
-    /// the tap is counted against its flow until this is dropped.
+    /// Attach both classifiers to `interface` **in the current network namespace**, adding a clsact
+    /// qdisc first (which gives the device its `tc` ingress and egress hooks). From here every IPv4
+    /// frame crossing that interface is counted against its flow until this is dropped. Use this for an
+    /// interface in your own netns (a test veth, a host device); for a sandbox's tap, which lives in the
+    /// sandbox's netns, use [`attach_in_netns`](Self::attach_in_netns).
     ///
     /// # Errors
     /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps); [`ProbeError::Object`] if the
@@ -416,49 +445,28 @@ impl TapMonitor {
     /// fails (the clsact qdisc needs `CAP_NET_ADMIN`, and `interface` must exist).
     pub fn attach(interface: &str) -> Result<Self, ProbeError> {
         check_support()?;
-        let path = object_path();
-        let bytes = std::fs::read(&path).map_err(|e| {
-            ProbeError::Object(format!(
-                "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
-                path.display()
-            ))
-        })?;
-        let mut ebpf =
-            Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+        let mut ebpf = load_classifiers()?;
+        attach_classifiers(&mut ebpf, interface)?;
+        Ok(Self { ebpf })
+    }
 
-        // clsact is the qdisc that gives a device both a `tc` ingress and egress hook. Idempotent: an
-        // already-present clsact (EEXIST) is fine; any other failure (no CAP_NET_ADMIN, or the interface
-        // is gone) is a typed attach error rather than a panic.
-        if let Err(e) = tc::qdisc_add_clsact(interface) {
-            if e.raw_os_error() != Some(EEXIST) {
-                return Err(ProbeError::Attach(format!(
-                    "add clsact qdisc on {interface}: {e}"
-                )));
-            }
-        }
-
-        for (program, attach_type) in [
-            (CLS_INGRESS, TcAttachType::Ingress),
-            (CLS_EGRESS, TcAttachType::Egress),
-        ] {
-            let cls: &mut SchedClassifier = ebpf
-                .program_mut(program)
-                .ok_or_else(|| {
-                    ProbeError::Load(format!("program `{program}` not found in object"))
-                })?
-                .try_into()
-                .map_err(|e| {
-                    ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
-                })?;
-            cls.load()
-                .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
-            cls.attach(interface, attach_type).map_err(|e| {
-                ProbeError::Attach(format!(
-                    "attach `{program}` to {interface} ({attach_type:?}): {e}"
-                ))
-            })?;
-        }
-
+    /// Bind the monitor to the **specific tap the driver named for one sandbox** (P10.4): that tap lives
+    /// inside the sandbox's own network namespace (decision 017), so this enters that netns by name (via
+    /// its `/run/netns/<netns>` handle), attaches both classifiers to `interface` there, and returns the
+    /// calling thread to the caller's netns. Hand it a sandbox's netns name and tap name (typically
+    /// `"fc0"`) and the trace is scoped to exactly that sandbox's traffic. The map is read afterward from
+    /// the caller's netns as usual (map fds are not namespace-scoped).
+    ///
+    /// # Errors
+    /// As [`attach`](Self::attach), plus [`ProbeError::Attach`] if the netns handle can't be opened or
+    /// entered (the netns must exist and `setns` needs `CAP_SYS_ADMIN`/root).
+    pub fn attach_in_netns(netns: &str, interface: &str) -> Result<Self, ProbeError> {
+        check_support()?;
+        // Load + verify the programs in the caller's netns (creating maps and loading programs is not
+        // namespace-scoped); only the `tc` attach must run inside the sandbox's netns.
+        let mut ebpf = load_classifiers()?;
+        let handle = Path::new(NETNS_DIR).join(netns);
+        with_netns(&handle, || attach_classifiers(&mut ebpf, interface))?;
         Ok(Self { ebpf })
     }
 
@@ -470,6 +478,17 @@ impl TapMonitor {
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
     pub fn flows(&self) -> Result<Vec<(FlowKey, FlowCounts)>, ProbeError> {
+        let mut out = Vec::new();
+        self.for_each_flow(|key, counts| out.push((key, counts)))?;
+        Ok(out)
+    }
+
+    /// Iterate the `FLOWS` map, decoding each raw key/value with the shared `from_bytes` and handing the
+    /// pair to `f`. The single map read [`flows`](Self::flows) and [`totals`](Self::totals) share, so
+    /// neither has to build a `Vec` the other would too: `flows` collects, `totals` folds in place. A
+    /// key or value whose size can't decode is a **hard** [`ProbeError::Map`] (the kernel record drifted
+    /// from [`FlowKey`]/[`FlowCounts`]), never a silent skip that would undercount the rollup.
+    fn for_each_flow(&self, mut f: impl FnMut(FlowKey, FlowCounts)) -> Result<(), ProbeError> {
         let map = self
             .ebpf
             .map(FLOWS_MAP)
@@ -477,16 +496,150 @@ impl TapMonitor {
         let flows: AyaHashMap<_, [u8; FLOW_KEY_SIZE], [u8; FLOW_COUNTS_SIZE]> =
             AyaHashMap::try_from(map)
                 .map_err(|e| ProbeError::Map(format!("open `{FLOWS_MAP}` as a hash map: {e}")))?;
-        let mut out = Vec::new();
         for entry in flows.iter() {
             let (k, v) =
                 entry.map_err(|e| ProbeError::Map(format!("iterate `{FLOWS_MAP}`: {e}")))?;
-            if let (Some(key), Some(counts)) = (FlowKey::from_bytes(&k), FlowCounts::from_bytes(&v))
-            {
-                out.push((key, counts));
-            }
+            let (Some(key), Some(counts)) = (FlowKey::from_bytes(&k), FlowCounts::from_bytes(&v))
+            else {
+                return Err(ProbeError::Map(format!(
+                    "decode a `{FLOWS_MAP}` entry: {}-byte key / {}-byte value don't match the shared record",
+                    k.len(),
+                    v.len()
+                )));
+            };
+            f(key, counts);
         }
-        Ok(out)
+        Ok(())
+    }
+
+    /// The per-VM network **totals** (P10.3): every [`flows`](Self::flows) entry summed into one
+    /// [`NetStats`], the sandbox-level rollup a caller exports. Reads the map once and folds in place
+    /// (no intermediate `Vec`), saturating-adding each flow's per-direction counters.
+    ///
+    /// # Errors
+    /// As [`flows`](Self::flows).
+    pub fn totals(&self) -> Result<NetStats, ProbeError> {
+        let mut stats = NetStats::default();
+        self.for_each_flow(|_, c| {
+            stats.ingress_packets = stats.ingress_packets.saturating_add(c.ingress_packets);
+            stats.ingress_bytes = stats.ingress_bytes.saturating_add(c.ingress_bytes);
+            stats.egress_packets = stats.egress_packets.saturating_add(c.egress_packets);
+            stats.egress_bytes = stats.egress_bytes.saturating_add(c.egress_bytes);
+        })?;
+        Ok(stats)
+    }
+}
+
+/// Read the compiled object and load + verify both `tc` classifier programs (not yet attached to any
+/// interface). Namespace-independent: creating the maps and loading the programs is global, so this
+/// runs in whatever netns the caller is in.
+fn load_classifiers() -> Result<Ebpf, ProbeError> {
+    let path = object_path();
+    let bytes = std::fs::read(&path).map_err(|e| {
+        ProbeError::Object(format!(
+            "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
+            path.display()
+        ))
+    })?;
+    let mut ebpf = Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+    for program in [CLS_INGRESS, CLS_EGRESS] {
+        let cls: &mut SchedClassifier = ebpf
+            .program_mut(program)
+            .ok_or_else(|| ProbeError::Load(format!("program `{program}` not found in object")))?
+            .try_into()
+            .map_err(|e| {
+                ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
+            })?;
+        cls.load()
+            .map_err(|e| ProbeError::Load(format!("verify/load `{program}`: {e}")))?;
+    }
+    Ok(ebpf)
+}
+
+/// Attach the already-loaded classifiers to `interface`'s clsact ingress and egress hooks, adding the
+/// clsact qdisc first. **Namespace-scoped**: the caller must already be in the netns that owns
+/// `interface` (the current netns for [`TapMonitor::attach`], the sandbox's for
+/// [`TapMonitor::attach_in_netns`]).
+fn attach_classifiers(ebpf: &mut Ebpf, interface: &str) -> Result<(), ProbeError> {
+    // clsact gives a device both a `tc` ingress and egress hook. Idempotent: an already-present clsact
+    // (EEXIST) is fine; any other failure (no CAP_NET_ADMIN, or the interface is gone) is a typed error.
+    if let Err(e) = tc::qdisc_add_clsact(interface) {
+        if e.raw_os_error() != Some(EEXIST) {
+            return Err(ProbeError::Attach(format!(
+                "add clsact qdisc on {interface}: {e}"
+            )));
+        }
+    }
+    for (program, attach_type) in [
+        (CLS_INGRESS, TcAttachType::Ingress),
+        (CLS_EGRESS, TcAttachType::Egress),
+    ] {
+        let cls: &mut SchedClassifier = ebpf
+            .program_mut(program)
+            .ok_or_else(|| ProbeError::Load(format!("program `{program}` not found in object")))?
+            .try_into()
+            .map_err(|e| {
+                ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
+            })?;
+        cls.attach(interface, attach_type).map_err(|e| {
+            ProbeError::Attach(format!(
+                "attach `{program}` to {interface} ({attach_type:?}): {e}"
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+/// Run `f` with the calling thread moved into the network namespace at `netns_handle`, then move it
+/// back — so a `tc` attach lands in a sandbox's netns without moving the whole process (only this
+/// thread is affected, briefly). Uses nix's *safe* `setns` wrapper, so the loader stays
+/// `#![forbid(unsafe_code)]`. The origin netns is captured first and **always** restored: on the normal
+/// path explicitly (so a restore failure is surfaced as an error), and on an unwinding panic in `f` by
+/// the [`NetnsGuard`], so no code path can strand the thread in the sandbox's netns.
+fn with_netns<T>(
+    netns_handle: &Path,
+    f: impl FnOnce() -> Result<T, ProbeError>,
+) -> Result<T, ProbeError> {
+    use nix::sched::{setns, CloneFlags};
+    // The *calling thread's* netns, not `/proc/self/ns/net` (which is the thread-group leader's): a
+    // caller may drive the loader off a worker thread, and we must return exactly where we started.
+    let origin = File::open("/proc/thread-self/ns/net")
+        .map_err(|e| ProbeError::Attach(format!("open the calling thread's netns handle: {e}")))?;
+    let target = File::open(netns_handle)
+        .map_err(|e| ProbeError::Attach(format!("open netns {}: {e}", netns_handle.display())))?;
+    setns(&target, CloneFlags::CLONE_NEWNET)
+        .map_err(|e| ProbeError::Attach(format!("enter netns {}: {e}", netns_handle.display())))?;
+
+    // Arm a guard so an unwinding panic in `f` still restores the origin netns (the sandbox's netns is
+    // about to be torn down; a thread stranded there would corrupt every later operation on it). The
+    // normal path disarms the guard and restores explicitly below, so a restore *failure* surfaces as
+    // an error rather than being swallowed on drop.
+    let mut guard = NetnsGuard {
+        origin: Some(origin),
+    };
+    let result = f();
+    // Disarm the guard (so its `Drop` won't restore a second time) and restore explicitly, so a restore
+    // *failure* is surfaced as an error rather than swallowed. `origin` is `Some` until exactly here.
+    if let Some(origin) = guard.origin.take() {
+        setns(&origin, CloneFlags::CLONE_NEWNET)
+            .map_err(|e| ProbeError::Attach(format!("restore the calling thread's netns: {e}")))?;
+    }
+    result
+}
+
+/// Restores a thread's origin netns if [`with_netns`] unwinds through it. Armed for the duration of
+/// `f`; the normal path takes `origin` (disarming it) and restores explicitly, so this fires **only**
+/// on a panic. `Drop` can't propagate, and the thread is already unwinding, so a failed restore here is
+/// best-effort — attempting it is still strictly better than leaving the thread in a doomed netns.
+struct NetnsGuard {
+    origin: Option<File>,
+}
+
+impl Drop for NetnsGuard {
+    fn drop(&mut self) {
+        if let Some(origin) = self.origin.take() {
+            let _ = nix::sched::setns(&origin, nix::sched::CloneFlags::CLONE_NEWNET);
+        }
     }
 }
 
