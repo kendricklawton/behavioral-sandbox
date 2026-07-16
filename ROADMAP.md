@@ -1132,8 +1132,11 @@ The eBPF on-ramp: build, load, and read a map from a trivial program.
       *(Landed: loading + attaching needs only `CAP_BPF` + `CAP_PERFMON` (the two that split out of
       `CAP_SYS_ADMIN` in 5.8), not full root. The loader reads its effective set from
       `/proc/self/status` `CapEff` (no libc, no unsafe) and the tests/demo are capability-aware, so a
-      `setcap cap_bpf,cap_perfmon+ep` binary runs unprivileged. Documented in CONTRIBUTING, `setup`,
-      the demo, and PROBES.md.)*
+      `setcap cap_bpf,cap_perfmon+ep` binary runs unprivileged. The `CapEff` parse + the two-bit check
+      are a pure `parse_cap_eff`/`mask_has_load_caps` pair, unit-tested on the host gate; the
+      end-to-end unprivileged load is verified by the `setcap` run (the privileged CI tests run as
+      root, whose mask has every bit, so they can't prove "not root" by themselves). Documented in
+      CONTRIBUTING, `setup`, the demo, and PROBES.md.)*
 - [x] **P8.9** Support probe: detect BTF (`/sys/kernel/btf/vmlinux`) and the kernel/verifier features
       the probes need **at load**, and fail (or degrade) with a **legible typed error** naming the
       requirement rather than a cryptic verifier reject (the eBPF analogue of P6.9b's

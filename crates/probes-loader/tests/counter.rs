@@ -70,30 +70,74 @@ fn execve_counter_counts_host_execve_events() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn counter_drops_without_pinned_residue() {
-    // P8.4: the loader owns the program/map/link; dropping it must leave no pinned residue in
-    // `/sys/fs/bpf`, and a second load after the drop must still succeed (nothing dangling).
+    // P8.4: the loader owns the program/map/link; dropping it must leave no residue — nothing pinned
+    // into `/sys/fs/bpf`, and no dangling attachment. The real no-dangling-attachment proof is that
+    // the `count_execve` program is *gone from the kernel* after the drop: a leaked link would pin its
+    // program alive (kept enumerable by `loaded_programs`), so the resident count returning to baseline
+    // catches a leaked program *or* a leaked link. (The pin check alone can't: nothing here ever pins,
+    // and a fresh load would succeed even with a leak, since a tracepoint takes many attachments.)
     if let Some(why) = skip_reason() {
         eprintln!("skipping counter_drops_without_pinned_residue: {why}");
         return;
     }
-    let before = bpf_pins();
+    let pins_before = bpf_pins();
+    let resident_before = resident_count_execve();
     {
         let counter = ExecveCounter::load().expect("first load");
         counter.count().expect("read the counter while loaded");
-        // `counter` drops here: aya detaches the program and frees the map, pinning nothing.
+        // While loaded, exactly one more `count_execve` is resident — the strong check's precondition.
+        if let (Some(before), Some(now)) = (resident_before, resident_count_execve()) {
+            assert_eq!(
+                now,
+                before + 1,
+                "one `count_execve` must be resident while loaded (before {before}, now {now})"
+            );
+        }
+        // `counter` drops here: aya detaches the program (dropping the link) and frees the map.
     }
-    let after = bpf_pins();
+    let pins_after = bpf_pins();
     assert_eq!(
-        before, after,
-        "loading and dropping the counter must not pin anything into /sys/fs/bpf (before {before:?}, after {after:?})"
+        pins_before, pins_after,
+        "loading and dropping the counter must not pin anything into /sys/fs/bpf (before {pins_before:?}, after {pins_after:?})"
     );
 
-    // A clean drop leaves no dangling attachment blocking a fresh load.
+    // The no-dangling-attachment proof: the program (and any link that would pin it alive) is gone,
+    // so the resident count is back to baseline. Degrades cleanly where the kernel won't let us
+    // enumerate program info (older kernel / narrower privilege): the pin check still ran.
+    match (resident_before, resident_count_execve()) {
+        (Some(before), Some(after)) => assert_eq!(
+            after, before,
+            "the `count_execve` program must be freed on drop, not left resident (before {before}, after {after})"
+        ),
+        _ => eprintln!(
+            "note: could not enumerate loaded BPF programs here — the no-dangling-attachment check \
+             was skipped; only the no-pin check ran"
+        ),
+    }
+
+    // And a clean drop leaves nothing blocking a fresh load.
     let reloaded = ExecveCounter::load().expect("a second load after drop must succeed");
     assert!(
         reloaded.count().is_ok(),
         "the re-loaded counter must be readable"
     );
+}
+
+/// How many loaded BPF programs are named `count_execve`, or `None` if the kernel won't let us
+/// enumerate program info here (older kernel, or narrower privilege than the load itself needs).
+/// Iterating loaded programs by name is what proves *our* program left the kernel on drop: a leaked
+/// program stays here, and a leaked link keeps its program resident too, so this returning to baseline
+/// is the actual no-dangling-attachment check the pin diff can't make.
+fn resident_count_execve() -> Option<usize> {
+    let mut n = 0usize;
+    for info in aya::programs::loaded_programs() {
+        // A read error (unprivileged/unsupported enumeration, or a program that vanished mid-scan)
+        // means we can't make this a hard assertion here — signal "unknown" rather than false-fail.
+        if info.ok()?.name_as_str() == Some("count_execve") {
+            n += 1;
+        }
+    }
+    Some(n)
 }
 
 /// The sorted top-level entries under `/sys/fs/bpf` (the bpffs pin root). Empty when the fs isn't

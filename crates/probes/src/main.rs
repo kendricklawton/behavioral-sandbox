@@ -43,7 +43,9 @@ static EXECVE_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 /// Per-PID `execve` counts (keyed by tgid). Bounded at [`MAX_PIDS`] entries; a full map just drops
 /// new keys (the global [`EXECVE_COUNT`] is the authoritative total). Demonstrates the hash-map
-/// lookup-or-init access pattern the verifier constrains (P8.6).
+/// lookup-or-init access pattern the verifier constrains (P8.6). Best-effort: the lookup-or-init is
+/// not atomic across CPUs, so two concurrent first-sightings of the same pid can each insert `1` and
+/// lose one increment (a slight undercount) — another reason the per-CPU global is authoritative.
 #[map]
 static EXECVE_BY_PID: HashMap<u32, u64> = HashMap::with_max_entries(MAX_PIDS, 0);
 

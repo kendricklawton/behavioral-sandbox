@@ -316,9 +316,10 @@ fn setup() -> Result<()> {
 /// `-Z build-std` (rustup ships no prebuilt `core` for the BPF target), so this drives its build
 /// directly rather than through the workspace `cargo`.
 ///
-/// Guarded so `cargo xtask` stays runnable everywhere: on a host without `bpf-linker` (or `rustup`),
-/// it prints a note and returns `Ok` instead of failing — the everyday host gate must not require the
-/// eBPF toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); this step is folded
+/// Guarded so `cargo xtask` stays runnable everywhere: on a host missing any of the toolchain
+/// (`bpf-linker`, `rustup`, or the nightly + `rust-src` the `build-std` build needs), it prints a
+/// note and returns `Ok` instead of failing — the everyday host gate must not require the eBPF
+/// toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); this step is folded
 /// into the `ci` gate (P8.7), and `ci-privileged` builds it before the probe tests.
 fn build_probes() -> Result<()> {
     if !in_path("bpf-linker") {
@@ -332,6 +333,18 @@ fn build_probes() -> Result<()> {
         println!(
             "· skipping eBPF object build: rustup not found \
              (crates/probes needs a nightly toolchain with `build-std`)"
+        );
+        return Ok(());
+    }
+    // The build below runs `rustup run nightly cargo build -Z build-std`, which needs the nightly
+    // toolchain *and* its `rust-src` component. A host with `rustup` + `bpf-linker` but no nightly
+    // would otherwise fall through to the build and `bail!`, failing the everyday gate — the exact
+    // thing this guard exists to prevent (`ci` must run everywhere). Skip cleanly instead.
+    if !nightly_ebpf_ready() {
+        println!(
+            "· skipping eBPF object build: nightly toolchain with `rust-src` not installed \
+             (add it: `rustup toolchain install nightly && rustup component add rust-src \
+             --toolchain nightly`; see `cargo xtask setup`)"
         );
         return Ok(());
     }
@@ -354,11 +367,13 @@ fn build_probes() -> Result<()> {
     }
     // P8.5: the object must carry BTF (`bpf-linker --btf`) — the CO-RE portability + BTF map typing
     // that lets aya relocate it against the running kernel. A missing `.BTF` section means the linker
-    // arg regressed to a legacy-only, non-portable object; fail loudly rather than shipping it.
+    // arg regressed to a legacy-only, non-portable object; fail loudly rather than shipping it. The
+    // check walks the ELF section headers for a section named exactly `.BTF` (not a raw byte scan,
+    // which `.BTF.ext` alone or a coincidental byte run could satisfy).
     let obj = dir.join("target/bpfel-unknown-none/release/probes");
     let bytes =
         std::fs::read(&obj).with_context(|| format!("read built object {}", obj.display()))?;
-    if !bytes.windows(4).any(|w| w == b".BTF") {
+    if !elf_has_section(&bytes, ".BTF") {
         bail!(
             "built eBPF object {} carries no .BTF section — is `-C link-arg=--btf` still set in \
              crates/probes/.cargo/config.toml (and `debug` kept in the profile)?",
@@ -367,6 +382,65 @@ fn build_probes() -> Result<()> {
     }
     println!("· eBPF object built (with BTF): {}", obj.display());
     Ok(())
+}
+
+/// Whether the ELF object in `bytes` has a section named exactly `name` (e.g. `.BTF`). A
+/// dependency-free ELF64 little-endian section-header walk: read the section-header table, resolve
+/// each section's name against the section-header string table, and compare. Precise where a raw
+/// byte-substring scan is not — `.BTF.ext` alone or a coincidental byte run won't satisfy it. Returns
+/// `false` on any malformed or non-ELF64-LE buffer, the safe direction for the build guard (a weird
+/// object fails the check rather than passing it).
+fn elf_has_section(bytes: &[u8], name: &str) -> bool {
+    // All reads are bounds- and overflow-checked (`checked_add` on the end offset), so a corrupt
+    // object with an out-of-range or huge offset yields `None` (→ `false`), never an index panic.
+    let u16_at = |o: usize| -> Option<u16> {
+        bytes
+            .get(o..o.checked_add(2)?)
+            .map(|s| u16::from_le_bytes([s[0], s[1]]))
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        bytes
+            .get(o..o.checked_add(4)?)?
+            .try_into()
+            .ok()
+            .map(u32::from_le_bytes)
+    };
+    let u64_at = |o: usize| -> Option<u64> {
+        bytes
+            .get(o..o.checked_add(8)?)?
+            .try_into()
+            .ok()
+            .map(u64::from_le_bytes)
+    };
+    let walk = || -> Option<bool> {
+        // ELF64, little-endian: magic, then EI_CLASS == 2 (64-bit) and EI_DATA == 1 (LSB).
+        if bytes.get(0..4)? != b"\x7fELF" || *bytes.get(4)? != 2 || *bytes.get(5)? != 1 {
+            return Some(false);
+        }
+        let e_shoff = u64_at(0x28)? as usize; // section-header table offset
+        let e_shentsize = u16_at(0x3a)? as usize; // bytes per section header
+        let e_shnum = u16_at(0x3c)? as usize; // section-header count
+        let e_shstrndx = u16_at(0x3e)? as usize; // index of the section-name string table
+        if e_shentsize < 0x40 || e_shnum == 0 || e_shstrndx >= e_shnum {
+            return Some(false);
+        }
+        // The string-table section's data holds every section name (NUL-terminated at sh_name).
+        let strtab_hdr = e_shoff.checked_add(e_shstrndx.checked_mul(e_shentsize)?)?;
+        let str_off = u64_at(strtab_hdr.checked_add(0x18)?)? as usize;
+        let str_size = u64_at(strtab_hdr.checked_add(0x20)?)? as usize;
+        let strtab = bytes.get(str_off..str_off.checked_add(str_size)?)?;
+        for i in 0..e_shnum {
+            let hdr = e_shoff.checked_add(i.checked_mul(e_shentsize)?)?;
+            let sh_name = u32_at(hdr)? as usize; // offset into the string table
+            let rest = strtab.get(sh_name..)?;
+            let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
+            if &rest[..end] == name.as_bytes() {
+                return Some(true);
+            }
+        }
+        Some(false)
+    };
+    walk().unwrap_or(false)
 }
 
 /// Whether the nightly toolchain with the `rust-src` component (needed to build `crates/probes` with
@@ -512,4 +586,64 @@ fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
         bail!("cargo {} failed", args.join(" "));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal valid ELF64-LE object with three sections: the null section, one named `sec1`, and
+    /// `.shstrtab`. Enough to exercise the section-name walk without pulling in an ELF crate.
+    fn tiny_elf(sec1: &str) -> Vec<u8> {
+        // Section-header string table: "\0" + sec1 + "\0" + ".shstrtab" + "\0".
+        let mut strtab = vec![0u8];
+        let sec1_name = strtab.len() as u32;
+        strtab.extend_from_slice(sec1.as_bytes());
+        strtab.push(0);
+        let shstrtab_name = strtab.len() as u32;
+        strtab.extend_from_slice(b".shstrtab");
+        strtab.push(0);
+
+        let e_shoff = 64 + strtab.len();
+        let mut buf = vec![0u8; e_shoff + 3 * 64];
+
+        buf[0..4].copy_from_slice(b"\x7fELF");
+        buf[4] = 2; // ELFCLASS64
+        buf[5] = 1; // ELFDATA2LSB
+        buf[6] = 1; // EV_CURRENT
+        buf[0x10..0x12].copy_from_slice(&1u16.to_le_bytes()); // ET_REL
+        buf[0x12..0x14].copy_from_slice(&247u16.to_le_bytes()); // EM_BPF
+        buf[0x28..0x30].copy_from_slice(&(e_shoff as u64).to_le_bytes()); // e_shoff
+        buf[0x34..0x36].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+        buf[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        buf[0x3c..0x3e].copy_from_slice(&3u16.to_le_bytes()); // e_shnum
+        buf[0x3e..0x40].copy_from_slice(&2u16.to_le_bytes()); // e_shstrndx (the .shstrtab index)
+
+        buf[64..64 + strtab.len()].copy_from_slice(&strtab);
+
+        // Section 1: named `sec1`.
+        let s1 = e_shoff + 64;
+        buf[s1..s1 + 4].copy_from_slice(&sec1_name.to_le_bytes());
+        // Section 2: `.shstrtab`, SHT_STRTAB, pointing at the string-table data above.
+        let s2 = e_shoff + 128;
+        buf[s2..s2 + 4].copy_from_slice(&shstrtab_name.to_le_bytes());
+        buf[s2 + 4..s2 + 8].copy_from_slice(&3u32.to_le_bytes()); // SHT_STRTAB
+        buf[s2 + 0x18..s2 + 0x20].copy_from_slice(&64u64.to_le_bytes()); // sh_offset
+        buf[s2 + 0x20..s2 + 0x28].copy_from_slice(&(strtab.len() as u64).to_le_bytes()); // sh_size
+        buf
+    }
+
+    #[test]
+    fn elf_section_scan_matches_the_exact_name() {
+        assert!(elf_has_section(&tiny_elf(".BTF"), ".BTF"));
+        assert!(elf_has_section(&tiny_elf(".BTF"), ".shstrtab")); // the string table itself is named
+    }
+
+    #[test]
+    fn elf_section_scan_rejects_near_misses_and_junk() {
+        assert!(!elf_has_section(&tiny_elf(".BTF.ext"), ".BTF")); // the substring scan's false positive
+        assert!(!elf_has_section(&tiny_elf(".text"), ".BTF")); // real sections, none named .BTF
+        assert!(!elf_has_section(b"not an elf at all", ".BTF"));
+        assert!(!elf_has_section(&[], ".BTF"));
+    }
 }

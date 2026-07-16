@@ -97,7 +97,12 @@ dangle on a torn-down sandbox's tap.
 Loading and attaching the probes needs **`CAP_BPF`** (load programs/maps, read maps) and
 **`CAP_PERFMON`** (attach a tracepoint via `perf_event_open`) — the two that split out of
 `CAP_SYS_ADMIN` in Linux 5.8. **Not full root:** grant a loader binary just those with
-`setcap cap_bpf,cap_perfmon+ep <binary>`.
+`setcap cap_bpf,cap_perfmon+ep <binary>`. `check_support` names *those two* as the standard
+requirement; an exotic host with only `CAP_BPF` and a permissive `kernel.perf_event_paranoid` may
+attach anyway, but the pre-flight is a conservative advisory, not a sysctl-probing oracle. The
+capability *bit logic* (which bits, correct masking) is unit-tested on the host gate; the end-to-end
+"loads unprivileged with just the two caps" is verified by the `setcap` run above, not by CI (whose
+privileged tests run as root, whose mask has every bit).
 
 `check_support()` is the dependency guard (the eBPF analogue of the driver's Firecracker-version
 probe): before a load it checks kernel BTF and the two capabilities and, if either is missing, returns

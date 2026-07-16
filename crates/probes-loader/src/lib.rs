@@ -1,6 +1,7 @@
 //! `agent-probes-loader` — the userspace side of the eBPF story: load and attach the probes from
-//! `crates/probes` to a *specific* sandbox (its cgroup, its tap device), read their maps, and
-//! stream events into the flight recorder.
+//! `crates/probes`, read their maps, and stream events into the flight recorder. Phase 8 attaches the
+//! one host-global `sys_enter_execve` tracepoint (scoped to nothing); binding a program to a
+//! *specific* sandbox (its cgroup, its tap device) arrives with the per-VM taps in Phase 10.
 //!
 //! **P8.3 — attach + read a map.** [`ExecveCounter`] loads the compiled BPF object, attaches the
 //! `count_execve` tracepoint to `syscalls/sys_enter_execve`, and reads its per-CPU counter map,
@@ -202,21 +203,42 @@ pub fn ebpf_supported() -> bool {
 const CAP_PERFMON: u32 = 38;
 const CAP_BPF: u32 = 39;
 
-/// Whether this process holds the capabilities the probes need (`CAP_BPF` + `CAP_PERFMON`), read from
-/// the effective set in `/proc/self/status` (`CapEff:`, a 64-bit hex mask) — no `libc`, no `unsafe`.
-/// Root's effective set has every bit, so this is `true` for root and for a `setcap cap_bpf,cap_perfmon+ep`
+/// Parse the low 64 bits of the effective-capability mask from `/proc/<pid>/status` text: the hex
+/// value on the `CapEff:` line, or `None` when that line is absent or unparseable. Pure (takes the
+/// text) so the bit logic is unit-testable without a live `/proc` — the same pure-parser pattern the
+/// driver uses for `parse_nofile_soft`.
+///
+/// Only the trailing 16 hex digits (bits 0-63) are read: `CAP_BPF` (39) and `CAP_PERFMON` (38) both
+/// live there, so a hypothetically wider future field can't overflow the parse into a false "no caps."
+fn parse_cap_eff(status: &str) -> Option<u64> {
+    let hex = status
+        .lines()
+        .find_map(|l| l.strip_prefix("CapEff:"))?
+        .trim();
+    if hex.is_empty() || !hex.is_ascii() {
+        return None;
+    }
+    let low64 = &hex[hex.len().saturating_sub(16)..];
+    u64::from_str_radix(low64, 16).ok()
+}
+
+/// Whether an effective-capability `mask` holds both caps the probes need (`CAP_BPF` + `CAP_PERFMON`).
+/// Root's mask has every bit, so this is `true` for root and for a `setcap cap_bpf,cap_perfmon+ep`
 /// binary alike: the point of P8.8 is that the second, unprivileged path works.
-fn have_load_caps() -> bool {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return false;
-    };
-    let Some(hex) = status.lines().find_map(|l| l.strip_prefix("CapEff:")) else {
-        return false;
-    };
-    let Ok(mask) = u64::from_str_radix(hex.trim(), 16) else {
-        return false;
-    };
+fn mask_has_load_caps(mask: u64) -> bool {
     (mask >> CAP_BPF) & 1 == 1 && (mask >> CAP_PERFMON) & 1 == 1
+}
+
+/// Whether this process holds the capabilities the probes need, read from the effective set in
+/// `/proc/self/status` (`CapEff:`, a 64-bit hex mask) — no `libc`, no `unsafe`. The standard
+/// requirement is the two caps; an exotic host with only `CAP_BPF` and a permissive
+/// `kernel.perf_event_paranoid` may also manage the tracepoint attach, but this pre-flight names the
+/// standard path rather than probing sysctls (a conservative advisory, not the kernel's final say).
+fn have_load_caps() -> bool {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| parse_cap_eff(&s))
+        .is_some_and(mask_has_load_caps)
 }
 
 /// The eBPF analogue of the driver's Firecracker-version guard (P6.9b): check the host can actually
@@ -225,9 +247,17 @@ fn have_load_caps() -> bool {
 /// deep in the load (P8.9). [`ExecveCounter::load`] runs this first; the CLI/`setup` can call it to
 /// report eBPF readiness before attempting anything.
 ///
+/// The BTF check is a deliberate engine *baseline*, not just this program's need: the shipped object
+/// is built CO-RE (`--btf`) and Phase 9 will read kernel struct fields, which does need vmlinux BTF,
+/// so the engine requires a BTF-enabled kernel uniformly (the modern-distro default) rather than
+/// per-program. A kernel lacking it that could still load *this* relocation-free P8 program is refused
+/// on purpose, so the support story stays one line, not a per-probe matrix.
+///
 /// # Errors
 /// [`ProbeError::Unsupported`] naming the first missing prerequisite (BTF, then capabilities).
 pub fn check_support() -> Result<(), ProbeError> {
+    // Deliberate baseline (see the fn doc): require vmlinux BTF uniformly for the CO-RE object, even
+    // though this relocation-free P8 program would load without it.
     if !ebpf_supported() {
         return Err(ProbeError::Unsupported(
             "kernel BTF (/sys/kernel/btf/vmlinux) is absent — CO-RE eBPF needs a BTF-enabled kernel \
@@ -243,4 +273,56 @@ pub fn check_support() -> Result<(), ProbeError> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cap_eff_parses_the_effective_line_only() {
+        // A real `/proc/self/status` has several `Cap*` rows; only `CapEff:` is the effective set.
+        let status = "Name:\tthing\nCapInh:\t0000000000000000\nCapPrm:\tffffffffffffffff\n\
+                      CapEff:\t000001ffffffffff\nCapBnd:\t000001ffffffffff\n";
+        assert_eq!(parse_cap_eff(status), Some(0x0000_01ff_ffff_ffff));
+    }
+
+    #[test]
+    fn cap_eff_absent_or_malformed_is_none() {
+        assert_eq!(parse_cap_eff("CapPrm:\t00\n"), None); // no CapEff line at all
+        assert_eq!(parse_cap_eff("CapEff:\tnothex\n"), None); // present but unparseable
+        assert_eq!(parse_cap_eff("CapEff:\t\n"), None); // present but empty
+        assert_eq!(parse_cap_eff(""), None);
+    }
+
+    #[test]
+    fn cap_eff_reads_low_64_bits_of_a_hypothetically_wider_field() {
+        // A field wider than 64 bits (>16 hex digits) must not overflow the parse to `None` and read
+        // as "no caps": we take the low 64 bits, where CAP_BPF/CAP_PERFMON live.
+        let both = (1u64 << CAP_BPF) | (1u64 << CAP_PERFMON);
+        let wide = format!("CapEff:\tdeadbeef{both:016x}\n"); // 8 extra high digits
+        assert_eq!(parse_cap_eff(&wide), Some(both));
+        assert!(mask_has_load_caps(
+            parse_cap_eff(&wide).expect("parse the wide CapEff line")
+        ));
+    }
+
+    #[test]
+    fn load_caps_need_both_bpf_and_perfmon() {
+        let both = (1u64 << CAP_BPF) | (1u64 << CAP_PERFMON);
+        assert!(mask_has_load_caps(u64::MAX)); // root: every bit
+        assert!(mask_has_load_caps(both)); // exactly the two (the setcap path)
+        assert!(!mask_has_load_caps(1u64 << CAP_BPF)); // CAP_PERFMON missing
+        assert!(!mask_has_load_caps(1u64 << CAP_PERFMON)); // CAP_BPF missing
+        assert!(!mask_has_load_caps(0)); // none
+    }
+
+    #[test]
+    fn cap_logic_round_trips_through_the_status_line() {
+        let both = (1u64 << CAP_BPF) | (1u64 << CAP_PERFMON);
+        let status = format!("CapEff:\t{both:016x}\n");
+        assert!(mask_has_load_caps(
+            parse_cap_eff(&status).expect("parse the crafted CapEff line")
+        ));
+    }
 }
