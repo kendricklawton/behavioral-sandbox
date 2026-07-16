@@ -64,8 +64,10 @@ not agent bookkeeping. State's lifetime is the VM's; `shutdown` discards it with
 
 ### Budgets: quantities on one struct, failing open (013)
 
-`Limits` is the per-sandbox resource policy: `vcpus`, `mem_mib`, `wall` (one wall for the whole
-run — the boot deadline and each exec's budget), and `output_cap`. Quantities only, never
+`Limits` is the per-sandbox resource policy: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`),
+`wall` (one wall for the whole run — the boot deadline and each exec's budget), and `output_cap`.
+The two quantity fields are typed nonzero because zero is not a small budget but an unbootable
+guest — the illegal value can't be constructed. Quantities only, never
 capabilities: network egress is a separate deny-by-default concern (008), enforced in a different
 layer. The cgroup caps **fail open** — a host without delegated controllers boots uncapped, with a
 warning — because caps are fairness/DoS hygiene; the **isolation walls never degrade**: a jail that

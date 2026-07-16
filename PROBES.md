@@ -127,6 +127,43 @@ reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host re
 watch-sandbox` boots a real networked sandbox and prints the per-VM flows its guest actually generated
 — Phase 10's live view.
 
+## Egress enforcement in the kernel (Phase 11)
+
+Phase 10 observes; Phase 11 turns the same tap hook into **control**. The ingress classifier (a frame
+the guest *sends*) now also consults a per-sandbox allow-list — the `POLICY` map of `PolicyRule`s
+(destination CIDR + optional port/proto), single-sourced in `crates/probes-common` next to the flow
+record. When the `ENFORCE` toggle is on, a guest-sent IPv4 packet whose destination matches no active
+rule returns `TC_ACT_SHOT` (dropped at the tap, never leaves the host); a match returns `TC_ACT_OK`.
+The per-rule test (`rule_matches`, a masked-CIDR + wildcard-port/proto compare) is shared by the kernel
+scan and a host-unit-tested `egress_allowed`, so the verdict can't drift. The program scans the fixed
+`MAX_POLICY_RULES` array in a **bounded loop** (the verifier's compile-time cap), and the mask is built
+so the shift operand is always `< 32` (an out-of-range shift is a verifier reject).
+
+Two deliberate carve-outs keep deny-by-default from being deny-*everything*: **ARP** is always allowed
+(the guest must resolve its on-link gateway `10.200.0.1` before it can reach any endpoint), and the
+**egress hook** (a reply arriving *to* the guest) always accepts, since egress policy governs what the
+guest sends and replies to allowed traffic must return. Enforcement is **opt-in and per VM**: each
+`TapMonitor` owns its own maps, and a monitor that never sets a policy stays observe-only (both hooks
+accept, exactly the Phase 10 behavior).
+
+The userspace schema is `EgressPolicy` — an allow-list built from friendly `Ipv4Addr` CIDRs and ports,
+lowered to the `PolicyRule`s the map holds. Its **deny-by-default** is the safe default: the empty
+policy (`EgressPolicy::deny_all()`, the `Default`) allows nothing, so a sandbox launched with no explicit
+allowance reaches nothing — the eBPF, host-observed complement to the driver's no-route-to-the-world
+deny-by-default (decision 008). `TapMonitor::set_egress_policy` applies a policy to an already-attached
+monitor; `TapMonitor::enforce_in_netns` applies it **at launch**, arming the maps *before* the tc
+programs go live on the tap so there is no window where the tap is up but un-policed (the first guest
+packet is already policed). Rules go in as raw bytes (`PolicyRule::to_bytes`, so the loader needs no
+`unsafe` `aya::Pod` binding); `clear_egress_policy` disarms.
+
+Every dropped packet is **recorded** before the drop: the classifier counts it against its destination
+in a `DENIALS` map, which `TapMonitor::denials()` reads back — the audit trail of which endpoints a
+sandbox was blocked from (P11.5), which Phase 13 folds into the per-run record. The whole mechanism (map,
+schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is decision 025; `net_enforce.rs`
+(ignored/privileged) proves a guest reaches an allow-listed endpoint and is blocked from everything else
+(P11.7); and `cargo xtask enforce-sandbox` is the live exit-gate demo. Folding attach-and-enforce into
+`Sandbox::open` at launch is Phase 13's convergence.
+
 ## The hardware-isolation consequence (the honest limit)
 
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so

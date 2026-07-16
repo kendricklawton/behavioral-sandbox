@@ -83,7 +83,7 @@ fn boots_under_the_jailer() {
     let mut cfg = config();
     cfg.jail = Some(Jail::default());
     let marker = cfg.userspace_marker.clone();
-    let (vcpus, mem_mib) = (cfg.vcpus, cfg.mem_mib);
+    let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
 
     let vm = Vm::boot(cfg).expect("microVM should boot to userspace under the jailer");
     assert!(

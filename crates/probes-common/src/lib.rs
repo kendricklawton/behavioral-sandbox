@@ -200,10 +200,47 @@ pub const ETH_HLEN: usize = 14;
 pub const ETHERTYPE_OFFSET: usize = 12;
 /// EtherType for IPv4.
 pub const ETH_P_IP: u16 = 0x0800;
+/// EtherType for ARP. Egress enforcement lets ARP through even under deny-by-default: the guest must
+/// resolve its on-link gateway (`10.200.0.1`, decision 017) before it can reach *any* allowed endpoint.
+pub const ETH_P_ARP: u16 = 0x0806;
+/// An L4 protocol an egress rule (or a flow) is matched on — the typed face of the raw IP protocol
+/// number the wire carries. A caller writes `Protocol::Udp`, never `17`. Only the two protocols the
+/// parser reads ports for; "any protocol" is [`None`], not a variant (see [`PolicyRule`]). `#[repr(u8)]`
+/// with the on-wire IP protocol number as the discriminant, so [`as_u8`](Self::as_u8) is the value the
+/// kernel and the map already use.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Protocol {
+    /// TCP: its L4 header starts with a 16-bit source then destination port.
+    Tcp = 6,
+    /// UDP: same leading source/destination port layout as TCP.
+    Udp = 17,
+}
+
+impl Protocol {
+    /// The on-wire IP protocol number (`6`/`17`) — the byte the kernel matches and the map stores.
+    #[must_use]
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// The typed protocol for an IP protocol number, or `None` for one this engine doesn't parse ports
+    /// for (the "any / other protocol" case a rule expresses as a `0` wire value).
+    #[must_use]
+    pub fn from_u8(n: u8) -> Option<Self> {
+        match n {
+            IPPROTO_TCP => Some(Self::Tcp),
+            IPPROTO_UDP => Some(Self::Udp),
+            _ => None,
+        }
+    }
+}
+
 /// IP protocol number for TCP (its L4 header starts with a 16-bit source then destination port).
-pub const IPPROTO_TCP: u8 = 6;
+/// Single-sourced from [`Protocol::Tcp`] so the constant and the enum can't disagree.
+pub const IPPROTO_TCP: u8 = Protocol::Tcp as u8;
 /// IP protocol number for UDP (same leading source/destination port layout as TCP).
-pub const IPPROTO_UDP: u8 = 17;
+pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 
 /// One **directional** network flow's identity: the IPv4 5-tuple, in host byte order (so a consumer
 /// formats `src_addr` straight to dotted-quad). `#[repr(C)]` and padding-free — the trailing `_pad` is
@@ -347,6 +384,119 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     Some(FlowKey::new(src, dst, src_port, dst_port, proto))
 }
 
+// ---------------------------------------------------------------------------
+// Egress policy (P11.1/P11.2): the allow-list the tc program on a VM's tap consults to drop or accept
+// a guest-sent packet. Single-sourced here so the in-kernel matcher and the host-tested one can't drift.
+// ---------------------------------------------------------------------------
+
+/// How many egress allow-rules a sandbox's policy holds — a fixed bound, because the tc program scans
+/// the whole array in a **bounded loop** (the verifier needs a compile-time cap) and BPF maps are sized
+/// at load. Comfortably covers a per-sandbox allow-list of a handful of endpoints.
+pub const MAX_POLICY_RULES: usize = 16;
+
+/// One entry in a sandbox's egress allow-list (P11.1): a destination **CIDR** plus optional port and
+/// protocol. A guest-sent IPv4 packet is allowed if its destination matches **any** `active` rule (see
+/// [`rule_matches`] / [`egress_allowed`]); with no rule matching, deny-by-default drops it. `#[repr(C)]`
+/// and padding-free (an explicit zeroed `_pad`) so it is a stable 12-byte map value the loader writes
+/// and the kernel reads without either side guessing the layout.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PolicyRule {
+    /// Allowed destination network, **host byte order** (compared masked to `prefix_len`).
+    pub addr: u32,
+    /// Allowed destination port, or `0` for "any port".
+    pub port: u16,
+    /// Prefix length in bits, `0..=32`; `0` matches any address (a `0.0.0.0/0` allow-all).
+    pub prefix_len: u8,
+    /// IP protocol to match ([`IPPROTO_TCP`] / [`IPPROTO_UDP`]), or `0` for "any protocol".
+    pub proto: u8,
+    /// `1` if this slot holds a real rule, `0` if it is empty. Explicit because the policy is a
+    /// fixed-size array: an all-zero (empty) slot must **not** read as an allow-all `0.0.0.0/0` rule.
+    pub active: u8,
+    /// Zeroed padding to a stable 12-byte record (see the type doc).
+    pub _pad: [u8; 3],
+}
+
+/// The on-wire size of a [`PolicyRule`] (the map value length the loader writes).
+pub const POLICY_RULE_SIZE: usize = core::mem::size_of::<PolicyRule>();
+
+impl PolicyRule {
+    /// Build an **active** allow-rule for `addr/prefix_len`, optional `port` (`0` = any) and `proto`
+    /// (`0` = any), zeroing the padding so it is a byte-stable map value.
+    #[must_use]
+    pub fn allow(addr: u32, prefix_len: u8, port: u16, proto: u8) -> Self {
+        Self {
+            addr,
+            port,
+            prefix_len,
+            proto,
+            active: 1,
+            _pad: [0; 3],
+        }
+    }
+
+    /// Serialize to the map value's raw native bytes, so the loader can write the policy without an
+    /// `unsafe` [`aya::Pod`](https://docs.rs/aya) binding (the write-side twin of [`FlowKey::from_bytes`]).
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; POLICY_RULE_SIZE] {
+        let mut b = [0u8; POLICY_RULE_SIZE];
+        b[0..4].copy_from_slice(&self.addr.to_ne_bytes());
+        b[4..6].copy_from_slice(&self.port.to_ne_bytes());
+        b[6] = self.prefix_len;
+        b[7] = self.proto;
+        b[8] = self.active;
+        b
+    }
+
+    /// Reconstruct a rule from a map value's raw bytes, or `None` if the slice is too short — the
+    /// read-side twin of [`to_bytes`](Self::to_bytes), defined next to the fields so it can't drift.
+    #[must_use]
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < POLICY_RULE_SIZE {
+            return None;
+        }
+        Some(Self {
+            addr: u32::from_ne_bytes(b.get(0..4)?.try_into().ok()?),
+            port: u16::from_ne_bytes(b.get(4..6)?.try_into().ok()?),
+            prefix_len: *b.get(6)?,
+            proto: *b.get(7)?,
+            active: *b.get(8)?,
+            _pad: [0; 3],
+        })
+    }
+}
+
+/// Whether one [`PolicyRule`] admits the destination `(dst_addr, dst_port, proto)` (all host byte
+/// order). A rule matches when it is `active`, its CIDR contains `dst_addr`, and its port and protocol
+/// match (a `0` port or proto is a wildcard). Single-sourced: the tc program in `crates/probes` calls
+/// this per rule, and [`egress_allowed`] loops it, so kernel and host can't disagree on the verdict.
+///
+/// The mask is built so the shift operand is always `< 32` (an out-of-range shift is UB in the kernel
+/// and rejected by the verifier): `prefix_len == 0` yields an all-zero mask (match any), `32` an
+/// all-ones mask, and an out-of-range `prefix_len` is treated as no match.
+#[must_use]
+pub fn rule_matches(rule: &PolicyRule, dst_addr: u32, dst_port: u16, proto: u8) -> bool {
+    if rule.active == 0 || rule.prefix_len > 32 {
+        return false;
+    }
+    let shift = 32u32 - u32::from(rule.prefix_len); // 0..=32, since prefix_len is 0..=32 here
+    let mask = if shift >= 32 { 0 } else { u32::MAX << shift };
+    (dst_addr & mask) == (rule.addr & mask)
+        && (rule.port == 0 || rule.port == dst_port)
+        && (rule.proto == 0 || rule.proto == proto)
+}
+
+/// Whether a sandbox's egress allow-list `rules` admits the destination `(dst_addr, dst_port, proto)`:
+/// **any** active rule matching means allow, none matching means deny (P11.2's deny-by-default). The
+/// host-side convenience over [`rule_matches`]; the tc program applies the same any-match logic reading
+/// its policy map. An empty allow-list allows nothing.
+#[must_use]
+pub fn egress_allowed(rules: &[PolicyRule], dst_addr: u32, dst_port: u16, proto: u8) -> bool {
+    rules
+        .iter()
+        .any(|r| rule_matches(r, dst_addr, dst_port, proto))
+}
+
 #[cfg(test)]
 mod flow_tests {
     use super::*;
@@ -438,6 +588,94 @@ mod flow_tests {
         b[24..32].copy_from_slice(&c.egress_bytes.to_ne_bytes());
         assert_eq!(FlowCounts::from_bytes(&b), Some(c));
         assert!(FlowCounts::from_bytes(&b[..31]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+
+    /// A dotted-quad as the host-order `u32` the parser and policy use.
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> u32 {
+        u32::from_be_bytes([a, b, c, d])
+    }
+
+    #[test]
+    fn rule_layout_is_padding_free_and_known_size() {
+        assert_eq!(POLICY_RULE_SIZE, 12);
+        // An empty (all-zero) slot must NOT admit anything: `active == 0` short-circuits, so a fixed
+        // array of zeroed rules is deny-all, never an accidental `0.0.0.0/0` allow-all.
+        let empty = PolicyRule::default();
+        assert_eq!(empty.active, 0);
+        assert!(!rule_matches(&empty, ip(8, 8, 8, 8), 53, IPPROTO_UDP));
+    }
+
+    #[test]
+    fn host_only_prefix_matches_exactly_one_address() {
+        // Allow only 10.200.0.1:9999/udp (the netns host end), /32.
+        let rule = PolicyRule::allow(ip(10, 200, 0, 1), 32, 9999, IPPROTO_UDP);
+        assert!(rule_matches(&rule, ip(10, 200, 0, 1), 9999, IPPROTO_UDP));
+        assert!(!rule_matches(&rule, ip(10, 200, 0, 2), 9999, IPPROTO_UDP)); // other host
+        assert!(!rule_matches(&rule, ip(10, 200, 0, 1), 9998, IPPROTO_UDP)); // other port
+        assert!(!rule_matches(&rule, ip(10, 200, 0, 1), 9999, IPPROTO_TCP)); // other proto
+    }
+
+    #[test]
+    fn cidr_and_wildcards_match_ranges() {
+        // A /24 with wildcard port and proto (0 = any) admits the whole subnet on any port/proto.
+        let subnet = PolicyRule::allow(ip(93, 184, 216, 0), 24, 0, 0);
+        assert!(rule_matches(
+            &subnet,
+            ip(93, 184, 216, 34),
+            443,
+            IPPROTO_TCP
+        ));
+        assert!(rule_matches(&subnet, ip(93, 184, 216, 1), 80, IPPROTO_TCP));
+        assert!(!rule_matches(
+            &subnet,
+            ip(93, 184, 217, 1),
+            443,
+            IPPROTO_TCP
+        )); // outside /24
+            // prefix_len 0 is an explicit allow-all address (still gated by port/proto if set).
+        let any = PolicyRule::allow(0, 0, 443, IPPROTO_TCP);
+        assert!(rule_matches(&any, ip(1, 2, 3, 4), 443, IPPROTO_TCP));
+        assert!(!rule_matches(&any, ip(1, 2, 3, 4), 80, IPPROTO_TCP));
+    }
+
+    #[test]
+    fn out_of_range_prefix_never_matches() {
+        // A malformed rule (prefix_len > 32, e.g. a garbled map write) is treated as no match, never a
+        // shift-overflow or an accidental allow.
+        let bad = PolicyRule {
+            prefix_len: 40,
+            ..PolicyRule::allow(ip(10, 0, 0, 0), 8, 0, 0)
+        };
+        assert!(!rule_matches(&bad, ip(10, 0, 0, 1), 443, IPPROTO_TCP));
+    }
+
+    #[test]
+    fn egress_allowed_is_any_match_and_deny_by_default() {
+        let rules = [
+            PolicyRule::allow(ip(10, 200, 0, 1), 32, 9999, IPPROTO_UDP),
+            PolicyRule::allow(ip(93, 184, 216, 0), 24, 443, IPPROTO_TCP),
+        ];
+        assert!(egress_allowed(&rules, ip(10, 200, 0, 1), 9999, IPPROTO_UDP));
+        assert!(egress_allowed(
+            &rules,
+            ip(93, 184, 216, 34),
+            443,
+            IPPROTO_TCP
+        ));
+        assert!(!egress_allowed(&rules, ip(8, 8, 8, 8), 53, IPPROTO_UDP)); // matches nothing
+        assert!(!egress_allowed(&[], ip(10, 200, 0, 1), 9999, IPPROTO_UDP)); // empty = deny-all
+    }
+
+    #[test]
+    fn rule_bytes_round_trip() {
+        let rule = PolicyRule::allow(ip(93, 184, 216, 0), 24, 443, IPPROTO_TCP);
+        assert_eq!(PolicyRule::from_bytes(&rule.to_bytes()), Some(rule));
+        assert!(PolicyRule::from_bytes(&rule.to_bytes()[..POLICY_RULE_SIZE - 1]).is_none());
     }
 }
 

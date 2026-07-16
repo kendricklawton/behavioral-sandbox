@@ -20,6 +20,9 @@
 //!   cgroup-attributed host syscall footprint. Needs KVM + the agent rootfs + `CAP_BPF` + the object.
 //! - **`watch-sandbox`** — the Phase 10 exit-gate demo: boot a real networked sandbox and watch its
 //!   per-VM network flows on the tap. Needs KVM + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
+//! - **`enforce-sandbox`** — the Phase 11 exit-gate demo: boot a real networked sandbox, arm a
+//!   deny-by-default egress policy allowing one endpoint, and show the allow-listed traffic passing while
+//!   everything else is dropped at the tap and logged. Same needs as `watch-sandbox`.
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch); the
@@ -128,9 +131,14 @@ enum Cmd {
     /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + `cargo xtask build-probes`.
     WatchSandbox {
         /// How many guest-traffic bursts to send, watching the per-VM counters climb each one.
-        #[arg(long, default_value_t = 3)]
+        /// At least 1, enforced at parse (a zero-round watch would prove nothing).
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
         rounds: u64,
     },
+    /// The Phase 11 exit-gate demo: boot a real networked sandbox, arm a deny-by-default egress policy
+    /// allowing one endpoint, and show the allow-listed traffic passing while everything else is dropped
+    /// at the tap and recorded. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
+    EnforceSandbox,
 }
 
 fn main() -> Result<()> {
@@ -151,6 +159,7 @@ fn main() -> Result<()> {
         Cmd::BenchTrace { runs } => bench::bench_trace(runs),
         Cmd::TraceSandbox { seconds } => demo::trace_sandbox(seconds),
         Cmd::WatchSandbox { rounds } => demo::watch_sandbox(rounds),
+        Cmd::EnforceSandbox => demo::enforce_sandbox(),
     }
 }
 

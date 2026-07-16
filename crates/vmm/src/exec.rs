@@ -34,8 +34,8 @@ pub(crate) const MAX_EXEC_OUTPUT: usize = 16 << 20; // 16 MiB
 /// frames can't spin the collect loop or grow the artifact list without advancing the cap.
 const FRAME_FLOOR: usize = 64;
 
-/// Default wall-clock budget for one command — the [`Limits::exec_wall`](crate::Limits::exec_wall)
-/// default. Sent to the guest agent, which kills the command past it (and clamps any request to its
+/// Default wall-clock budget for one command — the [`Limits::wall`](crate::Limits::wall)
+/// default (folded into [`BootConfig::exec_wall`](crate::BootConfig::exec_wall)). Sent to the guest agent, which kills the command past it (and clamps any request to its
 /// own 1 h ceiling). The knob is per-sandbox (`Limits` → `BootConfig` → `RunningVm`), and both the
 /// socket idle timeout *and* the host give-up deadline are derived from the *configured* value —
 /// `budget + EXEC_KILL_SLACK`, see `RunningVm::exec_with_files` — never from this const, so a raised

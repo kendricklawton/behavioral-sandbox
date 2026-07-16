@@ -13,6 +13,7 @@
 //! piped stdout and the console still reaches [`Console`].
 
 use std::net::Ipv4Addr;
+use std::num::{NonZeroU32, NonZeroU8};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -90,10 +91,11 @@ pub struct BootConfig {
     /// The base rootfs. A read-write boot runs against a fresh per-VM copy; a
     /// [`read_only_root`](BootConfig::read_only_root) boot shares it directly (see [`Vm::boot`]).
     pub rootfs: PathBuf,
-    /// Guest vCPUs.
-    pub vcpus: u32,
-    /// Guest memory, MiB.
-    pub mem_mib: u32,
+    /// Guest vCPUs. Typed [`NonZeroU8`] like [`Limits::vcpus`], so a zero-vCPU boot can't be
+    /// configured.
+    pub vcpus: NonZeroU8,
+    /// Guest memory, MiB. Typed [`NonZeroU32`] like [`Limits::mem_mib`].
+    pub mem_mib: NonZeroU32,
     /// The guest kernel command line.
     pub boot_args: String,
     /// Console substring that signals userspace was reached.
@@ -748,13 +750,13 @@ mod tests {
     #[test]
     fn with_limits_folds_budget() {
         let cfg = BootConfig::from_env().with_limits(Limits {
-            vcpus: 4,
-            mem_mib: 1024,
+            vcpus: NonZeroU8::new(4).unwrap(),
+            mem_mib: NonZeroU32::new(1024).unwrap(),
             wall: Duration::from_secs(60),
             output_cap: 4096,
         });
-        assert_eq!(cfg.vcpus, 4);
-        assert_eq!(cfg.mem_mib, 1024);
+        assert_eq!(cfg.vcpus.get(), 4);
+        assert_eq!(cfg.mem_mib.get(), 1024);
         // One wall for the whole run (decision 013): the fold sets the boot deadline *and* the
         // per-exec budget from it; the output cap rides alongside.
         assert_eq!(cfg.boot_timeout, Duration::from_secs(60));

@@ -69,6 +69,24 @@ pub(crate) struct Spawned {
     lifetime: VmLifetime,
 }
 
+/// Whether a `PUT /drives/{id}` attaches the boot disk or a data device — one half of the typed
+/// pair `put_drive` takes in place of Firecracker's two positional booleans (`is_root_device`,
+/// `is_read_only`), whose bare `true`/`false` call sites were silently swappable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DriveKind {
+    Root,
+    Data,
+}
+
+/// Whether the guest may write the attached device — the other half of the [`DriveKind`] pair.
+/// `ReadOnly` is what makes the bulk-input device provably immutable (Firecracker opens it
+/// `O_RDONLY`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DriveAccess {
+    ReadOnly,
+    ReadWrite,
+}
+
 /// The common product of a jailed spawn — everything [`launch_jailed`](Spawned::launch_jailed) and
 /// [`launch_jailed_for_restore`](Spawned::launch_jailed_for_restore) build a [`Spawned`] from
 /// identically. Each caller adds only the values the two paths differ in (rootfs, `restored`, the
@@ -686,13 +704,15 @@ impl Spawned {
 
     /// `PUT /drives/{id}` — attach a virtio-block device, deriving the API path from `id` so the URL
     /// and the body's `drive_id` are the same token and can't drift apart. `still_before` first, so a
-    /// boot already past its deadline fails fast with this drive named.
+    /// boot already past its deadline fails fast with this drive named. Takes the typed
+    /// [`DriveKind`]/[`DriveAccess`] pair rather than two bare `bool`s a call site could silently
+    /// swap; the booleans reappear only in the wire [`Drive`] body, whose serde field names pin them.
     fn put_drive(
         &self,
         id: &str,
         path_on_host: &str,
-        is_root_device: bool,
-        is_read_only: bool,
+        kind: DriveKind,
+        access: DriveAccess,
         deadline: Instant,
     ) -> Result<(), VmmError> {
         still_before(deadline, &format!("PUT /drives/{id}"))?;
@@ -701,8 +721,8 @@ impl Spawned {
             &Drive {
                 drive_id: id,
                 path_on_host,
-                is_root_device,
-                is_read_only,
+                is_root_device: kind == DriveKind::Root,
+                is_read_only: access == DriveAccess::ReadOnly,
             },
         )
     }
@@ -813,7 +833,7 @@ impl Spawned {
             format!(
                 "{} init=/sbin/overlay-init overlay_size={}M",
                 config.boot_args,
-                config.mem_mib / 2
+                config.mem_mib.get() / 2
             )
         } else {
             config.boot_args.clone()
@@ -836,7 +856,12 @@ impl Spawned {
                 boot_args: &boot_args,
             },
         )?;
-        self.put_drive("rootfs", rootfs, true, config.read_only_root, deadline)?;
+        let root_access = if config.read_only_root {
+            DriveAccess::ReadOnly
+        } else {
+            DriveAccess::ReadWrite
+        };
+        self.put_drive("rootfs", rootfs, DriveKind::Root, root_access, deadline)?;
         // Bulk read-only input (P3.4): attach the built image as `/dev/vdb`. `is_read_only` is what
         // makes the input provably immutable (Firecracker opens it `O_RDONLY`) and sidesteps the
         // read-back-a-dirty-ext4 hazard that a writable device would carry into P3.5. Jailed, the
@@ -848,7 +873,13 @@ impl Spawned {
             } else {
                 path_str(image)?.to_string()
             };
-            self.put_drive("input", &input, false, true, deadline)?;
+            self.put_drive(
+                "input",
+                &input,
+                DriveKind::Data,
+                DriveAccess::ReadOnly,
+                deadline,
+            )?;
         }
         // Bulk writable output (P3.5): attach the blank image read-write. The guest mounts it by
         // label (`agent-output`), so the `/dev/vdX` letter this lands on doesn't matter — a boot may
@@ -861,14 +892,20 @@ impl Spawned {
             } else {
                 path_str(&out.image)?.to_string()
             };
-            self.put_drive("output", &output, false, false, deadline)?;
+            self.put_drive(
+                "output",
+                &output,
+                DriveKind::Data,
+                DriveAccess::ReadWrite,
+                deadline,
+            )?;
         }
         still_before(deadline, "PUT /machine-config")?;
         self.api.put(
             "/machine-config",
             &MachineConfig {
-                vcpu_count: config.vcpus,
-                mem_size_mib: config.mem_mib,
+                vcpu_count: u32::from(config.vcpus.get()),
+                mem_size_mib: config.mem_mib.get(),
             },
         )?;
 
@@ -911,8 +948,8 @@ impl Spawned {
         }
 
         tracing::debug!(
-            vcpus = config.vcpus,
-            mem_mib = config.mem_mib,
+            vcpus = config.vcpus.get(),
+            mem_mib = config.mem_mib.get(),
             "boot source, root drive, and machine config set"
         );
 

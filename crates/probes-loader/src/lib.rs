@@ -47,6 +47,21 @@
 //! the driver named for one sandbox by entering that sandbox's netns (P10.4, decision 017/024);
 //! [`attach`](TapMonitor::attach) takes an interface in the current netns.
 //!
+//! **P11.1/P11.2 — egress enforcement.** [`set_egress_policy`](TapMonitor::set_egress_policy) installs an
+//! [`EgressPolicy`] (a deny-by-default allow-list of destination CIDRs + optional port/proto) into the
+//! classifier's policy map and arms enforcement, so the tap drops any guest-sent packet that matches no
+//! rule and accepts those that do — per VM. It is opt-in: until set, a monitor stays observe-only (the
+//! Phase 10 behavior); [`clear_egress_policy`](TapMonitor::clear_egress_policy) returns it there. Every
+//! drop is recorded per destination; [`denials`](TapMonitor::denials) reads that audit trail (P11.5).
+//!
+//! **P11.3/P11.4 — policy at launch, deny-by-default.** [`EgressPolicy`] is the userspace schema, built
+//! from validated [`Ipv4Cidr`]s with a typed [`Protocol`] and optional port (`None` = any), whose empty
+//! value ([`EgressPolicy::deny_all`], the
+//! [`Default`]) allows nothing — a sandbox launched with no explicit allowance reaches nothing.
+//! [`enforce_in_netns`](TapMonitor::enforce_in_netns) applies a policy *before* the tc programs go live
+//! on a sandbox's tap, so there is no window where the tap is up but un-policed: enforcement is in effect
+//! from the first packet.
+//!
 //! **P8.8/P8.9 — caps + a legible support probe.** Loading needs only `CAP_BPF`+`CAP_PERFMON`, not
 //! full root; [`check_support`] names a missing prerequisite (kernel BTF, or those caps) up front as a
 //! typed [`ProbeError::Unsupported`], so a host that can't run the probes says so plainly instead of
@@ -55,6 +70,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs::File;
+use std::net::Ipv4Addr;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -63,8 +79,8 @@ use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::{tc, SchedClassifier, TcAttachType, TracePoint};
 use aya::Ebpf;
 
-pub use agent_probes_common::{FlowCounts, FlowKey, Syscall, SyscallEvent};
-use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE};
+pub use agent_probes_common::{FlowCounts, FlowKey, PolicyRule, Protocol, Syscall, SyscallEvent};
+use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE_SIZE};
 
 /// Env override for the compiled BPF object's location — for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
@@ -99,6 +115,9 @@ pub enum ProbeError {
     Attach(String),
     /// Reading a program's map failed.
     Map(String),
+    /// The egress policy the caller asked to install is invalid (e.g. more rules than the map holds) —
+    /// a caller-input error, distinct from a map I/O failure. See [`PolicyError`].
+    Policy(PolicyError),
 }
 
 impl std::fmt::Display for ProbeError {
@@ -109,9 +128,47 @@ impl std::fmt::Display for ProbeError {
             Self::Load(e) => write!(f, "eBPF load failed: {e}"),
             Self::Attach(e) => write!(f, "eBPF attach failed: {e}"),
             Self::Map(e) => write!(f, "eBPF map read failed: {e}"),
+            Self::Policy(e) => write!(f, "invalid egress policy: {e}"),
         }
     }
 }
+
+impl From<PolicyError> for ProbeError {
+    fn from(e: PolicyError) -> Self {
+        Self::Policy(e)
+    }
+}
+
+/// A rejected egress-policy input, caught by construction (`parse, don't validate`) so an illegal policy
+/// can't reach the kernel map: an out-of-range CIDR prefix, or more rules than the map holds. Distinct
+/// from [`ProbeError`]'s eBPF-runtime failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyError {
+    /// An IPv4 CIDR prefix length over 32 (the given value) — rejected by [`Ipv4Cidr::new`].
+    PrefixTooLong(u8),
+    /// More allow-rules than the kernel `POLICY` map holds: the requested count and the cap.
+    TooManyRules {
+        /// The number of rules the caller supplied.
+        got: usize,
+        /// The fixed cap ([`MAX_POLICY_RULES`]).
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for PolicyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PrefixTooLong(len) => {
+                write!(f, "IPv4 CIDR prefix length {len} is over the /32 maximum")
+            }
+            Self::TooManyRules { got, max } => {
+                write!(f, "egress policy has {got} rules, over the {max}-rule cap")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolicyError {}
 
 impl std::error::Error for ProbeError {}
 
@@ -394,6 +451,13 @@ const CLS_INGRESS: &str = "tap_ingress";
 const CLS_EGRESS: &str = "tap_egress";
 /// The per-flow counter map the classifiers write (`#[map] static FLOWS`).
 const FLOWS_MAP: &str = "FLOWS";
+/// The egress allow-list the ingress classifier consults (`#[map] static POLICY`), and the enforcement
+/// toggle (`#[map] static ENFORCE`) that arms it — the two maps [`TapMonitor::set_egress_policy`] writes.
+const POLICY_MAP: &str = "POLICY";
+const ENFORCE_MAP: &str = "ENFORCE";
+/// The per-destination denied-packet counters the enforcement drop path records (`#[map] static
+/// DENIALS`), read back by [`TapMonitor::denials`] — the P11.5 audit trail of blocked endpoints.
+const DENIALS_MAP: &str = "DENIALS";
 /// `EEXIST`: a clsact qdisc already on the interface is not an error (the attach is idempotent).
 const EEXIST: i32 = 17;
 /// Where `ip netns` bind-mounts a named network namespace's handle (matches the driver's own
@@ -528,6 +592,228 @@ impl TapMonitor {
         })?;
         Ok(stats)
     }
+
+    /// The **denied** guest-sent packets (P11.5): `(FlowKey, count)` pairs from the `DENIALS` map, one per
+    /// destination the egress policy dropped, with how many packets were blocked. Empty until enforcement
+    /// drops something. The host-observed audit trail of which endpoints a sandbox was blocked from — read
+    /// it after a run, log it, or (Phase 13) fold it into the per-run record. Order is unspecified.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the `DENIALS` map is missing or a read fails mid-iteration.
+    pub fn denials(&self) -> Result<Vec<(FlowKey, u64)>, ProbeError> {
+        let map = self
+            .ebpf
+            .map(DENIALS_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{DENIALS_MAP}` not found")))?;
+        let denials: AyaHashMap<_, [u8; FLOW_KEY_SIZE], u64> = AyaHashMap::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{DENIALS_MAP}` as a hash map: {e}")))?;
+        let mut out = Vec::new();
+        for entry in denials.iter() {
+            let (k, count) =
+                entry.map_err(|e| ProbeError::Map(format!("iterate `{DENIALS_MAP}`: {e}")))?;
+            let Some(key) = FlowKey::from_bytes(&k) else {
+                return Err(ProbeError::Map(format!(
+                    "decode a `{DENIALS_MAP}` key: {}-byte key doesn't match the shared record",
+                    k.len()
+                )));
+            };
+            out.push((key, count));
+        }
+        Ok(out)
+    }
+
+    /// Install an [`EgressPolicy`] on this **already-attached** monitor (P11.2/P11.3): write its rules
+    /// into the `POLICY` map (zeroing the unused slots so no stale rule lingers) and arm the `ENFORCE`
+    /// toggle. From here the tap's ingress hook drops any guest-sent IPv4 packet whose destination matches
+    /// no rule, and accepts those that do — per VM, since each monitor owns its own maps. Idempotent: call
+    /// again to replace the policy. To arm a policy **at launch** with no un-enforced window, prefer
+    /// [`enforce_in_netns`](Self::enforce_in_netns), which policies the maps *before* the tc programs go
+    /// live on the tap.
+    ///
+    /// # Errors
+    /// [`ProbeError::Policy`] if the policy exceeds [`MAX_POLICY_RULES`], or [`ProbeError::Map`] if a
+    /// policy/enforce map is missing or a write fails.
+    pub fn set_egress_policy(&mut self, policy: &EgressPolicy) -> Result<(), ProbeError> {
+        apply_policy(&mut self.ebpf, policy)
+    }
+
+    /// Turn egress enforcement off again — back to observe-only (accept every packet), the Phase 10
+    /// behavior. Leaves the `POLICY` rules in place (harmless while `ENFORCE` is 0), so re-enforcing is a
+    /// single [`set_egress_policy`](Self::set_egress_policy) away.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the enforce map is missing or the write fails.
+    pub fn clear_egress_policy(&mut self) -> Result<(), ProbeError> {
+        set_enforce(&mut self.ebpf, false)
+    }
+}
+
+/// A sandbox's **egress allow-list** — the userspace schema for what the guest may reach (P11.3), built
+/// from friendly [`Ipv4Addr`] CIDRs and ports and lowered to the [`PolicyRule`]s the kernel map holds.
+/// **Deny-by-default (P11.4):** the empty policy ([`deny_all`](Self::deny_all) / [`Default`]) allows
+/// nothing, so a sandbox launched with no explicit allowance reaches nothing — you have to add each
+/// endpoint. This is the eBPF, host-observed complement to the driver's deny-by-default routing
+/// (decision 008): the driver gives the guest no route to the world, and this drops anything unlisted at
+/// the tap, where the host can see and record it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EgressPolicy {
+    rules: Vec<PolicyRule>,
+}
+
+/// A validated IPv4 **CIDR** — a network address and a prefix length that is guaranteed `0..=32` by
+/// construction. Parse, don't validate: an out-of-range prefix can't exist as an `Ipv4Cidr`, so it can
+/// never reach the kernel policy map. Build one with [`new`](Self::new) (fallible) or [`host`](Self::host)
+/// (an infallible `/32`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv4Cidr {
+    network: Ipv4Addr,
+    prefix_len: u8,
+}
+
+impl Ipv4Cidr {
+    /// A CIDR `network/prefix_len`, or [`PolicyError::PrefixTooLong`] if `prefix_len > 32`. The network is
+    /// taken as given (the kernel matcher masks it to `prefix_len`, so unmasked host bits don't matter).
+    ///
+    /// # Errors
+    /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds 32.
+    pub fn new(network: Ipv4Addr, prefix_len: u8) -> Result<Self, PolicyError> {
+        if prefix_len > 32 {
+            return Err(PolicyError::PrefixTooLong(prefix_len));
+        }
+        Ok(Self {
+            network,
+            prefix_len,
+        })
+    }
+
+    /// The `/32` CIDR of a single host — infallible, since `32` is always in range.
+    #[must_use]
+    pub fn host(addr: Ipv4Addr) -> Self {
+        Self {
+            network: addr,
+            prefix_len: 32,
+        }
+    }
+}
+
+impl EgressPolicy {
+    /// The **deny-everything** policy (P11.4): no rules, so every guest-sent packet is dropped once
+    /// enforced. The safe default — build up from here by adding explicit allowances.
+    #[must_use]
+    pub fn deny_all() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// Allow a destination [`Ipv4Cidr`] on an optional `port` and `proto` ([`None`] = any), consuming and
+    /// returning `self` for chaining. `None` reads as a wildcard (the kernel's `0`), so
+    /// `allow(cidr, None, None)` admits the whole CIDR on any port and protocol. The address goes in host
+    /// byte order (as [`Ipv4Addr`] naturally converts), matching the kernel matcher.
+    #[must_use]
+    pub fn allow(mut self, cidr: Ipv4Cidr, port: Option<u16>, proto: Option<Protocol>) -> Self {
+        self.rules.push(PolicyRule::allow(
+            u32::from(cidr.network),
+            cidr.prefix_len,
+            port.unwrap_or(0),
+            proto.map_or(0, Protocol::as_u8),
+        ));
+        self
+    }
+
+    /// Allow a single destination **host** (`/32`) on an optional `port`/`proto` — the common case, sugar
+    /// over [`allow`](Self::allow) with [`Ipv4Cidr::host`].
+    #[must_use]
+    pub fn allow_host(self, host: Ipv4Addr, port: Option<u16>, proto: Option<Protocol>) -> Self {
+        self.allow(Ipv4Cidr::host(host), port, proto)
+    }
+
+    /// The lowered [`PolicyRule`]s, as written into the kernel `POLICY` map.
+    #[must_use]
+    pub fn rules(&self) -> &[PolicyRule] {
+        &self.rules
+    }
+
+    /// Whether this policy allows nothing (deny-by-default). `true` for [`deny_all`](Self::deny_all) and
+    /// the [`Default`].
+    #[must_use]
+    pub fn is_deny_all(&self) -> bool {
+        self.rules.is_empty()
+    }
+}
+
+impl TapMonitor {
+    /// Attach the monitor to a sandbox's netns tap **and** install `policy`, arming enforcement in one
+    /// step (P11.3) — the launch-time entry point. The policy is written and `ENFORCE` set *before* the
+    /// tc programs are attached to the tap, so there is **no window** in which the tap is live but
+    /// un-policed: the very first guest packet the classifier sees is already under policy. Pass
+    /// [`EgressPolicy::deny_all`] for deny-by-default (P11.4). Otherwise like
+    /// [`attach_in_netns`](Self::attach_in_netns) (enters the sandbox's netns via `setns`, decision 024).
+    ///
+    /// # Errors
+    /// As [`attach_in_netns`](Self::attach_in_netns) and [`set_egress_policy`](Self::set_egress_policy).
+    pub fn enforce_in_netns(
+        netns: &str,
+        interface: &str,
+        policy: &EgressPolicy,
+    ) -> Result<Self, ProbeError> {
+        check_support()?;
+        // Load + policy the maps in the caller's netns, *then* attach in the sandbox's: arming before
+        // attach is what closes the un-enforced window (an attached-but-unpoliced tap would accept-all).
+        let mut ebpf = load_classifiers()?;
+        apply_policy(&mut ebpf, policy)?;
+        let handle = Path::new(NETNS_DIR).join(netns);
+        with_netns(&handle, || attach_classifiers(&mut ebpf, interface))?;
+        Ok(Self { ebpf })
+    }
+}
+
+/// Write `policy` into an [`Ebpf`]'s `POLICY` map and arm `ENFORCE`. Works on a loaded object whether or
+/// not its programs are attached yet, so it serves both the post-attach [`TapMonitor::set_egress_policy`]
+/// and the pre-attach [`TapMonitor::enforce_in_netns`] (arm-before-attach, no un-enforced window).
+fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError> {
+    let rules = policy.rules();
+    if rules.len() > MAX_POLICY_RULES {
+        return Err(PolicyError::TooManyRules {
+            got: rules.len(),
+            max: MAX_POLICY_RULES,
+        }
+        .into());
+    }
+    write_policy(ebpf, rules)?;
+    set_enforce(ebpf, true)
+}
+
+/// Write every `POLICY` slot: the first `rules.len()` from `rules`, the rest zeroed (an all-zero slot is
+/// `active == 0`, i.e. empty, so a shrunk policy can't leave a stale allow-rule behind). Rules go in as
+/// raw native bytes via [`PolicyRule::to_bytes`], so the loader needs no `unsafe` `aya::Pod` binding —
+/// the write-side twin of [`TapMonitor::flows`] reading raw bytes.
+fn write_policy(ebpf: &mut Ebpf, rules: &[PolicyRule]) -> Result<(), ProbeError> {
+    let map = ebpf
+        .map_mut(POLICY_MAP)
+        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY_MAP}` not found")))?;
+    let mut policy: Array<_, [u8; POLICY_RULE_SIZE]> = Array::try_from(map)
+        .map_err(|e| ProbeError::Map(format!("open `{POLICY_MAP}` as an array: {e}")))?;
+    for i in 0..MAX_POLICY_RULES {
+        let bytes = rules
+            .get(i)
+            .map_or([0u8; POLICY_RULE_SIZE], PolicyRule::to_bytes);
+        policy
+            .set(i as u32, bytes, 0)
+            .map_err(|e| ProbeError::Map(format!("write `{POLICY_MAP}`[{i}]: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Set the `ENFORCE` toggle (slot 0): `true` = deny-by-default egress, `false` = observe-only.
+fn set_enforce(ebpf: &mut Ebpf, on: bool) -> Result<(), ProbeError> {
+    let map = ebpf
+        .map_mut(ENFORCE_MAP)
+        .ok_or_else(|| ProbeError::Map(format!("map `{ENFORCE_MAP}` not found")))?;
+    let mut enforce: Array<_, u32> = Array::try_from(map)
+        .map_err(|e| ProbeError::Map(format!("open `{ENFORCE_MAP}` as an array: {e}")))?;
+    enforce
+        .set(0, u32::from(on), 0)
+        .map_err(|e| ProbeError::Map(format!("write `{ENFORCE_MAP}`: {e}")))?;
+    Ok(())
 }
 
 /// Read the compiled object and load + verify both `tc` classifier programs (not yet attached to any
@@ -849,5 +1135,127 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Egress policy (P11.3/P11.4): the userspace schema, host-testable without a live map ---
+    use agent_probes_common::egress_allowed;
+
+    /// A dotted-quad as the host-order `u32` the matcher takes.
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> u32 {
+        u32::from(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn protocol_round_trips_and_single_sources_the_wire_numbers() {
+        assert_eq!(Protocol::Tcp.as_u8(), 6);
+        assert_eq!(Protocol::Udp.as_u8(), 17);
+        assert_eq!(Protocol::from_u8(17), Some(Protocol::Udp));
+        assert_eq!(Protocol::from_u8(6), Some(Protocol::Tcp));
+        assert_eq!(Protocol::from_u8(1), None); // ICMP: parsed for no ports, so "any / other"
+    }
+
+    #[test]
+    fn ipv4_cidr_rejects_an_out_of_range_prefix() {
+        // parse-don't-validate: an over-/32 prefix can't be constructed, so it never reaches the map.
+        assert_eq!(
+            Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 40),
+            Err(PolicyError::PrefixTooLong(40))
+        );
+        assert!(Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).is_ok());
+        assert!(Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 32).is_ok());
+    }
+
+    #[test]
+    fn deny_all_is_the_default_and_allows_nothing() {
+        // P11.4: no policy = reaches nothing. The default and `deny_all` are the same empty allow-list.
+        let p = EgressPolicy::default();
+        assert!(p.is_deny_all());
+        assert_eq!(p, EgressPolicy::deny_all());
+        assert!(p.rules().is_empty());
+        assert!(!egress_allowed(
+            p.rules(),
+            ip(10, 200, 0, 1),
+            9999,
+            Protocol::Udp.as_u8()
+        ));
+    }
+
+    #[test]
+    fn allow_host_builds_a_slash32_rule() {
+        let host = Ipv4Addr::new(10, 200, 0, 1);
+        let p = EgressPolicy::deny_all().allow_host(host, Some(9999), Some(Protocol::Udp));
+        assert!(!p.is_deny_all());
+        let rule = p.rules()[0];
+        assert_eq!(rule.active, 1);
+        assert_eq!(rule.prefix_len, 32);
+        assert_eq!(rule.addr, u32::from(host));
+        assert_eq!(rule.port, 9999);
+        assert_eq!(rule.proto, Protocol::Udp.as_u8());
+        // Only that exact host/port/proto is admitted; everything else is denied.
+        assert!(egress_allowed(
+            p.rules(),
+            u32::from(host),
+            9999,
+            Protocol::Udp.as_u8()
+        ));
+        assert!(!egress_allowed(
+            p.rules(),
+            ip(10, 200, 0, 2),
+            9999,
+            Protocol::Udp.as_u8()
+        ));
+    }
+
+    #[test]
+    fn none_port_and_proto_lower_to_the_any_wildcard() {
+        // `None` is the typed "any", lowering to the kernel's `0` sentinel — no magic 0 at the API.
+        let p = EgressPolicy::deny_all().allow_host(Ipv4Addr::new(10, 200, 0, 1), None, None);
+        let rule = p.rules()[0];
+        assert_eq!(rule.port, 0);
+        assert_eq!(rule.proto, 0);
+        // Any port and any protocol to that host is admitted.
+        assert!(egress_allowed(
+            p.rules(),
+            ip(10, 200, 0, 1),
+            1234,
+            Protocol::Tcp.as_u8()
+        ));
+        assert!(egress_allowed(
+            p.rules(),
+            ip(10, 200, 0, 1),
+            53,
+            Protocol::Udp.as_u8()
+        ));
+    }
+
+    #[test]
+    fn allow_chains_cidr_and_host() {
+        let p = EgressPolicy::deny_all()
+            .allow(
+                Ipv4Cidr::new(Ipv4Addr::new(93, 184, 216, 0), 24).expect("valid /24"),
+                Some(443),
+                Some(Protocol::Tcp),
+            )
+            .allow_host(Ipv4Addr::new(10, 200, 0, 1), None, None); // any port/proto to the gateway
+        assert_eq!(p.rules().len(), 2);
+        // The chained policy admits both the subnet and the gateway, and nothing else.
+        assert!(egress_allowed(
+            p.rules(),
+            ip(93, 184, 216, 34),
+            443,
+            Protocol::Tcp.as_u8()
+        ));
+        assert!(egress_allowed(
+            p.rules(),
+            ip(10, 200, 0, 1),
+            1234,
+            Protocol::Udp.as_u8()
+        ));
+        assert!(!egress_allowed(
+            p.rules(),
+            ip(8, 8, 8, 8),
+            53,
+            Protocol::Udp.as_u8()
+        ));
     }
 }

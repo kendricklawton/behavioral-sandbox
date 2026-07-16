@@ -31,6 +31,7 @@
 //! teardown lives in [`crate::lifetime`] (P6.7): the jailed VM's sentinel watches the jailer's
 //! cgroup at its precomputed path, so host death can't leak a jailed VMM either.
 
+use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
@@ -524,12 +525,12 @@ fn read_delegated() -> Delegated {
 /// the cpu **and** memory controllers, so a host missing either gets no limits at all (empty). The
 /// host-side `pids.max` cap is added only when the `pids` controller is *also* delegated, so a host
 /// with cpu/memory but not pids keeps its cpu/memory caps (each controller fails open on its own).
-fn cgroup_args_for(d: &Delegated, vcpus: u32, mem_mib: u32) -> Vec<String> {
+fn cgroup_args_for(d: &Delegated, vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<String> {
     if !(d.cpu && d.memory) {
         return Vec::new();
     }
-    let quota = u64::from(vcpus) * CPU_PERIOD_US;
-    let memory_max = (u64::from(mem_mib) + u64::from(MEMORY_OVERHEAD_MIB)) * 1024 * 1024;
+    let quota = u64::from(vcpus.get()) * CPU_PERIOD_US;
+    let memory_max = (u64::from(mem_mib.get()) + u64::from(MEMORY_OVERHEAD_MIB)) * 1024 * 1024;
     let mut args = vec![
         format!("memory.max={memory_max}"),
         format!("cpu.max={quota} {CPU_PERIOD_US}"),
@@ -543,7 +544,7 @@ fn cgroup_args_for(d: &Delegated, vcpus: u32, mem_mib: u32) -> Vec<String> {
 /// The `--cgroup <file>=<value>` limits that cap the jailed VMM at the guest's own resource envelope
 /// (see [`cgroup_args_for`]). Returns empty when the cpu/memory controllers aren't delegated, so the
 /// caller passes no `--cgroup` and the jailed boot still runs; warns on each fail-open path.
-pub(crate) fn cgroup_limit_args(vcpus: u32, mem_mib: u32) -> Vec<String> {
+pub(crate) fn cgroup_limit_args(vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<String> {
     let delegated = read_delegated();
     if !(delegated.cpu && delegated.memory) {
         tracing::warn!(
@@ -600,6 +601,8 @@ mod tests {
     #[test]
     fn cgroup_args_fail_open_per_controller() {
         let has = |args: &[String], p: &str| args.iter().any(|s| s.starts_with(p));
+        let vcpus = NonZeroU8::new(2).unwrap();
+        let mem_mib = NonZeroU32::new(256).unwrap();
 
         // Everything delegated: cpu + memory + the host-side pid cap.
         let all = Delegated {
@@ -607,7 +610,7 @@ mod tests {
             memory: true,
             pids: true,
         };
-        let a = cgroup_args_for(&all, 2, 256);
+        let a = cgroup_args_for(&all, vcpus, mem_mib);
         assert!(has(&a, "cpu.max=") && has(&a, "memory.max="));
         assert!(a.contains(&format!("pids.max={VMM_PIDS_MAX}")));
 
@@ -617,7 +620,7 @@ mod tests {
             memory: true,
             pids: false,
         };
-        let b = cgroup_args_for(&no_pids, 2, 256);
+        let b = cgroup_args_for(&no_pids, vcpus, mem_mib);
         assert!(has(&b, "cpu.max=") && has(&b, "memory.max="));
         assert!(!has(&b, "pids.max="));
 
@@ -634,7 +637,7 @@ mod tests {
                 pids: false,
             },
         ] {
-            assert!(cgroup_args_for(&d, 2, 256).is_empty());
+            assert!(cgroup_args_for(&d, vcpus, mem_mib).is_empty());
         }
     }
 

@@ -27,6 +27,7 @@ mod sweep;
 mod test_util;
 mod vm;
 
+use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
 
 use agent_channel::ChannelError;
@@ -285,10 +286,13 @@ pub const FDS_PER_VM: usize = 8;
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Limits {
-    /// Guest vCPUs.
-    pub vcpus: u32,
-    /// Guest memory, MiB.
-    pub mem_mib: u32,
+    /// Guest vCPUs. Typed [`NonZeroU8`]: a zero-vCPU guest is not a small budget but an
+    /// unbootable one, so the illegal value is unrepresentable rather than a late Firecracker API
+    /// error, and the width states the realistic domain (the pinned v1.9 caps a microVM at 32).
+    pub vcpus: NonZeroU8,
+    /// Guest memory, MiB. Typed [`NonZeroU32`] for the same reason as [`vcpus`](Limits::vcpus):
+    /// zero is not a budget, so it can't be constructed.
+    pub mem_mib: NonZeroU32,
     /// The wall-clock budget: the boot-to-userspace deadline **and** each command's exec budget —
     /// one `wall` for the whole run, not just boot (decision 013). On the exec side it is sent to
     /// the guest agent, which kills the command past it (the cooperative
@@ -314,8 +318,10 @@ impl Default for Limits {
     /// cap. Treat these as a stable floor, raising any of them is a breaking change for embedders.
     fn default() -> Self {
         Self {
-            vcpus: 1,
-            mem_mib: 256,
+            vcpus: NonZeroU8::MIN, // 1
+            // 256; the fallback arm can't fire (256 is nonzero) — spelled without `unwrap`
+            // because the host path denies it (guardrail 5).
+            mem_mib: NonZeroU32::new(256).unwrap_or(NonZeroU32::MIN),
             wall: exec::DEFAULT_EXEC_TIMEOUT,
             output_cap: exec::MAX_EXEC_OUTPUT,
         }

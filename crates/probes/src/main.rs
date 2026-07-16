@@ -39,8 +39,16 @@
 //! classifiers on a VM's tap device: each parses the frame's IPv4 5-tuple and adds the packet to that
 //! flow's per-direction byte/packet counters in the [`FLOWS`] map. Unlike the syscall tracepoints, this
 //! *is* the guest's own traffic — a microVM's packets cross its tap on the host, so the host sees every
-//! one (the strong cross-boundary signal core property 1 leaves intact). Observe-only: the classifiers
-//! return `TC_ACT_OK` (accept); Phase 11 returns `TC_ACT_SHOT` to drop a denied flow.
+//! one (the strong cross-boundary signal core property 1 leaves intact).
+//!
+//! **P11.1/P11.2/P11.5 — egress enforcement in the kernel.** The ingress hook (a frame the guest
+//! *sends*) also consults a per-sandbox allow-list — the [`POLICY`] map of [`PolicyRule`]s the loader
+//! fills — and, when the [`ENFORCE`] toggle is on, returns `TC_ACT_SHOT` to drop any guest-sent IPv4
+//! packet whose destination matches no rule (deny-by-default), accepting the rest. A dropped packet is
+//! first counted against its destination in [`DENIALS`] (P11.5), so the host can report which endpoints
+//! a sandbox was blocked from — the audit trail Phase 13 folds in. Enforcement is opt-in: a monitor that
+//! never sets `ENFORCE` stays observe-only (both hooks accept, the Phase 10 behavior). ARP is always
+//! allowed so the guest can resolve its gateway; the egress hook (reply → guest) always accepts.
 //!
 //! `unsafe` lives here (raw map-pointer derefs), not on the host path: this crate builds for the BPF
 //! target, and the driver/host code stays `#![forbid(unsafe_code)]`. The program/map/link *lifetime*
@@ -59,8 +67,9 @@ use aya_ebpf::{
     programs::{TcContext, TracePointContext},
 };
 use agent_probes_common::{
-    FlowCounts, FlowKey, Syscall, SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_IP,
-    IPPROTO_TCP, IPPROTO_UDP, SOCKADDR_SNAP,
+    rule_matches, FlowCounts, FlowKey, PolicyRule, Syscall, SyscallEvent, DETAIL_CAP,
+    ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_ARP, ETH_P_IP, IPPROTO_TCP, IPPROTO_UDP, MAX_POLICY_RULES,
+    SOCKADDR_SNAP,
 };
 
 /// A single-slot **per-CPU** counter of `sys_enter_execve` events. Per-CPU means each CPU increments
@@ -234,10 +243,54 @@ static FLOWS: HashMap<FlowKey, FlowCounts> = HashMap::with_max_entries(MAX_FLOWS
 /// sandbox's tap sees in an observation window; overflow drops new flows, never faults.
 const MAX_FLOWS: u32 = 4096;
 
-/// A `tc` classifier's "accept this packet" verdict. P10 is **observe-only** (both hooks always accept);
-/// Phase 11 (enforcement) returns `TC_ACT_SHOT` to drop a denied flow. A literal so the classifier's
-/// return type is unambiguously `i32`, independent of the binding constant's width.
+/// Per-destination **denied**-packet counters (P11.5), keyed by the guest-sent [`FlowKey`] the egress
+/// policy dropped. The audit trail of *which endpoints a sandbox was blocked from*: the loader reads it
+/// and Phase 13 folds it into the per-run record. Bounded at [`MAX_FLOWS`] like [`FLOWS`]; best-effort
+/// (a non-atomic lookup-or-init can undercount a burst by one). Empty until enforcement drops something.
+#[map]
+static DENIALS: HashMap<FlowKey, u64> = HashMap::with_max_entries(MAX_FLOWS, 0);
+
+/// The Linux `tc` action a classifier returns to the kernel: `TC_ACT_OK` (`0`) lets the packet
+/// continue, `TC_ACT_SHOT` (`2`) drops it. Named after the kernel ABI constants so the values are
+/// unmistakable; [`Verdict`] is what the program's *logic* speaks, lowering to these on return.
 const TC_ACT_OK: i32 = 0;
+const TC_ACT_SHOT: i32 = 2;
+
+/// A classifier's decision, in the program's own terms rather than a bare `i32`: [`Verdict::Pass`]
+/// accepts the packet, [`Verdict::Drop`] drops it (P11.2). The functions decide in `Verdict`s and the
+/// `#[classifier]` entry points lower to the `tc` ABI with [`as_tc`](Verdict::as_tc), so no magic
+/// action number leaks into the logic.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    /// Accept the packet (`TC_ACT_OK`).
+    Pass,
+    /// Drop the packet at the tap (`TC_ACT_SHOT`).
+    Drop,
+}
+
+impl Verdict {
+    /// The `tc` action number this verdict returns to the kernel.
+    fn as_tc(self) -> i32 {
+        match self {
+            Self::Pass => TC_ACT_OK,
+            Self::Drop => TC_ACT_SHOT,
+        }
+    }
+}
+
+/// The per-sandbox egress allow-list (P11.1): a fixed [`MAX_POLICY_RULES`] array of [`PolicyRule`] the
+/// loader fills and the ingress classifier scans (P11.2). Zero-initialized at load, so every slot starts
+/// `active == 0` (empty) — an un-configured monitor has an empty policy, which only matters once
+/// [`ENFORCE`] is on. Sized per-object, so it is naturally **per VM** (each `TapMonitor` loads its own).
+#[map]
+static POLICY: Array<PolicyRule> = Array::with_max_entries(MAX_POLICY_RULES as u32, 0);
+
+/// Enforcement toggle (P11.2): slot 0 is `0` for **observe-only** (accept every packet, the Phase 10
+/// behavior) or `1` for **deny-by-default egress** (guest-sent IPv4 packets must match [`POLICY`]).
+/// Zero-initialized at load, so a monitor enforces nothing until the loader opts in — existing
+/// observation keeps working unchanged, and every allowance is explicit (guardrail 3).
+#[map]
+static ENFORCE: Array<u32> = Array::with_max_entries(1, 0);
 
 /// Which way a frame crossed the tap, from the tap's perspective (matching [`FlowCounts`]): `Ingress`
 /// is a frame the guest sent (arriving at the tap), `Egress` a frame delivered to the guest.
@@ -247,19 +300,85 @@ enum Direction {
     Egress,
 }
 
-/// `tc`/clsact **ingress** on a VM's tap — a frame the guest sent. Counts it against its flow, then
-/// accepts. Attached by the userspace loader's `TapMonitor` after it adds the clsact qdisc.
+/// `tc`/clsact **ingress** on a VM's tap — a frame the guest sent (egress *from the guest*). Counts it
+/// against its flow, then returns the egress-policy verdict (P11.2): accept under observe-only, or under
+/// enforcement accept only if the destination matches the sandbox's [`POLICY`] allow-list, else drop.
+/// Attached by the userspace loader's `TapMonitor` after it adds the clsact qdisc.
 #[classifier]
 pub fn tap_ingress(ctx: TcContext) -> i32 {
     count(&ctx, Direction::Ingress);
-    TC_ACT_OK
+    egress_verdict(&ctx).as_tc()
 }
 
-/// `tc`/clsact **egress** on a VM's tap — a frame delivered to the guest.
+/// `tc`/clsact **egress** on a VM's tap — a frame delivered to the guest. Always accepted: egress policy
+/// governs what the guest *sends* (the ingress hook), and replies to allowed traffic must come back in.
 #[classifier]
 pub fn tap_egress(ctx: TcContext) -> i32 {
     count(&ctx, Direction::Egress);
-    TC_ACT_OK
+    Verdict::Pass.as_tc()
+}
+
+/// The allow/drop verdict for a **guest-sent** frame (P11.2). Observe-only ([`ENFORCE`] slot 0 is `0`)
+/// accepts everything, preserving the Phase 10 behavior. Under enforcement, ARP is always allowed (the
+/// guest must resolve its on-link gateway to reach *any* endpoint), a non-IPv4 or truncated frame is
+/// dropped (deny-by-default), and an IPv4 frame is accepted only if its destination matches [`POLICY`].
+/// A denied IPv4 frame is recorded in [`DENIALS`] before the drop (P11.5), so the host can report which
+/// endpoint a guest was blocked from — the audit trail Phase 13 folds into the per-run record.
+#[inline(always)]
+fn egress_verdict(ctx: &TcContext) -> Verdict {
+    if ENFORCE.get(0).copied().unwrap_or(0) == 0 {
+        return Verdict::Pass;
+    }
+    // ARP must survive deny-by-default: without resolving 10.200.0.1 the guest can't send IP at all.
+    match ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be) {
+        Ok(ETH_P_ARP) => return Verdict::Pass,
+        Ok(ETH_P_IP) => {}
+        _ => return Verdict::Drop, // non-IPv4 (or an unreadable ethertype): deny by default, no 5-tuple to log
+    }
+    let Some(key) = parse(ctx) else {
+        return Verdict::Drop; // truncated IPv4: can't prove it's allowed (or key it), so drop
+    };
+    if policy_allows(key.dst_addr, key.dst_port, key.proto) {
+        Verdict::Pass
+    } else {
+        record_denial(&key); // P11.5: log which endpoint was blocked, then drop
+        Verdict::Drop
+    }
+}
+
+/// Record one denied guest-sent packet against its destination flow in [`DENIALS`] (P11.5). Best-effort
+/// like [`FLOWS`]: a lookup-or-init counter (the verifier's mandatory null-check on the map pointer), not
+/// atomic across CPUs, so a burst can undercount by one — fine for an audit signal. A full map drops new
+/// denied flows; the ones already recorded stay.
+#[inline(always)]
+fn record_denial(key: &FlowKey) {
+    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
+    // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
+    unsafe {
+        if let Some(count) = DENIALS.get_ptr_mut(key) {
+            *count += 1;
+        } else {
+            let _ = DENIALS.insert(key, &1, 0);
+        }
+    }
+}
+
+/// Whether the sandbox's [`POLICY`] allow-list admits destination `(addr, port, proto)` (P11.2): scan
+/// the fixed rule array in a **bounded loop** (the compile-time [`MAX_POLICY_RULES`] cap the verifier
+/// needs) and accept on the first active rule that matches. Deny-by-default: no match means drop. The
+/// per-rule test is [`rule_matches`], single-sourced with the host-tested [`agent_probes_common`] parser.
+#[inline(always)]
+fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
+    let mut i: u32 = 0;
+    while i < MAX_POLICY_RULES as u32 {
+        if let Some(rule) = POLICY.get(i) {
+            if rule_matches(rule, dst_addr, dst_port, proto) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Add one packet to its flow's per-direction counters. A non-IPv4 or truncated frame is skipped (the

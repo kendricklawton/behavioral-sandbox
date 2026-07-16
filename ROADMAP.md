@@ -1261,15 +1261,67 @@ Watch every packet a microVM sends/receives — at its tap device, in the kernel
 
 Turn observation into control — deny-by-default egress, allow-listed, enforced at the tap.
 
-- [ ] **P11.1** A policy map (allowed CIDRs/ports) the tc/XDP program consults.
-- [ ] **P11.2** Drop packets that don't match; allow those that do — per VM.
-- [ ] **P11.3** Userspace API to set a sandbox's egress policy at launch.
-- [ ] **P11.4** Deny-by-default: a sandbox with no policy reaches nothing.
-- [ ] **P11.5** Log denials (the audit trail feeds the audit log, Phase 13).
-- [ ] **P11.6** `(decision)` where policy lives + its schema (still *engine* mechanism, not org
+- [x] **P11.1** A policy map (allowed CIDRs/ports) the tc/XDP program consults.
+      *(Landed: a `POLICY` map of `PolicyRule` (destination CIDR + optional port/proto, a padding-free
+      12-byte record) plus an `ENFORCE` toggle, both `#[map]`s the ingress classifier reads. The rule
+      record and its matcher (`rule_matches`, a masked-CIDR + wildcard-port/proto compare) are
+      single-sourced in `crates/probes-common` next to the flow record, so the in-kernel scan and the
+      host-unit-tested `egress_allowed` can't drift. `TapMonitor::set_egress_policy` fills the map (as raw
+      bytes via `PolicyRule::to_bytes`, no `unsafe` aya::Pod). Both maps are per-object, so the policy is
+      naturally per VM. Matcher logic host-tested: /32 exact, CIDR ranges, wildcards, out-of-range prefix,
+      deny-by-default.)*
+- [x] **P11.2** Drop packets that don't match; allow those that do — per VM.
+      *(Landed: with `ENFORCE` on, the ingress hook (a frame the guest sends) returns `TC_ACT_SHOT` for a
+      guest-sent IPv4 packet whose destination matches no active rule and `TC_ACT_OK` for a match, scanning
+      the fixed rule array in a verifier-bounded loop (the mask built so the shift is always `< 32`).
+      Opt-in and per VM: a monitor that never sets a policy stays observe-only (both hooks accept, the
+      Phase 10 behavior); `clear_egress_policy` disarms. Two carve-outs keep deny-by-default from being
+      deny-everything: ARP is always allowed (the guest must resolve its gateway) and the egress hook
+      (reply → guest) always accepts. The launch-time API (P11.3), deny-by-default default (P11.4), denial
+      logging (P11.5), the schema decision (P11.6), and the live allowed-vs-blocked test (P11.7) remain.)*
+- [x] **P11.3** Userspace API to set a sandbox's egress policy at launch.
+      *(Landed: `EgressPolicy`, the userspace allow-list schema, built from friendly `Ipv4Addr`
+      CIDRs/ports (`deny_all().allow_host(..)/.allow_cidr(..)`) and lowered to the `PolicyRule`s the map
+      holds (prefix clamped to /32). `TapMonitor::set_egress_policy(&EgressPolicy)` applies it to an
+      attached monitor; `TapMonitor::enforce_in_netns(netns, iface, &policy)` applies it **at launch** —
+      arming the `POLICY`/`ENFORCE` maps *before* the tc programs attach to the tap, so there is no window
+      where the tap is live but un-policed (the first guest packet is already policed). Rules written as
+      raw bytes, no `unsafe` aya::Pod. Host-tested: building, chaining, prefix clamp, per-rule verdicts.
+      Folding this into `Sandbox::open` is Phase 13's convergence; the launch primitive lives here.)*
+- [x] **P11.4** Deny-by-default: a sandbox with no policy reaches nothing.
+      *(Landed: `EgressPolicy::deny_all()` (also the `Default`) is the empty allow-list, so a sandbox
+      launched with no explicit allowance drops every guest-sent packet once enforced — you must add each
+      endpoint. This is the eBPF, host-observed complement to the driver's no-route-to-the-world
+      deny-by-default (decision 008): the driver gives the guest no route out, and the tap drops anything
+      unlisted where the host can see it. Host-tested that the default/`deny_all` allow nothing. The live
+      allowed-vs-blocked proof is P11.7.)*
+- [x] **P11.5** Log denials (the audit trail feeds the audit log, Phase 13).
+      *(Landed: a dropped IPv4 packet is counted per destination in a `DENIALS` map (keyed by the denied
+      `FlowKey`) before the drop, read back by `TapMonitor::denials()` as `(FlowKey, count)` pairs — the
+      host-observed audit trail of which endpoints a sandbox was blocked from. Best-effort like `FLOWS`;
+      empty until enforcement drops something. Non-IPv4/truncated drops have no 5-tuple to key on, so the
+      denial log is the meaningful policy-miss case. Phase 13 folds this into the per-run record.)*
+- [x] **P11.6** `(decision)` where policy lives + its schema (still *engine* mechanism, not org
       policy) → `ARCHITECTURE.md`.
-- [ ] **P11.7** Test: a guest can reach an allow-listed endpoint and is blocked from everything else.
+      *(Landed: decision 025. Policy is a per-VM allow-list in two eBPF maps (`POLICY` array of
+      `PolicyRule` + `ENFORCE` toggle), schema = destination CIDR + optional port/proto (deny-by-default,
+      an explicit `active` byte so a zeroed map is deny-all not allow-all), consulted at the ingress
+      (guest-sent) hook, ARP always allowed, replies always accepted, denials recorded. Engine mechanism
+      only (guardrail 4): the schema is CIDR/port/proto, a hoster maps its own org policy onto that.
+      Records why over an LPM trie, netfilter, richer in-engine policy, or stateful return-path filtering,
+      and the complement to the driver's decision 008.)*
+- [x] **P11.7** Test: a guest can reach an allow-listed endpoint and is blocked from everything else.
+      *(Landed: the `#[ignore]`d `a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest`
+      (`net_enforce.rs`) boots a networked sandbox, `enforce_in_netns` with an allow-list of exactly one
+      endpoint (host end UDP 9999), and has the guest send to that port and a blocked one (8888). Asserts
+      the blocked port appears in `denials` (dropped at the tap) and the allowed port never does, and that
+      the allowed flow shows in the counters (sent and let through). `agent-vmm` a dev-dependency only.)*
 - **Exit gate:** kernel-enforced per-sandbox egress.
+  *(Demo: `cargo xtask enforce-sandbox` boots a real networked sandbox, arms a deny-by-default egress
+  policy allowing only its host end on UDP 9999, has the guest send to that endpoint and a blocked one,
+  and prints the denials audit trail plus the per-flow allow/deny verdicts — the allow-listed traffic
+  passes, everything else is dropped at the tap by host-side eBPF and recorded. Run on a KVM +
+  `CAP_BPF`+`CAP_NET_ADMIN` host.)*
 
 ## Phase 12 — Resource accounting via cgroup-bpf
 

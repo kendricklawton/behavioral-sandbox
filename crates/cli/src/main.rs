@@ -17,6 +17,11 @@ use std::time::Duration;
 use agent_vmm::{BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 use clap::{Parser, Subcommand};
 
+/// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
+/// command's own exit code): conventional "2", named so the intent is legible at the
+/// `ExitCode::from` site — the same convention (and name) as the guest agent's.
+const EXIT_OPERATIONAL: u8 = 2;
+
 #[derive(Parser)]
 #[command(
     name = "agent",
@@ -60,9 +65,10 @@ struct RunArgs {
     /// current directory at the same relative path).
     #[arg(long, value_name = "PATH")]
     get: Vec<String>,
-    /// Wall-clock budget in seconds (default 30): the boot deadline and the command's runtime
-    /// budget alike — the guest kills the command past it.
-    #[arg(long, value_name = "SECONDS")]
+    /// Wall-clock budget in seconds (default 30, minimum 1): the boot deadline and the command's
+    /// runtime budget alike — the guest kills the command past it. Zero is rejected at parse
+    /// (there is no "no limit"), never silently rounded up.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     wall: Option<u64>,
     /// Cap, in bytes, on captured stdout+stderr+artifacts (default 16 MiB).
     #[arg(long, value_name = "BYTES")]
@@ -91,7 +97,7 @@ fn main() -> ExitCode {
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
             let _ = writeln!(std::io::stderr(), "agent: {e}");
-            ExitCode::from(2) // operational error
+            ExitCode::from(EXIT_OPERATIONAL)
         }
     }
 }
@@ -108,7 +114,7 @@ fn run(cmd: Cmd) -> Result<ExitCode, VmmError> {
 fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
     let mut limits = Limits::default();
     if let Some(secs) = args.wall {
-        limits.wall = Duration::from_secs(secs.max(1));
+        limits.wall = Duration::from_secs(secs); // clap enforced >= 1 at parse
     }
     if let Some(bytes) = args.output_cap {
         limits.output_cap = bytes;

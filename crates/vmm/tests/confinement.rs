@@ -456,7 +456,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
         return;
     }
     let cfg = agent_rootfs_config();
-    let (vcpus, mem_mib) = (cfg.vcpus, cfg.mem_mib);
+    let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
     let Some(cg) = LimitCgroup::create(vcpus, mem_mib, "mem-hog") else {
         eprintln!(
             "skipping guest_mem_hog_is_bounded_by_the_cgroup: cgroup v2 not writable/delegated"
@@ -537,7 +537,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
         return;
     }
     let cfg = agent_rootfs_config();
-    let (vcpus, mem_mib) = (cfg.vcpus, cfg.mem_mib);
+    let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
     let Some(cg) = LimitCgroup::create(vcpus, mem_mib, "fork-bomb") else {
         eprintln!(
             "skipping guest_fork_bomb_is_bounded_by_the_cgroup: cgroup v2 not writable/delegated"

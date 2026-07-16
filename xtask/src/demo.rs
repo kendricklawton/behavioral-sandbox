@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::{cgroup_id_of_pid, SyscallTracer, TapMonitor};
+use agent_probes_loader::{cgroup_id_of_pid, EgressPolicy, Protocol, SyscallTracer, TapMonitor};
 use agent_vmm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use anyhow::{bail, Context, Result};
 
@@ -227,7 +227,6 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
     let sender = "import socket, time\n\
                   s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
                   for _ in range(10):\n    s.sendto(b'agent-p10-watch', ('10.200.0.1', 9999)); time.sleep(0.02)\n";
-    let rounds = rounds.max(1);
     for round in 1..=rounds {
         let out = sandbox
             .exec(&["python3".into(), "-c".into(), sender.into()], b"")
@@ -269,6 +268,140 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
     );
     println!(
         "# This was the guest's OWN traffic, observed at its tap from the host and scoped by netns."
+    );
+    Ok(())
+}
+
+/// The Phase 11 exit-gate demo (`enforce-sandbox`): **kernel-enforced per-sandbox egress**. Boot a real
+/// networked sandbox, arm a deny-by-default egress policy that allows exactly one endpoint, have the guest
+/// send to that endpoint and to a blocked one, and show the allow-listed traffic passing while everything
+/// else is dropped at the tap and recorded in the denials audit trail (P11.5).
+///
+/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object — a
+/// privileged, user-run demo like `watch-sandbox`.
+pub(crate) fn enforce_sandbox() -> Result<()> {
+    if !Path::new("/dev/kvm").exists() {
+        bail!("enforce-sandbox needs /dev/kvm (run on a KVM-capable host)");
+    }
+    if let Err(e) = agent_probes_loader::check_support() {
+        bail!("enforce-sandbox needs eBPF support: {e}");
+    }
+    let object = agent_probes_loader::object_path();
+    if !object.is_file() {
+        bail!(
+            "enforce-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
+            object.display()
+        );
+    }
+    let kernel = kernel_path();
+    let rootfs = agent_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+        if !p.is_file() {
+            bail!(
+                "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
+                p.display()
+            );
+        }
+    }
+
+    // Boot a networked sandbox: jailed when we're root (the confinement is the point), else the explicit
+    // unjailed opt-out so the demo still runs on a dev host.
+    let mut cfg = BootConfig::from_env();
+    cfg.kernel = kernel.clone();
+    cfg.rootfs = rootfs.clone();
+    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
+    cfg.guest_cid = Some(DEFAULT_GUEST_CID);
+    cfg.read_only_root = true;
+    cfg.enable_network = true;
+    cfg.boot_timeout = Duration::from_secs(30);
+    let sandbox = if effective_uid() == Some(0) {
+        Sandbox::open(cfg).context("boot the sandbox (jailed)")?
+    } else {
+        println!("# not root: booting unjailed (Sandbox::open_unjailed)");
+        Sandbox::open_unjailed(cfg).context("boot the sandbox (unjailed)")?
+    };
+
+    let netns = sandbox
+        .netns()
+        .context("the sandbox has no netns (networking should be on)")?
+        .to_string();
+    let tap = sandbox
+        .tap_name()
+        .context("the sandbox has no tap (networking should be on)")?
+        .to_string();
+
+    // Deny-by-default egress with a single allowed endpoint: the netns host end on UDP 9999 (decision
+    // 017). Everything else the guest sends is dropped at the tap and logged.
+    const ALLOWED_PORT: u16 = 9999;
+    const BLOCKED_PORT: u16 = 8888;
+    let host_end = std::net::Ipv4Addr::new(10, 200, 0, 1);
+    let policy =
+        EgressPolicy::deny_all().allow_host(host_end, Some(ALLOWED_PORT), Some(Protocol::Udp));
+    println!(
+        "# sandbox up: booted in {} ms; enforcing egress on tap {tap} in netns {netns}",
+        sandbox.boot_latency().as_millis()
+    );
+    println!("# policy: allow only {host_end}:{ALLOWED_PORT}/udp (deny-by-default for all else)");
+
+    // `enforce_in_netns` arms the policy *before* the tc programs go live: no un-enforced window (P11.3).
+    let monitor = TapMonitor::enforce_in_netns(&netns, &tap, &policy)
+        .context("attach + enforce the egress policy in the netns")?;
+
+    // The guest sends to the allowed port and a blocked port; watch the allowed pass and the blocked drop.
+    let sender = format!(
+        "import socket, time\n\
+         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
+         for _ in range(10):\n\
+        \x20   s.sendto(b'allowed', ('{host_end}', {ALLOWED_PORT}))\n\
+        \x20   s.sendto(b'blocked', ('{host_end}', {BLOCKED_PORT}))\n\
+        \x20   time.sleep(0.02)\n"
+    );
+    let out = sandbox
+        .exec(&["python3".into(), "-c".into(), sender], b"")
+        .context("run the guest traffic generator")?;
+    if out.exit_code != 0 {
+        bail!(
+            "guest traffic generator exited {}: {}",
+            out.exit_code,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // The denials audit trail (P11.5): which endpoints the policy blocked.
+    let denials = monitor.denials().context("read the denials map")?;
+    println!("\n# denied (blocked at the tap, recorded for the audit log):");
+    if denials.is_empty() {
+        println!("  (none)");
+    }
+    for (key, count) in &denials {
+        println!("  {key}  |  {count} packet(s) dropped");
+    }
+
+    // The flow counters show the allowed endpoint was seen and let through (both are counted before the
+    // verdict, so a blocked flow appears here too — but only the blocked one appears under denials).
+    let flows = monitor.flows().context("read the flow map")?;
+    println!(
+        "\n# flows seen on the tap (allowed traffic passes; blocked is counted then dropped):"
+    );
+    for (key, counts) in &flows {
+        let verdict = if denials.iter().any(|(k, _)| k == key) {
+            "DENIED"
+        } else {
+            "allowed"
+        };
+        println!(
+            "  [{verdict}] {key}  |  in {} pkt / {} B",
+            counts.ingress_packets, counts.ingress_bytes
+        );
+    }
+
+    drop(monitor);
+    sandbox.shutdown().context("shut the sandbox down")?;
+    println!(
+        "\n# sandbox shut down. The guest reached only its allow-listed endpoint; every other packet"
+    );
+    println!(
+        "# was dropped at the tap by the host-side eBPF and recorded — kernel-enforced per-sandbox egress."
     );
     Ok(())
 }
