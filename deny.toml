@@ -21,8 +21,8 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Unicode-3.0",
-    # `foldhash` (the default hasher for aya's `hashbrown`, via `aya`/`aya-obj` in the eBPF loader,
-    # P8.3) is Zlib-licensed — OSI-approved and FSF-free/permissive. Added when aya entered the tree.
+    # `foldhash` (the default hasher for aya's `hashbrown`, via `aya`/`aya-obj` in the eBPF
+    # loader) is Zlib-licensed — OSI-approved and FSF-free/permissive. Added when aya entered the tree.
     "Zlib",
 ]
 confidence-threshold = 0.9

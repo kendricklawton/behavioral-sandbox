@@ -9,7 +9,7 @@ build-std = ["core"]
 
 # `--btf` tells `bpf-linker` to emit the object's **BTF** (from the debug info the profile keeps): the
 # `.BTF` section + BTF-defined maps, which make the program CO-RE-portable across kernels and let aya
-# relocate it against the running kernel's BTF at load (P8.5). It is off by default, so pass it as a
+# relocate it against the running kernel's BTF at load (see `docs/probes.md`). It is off by default, so pass it as a
 # linker arg for this target.
 [target.bpfel-unknown-none]
 rustflags = ["-C", "link-arg=--btf"]

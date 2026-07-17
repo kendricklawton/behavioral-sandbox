@@ -88,7 +88,7 @@ pub fn render(record: &RunRecord) -> String {
         sys.total, sys.by_kind.execve, sys.by_kind.openat, sys.by_kind.connect, sys.by_kind.unknown
     );
     let mut notable: Vec<_> = sys.notable.iter().collect();
-    notable.sort_by(|a, b| b.hits.cmp(&a.hits)); // stable sort: ties keep the record's order
+    notable.sort_by_key(|n| std::cmp::Reverse(n.hits)); // stable sort: ties keep the record's order
     for n in notable.iter().take(MAX_TRAIL_NOTABLE) {
         let _ = writeln!(
             out,

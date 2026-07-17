@@ -12,7 +12,7 @@ members = [
 # `crates/probes` holds the eBPF programs. They build for `bpfel-unknown-none` (not the host
 # triple) via `bpf-linker`, so excluding them keeps the everyday host gate (clippy --all-targets,
 # test) host-only and green; the eBPF object is built separately for its own target. See
-# `.rules`, `ROADMAP.md` (Phase 8), and `docs/contributing-building.md`.
+# `.rules` and `docs/contributing-building.md`.
 #
 # `fuzz` is the `cargo fuzz` harness: nightly + libFuzzer, its own detached workspace, never part of
 # the everyday stable gate. Excluded here too so `cargo build --workspace` ignores it. See

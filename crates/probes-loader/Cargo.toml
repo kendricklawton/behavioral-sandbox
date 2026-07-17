@@ -9,15 +9,15 @@ description = "Userspace loader — attach the eBPF probes to a sandbox, read th
 
 [dependencies]
 # The userspace side of aya: load the object built from `crates/probes` (`cargo xtask build-probes`),
-# attach its programs, and read their maps — synchronously, no async runtime (P8.3). Added here now
-# that it is used; the load/attach for tc/XDP (P10) and cgroup-bpf (P12) build on this.
+# attach its programs, and read their maps — synchronously, no async runtime (see
+# `docs/probes.md`). The tc/XDP and cgroup-bpf load/attach paths build on this.
 aya = "0.13"
 
 # The wire record read out of the ring buffer (`SyscallEvent`), shared with the kernel writer in
 # `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
 agent-probes-common = { path = "../probes-common", features = ["std"] }
 
-# Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (P10.4, decision 024).
+# Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (decision 024).
 # `setns` has no `std` wrapper; nix's is a *safe* function, so the loader stays
 # `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
 # Pinned to the same 0.31 the workspace already carries (via `vsock` under `agent-vmm`) so the build
@@ -25,8 +25,8 @@ agent-probes-common = { path = "../probes-common", features = ["std"] }
 nix = { version = "0.31", default-features = false, features = ["sched"] }
 
 [dev-dependencies]
-# The Firecracker driver, for the P10.6 end-to-end test only (boot a real sandbox, attach the tap
-# monitor to its netns tap, prove guest traffic shows up). A dev-dependency so the loader library
+# The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach
+# the probes, prove what the guest did shows up). A dev-dependency so the loader library
 # stays independent of `vmm`: the eBPF track and the driver track bridge only by plain values.
 agent-vmm = { path = "../vmm" }
 

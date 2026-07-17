@@ -304,8 +304,9 @@ fn draw_network(f: &mut Frame, area: Rect, snap: &LiveSnapshot) {
                 .iter()
                 .take(room.saturating_sub(net.denials.len()))
             {
+                // Same vocabulary as the `--trace` trail: tap ingress is what the guest sent.
                 lines.push(Line::from(format!(
-                    "  {} · {}/{} out · {}/{} in",
+                    "  {} · sent {}/{} · recv {}/{}",
                     flow.key,
                     flow.counts.ingress_packets,
                     human_bytes(flow.counts.ingress_bytes),
@@ -378,7 +379,7 @@ fn draw_syscalls(f: &mut Frame, area: Rect, snap: &LiveSnapshot) {
                 sys.total, sys.by_kind.execve, sys.by_kind.openat, sys.by_kind.connect
             )));
             let mut notable: Vec<_> = sys.notable.iter().collect();
-            notable.sort_by(|a, b| b.hits.cmp(&a.hits));
+            notable.sort_by_key(|n| std::cmp::Reverse(n.hits));
             let room = usize::from(area.height.saturating_sub(3));
             for n in notable.iter().take(room) {
                 lines.push(Line::from(format!(

@@ -101,8 +101,9 @@ struct RunArgs {
     #[arg(long, value_name = "FILE", conflicts_with = "demo_boot")]
     record: Option<PathBuf>,
     /// Watch the run live: a full-screen view on stderr (network flows and denials, resources,
-    /// the VMM's host syscalls, a timeline) while the command runs. Needs stderr on a terminal;
-    /// `q` closes the view, the run continues.
+    /// the VMM's host syscalls, a timeline) while the command runs. Needs stderr on a terminal.
+    /// `q` closes the view (the run continues); after the command finishes, the view stays up
+    /// until closed.
     #[arg(long, conflicts_with = "demo_boot")]
     watch: bool,
     /// The command to run in the guest, after `--`.

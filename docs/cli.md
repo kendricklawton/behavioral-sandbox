@@ -43,7 +43,7 @@ agent run [FLAGS] -- <cmd> [args…]
 | `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host end of its /30. |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
 | `--record FILE` | Attach the probes and write the run's deterministic **audit record** (one line of byte-stable JSON) to `FILE` for later inspection. |
-| `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues. |
+| `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues (after the command finishes, the view stays up until closed). |
 | `--log FILTER` | Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`. |
 
 Piped stdin is forwarded to the guest command. Bulk data belongs on the block-device paths
@@ -103,7 +103,8 @@ Three surfaces, one record:
 
 - **`--watch`** — the live view, drawn on stderr (stdout stays the run's result): the guest's
   network flows and egress denials as they happen, its CPU/memory/IO, the VMM's host-syscall
-  footprint, and a running timeline. `q`/`Esc` closes the view; the run continues.
+  footprint, and a running timeline. `q`/`Esc` closes the view; the run continues. When the
+  command finishes the view stays up (so a fast run doesn't flash away) until you close it.
 - **`--trace`** — the human-readable trail on stdout after the run: timing, per-flow traffic,
   denials, resources, notable host syscalls, and a `gap` line for any axis that couldn't bind.
 - **`--record FILE`** — the machine surface: the record as one line of deterministic, byte-stable

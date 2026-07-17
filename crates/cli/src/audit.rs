@@ -52,9 +52,10 @@ impl Observability {
     }
 
     /// Bind the probes to one booted sandbox (post-boot, by plain values). With both shared probes
-    /// live this is [`SandboxProbes::attach`] — observe-only (no egress policy; that projection is a
-    /// separate CLI phase). Without them nothing attaches (the bundle needs both), and the returned
-    /// handle will produce a record whose coverage explains every unbound axis.
+    /// live this is [`SandboxProbes::attach`] — observe-only (no egress policy; the `--allow`
+    /// projection lands with the wider CLI surface, decision 029). Without them nothing attaches
+    /// (the bundle needs both), and the returned handle will produce a record whose coverage
+    /// explains every unbound axis.
     pub fn attach(&self, vmm_pid: u32, netns: Option<&str>, tap: Option<&str>) -> RunProbes {
         match (&self.tracer, &self.meter) {
             (Some(tracer), Some(meter)) => RunProbes {

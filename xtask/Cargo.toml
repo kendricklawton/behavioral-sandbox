@@ -12,11 +12,11 @@ clap.workspace = true
 # The host↔guest contract constants (`AGENT_VSOCK_PORT`, `GUEST_READY_MARKER`): the rootfs build
 # writes the guest's init line from the same definition the driver dials, so they cannot drift.
 agent-channel = { path = "../crates/channel" }
-# The driver, for `bench-boot` — it boots real microVMs and reads `boot_latency` (P3.7). A dev-only
+# The driver, for `bench-boot` — it boots real microVMs and reads `boot_latency`. A dev-only
 # dep on a never-shipped crate; the everyday `ci` gate doesn't invoke it (booting needs KVM).
 agent-vmm = { path = "../crates/vmm" }
 # The probe loader, for `bench-trace` — it attaches the syscall tracepoints and measures their
-# per-syscall overhead (P9.5). Dev-only; the everyday `ci` gate doesn't invoke it (loading eBPF
+# per-syscall overhead. Dev-only; the everyday `ci` gate doesn't invoke it (loading eBPF
 # needs CAP_BPF/CAP_PERFMON).
 agent-probes-loader = { path = "../crates/probes-loader" }
 

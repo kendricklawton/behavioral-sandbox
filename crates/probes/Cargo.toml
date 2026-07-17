@@ -20,9 +20,9 @@ aya-ebpf = "0.1"
 # the two sides can't drift. `no_std`, no default features — the BPF side never wants `std`.
 agent-probes-common = { path = "../probes-common", default-features = false }
 
-# One object per program set, linked by `bpf-linker` for `bpfel-unknown-none`. P8.1 ships one
-# placeholder program to prove the toolchain end to end; P8.2+ add the real tracepoints/tc/cgroup
-# programs (splitting into more `[[bin]]`s if it helps attach them independently).
+# One object per program set, linked by `bpf-linker` for `bpfel-unknown-none`: the syscall
+# tracepoints, the tc flow/egress programs, and the accounting probe ride together (splitting into
+# more `[[bin]]`s stays an option if attaching them independently ever helps).
 [[bin]]
 name = "probes"
 path = "src/main.rs"
@@ -31,7 +31,7 @@ path = "src/main.rs"
 # build optimized (the verifier rejects the un-optimized stack/spill patterns a debug build emits).
 # `debug = true` is deliberate and load-bearing: `bpf-linker` derives the object's **BTF** (the
 # `.BTF` section + BTF-defined maps) from DWARF debug info, and BTF is what makes the program
-# CO-RE-portable across kernels and lets aya relocate it at load (P8.5). Without it the object falls
+# CO-RE-portable across kernels and lets aya relocate it at load (see `docs/probes.md`). Without it the object falls
 # back to legacy maps and carries no BTF.
 [profile.dev]
 opt-level = 3
