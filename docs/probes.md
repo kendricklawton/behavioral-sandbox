@@ -200,6 +200,35 @@ eBPF where per-event timing earns its keep (CPU), the kernel's own counters wher
 CPU-heavy run reports more CPU than an idle one attributed to the sandbox (P12.5); `cargo xtask
 meter-sandbox` is the live exit-gate demo. The engine *measures*; the hoster *bills*.
 
+## The fused audit record (Phase 13)
+
+Phases 9–12 each drive one probe standalone; Phase 13 binds all three to a launched sandbox and fuses
+their output into one per-run **audit record**, host-observed from outside the guest. It lives in
+`probes-loader` (not `agent-vmm`, decisions 024/026/028), bridged to the driver only by plain values:
+
+- **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
+  global, so each is loaded **once** for the host — `SharedMeter` and `SharedTracer` — and every sandbox
+  registers its cgroup as a *target* on both (bounded overhead, decision 028). The tap monitor is per-VM.
+- **One post-boot attach.** `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)` runs
+  once after `Sandbox::open`: it resolves the VMM's cgroup, registers it on the shared tracer + meter, and
+  attaches the tap in the sandbox's netns (enforcing an egress policy if given). Every axis is fail-open —
+  a missing cap/BTF/object degrades to a recorded `AxisGap`, never a blocked run.
+- **Finalize + detach on close.** `SandboxProbes::collect(timing)` reads the three probes into a
+  `RunRecord` **and** unregisters this run's cgroup from the shared sets, while the sandbox is still alive.
+  Dropping without collecting detaches only (the abandoned path). Timing enters as plain `Duration`s the
+  caller lifts from `Sandbox::boot_latency` + `RunResult::metrics.wall`.
+- **The record.** `RunRecord` fuses network flows + per-VM totals + egress denials (tap), CPU + memory/IO
+  (`ResourceSummary`), and the VMM's bounded host-syscall footprint, with `coverage` gaps for whatever was
+  unavailable. Its core is network + resources + denials — the signals host eBPF observes strongly.
+- **Deterministic JSON.** `RunRecord::to_json` is a hand-rolled, compact, byte-stable serializer (fixed
+  key order, arrays pre-sorted, integer-nanosecond durations) — the machine-readable audit surface the
+  language SDKs parse and Phase 14 pretty-prints. Pinned by a golden test.
+
+The privileged `audit_record.rs` proves it end to end: a guest that touches the network + reads a file
+yields a record whose flows show the network **exactly**, while the in-guest file read correctly never
+appears in the host-syscall axis (below). `SandboxProbes::collect` is finalize-on-close; the live view +
+`agent run --trace` are Phase 14.
+
 ## The hardware-isolation consequence (the honest limit)
 
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so
@@ -256,6 +285,12 @@ completes; here is the shape so far):
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
   the default watches the whole host. See `docs/contributing-architecture.md` decision 021.
+- **Or a *set* of sandboxes, for one shared tracer (P13.5).** A `TRACE_TARGETS` cgroup set + a
+  `TRACE_SET` mode toggle (the `METER_TARGETS`/`METER_ALL` pattern) let **one** attached tracer serve
+  every concurrent sandbox — each registers its cgroup with `SyscallTracer::add_target`, and only those
+  cgroups' events are emitted. A tracer-per-sandbox would instead run *N* copies of each `sys_enter_*`
+  on every syscall (O(sandboxes)); the set keeps it one hash lookup. Off by default, so the single-target
+  path above is unchanged. Decision 028.
 - **A live trace, attributed to a sandbox (P9.3/P9.4).** `SyscallTracer::stream` loops the drain,
   decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` sockaddr) and handing
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop

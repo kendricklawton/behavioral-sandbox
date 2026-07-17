@@ -156,13 +156,41 @@ static FILTER: Array<u64> = Array::with_max_entries(2, 0);
 const FILTER_TGID: u32 = 0;
 const FILTER_CGROUP: u32 = 1;
 
-/// Whether an event from `tgid` in `cgroup` passes the loader-set [`FILTER`]: each configured
-/// (non-zero) axis must match. An absent/zero slot reads as "unfiltered", so the map is optional.
+/// The set of cgroup ids to trace (`cgroup_id -> 1`), the syscall analogue of [`METER_TARGETS`]
+/// (P13.5). **One shared tracer, a target *set*** is what keeps host-syscall observation bounded under
+/// many concurrent sandboxes: the three `sys_enter_*` tracepoints are global, so a tracer-per-sandbox
+/// would attach (and run) *N* copies of each program on *every* matching syscall (O(sandboxes) per
+/// syscall — the shape decision 026 rejects for `sched_switch`). Instead one shared tracer is attached
+/// once and every sandbox registers its cgroup here; the hot path is a single hash lookup, and
+/// [`EVENTS`] only ever carries the registered cgroups' events (not the whole host's). Consulted only
+/// when [`TRACE_SET`] is on; empty + off is the load-time single-[`FILTER`] behaviour.
+#[map]
+static TRACE_TARGETS: HashMap<u64, u8> = HashMap::with_max_entries(MAX_CGROUPS, 0);
+
+/// Selects which filter governs the tracepoints (slot 0): `0` (the load-time default) uses the
+/// single-target [`FILTER`] (tgid/cgroup) — the Phase-9 single-sandbox path the tests and demos drive;
+/// `1` uses the [`TRACE_TARGETS`] *set* — the shared multi-sandbox tracer (P13.5). One toggle, so the
+/// two modes never interfere: a set-mode tracer ignores `FILTER`, and a `FILTER`-mode tracer ignores
+/// the set.
+#[map]
+static TRACE_SET: Array<u32> = Array::with_max_entries(1, 0);
+
+const FILTER_MODE_SLOT: u32 = 0;
+
+/// Whether an event from `tgid` in `cgroup` passes the loader-set filter. In **set mode**
+/// ([`TRACE_SET`] slot 0 = 1) the event passes iff its cgroup is a registered [`TRACE_TARGETS`] member
+/// — the shared multi-sandbox tracer. Otherwise the single-target [`FILTER`] governs: each configured
+/// (non-zero) axis must match, an absent/zero slot reads as "unfiltered".
 ///
 /// `#[inline(always)]`: folded into each tracepoint so a program stays a single self-contained unit
 /// (no BPF-to-BPF call), matching the verifier profile P8 proved.
 #[inline(always)]
 fn passes_filter(tgid: u32, cgroup: u64) -> bool {
+    if TRACE_SET.get(FILTER_MODE_SLOT).copied().unwrap_or(0) != 0 {
+        // Set mode: pass only registered cgroups. `get_ptr` is a presence check without a deref, so no
+        // `unsafe` is needed (the same membership test `account_sched_switch` uses for the meter).
+        return TRACE_TARGETS.get_ptr(&cgroup).is_some();
+    }
     let want_tgid = FILTER.get(FILTER_TGID).copied().unwrap_or(0);
     let want_cgroup = FILTER.get(FILTER_CGROUP).copied().unwrap_or(0);
     (want_tgid == 0 || want_tgid == u64::from(tgid)) && (want_cgroup == 0 || want_cgroup == cgroup)

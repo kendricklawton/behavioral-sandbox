@@ -398,6 +398,51 @@ mod tests {
         assert_eq!(f.total, 1000 + (MAX_NOTABLE as u64) + 10);
     }
 
+    #[test]
+    fn concurrent_folds_stay_independent() {
+        // The shared tracer (P13.5) drains one interleaved stream and routes each event to its cgroup's
+        // fold. Mirror that routing here to prove two concurrent sandboxes never contaminate each other:
+        // each fold sees only its own cgroup, and one collecting doesn't disturb the other.
+        const A: u64 = 0xA;
+        const B: u64 = 0xB;
+        let mut fa = SyscallFold::new(A);
+        let mut fb = SyscallFold::new(B);
+        let stream = [
+            ev(Syscall::Openat as u32, A, b"/a/one", "a"),
+            ev(Syscall::Execve as u32, B, b"/b/bin", "b"),
+            ev(Syscall::Openat as u32, A, b"/a/two", "a"),
+            ev(Syscall::Connect as u32, B, &[2, 0, 0, 80, 1, 1, 1, 1], "b"),
+            ev(Syscall::Openat as u32, A, b"/a/one", "a"), // a repeat in A only
+        ];
+        for e in &stream {
+            match e.cgroup_id {
+                A => fa.record(e),
+                B => fb.record(e),
+                _ => {}
+            }
+        }
+        let a = fa.finish();
+        let b = fb.finish();
+        // A saw only its three opens (two distinct, one repeated); nothing of B's leaked in.
+        assert_eq!(a.total, 3);
+        assert_eq!(a.by_kind.openat, 3);
+        assert_eq!(a.by_kind.execve, 0);
+        assert_eq!(a.by_kind.connect, 0);
+        assert!(a.notable.iter().all(|n| n.detail.starts_with("/a/")));
+        let one = a
+            .notable
+            .iter()
+            .find(|n| n.detail == "/a/one")
+            .expect("A's repeated path is kept");
+        assert_eq!(one.hits, 2);
+        // B saw only its execve + connect.
+        assert_eq!(b.total, 2);
+        assert_eq!(b.by_kind.execve, 1);
+        assert_eq!(b.by_kind.connect, 1);
+        assert_eq!(b.by_kind.openat, 0);
+        assert!(b.notable.iter().all(|n| n.comm == "b"));
+    }
+
     fn flow(dst: [u8; 4], dport: u16) -> (FlowKey, FlowCounts) {
         (
             FlowKey::new(

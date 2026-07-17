@@ -91,13 +91,17 @@ use aya::Ebpf;
 pub use agent_probes_common::{FlowCounts, FlowKey, PolicyRule, Protocol, Syscall, SyscallEvent};
 use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE_SIZE};
 
-/// The attach bundle (P13.1): bind the three probes to one sandbox at launch and roll up a record.
+/// Deterministic JSON of the record (P13.4): the machine-readable audit surface, byte-stable and
+/// dependency-free (`RunRecord::to_json`). Pure, unit-tested host-safe against a golden.
+mod json;
+/// The attach bundle (P13.1/P13.5): bind the three probes to one sandbox at launch (shared tracer +
+/// shared meter, per-VM tap) and roll up a record; detach + finalize on close (P13.3).
 mod observer;
 /// The per-run audit record (P13.2): the fused, deterministically-ordered view of what one run did,
 /// aggregated from the three probes. Pure (no aya), so its whole aggregation is unit-tested host-safe.
 mod record;
 
-pub use observer::{ArmedProbes, SandboxProbes, SharedMeter};
+pub use observer::{SandboxProbes, SharedMeter, SharedTracer};
 pub use record::{
     AxisGap, DenialRecord, FlowRecord, NetSection, NotableSyscall, RunRecord, SyscallCounts,
     SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
@@ -301,6 +305,13 @@ const EVENTS_MAP: &str = "EVENTS";
 const FILTER_MAP: &str = "FILTER";
 const FILTER_TGID: u32 = 0;
 const FILTER_CGROUP: u32 = 1;
+/// The shared tracer's cgroup target *set* (`#[map] static TRACE_TARGETS`), the P13.5 analogue of
+/// [`METER_TARGETS_MAP`].
+const TRACE_TARGETS_MAP: &str = "TRACE_TARGETS";
+/// The filter-mode toggle (`#[map] static TRACE_SET`, slot 0): `0` = single [`FILTER_MAP`], `1` = the
+/// [`TRACE_TARGETS_MAP`] set.
+const TRACE_SET_MAP: &str = "TRACE_SET";
+const FILTER_MODE_SLOT: u32 = 0;
 
 /// A loaded, attached syscall tracer (P9.1/P9.2): the `sys_enter_{execve,openat,connect}` tracepoints
 /// stream per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the
@@ -396,6 +407,77 @@ impl SyscallTracer {
     pub fn watch_all(&mut self) -> Result<(), ProbeError> {
         self.set_filter(FILTER_TGID, 0)?;
         self.set_filter(FILTER_CGROUP, 0)
+    }
+
+    /// Switch to **set mode** (P13.5): the tracepoints now pass an event iff its cgroup is a registered
+    /// [`add_target`](Self::add_target) member, ignoring the single-target [`watch_pid`](Self::watch_pid)
+    /// / [`watch_cgroup`](Self::watch_cgroup) filter. This is what the shared multi-sandbox tracer
+    /// ([`SharedTracer`]) drives; a single-sandbox caller stays on the default `FILTER` path and never
+    /// calls this. Idempotent.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the mode map is missing or unwritable.
+    pub fn use_target_set(&mut self) -> Result<(), ProbeError> {
+        self.set_mode(true)
+    }
+
+    /// Register `cgroup_id` in the trace target *set* and switch to set mode if not already — so from
+    /// here the tracepoints emit that sandbox's host syscalls (P13.5). The multi-sandbox path: one shared
+    /// tracer, every sandbox's cgroup registered, the per-syscall cost a single hash lookup. Idempotent.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the target/mode map is missing or the write fails.
+    pub fn add_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
+        self.set_mode(true)?;
+        self.trace_targets()?
+            .insert(cgroup_id, TARGET_PRESENT, 0)
+            .map_err(|e| ProbeError::Map(format!("register cgroup {cgroup_id} for tracing: {e}")))
+    }
+
+    /// Unregister `cgroup_id`: the tracepoints stop emitting its events. Removing a cgroup that was never
+    /// a target is a no-op, not an error (idempotent teardown, like the meter's).
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the target map is missing, or the removal fails for a reason other than the
+    /// key being absent.
+    pub fn remove_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
+        match self.trace_targets()?.remove(&cgroup_id) {
+            Ok(()) => Ok(()),
+            // Absent key (ENOENT): already gone, so a no-op is intended — don't fail teardown on it.
+            Err(aya::maps::MapError::SyscallError(e))
+                if e.io_error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(ProbeError::Map(format!(
+                "unregister cgroup {cgroup_id} from tracing: {e}"
+            ))),
+        }
+    }
+
+    /// Write the filter-mode toggle: `true` = the [`TRACE_TARGETS_MAP`] set, `false` = the single
+    /// [`FILTER_MAP`].
+    fn set_mode(&mut self, set_mode: bool) -> Result<(), ProbeError> {
+        let map = self
+            .ebpf
+            .map_mut(TRACE_SET_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{TRACE_SET_MAP}` not found")))?;
+        let mut toggle: Array<_, u32> = Array::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{TRACE_SET_MAP}` as an array: {e}")))?;
+        toggle
+            .set(FILTER_MODE_SLOT, u32::from(set_mode), 0)
+            .map_err(|e| ProbeError::Map(format!("write `{TRACE_SET_MAP}`: {e}")))
+    }
+
+    /// The writable `TRACE_TARGETS` set handle, shared by [`add_target`](Self::add_target) /
+    /// [`remove_target`](Self::remove_target).
+    fn trace_targets(&mut self) -> Result<AyaHashMap<&mut MapData, u64, u8>, ProbeError> {
+        let map = self
+            .ebpf
+            .map_mut(TRACE_TARGETS_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{TRACE_TARGETS_MAP}` not found")))?;
+        AyaHashMap::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{TRACE_TARGETS_MAP}` as a hash map: {e}")))
     }
 
     /// Write one slot of the `FILTER` array (0 = tgid, 1 = cgroup id; 0 disables that axis).

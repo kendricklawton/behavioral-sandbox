@@ -1398,7 +1398,10 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       `vmm_pid`/`netns`/`tap_name`), decisions 024/026/027. The meter is **shared** (one `sched_switch`
       program metering a set), not per-VM, so it stays O(1) per switch; the bundle holds a target ticket
       and `remove_target`s on drop. Every axis is fail-open (a missing cap/BTF/object → a recorded
-      `AxisGap`, never a blocked run).)*
+      `AxisGap`, never a blocked run). **P13.5 later converged this**: the syscall tracer became shared
+      too (`SharedTracer`), so the two-phase `arm`/`bind` collapsed to a single post-boot
+      `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)` — decision 028 supersedes the
+      two-phase note here.)*
 - [x] **P13.2** Aggregate into one per-run record: network flows, resources, egress denials, timing,
       and notable **host-side** syscalls (the VMM's footprint, not in-guest syscalls; see Phase 9).
       The record's core is network + resources + denials, the signals host eBPF observes strongly
@@ -1414,12 +1417,46 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       equality across shuffled input, the no-network `None` case, and timing/resources passthrough.
       Decision 027. The deterministic JSON *output* surface is P13.4; the privileged end-to-end proof is
       P13.6.)*
-- [ ] **P13.3** Detach + finalize the record on `close`.
-- [ ] **P13.4** Deterministic, structured output (JSON) of "what this run did," from *outside* the guest.
-- [ ] **P13.5** Bound the overhead; keep concurrent sandboxes independent.
-- [ ] **P13.6** Test: run a workload that touches network + files → the record shows exactly that.
+- [x] **P13.3** Detach + finalize the record on `close`.
+      *(Landed: `SandboxProbes::collect(timing)` is the close-time finalize — it reads the three probes
+      into the `RunRecord` **and** unregisters this run's cgroup from the shared tracer + meter, while the
+      sandbox is still alive (cgroup dir + map fds must be live). `Drop` is the abandoned-path safety net
+      (detach only, no record) and a no-op after `collect`, so the shared sets never accumulate dead
+      cgroups whether the bundle is finalized or dropped. Decision 028.)*
+- [x] **P13.4** Deterministic, structured output (JSON) of "what this run did," from *outside* the guest.
+      *(Landed: `RunRecord::to_json` — a hand-rolled, dependency-free, compact serializer (the hand-framed
+      wire reasoning of decision 002: the audit-log format is a contract the SDKs parse, so the exact
+      bytes are pinned by a golden test, not a derive). Byte-stable (fixed key order; arrays pre-sorted by
+      their builders), float-free (durations as integer nanoseconds), addresses/protocols/syscalls by
+      name. Phase 14 pretty-prints + exports it; this is the machine surface. Decision 028.)*
+- [x] **P13.5** Bound the overhead; keep concurrent sandboxes independent.
+      *(Landed: the syscall tracer now gets the meter's shared treatment (decision 026) — a `TRACE_TARGETS`
+      cgroup **set** + a `TRACE_SET` mode toggle in the kernel program, one shared `SyscallTracer` loaded
+      once, every sandbox registering its cgroup. So one attachment serves all sandboxes (a program-per-VM
+      would run *N* copies of each `sys_enter_*` on every syscall — O(sandboxes)); the per-event cost is a
+      single hash lookup and only target cgroups are emitted. A single drain routes each event to that
+      cgroup's private `SyscallFold`, so concurrent sandboxes stay independent — proven host-safe by
+      `concurrent_folds_stay_independent`, and the two-phase attach collapses to one post-boot
+      `SandboxProbes::attach`. `TRACE_SET` defaults off, so the Phase-9 single-target path is unchanged.
+      Decision 028.)*
+- [x] **P13.6** Test: run a workload that touches network + files → the record shows exactly that.
+      *(Landed: the `#[ignore]`d `a_networked_file_touching_run_yields_a_faithful_audit_record`
+      (`audit_record.rs`) drives the real launch sequence — load the shared tracer + meter, boot a
+      networked sandbox, `attach` the bundle by plain values, run a guest workload that reads `/etc/hostname`
+      and sends UDP to the host end, then `collect` the record and serialize it. Asserts the guest's network
+      touch shows up **exactly** in the record's flows + per-VM totals, every axis bound (no coverage gap),
+      and the deterministic JSON shows the flow. The guest's in-guest file read correctly does **not**
+      appear in the host-syscall axis (a microVM services its own syscalls, Phase 9 — the isolation working,
+      not a gap): the host observes the guest's network strongly and the VMM's host footprint, never the
+      guest's syscalls. `agent-vmm` a dev-dependency only.)*
 - **Exit gate:** every run yields a tamper-resistant, host-observed audit trail (microVM + eBPF
   observability as one system).
+  *(Met: `SandboxProbes::attach` binds the three host-side probes to a launched sandbox and
+  `collect` fuses them into one deterministic, host-observed `RunRecord` — network flows + egress denials
+  (tap), CPU + memory/IO (shared meter + cgroup v2), and the VMM's host-syscall footprint (shared tracer),
+  serialized to stable JSON — all from **outside** the guest, where the code can't see or subvert it. The
+  privileged P13.6 test proves it end to end: the microVM and the eBPF observability as one system. The
+  live view + `agent run --trace` are the Phase 14 face.)*
 
 ## Phase 14 — Observability output (a face for it)
 

@@ -1742,3 +1742,51 @@ clean P13.5 follow-up, deliberately not built here.)
 - **Deferred.** Detach/finalize-on-close beyond the drop `remove_target` (P13.3), the deterministic JSON
   *output* surface (P13.4), the overhead bound (P13.5), the privileged end-to-end proof (P13.6), and the
   CLI `agent run --trace` (Phase 14) all build on this record without reshaping it.
+
+### 028 — The audit record converges: a shared syscall tracer, a single post-boot attach, and deterministic JSON *(2026-07-17)*
+
+Phase 13 closes the audit log: detach + finalize on close (P13.3), a structured JSON surface (P13.4),
+a bound on the overhead under concurrency (P13.5), and the end-to-end proof (P13.6). Three shape
+choices are worth pinning; the first **supersedes the two-phase arm/bind of decision 027**.
+
+**The syscall tracer is shared, not per-VM (P13.5) — this retires the two-phase attach.** Decision 027
+kept a per-VM `SyscallTracer` and reconciled "attach before boot" (to catch the boot window) with the
+tap/meter's "attach after boot" via `ArmedProbes::arm()` → `bind()`. But a tracer per sandbox attaches
+*N* copies of each `sys_enter_*` tracepoint and runs all of them on **every** matching host syscall —
+the O(sandboxes)-per-event shape decision 026 already rejected for `sched_switch`. So the tracer now
+takes the *same* treatment as the meter: a `TRACE_TARGETS` cgroup **set** + a `TRACE_SET` mode toggle
+in the kernel program (the exact `METER_TARGETS`/`METER_ALL` pattern), one shared `SyscallTracer`
+loaded once for the host, and every sandbox registers its cgroup as a target. One shared drain routes
+each event to that cgroup's private `SyscallFold`, so concurrent sandboxes stay independent (a sandbox
+reads only its own footprint; unregistering one leaves the others untouched) and both the per-event
+cost and the ring-buffer volume stay bounded (a single hash lookup, only target cgroups emitted). The
+CPU meter was already shared this way, so **both** host-wide probes are now loaded once
+(`SharedTracer` + `SharedMeter`) and only the per-VM tap is owned by the bundle.
+
+Because nothing per-VM has to pre-attach anymore, the two-phase `arm`/`bind` **collapses to a single
+post-boot `SandboxProbes::attach`** — simpler, and still "on `Sandbox::open`" (the caller's
+arm-free sequence). The one consequence: `host_syscalls` now covers from **registration (just after
+boot) onward**, not the pre-boot boot window. That window is the VMM/jailer's own host setup, not
+guest-attributable behaviour, and the record's core (network + resources + denials) is unaffected — a
+deliberate trade of exact-boot-window capture for bounded overhead. `TRACE_SET` defaults off, so the
+single-target `watch_pid`/`watch_cgroup` path (Phase 9 tests, benches, demos) is byte-for-byte
+unchanged; set mode is opt-in and used only by `SharedTracer`.
+
+**Detach + finalize on close (P13.3).** `collect(timing)` is the close-time finalize: it reads the
+three probes into the record **and** unregisters this run's cgroup from the shared tracer + meter, all
+while the sandbox is still alive (the cgroup dir + map fds must be live). `Drop` is the abandoned-path
+safety net — detach only, no record — and is a no-op after `collect`. So a bundle always leaves the
+shared sets clean whether it is finalized or dropped.
+
+**Deterministic JSON (P13.4).** `RunRecord::to_json` is hand-rolled, dependency-free, and compact — the
+same reasoning as the hand-framed wire (decision 002): the audit-log format is a contract the language
+SDKs parse, so the exact bytes are pinned here (a golden test), not left to a derive's field order.
+It is byte-stable (fixed key order; every array already sorted by its builder), float-free (durations
+are integer nanoseconds), and renders addresses/protocols/syscalls by name. Phase 14 pretty-prints it
+for people and exports it; this is the machine surface underneath.
+
+**Not the pinned public API.** All of this is on `probes-loader`; `agent-vmm`'s `Sandbox`/`RunResult`
+are untouched — **not** an `api:` change. The privileged P13.6 test drives the real launch sequence
+(load shared probes → boot → `attach` → run → `collect` → JSON) and asserts the guest's network touch
+shows up *exactly*, while its in-guest file read correctly does **not** appear in the host-syscall axis
+(the isolation working, not a gap).
