@@ -91,6 +91,18 @@ use aya::Ebpf;
 pub use agent_probes_common::{FlowCounts, FlowKey, PolicyRule, Protocol, Syscall, SyscallEvent};
 use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE_SIZE};
 
+/// The attach bundle (P13.1): bind the three probes to one sandbox at launch and roll up a record.
+mod observer;
+/// The per-run audit record (P13.2): the fused, deterministically-ordered view of what one run did,
+/// aggregated from the three probes. Pure (no aya), so its whole aggregation is unit-tested host-safe.
+mod record;
+
+pub use observer::{ArmedProbes, SandboxProbes, SharedMeter};
+pub use record::{
+    AxisGap, DenialRecord, FlowRecord, NetSection, NotableSyscall, RunRecord, SyscallCounts,
+    SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
+};
+
 /// Env override for the compiled BPF object's location — for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
 /// output (see [`object_path`]).

@@ -1387,11 +1387,33 @@ Per-sandbox CPU/mem/IO accounting from the kernel — the metering primitive (en
 
 Attach the eBPF programs to a sandbox at launch and produce a per-run **audit trail**.
 
-- [ ] **P13.1** On `Sandbox::open`, attach syscall + network + accounting probes bound to that VM.
-- [ ] **P13.2** Aggregate into one per-run record: network flows, resources, egress denials, timing,
+- [x] **P13.1** On `Sandbox::open`, attach syscall + network + accounting probes bound to that VM.
+      *(Landed: `agent-probes-loader`'s new `observer` module — `ArmedProbes::arm()` (pre-boot: load the
+      syscall tracer host-wide, clear the baseline) → `bind(vmm_pid, netns, tap, egress, meter)`
+      (post-boot: scope the tracer to the VMM's cgroup and fold the boot window, attach a per-VM
+      `TapMonitor` in the netns — enforcing when a policy is given — and register the cgroup as a target
+      on a shared `ResourceMeter`). Two-phase because the tracer must attach before boot but the tap/meter
+      need the netns/cgroup that only exist after; "on `Sandbox::open`" is the caller's arm→open→bind
+      sequence, kept **out of `agent-vmm`** (bridged only by the plain values `Sandbox` exposes:
+      `vmm_pid`/`netns`/`tap_name`), decisions 024/026/027. The meter is **shared** (one `sched_switch`
+      program metering a set), not per-VM, so it stays O(1) per switch; the bundle holds a target ticket
+      and `remove_target`s on drop. Every axis is fail-open (a missing cap/BTF/object → a recorded
+      `AxisGap`, never a blocked run).)*
+- [x] **P13.2** Aggregate into one per-run record: network flows, resources, egress denials, timing,
       and notable **host-side** syscalls (the VMM's footprint, not in-guest syscalls; see Phase 9).
       The record's core is network + resources + denials, the signals host eBPF observes strongly
       across the hardware boundary.
+      *(Landed: `agent-probes-loader`'s new `record` module — `RunRecord { network: Option<NetSection>,
+      resources: ResourceSummary, host_syscalls: SyscallFootprint, timing: Timing, coverage: Vec<AxisGap> }`,
+      assembled by `SandboxProbes::collect(timing)` from the three probes (timing supplied as plain
+      `Duration`s the caller lifts from `Sandbox::boot_latency` + `RunResult::metrics.wall`, so the record
+      never depends on `vmm`). `host_syscalls` is bounded (repeat events collapse to a hit count; distinct
+      events cap at `MAX_NOTABLE = 64`, flagging truncation) and every collection is deterministically
+      sorted, so the record is byte-stable. Pure module (no aya, no vmm): 7 host-safe unit tests cover
+      counts-by-kind incl. unknown, foreign-cgroup filtering, dedup+cap, deterministic sort, full-record
+      equality across shuffled input, the no-network `None` case, and timing/resources passthrough.
+      Decision 027. The deterministic JSON *output* surface is P13.4; the privileged end-to-end proof is
+      P13.6.)*
 - [ ] **P13.3** Detach + finalize the record on `close`.
 - [ ] **P13.4** Deterministic, structured output (JSON) of "what this run did," from *outside* the guest.
 - [ ] **P13.5** Bound the overhead; keep concurrent sandboxes independent.
