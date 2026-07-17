@@ -8,6 +8,7 @@
 //! `abort`/`into_running` still kills the VMM and reclaims its scratch dir. Every free helper here
 //! (scratch-dir creation, the `sun_path` guard, the shared `teardown`) serves that lifecycle.
 
+use std::num::NonZeroU32;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -21,11 +22,12 @@ use crate::drives::{build_input_image, build_output_image, OutputDevice};
 use crate::exec::connect_agent_at;
 use crate::firecracker::{
     Action, ApiClient, BootSource, Drive, MachineConfig, MemBackend, MemBackendType,
-    NetworkInterface, SnapshotLoad, Vsock,
+    NetworkInterface, RateLimiter, SnapshotLoad, Vsock,
 };
 use crate::jail::{
     cgroup_limit_args, give_to_jail, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup,
-    spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, Chroot, Jail, JAILED_VSOCK_UDS,
+    restore_mem_mib, spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, Chroot, Jail,
+    JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::Tap;
@@ -452,22 +454,33 @@ impl Spawned {
     /// snapshot's baked-in tap is recreated in a fresh per-VM netns the jailer joins (decision 017),
     /// owned by the jailed uid.
     ///
-    /// No `--cgroup` limits are passed: the guest's resource envelope lives in the snapshot, not in
-    /// `config` (which contributes only the binary and timeout on restore), so deriving caps from
-    /// `config` could contradict the restored guest and OOM-kill a legitimate clone. The jailer still
-    /// creates the cgroup (the lifetime sentinel watches it; the kill handle works); the caps join
-    /// when `Limits` ride the snapshot. A documented fail-open on the resource-cap side only
-    /// (decisions 013/014) — the isolation walls (chroot, uid drop, seccomp, netns) are all present.
+    /// The cgroup **resource caps** are re-applied here, derived from the *clone's true envelope*
+    /// rather than `config` — the guest's vCPUs and RAM come from the snapshot (restore issues no
+    /// `PUT /machine-config`, and nothing forces `config` to agree with the source), so caps derived
+    /// from a mis-declaring `config` would throttle or OOM-kill a legitimate clone. `cpu.max` uses the
+    /// snapshot's recorded vCPU count and `memory.max` the memory file's true guest RAM; `pids.max`
+    /// is a constant. Fail-open like a cold boot's caps (empty without delegated controllers,
+    /// decision 013) — the isolation walls (chroot, uid drop, seccomp, netns) are all present either way.
     fn launch_jailed_for_restore(
         config: &BootConfig,
         snapshot: &Snapshot,
         jail: &Jail,
     ) -> Result<Self, VmmError> {
-        // No `--cgroup` caps here (empty `cgroup_args`): the guest's resource envelope lives in the
-        // snapshot, not `config`, so deriving caps from `config` could contradict the restored guest
-        // and OOM-kill a legitimate clone (see the fn doc). A networked clone gets the fixed-name tap
-        // in a fresh netns; its baked-in guest identity is already correct there (decision 017).
-        let s = Self::spawn_jailed(config, jail, snapshot.tap_name.is_some(), &[])?;
+        // Re-apply the resource caps a cold jailed boot gets, so a restored clone (where the
+        // untrusted code runs) is confined too, not just isolated — the co-resident-safety property
+        // (P15.8). Both caps derive from the snapshot's true envelope, never `config`'s declaration:
+        // `memory.max` from the memory file's true size (`restore_mem_mib`, never below what the
+        // clone actually uses — the OOM hazard that once kept restore uncapped), `cpu.max` from the
+        // vCPU count recorded in the bundle (the clone's real parallelism; a `config` defaulting to
+        // fewer vCPUs than the source must not silently throttle it), and `pids.max` is a constant.
+        // A networked clone gets the fixed-name tap in a fresh netns; its baked-in guest identity is
+        // already correct there (decision 017).
+        let mem_len = std::fs::metadata(&snapshot.mem)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let cgroup_args =
+            cgroup_limit_args(snapshot.vcpus, restore_mem_mib(config.mem_mib, mem_len));
+        let s = Self::spawn_jailed(config, jail, snapshot.tap_name.is_some(), &cgroup_args)?;
         // A prewarmed snapshot baked the **relative** `v.sock` (every snapshot source is unjailed — a
         // jailed VM refuses snapshotting), and the jailed clone's cwd is the chroot root, so
         // Firecracker re-binds it there; the host dials the same file at its absolute path under the
@@ -723,6 +736,12 @@ impl Spawned {
                 path_on_host,
                 is_root_device: kind == DriveKind::Root,
                 is_read_only: access == DriveAccess::ReadOnly,
+                // Bound the guest's IO to every drive with the derived default (defense in depth: a
+                // disk-thrashing guest can't starve a co-resident run). Set once at cold boot, but it
+                // *rides restore*: a clone reopens the drive from the snapshot state file, which
+                // carries this rate limiter (unlike the cgroup caps, which a restore does not
+                // re-apply). A boot-sized burst keeps normal boot/exec unthrottled.
+                rate_limiter: Some(RateLimiter::default_guest_io()),
             },
         )
     }
@@ -825,15 +844,14 @@ impl Spawned {
         let kernel = kernel_arg.as_str();
         let rootfs = rootfs_arg.as_str();
         // A read-only root hands off to the overlay init, which stacks a size-capped tmpfs over the
-        // RO base so `/` is writable per-run. The cap is half of guest RAM — the guest has no swap,
-        // so a tmpfs sized near RAM would OOM the guest rather than bound a runaway write. It rides
-        // the kernel command line as a `key=value` token, which the kernel routes into PID 1's
+        // RO base so `/` is writable per-run (the cap's derivation lives in `overlay_size_mib`). It
+        // rides the kernel command line as a `key=value` token, which the kernel routes into PID 1's
         // environment (so `overlay-init` reads `$overlay_size` without mounting `/proc` first).
         let mut boot_args = if config.read_only_root {
             format!(
                 "{} init=/sbin/overlay-init overlay_size={}M",
                 config.boot_args,
-                config.mem_mib.get() / 2
+                overlay_size_mib(config.mem_mib)
             )
         } else {
             config.boot_args.clone()
@@ -1090,6 +1108,10 @@ impl Spawned {
         Ok(RunningVm {
             exec_wall: config.exec_wall,
             output_cap: config.output_cap,
+            // On a cold boot this is the true guest envelope (`PUT /machine-config` set it); on a
+            // restore it merely mirrors `config` and is never read (a restored VM refuses
+            // snapshotting, the field's one consumer).
+            vcpus: config.vcpus,
             child,
             workdir: std::mem::take(&mut self.workdir),
             console: std::mem::take(&mut self.console),
@@ -1366,6 +1388,16 @@ fn workdir_name(workdir: &Path) -> String {
         .into_owned()
 }
 
+/// The read-only-root overlay's tmpfs cap, in MiB: **half of guest RAM** — the guest has no swap,
+/// so a tmpfs sized near RAM would OOM the guest rather than bound a runaway write — **floored at
+/// 1 MiB**, so the integer division can never hand the overlay a size of `0M` (a zero-sized tmpfs
+/// would leave the guest's `/` read-only and unwritable). The floor only fires at `mem_mib == 1`,
+/// which can't boot Linux anyway; it exists so the derivation has no degenerate value at all.
+/// Pure, so the arithmetic is unit-tested without a boot.
+fn overlay_size_mib(mem_mib: NonZeroU32) -> u32 {
+    (mem_mib.get() / 2).max(1)
+}
+
 /// Fail fast if the boot deadline has already passed before the next step (`what`). Each API call is
 /// individually time-capped by the client, but their *sum* must also respect the boot deadline, or a
 /// slow VMM could stretch `boot` well past `wall`.
@@ -1453,6 +1485,18 @@ mod tests {
             msg.contains("/no/such/scratch/base"),
             "error names the base: {msg}"
         );
+    }
+
+    #[test]
+    fn overlay_size_is_half_ram_floored_at_one_mib() {
+        let mib = |n: u32| NonZeroU32::new(n).expect("nonzero test value");
+        // The working range: half of guest RAM (the default 256 gives 128M).
+        assert_eq!(overlay_size_mib(mib(256)), 128);
+        assert_eq!(overlay_size_mib(mib(2)), 1);
+        assert_eq!(overlay_size_mib(mib(3)), 1);
+        // The degenerate edge the floor exists for: `1 / 2` must not hand the overlay `0M` (a
+        // zero-sized tmpfs would leave `/` read-only and unwritable).
+        assert_eq!(overlay_size_mib(mib(1)), 1);
     }
 
     #[test]

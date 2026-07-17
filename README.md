@@ -105,7 +105,7 @@ contract and the full non-goals list live in [docs/embedding.md](docs/embedding.
 the engine's wire API, and a Wasmtime-based *software-isolation* sibling built to compare both
 boundaries. Each is its own repo built on this engine's frozen wire API — thin clients / a sibling,
 never part of its trust boundary, and never traded against the hardware-isolation guarantee. See
-[`ROADMAP.md`](ROADMAP.md) Phases 19–20.
+[`ROADMAP.md`](ROADMAP.md) Phases 20–21.
 
 ## Contributing
 

@@ -10,13 +10,14 @@
 
 mod common;
 
+use std::num::NonZeroU8;
 use std::time::Duration;
 
 use agent_vmm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
 
 use common::{
-    agent_rootfs_config, config, have_jailer_privileges, have_net_admin, prewarmed_python_snapshot,
-    TmpDir,
+    agent_rootfs_config, cgroup_of, config, have_jailer_privileges, have_net_admin,
+    prewarmed_python_snapshot, TmpDir,
 };
 
 #[test]
@@ -174,6 +175,69 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
     for clone in clones {
         clone.shutdown().expect("clone shutdown should succeed");
     }
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn restored_clones_do_not_bleed_state_under_load() {
+    // No state bleed between clones restored from one snapshot, under concurrent load. Each clone
+    // shares the read-only base (memory-sharing) but owns its in-RAM overlay and its guest RAM, so a
+    // write in one clone is invisible to its siblings. Prove it under load: N clones each write a
+    // *distinct* secret to the same guest path and read it back, all in flight at once. If the disk
+    // were shared, a sibling's concurrent write would clobber the path and the readback would
+    // mismatch; with per-clone isolation each reads back exactly its own.
+    const N: usize = 4;
+    let bundle = TmpDir::new("snap-bleed");
+    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+
+    let clones: Vec<_> = (0..N)
+        .map(|i| {
+            Vm::restore(&snap, &agent_rootfs_config())
+                .unwrap_or_else(|e| panic!("clone {i} should restore: {e}"))
+        })
+        .collect();
+
+    // Each clone drives its own thread (ownership moves in), so the writes race concurrently — the
+    // "under load" that would expose a shared disk. Spawn all N before joining any.
+    let readbacks: Vec<(String, String)> = clones
+        .into_iter()
+        .enumerate()
+        .map(|(i, clone)| {
+            std::thread::spawn(move || {
+                let secret = format!("bleed-secret-{i}-{}", clone.vmm_pid());
+                let write =
+                    ["sh", "-c", &format!("printf '%s' '{secret}' > /tmp/bleed")].map(String::from);
+                clone
+                    .exec(&write, b"")
+                    .unwrap_or_else(|e| panic!("clone {i} write: {e}"));
+                let read = ["sh", "-c", "cat /tmp/bleed"].map(String::from);
+                let out = clone
+                    .exec(&read, b"")
+                    .unwrap_or_else(|e| panic!("clone {i} read: {e}"));
+                clone
+                    .shutdown()
+                    .unwrap_or_else(|e| panic!("clone {i} shutdown: {e}"));
+                (secret, String::from_utf8_lossy(&out.stdout).into_owned())
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|h| h.join().expect("clone thread should not panic"))
+        .collect();
+
+    for (secret, readback) in &readbacks {
+        assert_eq!(
+            readback, secret,
+            "each clone must read back only its own write — no state bleed between concurrent clones"
+        );
+    }
+    // Guard against a vacuous pass: the secrets really were distinct across clones.
+    let distinct: std::collections::BTreeSet<_> = readbacks.iter().map(|(s, _)| s).collect();
+    assert_eq!(
+        distinct.len(),
+        N,
+        "each clone should have had a distinct secret"
+    );
 }
 
 #[test]
@@ -343,6 +407,80 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
     assert_eq!(out.exit_code, 0);
     vm.shutdown().expect("pooled clone shutdown");
     pool.shutdown();
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
+fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
+    // The `cpu.max` a jailed restore re-applies must come from the snapshot's **recorded** vCPU
+    // count — the clone's true parallelism, since the vCPUs come from the snapshot state (restore
+    // issues no `PUT /machine-config`) and nothing forces the restoring `config` to agree. A
+    // 2-vCPU source restored under a default (1-vCPU) config must be capped at 2 cores' worth,
+    // not silently throttled to 1 — the CPU analogue of `restore_mem_mib`'s never-below-the-true-RAM
+    // guarantee.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping restored_clone_cpu_cap_follows_the_snapshot_not_the_config: needs real root"
+        );
+        return;
+    }
+    let mut src_cfg = agent_rootfs_config();
+    src_cfg.vcpus = NonZeroU8::new(2).expect("2 is nonzero");
+    let source = Vm::boot(src_cfg).expect("2-vCPU agent microVM should boot");
+    let bundle = TmpDir::new("snap-cpu-cap");
+    let snap = source
+        .snapshot(bundle.path())
+        .expect("snapshot the 2-vCPU source");
+    assert_eq!(
+        snap.vcpus().get(),
+        2,
+        "the bundle must record the source's vCPU count"
+    );
+    source.shutdown().expect("source shutdown");
+
+    // Restore with the *default* (1-vCPU) config: the cap must follow the snapshot, not this.
+    let mut cfg = agent_rootfs_config();
+    cfg.jail = Some(Jail::default());
+    assert_eq!(cfg.vcpus.get(), 1, "the restoring config declares 1 vCPU");
+    let clone = Vm::restore(&snap, &cfg).expect("jailed restore of the 2-vCPU snapshot");
+    let cgroup = cgroup_of(clone.vmm_pid()).expect("the jailed clone lives in a cgroup");
+    let cpu_max =
+        std::fs::read_to_string(cgroup.join("cpu.max")).expect("read the clone's cpu.max");
+    let mut fields = cpu_max.split_whitespace();
+    let quota = fields.next().expect("cpu.max quota field");
+    if quota == "max" {
+        // No cap was written at all — the fail-open path (cpu/memory not delegated). The derivation
+        // under test never ran, so skip rather than pass vacuously.
+        eprintln!(
+            "skipping restored_clone_cpu_cap_follows_the_snapshot_not_the_config: cgroup \
+             controllers not delegated (cpu.max is `max`)"
+        );
+        clone.shutdown().expect("clone shutdown");
+        return;
+    }
+    let quota: u64 = quota.parse().expect("numeric cpu.max quota");
+    let period: u64 = fields
+        .next()
+        .expect("cpu.max period field")
+        .parse()
+        .expect("numeric cpu.max period");
+    assert_eq!(
+        quota,
+        2 * period,
+        "cpu.max must grant the snapshot's 2 vCPUs' worth, not the config's 1 (cpu.max: {})",
+        cpu_max.trim()
+    );
+
+    // And the mis-declared clone still works: both vCPUs are real, the cap didn't break the run.
+    let out = clone
+        .exec(&["nproc".into()], b"")
+        .expect("exec on the restored clone");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "2",
+        "the clone runs the snapshot's 2 vCPUs regardless of the config's declaration"
+    );
+    clone.shutdown().expect("clone shutdown");
 }
 
 #[test]

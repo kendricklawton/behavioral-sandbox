@@ -9,10 +9,10 @@ in [`SECURITY.md`](https://github.com/kendricklawton/agent/blob/main/SECURITY.md
 ## No supported release yet
 
 Until the first tagged release (`v0.1.0`), every version is a development snapshot: no version
-receives backported fixes, and nothing here should be treated as production-ready. The full
-**threat model** (the adversarial suite, the "guest cannot see or disable the host probes" proof,
-and the written trust boundary) is a milestone still ahead on the [roadmap](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md);
-this page states the current stance, not a finished audit.
+receives backported fixes, and nothing here should be treated as production-ready. This page states
+the current stance, not a finished audit; the full **[threat model](./threat-model.md)** (assets, the
+trust boundary, the adversary, and the attack-class-by-attack-class containment with the tests that
+prove it) is its companion.
 
 ## What is trusted, and what is not
 

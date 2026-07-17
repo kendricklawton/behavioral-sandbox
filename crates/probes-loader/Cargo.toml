@@ -29,6 +29,9 @@ nix = { version = "0.31", default-features = false, features = ["sched"] }
 # the probes, prove what the guest did shows up). A dev-dependency so the loader library
 # stays independent of `vmm`: the eBPF track and the driver track bridge only by plain values.
 agent-vmm = { path = "../vmm" }
+# Cross-crate test helpers (the cgroup-cap harness, host-capability probes), shared with the driver's
+# confinement tests so they aren't copy-pasted. Dev-only, never shipped.
+agent-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

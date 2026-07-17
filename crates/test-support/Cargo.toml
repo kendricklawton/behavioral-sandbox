@@ -1,0 +1,14 @@
+[package]
+name = "agent-test-support"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "Test-only helpers shared across the integration-test crates (cgroup caps, host-capability probes). Never shipped."
+
+# No dependencies by design: pure-std helpers (`/proc`, `/sys`, `std::fs`), so this stays a leaf both
+# the driver and the loader test suites can borrow without coupling to either.
+
+[lints]
+workspace = true

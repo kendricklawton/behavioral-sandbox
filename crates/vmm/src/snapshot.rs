@@ -45,8 +45,14 @@ impl Vm {
     /// bundle is staged into the chroot — the state file copied, the memory file and a shared base
     /// disk bind-mounted read-only (so clones keep sharing one page cache), a private disk copy
     /// handed to the jailed uid — and a networked clone's netns is joined via `--netns`. Needs real
-    /// root, like a jailed boot. Cgroup **resource caps** are not applied on a jailed restore (the
-    /// guest's envelope lives in the snapshot, not `config`); the isolation walls all are.
+    /// root, like a jailed boot. The cgroup **resource caps** are re-applied to a jailed clone (P15.8),
+    /// so the restored VM (where the untrusted code runs) is confined, not just isolated — and both
+    /// caps derive from the *snapshot's* true envelope, never `config`'s declaration (the guest's
+    /// vCPUs and RAM come from the snapshot state; restore issues no `PUT /machine-config`):
+    /// `memory.max` from the memory file's true size (so a `config` under-declaring the guest's RAM
+    /// can't OOM a legitimate clone), `cpu.max` from the vCPU count recorded in the bundle
+    /// ([`Snapshot::vcpus`] — so a `config` defaulting to fewer vCPUs than the source can't silently
+    /// throttle a clone), and the constant `pids.max`.
     ///
     /// Restore latency (load + resume) is [`RunningVm::boot_latency`] on the returned VM, for the
     /// cold-boot-vs-restore comparison.
@@ -175,6 +181,10 @@ impl RunningVm {
             shared_base,
             has_vsock: self.vsock_uds.is_some(),
             tap_name: self.tap.as_ref().map(|t| t.name.clone()),
+            // The source's true envelope (this VM is boot-originated — a restored VM was refused
+            // above — so the boot-time config value is what `PUT /machine-config` really set): a
+            // jailed restore derives its `cpu.max` from this, not from the restoring config.
+            vcpus: self.vcpus,
         })
     }
 

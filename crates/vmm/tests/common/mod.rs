@@ -148,18 +148,25 @@ pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (agent_vmm::Snapshot, Durat
     (snap, cold_boot)
 }
 
+/// The cgroup v2 dir `pid` currently lives in (`/sys/fs/cgroup` + its `0::` line), or `None` for
+/// the root cgroup or an unreadable entry. Shared by the confinement suite (the sentinel watches
+/// this dir) and the snapshot suite (the restored clone's re-applied caps are read from it).
+pub fn cgroup_of(pid: u32) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let rel = text.lines().find_map(|l| l.strip_prefix("0::"))?.trim();
+    if rel.is_empty() || rel == "/" {
+        return None;
+    }
+    Some(PathBuf::from("/sys/fs/cgroup").join(rel.trim_start_matches('/')))
+}
+
 /// Whether this process holds `CAP_NET_ADMIN` (effective) — needed to create a tap. Creating a tap
 /// is privileged (unlike the rootless block-device builds), so the NIC tests skip without it rather
-/// than fail on a box that can do KVM but not net-admin. `CAP_NET_ADMIN` is bit 12 of `CapEff`.
+/// than fail on a box that can do KVM but not net-admin. Delegates to `agent-test-support`'s
+/// audited `CapEff` parse (which reads only the low 64 bits, so a wider future field can't read a
+/// capable host as incapable and silently skip these tests).
 pub fn have_net_admin() -> bool {
-    std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("CapEff:").map(|v| v.trim().to_string()))
-        })
-        .and_then(|hex| u64::from_str_radix(&hex, 16).ok())
-        .is_some_and(|caps| caps & (1 << 12) != 0)
+    agent_test_support::have_cap(agent_test_support::CAP_NET_ADMIN)
 }
 
 /// Whether this process can run the **jailer**: effective uid 0 **in the initial user namespace**.

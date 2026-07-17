@@ -22,6 +22,9 @@ agent-channel = { path = "../channel" }
 agent-guest = { path = "../guest-agent" }
 # The secret-hygiene leak test captures everything both sides log during an exec and greps it.
 tracing-subscriber = { workspace = true }
+# Cross-crate test helpers (the cgroup-cap harness, host-capability probes), shared with the loader's
+# privileged tests so they aren't copy-pasted. Dev-only, never shipped.
+agent-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

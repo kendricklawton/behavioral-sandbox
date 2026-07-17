@@ -14,7 +14,7 @@ repo, or moves the security boundary into the guest, the design is wrong.
 The **language SDKs** (Go/Python/Node/C#) and the **Wasmtime sibling** are separate repos built on
 this engine's frozen wire API + audit-log format — thin clients / a sibling, never in this
 repo. The Wasmtime variant is a *sibling, not a backend*, so *isolation is hardware* holds here
-without exception. (They're a forward map in `ROADMAP.md` Phases 19–20; their code lives elsewhere.)
+without exception. (They're a forward map in `ROADMAP.md` Phases 20–21; their code lives elsewhere.)
 
 **Why this exists.** A self-hostable, embeddable engine for running untrusted code with hardware
 isolation and a trustworthy, host-observed audit log isn't something you can pull off the shelf. This

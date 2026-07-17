@@ -287,6 +287,11 @@ pub struct RunningVm {
     pub(crate) exec_wall: Duration,
     /// Per-exec aggregate output cap in bytes, from [`BootConfig::output_cap`].
     pub(crate) output_cap: usize,
+    /// The guest's vCPU count as configured at boot ([`BootConfig::vcpus`], what
+    /// `PUT /machine-config` set), recorded into a [`Snapshot`]'s envelope so a jailed restore can
+    /// derive its `cpu.max` from the clone's *true* parallelism. On a restore this mirrors the
+    /// restoring `config` and is never read — a restored VM refuses snapshotting.
+    pub(crate) vcpus: NonZeroU8,
 }
 
 /// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
@@ -325,6 +330,13 @@ pub struct Snapshot {
     /// and the snapshot's baked-in guest address/MAC/routes are already correct in each, with no
     /// re-addressing needed. (This retired decision 011's one-live-networked-clone limit.)
     pub(crate) tap_name: Option<String>,
+    /// The source's vCPU count — the restored clone's **true** parallelism, since the vCPUs come
+    /// from the snapshot state (restore issues no `PUT /machine-config`) and nothing forces the
+    /// restoring `config` to agree. A jailed restore derives its `cpu.max` from this, the CPU
+    /// analogue of deriving `memory.max` from the memory file's true size: the cap tracks what the
+    /// clone actually runs, so a `config` mis-declaring the envelope can neither throttle nor
+    /// over-grant a legitimate clone.
+    pub(crate) vcpus: NonZeroU8,
 }
 
 impl Snapshot {
@@ -345,6 +357,14 @@ impl Snapshot {
     #[must_use]
     pub fn root_drive_path(&self) -> &Path {
         &self.root_drive
+    }
+
+    /// The source's vCPU count — what a clone restored from this bundle actually runs (the vCPUs
+    /// come from the snapshot state, not the restoring config). A jailed restore's `cpu.max` is
+    /// derived from this; exposed so an embedder sizing a pool can read a bundle's CPU envelope.
+    #[must_use]
+    pub fn vcpus(&self) -> NonZeroU8 {
+        self.vcpus
     }
 }
 

@@ -19,8 +19,9 @@
 //!
 //! **Scope.** This confines both a jailed **cold boot** and a jailed **restore**: the chroot +
 //! uid/gid drop + the jailer's mount namespace, cgroup **cpu/memory limits** derived from the
-//! guest's envelope plus a fixed host-side **`pids.max`** cap (applied on cold boot when the host
-//! delegates the cgroup v2 controllers, each fail-open on its own), and Firecracker's built-in
+//! guest's envelope plus a fixed host-side **`pids.max`** cap (applied on cold boot *and re-applied on
+//! restore* when the host delegates the cgroup v2 controllers, each fail-open on its own), and
+//! Firecracker's built-in
 //! **seccomp** filters (on by default; we never pass `--no-seccomp`). Every
 //! boot feature composes with the jail: the **vsock exec channel** (its unix socket bound
 //! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
@@ -560,6 +561,17 @@ pub(crate) fn cgroup_limit_args(vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<St
     cgroup_args_for(&delegated, vcpus, mem_mib)
 }
 
+/// The memory envelope to cap a **restored** jailed clone at: the larger of the caller's `config`
+/// value and the guest RAM the snapshot memory file implies (`mem_file_len` bytes, since a full
+/// snapshot's memory file *is* the guest's RAM). Deriving from the file's true guest RAM means the cap
+/// can never fall *below* what the restored guest actually uses — the exact hazard that kept restore
+/// uncapped: a `config` under-declaring the envelope must not OOM-kill a legitimate clone. Pure, so
+/// the max logic is unit-tested without a real snapshot.
+pub(crate) fn restore_mem_mib(config_mem_mib: NonZeroU32, mem_file_len: u64) -> NonZeroU32 {
+    let from_file = u32::try_from(mem_file_len / (1024 * 1024)).unwrap_or(u32::MAX);
+    NonZeroU32::new(from_file.max(config_mem_mib.get())).unwrap_or(config_mem_mib)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +651,25 @@ mod tests {
         ] {
             assert!(cgroup_args_for(&d, vcpus, mem_mib).is_empty());
         }
+    }
+
+    #[test]
+    fn restore_mem_cap_never_falls_below_the_snapshots_true_ram() {
+        let mib = 1024 * 1024;
+        // The snapshot's memory file is larger than `config` declares: the true guest RAM (the file)
+        // wins, so the cap can't OOM the clone.
+        assert_eq!(
+            restore_mem_mib(NonZeroU32::new(256).unwrap(), 512 * mib).get(),
+            512
+        );
+        // `config` is larger (a looser declared bound): keep it — still safe (never below the file).
+        assert_eq!(
+            restore_mem_mib(NonZeroU32::new(512).unwrap(), 256 * mib).get(),
+            512
+        );
+        // A missing/zero-length memory file falls back to `config`, never zero (which `NonZeroU32`
+        // couldn't hold anyway).
+        assert_eq!(restore_mem_mib(NonZeroU32::new(256).unwrap(), 0).get(), 256);
     }
 
     #[test]

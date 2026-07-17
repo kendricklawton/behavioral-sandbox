@@ -183,6 +183,60 @@ pub(crate) struct Drive<'a> {
     pub path_on_host: &'a str,
     pub is_root_device: bool,
     pub is_read_only: bool,
+    /// The guest's IO bandwidth bound for this device (`None` omits it — an unthrottled drive). The
+    /// driver sets a derived default ([`RateLimiter::default_guest_io`]); it is not a `Limits` knob.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_limiter: Option<RateLimiter>,
+}
+
+/// A [Firecracker rate-limiter token bucket](https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md):
+/// `size` tokens available, refilled in full every `refill_time` **milliseconds** — so the sustained
+/// rate is `size / refill_time`. `one_time_burst` is extra tokens spent *before* the steady-state
+/// bucket engages, so an initial burst runs unthrottled.
+#[derive(Serialize)]
+pub(crate) struct TokenBucket {
+    pub size: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub one_time_burst: Option<u64>,
+    pub refill_time: u64,
+}
+
+/// A drive's `rate_limiter`: a `bandwidth` (bytes/s) and/or `ops` (IO/s) token bucket bounding the
+/// guest's IO to that virtio-block device. The engine uses a bandwidth bound only (see
+/// [`default_guest_io`](RateLimiter::default_guest_io)).
+#[derive(Serialize)]
+pub(crate) struct RateLimiter {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bandwidth: Option<TokenBucket>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ops: Option<TokenBucket>,
+}
+
+/// The derived per-drive **bandwidth** cap (bytes/second): 256 MiB/s. Defense in depth against a
+/// disk-thrashing guest starving a co-resident run — it sits well under a typical NVMe's throughput
+/// (so a co-resident run keeps the bulk of it) yet is ample for one sandbox's normal IO.
+const GUEST_IO_BANDWIDTH_BYTES_PER_S: u64 = 256 * 1024 * 1024;
+/// The one-time burst (bytes) that runs unthrottled before the steady-state cap engages: 1 GiB, past
+/// any rootfs the engine ships, so a cold boot's rootfs read fits inside the burst and runs
+/// unthrottled *by construction*; only *sustained* thrashing beyond the burst is throttled. (The
+/// measured confirmation that boot latency is unchanged is the pending privileged readback.)
+const GUEST_IO_ONE_TIME_BURST_BYTES: u64 = 1024 * 1024 * 1024;
+
+impl RateLimiter {
+    /// The driver's derived default drive bound: a bandwidth cap with a boot-sized burst, no ops cap.
+    /// An **internal derived default** (decision 013's "quantities the engine derives, not new
+    /// `Limits` knobs"), so the public contract is unchanged; surfacing it as a `Limits` field later
+    /// would be an additive, `api:`-marked change.
+    pub(crate) fn default_guest_io() -> Self {
+        RateLimiter {
+            bandwidth: Some(TokenBucket {
+                size: GUEST_IO_BANDWIDTH_BYTES_PER_S,
+                one_time_burst: Some(GUEST_IO_ONE_TIME_BURST_BYTES),
+                refill_time: 1000,
+            }),
+            ops: None,
+        }
+    }
 }
 
 /// `PUT /machine-config` — the vCPU and memory budget.
@@ -391,11 +445,40 @@ mod tests {
             path_on_host: "/w/rootfs.ext4",
             is_root_device: true,
             is_read_only: false,
+            rate_limiter: None,
         })
         .unwrap();
         assert_eq!(json["drive_id"], "rootfs");
         assert_eq!(json["is_root_device"], true);
         assert_eq!(json["is_read_only"], false);
+        // A `None` rate limiter is omitted entirely — an unthrottled drive, not `"rate_limiter":null`.
+        assert!(
+            json.get("rate_limiter").is_none(),
+            "an absent rate limiter must not serialize a key: {json}"
+        );
+    }
+
+    #[test]
+    fn default_guest_io_rate_limiter_matches_firecrackers_schema() {
+        // The derived IO bound: a bandwidth token bucket (256 MiB/s, 1 GiB burst), no ops bucket. The
+        // shape must be exactly what Firecracker's `PUT /drives` expects, and the ops key must be
+        // omitted (not null), so this pins both the numbers and the wire shape.
+        let json = serde_json::to_value(Drive {
+            drive_id: "rootfs",
+            path_on_host: "/w/rootfs.ext4",
+            is_root_device: true,
+            is_read_only: false,
+            rate_limiter: Some(RateLimiter::default_guest_io()),
+        })
+        .unwrap();
+        let bw = &json["rate_limiter"]["bandwidth"];
+        assert_eq!(bw["size"], 256 * 1024 * 1024);
+        assert_eq!(bw["one_time_burst"], 1024 * 1024 * 1024_u64);
+        assert_eq!(bw["refill_time"], 1000);
+        assert!(
+            json["rate_limiter"].get("ops").is_none(),
+            "the engine sets no ops bound, so the key must be absent: {json}"
+        );
     }
 
     #[test]

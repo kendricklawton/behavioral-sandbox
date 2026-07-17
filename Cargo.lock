@@ -40,10 +40,15 @@ name = "agent-probes-loader"
 version = "0.1.0"
 dependencies = [
  "agent-probes-common",
+ "agent-test-support",
  "agent-vmm",
  "aya",
  "nix",
 ]
+
+[[package]]
+name = "agent-test-support"
+version = "0.1.0"
 
 [[package]]
 name = "agent-vmm"
@@ -51,6 +56,7 @@ version = "0.1.0"
 dependencies = [
  "agent-channel",
  "agent-guest",
+ "agent-test-support",
  "serde",
  "serde_json",
  "tracing",

@@ -9,6 +9,7 @@
   - [Observing a run from the host](./examples-observe-a-run.md)
 - [Host-side observability & enforcement](./probes.md)
 - [Security](./security.md)
+  - [Threat model](./threat-model.md)
 - [Contributing](./contributing.md)
   - [Architecture & decisions](./contributing-architecture.md)
   - [Building](./contributing-building.md)

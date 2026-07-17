@@ -17,7 +17,8 @@ use std::time::{Duration, Instant};
 
 use agent_vmm::{sweep_orphans, BootConfig, Vm};
 
-use common::{agent_rootfs_config, config, have_jailer_privileges, have_net_admin};
+use agent_test_support::{process_threads, LimitCgroup};
+use common::{agent_rootfs_config, cgroup_of, config, have_jailer_privileges, have_net_admin};
 
 /// The env var that turns `helper_boot_and_park` from a no-op into the crash-test victim. Without
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
@@ -33,16 +34,6 @@ fn is_firecracker(pid: u32) -> bool {
     std::fs::read_to_string(format!("/proc/{pid}/comm"))
         .map(|c| c.trim() == "firecracker")
         .unwrap_or(false)
-}
-
-/// The cgroup dir `pid` currently lives in (`/sys/fs/cgroup` + the `0::` line), or `None`.
-fn cgroup_of(pid: u32) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
-    let rel = text.lines().find_map(|l| l.strip_prefix("0::"))?.trim();
-    if rel.is_empty() || rel == "/" {
-        return None;
-    }
-    Some(Path::new("/sys/fs/cgroup").join(rel.trim_start_matches('/')))
 }
 
 /// Poll `cond` up to `timeout`, returning whether it became true.
@@ -384,66 +375,6 @@ fn kill_handle_unblocks_a_wedged_exec() {
     drop(vm);
 }
 
-/// A cgroup carrying the engine's own limit derivation (`jail::cgroup_limit_args`, decision
-/// 013): `cpu.max` = exactly `vcpus` cores, `memory.max` = guest RAM + the 128 MiB VMM overhead.
-/// Built by the test because the limits normally arrive via the jailer, and exec-under-jail is a
-/// later migration — so this suite pins the *same-derived* caps onto the exec-capable boot path
-/// and proves they bind under load. `None` (skip) where cgroups aren't writable/delegated.
-struct LimitCgroup {
-    dir: PathBuf,
-    parent: PathBuf,
-}
-
-impl LimitCgroup {
-    fn create(vcpus: u32, mem_mib: u32, tag: &str) -> Option<Self> {
-        let parent =
-            PathBuf::from("/sys/fs/cgroup").join(format!("agent-p68-{}", std::process::id()));
-        std::fs::create_dir(&parent).ok()?;
-        // Enable the controllers for the leaf. The parent holds no processes, so the cgroup v2
-        // no-internal-processes rule doesn't apply; this still needs cpu+memory delegated to the
-        // cgroup root (the same prerequisite the jailer limits have).
-        let this = Self {
-            dir: parent.join(tag),
-            parent,
-        };
-        std::fs::write(this.parent.join("cgroup.subtree_control"), "+cpu +memory").ok()?;
-        std::fs::create_dir(&this.dir).ok()?;
-        let memory_max = (u64::from(mem_mib) + 128) * 1024 * 1024;
-        let cpu_quota = u64::from(vcpus) * 100_000;
-        std::fs::write(this.dir.join("memory.max"), memory_max.to_string()).ok()?;
-        std::fs::write(this.dir.join("cpu.max"), format!("{cpu_quota} 100000")).ok()?;
-        Some(this)
-    }
-
-    /// Move `pid` (its whole thread group) into the limited cgroup.
-    fn enter(&self, pid: u32) {
-        if let Err(e) = std::fs::write(self.dir.join("cgroup.procs"), pid.to_string()) {
-            panic!("move VMM {pid} into {}: {e}", self.dir.display());
-        }
-    }
-
-    fn read(&self, file: &str) -> String {
-        std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
-    }
-
-    /// A named counter out of a flat `key value` stat file (`memory.events`, `cpu.stat`).
-    fn stat(&self, file: &str, key: &str) -> u64 {
-        self.read(file)
-            .lines()
-            .find_map(|l| l.strip_prefix(key))
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0)
-    }
-}
-
-impl Drop for LimitCgroup {
-    fn drop(&mut self) {
-        // The VM must already be reaped (declare the cgroup before the VM, so it drops after).
-        let _ = std::fs::remove_dir(&self.dir);
-        let _ = std::fs::remove_dir(&self.parent);
-    }
-}
-
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn guest_mem_hog_is_bounded_by_the_cgroup() {
@@ -547,17 +478,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
     let vm = Vm::boot(cfg).expect("agent microVM should boot");
     cg.enter(vm.vmm_pid());
 
-    let threads = |pid: u32| -> u64 {
-        std::fs::read_to_string(format!("/proc/{pid}/status"))
-            .ok()
-            .and_then(|s| {
-                s.lines()
-                    .find_map(|l| l.strip_prefix("Threads:"))
-                    .and_then(|v| v.trim().parse().ok())
-            })
-            .unwrap_or(0)
-    };
-    let threads_before = threads(vm.vmm_pid());
+    let threads_before = process_threads(vm.vmm_pid());
     let usage_before = cg.stat("cpu.stat", "usage_usec");
     let started = Instant::now();
 
@@ -583,7 +504,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
     );
 
     // Hardware isolation, observed: 100 guest processes created zero host threads.
-    let threads_after = threads(vm.vmm_pid());
+    let threads_after = process_threads(vm.vmm_pid());
     assert_eq!(
         threads_after, threads_before,
         "guest forks must not create host threads (hardware isolation)"
@@ -607,4 +528,126 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
     let after = vm.exec(&echo, b"").expect("post-storm exec should run");
     assert_eq!(after.stdout, b"alive\n");
     vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
+fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
+    // The explicitly multi-tenant assertion (P15.8): a hostile run storming the host's CPU alongside
+    // a well-behaved run on the *same host* can neither **starve** it (the victim's work still
+    // completes, correctly and within a bound) nor **observe** it (distinct VMMs; network isolation is
+    // the per-VM netns's job, net.rs). Each run is capped at its own cgroup, so the attacker cannot
+    // take more than its quota — the victim's share is protected *by construction*; the wall-clock
+    // ceiling is a sanity check layered on top of that guarantee, not the guarantee itself.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping a_hostile_run_cannot_starve_or_observe_a_co_resident_run: needs real root"
+        );
+        return;
+    }
+    let cfg = agent_rootfs_config();
+    let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
+    let (Some(victim_cg), Some(attacker_cg)) = (
+        LimitCgroup::create(vcpus, mem_mib, "victim"),
+        LimitCgroup::create(vcpus, mem_mib, "attacker"),
+    ) else {
+        eprintln!("skipping a_hostile_run_cannot_starve_or_observe_a_co_resident_run: cgroup v2 not writable/delegated");
+        return;
+    };
+
+    // Two co-resident runs, each in its own capped cgroup — the per-run isolation a hoster relies on.
+    let victim = Vm::boot(cfg.clone()).expect("victim microVM should boot");
+    victim_cg.enter(victim.vmm_pid());
+    let attacker = Vm::boot(cfg).expect("attacker microVM should boot");
+    attacker_cg.enter(attacker.vmm_pid());
+    assert_ne!(
+        victim.vmm_pid(),
+        attacker.vmm_pid(),
+        "co-resident runs are distinct VMM processes (the attacker can't see the victim's)"
+    );
+
+    // A CPU-bound victim workload with a checkable result and a measurable solo time (the attacker VM
+    // is idle here, so this is a clean baseline). One literal, explicit `\n`s + single-space indent.
+    let work = [
+        "python3",
+        "-c",
+        "s=0\nfor i in range(20000000): s+=i\nprint(s)",
+    ]
+    .map(String::from);
+    const EXPECTED: &str = "199999990000000";
+    let solo_started = Instant::now();
+    let solo = victim
+        .exec(&work, b"")
+        .expect("victim solo workload should run");
+    let solo_wall = solo_started.elapsed();
+    assert_eq!(
+        String::from_utf8_lossy(&solo.stdout).trim(),
+        EXPECTED,
+        "victim workload should compute its known result"
+    );
+
+    // The attacker storms the CPU (100 spinners for 6 s) in its own thread while the victim reruns its
+    // workload concurrently. The `Vm` moves into the thread (it is `Send`); we get it back to read its
+    // cgroup and shut it down.
+    let storm = [
+        "sh",
+        "-c",
+        "i=0; while [ \"$i\" -lt 100 ]; do i=$((i+1)); while :; do :; done & done; sleep 6; echo storm-live",
+    ]
+    .map(String::from);
+    let attack_started = Instant::now();
+    let usage_before = attacker_cg.stat("cpu.stat", "usage_usec");
+    let storm_thread = std::thread::spawn(move || {
+        let out = attacker.exec(&storm, b"");
+        (attacker, out)
+    });
+    std::thread::sleep(Duration::from_millis(500)); // let the storm ramp before timing the victim
+
+    let under_started = Instant::now();
+    // Capture, don't assert yet: nothing between spawning the storm thread and joining it may panic,
+    // or a failed victim assertion would detach the thread and leave its VM un-torn-down.
+    let under = victim.exec(&work, b"");
+    let under_wall = under_started.elapsed();
+
+    let (attacker, storm_out) = storm_thread
+        .join()
+        .expect("attacker thread should not panic");
+    let attack_wall = attack_started.elapsed();
+
+    // With the storm thread joined (its VM now ours again), it's safe to assert.
+    let under = under.expect("victim workload should run under attack");
+    assert_eq!(
+        String::from_utf8_lossy(&under.stdout).trim(),
+        EXPECTED,
+        "the victim's result must be correct under attack (not starved to death or corrupted)"
+    );
+    assert_eq!(
+        storm_out.expect("attacker storm should run").exit_code,
+        0,
+        "the attacker's storm command should exit 0"
+    );
+
+    // The attacker stayed within its cgroup CPU quota — it could not monopolize the host, so the
+    // victim's share was protected by the cap regardless of the scheduler.
+    let attacker_cpu = attacker_cg.stat("cpu.stat", "usage_usec") - usage_before;
+    let cpu_cap = attack_wall.as_micros() as u64 * u64::from(vcpus) + 2_000_000;
+    assert!(
+        attacker_cpu <= cpu_cap,
+        "attacker host CPU ({attacker_cpu} usec) must stay within its cgroup quota ({cpu_cap} usec)"
+    );
+
+    // Not slowed past a bound: a generous ceiling that only trips on gross starvation (timing is
+    // host-dependent, so the real guarantee is the cap above; this is the sanity check).
+    const SLOWDOWN_MAX: u32 = 10;
+    let ceiling = solo_wall * SLOWDOWN_MAX + Duration::from_secs(5);
+    eprintln!("co-resident: victim solo {solo_wall:?} vs under attack {under_wall:?} (ceiling {ceiling:?})");
+    assert!(
+        under_wall <= ceiling,
+        "victim was slowed past the bound: {under_wall:?} > {ceiling:?} (starvation)"
+    );
+
+    victim.shutdown().expect("victim shutdown should succeed");
+    attacker
+        .shutdown()
+        .expect("attacker shutdown should succeed");
 }

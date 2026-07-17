@@ -14,12 +14,12 @@
 > Multi-tenant auth, billing, scheduling across a fleet, a web dashboard: **out of scope**, the
 > hoster's job.
 >
-> **Scope of this repo:** the **core engine** — the Firecracker + eBPF sandbox of **Phases 0–18**,
-> defined by the four core properties (§0). The **vNext tracks** (Phases 19–20: the polyglot SDKs
+> **Scope of this repo:** the **core engine** — the Firecracker + eBPF sandbox of **Phases 0–19**,
+> defined by the four core properties (§0). The **vNext tracks** (Phases 20–21: the polyglot SDKs
 > and the software-isolation Wasmtime sibling) are **adjacent repos** — they build on this engine's
 > frozen wire API + audit-log format, but their code lives **outside** this repo and is
 > tracked here only as a forward map. This repo never trades its core properties to accommodate them: the
-> Wasmtime variant is a *sibling, not a backend* (Phase 20), so *isolation is hardware* holds here
+> Wasmtime variant is a *sibling, not a backend* (Phase 21), so *isolation is hardware* holds here
 > without exception.
 >
 > This file is the **single source of truth for progress** — of the core engine, and a map to its
@@ -54,12 +54,12 @@ Four properties every phase must protect:
 
 - **`v0.1.0` is the finish line** — the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; this is
-  P18.8).
-- **The vNext tracks (Phases 19–20) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
+  P19.8).
+- **The vNext tracks (Phases 20–21) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
   neither pulls tenancy/billing/scheduling into scope, and the Wasmtime sibling never dilutes this
-  engine's core properties (it's a separate artifact — see Phase 20).
+  engine's core properties (it's a separate artifact — see Phase 21).
 - **Everything until then is a pre-release `v0.0.x`.** Tag the foundation baseline (the engine
   boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
   patch as they land. These are checkpoints, not releases — no stability promise.
@@ -810,10 +810,10 @@ surface freezes.
       sha256-pinned (tamper-safe) but **availability-fragile** — a deleted bucket bricks new-host
       setup while existing artifact dirs keep working. Record the failure mode + the vendoring plan
       (decision 007 already notes the `.apk` closure half; this adds the kernel/base-image
-      half), pointing at P18.1 where vendored artifacts ride the packaging work. Docs only.
+      half), pointing at P19.1 where vendored artifacts ride the packaging work. Docs only.
       *(Recorded as a decision-007 consequence bullet: the kernel/base-image half joins the `.apk`
       half in the same availability class — loud failure (hash-checked fetches never silently
-      substitute), fresh-host-only blast radius, vendored as release artifacts at P18.1 where the
+      substitute), fresh-host-only blast radius, vendored as release artifacts at P19.1 where the
       self-host bundle needs them offline anyway.)*
 - **Exit gate:** a crash-looped host stays serviceable (sweep demo) and a mismatched host
   explains itself (`setup` demo).
@@ -954,12 +954,12 @@ Wrap the FC track into a clean, self-hostable engine API.
       delegates to `open` and flips with it. Inputs: `exec_with_files(argv, stdin, files, env,
       artifacts)` on `Sandbox` and `RunningVm`; `env` rides `Request::Exec` as **protocol v2** — the
       handshake version gates the skew, because an old agent parses the new frame and silently runs
-      *without* the env, which for secrets/config is a correctness failure, not compat (decision 018) —
+      *without* the env, which for secrets/config is a correctness failure, not compat (decision 019) —
       and the guest applies it via `Command::env` on the spawned command only, never its own process
       (proven in-process by `env_reaches_the_command_but_never_the_agents_own_process` and against a
       real guest by the per-exec-scope assertion in the leak test). `collect_outputs`, `snapshot`,
       `kill_handle`, and `vmm_pid` are surfaced on `Sandbox`, so an embedder never reaches into
-      `RunningVm`. Secret hygiene pinned on `RunningVm::exec_with_files` and recorded as decision 018;
+      `RunningVm`. Secret hygiene pinned on `RunningVm::exec_with_files` and recorded as decision 019;
       the wire copies (the channel's serialized payload, the driver's request clones) are zero-wiped
       after send. Exit gate: `sandbox_opens_jailed_by_default` (real-root, self-skips) proves the
       polarity flip; `lifecycle_runs_inputs_and_collects_outputs` +
@@ -1596,7 +1596,7 @@ interacting flags on `run`.
 - [x] **P14.9e** Version the JSON surface: a `schema` field (integer, starting at `1`) on the
       `--json` run result **and** the audit-record JSON, plus a written compatibility policy
       (additive within a version; field rename/removal bumps it). This is the seed the wire API
-      (P16.2) and the SDK freeze (Phase 19) harden — versioning lands *before* anything external
+      (P16.2) and the SDK freeze (Phase 20) harden — versioning lands *before* anything external
       parses these bytes, not after. (The audit record's open field questions are already settled:
       `overflow_events` semantics and the u64-nanosecond ceiling, decision 028's hardening pass.)
       *(Landed: a leading `schema` field on both surfaces — `RUN_RESULT_SCHEMA` on the `--json` run
@@ -1634,30 +1634,89 @@ egress with an allow-listed exception (P4.7), no-leak teardown of a killed/crash
 and this phase runs them as one hostile guest and closes the last gaps. Tenant-agnostic throughout: the
 engine guarantees per-run containment; whose run is whose is the hoster's (decisions 016, 022).
 
-- [ ] **P15.1** Adversarial suite: guest tries to escape/DoS/exfiltrate → contained + recorded.
-- [ ] **P15.2** Confirm the guest cannot see or disable the host-side probes.
-- [ ] **P15.3** Resource-exhaustion, fork-bomb, network-flood → bounded by cgroup + egress policy.
-- [ ] **P15.4** Snapshot-restore correctness under load (no state bleed between clones).
-- [ ] **P15.5** Document the **threat model**: what's trusted (CPU/KVM/host kernel), what isn't.
-- [ ] **P15.6** `(decision)` the security boundary + assumptions → `docs/contributing-architecture.md`. *(Partially
-      seeded early by decision 016, the engine/hoster line the P6.9a sweep forced: the engine
-      guarantees its privileged tools can't be weaponized (euid-scoped, authorship not policy), the
-      hoster owns deployment (scheduling, per-identity sweeps, base hardening, dividing the /16
-      pool). This box closes the *whole* boundary — what's trusted vs not — behind the Phase-15
-      adversarial suite; decision 016 is one worked facet, not the closure.)*
-- [ ] **P15.7** Close the cgroup matrix. **`pids.max` is done** (`jail.rs`, added to the per-VM cgroup
+- [x] **P15.1** Adversarial suite: guest tries to escape/DoS/exfiltrate → contained + recorded.
+      *(Landed as `probes-loader/tests/hardening.rs::a_hostile_guest_is_contained_and_the_record_shows_it`:
+      one hostile guest **exfiltrates** to a blocked endpoint (dropped at the tap, the drop recorded in
+      the fused `RunRecord`'s denial trail) and **DoS**es the host with a 50-process fork storm (which
+      creates zero host threads — hardware isolation), while the allow-listed exception and a clean
+      coverage set show in the *same* record and the VM stays exec-responsive afterward. The cgroup
+      cpu/mem/pid caps under real hostile load are the `agent-vmm` confinement suite's real-root
+      mem-hog/fork-bomb (P6.8) and full VM/jail escape is P6.6; this consolidates the observed-and-
+      recorded dimensions on the probe-capability path, adding the part those pieces lack — the record
+      as the evidence.)*
+- [x] **P15.2** Confirm the guest cannot see or disable the host-side probes.
+      *(Landed as `hardening.rs::a_guest_cannot_see_or_disable_the_host_side_probes`: the guest runs its
+      **own** kernel inside the microVM while the eBPF lives in the **host** kernel and the tap monitor
+      sits on the host end of the VM's tap — outside the guest — so a guest that hunts for the
+      observability (finds zero BPF objects in its view) and then sends identifiable traffic is **still
+      fully recorded** with clean coverage. It can't disable what it can't reach; the proof is
+      behavioural — the host keeps recording across the guest's attempts.)*
+- [x] **P15.3** Resource-exhaustion, fork-bomb, network-flood → bounded by cgroup + egress policy.
+      *(Landed as `hardening.rs::all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy`:
+      one hostile guest under both a cgroup cap and an enforcing egress policy hits every axis at once
+      — a memory hog (stays under `memory.max`, no host OOM-kill of the VMM), a fork storm (zero host
+      threads, host CPU within the `cpu.max` quota), and a 200-packet network flood to a blocked
+      endpoint (dropped at the tap at volume, a high denial count in the record) — while the
+      allow-listed endpoint keeps working and the VM stays responsive. Real-root + probe-caps gated,
+      skips with a reason otherwise. The two enforcement mechanisms bound all three vectors together.)*
+- [x] **P15.4** Snapshot-restore correctness under load (no state bleed between clones).
+      *(Landed as `snapshot.rs::restored_clones_do_not_bleed_state_under_load`: N clones restored from
+      one prewarmed snapshot each write a **distinct** secret to the same guest path and read it back,
+      all in flight at once (each clone drives its own thread). A shared writable disk would let a
+      sibling's concurrent write clobber the path; instead each reads back exactly its own — per-clone
+      in-RAM overlay + guest RAM, shared base read-only, no bleed. Guards against a vacuous pass by
+      asserting the secrets were distinct.)*
+- [x] **P15.5** Document the **threat model**: what's trusted (CPU/KVM/host kernel), what isn't.
+      *(Landed as `docs/threat-model.md` (linked under Security in `SUMMARY.md`): assets in priority
+      order, the trusted/untrusted boundary, the fully-hostile-guest adversary, an attack-class →
+      mechanism → proving-test table, and the explicit assumptions/residual risk (KVM + host-kernel
+      soundness, side channels) and out-of-scope (engine, not platform). `security.md` now points at
+      it as its companion. The `(decision)` recording the boundary is P15.6, still open.)*
+- [x] **P15.6** `(decision)` the security boundary + assumptions → `docs/contributing-architecture.md`. *(Seeded early
+      by decision 016, the engine/hoster line the P6.9a sweep forced: the engine guarantees its
+      privileged tools can't be weaponized (euid-scoped, authorship not policy), the hoster owns
+      deployment (scheduling, per-identity sweeps, base hardening, dividing the /16 pool). **Closed as
+      decision 033**: the whole boundary written down — trusted (CPU/KVM/host kernel/driver/host-eBPF)
+      vs not (the guest incl. its own kernel + the in-guest agent), the fully-hostile-guest adversary,
+      the assumptions/residual risk (KVM + host-kernel soundness, side channels, fair scheduling), and
+      the map from each attack class to the test that proves it. `docs/threat-model.md` (P15.5) is its
+      reader-facing companion; decision 016 is one worked facet, 022 the multi-tenant claim, 033 the
+      closure.)*
+- [x] **P15.7** Close the cgroup matrix. **`pids.max` is done** (`jail.rs`, added to the per-VM cgroup
       alongside `cpu.max`/`memory.max`, fail-open per controller, host-gate unit-tested; a privileged
       readback stays pending). It is host-side *defense in depth*: a guest fork-bomb is already bounded
       by `memory.max` and never reaches the host (P6.8), but a hypervisor-level exploit that forked
-      *host* processes is now capped. **Remaining:** bound guest **IO bandwidth** so a disk-thrashing
-      guest can't starve a co-resident run — via Firecracker's per-drive **virtio-blk rate limiter**
-      (the engine-native control) or host `io.max`. Internal, derived defaults — **not** new `Limits`
-      knobs — so the public contract is unchanged; surfacing them as `Limits` fields later would be an
-      additive, marked `api:` change.
-- [ ] **P15.8** **Co-resident interference test:** launch a hostile run (cpu/mem/pid/io/network storm)
+      *host* processes is now capped. **IO bandwidth is now bounded** via Firecracker's per-drive
+      **virtio-blk rate limiter** (the engine-native control, not host `io.max`): a derived default
+      (`RateLimiter::default_guest_io` — 256 MiB/s with a 1 GiB `one_time_burst` sized past any rootfs,
+      so a cold boot's read fits the burst and runs unthrottled *by construction*; only *sustained*
+      thrashing is throttled), set on every drive at cold-boot `put_drive`, host-safe unit-tested for
+      both the wire shape and the numbers. It **rides restore**: a clone reopens the drive from the
+      snapshot state file, which carries the limiter. (The cgroup caps used *not* to ride restore — a
+      pre-existing gap now closed under P15.8.) An **internal derived default,
+      not a new `Limits` knob** (decision 013), so the public contract is unchanged and this is
+      non-`api:`; the measured boot-latency-is-unchanged confirmation and a throttle readback stay
+      pending on a privileged host, like `pids.max`. Decision 033 records the boundary this sits in.
+- [x] **P15.8** **Co-resident interference test:** launch a hostile run (cpu/mem/pid/io/network storm)
       alongside a well-behaved run on the same host and assert the victim run is not starved, slowed
       past a bound, or observable by the attacker — the explicitly multi-tenant assertion the hoster
       gates on (still tenant-agnostic: two *runs*, no tenant concept).
+      *(Two parts. First, the **prerequisite fix**: a jailed **restore** now re-applies the cgroup caps
+      (`spawn.rs`), so a restored clone — where untrusted code runs — is confined, not just isolated.
+      Both caps derive from the *snapshot's* true envelope, never `config`'s declaration (the clone's
+      vCPUs and RAM come from the snapshot state; restore issues no `PUT /machine-config`): `memory.max`
+      from the memory file's true guest RAM (`jail::restore_mem_mib`, unit-tested — the old OOM hazard),
+      `cpu.max` from the vCPU count recorded in the bundle (`Snapshot::vcpus`, so a config defaulting to
+      fewer vCPUs than the source can't silently throttle a clone — proven by
+      `snapshot.rs::restored_clone_cpu_cap_follows_the_snapshot_not_the_config`), constant `pids.max`.
+      Then the test,
+      `confinement.rs::a_hostile_run_cannot_starve_or_observe_a_co_resident_run`: two co-resident runs
+      each in its own capped cgroup; the attacker storms 100 spinning processes while the victim reruns
+      a CPU-bound workload, and the victim's result stays **correct** and within a generous wall-clock
+      ceiling, while the attacker's host CPU stays **within its cgroup quota** (so it can't monopolize
+      the host — the victim's share is protected by construction). Distinct VMMs prove non-observability
+      of the process; network non-observability between runs is the per-VM netns (net.rs, decision 017).
+      Real-root + delegated-cgroups gated.)*
 - [x] **P15.9** **Fuzz the untrusted-input boundary:** the host↔guest channel decoders, where a hostile
       guest chooses the bytes the host parses. *(Landed early as a Phase-15 constituent, like the jail/
       cgroup/egress checks the intro lists. Two tiers: a **dependency-free property harness in the `ci`
@@ -1683,10 +1742,10 @@ A local daemon others drive over a socket: still engine, not PaaS.
 
 - [ ] **P16.1** `agentd`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
 - [ ] **P16.2** A **versioned** wire API (JSON/gRPC — `(decision)`): open/exec/put/get/snapshot/
-      close/trace. This is the **SDK contract** — Phase 19 freezes and spec's it.
+      close/trace. This is the **SDK contract** — Phase 20 freezes and spec's it.
 - [ ] **P16.3** Pre-warmed-pool management lives in the daemon (fast `exec`).
 - [ ] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agentd` over the
-      wire API — the seed the **polyglot SDKs (Phase 19)** harden into Go/Python/Node/C#. (The full
+      wire API — the seed the **polyglot SDKs (Phase 20)** harden into Go/Python/Node/C#. (The full
       SDK set is post-`v0.1.0`.)
 - [ ] **P16.5** Structured logs + a metrics endpoint (Prometheus) — for the *hoster* to scrape.
 - [ ] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
@@ -1707,21 +1766,64 @@ Make the numbers real — the benchmarks that back every claim.
 - **Exit gate:** documented latency/memory-sharing/overhead numbers, with the methodology stated
   (percentiles, not averages).
 
-## Phase 18 — Packaging & docs
+## Phase 18 — AI-native surfaces (the runtime for agent-generated code)
+
+The engine's highest-value untrusted workload is **AI-generated code and autonomous agents** — the
+dynamic, possibly-misaligned input the isolation-and-audit thesis was built to contain. Make that a
+first-class fit **without embedding a model.** A model in the host path is not an isolation boundary
+(invariant 1), and dragging inference (unbounded, un-benchmarkable) or model-driven policy into the
+engine would break "engine, not platform" and "measured, not marketed" (invariants 3, 4). So the
+model always stays the **caller's**; the engine stays the containment-and-audit substrate it already
+is. This phase puts a **model-legible face** on the record the engine already builds and proves the
+containment story end to end — no new isolation, no bundled model — leaning on the documented threat
+model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through.
+
+- [ ] **P18.1** `(decision)` **The AI-scope boundary** → `docs/contributing-architecture.md`: the
+      model is always the **caller**, never an engine component; the engine's whole contribution is
+      hardware containment plus a host-observed, **model-legible** record; the reference example
+      drives the engine with a **deterministic scripted agent**, not a live model (so the demo is
+      CI-reproducible and needs no API keys). Records why embedding a model, or letting one decide
+      policy, would break invariants 1 / 3 / 4 — so the line is auditable and can't drift into a
+      slap-on.
+- [ ] **P18.2** A **model-legible projection of the audit record** — a third face alongside `--trace`
+      (human) and `--record` (machine JSON), surfaced as `agent run --record-summary FILE` and a
+      `RunRecord` method: a compact, semantically-labelled summary shaped to feed straight back into
+      an agent's observe→act loop (what it read/wrote, which flows it opened, what egress was
+      **denied**, its resource envelope, and any coverage gap). A **view of the existing `RunRecord`**,
+      not new machinery: deterministic, byte-stable, carrying its own leading `schema` field, and
+      **golden-tested** like the full record. Its size is **measured and bounded** against the full
+      record, so "compact" is a number, not a claim (invariant 4).
+- [ ] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
+      **Phase 20 SDKs** expose it as part of the SDK contract — an agent driving `agentd` from any
+      language reads the same model-legible observation the CLI writes, not a CLI-only convenience.
+- [ ] **P18.4** A **reference agent-containment example** (`docs/examples`): a **scripted agent** (a
+      deterministic stand-in for an LLM's tool loop — no model, no secrets) runs inside a sandbox,
+      egress-policed with `--allow` to only its permitted tool / MCP endpoints, makes one allowed call
+      and one that is **denied**, and the host-observed record + projection prove **exactly what it
+      reached and what was blocked**. Uses only surfaces the engine already ships (`--net` / `--allow`
+      / `--record` + P18.2). This is the thesis applied to the workload of the moment — the
+      tamper-resistant, host-observed audit trail a supervisor needs to trust an agent, which the
+      pure-execution sandboxes can't offer.
+- **Exit gate:** the scripted agent runs contained and **CI-reproducibly** — its egress policed to an
+  allow-list, one permitted tool call succeeding and one denied — and the **model-legible record**
+  (from the CLI and over the wire API) shows what it did and what was blocked, its size measured
+  against the full record, **with no model anywhere in the host path.**
+
+## Phase 19 — Packaging & docs
 
 Ship it as a thing others can run: packaged, documented, and self-hostable.
 
-- [ ] **P18.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
+- [ ] **P19.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
       *(Includes vendoring the sha-pinned upstream inputs — the Firecracker CI kernel/rootfs and the
       `.apk` closure (decision 007's note, P6.9d's recording) — so a fresh host's setup no longer
       depends on the FC S3 bucket or the Alpine CDN staying alive.)*
-- [ ] **P18.2** `curl | sh` / container / release binaries with checksums.
-- [ ] **P18.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
-- [ ] **P18.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
-- [ ] **P18.5** A **reference integration**: a small host application embedding the engine end to end.
-- [ ] **P18.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
-- [ ] **P18.7** Security policy + responsible-disclosure notes.
-- [ ] **P18.8** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
+- [ ] **P19.2** `curl | sh` / container / release binaries with checksums.
+- [ ] **P19.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
+- [ ] **P19.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
+- [ ] **P19.5** A **reference integration**: a small host application embedding the engine end to end.
+- [ ] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
+- [ ] **P19.7** Security policy + responsible-disclosure notes.
+- [ ] **P19.8** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
   and read the eBPF-observed audit trail.
 
@@ -1729,7 +1831,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 ## Post-v0.1.0 — vNext tracks
 
-> These land **after** the `v0.1.0` finish line (P18.8) and **do not gate that tag** (§0.6). They
+> These land **after** the `v0.1.0` finish line (P19.8) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
 > — without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.
@@ -1740,47 +1842,47 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 > contract (and its certification) landing here* — the SDK/engine **code lives in its sibling
 > repo**, gated by the conformance suite this repo publishes.
 
-## Phase 19 — Polyglot SDKs (Go · Python · C# · Node.js)
+## Phase 20 — Polyglot SDKs (Go · Python · C# · Node.js)
 
 Thin, idiomatic clients so non-Rust callers can drive `agentd` — a client-SDK surface, still
 **engine, not platform**.
 
-- [ ] **P19.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
+- [ ] **P20.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
       SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/contributing-architecture.md`.
-- [ ] **P19.2** A **cross-language conformance suite** (golden request/response + audit-log
+- [ ] **P20.2** A **cross-language conformance suite** (golden request/response + audit-log
       round-trips) every SDK must pass — the single source of SDK correctness, run in CI.
-- [ ] **P19.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
-- [ ] **P19.4** **Python** SDK (own repo; sync + async).
-- [ ] **P19.5** **Node.js / TypeScript** SDK (own repo).
-- [ ] **P19.6** **C# / .NET** SDK (own repo).
-- [ ] **P19.7** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
-      to a wire-API version, certified by the P19.2 conformance suite, and published to its language
+- [ ] **P20.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
+- [ ] **P20.4** **Python** SDK (own repo; sync + async).
+- [ ] **P20.5** **Node.js / TypeScript** SDK (own repo).
+- [ ] **P20.6** **C# / .NET** SDK (own repo).
+- [ ] **P20.7** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
+      to a wire-API version, certified by the P20.2 conformance suite, and published to its language
       registry with checksums.
-- [ ] **P19.8** Each SDK is a **thin protocol client** — no tenancy/auth/billing/scheduling; deny-by-
+- [ ] **P20.8** Each SDK is a **thin protocol client** — no tenancy/auth/billing/scheduling; deny-by-
       default and the non-goals hold at the SDK layer too (note).
 - **Exit gate:** four languages run the same golden `exec` and read the same host-observed
   audit log through `agentd`, against one stable polyglot wire API with a shared conformance suite.
 
-## Phase 20 — The Wasmtime sibling (a second isolation boundary)
+## Phase 21 — The Wasmtime sibling (a second isolation boundary)
 
 A **separate** engine that reuses this one's driver API + audit-log format but swaps the
 isolation boundary from **hardware (KVM)** to **software (Wasmtime SFI)** — a second isolation
 option, not a replacement for this repo.
 
-- [ ] **P20.1** `(decision)` **Sibling repo, not a backend here.** Core property 1 (*isolation is
+- [ ] **P21.1** `(decision)` **Sibling repo, not a backend here.** Core property 1 (*isolation is
       hardware*) is never traded in this engine; the wasm variant carries a **different, weaker**
       guarantee, so it's a distinct artifact that *shares the API*, not a plug-in backend →
       `docs/contributing-architecture.md`.
-- [ ] **P20.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
+- [ ] **P21.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
       a `ResourceLimiter` (memory) → typed limits, mirroring the FC engine's no-hang/no-leak contract.
-- [ ] **P20.3** The **host-function (WASI) shim layer** = capabilities + policy + audit log:
+- [ ] **P21.3** The **host-function (WASI) shim layer** = capabilities + policy + audit log:
       enforcement moves from host-side eBPF to the **import boundary** (the module has zero ambient
       authority; deny-by-default becomes "link no imports").
-- [ ] **P20.4** Reuse the `Sandbox` lifecycle shape + the audit-log **JSON schema**, so a caller
-      (and the Phase 19 SDKs) can drive either engine.
-- [ ] **P20.5** Comparative benchmarks: **instantiate latency + fuel overhead + memory-sharing** vs the
+- [ ] **P21.4** Reuse the `Sandbox` lifecycle shape + the audit-log **JSON schema**, so a caller
+      (and the Phase 20 SDKs) can drive either engine.
+- [ ] **P21.5** Comparative benchmarks: **instantiate latency + fuel overhead + memory-sharing** vs the
       microVM's boot/restore/memory-sharing — same harness, honest numbers.
-- [ ] **P20.6** Test: the same untrusted program on both engines yields comparable audit-log
+- [ ] **P21.6** Test: the same untrusted program on both engines yields comparable audit-log
       records; where they *can't* be comparable, document why.
 - **Exit gate:** two engines, one API, two isolation boundaries, with a documented **hardware vs
   software** comparison: TCB size, startup, memory-sharing, scope, and threat model.
