@@ -177,6 +177,13 @@ static TRACE_SET: Array<u32> = Array::with_max_entries(1, 0);
 
 const FILTER_MODE_SLOT: u32 = 0;
 
+/// A single-slot **per-CPU** counter of events the ring buffer **dropped** (a full [`EVENTS`] rejects
+/// the write rather than blocking the syscall). The loader sums the slots and surfaces a nonzero delta
+/// as a coverage gap on the run's record — so best-effort loss is *visible*, never a silently thinner
+/// footprint. Per-CPU for the same no-cross-CPU-atomic reason as `EXECVE_COUNT`.
+#[map]
+static EVENT_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
 /// Whether an event from `tgid` in `cgroup` passes the loader-set filter. In **set mode**
 /// ([`TRACE_SET`] slot 0 = 1) the event passes iff its cgroup is a registered [`TRACE_TARGETS`] member
 /// — the shared multi-sandbox tracer. Otherwise the single-target [`FILTER`] governs: each configured
@@ -243,8 +250,15 @@ fn record(ctx: &TracePointContext, kind: Syscall, arg_off: usize, path_like: boo
         }
     }
 
-    // A full ring buffer drops the event — best-effort observability, never blocking the syscall.
-    let _ = EVENTS.output(&ev, 0);
+    // A full ring buffer drops the event — best-effort observability, never blocking the syscall —
+    // but the drop is *counted*, so the loader can report the loss instead of undercounting silently.
+    if EVENTS.output(&ev, 0).is_err() {
+        if let Some(drops) = EVENT_DROPS.get_ptr_mut(0) {
+            // SAFETY: this CPU's own slot of the one-element per-CPU array; the pointer is only used
+            // inside the null-check and this program is its sole writer on this CPU.
+            unsafe { *drops += 1 };
+        }
+    }
     0
 }
 

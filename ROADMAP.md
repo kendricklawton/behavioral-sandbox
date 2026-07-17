@@ -1411,10 +1411,13 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       assembled by `SandboxProbes::collect(timing)` from the three probes (timing supplied as plain
       `Duration`s the caller lifts from `Sandbox::boot_latency` + `RunResult::metrics.wall`, so the record
       never depends on `vmm`). `host_syscalls` is bounded (repeat events collapse to a hit count; distinct
-      events cap at `MAX_NOTABLE = 64`, flagging truncation) and every collection is deterministically
-      sorted, so the record is byte-stable. Pure module (no aya, no vmm): 7 host-safe unit tests cover
-      counts-by-kind incl. unknown, foreign-cgroup filtering, dedup+cap, deterministic sort, full-record
-      equality across shuffled input, the no-network `None` case, and timing/resources passthrough.
+      events cap at `MAX_NOTABLE = 64` by arrival order, with `overflow_events` counting every event past
+      the cap so `total - overflow_events` is the exactly-attributed share) and every collection is
+      deterministically sorted with a **total** order — denials aggregate by destination triple (one row
+      per blocked endpoint, summed across guest source ports) — so the record is byte-stable. Pure module
+      (no aya, no vmm): host-safe unit tests cover counts-by-kind incl. unknown, foreign-cgroup filtering,
+      dedup+cap, overflow accounting, denial aggregation, deterministic sort, full-record equality across
+      shuffled input, the no-network `None` case, and timing/resources passthrough.
       Decision 027. The deterministic JSON *output* surface is P13.4; the privileged end-to-end proof is
       P13.6.)*
 - [x] **P13.3** Detach + finalize the record on `close`.
@@ -1427,8 +1430,9 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       *(Landed: `RunRecord::to_json` — a hand-rolled, dependency-free, compact serializer (the hand-framed
       wire reasoning of decision 002: the audit-log format is a contract the SDKs parse, so the exact
       bytes are pinned by a golden test, not a derive). Byte-stable (fixed key order; arrays pre-sorted by
-      their builders), float-free (durations as integer nanoseconds), addresses/protocols/syscalls by
-      name. Phase 14 pretty-prints + exports it; this is the machine surface. Decision 028.)*
+      their builders), float-free (durations as integer nanoseconds, clamped to u64 so consumers parse
+      with ordinary 64-bit integers), addresses/protocols/syscalls by name. Phase 14 pretty-prints +
+      exports it; this is the machine surface. Decision 028.)*
 - [x] **P13.5** Bound the overhead; keep concurrent sandboxes independent.
       *(Landed: the syscall tracer now gets the meter's shared treatment (decision 026) — a `TRACE_TARGETS`
       cgroup **set** + a `TRACE_SET` mode toggle in the kernel program, one shared `SyscallTracer` loaded
@@ -1437,8 +1441,11 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       single hash lookup and only target cgroups are emitted. A single drain routes each event to that
       cgroup's private `SyscallFold`, so concurrent sandboxes stay independent — proven host-safe by
       `concurrent_folds_stay_independent`, and the two-phase attach collapses to one post-boot
-      `SandboxProbes::attach`. `TRACE_SET` defaults off, so the Phase-9 single-target path is unchanged.
-      Decision 028.)*
+      `SandboxProbes::attach`. `TRACE_SET` defaults off (the `watch_*` setters switch back, so the mode
+      always matches the last setter used and neither filter model can silently no-op). Loss is honest:
+      the kernel counts ring-buffer drops (`EVENT_DROPS`), the bundle snapshots the counter around each
+      run and reports a nonzero delta as a coverage gap, the buffer is drained at load (the unfiltered
+      load-window baseline), at every attach, and on demand via `SharedTracer::poll`. Decision 028.)*
 - [x] **P13.6** Test: run a workload that touches network + files → the record shows exactly that.
       *(Landed: the `#[ignore]`d `a_networked_file_touching_run_yields_a_faithful_audit_record`
       (`audit_record.rs`) drives the real launch sequence — load the shared tracer + meter, boot a
@@ -1462,12 +1469,50 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
 
 Make what a run did *legible* — the payoff demo.
 
-- [ ] **P14.1** A live TUI (ratatui) or structured stream: sandboxes, their syscalls, network, resources.
-- [ ] **P14.2** Per-sandbox drill-down: this run's flows, denials, timeline.
-- [ ] **P14.3** `agent run --trace` prints the audit log after a run.
-- [ ] **P14.4** Export the record (JSON) for later inspection.
-- [ ] **P14.5** Test/demo: run something interesting, watch it live, read the trace after.
+- [x] **P14.1** A live TUI (ratatui) or structured stream: sandboxes, their syscalls, network, resources.
+      *(Landed: `agent run --watch` — a ratatui full-screen live view over the running sandbox, drawn on
+      **stderr** so stdout stays the run's result (the pipe-clean rule extended to the screen; decision
+      029). Panels: the sandbox (pid, boot, elapsed, state), its network, its resources, the VMM's
+      host-syscall footprint. Fed by a new **non-destructive** `SandboxProbes::snapshot() ->
+      LiveSnapshot` poll (tap reads, meter summary, a finished *clone* of the syscall fold), so watching
+      never disturbs the record `collect` finalizes; the exec runs on a worker thread that owns the
+      `Sandbox`. `q` closes the view, the run continues; terminal state restores via a drop guard on
+      every exit path, and a broken TUI degrades to a headless run, never a failed one. The structured
+      *stream* alternative was rejected as a second premature machine contract — decision 029.)*
+- [x] **P14.2** Per-sandbox drill-down: this run's flows, denials, timeline.
+      *(Landed: the live view's detail panes — the per-flow table (5-tuple + per-direction
+      packets/bytes), the denial rows (blocked endpoint + drop count, red), and a **timeline** derived
+      by diffing successive snapshots: each new flow, denial-count delta, and new distinct notable
+      syscall becomes one timestamped entry (pure, host-safe-tested `Timeline::observe`); boot/finish
+      are lifecycle entries. The CLI drives one sandbox per run, so the drill-down *is* the screen;
+      many-sandbox rollup is the daemon's later.)*
+- [x] **P14.3** `agent run --trace` prints the audit log after a run.
+      *(Landed: `--trace` binds the probes at launch (the decision-028 sequence composed in the CLI —
+      load shared tracer+meter, `attach` by plain values, `collect` while the sandbox is alive) and
+      prints the human-readable trail on **stdout** after the guest's own output: timing, per-flow
+      traffic, denials, resources, notable host syscalls (labeled the VMM's, not the guest's), and a
+      `gap` line per unbound axis. Fail-open end to end: a capless host still runs and the trail
+      explains every absence. Conflicts with `--json` (machine consumers take `--record`); the pretty
+      trail makes no byte-stability promise — that contract stays `to_json`'s alone. New `--net` flag
+      boots the NIC so there is a tap to observe (observe-only; the `--allow` policy projection stays
+      in the CLI-completeness phase, which inherits `--net` shipped).)*
+- [x] **P14.4** Export the record (JSON) for later inspection.
+      *(Landed: `--record FILE` writes the run's `RunRecord::to_json` — one line, deterministic,
+      byte-stable (the machine surface the SDKs will parse) — composable with `--json`, `--trace`,
+      and `--watch`.)*
+- [x] **P14.5** Test/demo: run something interesting, watch it live, read the trace after.
+      *(Landed: the demo is one command — `agent run --unjailed --net --watch --trace --record
+      run.json -- python3 …` (docs/cli.md + docs/examples-observe-a-run.md, "The whole run, fused") —
+      watch the flows/denials/resources/syscalls live, read the trail after, keep the JSON. Proven by
+      the `#[ignore]`d CLI e2e `run_with_trace_and_record_yields_trail_and_json` (`ci-privileged`):
+      drives the **built `agent` binary** on a real networked sandbox and asserts the guest output +
+      trail render on stdout, the record parses, and every axis binds (no coverage gap). Host-safe
+      unit tests pin the trail's golden text and the timeline diffing.)*
 - **Exit gate:** a compelling live view of hardware-isolated runs; the demo you show people.
+  *(Met: one flag set on `agent run` shows a hardware-isolated run live — its flows as the guest
+  makes them, denials as policy drops them, resources, the VMM's footprint, a timeline — then leaves
+  behind the human trail and the machine record, all host-observed from outside the guest.
+  Decision 029.)*
 
 ## Phase 14.9 — CLI completeness (interphase: the reference embedder, finished)
 
@@ -1486,7 +1531,8 @@ interacting flags on `run`.
       with clap ranges matching the `NonZeroU8`/`NonZeroU32` types so a refused value is a typed
       CLI error, never a silent clamp. `--json` reports the effective limits back.
 - [ ] **P14.9b** Project the network + egress policy: `--net` boots with a NIC (unchanged
-      deny-by-default: a `--net` run with no allowance reaches nothing but the host /30), and a
+      deny-by-default: a `--net` run with no allowance reaches nothing but the host /30 — **this
+      half already landed with the observability face**, P14.3/decision 029, observe-only), and a
       repeatable `--allow IP[/CIDR][:PORT][/PROTO]` builds the `EgressPolicy`, armed **before** the
       tap goes live (the no-unpoliced-window property, decision 025). Every allowance is explicit
       on the command line — the greppable audit line guardrail 3 asks for — and lands in the run's
@@ -1508,9 +1554,8 @@ interacting flags on `run`.
       `--json` run result **and** the audit-record JSON, plus a written compatibility policy
       (additive within a version; field rename/removal bumps it). This is the seed the wire API
       (P16.2) and the SDK freeze (Phase 19) harden — versioning lands *before* anything external
-      parses these bytes, not after. Settle the audit record's open field-name questions (the
-      FIX.md review items on `distinct_dropped` semantics and the u128 duration ceiling) in the
-      same stroke, while the format is still unshipped.
+      parses these bytes, not after. (The audit record's open field questions are already settled:
+      `overflow_events` semantics and the u64-nanosecond ceiling, decision 028's hardening pass.)
 - [ ] **P14.9f** Prove completeness end to end: on a fresh host, `agent doctor` → one `agent run`
       driving every projection at once (limits + `--net`/`--allow` + `--put`/`--get` + stdin +
       `--json`, with `--trace` if P14.3 has landed) — and `docs/cli.md` rewritten to document the

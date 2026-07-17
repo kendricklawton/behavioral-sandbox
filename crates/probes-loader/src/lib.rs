@@ -88,7 +88,9 @@ use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::{tc, SchedClassifier, TcAttachType, TracePoint};
 use aya::Ebpf;
 
-pub use agent_probes_common::{FlowCounts, FlowKey, PolicyRule, Protocol, Syscall, SyscallEvent};
+pub use agent_probes_common::{
+    FlowCounts, FlowKey, PolicyRule, Protocol, Syscall, SyscallEvent, COMM_CAP, DETAIL_CAP,
+};
 use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE_SIZE};
 
 /// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
@@ -101,7 +103,7 @@ mod observer;
 /// aggregated from the three probes. Pure (no aya), so its whole aggregation is unit-tested host-safe.
 mod record;
 
-pub use observer::{SandboxProbes, SharedMeter, SharedTracer};
+pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
 pub use record::{
     AxisGap, DenialRecord, FlowRecord, NetSection, NotableSyscall, RunRecord, SyscallCounts,
     SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
@@ -312,6 +314,9 @@ const TRACE_TARGETS_MAP: &str = "TRACE_TARGETS";
 /// [`TRACE_TARGETS_MAP`] set.
 const TRACE_SET_MAP: &str = "TRACE_SET";
 const FILTER_MODE_SLOT: u32 = 0;
+/// The per-CPU counter of events a full ring buffer dropped (`#[map] static EVENT_DROPS`), read by
+/// [`SyscallTracer::dropped_events`] so best-effort loss is reported, never silent.
+const EVENT_DROPS_MAP: &str = "EVENT_DROPS";
 
 /// A loaded, attached syscall tracer: the `sys_enter_{execve,openat,connect}` tracepoints
 /// stream per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the
@@ -383,28 +388,36 @@ impl SyscallTracer {
 
     /// Watch only the process tree with this **tgid** (the userspace pid): the programs drop events
     /// from any other tgid. Pass `0` to stop filtering on tgid. Composes with
-    /// [`watch_cgroup`](Self::watch_cgroup) (both configured axes must match).
+    /// [`watch_cgroup`](Self::watch_cgroup) (both configured axes must match). **Selects single-filter
+    /// mode**: like every `watch_*`, this switches the tracer off the [`add_target`](Self::add_target)
+    /// set if it was on, so the two filter models can't half-apply (the mode always matches the last
+    /// setter used).
     ///
     /// # Errors
-    /// [`ProbeError::Map`] if the filter map is missing or unwritable.
+    /// [`ProbeError::Map`] if the filter/mode map is missing or unwritable.
     pub fn watch_pid(&mut self, pid: u32) -> Result<(), ProbeError> {
+        self.set_mode(false)?;
         self.set_filter(FILTER_TGID, u64::from(pid))
     }
 
     /// Watch only the process in this **cgroup id** (`bpf_get_current_cgroup_id`): the axis a
-    /// sandbox's host workers are attributed on. Pass `0` to stop filtering on cgroup.
+    /// sandbox's host workers are attributed on. Pass `0` to stop filtering on cgroup. Selects
+    /// single-filter mode (see [`watch_pid`](Self::watch_pid)).
     ///
     /// # Errors
-    /// [`ProbeError::Map`] if the filter map is missing or unwritable.
+    /// [`ProbeError::Map`] if the filter/mode map is missing or unwritable.
     pub fn watch_cgroup(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
+        self.set_mode(false)?;
         self.set_filter(FILTER_CGROUP, cgroup_id)
     }
 
     /// Clear both filter axes: observe every process on the host again (the load-time default).
+    /// Selects single-filter mode (see [`watch_pid`](Self::watch_pid)).
     ///
     /// # Errors
-    /// [`ProbeError::Map`] if the filter map is missing or unwritable.
+    /// [`ProbeError::Map`] if the filter/mode map is missing or unwritable.
     pub fn watch_all(&mut self) -> Result<(), ProbeError> {
+        self.set_mode(false)?;
         self.set_filter(FILTER_TGID, 0)?;
         self.set_filter(FILTER_CGROUP, 0)
     }
@@ -413,12 +426,33 @@ impl SyscallTracer {
     /// [`add_target`](Self::add_target) member, ignoring the single-target [`watch_pid`](Self::watch_pid)
     /// / [`watch_cgroup`](Self::watch_cgroup) filter. This is what the shared multi-sandbox tracer
     /// ([`SharedTracer`]) drives; a single-sandbox caller stays on the default `FILTER` path and never
-    /// calls this. Idempotent.
+    /// calls this. Symmetric with the `watch_*` setters, which switch back — the mode always matches
+    /// the last setter used, so neither filter model can silently no-op. Idempotent.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the mode map is missing or unwritable.
     pub fn use_target_set(&mut self) -> Result<(), ProbeError> {
         self.set_mode(true)
+    }
+
+    /// Events the kernel **dropped** because the ring buffer was full, summed across CPUs — the
+    /// best-effort loss made visible. A monotonic counter since [`load`](Self::load); callers snapshot
+    /// it around a window and report a nonzero delta (the audit bundle turns one into a coverage gap).
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
+    pub fn dropped_events(&self) -> Result<u64, ProbeError> {
+        let map = self
+            .ebpf
+            .map(EVENT_DROPS_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{EVENT_DROPS_MAP}` not found")))?;
+        let drops: PerCpuArray<_, u64> = PerCpuArray::try_from(map).map_err(|e| {
+            ProbeError::Map(format!("open `{EVENT_DROPS_MAP}` as a per-cpu array: {e}"))
+        })?;
+        let per_cpu = drops
+            .get(&0, 0)
+            .map_err(|e| ProbeError::Map(format!("read `{EVENT_DROPS_MAP}`[0]: {e}")))?;
+        Ok(per_cpu.iter().copied().sum())
     }
 
     /// Register `cgroup_id` in the trace target *set* and switch to set mode if not already — so from

@@ -22,8 +22,9 @@ use agent_probes_common::{FlowCounts, FlowKey, Syscall, SyscallEvent};
 use crate::{NetStats, ResourceSummary};
 
 /// The cap on **distinct** notable syscalls kept in a footprint. Repetition is already collapsed into
-/// a hit count, so this bounds cardinality: a run that touches thousands of *different* paths keeps the
-/// first `MAX_NOTABLE` distinct ones (by sort order) and records the rest as a count, never growing the
+/// a hit count, so this bounds cardinality: a run that touches thousands of *different* paths keeps
+/// the first `MAX_NOTABLE` distinct ones **by arrival order** (the fold caps as events stream in;
+/// sorting happens at `finish`, after membership is settled) and counts the rest, never growing the
 /// record without bound.
 pub const MAX_NOTABLE: usize = 64;
 
@@ -76,13 +77,18 @@ pub struct NetSection {
     /// Per-flow byte/packet counters, sorted deterministically by destination then source.
     pub flows: Vec<FlowRecord>,
     /// Destinations the egress policy blocked, with the dropped-packet count — the audit trail
-    /// decision 025 folds in here. Sorted deterministically by destination.
+    /// decision 025 folds in here. **Aggregated by destination** (one row per blocked endpoint,
+    /// summed across guest source ports) and sorted by that destination triple.
     pub denials: Vec<DenialRecord>,
 }
 
 impl NetSection {
-    /// Build a sorted section from the tap monitor's raw reads (`flows`, `totals`, `denials`). Sorting
-    /// here is what makes the record stable across map-iteration order.
+    /// Build a sorted section from the tap monitor's raw reads (`flows`, `totals`, `denials`). Flows
+    /// sort on the full 5-tuple; denials **aggregate by destination** — the kernel keys `DENIALS` by
+    /// the dropped packet's whole 5-tuple, so retries from different guest source ports arrive as
+    /// separate entries, and summing them per `(dst, port, proto)` is what makes the trail both
+    /// meaningful (one row per blocked endpoint) and totally ordered. Total orders on both
+    /// collections are what make the record byte-stable across map-iteration order.
     #[must_use]
     pub fn from_tap(
         flows: Vec<(FlowKey, FlowCounts)>,
@@ -94,11 +100,23 @@ impl NetSection {
             .map(|(key, counts)| FlowRecord { key, counts })
             .collect();
         flows.sort_by_key(|f| flow_order(&f.key));
-        let mut denials: Vec<DenialRecord> = denials
+        // Aggregate denials by destination triple. A BTreeMap keyed on the triple both sums the
+        // per-source entries and yields them already in the total (dst, port, proto) order.
+        let mut by_dst: BTreeMap<(u32, u16, u8), u64> = BTreeMap::new();
+        for (key, count) in denials {
+            *by_dst
+                .entry((key.dst_addr, key.dst_port, key.proto))
+                .or_insert(0) += count;
+        }
+        let denials = by_dst
             .into_iter()
-            .map(|(key, count)| DenialRecord { key, count })
+            .map(|((dst_addr, dst_port, proto), count)| DenialRecord {
+                dst_addr,
+                dst_port,
+                proto,
+                count,
+            })
             .collect();
-        denials.sort_by_key(|d| denial_order(&d.key));
         Self {
             totals,
             flows,
@@ -114,21 +132,24 @@ pub struct FlowRecord {
     pub counts: FlowCounts,
 }
 
-/// One blocked destination and how many packets to it were dropped.
+/// One blocked **destination** and how many packets to it were dropped, summed across guest source
+/// ports (the source of a dropped probe is noise; the endpoint is the audit signal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DenialRecord {
-    pub key: FlowKey,
+    /// Destination IPv4 address, host byte order (as [`FlowKey::dst_addr`]).
+    pub dst_addr: u32,
+    /// Destination L4 port.
+    pub dst_port: u16,
+    /// IP protocol number.
+    pub proto: u8,
+    /// Dropped packets to this destination, summed across all source 5-tuples.
     pub count: u64,
 }
 
-/// Sort a flow by destination first (the meaningful axis), then source, for a stable order.
+/// Sort a flow by destination first (the meaningful axis), then source — the full 5-tuple, so the
+/// order is total and the record byte-stable.
 fn flow_order(k: &FlowKey) -> (u32, u16, u8, u32, u16) {
     (k.dst_addr, k.dst_port, k.proto, k.src_addr, k.src_port)
-}
-
-/// Sort a denial by its destination (source/port of a dropped probe is noise).
-fn denial_order(k: &FlowKey) -> (u32, u16, u8) {
-    (k.dst_addr, k.dst_port, k.proto)
 }
 
 /// The VMM's host syscall footprint: exact counts plus a bounded, de-duplicated sample of notable
@@ -140,12 +161,18 @@ pub struct SyscallFootprint {
     pub total: u64,
     /// Counts by syscall kind (an unrecognized discriminant lands in `unknown`).
     pub by_kind: SyscallCounts,
-    /// Distinct `(kind, detail)` events with a hit count, sorted deterministically, capped.
+    /// Distinct `(kind, detail)` events with a hit count, sorted deterministically, capped at
+    /// [`MAX_NOTABLE`] (kept by arrival order; see the const doc).
     pub notable: Vec<NotableSyscall>,
-    /// `true` if distinct events exceeded [`MAX_NOTABLE`] and some were dropped.
+    /// `true` if the cap was hit and events overflowed it.
     pub notable_truncated: bool,
-    /// How many distinct events were dropped past the cap (0 when not truncated).
-    pub distinct_dropped: u64,
+    /// **Events** (not distinct keys) that overflowed the notable cap: they arrived after it was full
+    /// and matched no stored entry, so every occurrence counts (one new path opened 1000 times past the
+    /// cap adds 1000). These are still tallied in [`by_kind`](Self::by_kind) — whose per-kind totals sum
+    /// to [`total`](Self::total) exactly, always — and absent only from the detailed [`notable`](Self::notable)
+    /// sample. So the count is what the sample omits, making the truncation honest rather than silent.
+    /// 0 when not truncated.
+    pub overflow_events: u64,
 }
 
 impl SyscallFootprint {
@@ -195,7 +222,7 @@ pub struct SyscallFold {
     by_kind: SyscallCounts,
     /// Keyed by `(kind discriminant, detail)`; the value carries the typed kind + comm + hits.
     notable: BTreeMap<(u32, String), NotableAccum>,
-    distinct_dropped: u64,
+    overflow_events: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -214,7 +241,7 @@ impl SyscallFold {
             total: 0,
             by_kind: SyscallCounts::default(),
             notable: BTreeMap::new(),
-            distinct_dropped: 0,
+            overflow_events: 0,
         }
     }
 
@@ -244,7 +271,7 @@ impl SyscallFold {
             Entry::Occupied(mut e) => e.get_mut().hits += 1,
             Entry::Vacant(v) => {
                 if at_cap {
-                    self.distinct_dropped += 1;
+                    self.overflow_events += 1;
                 } else {
                     v.insert(NotableAccum {
                         kind,
@@ -280,8 +307,8 @@ impl SyscallFold {
             total: self.total,
             by_kind: self.by_kind,
             notable,
-            notable_truncated: self.distinct_dropped > 0,
-            distinct_dropped: self.distinct_dropped,
+            notable_truncated: self.overflow_events > 0,
+            overflow_events: self.overflow_events,
         }
     }
 }
@@ -378,7 +405,7 @@ mod tests {
         }
         // MAX_NOTABLE + 10 more *distinct* paths: the cap holds, the overflow is counted, not stored.
         // `/etc/hostname` already took one slot, so of the (1 + MAX_NOTABLE + 10) distinct events
-        // offered, MAX_NOTABLE are kept and 11 are dropped.
+        // offered, MAX_NOTABLE are kept and 11 events overflow (each offered exactly once here).
         for i in 0..(MAX_NOTABLE + 10) {
             let path = format!("/f/{i}");
             fold.record(&ev(Syscall::Openat as u32, CG, path.as_bytes(), "sh"));
@@ -386,7 +413,7 @@ mod tests {
         let f = fold.finish();
         assert_eq!(f.notable.len(), MAX_NOTABLE);
         assert!(f.notable_truncated);
-        assert_eq!(f.distinct_dropped, 11);
+        assert_eq!(f.overflow_events, 11);
         // The repeated entry survived with its full hit count.
         let hostname = f
             .notable
@@ -396,6 +423,66 @@ mod tests {
         assert_eq!(hostname.hits, 1000);
         // total counts every event, exactly.
         assert_eq!(f.total, 1000 + (MAX_NOTABLE as u64) + 10);
+    }
+
+    #[test]
+    fn overflow_counts_every_event_past_the_cap() {
+        let mut fold = SyscallFold::new(CG);
+        // Fill the cap exactly with distinct paths.
+        for i in 0..MAX_NOTABLE {
+            let path = format!("/cap/{i}");
+            fold.record(&ev(Syscall::Openat as u32, CG, path.as_bytes(), "sh"));
+        }
+        // One *new* path, opened 3 times past the cap: every occurrence overflows (the field counts
+        // events, not distinct keys — that is its documented meaning).
+        for _ in 0..3 {
+            fold.record(&ev(Syscall::Openat as u32, CG, b"/late/arrival", "sh"));
+        }
+        // A repeat of a *stored* path still lands on its entry, not in the overflow.
+        fold.record(&ev(Syscall::Openat as u32, CG, b"/cap/0", "sh"));
+        // An unknown-discriminant event: tallied in `by_kind.unknown` + `total`, but never notable and
+        // never overflow (it has no notable key at all) — so `by_kind` stays exact while `notable` doesn't.
+        fold.record(&ev(999, CG, b"", "sh"));
+        let f = fold.finish();
+        assert_eq!(f.notable.len(), MAX_NOTABLE);
+        assert!(f.notable_truncated);
+        assert_eq!(f.overflow_events, 3);
+        assert_eq!(f.total, (MAX_NOTABLE as u64) + 3 + 1 + 1);
+        // `by_kind` is always exact and complete — its per-kind totals sum to `total`, cap or not.
+        let by_kind = f.by_kind.execve + f.by_kind.openat + f.by_kind.connect + f.by_kind.unknown;
+        assert_eq!(by_kind, f.total);
+        // `notable`'s hits are the *known* events the sample kept: total minus the overflow it omitted
+        // and minus the unknowns it never had a key for.
+        let attributed: u64 = f.notable.iter().map(|n| n.hits).sum();
+        assert_eq!(attributed, f.total - f.overflow_events - f.by_kind.unknown);
+    }
+
+    #[test]
+    fn denials_aggregate_by_destination_and_stay_byte_stable() {
+        // The kernel keys DENIALS by the full 5-tuple, so retries from different guest source ports
+        // arrive as separate entries. The record aggregates them: one row per blocked endpoint,
+        // stable across input (map-iteration) order.
+        let dst = u32::from_be_bytes([9, 9, 9, 9]);
+        let d = |sport: u16, count: u64| {
+            (
+                FlowKey::new(
+                    u32::from_be_bytes([10, 200, 0, 2]),
+                    dst,
+                    sport,
+                    443,
+                    agent_probes_common::IPPROTO_TCP,
+                ),
+                count,
+            )
+        };
+        let totals = NetStats::default();
+        let a = NetSection::from_tap(vec![], totals, vec![d(40000, 3), d(40001, 4)]);
+        let b = NetSection::from_tap(vec![], totals, vec![d(40001, 4), d(40000, 3)]);
+        assert_eq!(a, b); // same observations, shuffled input → identical section
+        assert_eq!(a.denials.len(), 1, "one row per blocked endpoint");
+        assert_eq!(a.denials[0].dst_addr, dst);
+        assert_eq!(a.denials[0].dst_port, 443);
+        assert_eq!(a.denials[0].count, 7, "per-source counts are summed");
     }
 
     #[test]

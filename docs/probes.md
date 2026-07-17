@@ -226,8 +226,12 @@ their output into one per-run **audit record**, host-observed from outside the g
 
 The privileged `audit_record.rs` proves it end to end: a guest that touches the network + reads a file
 yields a record whose flows show the network **exactly**, while the in-guest file read correctly never
-appears in the host-syscall axis (below). `SandboxProbes::collect` is finalize-on-close; the live view +
-`agent run --trace` are Phase 14.
+appears in the host-syscall axis (below). `SandboxProbes::collect` is finalize-on-close; between attach
+and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** live reading
+(`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far) — what the
+CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
+(`agent run --net --trace --record --watch`) is documented in [Using the agent CLI](./cli.md); decision
+029 covers where each surface lives.
 
 ## The hardware-isolation consequence (the honest limit)
 

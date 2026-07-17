@@ -189,13 +189,13 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     );
 
     // --- The record serializes to deterministic JSON, showing the flow -------------------------------
+    // (Byte-stability across shuffled inputs is pinned by the host-safe unit tests —
+    // `json_is_byte_stable_across_input_order` — so it isn't re-proven here.)
     let json = record.to_json();
     assert!(
         json.contains(&format!("\"dst\":\"{host_ip}\"")) && json.contains("\"proto\":\"udp\""),
         "the JSON audit surface should show the guest's flow: {json}"
     );
-    // Byte-stability: re-serializing the same record yields the identical line (the property).
-    assert_eq!(json, record.to_json());
 
     vm.shutdown().expect("shut the sandbox down");
 }

@@ -10,9 +10,27 @@ rootfs, the built probe object (`cargo xtask build-probes`), and the eBPF capabi
 (`CAP_BPF`+`CAP_PERFMON`, plus `CAP_NET_ADMIN` for the network ones) — run as root or grant the
 named caps.
 
-> The unified `agent run --trace` that prints one fused per-run audit log is the next track on the
-> [roadmap](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md); today each axis is its own
-> demo, shown here.
+## The whole run, fused
+
+The CLI carries the fused surface: one run, all three probes bound to it, one audit record out.
+Watch it live, read the trail after, keep the machine record:
+
+```console
+agent run --unjailed --net --watch --trace --record run.json -- \
+    python3 -c "import socket; open('/etc/hostname').read(); \
+                socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'hi', ('10.200.0.1', 9999))"
+```
+
+- `--watch` is the live view (a full-screen terminal UI on stderr): the guest's flows and denials
+  as they happen, its resources, the VMM's host-syscall footprint, and a timeline. `q` closes the
+  view; the run continues.
+- `--trace` prints the human-readable audit trail on stdout after the run.
+- `--record run.json` writes the deterministic JSON record — the machine surface downstream tools
+  parse (byte-stable; see [Using the agent CLI](./cli.md)).
+
+All of it is fail-open: without the eBPF capabilities the run still works and the record says
+exactly which axes are missing and why. The per-axis demos below are the same probes driven one at
+a time — useful when you want to study a single mechanism.
 
 ## Its syscalls
 
@@ -56,8 +74,7 @@ cargo xtask meter-sandbox
 
 ## Putting it together
 
-A typical loop is: run the workload with `agent run` (see [Running untrusted
-code](./examples-untrusted-code.md)), and observe it with the views above. The engine *measures*
-and *records*; what a hoster does with that (bill it, alert on it, store it) is the hoster's, by
-design. Once the audit-log track lands, these separate views become one structured record emitted
-per run.
+A typical loop is: run the workload with `agent run --trace` (or `--watch` to see it live, and
+`--record` to keep the JSON), then drill into a single axis with the demos above when something
+looks interesting. The engine *measures* and *records*; what a hoster does with that (bill it,
+alert on it, store it) is the hoster's, by design.

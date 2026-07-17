@@ -79,13 +79,31 @@ impl SharedTracer {
     pub fn load() -> Result<Self, ProbeError> {
         let mut tracer = SyscallTracer::load()?;
         tracer.use_target_set()?;
+        // Clear the load-window baseline: between the (unfiltered) attach inside `load()` and the mode
+        // flip above, the whole host's events streamed into the ring buffer. Drain and discard them so
+        // the buffer starts empty — residue would occupy space (a full buffer drops *new* events) and
+        // could even misattribute onto a later sandbox whose recycled cgroup id collides.
+        let _ = tracer.drain(|_| {});
         Ok(Self(Arc::new(Mutex::new(TracerInner {
             tracer,
             folds: HashMap::new(),
         }))))
     }
 
-    /// Register one sandbox's cgroup: add it to the kernel target set and open its fold.
+    /// Drain the shared ring buffer now, routing pending events to every registered sandbox's fold, and
+    /// return how many were delivered (0 if the lock is poisoned). The buffer is drained automatically at
+    /// each [`attach`](SandboxProbes::attach) and [`collect`](SandboxProbes::collect); a long-lived host
+    /// process (the daemon later) calls this periodically between them so a busy VMM can't fill the
+    /// buffer — a drop is counted by the kernel and surfaces as a coverage gap, but polling is what
+    /// prevents it.
+    pub fn poll(&self) -> usize {
+        self.with(drain_route).unwrap_or(0)
+    }
+
+    /// Register one sandbox's cgroup: route pending events to their current owners, add the cgroup to
+    /// the kernel target set, and open a **fresh** fold (replacing, not reusing, any stale fold a
+    /// failed teardown left behind — cgroup ids are inode numbers and can recycle, and inheriting a
+    /// dead run's fold would misattribute its events onto the new run).
     ///
     /// # Errors
     /// [`ProbeError`] if the lock is poisoned or the target write fails (the caller records a gap).
@@ -94,28 +112,37 @@ impl SharedTracer {
             .0
             .lock()
             .map_err(|_| ProbeError::Map("shared tracer lock poisoned".to_string()))?;
+        drain_route(&mut inner);
         inner.tracer.add_target(cgroup_id)?;
-        inner
-            .folds
-            .entry(cgroup_id)
-            .or_insert_with(|| SyscallFold::new(cgroup_id));
+        inner.folds.insert(cgroup_id, SyscallFold::new(cgroup_id));
         Ok(())
     }
 
     /// Finalize one sandbox: drain every pending event (routing all cgroups' events to their folds so no
     /// sandbox loses events to another's collect), then remove + finish this cgroup's fold and unregister
-    /// it from the kernel set. Default footprint if its fold is gone or the lock is poisoned (fail-open).
-    fn finalize(&self, cgroup_id: u64) -> SyscallFootprint {
+    /// it from the kernel set. `None` if the lock is poisoned or the fold is gone — the caller records
+    /// that as a coverage gap rather than passing off an empty footprint as a quiet run.
+    fn finalize(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
             drain_route(inner);
             let _ = inner.tracer.remove_target(cgroup_id);
+            inner.folds.remove(&cgroup_id).map(SyscallFold::finish)
+        })
+        .flatten()
+    }
+
+    /// A live, non-destructive read of one sandbox's footprint-so-far: drain pending events to every
+    /// fold, then finish a **clone** of this cgroup's fold (the original keeps accumulating). `None` if
+    /// the lock is poisoned or the fold is gone.
+    fn snapshot_fold(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
+        self.with(|inner| {
+            drain_route(inner);
             inner
                 .folds
-                .remove(&cgroup_id)
-                .map(SyscallFold::finish)
-                .unwrap_or_default()
+                .get(&cgroup_id)
+                .map(|fold| fold.clone().finish())
         })
-        .unwrap_or_default()
+        .flatten()
     }
 
     /// Detach one sandbox without producing a footprint (the abandoned path): unregister its cgroup and
@@ -127,21 +154,33 @@ impl SharedTracer {
         });
     }
 
+    /// The kernel's cumulative dropped-event count (a full ring buffer rejects writes), or `None` if it
+    /// can't be read. [`attach`](SandboxProbes::attach) snapshots this and [`collect`](SandboxProbes::collect)
+    /// reports a nonzero delta as a coverage gap: the drops are host-global (one shared buffer), so the
+    /// attribution is approximate, but a footprint that *may* undercount says so instead of looking exact.
+    fn drops(&self) -> Option<u64> {
+        self.with(|inner| inner.tracer.dropped_events().ok())
+            .flatten()
+    }
+
     fn with<R>(&self, f: impl FnOnce(&mut TracerInner) -> R) -> Option<R> {
         self.0.lock().ok().map(|mut g| f(&mut g))
     }
 }
 
-/// Drain the tracer's ring buffer, routing each event to its cgroup's fold. Events for an unregistered
-/// cgroup (a brief race at registration, or none under the set filter) are dropped. The disjoint-field
-/// split lets the drain closure borrow `folds` while `tracer` drains.
-fn drain_route(inner: &mut TracerInner) {
+/// Drain the tracer's ring buffer, routing each event to its cgroup's fold; returns how many events
+/// were delivered. Events for an unregistered cgroup are dropped (under the set filter none should
+/// exist except a just-unregistered sandbox's stragglers). The disjoint-field split lets the drain
+/// closure borrow `folds` while `tracer` drains.
+fn drain_route(inner: &mut TracerInner) -> usize {
     let TracerInner { tracer, folds } = inner;
-    let _ = tracer.drain(|ev: SyscallEvent| {
-        if let Some(fold) = folds.get_mut(&ev.cgroup_id) {
-            fold.record(&ev);
-        }
-    });
+    tracer
+        .drain(|ev: SyscallEvent| {
+            if let Some(fold) = folds.get_mut(&ev.cgroup_id) {
+                fold.record(&ev);
+            }
+        })
+        .unwrap_or(0)
 }
 
 /// Live bundle for one VM: a target registration on the shared tracer + meter, the per-VM tap, and the
@@ -159,6 +198,9 @@ pub struct SandboxProbes {
     meter: SharedMeter,
     /// Registered on the shared meter (its cgroup is a metering target).
     metered: bool,
+    /// The kernel's cumulative ring-buffer drop count at attach time; `collect` reports a nonzero
+    /// delta as a coverage gap (the footprint may undercount). `None` if unreadable at attach.
+    drops_at_attach: Option<u64>,
     gaps: Vec<AxisGap>,
     /// Set once [`collect`](Self::collect) has read + detached everything, so `Drop` is a no-op.
     finalized: bool,
@@ -252,6 +294,7 @@ impl SandboxProbes {
             tap: tap_mon,
             meter: meter.clone(),
             metered,
+            drops_at_attach: if traced { tracer.drops() } else { None },
             gaps,
             finalized: false,
         }
@@ -264,34 +307,78 @@ impl SandboxProbes {
     /// Each axis degrades to a recorded gap on a read error.
     pub fn collect(mut self, timing: Timing) -> RunRecord {
         // Host syscalls: drain + finish this cgroup's fold on the shared tracer (also unregisters it).
+        // A lost fold or poisoned lock is a *recorded gap*, never an empty footprint passed off as a
+        // quiet run.
         let host_syscalls = match (self.traced, self.cgroup_id) {
-            (true, Some(cgid)) => self.tracer.finalize(cgid),
+            (true, Some(cgid)) => match self.tracer.finalize(cgid) {
+                Some(footprint) => footprint,
+                None => {
+                    self.gaps.push(AxisGap::HostSyscalls(
+                        "shared tracer state unavailable at finalize (lock poisoned or fold lost)"
+                            .to_string(),
+                    ));
+                    SyscallFootprint::default()
+                }
+            },
             _ => SyscallFootprint::default(),
         };
         self.traced = false;
 
-        // Network + denials from the one per-VM tap monitor.
+        // The shared ring buffer is host-global; if the kernel counted drops during this run's window,
+        // the footprint may undercount — say so instead of looking exact.
+        if let (Some(before), Some(after)) = (self.drops_at_attach, self.tracer.drops()) {
+            if after > before {
+                self.gaps.push(AxisGap::HostSyscalls(format!(
+                    "ring buffer dropped {} event(s) during this run's window; the footprint may \
+                     undercount",
+                    after - before
+                )));
+            }
+        }
+
+        // Network + denials from the one per-VM tap monitor. Totals are the section's spine (a section
+        // without them would misread as "no traffic"), so their failure gaps the whole axis; a failed
+        // flow/denial read keeps the rest and records exactly which read was lost.
         let network = match self.tap.as_ref() {
-            Some(monitor) => match (monitor.flows(), monitor.totals(), monitor.denials()) {
-                (Ok(flows), Ok(totals), Ok(denials)) => {
-                    Some(NetSection::from_tap(flows, totals, denials))
-                }
-                _ => {
+            Some(monitor) => match monitor.totals() {
+                Err(e) => {
                     self.gaps
-                        .push(AxisGap::Network("reading tap maps failed".to_string()));
+                        .push(AxisGap::Network(format!("read tap totals: {e}")));
                     None
+                }
+                Ok(totals) => {
+                    let flows = monitor.flows().unwrap_or_else(|e| {
+                        self.gaps
+                            .push(AxisGap::Network(format!("read tap flows: {e}")));
+                        Vec::new()
+                    });
+                    let denials = monitor.denials().unwrap_or_else(|e| {
+                        self.gaps
+                            .push(AxisGap::Network(format!("read tap denials: {e}")));
+                        Vec::new()
+                    });
+                    Some(NetSection::from_tap(flows, totals, denials))
                 }
             },
             None => None,
         };
 
         // Resources: read the shared meter's CPU + the cgroup's native memory/IO *before* unregistering
-        // (the cgroup dir must still be live). Best-effort — a lost lock yields zero CPU.
-        let resources = self
-            .meter
-            .with(|m| m.summary_for_pid(self.vmm_pid).ok())
-            .flatten()
-            .unwrap_or_default();
+        // (the cgroup dir must still be live). Every failure is a recorded gap — a record showing zero
+        // CPU must mean "the sandbox used none", never "the read silently failed".
+        let resources = match self.meter.with(|m| m.summary_for_pid(self.vmm_pid)) {
+            Some(Ok(summary)) => summary,
+            Some(Err(e)) => {
+                self.gaps
+                    .push(AxisGap::Cpu(format!("read resource summary: {e}")));
+                crate::ResourceSummary::default()
+            }
+            None => {
+                self.gaps
+                    .push(AxisGap::Cpu("meter lock poisoned".to_string()));
+                crate::ResourceSummary::default()
+            }
+        };
         if self.metered {
             if let Some(cgid) = self.cgroup_id {
                 let _ = self.meter.with(|m| m.remove_target(cgid));
@@ -309,12 +396,57 @@ impl SandboxProbes {
         )
     }
 
+    /// A **live, non-destructive** read of this sandbox's probes so far — the watcher's poll (a live
+    /// view redraws from these mid-run). Each axis is a point-in-time reading: the syscall footprint
+    /// accrued so far (a finished *clone*; the underlying fold keeps accumulating), the tap's
+    /// flows/totals/denials now, and the meter's resource summary now. A transiently unreadable axis is
+    /// `None` — the watcher keeps its last good view; the *authoritative*, gap-recording read is
+    /// [`collect`](Self::collect), which this never disturbs.
+    #[must_use]
+    pub fn snapshot(&self) -> LiveSnapshot {
+        let host_syscalls = match (self.traced, self.cgroup_id) {
+            (true, Some(cgid)) => self.tracer.snapshot_fold(cgid),
+            _ => None,
+        };
+        let network = self.tap.as_ref().and_then(|monitor| {
+            let totals = monitor.totals().ok()?;
+            let flows = monitor.flows().ok()?;
+            let denials = monitor.denials().ok()?;
+            Some(NetSection::from_tap(flows, totals, denials))
+        });
+        let resources = self
+            .meter
+            .with(|m| m.summary_for_pid(self.vmm_pid).ok())
+            .flatten();
+        LiveSnapshot {
+            network,
+            resources,
+            host_syscalls,
+        }
+    }
+
     /// The gaps recorded so far (which axes are unavailable and why) — useful to a caller before
     /// `collect`, e.g. to warn.
     #[must_use]
     pub fn coverage(&self) -> &[AxisGap] {
         &self.gaps
     }
+}
+
+/// One point-in-time reading of a live sandbox's probes, from [`SandboxProbes::snapshot`] — what a
+/// live view (the CLI's `--watch` TUI, a daemon's stream) redraws from between attach and collect.
+/// Pure data (no aya), so consumers that transform it (timeline diffing, rendering) stay host-safe
+/// testable. An axis that couldn't be read *right now* is `None`; honesty about *why* an axis is
+/// missing belongs to the final [`RunRecord`](crate::RunRecord)'s coverage, not here.
+#[derive(Debug, Clone, Default)]
+pub struct LiveSnapshot {
+    /// The tap's flows/totals/denials at this instant, already deterministically sorted
+    /// ([`NetSection::from_tap`]). `None` without a NIC or on a transient read failure.
+    pub network: Option<NetSection>,
+    /// The shared meter's CPU + cgroup memory/IO reading at this instant.
+    pub resources: Option<crate::ResourceSummary>,
+    /// The VMM's host-syscall footprint accrued so far (a finished clone of the live fold).
+    pub host_syscalls: Option<SyscallFootprint>,
 }
 
 impl Drop for SandboxProbes {

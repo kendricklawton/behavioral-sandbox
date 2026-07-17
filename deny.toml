@@ -5,6 +5,12 @@
 # Fail on any known RustSec advisory in the tree. `yanked` crates are also rejected.
 version = 2
 yanked = "deny"
+ignore = [
+    # `paste` (a compile-time proc-macro, pulled in by ratatui — the CLI's `--watch` live view) is
+    # archived by its author: an *unmaintained* notice, not a vulnerability, and the crate does no
+    # runtime work. Drop this exception when ratatui moves off it upstream.
+    "RUSTSEC-2024-0436",
+]
 
 [licenses]
 version = 2

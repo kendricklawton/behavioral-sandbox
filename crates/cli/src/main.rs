@@ -1,19 +1,28 @@
 //! The `agent` CLI — drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
-//! or hold it open as an interactive stateful session (`shell`).
+//! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
+//! **audit surface** on flags (`--trace`/`--record`/`--watch` — see [`audit`]).
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
 //! or the `--json` structured result / audit log), so `agent run … 2>/dev/null` stays
-//! pipe-clean. Log filter resolves flags > env (`AGENT_LOG`) > default. Both subcommands run
+//! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
+//! flags > env (`AGENT_LOG`) > default. Both subcommands run
 //! **jailed by default** (decision 015) with `--unjailed` as the explicit opt-out, and both point
 //! at the env-layered artifacts (`AGENT_ROOTFS`/`AGENT_KERNEL`/`AGENT_MARKER` — exec needs the
 //! agent rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
+mod audit;
+mod trace;
+mod watch;
+
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
+use agent_probes_loader::Timing;
 use agent_vmm::{BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 use clap::{Parser, Subcommand};
 
@@ -77,6 +86,25 @@ struct RunArgs {
     /// stdout/stderr, artifact list, metrics) instead of relaying the raw streams.
     #[arg(long)]
     json: bool,
+    /// Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged:
+    /// with no egress allowance the guest reaches nothing beyond the host end of its /30. What
+    /// crosses the tap lands in the audit record's network section.
+    #[arg(long, conflicts_with = "demo_boot")]
+    net: bool,
+    /// Attach the host-side probes and print the run's audit trail (human-readable) on stdout
+    /// after the run. Fail-open: a host without eBPF caps still runs, with the gaps explained.
+    /// Machine consumers use `--record` (so this conflicts with `--json`).
+    #[arg(long, conflicts_with_all = ["json", "demo_boot"])]
+    trace: bool,
+    /// Attach the host-side probes and write the run's deterministic audit record (one line of
+    /// JSON, the machine surface) to this file for later inspection.
+    #[arg(long, value_name = "FILE", conflicts_with = "demo_boot")]
+    record: Option<PathBuf>,
+    /// Watch the run live: a full-screen view on stderr (network flows and denials, resources,
+    /// the VMM's host syscalls, a timeline) while the command runs. Needs stderr on a terminal;
+    /// `q` closes the view, the run continues.
+    #[arg(long, conflicts_with = "demo_boot")]
+    watch: bool,
     /// The command to run in the guest, after `--`.
     #[arg(trailing_var_arg = true)]
     argv: Vec<String>,
@@ -109,8 +137,10 @@ fn run(cmd: Cmd) -> Result<ExitCode, VmmError> {
     }
 }
 
-/// `agent run`: open (jailed by default) → one exec with the flag-supplied inputs → write the
-/// requested artifacts → close → report (raw relay, or the `--json` structured result).
+/// `agent run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
+/// `--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed under `--watch`) →
+/// write the requested artifacts → finalize the audit record while the sandbox is alive → close →
+/// report (raw relay or the `--json` structured result, then the `--trace` trail / `--record` file).
 fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
     let mut limits = Limits::default();
     if let Some(secs) = args.wall {
@@ -119,10 +149,20 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
     if let Some(bytes) = args.output_cap {
         limits.output_cap = bytes;
     }
+    // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
+    if args.watch && !std::io::stderr().is_terminal() {
+        return Err(VmmError::Vmm(
+            "--watch draws on stderr and needs it to be a terminal; use --trace or --record when \
+             piping"
+                .to_string(),
+        ));
+    }
     // Read the local `--put` files *before* the (jailed-by-default) boot: a bad path is a cheap stat
     // failure, so validate it up front rather than paying a full boot + teardown only to fail on it.
     let files_in = read_put_files(&args.put)?;
-    let sandbox = open(BootConfig::from_env().with_limits(limits), args.unjailed)?;
+    let mut config = BootConfig::from_env().with_limits(limits);
+    config.enable_network = args.net;
+    let sandbox = open(config, args.unjailed)?;
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!` —
         // it panics on a closed pipe (`agent run … | head -0`), and a no-panic host path
@@ -135,10 +175,64 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
         return sandbox.shutdown().map(|()| ExitCode::SUCCESS);
     }
 
-    let result =
-        sandbox.exec_with_files(&args.argv, &piped_stdin(), &files_in, &args.env, &args.get)?;
-    write_artifacts(&result.files, &args.get)?;
+    // The audit surface, only when a flag asked for it (a plain `agent run` pays nothing): load the
+    // shared probes and bind them to this sandbox by the plain values it exposes — the launch
+    // sequence the probes-loader documents, composed here in the caller. Fail-open throughout.
+    let observing = args.trace || args.record.is_some() || args.watch;
+    let probes = observing.then(|| {
+        audit::Observability::load().attach(sandbox.vmm_pid(), sandbox.netns(), sandbox.tap_name())
+    });
+
     let boot_latency = sandbox.boot_latency();
+    let vmm_pid = sandbox.vmm_pid();
+    let stdin = piped_stdin();
+    let (sandbox, result) = if args.watch {
+        // Exec on a worker thread that owns the sandbox; the main thread runs the live view off
+        // non-destructive probe snapshots until the worker flags completion.
+        let done = Arc::new(AtomicBool::new(false));
+        let worker_done = Arc::clone(&done);
+        let (argv, env, get) = (args.argv.clone(), args.env.clone(), args.get.clone());
+        let worker = std::thread::spawn(move || {
+            let result = sandbox.exec_with_files(&argv, &stdin, &files_in, &env, &get);
+            worker_done.store(true, Ordering::Release);
+            (sandbox, result)
+        });
+        if let Some(p) = probes.as_ref() {
+            let meta = watch::WatchMeta {
+                vmm_pid,
+                boot: boot_latency,
+                command: args.argv.join(" "),
+            };
+            // A broken live view must not fail a working run: log it and let the exec finish
+            // headless. (The terminal is restored by the view's own guard either way.)
+            if let Err(e) = watch::live(p, &meta, &done) {
+                tracing::warn!(error = %e, "live view failed; run continues headless");
+            }
+        }
+        if !done.load(Ordering::Acquire) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "agent: live view closed; waiting for the command to finish"
+            );
+        }
+        let (sandbox, result) = worker
+            .join()
+            .map_err(|_| VmmError::Vmm("exec worker thread panicked".to_string()))?;
+        (sandbox, result?)
+    } else {
+        let result =
+            sandbox.exec_with_files(&args.argv, &stdin, &files_in, &args.env, &args.get)?;
+        (sandbox, result)
+    };
+    write_artifacts(&result.files, &args.get)?;
+    // Finalize the audit record **while the sandbox is still alive** (the attached bundle reads the
+    // live cgroup + maps), then close.
+    let record = probes.map(|p| {
+        p.collect(Timing {
+            boot: boot_latency,
+            exec_wall: result.metrics.wall,
+        })
+    });
     sandbox.shutdown()?;
 
     if args.json {
@@ -165,6 +259,20 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
         // write errors (a closed pipe is not our failure); the guest exit code is what we return.
         let _ = std::io::stdout().write_all(&result.stdout);
         let _ = std::io::stderr().write_all(&result.stderr);
+    }
+    if let Some(record) = record {
+        if args.trace {
+            // The human-readable audit trail, after the guest's own output: a requested run
+            // result, so it belongs on stdout like the rest (never mixed with `--json` — clap
+            // makes the two conflict; machine consumers take `--record`).
+            let _ = writeln!(std::io::stdout(), "\n{}", trace::render(&record).trim_end());
+        }
+        if let Some(path) = &args.record {
+            // The deterministic JSON record — the machine surface, one line, byte-stable.
+            std::fs::write(path, record.to_json() + "\n")
+                .map_err(|e| VmmError::Artifact(format!("--record {}: {e}", path.display())))?;
+            tracing::info!(path = %path.display(), "wrote audit record");
+        }
     }
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
 }

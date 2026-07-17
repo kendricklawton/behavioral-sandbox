@@ -40,6 +40,10 @@ agent run [FLAGS] -- <cmd> [args…]
 | `--wall SECONDS` | Wall-clock budget (default 30, minimum 1): the boot deadline and the command's runtime budget alike. |
 | `--output-cap BYTES` | Cap on captured stdout+stderr+artifacts (default 16 MiB). |
 | `--json` | Emit the structured run result as one JSON object on stdout instead of relaying the raw streams. |
+| `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host end of its /30. |
+| `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
+| `--record FILE` | Attach the probes and write the run's deterministic **audit record** (one line of byte-stable JSON) to `FILE` for later inspection. |
+| `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues. |
 | `--log FILTER` | Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`. |
 
 Piped stdin is forwarded to the guest command. Bulk data belongs on the block-device paths
@@ -86,6 +90,32 @@ planned). The environment keys:
 
 ## Watching a run from the host
 
-The eBPF side has its own live demos — a sandbox's host syscall footprint, its per-VM network
-flows, deny-by-default egress enforcement, and per-sandbox resource metering. They live in
+`agent run` carries the engine's convergence on flags: `--trace`, `--record`, and `--watch` bind
+the host-side eBPF probes to the sandbox at launch and fuse what they saw into one per-run audit
+record — observed from *outside* the guest, where the code can't forge or disable it.
+
+```console
+# Watch it live, read the trail after, keep the machine record:
+agent run --unjailed --net --watch --trace --record run.json -- python3 -c '…'
+```
+
+Three surfaces, one record:
+
+- **`--watch`** — the live view, drawn on stderr (stdout stays the run's result): the guest's
+  network flows and egress denials as they happen, its CPU/memory/IO, the VMM's host-syscall
+  footprint, and a running timeline. `q`/`Esc` closes the view; the run continues.
+- **`--trace`** — the human-readable trail on stdout after the run: timing, per-flow traffic,
+  denials, resources, notable host syscalls, and a `gap` line for any axis that couldn't bind.
+- **`--record FILE`** — the machine surface: the record as one line of deterministic, byte-stable
+  JSON (integer nanoseconds, no floats; addresses and protocols by name). This is the format
+  downstream SDKs parse; the pretty trail makes no stability promise.
+
+The probes need kernel BTF, `CAP_BPF`+`CAP_PERFMON` (+ `CAP_NET_ADMIN` for the tap), and the built
+object (`cargo xtask build-probes`). Everything is **fail-open**: on a host without them the run
+still works and the record's coverage section says exactly which axes are missing and why. The
+syscall axis is the **VMM's host footprint** — a microVM services the guest's syscalls in-guest,
+so their absence there is the isolation working, not a blind spot (the guest's *network* is
+observed exactly, at the tap).
+
+The per-axis eBPF demos (one probe at a time) live in
 [Host-side observability & enforcement](./probes.md), under *Try it*.

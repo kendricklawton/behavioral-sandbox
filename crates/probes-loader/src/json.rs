@@ -11,10 +11,14 @@
 //!
 //! No floats (durations are integer nanoseconds, byte counts are integers), so there is no
 //! locale/precision wobble; IPv4 addresses render as dotted quads and protocols/syscalls as their
-//! names, so the record reads without a decoder ring. The human-facing view (a TUI, a pretty-printer)
-//! is the live view's job; this is the machine surface it and the SDKs build on.
+//! names, so the record reads without a decoder ring. Durations are clamped to **u64 nanoseconds**
+//! (a ~584-year ceiling — the numeric bound consumers can rely on; parse these with 64-bit integers,
+//! not doubles). The human-facing view (a TUI, a pretty-printer) is the live view's job; this is the
+//! machine surface it and the SDKs build on.
 
+use std::fmt::Display;
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use agent_probes_common::{FlowKey, Syscall};
 
@@ -32,11 +36,11 @@ impl RunRecord {
 
         // timing
         out.push_str("\"timing\":{");
-        field_u128(&mut out, "boot_ns", self.timing.boot.as_nanos(), true);
-        field_u128(
+        field(&mut out, "boot_ns", clamped_ns(self.timing.boot), true);
+        field(
             &mut out,
             "exec_wall_ns",
-            self.timing.exec_wall.as_nanos(),
+            clamped_ns(self.timing.exec_wall),
             false,
         );
         out.push('}');
@@ -91,15 +95,15 @@ fn net_to_json(out: &mut String, net: &NetSection) {
             out.push(',');
         }
         out.push('{');
-        // A denial keys on the destination (source/port of a dropped probe is noise, so the sort drops
-        // them; render the destination + proto that the policy blocked, and the dropped-packet count).
-        let d = denial.key.dst_addr.to_be_bytes();
-        write!(out, "\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]).ok();
-        field_u16(out, "dst_port", denial.key.dst_port, false);
+        // A denial is per-destination (already aggregated across guest source ports by the builder):
+        // the blocked endpoint + proto, and the dropped-packet count.
+        let d = denial.dst_addr.to_be_bytes();
+        let _ = write!(out, "\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]);
+        field(out, "dst_port", denial.dst_port, false);
         out.push_str(",\"proto\":\"");
-        proto_name(out, denial.key.proto);
+        proto_name(out, denial.proto);
         out.push('"');
-        field_u64(out, "packets", denial.count, false);
+        field(out, "packets", denial.count, false);
         out.push('}');
     }
     out.push_str("]}");
@@ -107,10 +111,10 @@ fn net_to_json(out: &mut String, net: &NetSection) {
 
 fn net_stats_to_json(out: &mut String, s: &NetStats) {
     out.push('{');
-    field_u64(out, "ingress_packets", s.ingress_packets, true);
-    field_u64(out, "ingress_bytes", s.ingress_bytes, false);
-    field_u64(out, "egress_packets", s.egress_packets, false);
-    field_u64(out, "egress_bytes", s.egress_bytes, false);
+    field(out, "ingress_packets", s.ingress_packets, true);
+    field(out, "ingress_bytes", s.ingress_bytes, false);
+    field(out, "egress_packets", s.egress_packets, false);
+    field(out, "egress_bytes", s.egress_bytes, false);
     out.push('}');
 }
 
@@ -119,25 +123,25 @@ fn net_stats_to_json(out: &mut String, s: &NetStats) {
 fn endpoints(out: &mut String, key: &FlowKey) {
     let s = key.src_addr.to_be_bytes();
     let d = key.dst_addr.to_be_bytes();
-    write!(out, "\"src\":\"{}.{}.{}.{}\"", s[0], s[1], s[2], s[3]).ok();
-    field_u16(out, "src_port", key.src_port, false);
-    write!(out, ",\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]).ok();
-    field_u16(out, "dst_port", key.dst_port, false);
+    let _ = write!(out, "\"src\":\"{}.{}.{}.{}\"", s[0], s[1], s[2], s[3]);
+    field(out, "src_port", key.src_port, false);
+    let _ = write!(out, ",\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]);
+    field(out, "dst_port", key.dst_port, false);
     out.push_str(",\"proto\":\"");
     proto_name(out, key.proto);
     out.push('"');
 }
 
 fn counts(out: &mut String, c: &FlowCounts) {
-    field_u64(out, "ingress_packets", c.ingress_packets, false);
-    field_u64(out, "ingress_bytes", c.ingress_bytes, false);
-    field_u64(out, "egress_packets", c.egress_packets, false);
-    field_u64(out, "egress_bytes", c.egress_bytes, false);
+    field(out, "ingress_packets", c.ingress_packets, false);
+    field(out, "ingress_bytes", c.ingress_bytes, false);
+    field(out, "egress_packets", c.egress_packets, false);
+    field(out, "egress_bytes", c.egress_bytes, false);
 }
 
 fn resources_to_json(out: &mut String, r: &ResourceSummary) {
     out.push('{');
-    field_u128(out, "cpu_time_ns", r.cpu_time.as_nanos(), true);
+    field(out, "cpu_time_ns", clamped_ns(r.cpu_time), true);
     out.push_str(",\"cgroup\":");
     cgroup_to_json(out, &r.cgroup);
     out.push('}');
@@ -155,12 +159,12 @@ fn cgroup_to_json(out: &mut String, c: &CgroupStats) {
 
 fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
     out.push('{');
-    field_u64(out, "total", s.total, true);
+    field(out, "total", s.total, true);
     out.push_str(",\"by_kind\":{");
-    field_u64(out, "execve", s.by_kind.execve, true);
-    field_u64(out, "openat", s.by_kind.openat, false);
-    field_u64(out, "connect", s.by_kind.connect, false);
-    field_u64(out, "unknown", s.by_kind.unknown, false);
+    field(out, "execve", s.by_kind.execve, true);
+    field(out, "openat", s.by_kind.openat, false);
+    field(out, "connect", s.by_kind.connect, false);
+    field(out, "unknown", s.by_kind.unknown, false);
     out.push('}');
     out.push_str(",\"notable\":[");
     for (i, n) in s.notable.iter().enumerate() {
@@ -173,12 +177,12 @@ fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
         json_str(out, &n.detail);
         out.push_str(",\"comm\":");
         json_str(out, &n.comm);
-        field_u64(out, "hits", n.hits, false);
+        field(out, "hits", n.hits, false);
         out.push('}');
     }
     out.push(']');
-    write!(out, ",\"notable_truncated\":{}", s.notable_truncated).ok();
-    field_u64(out, "distinct_dropped", s.distinct_dropped, false);
+    let _ = write!(out, ",\"notable_truncated\":{}", s.notable_truncated);
+    field(out, "overflow_events", s.overflow_events, false);
     out.push('}');
 }
 
@@ -188,7 +192,7 @@ fn gap_to_json(out: &mut String, gap: &AxisGap) {
         AxisGap::Network(r) => ("network", r),
         AxisGap::Cpu(r) => ("cpu", r),
     };
-    write!(out, "{{\"axis\":\"{axis}\",\"reason\":").ok();
+    let _ = write!(out, "{{\"axis\":\"{axis}\",\"reason\":");
     json_str(out, reason);
     out.push('}');
 }
@@ -198,7 +202,7 @@ fn proto_name(out: &mut String, proto: u8) {
         agent_probes_common::IPPROTO_TCP => out.push_str("tcp"),
         agent_probes_common::IPPROTO_UDP => out.push_str("udp"),
         p => {
-            write!(out, "proto {p}").ok();
+            let _ = write!(out, "proto {p}");
         }
     }
 }
@@ -211,26 +215,19 @@ fn syscall_name(out: &mut String, kind: Syscall) {
     });
 }
 
-/// Write `,"key":<n>` (or `"key":<n>` when `first`), for a `u64` value.
-fn field_u64(out: &mut String, key: &str, value: u64, first: bool) {
+/// Write `,"key":<value>` (or `"key":<value>` when `first`) for any unquoted-rendering value — the
+/// integer fields all funnel through here, one helper instead of one per width.
+fn field<T: Display>(out: &mut String, key: &str, value: T, first: bool) {
     if !first {
         out.push(',');
     }
-    write!(out, "\"{key}\":{value}").ok();
+    let _ = write!(out, "\"{key}\":{value}");
 }
 
-fn field_u16(out: &mut String, key: &str, value: u16, first: bool) {
-    if !first {
-        out.push(',');
-    }
-    write!(out, "\"{key}\":{value}").ok();
-}
-
-fn field_u128(out: &mut String, key: &str, value: u128, first: bool) {
-    if !first {
-        out.push(',');
-    }
-    write!(out, "\"{key}\":{value}").ok();
+/// A duration as **u64 nanoseconds**, saturating at `u64::MAX` (~584 years) — the documented numeric
+/// ceiling of the JSON surface, so consumers can parse with ordinary 64-bit integers.
+fn clamped_ns(d: Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Write `,"key":<n|null>` — an absent counter (a cgroup file a kernel doesn't have) renders `null`,
@@ -261,7 +258,7 @@ fn json_str(out: &mut String, s: &str) {
             '\u{08}' => out.push_str("\\b"),
             '\u{0C}' => out.push_str("\\f"),
             c if (c as u32) < 0x20 => {
-                write!(out, "\\u{:04x}", c as u32).ok();
+                let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
         }
@@ -388,7 +385,7 @@ mod tests {
             "\"unknown\":0},\"notable\":[",
             "{\"kind\":\"execve\",\"detail\":\"/bin/sh\",\"comm\":\"sh\",\"hits\":1},",
             "{\"kind\":\"openat\",\"detail\":\"/etc/hosts\",\"comm\":\"sh\",\"hits\":2}],",
-            "\"notable_truncated\":false,\"distinct_dropped\":0}",
+            "\"notable_truncated\":false,\"overflow_events\":0}",
             ",\"coverage\":[{\"axis\":\"cpu\",\"reason\":\"meter lock poisoned\"}]}",
         );
         assert_eq!(json, expected);

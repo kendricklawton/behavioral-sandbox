@@ -12,8 +12,13 @@ name = "agent"
 path = "src/main.rs"
 
 [dependencies]
+# The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
+# tracks — it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
+agent-probes-loader = { path = "../probes-loader" }
 agent-vmm = { path = "../vmm" }
 clap = { workspace = true }
+# `agent run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
+ratatui = { workspace = true }
 # `agent run --json`: the structured run result is one JSON object on stdout.
 serde_json = { workspace = true }
 tracing.workspace = true
