@@ -1859,3 +1859,75 @@ lands with the policy projection). That later phase inherits `--net` already shi
 less code, pipeable — but it is a second machine surface to freeze prematurely, and the phase's
 point is the *demo you show people*. The record file already serves machines; a stream can join the
 daemon later if embedders want push-style events.
+
+### 030 — `--allow` projects the egress policy: enforcement is a typed refusal, never a degradation *(2026-07-17)*
+
+**Decision.** `agent run --allow IP[/CIDR][:PORT][/PROTO]` (repeatable, `requires` `--net`) projects
+the `EgressPolicy` onto the CLI, completing the network half decision 029 pulled forward observe-only.
+Each value parses into one validated allow-rule (`parse_allow`, right-to-left so the numeric CIDR
+prefix and the `/tcp`|`/udp` suffix can't be confused); the rules fold into a deny-by-default policy
+(`build_egress`, capped at `MAX_POLICY_RULES` with a typed refusal), which the audit-bundle launch
+sequence hands to `SandboxProbes::attach` as `Some(policy)` — so it is armed on the tap *before* the
+tc programs go live (the no-unpoliced-window property, decision 025). Every allowance is explicit on
+the command line (guardrail 3's greppable audit line), and what the policy drops lands in the record's
+denials.
+
+**Enforcement does not fail open.** Observation degrades to a recorded coverage gap on a capless host
+(a `--trace` run still works, decision 029). A *policy* can't: a run that asked to enforce one and
+couldn't arm the tap would silently ignore the operator's allow-list, so it is a **typed refusal**
+instead. Two layers realize this: a cheap pre-boot `check_support()` when `--allow` is present (catches
+the missing-BTF/`CAP_BPF`/`CAP_PERFMON` case before paying a boot), and a post-attach check in the CLI's
+`Observability::attach` that refuses if the *network* axis gapped (the residual `CAP_NET_ADMIN`/tc-attach
+case the pre-flight can't see). `--allow` without `--net` is refused by clap. The split is deliberate:
+the enforcement check keys on the network axis alone, so a poisoned syscall/CPU probe still degrades
+observation to a gap without blocking a policed run.
+
+**Scope.** This closes the network projection of the CLI-completeness interphase; the config-file layer,
+`agent doctor`, and the JSON schema version remain. `--allow` is `run`-only, where `--net` lives (the
+interactive `shell` has no network face).
+
+### 031 — The `.agent.toml` config file layer: nearest-up-from-cwd, env-mirrored keys, typos are errors *(2026-07-17)*
+
+**Decision.** The config precedence `flags > env (AGENT_*) > file > defaults` becomes real by inserting
+a `.agent.toml` **file** layer between the environment and the defaults. Discovery is the **nearest
+`.agent.toml` walking up from the cwd** (the `.gitignore`/`.editorconfig` convention), so a project
+pins its engine config beside its code and a nearer file shadows a farther one. The file's keys
+**mirror the `AGENT_*` env names 1:1** (minus the prefix, lowercased: `kernel`, `rootfs`, `marker`,
+`scratch_dir`, `firecracker`, `log`), so a value is spelled the same across all three lower layers —
+one vocabulary. **Unknown keys are a typed error** (`serde(deny_unknown_fields)`): a typo like
+`kernal` fails loudly, naming the valid keys, rather than silently no-opping.
+
+**The layering reuses the engine, it doesn't reimplement it.** `agent-vmm::BootConfig::from_env_with`
+(made public for this) takes a lookup closure; the CLI composes `std::env::var_os(key).or_else(|| file.env_value(key))`,
+which resolves `env > file > defaults` for every artifact/scratch key with **zero duplication** of the
+engine's env-key handling or its pinned defaults. The one config value with no `BootConfig` field —
+`log` (it drives `tracing`, not the engine) — is resolved by a parallel `flag > env > file > default`
+helper in the CLI. This keeps the file layer entirely in the CLI (the reference embedder); a library
+embedder builds `BootConfig` programmatically and is unaffected. Making `from_env_with` public is an
+additive change to `agent-vmm`, not to the enumerated pinned items (`Sandbox`/`Limits`/`RunResult`/
+`VmmError`/`channel`).
+
+### 032 — `agent doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them *(2026-07-17)*
+
+**Doctor.** The host readiness check ships as an engine subcommand, `agent doctor`, so an operator on
+a fresh host reads what will work, degrade, or refuse *before* the first sandbox. The **one
+implementation** lives in `agent-vmm::doctor` (structured `Vec<Check>` with an `Ok`/`Warn`/`Fail`
+status + the degradation matrix), where the engine-runtime prerequisites (KVM, jailer, real-root,
+firecracker, iproute2/e2fsprogs, cgroup delegation, kernel version, boot artifacts) are its domain;
+both `agent doctor` and `cargo xtask setup` render it, so the dev-box check and the operator's can't
+drift. The status split mirrors the engine's own error discipline: the isolation boundary (`/dev/kvm`)
+and the boot artifacts are **hard** (`Fail` → non-zero exit, so `agent doctor && agent run …` gates),
+while the jailer, resource caps, and networking/bulk-I/O tools **fail open** (`Warn` with a named
+consequence). The eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of
+`agent-vmm` (decisions 024/026); each entry point appends it. `xtask setup` keeps its dev-only rows
+(bpf-linker, nightly, readelf) local — an operator running the shipped engine doesn't need them.
+
+**Versioned JSON.** Both machine JSON surfaces carry a leading integer `schema` field: the `--json`
+run result (`RUN_RESULT_SCHEMA`) and the audit record (`AUDIT_SCHEMA_VERSION`), each starting at `1`
+and **versioned independently** — two contracts, two versions. The **compatibility policy**: within a
+version, changes are *additive only* (a new field a consumer can ignore); renaming/removing a field or
+changing a value's meaning **bumps** the integer. This lands *before* anything external parses the
+bytes (the wire API and the SDK freeze harden a stable contract, not a moving one). The audit record's
+previously-open field questions were already settled by decision 028's hardening pass
+(`overflow_events` semantics, the u64-nanosecond ceiling), so v1 is a considered shape, not a
+placeholder.

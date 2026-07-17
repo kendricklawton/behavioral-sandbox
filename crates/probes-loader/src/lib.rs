@@ -90,8 +90,9 @@ use aya::Ebpf;
 
 pub use agent_probes_common::{
     FlowCounts, FlowKey, PolicyRule, Protocol, Syscall, SyscallEvent, COMM_CAP, DETAIL_CAP,
+    MAX_POLICY_RULES,
 };
-use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE_SIZE};
+use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, POLICY_RULE_SIZE};
 
 /// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
 /// dependency-free (`RunRecord::to_json`). Pure, unit-tested host-safe against a golden.
@@ -103,6 +104,7 @@ mod observer;
 /// aggregated from the three probes. Pure (no aya), so its whole aggregation is unit-tested host-safe.
 mod record;
 
+pub use json::AUDIT_SCHEMA_VERSION;
 pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
 pub use record::{
     AxisGap, DenialRecord, FlowRecord, NetSection, NotableSyscall, RunRecord, SyscallCounts,

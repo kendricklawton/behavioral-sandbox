@@ -345,62 +345,42 @@ fn ci_privileged() -> Result<()> {
 /// Print a checklist of the host prerequisites; read-only, never fails the build.
 fn setup() -> Result<()> {
     println!("agent — host capability check\n");
-    check("/dev/kvm present", Path::new("/dev/kvm").exists());
-    check("/dev/kvm writable (kvm group or root)", kvm_writable());
+
+    // The runtime host checks are the *same* implementation `agent doctor` renders (P14.9d): one
+    // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
+    // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
+    // matching what a dev boot resolves.
+    let config = agent_vmm::BootConfig::from_env();
+    for c in agent_vmm::doctor::checks(&config) {
+        let ok = c.status == agent_vmm::doctor::CheckStatus::Ok;
+        check(&c.label, ok);
+    }
+    // The eBPF-observability capability row (owned by the probe loader, out of `agent-vmm`).
     check(
-        "kernel BTF (/sys/kernel/btf/vmlinux)",
-        Path::new("/sys/kernel/btf/vmlinux").exists(),
+        "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
+        agent_probes_loader::check_support().is_ok(),
     );
-    check("firecracker in PATH", in_path("firecracker"));
-    check(
-        "firecracker is the pinned v1.9 (API schema, decision 001)",
-        firecracker_version() == Some((1, 9)),
-    );
-    check("jailer in PATH", in_path("jailer"));
-    check(
-        "cgroup v2 cpu+memory delegated (jailer resource limits)",
-        cgroup_controllers_delegated(),
-    );
-    check(
-        "kernel >= 5.14 (cgroup.kill — crash-safe VM teardown)",
-        kernel_at_least(5, 14),
-    );
+
+    // Dev-toolchain checks — only `xtask` needs these (building the eBPF object, the guest agent,
+    // verifying static links); an operator running the shipped engine does not, so they are not in
+    // the shared `agent doctor` set.
+    println!("\ndev toolchain (for building, not running):");
     check("bpf-linker installed", in_path("bpf-linker"));
     check(
         "nightly toolchain + rust-src (eBPF object build: `cargo xtask build-probes`)",
         nightly_ebpf_ready(),
     );
-    check("mke2fs (rootfs + input block device)", in_path("mke2fs"));
-    check(
-        "e2fsck + debugfs (output readback)",
-        in_path("e2fsck") && in_path("debugfs"),
-    );
     check(
         "readelf (binutils — static-link verification)",
         in_path("readelf"),
     );
-    check("ip (iproute2 — per-VM tap device)", in_path("ip"));
-    check(
-        "guest kernel + rootfs (cargo xtask fetch-artifacts)",
-        kernel_path().is_file() && boot_rootfs_path().is_file(),
-    );
 
-    // The degradation matrix: what each missing capability above costs, in one place, so
-    // a mismatched host explains itself *before* the first boot discovers it. The split is decision
-    // 013's: resource caps and leak-proofing fail open (they're DoS mitigation), the isolation
-    // boundary never does.
+    // The degradation matrix — the same fails-open-vs-hard split `agent doctor` prints, from the one
+    // shared source, so a mismatched host explains itself *before* the first boot discovers it.
     println!("\nDegradation matrix — what a missing item above means at runtime:");
-    println!("  fails open (loud warning, still runs):");
-    println!(
-        "    cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (decision 013)"
-    );
-    println!("    cgroup v2 not writable       -> Drop-only teardown; a SIGKILLed driver can leak its VM (decision 014)");
-    println!("    kernel < 5.14 (no cgroup.kill) -> the lifetime sentinel cannot kill the VM tree (decision 014)");
-    println!("    firecracker not v1.9         -> boots continue with a warning; API bodies may not match (decision 001)");
-    println!("  hard errors (typed, never a silent half-measure):");
-    println!("    /dev/kvm missing/unwritable  -> every boot fails: NoKvm (isolation is hardware)");
-    println!("    jail cannot be built         -> jailed boot fails; never a half-confined VM (decision 013)");
-    println!("    host tool missing (ip, mke2fs, e2fsck/debugfs, firecracker) -> typed Artifact/Vmm error");
+    for line in agent_vmm::doctor::matrix() {
+        println!("  {line}");
+    }
 
     // The engine/hoster line (decision 016): the engine guarantees its own privileged tools can't
     // be weaponized; *deploying* them — as whom, when, over what directory — is the hoster's, and
@@ -580,35 +560,6 @@ fn nightly_ebpf_ready() -> bool {
         .unwrap_or(false)
 }
 
-/// The `(major, minor)` of `firecracker --version` on PATH (first line `Firecracker v1.9.1`), or
-/// `None` when it's missing or unparseable. The same parse the driver runs once per process to
-/// warn on an unpinned binary; here it feeds the setup checklist.
-fn firecracker_version() -> Option<(u64, u64)> {
-    let out = Command::new("firecracker").arg("--version").output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let rest = text.split("Firecracker v").nth(1)?;
-    let mut parts = rest
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|t| !t.is_empty());
-    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
-}
-
-/// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.
-fn kernel_at_least(major: u64, minor: u64) -> bool {
-    std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .ok()
-        .and_then(|s| {
-            let mut it = s
-                .split(|c: char| !c.is_ascii_digit())
-                .filter(|t| !t.is_empty());
-            Some((
-                it.next()?.parse::<u64>().ok()?,
-                it.next()?.parse::<u64>().ok()?,
-            ))
-        })
-        .is_some_and(|v| v >= (major, minor))
-}
-
 /// The workspace root (not the cwd), so the commands work from anywhere.
 fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -663,31 +614,11 @@ fn check(label: &str, ok: bool) {
     println!("  [{}] {label}", if ok { "✓" } else { " " });
 }
 
-fn kvm_writable() -> bool {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/kvm")
-        .is_ok()
-}
-
 fn in_path(bin: &str) -> bool {
     let Ok(path) = std::env::var("PATH") else {
         return false;
     };
     std::env::split_paths(&path).any(|dir| dir.join(bin).is_file())
-}
-
-/// Whether the cgroup v2 `cpu`+`memory` controllers are delegated to the cgroup root, so the jailer
-/// can set a jailed VM's CPU/memory limits. A systemd host enables these by default; where they
-/// aren't, jailed boots still run but without limits. Informational only.
-fn cgroup_controllers_delegated() -> bool {
-    std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control")
-        .map(|s| {
-            let toks: Vec<&str> = s.split_whitespace().collect();
-            toks.contains(&"cpu") && toks.contains(&"memory")
-        })
-        .unwrap_or(false)
 }
 
 fn cargo(args: &[&str]) -> Result<()> {

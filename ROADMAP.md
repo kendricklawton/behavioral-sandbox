@@ -1527,10 +1527,20 @@ registry management is platform territory (guardrail 4) that never lands. The de
 phase pins: **grow verbs, not modes** — `run`, `shell`, `doctor`, later `agentd`; not twenty
 interacting flags on `run`.
 
-- [ ] **P14.9a** Project `Limits` onto the CLI: `--vcpus N` / `--mem MIB` on `run` and `shell`,
+- [x] **P14.9a** Project `Limits` onto the CLI: `--vcpus N` / `--mem MIB` on `run` and `shell`,
       with clap ranges matching the `NonZeroU8`/`NonZeroU32` types so a refused value is a typed
       CLI error, never a silent clamp. `--json` reports the effective limits back.
-- [ ] **P14.9b** Project the network + egress policy: `--net` boots with a NIC (unchanged
+      *(Landed: `--vcpus N` / `--mem MIB` on both `run` and `shell`, parsed by `parse_vcpus` /
+      `parse_mem_mib` straight into the `Limits` non-zero types — parsing *into* `NonZeroU8`/
+      `NonZeroU32` rejects `0` (and non-numbers / overflow) as a typed clap error, and `--vcpus`
+      additionally caps at 32 (`MAX_VCPUS`, the pinned Firecracker v1.9 microVM ceiling, decision
+      001). A refused value is an error at parse, never a silent clamp nor a late boot-time API
+      failure. `limits_with(vcpus, mem)` folds the two overrides onto the conservative defaults (the
+      shared knobs of `run` and `shell`; `run` layers `--wall`/`--output-cap` on top), and `--json`
+      echoes the **effective** limits back (`vcpus`, `mem_mib`, `wall_ms`, `output_cap_bytes`) so a
+      caller sees what it got. Host-safe unit tests cover the parse domain (0/33/300/non-number
+      refused, 1 and 32 accepted, 1 MiB floor) and the default-fold precedence.)*
+- [x] **P14.9b** Project the network + egress policy: `--net` boots with a NIC (unchanged
       deny-by-default: a `--net` run with no allowance reaches nothing but the host /30 — **this
       half already landed with the observability face**, P14.3/decision 029, observe-only), and a
       repeatable `--allow IP[/CIDR][:PORT][/PROTO]` builds the `EgressPolicy`, armed **before** the
@@ -1539,31 +1549,80 @@ interacting flags on `run`.
       denial/flow record. This is the CLI composing both tracks (driver + probes) the way the
       audit-bundle launch sequence does; `--allow` without `--net`, or enforcement without the
       needed caps, is a typed refusal, not a degradation.
-- [ ] **P14.9c** The `.agent.toml` file layer: **flags > env (`AGENT_*`) > file > defaults**
+      *(Landed: repeatable `--allow` on `run`, `requires` `--net` at clap. `parse_allow` reads
+      `IP[/CIDR][:PORT][/PROTO]` right-to-left (the `/tcp`|`/udp` suffix first, so a numeric CIDR
+      prefix can't be mistaken for it) into a validated `AllowRule`, each malformed field a typed
+      CLI error naming the token; `build_egress` folds them into a deny-by-default `EgressPolicy`,
+      capped at `MAX_POLICY_RULES` with a typed refusal. The CLI hands the policy to
+      `SandboxProbes::attach` as `Some(...)`, arming enforcement on the tap before the tc programs go
+      live (decision 025). **Enforcement doesn't fail open** (unlike observation, decision 029): a
+      cheap pre-boot `check_support()` refuses on a host missing BTF/`CAP_BPF`/`CAP_PERFMON`, and the
+      CLI's `Observability::attach` refuses post-attach if the *network* axis gapped (the residual
+      `CAP_NET_ADMIN`/tc case) — a policed run that can't arm is a typed error, never a silent
+      unenforced run. Host-safe unit tests cover the parse grammar (every field combination + each
+      malformed field), the deny-by-default fold + rule cap, and the enforcement-refusal keying on
+      the network axis alone; the `#[ignore]`d CLI e2e
+      `allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial` boots a real
+      networked sandbox, allows the fixed host end `10.200.0.1` on one UDP port, and asserts the
+      allowed flow **and** the denial for the blocked port land in the `--record` JSON. Decision 030.)*
+- [x] **P14.9c** The `.agent.toml` file layer: **flags > env (`AGENT_*`) > file > defaults**
       becomes real. Discovery and precedence are a `(decision)` (proposed: nearest `.agent.toml`
       up from the cwd, keys mirroring the env names 1:1 so the three layers stay one vocabulary);
       unknown keys are a typed error (config typos must not silently no-op). Precedence proven by
       unit tests per layer pair.
-- [ ] **P14.9d** `agent doctor`: ship the host check as an engine subcommand — KVM, the jailer
+      *(Landed: `agent-cli`'s new `config` module — the nearest `.agent.toml` walking up from the cwd,
+      `serde(deny_unknown_fields)` so a typo is a typed error naming the valid keys (not a silent
+      no-op), keys mirroring the `AGENT_*` names 1:1. The layering reuses the engine, not a
+      reimplementation: `BootConfig::from_env_with` is made public and the CLI composes
+      `env.or(file)` into its lookup, resolving `env > file > defaults` with zero duplication of the
+      engine's env-key logic or pinned defaults; the fieldless `log` value gets a parallel
+      `flag > env > file > default` resolver. Host-safe unit tests cover each layer pair (env>file,
+      file>default), the deny-unknown-fields error, and nearest-up-from-cwd discovery. Decision 031.)*
+- [x] **P14.9d** `agent doctor`: ship the host check as an engine subcommand — KVM, the jailer
       binary + real-root, iproute2/e2fsprogs, kernel BTF + `CAP_BPF`/`CAP_PERFMON`, artifact
       presence, and the degrades-vs-hard-errors matrix (P6.9b's content, today locked in dev-only
       `xtask setup`). An operator on a fresh host runs `agent doctor` *before* the first sandbox
       and reads exactly what will work, degrade, or refuse. `xtask setup` delegates to it (one
       implementation, two entry points).
-- [ ] **P14.9e** Version the JSON surface: a `schema` field (integer, starting at `1`) on the
+      *(Landed: the shared implementation is `agent-vmm::doctor` — a structured `Vec<Check>` with an
+      `Ok`/`Warn`/`Fail` status + the degradation matrix, the engine-runtime prerequisites in the
+      engine's own crate. `agent doctor` renders it + the eBPF-capability row (from the probe loader,
+      out of `agent-vmm`, decisions 024/026) and exits non-zero on any hard `Fail` so
+      `agent doctor && agent run …` gates; `xtask setup` renders the **same** checks + its dev-only
+      toolchain rows (bpf-linker/nightly/readelf). The status split mirrors the engine's error
+      discipline: `/dev/kvm` + artifacts are hard, the jailer/caps/tools fail open with a named
+      consequence. Host-safe unit tests cover the status classification, `can_boot`, and the check
+      set. Decision 032.)*
+- [x] **P14.9e** Version the JSON surface: a `schema` field (integer, starting at `1`) on the
       `--json` run result **and** the audit-record JSON, plus a written compatibility policy
       (additive within a version; field rename/removal bumps it). This is the seed the wire API
       (P16.2) and the SDK freeze (Phase 19) harden — versioning lands *before* anything external
       parses these bytes, not after. (The audit record's open field questions are already settled:
       `overflow_events` semantics and the u64-nanosecond ceiling, decision 028's hardening pass.)
-- [ ] **P14.9f** Prove completeness end to end: on a fresh host, `agent doctor` → one `agent run`
+      *(Landed: a leading `schema` field on both surfaces — `RUN_RESULT_SCHEMA` on the `--json` run
+      result and `AUDIT_SCHEMA_VERSION` on `RunRecord::to_json`, each starting at `1` and versioned
+      independently (two contracts). The compatibility policy — additive within a version, a
+      rename/removal bumps it — is written in `docs/cli.md`. The audit-record golden test pins the
+      new leading bytes. Decision 032.)*
+- [x] **P14.9f** Prove completeness end to end: on a fresh host, `agent doctor` → one `agent run`
       driving every projection at once (limits + `--net`/`--allow` + `--put`/`--get` + stdin +
       `--json`, with `--trace` if P14.3 has landed) — and `docs/cli.md` rewritten to document the
       finished surface, including the capability↔flag map and the explicit "daemon-scoped, by
       design" list (snapshots, pool, wire API) so absence reads as intent, not omission.
+      *(Landed: the `#[ignore]`d CLI e2e `doctor_passes_then_one_run_drives_every_projection_at_once`
+      (`ci-privileged`) runs `agent doctor` (asserts ready, exit 0) then one `agent run` folding
+      `--vcpus`/`--mem` + `--net`/`--allow` + `--put`/`--get` + piped stdin + `--json` through the
+      built binary, asserting the schema-versioned result echoes the effective limits and the
+      injected file + stdin round-trip back through `--get`. `docs/cli.md` gains the capability↔flag
+      map and the explicit daemon-scoped/platform exclusions list (snapshots, pool, wire API,
+      tenancy) so absence reads as intent.)*
 - **Exit gate:** every engine capability is reachable from the CLI or named as deliberately
   daemon-scoped; config layers all four levels; a fresh host self-diagnoses with `agent doctor`;
   and the JSON the CLI emits is a versioned contract.
+  *(Met: the capability↔flag map in `docs/cli.md` accounts for every library capability — projected
+  as a flag/verb, or named daemon-scoped/platform; `flags > env > .agent.toml > defaults` layers all
+  four levels; `agent doctor` self-diagnoses a fresh host (and gates via its exit code); both `--json`
+  and the audit record carry a versioned `schema`. Decisions 031, 032.)*
 
 ## Phase 15 — Hardening & the trust story (multi-tenant safety)
 

@@ -174,10 +174,13 @@ impl BootConfig {
         Self::from_env_with(|key| std::env::var_os(key))
     }
 
-    /// The testable core of [`from_env`](BootConfig::from_env): overrides come through `lookup`,
-    /// so precedence is unit-testable without mutating the process environment (which races
-    /// under the parallel test runner and is `unsafe` from edition 2024).
-    fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
+    /// The composable core of [`from_env`](BootConfig::from_env): every override comes through
+    /// `lookup`, keyed by the `AGENT_*` env name. Two uses: precedence is unit-testable without
+    /// mutating the process environment (which races under the parallel runner and is `unsafe` from
+    /// edition 2024); and a caller can **layer another source under the environment** by returning
+    /// the real env var if set, else its own value — e.g. the CLI's `.agent.toml` file layer resolves
+    /// `env > file > defaults` by composing `std::env::var_os(key).or_else(|| file.get(key))`.
+    pub fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
         let mut cfg = Self::default();
         if let Some(v) = lookup("AGENT_FIRECRACKER") {
             cfg.firecracker = PathBuf::from(v);

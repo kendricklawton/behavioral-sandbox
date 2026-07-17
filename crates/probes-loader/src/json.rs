@@ -25,17 +25,28 @@ use agent_probes_common::{FlowKey, Syscall};
 use crate::record::{AxisGap, NetSection, RunRecord, SyscallFootprint};
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
 
+/// The version of the audit-record JSON schema, emitted as the leading `schema` field of
+/// [`RunRecord::to_json`]. **Compatibility policy:** within a version, changes are *additive only*
+/// (a new field a consumer may ignore); renaming or removing a field, or changing a value's meaning,
+/// bumps this integer. A parser keys on this to know which shape it is reading. This is the seed the
+/// wire API and the language-SDK freeze harden — versioned *before* anything external parses it.
+pub const AUDIT_SCHEMA_VERSION: u32 = 1;
+
 impl RunRecord {
     /// Render this record as one line of deterministic, compact JSON — the structured output. The
     /// schema is stable and byte-for-byte reproducible across map-iteration order (see the module doc);
     /// The live view pretty-prints it for people, and the language SDKs parse it as the audit-log format.
+    /// The leading `schema` field ([`AUDIT_SCHEMA_VERSION`]) versions the format.
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(512);
         out.push('{');
 
+        // schema version — first, so a consumer reads it before anything else.
+        field(&mut out, "schema", AUDIT_SCHEMA_VERSION, true);
+
         // timing
-        out.push_str("\"timing\":{");
+        out.push_str(",\"timing\":{");
         field(&mut out, "boot_ns", clamped_ns(self.timing.boot), true);
         field(
             &mut out,
@@ -369,7 +380,7 @@ mod tests {
         ]);
         let json = record.to_json();
         let expected = concat!(
-            "{\"timing\":{\"boot_ns\":120000000,\"exec_wall_ns\":42000000}",
+            "{\"schema\":1,\"timing\":{\"boot_ns\":120000000,\"exec_wall_ns\":42000000}",
             ",\"network\":{\"totals\":{\"ingress_packets\":2,\"ingress_bytes\":120,",
             "\"egress_packets\":3,\"egress_bytes\":200},\"flows\":[",
             "{\"src\":\"10.200.0.2\",\"src_port\":40000,\"dst\":\"1.1.1.1\",\"dst_port\":53,",

@@ -12,17 +12,21 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod config;
+mod doctor;
 mod trace;
 mod watch;
 
 use std::io::{IsTerminal, Read, Write};
+use std::net::Ipv4Addr;
+use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use agent_probes_loader::Timing;
+use agent_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
 use agent_vmm::{BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 use clap::{Parser, Subcommand};
 
@@ -30,6 +34,12 @@ use clap::{Parser, Subcommand};
 /// command's own exit code): conventional "2", named so the intent is legible at the
 /// `ExitCode::from` site — the same convention (and name) as the guest agent's.
 const EXIT_OPERATIONAL: u8 = 2;
+
+/// The version of the `--json` **run-result** contract (exit code, streams, artifacts, metrics,
+/// limits). Distinct from the audit record's `agent_probes_loader::AUDIT_SCHEMA_VERSION`: two
+/// surfaces, two independent versions. Same policy — additive within a version, a rename/removal
+/// bumps it (docs/cli.md).
+const RUN_RESULT_SCHEMA: u32 = 1;
 
 #[derive(Parser)]
 #[command(
@@ -52,6 +62,9 @@ enum Cmd {
     /// session's filesystem until you exit (shell process state like `cd`/variables does not —
     /// each line is its own exec).
     Shell(ShellArgs),
+    /// Check this host's readiness to run the engine — KVM, the jailer, tools, artifacts, eBPF
+    /// capabilities — and print what will work, degrade, or refuse before the first sandbox.
+    Doctor,
 }
 
 #[derive(clap::Args)]
@@ -82,8 +95,16 @@ struct RunArgs {
     /// Cap, in bytes, on captured stdout+stderr+artifacts (default 16 MiB).
     #[arg(long, value_name = "BYTES")]
     output_cap: Option<usize>,
+    /// Guest vCPUs (default 1). A whole number in 1..=32; zero or over-cap is a typed CLI error,
+    /// never a silent clamp (Firecracker v1.9 caps a microVM at 32, decision 001).
+    #[arg(long, value_name = "N", value_parser = parse_vcpus)]
+    vcpus: Option<NonZeroU8>,
+    /// Guest memory in MiB (default 256). A whole number of at least 1; zero is a typed CLI error.
+    #[arg(long, value_name = "MIB", value_parser = parse_mem_mib)]
+    mem: Option<NonZeroU32>,
     /// Emit the structured run result as one JSON object on stdout (exit code, lossy
-    /// stdout/stderr, artifact list, metrics) instead of relaying the raw streams.
+    /// stdout/stderr, artifact list, metrics, and the effective limits) instead of relaying the
+    /// raw streams.
     #[arg(long)]
     json: bool,
     /// Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged:
@@ -91,6 +112,13 @@ struct RunArgs {
     /// crosses the tap lands in the audit record's network section.
     #[arg(long, conflicts_with = "demo_boot")]
     net: bool,
+    /// Allow one egress destination past the deny-by-default tap (repeatable), as
+    /// `IP[/CIDR][:PORT][/PROTO]` — e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires
+    /// `--net`; the allowances build the run's egress policy, armed before the tap goes live. A
+    /// host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced
+    /// run.
+    #[arg(long, value_name = "IP[/CIDR][:PORT][/PROTO]", value_parser = parse_allow, requires = "net")]
+    allow: Vec<AllowRule>,
     /// Attach the host-side probes and print the run's audit trail (human-readable) on stdout
     /// after the run. Fail-open: a host without eBPF caps still runs, with the gaps explained.
     /// Machine consumers use `--record` (so this conflicts with `--json`).
@@ -116,12 +144,29 @@ struct ShellArgs {
     /// Run the VMM without the jailer (see `run --unjailed`).
     #[arg(long)]
     unjailed: bool,
+    /// Guest vCPUs (default 1). A whole number in 1..=32 (see `run --vcpus`).
+    #[arg(long, value_name = "N", value_parser = parse_vcpus)]
+    vcpus: Option<NonZeroU8>,
+    /// Guest memory in MiB (default 256). A whole number of at least 1 (see `run --mem`).
+    #[arg(long, value_name = "MIB", value_parser = parse_mem_mib)]
+    mem: Option<NonZeroU32>,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    init_tracing(cli.log.as_deref());
-    match run(cli.cmd) {
+    // The `.agent.toml` file layer is discovered once, from the cwd — a mistyped key is a loud
+    // failure here, before any boot (config typos must not silently no-op).
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let file = match config::AgentToml::discover(&cwd) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = writeln!(std::io::stderr(), "agent: {e}");
+            return ExitCode::from(EXIT_OPERATIONAL);
+        }
+    };
+    // Log filter resolves flags > env > file > default.
+    init_tracing(config::resolve_log(cli.log.as_deref(), file.as_ref()).as_deref());
+    match run(cli.cmd, file.as_ref()) {
         Ok(code) => code,
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
@@ -131,19 +176,30 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cmd: Cmd) -> Result<ExitCode, VmmError> {
+fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
     match cmd {
-        Cmd::Run(args) => run_command(args),
-        Cmd::Shell(args) => shell(args),
+        Cmd::Run(args) => run_command(args, file),
+        Cmd::Shell(args) => shell(args, file),
+        Cmd::Doctor => Ok(doctor::report(&base_config(file))),
     }
+}
+
+/// The env+file-layered base config — `env > file > defaults` — over which each subcommand applies
+/// its flags. Composes a single lookup that prefers the real environment, then the `.agent.toml`
+/// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
+/// stay one vocabulary keyed by the `AGENT_*` names.
+fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
+    BootConfig::from_env_with(|key| {
+        std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
+    })
 }
 
 /// `agent run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
 /// `--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed under `--watch`) →
 /// write the requested artifacts → finalize the audit record while the sandbox is alive → close →
 /// report (raw relay or the `--json` structured result, then the `--trace` trail / `--record` file).
-fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
-    let mut limits = Limits::default();
+fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
+    let mut limits = limits_with(args.vcpus, args.mem);
     if let Some(secs) = args.wall {
         limits.wall = Duration::from_secs(secs); // clap enforced >= 1 at parse
     }
@@ -158,10 +214,25 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
                 .to_string(),
         ));
     }
+    // Build the egress policy from `--allow` (clap already required `--net`). Enforcement needs the
+    // eBPF probes, so refuse up front on a host that plainly can't load them — before paying a boot,
+    // and never degrading to an unenforced run (the tap-attach cap check `attach` does catches the
+    // residual CAP_NET_ADMIN case that this cheap pre-flight can't).
+    let egress = if args.allow.is_empty() {
+        None
+    } else {
+        let policy = build_egress(&args.allow)?;
+        if let Err(e) = agent_probes_loader::check_support() {
+            return Err(VmmError::Vmm(format!(
+                "--allow requested egress enforcement, but this host can't load the eBPF probes: {e}"
+            )));
+        }
+        Some(policy)
+    };
     // Read the local `--put` files *before* the (jailed-by-default) boot: a bad path is a cheap stat
     // failure, so validate it up front rather than paying a full boot + teardown only to fail on it.
     let files_in = read_put_files(&args.put)?;
-    let mut config = BootConfig::from_env().with_limits(limits);
+    let mut config = base_config(file).with_limits(limits);
     config.enable_network = args.net;
     let sandbox = open(config, args.unjailed)?;
     if args.demo_boot {
@@ -176,13 +247,22 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
         return sandbox.shutdown().map(|()| ExitCode::SUCCESS);
     }
 
-    // The audit surface, only when a flag asked for it (a plain `agent run` pays nothing): load the
-    // shared probes and bind them to this sandbox by the plain values it exposes — the launch
-    // sequence the probes-loader documents, composed here in the caller. Fail-open throughout.
-    let observing = args.trace || args.record.is_some() || args.watch;
-    let probes = observing.then(|| {
-        audit::Observability::load().attach(sandbox.vmm_pid(), sandbox.netns(), sandbox.tap_name())
-    });
+    // The audit surface, when a flag asked for it (a plain `agent run` pays nothing): load the shared
+    // probes and bind them to this sandbox by the plain values it exposes — the launch sequence the
+    // probes-loader documents, composed here in the caller. `--allow` enforces (arming the tap before
+    // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
+    // enforcement is a typed refusal (`attach`).
+    let observing = args.trace || args.record.is_some() || args.watch || egress.is_some();
+    let probes = if observing {
+        Some(audit::Observability::load().attach(
+            sandbox.vmm_pid(),
+            sandbox.netns(),
+            sandbox.tap_name(),
+            egress.as_ref(),
+        )?)
+    } else {
+        None
+    };
 
     let boot_latency = sandbox.boot_latency();
     let vmm_pid = sandbox.vmm_pid();
@@ -241,6 +321,9 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
         // pipe-clean convention (stderr already carries the logs). Byte streams are lossy UTF-8
         // here; exact bytes ride the artifact files, which are on disk by now.
         let structured = serde_json::json!({
+            // Versions the run-result contract (distinct from the audit record's own `schema`).
+            // Additive changes keep this integer; a rename/removal bumps it — see docs/cli.md.
+            "schema": RUN_RESULT_SCHEMA,
             "exit_code": result.exit_code,
             "stdout": String::from_utf8_lossy(&result.stdout),
             "stderr": String::from_utf8_lossy(&result.stderr),
@@ -252,6 +335,14 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
             "metrics": {
                 "boot_ms": boot_latency.as_millis() as u64,
                 "exec_wall_ms": result.metrics.wall.as_millis() as u64,
+            },
+            // The effective limits this run actually booted with — the flag values folded onto the
+            // defaults, echoed back so a `--json` caller sees what it got, not just what it asked.
+            "limits": {
+                "vcpus": limits.vcpus.get(),
+                "mem_mib": limits.mem_mib.get(),
+                "wall_ms": u64::try_from(limits.wall.as_millis()).unwrap_or(u64::MAX),
+                "output_cap_bytes": limits.output_cap,
             },
         });
         let _ = writeln!(std::io::stdout(), "{structured}");
@@ -282,9 +373,9 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
-fn shell(args: ShellArgs) -> Result<ExitCode, VmmError> {
+fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
     let sandbox = open(
-        BootConfig::from_env().with_limits(Limits::default()),
+        base_config(file).with_limits(limits_with(args.vcpus, args.mem)),
         args.unjailed,
     )?;
     let mut err_out = std::io::stderr();
@@ -347,6 +438,116 @@ fn open(config: BootConfig, unjailed: bool) -> Result<Sandbox, VmmError> {
     } else {
         Sandbox::open(config)
     }
+}
+
+/// One parsed `--allow` allowance: a validated destination CIDR with optional port/protocol, the
+/// CLI face of one [`EgressPolicy`] rule. `Clone` for clap's repeatable collection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AllowRule {
+    cidr: Ipv4Cidr,
+    port: Option<u16>,
+    proto: Option<Protocol>,
+}
+
+/// Parse one `--allow` value, `IP[/CIDR][:PORT][/PROTO]`, into an [`AllowRule`]. Parsed
+/// right-to-left so the grammar is unambiguous: an optional `/tcp`|`/udp` **protocol** suffix comes
+/// off first (the only non-numeric `/`, so a numeric CIDR prefix can never be mistaken for it), then
+/// an optional `:port`, then the address with an optional `/prefix`. Every malformed field is a
+/// typed CLI error naming the offending token, never a silently dropped allowance.
+fn parse_allow(s: &str) -> Result<AllowRule, String> {
+    // Trailing protocol: `/tcp` or `/udp` (case-insensitive), else none.
+    let (head, proto) = match s.rsplit_once('/') {
+        Some((rest, tail)) if tail.eq_ignore_ascii_case("tcp") => (rest, Some(Protocol::Tcp)),
+        Some((rest, tail)) if tail.eq_ignore_ascii_case("udp") => (rest, Some(Protocol::Udp)),
+        _ => (s, None),
+    };
+    // Optional `:port`.
+    let (addr_cidr, port) = match head.rsplit_once(':') {
+        Some((addr, p)) => {
+            let port: u16 = p
+                .parse()
+                .map_err(|_| format!("invalid port {p:?} in --allow {s:?}"))?;
+            (addr, Some(port))
+        }
+        None => (head, None),
+    };
+    // The address, with an optional `/prefix` CIDR (absent = a single-host `/32`).
+    let cidr = match addr_cidr.split_once('/') {
+        Some((ip, prefix)) => {
+            let ip: Ipv4Addr = ip
+                .parse()
+                .map_err(|_| format!("invalid IPv4 address {ip:?} in --allow {s:?}"))?;
+            let prefix: u8 = prefix
+                .parse()
+                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in --allow {s:?}"))?;
+            Ipv4Cidr::new(ip, prefix).map_err(|e| format!("--allow {s:?}: {e}"))?
+        }
+        None => Ipv4Cidr::host(
+            addr_cidr
+                .parse()
+                .map_err(|_| format!("invalid IPv4 address {addr_cidr:?} in --allow {s:?}"))?,
+        ),
+    };
+    Ok(AllowRule { cidr, port, proto })
+}
+
+/// Fold the `--allow` rules into a deny-by-default [`EgressPolicy`]. Refuses more than the kernel
+/// policy map holds ([`MAX_POLICY_RULES`]) with a typed error naming the cap, rather than letting the
+/// overflow surface as a cryptic attach-time failure.
+fn build_egress(allows: &[AllowRule]) -> Result<EgressPolicy, VmmError> {
+    if allows.len() > MAX_POLICY_RULES {
+        return Err(VmmError::Vmm(format!(
+            "too many --allow rules: {} given, but the kernel egress policy holds at most \
+             {MAX_POLICY_RULES}",
+            allows.len()
+        )));
+    }
+    let mut policy = EgressPolicy::deny_all();
+    for a in allows {
+        policy = policy.allow(a.cidr, a.port, a.proto);
+    }
+    Ok(policy)
+}
+
+/// Firecracker v1.9 caps a microVM at 32 vCPUs (decision 001), so refuse anything above it at the
+/// CLI edge rather than surfacing a late Firecracker API error mid-boot.
+const MAX_VCPUS: u8 = 32;
+
+/// Fold the `--vcpus`/`--mem` overrides onto the default [`Limits`] — the two resource knobs both
+/// `run` and `shell` project. An unset flag keeps the (deliberately conservative) default; a set one
+/// carries the already-validated [`NonZeroU8`]/[`NonZeroU32`] the parsers produced. `run` layers its
+/// own `--wall`/`--output-cap` on top of the result.
+fn limits_with(vcpus: Option<NonZeroU8>, mem_mib: Option<NonZeroU32>) -> Limits {
+    let mut limits = Limits::default();
+    if let Some(vcpus) = vcpus {
+        limits.vcpus = vcpus;
+    }
+    if let Some(mem_mib) = mem_mib {
+        limits.mem_mib = mem_mib;
+    }
+    limits
+}
+
+/// Parse `--vcpus`: a whole number in `1..=32` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing
+/// straight into the non-zero type rejects `0` (and any non-number / u8 overflow); the explicit cap
+/// check rejects an over-32 value. Either way it is a **typed CLI error, never a silent clamp** — the
+/// value is refused at parse, not narrowed behind the caller's back or surfaced as a late boot error.
+fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
+    let vcpus: NonZeroU8 = s
+        .parse()
+        .map_err(|_| format!("expected a whole number of vCPUs in 1..={MAX_VCPUS}, got {s:?}"))?;
+    if vcpus.get() > MAX_VCPUS {
+        return Err(format!("vCPUs must be in 1..={MAX_VCPUS}, got {vcpus}"));
+    }
+    Ok(vcpus)
+}
+
+/// Parse `--mem`: guest memory in whole MiB into the [`Limits::mem_mib`] [`NonZeroU32`]. Parsing
+/// straight into the non-zero type rejects `0` (and any non-number / overflow) as a typed CLI error,
+/// never a silent clamp.
+fn parse_mem_mib(s: &str) -> Result<NonZeroU32, String> {
+    s.parse()
+        .map_err(|_| format!("expected guest memory in whole MiB (at least 1), got {s:?}"))
 }
 
 /// A `KEY=VALUE` pair for `--env`. Values are secrets by presumption, so the error names only the
@@ -511,7 +712,13 @@ fn init_tracing(flag: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_env_pair, write_artifacts_in};
+    use super::{
+        build_egress, limits_with, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus,
+        write_artifacts_in, AllowRule, MAX_VCPUS,
+    };
+    use agent_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
+    use std::net::Ipv4Addr;
+    use std::num::{NonZeroU32, NonZeroU8};
     use std::path::{Path, PathBuf};
 
     /// A scratch dir removed on drop, so a panicking assertion can't leak it. Unique per (pid, tag,
@@ -561,6 +768,126 @@ mod tests {
         );
         assert!(parse_env_pair("novalue").is_err());
         assert!(parse_env_pair("=orphan").is_err());
+    }
+
+    #[test]
+    fn vcpus_parse_within_the_one_to_thirty_two_domain() {
+        assert_eq!(parse_vcpus("1"), Ok(NonZeroU8::MIN));
+        assert_eq!(parse_vcpus("32"), NonZeroU8::new(32).ok_or(String::new()));
+        // Zero, over-cap, u8 overflow, and non-numbers are each a typed error, never a clamp.
+        assert!(
+            parse_vcpus("0").is_err(),
+            "zero is unbootable, not a small budget"
+        );
+        assert!(parse_vcpus("33").is_err(), "over the v1.9 cap");
+        assert!(parse_vcpus("300").is_err(), "u8 overflow");
+        assert!(parse_vcpus("").is_err());
+        assert!(parse_vcpus("two").is_err());
+        // The over-cap message names the cap so the refusal is actionable.
+        assert!(parse_vcpus("64")
+            .unwrap_err()
+            .contains(&MAX_VCPUS.to_string()));
+    }
+
+    #[test]
+    fn mem_mib_parses_any_nonzero_u32() {
+        assert_eq!(
+            parse_mem_mib("256"),
+            NonZeroU32::new(256).ok_or(String::new())
+        );
+        assert_eq!(
+            parse_mem_mib("1"),
+            NonZeroU32::new(1).ok_or(String::new()),
+            "1 MiB is the floor, not zero"
+        );
+        assert!(parse_mem_mib("0").is_err(), "zero memory is unbootable");
+        assert!(parse_mem_mib("").is_err());
+        assert!(parse_mem_mib("lots").is_err());
+    }
+
+    #[test]
+    fn allow_parses_every_field_combination() {
+        let host = |a: [u8; 4]| Ipv4Cidr::host(Ipv4Addr::from(a));
+        // Bare host: /32, any port, any proto.
+        assert_eq!(
+            parse_allow("1.1.1.1"),
+            Ok(AllowRule {
+                cidr: host([1, 1, 1, 1]),
+                port: None,
+                proto: None
+            })
+        );
+        // CIDR only.
+        assert_eq!(
+            parse_allow("10.0.0.0/8"),
+            Ok(AllowRule {
+                cidr: Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).expect("valid /8"),
+                port: None,
+                proto: None
+            })
+        );
+        // Host + port + proto, and the full CIDR+port+proto form.
+        assert_eq!(
+            parse_allow("1.1.1.1:443/tcp"),
+            Ok(AllowRule {
+                cidr: host([1, 1, 1, 1]),
+                port: Some(443),
+                proto: Some(Protocol::Tcp)
+            })
+        );
+        assert_eq!(
+            parse_allow("10.0.0.0/8:53/udp"),
+            Ok(AllowRule {
+                cidr: Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).expect("valid /8"),
+                port: Some(53),
+                proto: Some(Protocol::Udp)
+            })
+        );
+        // Proto without a port (the `/proto` suffix is stripped before the `:port` split).
+        assert_eq!(
+            parse_allow("8.8.8.8/udp").map(|r| r.proto),
+            Ok(Some(Protocol::Udp))
+        );
+    }
+
+    #[test]
+    fn allow_rejects_malformed_fields_with_a_typed_error() {
+        // Each bad field is a typed error naming the offending token, never a dropped allowance.
+        assert!(parse_allow("999.1.1.1").is_err(), "bad octet");
+        assert!(parse_allow("1.1.1.1/33").is_err(), "CIDR prefix over 32");
+        assert!(parse_allow("1.1.1.1:70000").is_err(), "port over u16");
+        assert!(parse_allow("1.1.1.1:").is_err(), "empty port");
+        assert!(parse_allow("").is_err(), "empty");
+        // The prefix error names the offending token.
+        assert!(parse_allow("1.1.1.1/33").unwrap_err().contains("33"));
+    }
+
+    #[test]
+    fn build_egress_denies_by_default_and_caps_the_rule_count() {
+        // No rules is still a policy — deny-everything.
+        assert!(build_egress(&[]).expect("empty is valid").is_deny_all());
+        // Each allow becomes one rule.
+        let one = parse_allow("1.1.1.1:443/tcp").expect("valid");
+        assert_eq!(build_egress(&[one]).expect("one rule").rules().len(), 1);
+        // Over the kernel-map cap is a typed refusal (not a cryptic attach-time overflow).
+        let many = vec![one; MAX_POLICY_RULES + 1];
+        let err = build_egress(&many).expect_err("over the cap must refuse");
+        assert!(format!("{err}").contains(&MAX_POLICY_RULES.to_string()));
+    }
+
+    #[test]
+    fn limits_fold_overrides_onto_conservative_defaults() {
+        // An unset flag keeps the default; a set one wins. The other knobs are untouched by this
+        // helper (run layers wall/output-cap separately).
+        let d = agent_vmm::Limits::default();
+        let none = limits_with(None, None);
+        assert_eq!(none.vcpus, d.vcpus);
+        assert_eq!(none.mem_mib, d.mem_mib);
+        let both = limits_with(NonZeroU8::new(4), NonZeroU32::new(1024));
+        assert_eq!(both.vcpus.get(), 4);
+        assert_eq!(both.mem_mib.get(), 1024);
+        assert_eq!(both.wall, d.wall, "wall is not this helper's to touch");
+        assert_eq!(both.output_cap, d.output_cap);
     }
 
     #[test]

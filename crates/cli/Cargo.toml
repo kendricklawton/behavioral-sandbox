@@ -19,8 +19,12 @@ agent-vmm = { path = "../vmm" }
 clap = { workspace = true }
 # `agent run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
+# `.agent.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
+# denied so a config typo is a typed error, not a silent no-op.
+serde = { workspace = true }
 # `agent run --json`: the structured run result is one JSON object on stdout.
 serde_json = { workspace = true }
+toml = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
