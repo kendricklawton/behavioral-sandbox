@@ -56,6 +56,7 @@ cargo xtask fuzz channel_frame --seconds 0     # run until a crash or Ctrl-C
 ```
 
 The targets are `channel_response` (host reads guest, the highest-value one), `channel_request`
-(guest reads host), and `channel_frame` (the shared framing). A crash is written under
-`fuzz/artifacts/` and replays with `cargo fuzz run <target> fuzz/artifacts/<file>`; feed a minimized
-reproducer back as a `crates/channel` unit test when you fix it.
+(guest reads host), `channel_frame` (the shared framing), and `channel_handshake` (the magic +
+version exchanged before any message). A crash is written under `fuzz/artifacts/` and replays with
+`cargo fuzz run <target> fuzz/artifacts/<file>`; feed a minimized reproducer back as a
+`crates/channel` unit test when you fix it.

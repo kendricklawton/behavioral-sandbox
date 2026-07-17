@@ -46,3 +46,10 @@ path = "fuzz_targets/channel_frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "channel_handshake"
+path = "fuzz_targets/channel_handshake.rs"
+test = false
+doc = false
+bench = false

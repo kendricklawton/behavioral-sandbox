@@ -167,7 +167,7 @@ enum Cmd {
     /// Fuzz the host↔guest channel decoders with `cargo fuzz` (libFuzzer) — the deep, nightly-only
     /// counterpart to the channel crate's in-gate `fuzz_tests`. Needs `cargo install cargo-fuzz` + a
     /// nightly toolchain; never part of `ci`. Targets: `channel_response` (default), `channel_request`,
-    /// `channel_frame`.
+    /// `channel_frame`, `channel_handshake`.
     Fuzz {
         /// The libFuzzer target to run.
         #[arg(default_value = "channel_response")]
