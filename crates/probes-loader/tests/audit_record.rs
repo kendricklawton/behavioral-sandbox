@@ -1,4 +1,4 @@
-//! P13.6 end-to-end test: a workload that touches the network + a file yields a per-run audit record
+//! End-to-end test: a workload that touches the network + a file yields a per-run audit record
 //! that shows exactly what the host could observe of it.
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches all three
@@ -13,8 +13,8 @@
 //!
 //! **What the host can and can't see, by design.** The guest's outbound packets cross the tap on the
 //! host, so the **network** touch shows up *exactly* in the record's flows — the strong cross-boundary
-//! signal (Phase 10). The guest's **file** read happens in-guest and does *not* trap to the host's
-//! syscall tracepoints (a microVM services its own syscalls; ROADMAP Phase 9): that is the isolation
+//! signal. The guest's **file** read happens in-guest and does *not* trap to the host's
+//! syscall tracepoints (a microVM services its own syscalls): that is the isolation
 //! working, not a gap. The record's host-syscall axis is the **VMM's** host footprint, and the test
 //! asserts that axis *bound* to this sandbox (no coverage gap) rather than asserting in-guest activity it
 //! is architecturally blind to. Network exactness + every axis bound + a serializable record is the
@@ -86,7 +86,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
         return;
     }
 
-    // Load the two host-wide probes **once** (the shared model — P13.5). A real host loads these at
+    // Load the two host-wide probes **once** (the shared model). A real host loads these at
     // startup and hands them to every sandbox; here one sandbox exercises the same path.
     let tracer = SharedTracer::load().expect("load the shared syscall tracer");
     let meter = SharedMeter::load().expect("load the shared CPU meter");
@@ -135,7 +135,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     );
     std::thread::sleep(Duration::from_millis(100)); // let the last datagrams settle onto the tap
 
-    // Finalize the record while the sandbox is still alive (P13.3): reads all three probes, detaches
+    // Finalize the record while the sandbox is still alive: reads all three probes, detaches
     // this run's cgroup from the shared tracer + meter, and returns the fused record.
     let record = probes.collect(Timing {
         boot: vm.boot_latency(),
@@ -173,7 +173,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 
     // --- Every axis bound, and the record is honest about coverage -----------------------------------
     // No axis gap survived to the record (the network + host-syscall + CPU axes all attached). The
-    // guest's in-guest file read is *not* a host syscall (Phase 9) — its absence from `host_syscalls`
+    // guest's in-guest file read is *not* a host syscall — its absence from `host_syscalls`
     // is the isolation working, so we assert the axis *bound*, not that guest file ops appear.
     assert!(
         !record
@@ -194,7 +194,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
         json.contains(&format!("\"dst\":\"{host_ip}\"")) && json.contains("\"proto\":\"udp\""),
         "the JSON audit surface should show the guest's flow: {json}"
     );
-    // Byte-stability: re-serializing the same record yields the identical line (the P13.4 property).
+    // Byte-stability: re-serializing the same record yields the identical line (the property).
     assert_eq!(json, record.to_json());
 
     vm.shutdown().expect("shut the sandbox down");

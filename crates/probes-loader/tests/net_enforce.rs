@@ -1,4 +1,4 @@
-//! P11.7 end-to-end test: a guest reaches an allow-listed endpoint and is blocked from everything else.
+//! End-to-end test: a guest reaches an allow-listed endpoint and is blocked from everything else.
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches an enforcing
 //! `tc` program inside the VM's netns (needs `CAP_BPF`+`CAP_NET_ADMIN` + BTF + the built object). Run via
@@ -6,7 +6,7 @@
 //! stays independent of the driver: the two tracks bridge by plain values (a netns name and a tap name).
 //!
 //! The proof is at the enforcement point (the tap): the guest sends UDP to two ports of its host end, one
-//! allow-listed and one not. The blocked port shows up in the `DENIALS` audit trail (dropped, P11.5); the
+//! allow-listed and one not. The blocked port shows up in the `DENIALS` audit trail (dropped); the
 //! allowed port does not (accepted). Deny-by-default with a single-endpoint allow-list — the guest can
 //! reach exactly what the policy admits and nothing more.
 #![allow(clippy::panic)]
@@ -78,7 +78,7 @@ fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
         return;
     }
 
-    // Boot a networked sandbox. Unjailed on purpose: the P11.7 proof is about the tap enforcement, not
+    // Boot a networked sandbox. Unjailed on purpose: the proof is about the tap enforcement, not
     // the jailer, and the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let netns = vm
@@ -91,7 +91,7 @@ fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
         .to_string();
     let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
 
-    // P11.3/P11.4: launch enforcement with a single-endpoint allow-list — only host_ip:ALLOWED_PORT/udp.
+    // Launch enforcement with a single-endpoint allow-list — only host_ip:ALLOWED_PORT/udp.
     // `enforce_in_netns` arms the policy before the tc programs go live, so there is no un-enforced window.
     let policy =
         EgressPolicy::deny_all().allow_host(host_ip, Some(ALLOWED_PORT), Some(Protocol::Udp));

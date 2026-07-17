@@ -279,7 +279,7 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
             Ok(0) => {
                 // Firecracker closes the connection with no ack when nothing is listening on the
                 // guest port — the canonical "agent not up yet / not anymore" signal, typed so a
-                // retry/pool caller can branch on it (P2.7's deferred variant, landed with the pool).
+                // retry/pool caller can branch on it (the deferred variant, landed with the pool).
                 return Err(VmmError::GuestUnavailable(format!(
                     "vsock CONNECT {port}: peer closed before ack (is the guest agent listening?)"
                 )));
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn exec_over_fake_vsock_runs_a_command() {
-        // P2.8 happy path: `exec("echo hi")` → `hi`, exit 0 — through the *real* agent (only the
+        // Happy path: `exec("echo hi")` → `hi`, exit 0 — through the *real* agent (only the
         // Firecracker vsock UDS is faked).
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-echo");
         let mut conn =
@@ -375,7 +375,7 @@ mod tests {
         assert_eq!(result.stdout, b"hi\n");
         assert!(result.stderr.is_empty());
         assert_eq!(result.exit_code, 0);
-        // The structured result's metrics leg (P7.5): a real exec took nonzero host-observed time.
+        // The structured result's metrics leg: a real exec took nonzero host-observed time.
         assert!(result.metrics.wall > Duration::ZERO);
         server.join().expect("server thread");
     }
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn injected_secrets_reach_no_observable_surface() {
-        // The secret-hygiene leak test (P7.1 exit gate, host half): drive a succeeding exec whose
+        // The secret-hygiene leak test (host half): drive a succeeding exec whose
         // env value and injected file hold a sentinel, and a failing injection whose *data* holds
         // it, while capturing — at TRACE — every log line the driver and the in-process real agent
         // emit. The sentinel may appear only in the RunResult (the caller's own data); never in a
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn exec_crashing_command_is_a_typed_error() {
-        // P2.8: a command the guest can't run ("crashing" in the agent-fault sense) comes back as a
+        // A command the guest can't run ("crashing" in the agent-fault sense) comes back as a
         // terminal `Error` frame → the typed `VmmError::GuestExec`, end to end through the real
         // agent (which reports the spawn failure), not via a hand-crafted `Error` response.
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-crash");

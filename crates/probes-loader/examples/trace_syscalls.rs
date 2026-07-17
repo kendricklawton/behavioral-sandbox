@@ -1,7 +1,7 @@
-//! Demo (P9.3/P9.4): a **live syscall trace**. Loads the three `sys_enter_{execve,openat,connect}`
+//! Demo: a **live syscall trace**. Loads the three `sys_enter_{execve,openat,connect}`
 //! tracepoints and streams decoded events as they happen, until the window closes.
 //!
-//! With a `PID` argument it **attributes** the trace to that process's cgroup (P9.4): pass a sandbox's
+//! With a `PID` argument it **attributes** the trace to that process's cgroup: pass a sandbox's
 //! Firecracker VMM pid to watch exactly one sandbox's host footprint. With none, it traces the whole
 //! host.
 //!
@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut tracer = SyscallTracer::load()?;
     match pid {
-        // P9.4: resolve the pid's cgroup id from the Firecracker track and scope the trace to it.
+        // Resolve the pid's cgroup id from the Firecracker track and scope the trace to it.
         Some(p) => {
             let cgroup = cgroup_id_of_pid(p)?;
             tracer.watch_cgroup(cgroup)?;
@@ -48,7 +48,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     tracer.drain(|_| {})?; // discard whatever was buffered before the window opens
 
-    // P9.3: stream the decoded trace live until the window closes; events print within ~2 ms.
+    // Stream the decoded trace live until the window closes; events print within ~2 ms.
     let deadline = Instant::now() + Duration::from_secs(seconds);
     let count = tracer.stream(
         Duration::from_millis(2),

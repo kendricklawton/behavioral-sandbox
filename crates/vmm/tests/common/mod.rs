@@ -88,7 +88,7 @@ pub fn agent_rootfs_config() -> BootConfig {
     cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
     cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
-    // Read-only shared base + a per-run tmpfs overlay (P3.3): `/` is writable in-guest but the base
+    // Read-only shared base + a per-run tmpfs overlay: `/` is writable in-guest but the base
     // file is never mutated. This is what makes the agent's `/tmp` working dir usable, so the exec
     // tests below exercise the overlay end to end.
     cfg.read_only_root = true;

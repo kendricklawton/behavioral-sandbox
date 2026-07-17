@@ -1,10 +1,10 @@
-//! Privileged integration test for the tap flow monitor (P10.1: attach a tc program to a tap).
+//! Privileged integration test for the tap flow monitor (attach a tc program to a tap).
 //!
 //! `#[ignore]`d like the other probe tests: loading + attaching `tc` BPF needs `CAP_BPF` +
 //! `CAP_NET_ADMIN` (or root), a BTF kernel, and the built object (`cargo xtask build-probes`). Run via
-//! `cargo xtask ci-privileged`. This proves the **attach** path (P10.1) and that the flow map reads
-//! back; the header **parsing** (P10.2) is covered host-safe by `agent-probes-common`'s unit tests, and
-//! the live "guest traffic shows up in the counters" proof is P10.6 (it needs a booted VM driving its
+//! `cargo xtask ci-privileged`. This proves the **attach** path and that the flow map reads
+//! back; the header **parsing** is covered host-safe by `agent-probes-common`'s unit tests, and
+//! the live "guest traffic shows up in the counters" proof is `net_flows.rs` (it needs a booted VM driving its
 //! tap, which no `#[ignore]`d unit test can stand up on its own).
 #![allow(clippy::panic)]
 
@@ -30,7 +30,7 @@ fn skip_reason() -> Option<String> {
 #[test]
 #[ignore = "needs CAP_BPF+CAP_NET_ADMIN/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn attaches_to_a_tap_and_reads_the_flow_map() {
-    // P10.1: attach the two clsact classifiers to a real ethernet device (a tap, exactly what a VM
+    // Attach the two clsact classifiers to a real ethernet device (a tap, exactly what a VM
     // uses) and read the per-flow map back. Freshly attached on an idle tap it is empty — the point
     // here is that the qdisc-add + ingress/egress attach + map-open path works end to end.
     if let Some(why) = skip_reason() {

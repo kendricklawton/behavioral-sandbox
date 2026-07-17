@@ -1,4 +1,4 @@
-//! A P3.9 runtime-agnostic **fixture** — *not* a usage example of the agent.
+//! A runtime-agnostic **fixture** — *not* a usage example of the agent.
 //!
 //! A minimal, **statically linked** native binary (musl, no dynamic libc, no interpreter, no
 //! `PT_INTERP`) that the driver injects into a microVM read-only and executes, to prove the engine

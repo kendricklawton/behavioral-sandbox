@@ -1,10 +1,10 @@
-//! Demo (P8.3): load the `sys_enter_execve` counter, print the running total, sample again after a
+//! Demo: load the `sys_enter_execve` counter, print the running total, sample again after a
 //! moment, and print how much it moved. This is the eBPF introduction's "it works" demo — a Rust eBPF
 //! program loads, attaches, and reports from userspace.
 //!
 //! Needs `CAP_BPF`+`CAP_PERFMON` (or root), a BTF kernel, and the built object
 //! (`cargo xtask build-probes`). Either run as root, or grant just the two caps to the built binary
-//! (P8.8):
+//!:
 //!
 //! ```console
 //! cargo xtask build-probes
@@ -32,7 +32,7 @@ fn main() -> Result<(), ProbeError> {
     let after = counter.count()?;
     println!("after 500ms: {after} (+{})", after.saturating_sub(before));
 
-    // The per-PID breakdown (P8.6's hash map): the busiest execve'ers seen in the window.
+    // The per-PID breakdown (the per-PID hash map): the busiest execve'ers seen in the window.
     let mut by_pid = counter.counts_by_pid()?;
     by_pid.sort_by_key(|b| std::cmp::Reverse(b.1));
     println!("top execve'ers by pid:");

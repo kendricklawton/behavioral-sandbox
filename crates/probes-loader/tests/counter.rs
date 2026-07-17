@@ -1,11 +1,11 @@
-//! Privileged integration tests for the eBPF `execve` counter (P8.3 attach+read, P8.4 lifetime,
-//! P8.10 counter-moves).
+//! Privileged integration tests for the eBPF `execve` counter (attach+read, lifetime,
+//! counter-moves).
 //!
 //! `#[ignore]`d: loading eBPF needs `CAP_BPF`+`CAP_PERFMON` (or root), a BTF-capable kernel, and the
 //! built object (`cargo xtask build-probes`). Run them via `cargo xtask ci-privileged` (as root), or
 //! grant the two caps to the test binary and run it unprivileged:
 //! `cargo test -p agent-probes-loader --test counter --no-run` then
-//! `sudo setcap cap_bpf,cap_perfmon+ep <binary>` then `<binary> --ignored` (P8.8). Each self-skips
+//! `sudo setcap cap_bpf,cap_perfmon+ep <binary>` then `<binary> --ignored`. Each self-skips
 //! when its prerequisites are absent, so an unprivileged run reports a clean skip, not a failure.
 #![allow(clippy::panic)]
 
@@ -14,8 +14,8 @@ use std::process::Command;
 use agent_probes_loader::{check_support, object_path, ExecveCounter};
 
 /// Whether this host can actually load the probe, as a skip reason (`Some`) when it can't, so each
-/// test prints *why* it skipped. Capability-aware (P8.8): `check_support` passes under
-/// `CAP_BPF`+`CAP_PERFMON`, not just full root, and names the missing BTF/caps legibly (P8.9); the
+/// test prints *why* it skipped. Capability-aware: `check_support` passes under
+/// `CAP_BPF`+`CAP_PERFMON`, not just full root, and names the missing BTF/caps legibly; the
 /// built object is the remaining prerequisite.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {
@@ -33,7 +33,7 @@ fn skip_reason() -> Option<String> {
 #[test]
 #[ignore = "needs /dev/kvm-class privilege (CAP_BPF/root) + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn execve_counter_counts_host_execve_events() {
-    // P8.3: load + attach the tracepoint, read its per-CPU map, and prove the counter tracks the
+    // Load + attach the tracepoint, read its per-CPU map, and prove the counter tracks the
     // host's `execve`s — spawn N processes and assert the total rose by at least N.
     if let Some(why) = skip_reason() {
         eprintln!("skipping execve_counter_counts_host_execve_events: {why}");
@@ -54,7 +54,7 @@ fn execve_counter_counts_host_execve_events() {
         "the execve count must rise by at least the {SPAWNS} spawns (before {before}, after {after})"
     );
 
-    // P8.6: the per-PID hash map recorded the execing processes too (lookup-or-init worked).
+    // The per-PID hash map recorded the execing processes too (lookup-or-init worked).
     let by_pid = counter.counts_by_pid().expect("read the per-pid counts");
     assert!(
         !by_pid.is_empty(),
@@ -70,7 +70,7 @@ fn execve_counter_counts_host_execve_events() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn counter_drops_without_pinned_residue() {
-    // P8.4: the loader owns the program/map/link; dropping it must leave no residue — nothing pinned
+    // The loader owns the program/map/link; dropping it must leave no residue — nothing pinned
     // into `/sys/fs/bpf`, and no dangling attachment. The real no-dangling-attachment proof is that
     // the `count_execve` program is *gone from the kernel* after the drop: a leaked link would pin its
     // program alive (kept enumerable by `loaded_programs`), so the resident count returning to baseline

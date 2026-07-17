@@ -22,7 +22,7 @@ use common::{
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn snapshots_a_running_microvm() {
-    // P5.1: pause a booted VM and take a full snapshot (memory + state) via the API. The bundle is
+    // Pause a booted VM and take a full snapshot (memory + state) via the API. The bundle is
     // three real files, and the VM is resumed so it stays usable afterward.
     let vm = Vm::boot(config()).expect("microVM should boot to userspace");
     let bundle = TmpDir::new("snap-p51");
@@ -55,7 +55,7 @@ fn snapshots_a_running_microvm() {
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn restores_a_snapshot_onto_a_fresh_vmm() {
-    // P5.2: snapshot a VM, throw it away, then restore from the bundle on a fresh VMM and confirm it
+    // Snapshot a VM, throw it away, then restore from the bundle on a fresh VMM and confirm it
     // resumes. Measures restore latency alongside the source's cold boot for the comparison.
     let cfg = config();
     let source = Vm::boot(cfg.clone()).expect("source microVM should boot");
@@ -93,7 +93,7 @@ fn restores_a_snapshot_onto_a_fresh_vmm() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn prewarmed_snapshot_restores_and_runs_code() {
-    // P5.3: snapshot a prewarmed agent VM (runtime loaded), throw the source away, restore a clone off the
+    // Snapshot a prewarmed agent VM (runtime loaded), throw the source away, restore a clone off the
     // shared read-only base, and run Python on it — the exec channel survives the snapshot (Firecracker
     // re-binds vsock on restore), so a prewarmed clone runs code without paying the cold boot.
     let bundle = TmpDir::new("snap-warm");
@@ -135,7 +135,7 @@ fn prewarmed_snapshot_restores_and_runs_code() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
-    // P5.4: restore several clones from one prewarmed snapshot and keep them all alive at once. Each shares
+    // Restore several clones from one prewarmed snapshot and keep them all alive at once. Each shares
     // the read-only base (memory-sharing) but is an independent VM — its own vsock socket (bound relative to
     // its own scratch dir, so no collision) and its own in-RAM overlay. Prove it by running a distinct
     // computation on each concurrently-alive clone and getting each clone's own answer back.
@@ -179,7 +179,7 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_networked_clones_coexist_each_in_its_own_netns() {
-    // P7.0c retires decision 011's one-live-networked-clone limit. On v1.9 (no `network_overrides`)
+    // Retires decision 011's one-live-networked-clone limit. On v1.9 (no `network_overrides`)
     // every clone must present the snapshot's baked-in tap name, which in a shared host netns could
     // exist only once — so only one networked clone could be live. Under the netns model each clone
     // recreates that tap in its **own** network namespace, where the baked-in identity is already
@@ -276,7 +276,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
-    // P7.0e: prewarmed start and confinement compose. The prewarmed source runs unjailed — it executes only
+    // Prewarmed start and confinement compose. The prewarmed source runs unjailed — it executes only
     // the embedder's warm-up, and a jailed VM refuses snapshotting — and every *clone* restores
     // under the jailer: the bundle is staged into the chroot (state copied in; the memory file and
     // the shared base disk bind-mounted read-only, so clones keep sharing one page cache), vsock is
@@ -348,7 +348,7 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
-    // P5.5 (decision 011), entropy + clocks. Every clone wakes from the same memory image, so if the
+    // Decision 011, entropy + clocks. Every clone wakes from the same memory image, so if the
     // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical — the
     // classic clone-entropy vulnerability (shared session keys/nonces/UUIDs). The pinned stack has
     // both halves of the fix (Firecracker v1.9 ships VMGenID; kernel 6.1 has the vmgenid driver,
@@ -410,10 +410,10 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
-    // P5.6: the prewarmed Pool. Prefill keeps clones exec-ready so `take` is a pop (µs) plus a fast
+    // The prewarmed Pool. Prefill keeps clones exec-ready so `take` is a pop (µs) plus a fast
     // health probe — not a cold boot. A clone that died while pooled is a typed GuestUnavailable
     // from the probe, so `take` discards it and serves the next (or restores inline when dry)
-    // instead of surfacing an infra failure — the retry semantics the P2.7 deferral promised.
+    // instead of surfacing an infra failure — the retry semantics the deferral promised.
     use agent_vmm::Pool;
 
     let bundle = TmpDir::new("snap-pool");
@@ -503,9 +503,9 @@ fn pool_over_a_no_vsock_snapshot_keeps_its_stock() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
-    // P5.8: the phase's payoff asserted, not eyeballed: from "restore a prewarmed Python snapshot" to
+    // The prewarm payoff asserted, not eyeballed: from "restore a prewarmed Python snapshot" to
     // "the code's output is back on the host" in well under the source's cold-boot latency. The
-    // bound is generous twofold: the asserted 2x margin is far inside the measured ~6.6x (P5.7's
+    // bound is generous twofold: the asserted 2x margin is far inside the measured ~6.6x (the boot-modes
     // bench, n=100: restore-to-output p50 105 ms vs cold boot + exec p50 689 ms), and `cold_boot`
     // itself understates the cold path, which pays boot *plus* this same exec.
     let bundle = TmpDir::new("snap-warm-fast");

@@ -117,7 +117,7 @@ pub enum Response {
     /// A requested artifact read back from the working dir (sent before [`Exit`](Response::Exit)).
     /// A missing artifact is simply omitted. Each file is one `≤ MAX_PAYLOAD` frame.
     File { path: String, data: Vec<u8> },
-    /// The command finished. Struct-form so a later phase can add a field (e.g. a separate
+    /// The command finished. Struct-form so a later revision can add a field (e.g. a separate
     /// `signal`) without a breaking change; `code` is `128 + signal` on signal death today.
     Exit { code: i32 },
     /// The command exceeded its `timeout_ms` deadline and was killed by the agent — terminal, no

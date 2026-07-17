@@ -1,4 +1,4 @@
-//! Integration tests for the [`Sandbox`] public API (P7.1): the lifecycle `open → exec (files + env) →
+//! Integration tests for the [`Sandbox`] public API: the lifecycle `open → exec (files + env) →
 //! outputs → snapshot → close`, the jailed-by-default polarity (decision 015), and the VM half of
 //! the secret-hygiene leak check (the host-log/error half runs without a VM in `src/exec.rs`).
 //!
@@ -145,7 +145,7 @@ fn kill_handle_stays_inert_during_output_readback() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn session_state_persists_across_execs() {
-    // Stateful sessions (P7.2) against a real guest: the VM is the session. Every exec serves
+    // Stateful sessions against a real guest: the VM is the session. Every exec serves
     // from the agent's one persistent working directory, so a file injected before exec 1 and a
     // file exec 1 writes are both visible to exec 2 — and the guest filesystem beyond the workdir
     // (here /root, on the boot's tmpfs overlay) accumulates too. State's lifetime is the VM's:
@@ -191,7 +191,7 @@ fn session_state_persists_across_execs() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn exec_budgets_are_per_sandbox_knobs() {
-    // The two budgets as knobs (P7.3), driven end to end through Limits → BootConfig → every exec:
+    // The two budgets as knobs, driven end to end through Limits → BootConfig → every exec:
     // a 2 s wall makes a long sleep the cooperative ExecTimeout (the guest killed it — the
     // unchanged semantics), and a 4 KiB output cap makes a flood the typed OutputCap. Same
     // sandbox, both knobs, plus a within-budget exec proving the knobs don't false-positive.
@@ -236,7 +236,7 @@ fn exec_budgets_are_per_sandbox_knobs() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn many_sandboxes_run_concurrently_without_interference() {
-    // Concurrency (P7.6): several sandboxes boot and exec *at the same time* — from threads, so
+    // Concurrency: several sandboxes boot and exec *at the same time* — from threads, so
     // the boots genuinely overlap — and each result is exactly its own: no cross-talk on the vsock
     // channels, no scratch-dir or netns collisions, no wedge. (Concurrent *clones* are proven in
     // tests/snapshot.rs; this is concurrent independent sandboxes, the embedder's fan-out shape.)
@@ -273,7 +273,7 @@ fn many_sandboxes_run_concurrently_without_interference() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_concurrent_stateful_sessions_stay_isolated() {
-    // Two stateful sessions at once (P7.8): session identity is VM identity (decision 019), so
+    // Two stateful sessions at once: session identity is VM identity (decision 019), so
     // isolation between them is KVM, not agent bookkeeping. Both sandboxes are live together and
     // their execs interleave A1 → B1 → A2 → B2 on the *same* relative filename; each session then
     // reads back exactly its own accumulated state, and a file that exists only in B is absent
@@ -335,7 +335,7 @@ fn two_concurrent_stateful_sessions_stay_isolated() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn snapshot_yields_a_restorable_bundle() {
     // `Sandbox::snapshot` closes the lifecycle: a prewarmed (unjailed, overlay) sandbox snapshots, and
-    // the bundle restores to an exec-ready clone. (Jailed clones from such a bundle are P7.0e's
+    // the bundle restores to an exec-ready clone. (Jailed clones from such a bundle are the jailed-restore path's
     // proof in tests/snapshot.rs; snapshotting a *jailed* sandbox stays a typed refusal.)
     let bundle = TmpDir::new("sandbox-bundle");
     let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
@@ -361,7 +361,7 @@ fn snapshot_yields_a_restorable_bundle() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn injected_secrets_never_reach_the_console_or_host_logs() {
-    // The VM half of the P7.1 leak gate: a sentinel rides in as an env value and as an injected
+    // The VM half of the leak gate: a sentinel rides in as an env value and as an injected
     // file against a *real* guest, and is then grepped out of every observable engine surface —
     // the serial console (where the guest agent's own log lands), the host's log stream (captured
     // at TRACE around the calls), and a failing injection's error rendering. The run's own

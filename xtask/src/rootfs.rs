@@ -1,4 +1,4 @@
-//! The reproducible guest rootfs build (ROADMAP P3.1/P3.6): a pinned Alpine base + the guest
+//! The reproducible guest rootfs build: a pinned Alpine base + the guest
 //! runtimes + the static agent + a vsock init, assembled rootless into an ext4 image that two
 //! builds reproduce byte-identically.
 
@@ -13,12 +13,12 @@ use crate::guest_bins::build_guest_agent;
 use crate::{agent_rootfs_path, artifacts_dir, run_tool, run_tool_env, workspace_root};
 
 /// A fixed rootfs UUID so repeated builds don't churn it (Firecracker roots by device, not UUID).
-/// Reused as the ext4 directory-hash seed (P3.6): the seed only guards against adversarial
+/// Reused as the ext4 directory-hash seed: the seed only guards against adversarial
 /// directory-hash flooding, which a trusted, pinned build-time image doesn't face — so a fixed seed
 /// costs nothing and buys byte-for-byte determinism.
 const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
 
-/// A fixed build epoch for the rootfs image (P3.6). `mke2fs` honours `SOURCE_DATE_EPOCH`: it stamps
+/// A fixed build epoch for the rootfs image. `mke2fs` honours `SOURCE_DATE_EPOCH`: it stamps
 /// the filesystem's create/write/check times with it and **clamps every `-d`-copied file mtime down
 /// to it**, so repeated builds don't churn timestamps. A constant, deliberately — a `git log` or
 /// wall-clock date would vary across shallow clones and over time, defeating the purpose. Together
@@ -26,12 +26,12 @@ const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
 const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
 
 /// Image size. Headroom over the payload so `apk.static --root` has room without a re-size. Bumped
-/// 128→256 at P3.9 when Node (its `icu-libs`/`simdjson`/`ada-libs` closure, ~64 MiB) joined python3.
+/// 128→256 when Node (its `icu-libs`/`simdjson`/`ada-libs` closure, ~64 MiB) joined python3.
 const ROOTFS_SIZE_MIB: u32 = 256;
 
-/// Soft ceiling on the base rootfs's real footprint (P3.7 — "keep the base small"). `build-rootfs`
+/// Soft ceiling on the base rootfs's real footprint ("keep the base small"). `build-rootfs`
 /// fails past it, a regression guard against accidental bloat. The image is ~132 MiB (Alpine +
-/// python3 + **Node** + the agent, P3.9); this leaves ~28 MiB headroom. Adding another runtime is a
+/// python3 + **Node** + the agent); this leaves ~28 MiB headroom. Adding another runtime is a
 /// deliberate bump of this *and* `ROOTFS_SIZE_MIB`, not a silent creep — and a prompt to ask whether
 /// the base is still "small."
 const ROOTFS_BUDGET_MIB: u64 = 160;
@@ -51,11 +51,11 @@ fn rootfs_inittab() -> String {
 ::sysinit:/bin/mount -t devtmpfs dev /dev
 ::sysinit:/bin/mount -t proc proc /proc
 ::sysinit:/bin/mount -t sysfs sys /sys
-# cgroup v2 (P6.4): the agent runs each command in its own cgroup and reaps the whole process tree
+# cgroup v2: the agent runs each command in its own cgroup and reaps the whole process tree
 # via `cgroup.kill`, so a double-forked grandchild or `setsid` daemon can't outlive the command and
 # wedge the exec connection. `/sys/fs/cgroup` is provided by the sysfs mount above.
 ::sysinit:/bin/mount -t cgroup2 cgroup2 /sys/fs/cgroup
-# Bulk input/output block devices (P3.4/P3.5): mount whichever the driver attached, by label — so
+# Bulk input/output block devices: mount whichever the driver attached, by label — so
 # their /dev/vdX order doesn't matter. Best-effort: a missing device is skipped, so plain boots are
 # unaffected. Runs after devtmpfs/proc are up (findfs needs the device nodes + /proc/partitions).
 ::sysinit:/sbin/mount-drives
@@ -67,7 +67,7 @@ ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
     )
 }
 
-/// `/sbin/mount-drives` — mounts the driver-attached data block devices (P3.4 input, P3.5 output) by
+/// `/sbin/mount-drives` — mounts the driver-attached data block devices (input + output) by
 /// **filesystem label**, so their `/dev/vdX` enumeration order is irrelevant (a boot may attach
 /// input, output, both, or neither). `findfs LABEL=…` resolves each label from the superblock via
 /// busybox's volume_id (no udev / `/dev/disk/by-label` needed); a label with no matching device
@@ -92,13 +92,13 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 /// runtime packages install from. One pin, used by both, so base and packages can't skew branches.
 const ALPINE_BRANCH: &str = "v3.24";
 
-/// The language runtimes baked into the guest image: python3 (P3.2's reference) + **nodejs** (P3.9's
+/// The language runtimes baked into the guest image: python3 (the reference runtime) + **nodejs** (its
 /// second, differently-shaped interpreter, proving the rootfs isn't Python-specific — a static native
 /// ELF is injected at runtime rather than baked, so it isn't listed here). Installed by `apk.static`
 /// from the pinned branch. The install **floats** within that stable
 /// branch — Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN`
 /// pin would just *fail* the build the day upstream bumps (the old `.apk` is gone from the CDN), not
-/// reproduce it. Instead P3.6 **records** the resolved closure in a committed lockfile and detects
+/// reproduce it. Instead the build **records** the resolved closure in a committed lockfile and detects
 /// drift (`build-rootfs --verify`), keeping the everyday build working; durable pinning would mean
 /// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
 const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
@@ -162,7 +162,7 @@ fn apk_tools_artifact() -> Result<Artifact> {
 /// One full rootfs assembly into `out_image`: extract the pinned Alpine base, install the guest
 /// packages, bake the static agent + init in, and build the ext4 from the staging dir with
 /// `mke2fs -d` (rootless — no loopback, no `sudo`). A distinct output path from the pinned Ubuntu
-/// `rootfs.ext4`, so its hash-guard + the Phase-1 `login:` boot test are untouched. Returns the
+/// `rootfs.ext4`, so its hash-guard + the `login:` boot test are untouched. Returns the
 /// image's sha256 and the resolved package closure, so [`build_rootfs`] can check reproducibility.
 fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     let agent = build_guest_agent()?;
@@ -189,7 +189,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
         ],
     )?;
 
-    // Install the guest runtimes (P3.2: python3) into the staging root with the pinned static apk —
+    // Install the guest runtimes (python3) into the staging root with the pinned static apk —
     // rootless, on any host distro. Packages are signature-verified against the keys the minirootfs
     // itself ships (`/etc/apk/keys`). `--no-scripts` because pre/post-install scripts need a chroot
     // (root); the runtime packages are file payloads, and the in-VM exec test proves they run.
@@ -215,7 +215,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     set_mode_0755(&overlay_init)?;
     std::fs::create_dir_all(staging.join("overlay")).context("create /overlay mountpoint")?;
 
-    // The by-label mount helper (P3.4 input, P3.5 output) + its mountpoints. Baked, not `mkdir`'d at
+    // The by-label mount helper (input + output) + its mountpoints. Baked, not `mkdir`'d at
     // runtime, so they're image properties that hold regardless of whether `/` is the writable
     // overlay or a base. `/sbin/mount-drives` is run from the inittab sysinit line.
     let mount_drives = staging.join("sbin/mount-drives");
@@ -224,7 +224,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     std::fs::create_dir_all(staging.join("input")).context("create /input mountpoint")?;
     std::fs::create_dir_all(staging.join("output")).context("create /output mountpoint")?;
 
-    // Build the ext4 from the staging dir — rootless, via `mke2fs -d`, and **deterministic** (P3.6):
+    // Build the ext4 from the staging dir — rootless, via `mke2fs -d`, and **deterministic**:
     // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` — which stamps the superblock
     // create/write/check times and clamps the copied file mtimes down to the epoch — make two builds
     // byte-identical. `lazy_itable_init=0` writes the inode table eagerly, so its bytes are fixed here
@@ -291,13 +291,13 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
     println!("  sha256: {}", build.image_sha256);
 
-    // Keep the base small (P3.7): report the real footprint and fail on bloat past the budget.
+    // Keep the base small: report the real footprint and fail on bloat past the budget.
     let used_mib = image_used_bytes(&out)? / (1024 * 1024);
     println!("  size:   {used_mib} MiB used / {ROOTFS_BUDGET_MIB} MiB budget");
     if used_mib > ROOTFS_BUDGET_MIB {
         bail!(
             "rootfs base is over budget: {used_mib} MiB > {ROOTFS_BUDGET_MIB} MiB — keep the base \
-             small (P3.7), or raise ROOTFS_BUDGET_MIB (+ ROOTFS_SIZE_MIB) deliberately"
+             small, or raise ROOTFS_BUDGET_MIB (+ ROOTFS_SIZE_MIB) deliberately"
         );
     }
 
@@ -337,7 +337,7 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     Ok(())
 }
 
-/// The committed lockfile recording the exact guest package closure (P3.6). Lives next to the build
+/// The committed lockfile recording the exact guest package closure. Lives next to the build
 /// code — **not** in the gitignored `artifacts/` — so it's version-controlled and a diff shows
 /// exactly when Alpine's branch repo moved a package under the floating install.
 fn packages_lock_path() -> PathBuf {
@@ -377,7 +377,7 @@ fn resolved_packages(staging: &Path) -> Result<Vec<String>> {
 fn write_packages_lock(packages: &[String]) -> Result<()> {
     let path = packages_lock_path();
     let mut body = String::from(
-        "# Resolved guest rootfs package closure (P3.6) — the exact Alpine packages baked into\n\
+        "# Resolved guest rootfs package closure — the exact Alpine packages baked into\n\
          # artifacts/rootfs-agent.ext4. Regenerate after an upstream bump with:\n\
          #   cargo xtask build-rootfs --update-lock\n\
          # Drift from this list means Alpine's branch repo moved and the image no longer reproduces.\n",
@@ -478,7 +478,7 @@ fn install_guest_packages(staging: &Path) -> Result<()> {
 
     // Drop apk's install log: it records each action with a **wall-clock** timestamp, the one piece
     // of the install that isn't reproducible (the package db itself is deterministic). It has no
-    // runtime purpose in the guest, so removing it makes the image byte-identical across builds (P3.6).
+    // runtime purpose in the guest, so removing it makes the image byte-identical across builds.
     let apk_log = staging.join("var/log/apk.log");
     if apk_log.exists() {
         std::fs::remove_file(&apk_log).with_context(|| format!("remove {}", apk_log.display()))?;

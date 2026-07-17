@@ -1,4 +1,4 @@
-//! P12.5 end-to-end test: a CPU-heavy run reports higher CPU than an idle one, attributed to the
+//! End-to-end test: a CPU-heavy run reports higher CPU than an idle one, attributed to the
 //! sandbox's own cgroup.
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches the
@@ -9,7 +9,7 @@
 //! The proof is the metering primitive doing its job: with the meter targeting the VMM's cgroup, an idle
 //! guest (`sleep`) charges near-zero host CPU to that cgroup, while a guest pegging a vCPU (a busy Python
 //! loop) charges most of a core's worth — measured from the host's scheduler, attributed to exactly the
-//! sandbox's cgroup (P12.2), never the driver's.
+//! sandbox's cgroup, never the driver's.
 #![allow(clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -84,14 +84,14 @@ fn a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox()
         return;
     }
 
-    // Boot a sandbox (unjailed on purpose: the P12.5 proof is the cgroup accounting, not the jailer, and
+    // Boot a sandbox (unjailed on purpose: the proof is the cgroup accounting, not the jailer, and
     // the unjailed path doesn't need the jail-uid device ACL). Its VMM runs in a per-VM lifetime cgroup
-    // (P6.7); that is the cgroup the meter attributes to.
+    //; that is the cgroup the meter attributes to.
     let vm = Vm::boot(agent_config()).expect("an agent microVM should boot");
     let vmm_pid = vm.vmm_pid();
     let cgroup = cgroup_id_of_pid(vmm_pid).expect("resolve the VMM's cgroup id");
 
-    // Attach the meter once and target this sandbox's cgroup — the P12.2 bridge (VMM pid → cgroup id).
+    // Attach the meter once and target this sandbox's cgroup — the bridge (VMM pid → cgroup id).
     let mut meter = ResourceMeter::load().expect("load + attach the resource meter");
     meter.add_target(cgroup).expect("meter the sandbox cgroup");
 

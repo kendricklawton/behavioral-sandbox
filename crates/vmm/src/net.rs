@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn fixed_identity_is_well_formed() {
-        // The tap name keeps the `fc` prefix the eBPF-binding handle contract (P4.6) promises.
+        // The tap name keeps the `fc` prefix the eBPF-binding handle contract promises.
         assert!(TAP_NAME.starts_with("fc"));
         assert!(TAP_NAME.len() <= 15, "within IFNAMSIZ-1");
         // A locally-administered unicast MAC: LAA bit (0x02) set, multicast bit (0x01) clear.

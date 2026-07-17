@@ -1,4 +1,4 @@
-//! Deterministic JSON of the per-run [`RunRecord`] (P13.4): "what this run did," serialized from
+//! Deterministic JSON of the per-run [`RunRecord`]: "what this run did," serialized from
 //! *outside* the guest.
 //!
 //! Hand-rolled, dependency-free, and **compact** (no incidental whitespace), for the same reasons the
@@ -12,7 +12,7 @@
 //! No floats (durations are integer nanoseconds, byte counts are integers), so there is no
 //! locale/precision wobble; IPv4 addresses render as dotted quads and protocols/syscalls as their
 //! names, so the record reads without a decoder ring. The human-facing view (a TUI, a pretty-printer)
-//! is Phase 14; this is the machine surface it and the SDKs build on.
+//! is the live view's job; this is the machine surface it and the SDKs build on.
 
 use std::fmt::Write as _;
 
@@ -22,9 +22,9 @@ use crate::record::{AxisGap, NetSection, RunRecord, SyscallFootprint};
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
 
 impl RunRecord {
-    /// Render this record as one line of deterministic, compact JSON — the P13.4 structured output. The
+    /// Render this record as one line of deterministic, compact JSON — the structured output. The
     /// schema is stable and byte-for-byte reproducible across map-iteration order (see the module doc);
-    /// Phase 14 pretty-prints it for people, and the language SDKs parse it as the audit-log format.
+    /// The live view pretty-prints it for people, and the language SDKs parse it as the audit-log format.
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(512);

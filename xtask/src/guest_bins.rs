@@ -1,5 +1,5 @@
 //! Static musl builds of the in-guest binaries: the guest agent (baked into the rootfs) and the
-//! P3.9 native-ELF test fixture, each verified actually statically linked before use.
+//! native-ELF test fixture, each verified actually statically linked before use.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,7 +19,7 @@ pub(crate) fn build_guest_agent() -> Result<PathBuf> {
     build_guest_musl(GuestBin::Agent)
 }
 
-/// Build the P3.9 static native-ELF fixture (`crates/guest-agent/examples/writefile.rs`) for the
+/// Build the static native-ELF fixture (`crates/guest-agent/examples/writefile.rs`) for the
 /// guest target and return its path. A statically linked musl binary with no interpreter/libc, which
 /// the runtime-agnostic test injects and execs to prove the engine runs *any* Linux binary. Built
 /// like the agent (musl, `--locked`) and verified static.
@@ -27,7 +27,7 @@ pub(crate) fn build_guest_example() -> Result<PathBuf> {
     build_guest_musl(GuestBin::Example)
 }
 
-/// A static musl guest binary `xtask` builds: the agent itself, or the P3.9 native-ELF fixture.
+/// A static musl guest binary `xtask` builds: the agent itself, or the native-ELF fixture.
 enum GuestBin {
     Agent,
     Example,

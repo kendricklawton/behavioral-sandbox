@@ -47,7 +47,7 @@ enum Cmd {
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// Just boot a microVM and read its console — no command (the Phase 1 demo).
+    /// Just boot a microVM and read its console — no command (the boot-only demo).
     #[arg(long)]
     demo_boot: bool,
     /// Run the VMM without the jailer. The default is confined (jailed, which needs real root and
@@ -170,7 +170,7 @@ fn run_command(args: RunArgs) -> Result<ExitCode, VmmError> {
 }
 
 /// `agent shell`: one sandbox held open, one `sh -c` exec per input line — a stateful session
-/// (P7.2: every exec shares the guest's session working directory, so files persist across lines;
+/// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
 fn shell(args: ShellArgs) -> Result<ExitCode, VmmError> {

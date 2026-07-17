@@ -70,7 +70,7 @@ fn boots_under_the_jailer() {
     // which needs real root (the `unshare -Urn` trick the other privileged tests use can't), so skip
     // rather than fail on a box that can do KVM but not real root.
     //
-    // P6.6 verifies the confinement is actually *in force*, not merely configured: below we read the
+    // This verifies the confinement is actually *in force*, not merely configured: below we read the
     // running VMM's `/proc` and assert each wall independently, so a guest that breached KVM into the
     // VMM lands in a chroot, as an unprivileged uid, holding no capabilities, under `no_new_privs` and
     // seccomp, in its own mount namespace and cgroup. None of these can be escaped from inside the VMM.
@@ -233,7 +233,7 @@ fn boots_under_the_jailer() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn overlay_is_writable_and_base_is_untouched() {
-    // P3.3 acceptance: the read-only base is shared (no copy), a per-run tmpfs overlay makes `/`
+    // Acceptance: the read-only base is shared (no copy), a per-run tmpfs overlay makes `/`
     // writable in-guest, and the base file on the host is never mutated.
     let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
     let before = std::fs::metadata(&base).expect("stat base");
@@ -278,7 +278,7 @@ fn overlay_is_writable_and_base_is_untouched() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn jailed_overlay_is_dense_and_base_is_untouched() {
-    // P7.0b: a jailed boot runs the shared-base path, not a full rootfs copy. The read-only shared base is
+    // A jailed boot runs the shared-base path, not a full rootfs copy. The read-only shared base is
     // *bind-mounted* into the chroot (same inode, page-cache-deduped across VMs), the guest overlays a
     // per-run tmpfs so `/` is writable, and the base file is never mutated. Needs real root (the
     // jailer `mknod`s device nodes); skip where KVM is available but real root isn't.
@@ -486,7 +486,7 @@ fn open_fds() -> usize {
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
-    // P6.9c: each live VM costs the embedder driver-side fds; at the default 1024 soft ulimit an
+    // Each live VM costs the embedder driver-side fds; at the default 1024 soft ulimit an
     // unstated budget fails as an illegible mid-boot EMFILE a few hundred VMs in. This pins the
     // budget (`FDS_PER_VM`) per start path — cold, networked, prewarmed restore — and, just as
     // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any

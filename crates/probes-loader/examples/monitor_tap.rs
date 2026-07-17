@@ -1,4 +1,4 @@
-//! Demo (P10.1/P10.2): attach the tap flow monitor to an interface, wait, and print the per-flow
+//! Demo: attach the tap flow monitor to an interface, wait, and print the per-flow
 //! byte/packet counters. This is the network half of the observability story — the guest's *own*
 //! traffic, counted at its tap on the host (unlike the syscall trace, which sees only the host's
 //! footprint).

@@ -8,7 +8,7 @@
 //! pool-ran-dry fallback. A prewarmed restore is milliseconds, so even the fallback path keeps the
 //! "starts in ms" property; what the pool buys over restore-on-demand is the **µs pop** when stock
 //! is ready, and a place to put the health/discard policy. A self-refilling, concurrency-managed
-//! pool belongs to the daemon (Phase 16), not the library.
+//! pool belongs to the daemon, not the library.
 
 use crate::vm::{Snapshot, Vm};
 use crate::{BootConfig, RunningVm, VmmError, FDS_PER_VM};
@@ -29,13 +29,13 @@ const POOL_FD_HEADROOM: usize = 64;
 /// Dropping the pool tears down every pooled clone (each [`RunningVm`]'s own `Drop`);
 /// [`shutdown`](Pool::shutdown) is the graceful form. **Networked snapshots** pool without a
 /// concurrency limit: each clone recreates the baked-in tap in its own network namespace
-/// (decision 017). **Confined pool** (P7.0e): set [`jail`](crate::BootConfig::jail) on `config` and
+/// (decision 017). **Confined pool**: set [`jail`](crate::BootConfig::jail) on `config` and
 /// every pooled clone restores under the jailer — chroot, dropped uid, seccomp, its own netns —
 /// so prewarmed starts and confinement compose (needs real root, like any jailed boot).
 ///
 /// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
 /// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n` — state
-/// the bound, don't discover it via `EMFILE` mid-restore (P6.9c). [`new`](Pool::new) enforces the
+/// the bound, don't discover it via `EMFILE` mid-restore. [`new`](Pool::new) enforces the
 /// *stating*: an over-budget target logs one `tracing::warn!` naming the numbers and the fix
 /// (raise `ulimit -n`, or shrink the target) before the prefill runs. A warning, not a refusal —
 /// like the cgroup caps (decision 013), sizing is fairness hygiene, not the isolation boundary,
@@ -62,7 +62,7 @@ impl Pool {
     /// Any [`Vm::restore`] failure during the prefill; already-restored clones are torn down by
     /// `Pool`'s drop on the error return, so a failed prefill leaks nothing.
     pub fn new(snapshot: Snapshot, config: BootConfig, target: usize) -> Result<Self, VmmError> {
-        // State the fd bound up front (P6.9c) rather than letting the prefill discover it as an
+        // State the fd bound up front rather than letting the prefill discover it as an
         // illegible mid-restore `EMFILE` in whatever syscall lands first. Warn-only: sizing is
         // fairness hygiene, not the isolation boundary (the decision-013 fail-open posture).
         if let Some((need, soft)) = nofile_soft_limit().and_then(|s| fd_budget_excess(target, s)) {
@@ -147,7 +147,7 @@ impl Pool {
     }
 
     /// The pooled clones' VMM pids, for out-of-band supervision (the same rationale as
-    /// [`RunningVm::vmm_pid`]: cgroup placement in the confinement phase, host-side observers,
+    /// [`RunningVm::vmm_pid`]: cgroup placement under confinement, host-side observers,
     /// leak assertions in tests). Valid only while the clones stay pooled.
     #[must_use]
     pub fn vmm_pids(&self) -> Vec<u32> {

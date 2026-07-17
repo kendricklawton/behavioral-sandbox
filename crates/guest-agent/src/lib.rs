@@ -3,12 +3,12 @@
 //! [`serve`] handles **one connection**: it accepts a [`ServerConnection`], reads a single
 //! [`Request::Exec`], runs the command, streams its `stdout`/`stderr` back as they arrive, and ends
 //! with the exit code. It is generic over the byte stream, so the same logic runs over **vsock** in
-//! a real guest (P2.3) and over a **unix socket** in tests and the `main` harness here — the driver
+//! a real guest and over a **unix socket** in tests and the `main` harness here — the driver
 //! is unit-testable without a VM. [`serve_session`] is the same one-command-per-connection loop
 //! body with a **stable working directory**, which is what turns a sequence of execs against one
 //! agent into a stateful session (the in-VM binary uses it; the VM is the session).
 //!
-//! **The load-bearing subtlety** (the Phase-1 pipe-deadlock hazard, again): the child's `stdout`
+//! **The load-bearing subtlety** (the pipe-deadlock hazard, again): the child's `stdout`
 //! and `stderr` are drained by two threads that keep reading **even after forwarding to the host
 //! fails** — on the first forward error they switch to read-and-discard, so the child's ~64 KiB
 //! pipe can never fill and block `wait()`. This is what stops a *dead* host from wedging a live
@@ -189,10 +189,10 @@ where
     let budget = budget_from(timeout_ms);
     let started = Instant::now();
     let deadline = started + budget;
-    // Run the command in its own cgroup (P6.4) so its whole process tree can be reaped at once.
+    // Run the command in its own cgroup so its whole process tree can be reaped at once.
     // Created before spawn; the child *enrolls itself* via the trampoline below, so every process
     // the command ever forks inherits membership. Best-effort: `None` on a guest without cgroup v2,
-    // and the agent falls back to the direct-child kill (the pre-P6.4 behaviour).
+    // and the agent falls back to the direct-child kill (the pre-tree-reaping behaviour).
     let cgroup = ExecCgroup::create();
 
     // Resolve the program up front so "no such binary" stays the typed spawn error the host knows
@@ -253,7 +253,7 @@ where
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // The connection is now write-only (streaming stdin is a later phase); share it across the pump
+    // The connection is now write-only (streaming stdin is future work); share it across the pump
     // threads. `first_err` records the first forward failure without stopping the drain.
     let conn = Mutex::new(conn);
     let first_err: Mutex<Option<ChannelError>> = Mutex::new(None);
@@ -277,7 +277,7 @@ where
         // child from blocking on a full pipe. Bounded by the deadline: past it we SIGKILL the child
         // (which unblocks the pumps at EOF) and report a timeout instead of an exit.
         let result = wait_bounded(&mut child, deadline);
-        // Then reap the *whole tree* (P6.4): a double-forked grandchild or a `setsid` daemon that
+        // Then reap the *whole tree*: a double-forked grandchild or a `setsid` daemon that
         // inherited the stdout/stderr pipe would otherwise keep its write end open, so the pumps
         // never see EOF and this scope could not join them — wedging the agent on both the exit and
         // timeout paths. `cgroup.kill` SIGKILLs every process in the cgroup at once, which the
@@ -364,7 +364,7 @@ fn budget_from(timeout_ms: u32) -> Duration {
 ///
 /// This kills only the *direct* child; the command's wider process tree (double-forked grandchildren,
 /// `setsid` daemons that would otherwise keep the output pipes open) is reaped by [`serve`] through
-/// the per-exec [`ExecCgroup`] after this returns, on both the exit and timeout paths (P6.4). So a
+/// the per-exec [`ExecCgroup`] after this returns, on both the exit and timeout paths. So a
 /// hung or double-forking command can no longer wedge the agent's connection.
 fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited> {
     loop {
@@ -423,7 +423,7 @@ fn resolve_program(program: &str) -> Result<(), std::io::Error> {
 /// Names the next per-exec cgroup uniquely within this agent process.
 static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns (P6.4).
+/// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns.
 /// cgroup v2 membership is inherited by every child the command forks and cannot be escaped by
 /// `setsid`, so writing `cgroup.kill` SIGKILLs the entire tree at once — the definitive fix for the
 /// double-fork / daemon wedge that a direct-child `kill` (and even a `killpg`) miss.

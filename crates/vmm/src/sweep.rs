@@ -61,7 +61,7 @@ pub struct SweepReport {
 /// **The hoster's half (decision 016).** The engine guarantees this call can't be weaponized (it
 /// only ever reclaims dirs the calling euid owns), but *deploying* it is the caller's:
 /// - **Schedule it.** Nothing calls this for you — a self-refilling janitor daemon is platform
-///   territory (Phase 16). Run it at startup and periodically.
+///   territory. Run it at startup and periodically.
 /// - **One per identity.** It reclaims only what the calling euid owns, so if drivers run as
 ///   several users, each must run its own sweep; one root sweep does **not** cover a user driver's
 ///   residue (nor should it — that would be the weaponization the ownership check prevents).
@@ -209,7 +209,7 @@ fn own_euid() -> Option<u32> {
 /// unjailed VMM's cwd *is* its scratch dir (`spawn_fc` sets it for the relative vsock path); a
 /// jailed VMM's cwd is its chroot root, `<dir>/<exec-name>/<id>/root`. Identity is compared by
 /// `(st_dev, st_ino)` through the `/proc/<pid>/cwd` magic link — the link *text* is
-/// namespace-relative after a pivot_root (the P6.6 finding), but `metadata` resolves through it.
+/// namespace-relative after a pivot_root (the finding), but `metadata` resolves through it.
 /// Processes whose cwd we can't stat (another user's) are ignored; jailed boots need root, so a
 /// sweep of jailed residue runs as root and can see them.
 fn vmm_running_in(dir: &Path) -> Option<u32> {

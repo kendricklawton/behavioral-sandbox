@@ -1,4 +1,4 @@
-//! Cgroup-owned VM lifetime (P6.7): make **host-process death unable to leak a VM**, and give the
+//! Cgroup-owned VM lifetime: make **host-process death unable to leak a VM**, and give the
 //! embedder a **kill handle** that forces teardown from outside a blocked call.
 //!
 //! Until this module, teardown was `Drop`-based: correct on every path the driver *survives*, but a
@@ -283,7 +283,7 @@ impl Drop for VmLifetime {
 /// Create the per-VM lifetime cgroup as a child of the **driver's own** cgroup (the one place an
 /// unprivileged driver is guaranteed write access when anything is — e.g. its delegated systemd
 /// session scope) and enroll `pid`. No controllers are enabled, so this works with zero delegation
-/// (like the guest agent's exec cgroups, P6.4) and never trips the no-internal-processes rule.
+/// (like the guest agent's exec cgroups) and never trips the no-internal-processes rule.
 fn create_lifetime_cgroup(pid: u32, name: &str) -> Result<PathBuf, String> {
     let own = read_cgroup_dir(std::process::id())
         .ok_or_else(|| "no cgroup v2 entry for this process".to_string())?;

@@ -22,7 +22,7 @@ use common::{
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn execs_a_command_in_the_microvm() {
-    // Closes Phase 2's provisional "in a microVM" gate: the agent baked into `rootfs-agent.ext4`
+    // Closes the provisional "in a microVM" gate: the agent baked into `rootfs-agent.ext4`
     // actually binds vsock in a real guest, so `exec` round-trips end to end — not against a faked
     // socket. Boot returns once the agent's readiness marker reaches the console, so the connect
     // can't race the bind.
@@ -86,7 +86,7 @@ fn jailed_exec_runs_a_command() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn jailed_bulk_io_round_trips_through_the_chroot() {
-    // P7.0d: the bulk input/output block devices compose with the jailer — the last boot feature to.
+    // The bulk input/output block devices compose with the jailer — the last boot feature to.
     // The images are built in place *inside the chroot* (rootless mke2fs runs pointed at the chroot
     // root, no copy or mount) and handed to the jailed uid, so the dropped-privilege Firecracker can
     // open them. This drives the full jailed feature matrix at once: overlay (read_only_root) + vsock
@@ -193,11 +193,11 @@ fn execs_python_in_the_microvm() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn python_script_writes_a_file_and_we_capture_it() {
-    // Phase 3's runtime payoff, end to end: inject a small **Python script** as a file, run the real
+    // The runtime payoff, end to end: inject a small **Python script** as a file, run the real
     // interpreter on it inside a microVM, and pull back the file it wrote — the exec surface's
     // inject → run → capture loop with an actual language runtime (using the stdlib, `json`), not a
-    // shell builtin. This is the per-file channel path (P2.5); the bulk block-device paths are
-    // P3.4/P3.5.
+    // shell builtin. This is the per-file channel path; the bulk block-device paths are
+    // covered by the input/output-disk tests below.
     let vm = Vm::boot(agent_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
 
@@ -237,9 +237,9 @@ fn python_script_writes_a_file_and_we_capture_it() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn runs_node_a_second_interpreter() {
-    // P3.9 runtime-agnostic proof, second half: a *different* interpreter (Node) runs unchanged
+    // Runtime-agnostic proof, second half: a *different* interpreter (Node) runs unchanged
     // through the same exec path as Python — the rootfs isn't Python-specific. Inject a small `.js`,
-    // run the real `node` on it, and capture the file it writes (the per-file channel path, P2.5).
+    // run the real `node` on it, and capture the file it writes (the per-file channel path).
     let vm = Vm::boot(agent_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
 
@@ -277,9 +277,9 @@ fn runs_node_a_second_interpreter() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs + the static example (run via `cargo xtask ci-privileged`)"]
 fn runs_a_static_native_binary_and_captures_its_artifact() {
-    // P3.9 runtime-agnostic proof: a **static native ELF** (no interpreter, no libc, no loader) runs
-    // unchanged through the same exec path. Inject the binary read-only via a block device (P3.4),
-    // exec it, and capture the file it writes via the output device (P3.5) — showing the engine runs
+    // Runtime-agnostic proof: a **static native ELF** (no interpreter, no libc, no loader) runs
+    // unchanged through the same exec path. Inject the binary read-only via a block device,
+    // exec it, and capture the file it writes via the output device — showing the engine runs
     // *any* Linux binary handed in at runtime, not just the baked-in interpreters. (Contrast the
     // Wasmtime sibling, which needs code recompiled to wasm32.)
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -335,7 +335,7 @@ fn runs_a_static_native_binary_and_captures_its_artifact() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn injects_a_large_file_via_block_device() {
-    // P3.4: a whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
+    // A whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
     // **larger than the 1 MiB channel frame cap** (the whole point) in a host dir, inject it as a
     // read-only block device, and prove the guest reads it back byte-for-byte from `/input`.
     let dir = std::env::temp_dir().join(format!("agent-p34-{}", std::process::id()));
@@ -391,7 +391,7 @@ fn injects_a_large_file_via_block_device() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn collects_outputs_via_block_device() {
-    // P3.5: the whole-working-dir / large-file *output* path the vsock channel can't carry — the
+    // The whole-working-dir / large-file *output* path the vsock channel can't carry — the
     // counterpart to `injects_a_large_file_via_block_device`. Boot with a writable output device, have
     // the guest write a file **larger than the 1 MiB channel frame cap**, a nested file, and a
     // host-escaping symlink into `/output`; pull the tree back and prove it arrived byte-for-byte —
@@ -472,8 +472,8 @@ fn collects_outputs_via_block_device() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn reaps_the_whole_process_tree_so_a_daemon_cannot_wedge_exec() {
-    // P6.4 (closes the P2.6 gap): a command double-forks a `setsid` daemon that escapes the process
-    // group and inherits the command's stdout, then the parent exits 0. Before P6.4 that daemon kept
+    // Tree reaping (closes the daemon gap): a command double-forks a `setsid` daemon that escapes the process
+    // group and inherits the command's stdout, then the parent exits 0. Before tree reaping that daemon kept
     // the stdout pipe's write end open, so the agent's output pumps never saw EOF and the exec wedged
     // until the daemon died (~30s here). Now the agent runs each command in its own cgroup and reaps
     // the whole tree via `cgroup.kill`, so the exec returns immediately with the parent's exit code

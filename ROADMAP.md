@@ -1469,6 +1469,57 @@ Make what a run did *legible* — the payoff demo.
 - [ ] **P14.5** Test/demo: run something interesting, watch it live, read the trace after.
 - **Exit gate:** a compelling live view of hardware-isolated runs; the demo you show people.
 
+## Phase 14.9 — CLI completeness (interphase: the reference embedder, finished)
+
+The CLI is the **reference embedder**, and the bar for a reference is *projection completeness*:
+every engine capability reachable from the command line through a few orthogonal verbs — never flag
+sprawl, never platform features. Today three library capabilities have no CLI face (limits, network
++ egress policy, host diagnosis), the config file layer is still a promise, and the JSON the CLI
+emits is an unversioned de-facto contract. This interphase closes exactly that gap and nothing
+more. The deliberate exclusions stay excluded: snapshot/pool verbs are the daemon's (P16.3 — a warm
+pool is a long-lived-process concern, wrong for a one-shot CLI), the wire API is P16.2, and image/
+registry management is platform territory (guardrail 4) that never lands. The design rule this
+phase pins: **grow verbs, not modes** — `run`, `shell`, `doctor`, later `agentd`; not twenty
+interacting flags on `run`.
+
+- [ ] **P14.9a** Project `Limits` onto the CLI: `--vcpus N` / `--mem MIB` on `run` and `shell`,
+      with clap ranges matching the `NonZeroU8`/`NonZeroU32` types so a refused value is a typed
+      CLI error, never a silent clamp. `--json` reports the effective limits back.
+- [ ] **P14.9b** Project the network + egress policy: `--net` boots with a NIC (unchanged
+      deny-by-default: a `--net` run with no allowance reaches nothing but the host /30), and a
+      repeatable `--allow IP[/CIDR][:PORT][/PROTO]` builds the `EgressPolicy`, armed **before** the
+      tap goes live (the no-unpoliced-window property, decision 025). Every allowance is explicit
+      on the command line — the greppable audit line guardrail 3 asks for — and lands in the run's
+      denial/flow record. This is the CLI composing both tracks (driver + probes) the way the
+      audit-bundle launch sequence does; `--allow` without `--net`, or enforcement without the
+      needed caps, is a typed refusal, not a degradation.
+- [ ] **P14.9c** The `.agent.toml` file layer: **flags > env (`AGENT_*`) > file > defaults**
+      becomes real. Discovery and precedence are a `(decision)` (proposed: nearest `.agent.toml`
+      up from the cwd, keys mirroring the env names 1:1 so the three layers stay one vocabulary);
+      unknown keys are a typed error (config typos must not silently no-op). Precedence proven by
+      unit tests per layer pair.
+- [ ] **P14.9d** `agent doctor`: ship the host check as an engine subcommand — KVM, the jailer
+      binary + real-root, iproute2/e2fsprogs, kernel BTF + `CAP_BPF`/`CAP_PERFMON`, artifact
+      presence, and the degrades-vs-hard-errors matrix (P6.9b's content, today locked in dev-only
+      `xtask setup`). An operator on a fresh host runs `agent doctor` *before* the first sandbox
+      and reads exactly what will work, degrade, or refuse. `xtask setup` delegates to it (one
+      implementation, two entry points).
+- [ ] **P14.9e** Version the JSON surface: a `schema` field (integer, starting at `1`) on the
+      `--json` run result **and** the audit-record JSON, plus a written compatibility policy
+      (additive within a version; field rename/removal bumps it). This is the seed the wire API
+      (P16.2) and the SDK freeze (Phase 19) harden — versioning lands *before* anything external
+      parses these bytes, not after. Settle the audit record's open field-name questions (the
+      FIX.md review items on `distinct_dropped` semantics and the u128 duration ceiling) in the
+      same stroke, while the format is still unshipped.
+- [ ] **P14.9f** Prove completeness end to end: on a fresh host, `agent doctor` → one `agent run`
+      driving every projection at once (limits + `--net`/`--allow` + `--put`/`--get` + stdin +
+      `--json`, with `--trace` if P14.3 has landed) — and `docs/cli.md` rewritten to document the
+      finished surface, including the capability↔flag map and the explicit "daemon-scoped, by
+      design" list (snapshots, pool, wire API) so absence reads as intent, not omission.
+- **Exit gate:** every engine capability is reachable from the CLI or named as deliberately
+  daemon-scoped; config layers all four levels; a fresh host self-diagnoses with `agent doctor`;
+  and the JSON the CLI emits is a versioned contract.
+
 ## Phase 15 — Hardening & the trust story (multi-tenant safety)
 
 Prove the isolation + observation claims hold under adversarial workloads: that **any run is fully

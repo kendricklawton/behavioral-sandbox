@@ -1,5 +1,5 @@
-//! The latency benchmarks: boot-to-userspace vs base size (`bench-boot`, P3.7) and
-//! time-to-first-result across the three start paths (`bench-warm`, P5.7), reported as honest
+//! The latency benchmarks: boot-to-userspace vs base size (`bench-boot`) and
+//! time-to-first-result across the three start paths (`bench-warm`), reported as honest
 //! nearest-rank percentiles.
 
 use std::path::{Path, PathBuf};
@@ -20,8 +20,8 @@ pub(crate) fn image_used_bytes(path: &Path) -> Result<u64> {
     Ok(meta.blocks().saturating_mul(512))
 }
 
-/// Measure boot-to-userspace latency of the agent rootfs (P3.7). Boots `runs` times on **each** of
-/// two paths — the P3.3 read-only *shared* base (no per-VM copy) and the read-write *copy* base — and
+/// Measure boot-to-userspace latency of the agent rootfs. Boots `runs` times on **each** of
+/// two paths — the read-only *shared* base (no per-VM copy) and the read-write *copy* base — and
 /// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
 /// duplicates the whole image per boot, the shared path doesn't. "Measured, not marketed."
 pub(crate) fn bench_boot(runs: usize) -> Result<()> {
@@ -82,7 +82,7 @@ impl Drop for ScratchDir {
 /// The agent-rootfs boot config the prewarmed bench uses: vsock (the exec channel) plus the agent's
 /// readiness marker. `read_only_root` is the shared-base switch: `true` is what a prewarmed snapshot
 /// requires (the bundle references the base in place, clones share its page cache), `false` is the
-/// Phase-1-style baseline that duplicates the whole image per VM.
+/// full-copy baseline that duplicates the whole image per VM.
 fn warm_bench_config(kernel: &Path, rootfs: &Path, read_only_root: bool) -> BootConfig {
     let mut cfg = BootConfig::from_env();
     cfg.kernel = kernel.to_path_buf();
@@ -109,8 +109,8 @@ fn timed_python(vm: &RunningVm) -> Result<()> {
     Ok(())
 }
 
-/// Measure time-to-first-result of the three start paths (P5.7): a **cold boot** (per-VM rootfs
-/// copy, the Phase-1-style baseline), a **prewarmed-snapshot restore**, and a **prewarmed-pool take**, each
+/// Measure time-to-first-result of the three start paths: a **cold boot** (per-VM rootfs
+/// copy, the full-copy baseline), a **prewarmed-snapshot restore**, and a **prewarmed-pool take**, each
 /// timed from "start a sandbox" to "a Python one-liner's output is back on the host". One prewarmed
 /// snapshot (Python imported, then paused) feeds the restore and pool paths, the way an embedder
 /// would hold one prewarmed image per runtime. Teardown and pool refill happen off the clock: they're
@@ -250,7 +250,7 @@ fn ns_per_openat(path: &Path, batch: usize) -> u64 {
     (openat_burst(path, batch).as_nanos() / batch as u128) as u64
 }
 
-/// Measure the **tracing overhead** (P9.5): the added per-syscall cost of the attached
+/// Measure the **tracing overhead**: the added per-syscall cost of the attached
 /// `sys_enter_*` tracepoints, in three conditions timed on the same `openat` micro-workload:
 ///
 /// 1. **baseline** — no probes attached at all;
@@ -387,7 +387,7 @@ fn ns_per_switch(rounds: usize) -> Result<u64> {
     Ok((elapsed.as_nanos() / (rounds as u128 * 2)) as u64)
 }
 
-/// Measure the **resource-metering overhead** (P12.4): the added per-context-switch cost of the attached
+/// Measure the **resource-metering overhead**: the added per-context-switch cost of the attached
 /// `sched_switch` accounting probe, in three conditions on the same ping-pong micro-workload (mirroring
 /// `bench-trace`'s baseline/unwatched/watched shape):
 ///

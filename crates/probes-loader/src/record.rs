@@ -1,4 +1,4 @@
-//! The fused per-run **audit record** (P13.2) and its pure builders.
+//! The fused per-run **audit record** and its pure builders.
 //!
 //! This module is deliberately dependency-light: no aya, no `agent-vmm`. It defines the shape of
 //! "what a run did" as observed from *outside* the guest, and the aggregation that folds the three
@@ -8,9 +8,9 @@
 //!
 //! The record's **core is network + resources + denials** — the signals host-side eBPF observes
 //! strongly across the hardware boundary. [`host_syscalls`](RunRecord::host_syscalls) is the **VMM's
-//! host footprint**, explicitly *not* the guest's syscalls (a microVM services those in-guest; see
-//! ROADMAP Phase 9). Every collection is deterministically sorted, so a record built from the same
-//! observations is byte-stable regardless of map-iteration order — the property the Phase-14 JSON
+//! host footprint**, explicitly *not* the guest's syscalls (a microVM services those in-guest).
+//! Every collection is deterministically sorted, so a record built from the same
+//! observations is byte-stable regardless of map-iteration order — the property the JSON
 //! output will rely on. Kept here, out of `agent-vmm`, so the driver stays independent of the eBPF
 //! loader (decisions 024/026); the two tracks bridge only by plain values.
 
@@ -33,9 +33,9 @@ pub struct RunRecord {
     /// The guest's own network traffic on its tap, plus the blocked-egress trail. `None` when the
     /// sandbox had no NIC (nothing to observe), distinct from "observed, and it was empty".
     pub network: Option<NetSection>,
-    /// Host CPU (eBPF) + the cgroup's native memory/IO counters (reused verbatim from P12).
+    /// Host CPU (eBPF) + the cgroup's native memory/IO counters (reused verbatim from the resource meter).
     pub resources: ResourceSummary,
-    /// The VMM's **host** syscall footprint — not in-guest syscalls (Phase 9). Bounded.
+    /// The VMM's **host** syscall footprint — not in-guest syscalls. Bounded.
     pub host_syscalls: SyscallFootprint,
     /// Boot + exec wall time, supplied by the caller as plain [`Duration`]s (the record never depends
     /// on `agent-vmm` to learn them).
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn concurrent_folds_stay_independent() {
-        // The shared tracer (P13.5) drains one interleaved stream and routes each event to its cgroup's
+        // The shared tracer drains one interleaved stream and routes each event to its cgroup's
         // fold. Mirror that routing here to prove two concurrent sandboxes never contaminate each other:
         // each fold sees only its own cgroup, and one collecting doesn't disturb the other.
         const A: u64 = 0xA;

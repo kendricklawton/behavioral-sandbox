@@ -1,11 +1,11 @@
-//! The Phase 9 exit-gate demo (`trace-sandbox`): a **live syscall trace of a running sandbox**.
+//! The syscall-trace demo (`trace-sandbox`): a **live syscall trace of a running sandbox**.
 //!
 //! Binds the two tracks an embedder binds — boot a real microVM sandbox (the Firecracker driver,
 //! `agent-vmm`) and watch its host footprint with the eBPF syscall tracer (`agent-probes-loader`),
 //! attributed to the sandbox's cgroup. It is deliberately the *VMM's host footprint* (the
 //! jailer/Firecracker `execve`, the drive/tap/socket `openat`s), not the guest's own syscalls: a
 //! microVM services those in-guest and they never trap to the host (the hardware-isolation
-//! consequence Phase 9 opens with).
+//! consequence stated up front).
 //!
 //! Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object — a
 //! privileged, user-run demo like `bench-boot`, never part of the host-safe gate.
@@ -33,7 +33,7 @@ fn effective_uid() -> Option<u32> {
         .and_then(|u| u.parse().ok())
 }
 
-/// Boot a sandbox and stream its cgroup-attributed host syscall footprint — the Phase 9 exit-gate
+/// Boot a sandbox and stream its cgroup-attributed host syscall footprint — the syscall-trace exit-gate
 /// demo. `seconds` is the length of the live tail after the boot+exec window is printed.
 pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
@@ -125,7 +125,7 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
     }
 
     // A short live tail, scoped in-kernel to the sandbox's cgroup, so the demo also exercises the
-    // streaming consumer (P9.3) against the running sandbox.
+    // streaming consumer against the running sandbox.
     if seconds > 0 {
         println!("\n# streaming this sandbox's host footprint for {seconds}s...");
         tracer
@@ -151,12 +151,12 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
         "# drive/tap/socket openats), attributed by cgroup id. The guest's own syscalls never"
     );
     println!(
-        "# trapped here: they stayed in-guest, behind the KVM boundary (Phase 9's opening note)."
+        "# trapped here: they stayed in-guest, behind the KVM boundary (the hardware-isolation note)."
     );
     Ok(())
 }
 
-/// The Phase 10 exit-gate demo (`watch-sandbox`): **live per-microVM network visibility**. Boot a real
+/// The network-observability exit-gate demo (`watch-sandbox`): **live per-microVM network visibility**. Boot a real
 /// networked sandbox and watch the guest's own traffic on its tap, per flow and as a per-VM rollup,
 /// scoped to the sandbox's own netns (decision 017). Unlike the syscall trace, this is the guest's
 /// *own* packets: they cross the tap on the host, so the host sees every one.
@@ -219,7 +219,7 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
         sandbox.boot_latency().as_millis()
     );
 
-    // Bind the monitor to *this* sandbox's tap, inside its own netns (P10.4).
+    // Bind the monitor to *this* sandbox's tap, inside its own netns.
     let monitor =
         TapMonitor::attach_in_netns(&netns, &tap).context("attach the tap monitor in the netns")?;
 
@@ -274,10 +274,10 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
     Ok(())
 }
 
-/// The Phase 11 exit-gate demo (`enforce-sandbox`): **kernel-enforced per-sandbox egress**. Boot a real
+/// The egress-enforcement exit-gate demo (`enforce-sandbox`): **kernel-enforced per-sandbox egress**. Boot a real
 /// networked sandbox, arm a deny-by-default egress policy that allows exactly one endpoint, have the guest
 /// send to that endpoint and to a blocked one, and show the allow-listed traffic passing while everything
-/// else is dropped at the tap and recorded in the denials audit trail (P11.5).
+/// else is dropped at the tap and recorded in the denials audit trail.
 ///
 /// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object — a
 /// privileged, user-run demo like `watch-sandbox`.
@@ -345,7 +345,7 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
     );
     println!("# policy: allow only {host_end}:{ALLOWED_PORT}/udp (deny-by-default for all else)");
 
-    // `enforce_in_netns` arms the policy *before* the tc programs go live: no un-enforced window (P11.3).
+    // `enforce_in_netns` arms the policy *before* the tc programs go live: no un-enforced window.
     let monitor = TapMonitor::enforce_in_netns(&netns, &tap, &policy)
         .context("attach + enforce the egress policy in the netns")?;
 
@@ -369,7 +369,7 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
         );
     }
 
-    // The denials audit trail (P11.5): which endpoints the policy blocked.
+    // The denials audit trail: which endpoints the policy blocked.
     let denials = monitor.denials().context("read the denials map")?;
     println!("\n# denied (blocked at the tap, recorded for the audit log):");
     if denials.is_empty() {
@@ -408,7 +408,7 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
     Ok(())
 }
 
-/// The Phase 12 exit-gate demo (`meter-sandbox`): **per-sandbox resource metrics from eBPF**. Boot a
+/// The resource-metering exit-gate demo (`meter-sandbox`): **per-sandbox resource metrics from eBPF**. Boot a
 /// real sandbox, meter its cgroup with the `sched_switch` accounting probe, and show an idle guest
 /// charging near-zero host CPU while a CPU-heavy guest charges most of a core — the engine *measures*,
 /// the hoster *bills*. Prints the full `ResourceSummary` (CPU from eBPF, memory/IO from the kernel's
@@ -442,7 +442,7 @@ pub(crate) fn meter_sandbox() -> Result<()> {
     }
 
     // Boot a sandbox on the agent rootfs (jailed as root, else the unjailed opt-out so a dev host still
-    // runs it). Its VMM runs in a per-VM lifetime cgroup (P6.7) — the cgroup the meter attributes to.
+    // runs it). Its VMM runs in a per-VM lifetime cgroup — the cgroup the meter attributes to.
     let mut cfg = BootConfig::from_env();
     cfg.kernel = kernel.clone();
     cfg.rootfs = rootfs.clone();
@@ -466,7 +466,7 @@ pub(crate) fn meter_sandbox() -> Result<()> {
         sandbox.boot_latency().as_millis()
     );
 
-    // Attach the meter and target this sandbox's cgroup (the P12.2 bridge: VMM pid -> cgroup id). One
+    // Attach the meter and target this sandbox's cgroup (the bridge: VMM pid -> cgroup id). One
     // shared program on the global sched_switch would meter many sandboxes; here we register just one.
     let mut meter = ResourceMeter::load().context("load + attach the resource meter")?;
     meter

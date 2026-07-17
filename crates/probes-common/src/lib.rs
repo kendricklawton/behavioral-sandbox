@@ -46,7 +46,7 @@ pub enum Syscall {
 /// padding-free (fields large-to-small: the `u64` first, then the `u32`s, then the byte arrays), so
 /// [`from_bytes`](Self::from_bytes) can read it field by field at fixed offsets. This is the **host's**
 /// footprint (a microVM services its own syscalls in-guest and they never trap here — see the crate
-/// and ROADMAP Phase 9).
+/// docs).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SyscallEvent {
@@ -188,7 +188,7 @@ fn describe_sockaddr(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Network flows (P10.2): the per-flow record the tc program on a VM's tap writes.
+// Network flows: the per-flow record the tc program on a VM's tap writes.
 // ---------------------------------------------------------------------------
 
 /// Ethernet header length (dst MAC + src MAC + EtherType), the offset the IPv4 header starts at.
@@ -385,7 +385,7 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
 }
 
 // ---------------------------------------------------------------------------
-// Egress policy (P11.1/P11.2): the allow-list the tc program on a VM's tap consults to drop or accept
+// Egress policy: the allow-list the tc program on a VM's tap consults to drop or accept
 // a guest-sent packet. Single-sourced here so the in-kernel matcher and the host-tested one can't drift.
 // ---------------------------------------------------------------------------
 
@@ -394,7 +394,7 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
 /// at load. Comfortably covers a per-sandbox allow-list of a handful of endpoints.
 pub const MAX_POLICY_RULES: usize = 16;
 
-/// One entry in a sandbox's egress allow-list (P11.1): a destination **CIDR** plus optional port and
+/// One entry in a sandbox's egress allow-list: a destination **CIDR** plus optional port and
 /// protocol. A guest-sent IPv4 packet is allowed if its destination matches **any** `active` rule (see
 /// [`rule_matches`] / [`egress_allowed`]); with no rule matching, deny-by-default drops it. `#[repr(C)]`
 /// and padding-free (an explicit zeroed `_pad`) so it is a stable 12-byte map value the loader writes
@@ -487,7 +487,7 @@ pub fn rule_matches(rule: &PolicyRule, dst_addr: u32, dst_port: u16, proto: u8) 
 }
 
 /// Whether a sandbox's egress allow-list `rules` admits the destination `(dst_addr, dst_port, proto)`:
-/// **any** active rule matching means allow, none matching means deny (P11.2's deny-by-default). The
+/// **any** active rule matching means allow, none matching means deny (deny-by-default). The
 /// host-side convenience over [`rule_matches`]; the tc program applies the same any-match logic reading
 /// its policy map. An empty allow-list allows nothing.
 #[must_use]

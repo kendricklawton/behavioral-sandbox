@@ -1,7 +1,7 @@
-//! Privileged integration tests for Phase-6 confinement under adversity: driver death cannot leak
-//! a VM, the kill handle unblocks a wedged exec (P6.7), a guest fork bomb / mem-hog is bounded
-//! by the VMM's cgroup with the host unaffected (P6.8), and the orphan sweep reclaims a crashed
-//! driver's netns + scratch dir without touching a live sibling's (P6.9a).
+//! Privileged integration tests for confinement under adversity: driver death cannot leak
+//! a VM, the kill handle unblocks a wedged exec, a guest fork bomb / mem-hog is bounded
+//! by the VMM's cgroup with the host unaffected, and the orphan sweep reclaims a crashed
+//! driver's netns + scratch dir without touching a live sibling's.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
 //! `cargo xtask ci-privileged` or `cargo test -p agent-vmm -- --ignored`.
@@ -23,7 +23,7 @@ use common::{agent_rootfs_config, config, have_jailer_privileges, have_net_admin
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
 const HELPER_ENV: &str = "AGENT_CONFINEMENT_HELPER";
 
-/// The env var that turns `helper_boot_networked_and_park` into the P6.9a sweep test's victim: a
+/// The env var that turns `helper_boot_networked_and_park` into the sweep test's victim: a
 /// **networked** boot, so the crash leaves the residue that matters — a per-VM netns holding a tap.
 const HELPER_NET_ENV: &str = "AGENT_CONFINEMENT_HELPER_NET";
 
@@ -88,7 +88,7 @@ fn helper_boot_and_park() {
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn driver_death_cannot_leak_a_vm() {
-    // P6.7's headline claim, tested with a real crash: a driver process SIGKILLed mid-run (the one
+    // The cgroup-owned-lifetime headline claim, tested with a real crash: a driver process SIGKILLed mid-run (the one
     // signal no handler can catch — the stand-in for Ctrl-C, OOM, a panic-abort) does not leak its
     // VMM. The sentinel outlives the driver, wakes on the pipe EOF the kernel delivers for us, and
     // kills + removes the VM's cgroup. Run the driver as a subprocess (this same test binary,
@@ -133,7 +133,7 @@ fn driver_death_cannot_leak_a_vm() {
     let cleanup_victim_scratch = || {
         // The victim never tears down its scratch dir (that's the crash); it is residue the
         // sentinel deliberately doesn't own (see the lifetime module doc). The orphan sweep
-        // (P6.9a) owns exactly this, so dogfood it rather than hand-rolling a scan. `child_pid`
+        // owns exactly this, so dogfood it rather than hand-rolling a scan. `child_pid`
         // is dead by every path that reaches here, so its dirs are sweep candidates.
         let _ = child_pid; // ownership is by liveness now, not by prefix
         match sweep_orphans(&BootConfig::from_env().scratch_dir) {
@@ -182,7 +182,7 @@ fn driver_death_cannot_leak_a_vm() {
     cleanup_victim_scratch();
 }
 
-/// The P6.9a crash-test victim: like [`helper_boot_and_park`], but a **networked** boot, so the
+/// The sweep crash-test victim: like [`helper_boot_and_park`], but a **networked** boot, so the
 /// crash leaves the residue the sweep exists for — a per-VM network namespace holding an orphan tap.
 #[test]
 #[ignore = "crash-test helper; only meaningful under sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir"]
@@ -220,7 +220,7 @@ fn scratch_dirs_of(base: &Path, pid: u32) -> usize {
 #[test]
 #[ignore = "needs /dev/kvm + artifacts + CAP_NET_ADMIN (run via `cargo xtask ci-privileged`)"]
 fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
-    // P6.9a's claim under the netns model: a networked VM's residue is a per-VM network namespace
+    // The sweep's claim under the netns model: a networked VM's residue is a per-VM network namespace
     // (holding an orphan tap), left behind when its driver dies without teardown. It is no longer a
     // finite-pool reservation (each netns reuses a fixed /30), but still residue worth reclaiming. The
     // sweep must reclaim a dead driver's netns + scratch dir while sparing a concurrently-live
@@ -349,7 +349,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn kill_handle_unblocks_a_wedged_exec() {
-    // The embedder kill handle (P6.7): `exec` borrows `&self` and `shutdown` consumes `self`, so a
+    // The embedder kill handle: `exec` borrows `&self` and `shutdown` consumes `self`, so a
     // thread blocked in a long exec can't be stopped through the VM's own API. The handle is the
     // out-of-band path: cloneable, Send, and it kills through the cgroup file — so firing it from
     // another thread makes the VMM die, the vsock peer close, and the blocked exec return a typed
@@ -384,10 +384,10 @@ fn kill_handle_unblocks_a_wedged_exec() {
     drop(vm);
 }
 
-/// A cgroup carrying the engine's own limit derivation (`jail::cgroup_limit_args`, P6.2/decision
+/// A cgroup carrying the engine's own limit derivation (`jail::cgroup_limit_args`, decision
 /// 013): `cpu.max` = exactly `vcpus` cores, `memory.max` = guest RAM + the 128 MiB VMM overhead.
 /// Built by the test because the limits normally arrive via the jailer, and exec-under-jail is a
-/// later Phase-6 migration — so P6.8 pins the *same-derived* caps onto the exec-capable boot path
+/// later migration — so this suite pins the *same-derived* caps onto the exec-capable boot path
 /// and proves they bind under load. `None` (skip) where cgroups aren't writable/delegated.
 struct LimitCgroup {
     dir: PathBuf,
@@ -447,7 +447,7 @@ impl Drop for LimitCgroup {
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn guest_mem_hog_is_bounded_by_the_cgroup() {
-    // P6.8, memory half: a guest allocating everything it can reach pushes the VMM's host memory
+    // Memory half: a guest allocating everything it can reach pushes the VMM's host memory
     // toward its cap, and the cap holds — accounted memory never passes `memory.max`, the kernel
     // never OOM-kills the VMM (the guest's *own* OOM killer eats the hog first, inside the
     // hardware boundary), and the VM stays responsive afterwards. Host unaffected, by observation.
@@ -526,11 +526,11 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn guest_fork_bomb_is_bounded_by_the_cgroup() {
-    // P6.8, CPU half: a storm of spinning guest processes. Two bounds hold at once. Hardware
+    // CPU half: a storm of spinning guest processes. Two bounds hold at once. Hardware
     // isolation means guest processes simply don't exist on the host — the VMM's thread count
     // stays flat no matter how hard the guest forks. And the cgroup's cpu.max means the whole VM
     // (vCPUs + VMM overhead threads) cannot burn more than its quota of host CPU. The storm's own
-    // exit also exercises P6.4: its spinners are reaped by the guest agent's per-exec cgroup, so
+    // exit also exercises tree reaping: its spinners are reaped by the guest agent's per-exec cgroup, so
     // the guest is idle again for the follow-up exec.
     if !have_jailer_privileges() {
         eprintln!("skipping guest_fork_bomb_is_bounded_by_the_cgroup: needs real root");
@@ -564,7 +564,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
     // 100 spinning shells for 3 s: a bounded storm rather than the classic unbounded `:(){ :|:& };:`
     // so the guest agent stays schedulable and the run is measurable (the *unbounded* variant would
     // starve the agent inside the guest — a guest-availability problem, while this test is about
-    // what the host feels). The spinners outlive their parent command on purpose: P6.4's tree
+    // what the host feels). The spinners outlive their parent command on purpose: the agent's tree
     // reaping is what cleans them up.
     let storm = [
         "sh",
@@ -602,7 +602,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
         "host CPU burned ({usage} usec) must stay within the cgroup quota ({cap} usec)"
     );
 
-    // P6.4 reaped the orphaned spinners with the storm's exec cgroup: the guest is idle again.
+    // The per-exec cgroup reaped the orphaned spinners with the storm's exec cgroup: the guest is idle again.
     let echo = ["echo", "alive"].map(String::from);
     let after = vm.exec(&echo, b"").expect("post-storm exec should run");
     assert_eq!(after.stdout, b"alive\n");

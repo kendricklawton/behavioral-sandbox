@@ -29,10 +29,10 @@ fn ip_netns_exec(netns: &str, args: &[&str]) -> std::process::Output {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
-    // P4.1 under the netns model: with `enable_network`, the driver creates a per-VM network
+    // Under the netns model: with `enable_network`, the driver creates a per-VM network
     // namespace with a tap inside it, attached as virtio-net, so the guest gets an `eth0` carrying the
     // driver's locally-administered MAC. This pins the NIC + MAC + the deny-by-default invariant (no
-    // default route); guest addressing itself is P4.2's `addresses_the_guest_and_routes_host_to_guest`.
+    // default route); guest addressing itself is `addresses_the_guest_and_routes_host_to_guest`.
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
@@ -41,7 +41,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
 
-    // The driver exposes the netns + tap name as the eBPF-binding handle (P4.6): the Phase-8 loader
+    // The driver exposes the netns + tap name as the eBPF-binding handle: the eBPF loader
     // enters the netns and resolves the tap there. The tap is a real `fc`-prefixed interface *inside*
     // the netns (not the host's), so check it there.
     let netns = vm.netns().expect("a networked VM should expose its netns");
@@ -77,7 +77,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
         String::from_utf8_lossy(&mac.stdout)
     );
 
-    // Deny-by-default: the guest has no default route (P4.2 adds a connected /30, never a route to
+    // Deny-by-default: the guest has no default route (addressing adds a connected /30, never a route to
     // the world) — `ip route` lists no `default`.
     let routes = vm
         .exec(&["ip".into(), "route".into()], b"")
@@ -94,7 +94,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn addresses_the_guest_and_routes_host_to_guest() {
-    // P4.2: static addressing over the tap. The kernel configures `eth0` with the guest's /30 IP via
+    // Static addressing over the tap. The kernel configures `eth0` with the guest's /30 IP via
     // the `ip=` boot param, giving a connected route to the host end and NO default route — so
     // host<->guest works but the guest reaches nothing else (deny-by-default). Needs CAP_NET_ADMIN.
     if !have_net_admin() {
@@ -174,7 +174,7 @@ fn addresses_the_guest_and_routes_host_to_guest() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_networked_vms_run_in_isolated_netns() {
-    // P4.4 under the netns model: per-VM isolation is now **kernel-enforced** by a per-VM network
+    // Under the netns model: per-VM isolation is now **kernel-enforced** by a per-VM network
     // namespace, not the earlier unique-/30 reservation. Two concurrently-booted networked VMs hold
     // identically-named taps on the *same* fixed /30, yet share no path: each is its own network
     // stack. This is strictly stronger than L3-unreachability (it holds even for identical addresses).
@@ -235,8 +235,8 @@ fn two_networked_vms_run_in_isolated_netns() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
-    // P4.7: prove the allow/deny posture at the transport layer, not just ICMP. Per decision 008,
-    // "allowed" in Phase 4 is host-local (world-egress allow-listing is eBPF-enforced in P8). Under
+    // Prove the allow/deny posture at the transport layer, not just ICMP. Per decision 008,
+    // "allowed" here is host-local (world-egress allow-listing is eBPF-enforced at the tap). Under
     // the netns model the tap's host end lives *inside* the VM's netns, so the host endpoint the guest
     // reaches is bound there too: a real TCP listener on the host `/30` end, entered via
     // `ip netns exec`. An off-subnet endpoint stays unreachable (no route, fast failure).

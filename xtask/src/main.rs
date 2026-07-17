@@ -13,20 +13,20 @@
 //! - **`bench-boot`** — measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
 //! - **`bench-warm`** — time-to-first-result percentiles: cold boot vs prewarmed-snapshot restore vs
 //!   prewarmed-pool take. Needs KVM + the built agent rootfs.
-//! - **`bench-trace`** — the syscall-tracing overhead (P9.5): per-`openat` cost with no probes vs
+//! - **`bench-trace`** — the syscall-tracing overhead: per-`openat` cost with no probes vs
 //!   attached-but-filtered-out vs attached-and-capturing. Needs `CAP_BPF`+`CAP_PERFMON` + the built
 //!   object (not KVM).
-//! - **`trace-sandbox`** — the Phase 9 exit-gate demo: boot a real sandbox and stream its
+//! - **`trace-sandbox`** — the syscall-trace demo: boot a real sandbox and stream its
 //!   cgroup-attributed host syscall footprint. Needs KVM + the agent rootfs + `CAP_BPF` + the object.
-//! - **`watch-sandbox`** — the Phase 10 exit-gate demo: boot a real networked sandbox and watch its
+//! - **`watch-sandbox`** — the network-observability demo: boot a real networked sandbox and watch its
 //!   per-VM network flows on the tap. Needs KVM + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
-//! - **`enforce-sandbox`** — the Phase 11 exit-gate demo: boot a real networked sandbox, arm a
+//! - **`enforce-sandbox`** — the egress-enforcement demo: boot a real networked sandbox, arm a
 //!   deny-by-default egress policy allowing one endpoint, and show the allow-listed traffic passing while
 //!   everything else is dropped at the tap and logged. Same needs as `watch-sandbox`.
-//! - **`bench-meter`** — the resource-metering overhead (P12.4): per-context-switch cost with no meter vs
+//! - **`bench-meter`** — the resource-metering overhead: per-context-switch cost with no meter vs
 //!   attached-but-not-metering-us vs attached-and-metering-us. Needs `CAP_BPF`+`CAP_PERFMON` + the built
 //!   object (not KVM).
-//! - **`meter-sandbox`** — the Phase 12 exit-gate demo: boot a real sandbox, meter its cgroup, and show an
+//! - **`meter-sandbox`** — the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
 //! - **`fuzz`** — deep `cargo fuzz` (libFuzzer) runs against the host↔guest channel decoders (the
@@ -81,7 +81,7 @@ enum Cmd {
     FetchArtifacts,
     /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
     BuildGuestAgent,
-    /// Build the P3.9 static native-ELF fixture (`examples/writefile`) for the guest target — the
+    /// Build the static native-ELF fixture (`examples/writefile`) for the guest target — the
     /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
     BuildGuestExample,
     /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
@@ -99,7 +99,7 @@ enum Cmd {
     },
     /// Measure boot-to-userspace latency (percentiles) of the agent rootfs, on both the read-only
     /// shared base and the read-write per-VM copy, so the base **size**'s effect on boot is visible
-    /// (P3.7). Needs `/dev/kvm` + the built agent rootfs.
+    ///. Needs `/dev/kvm` + the built agent rootfs.
     BenchBoot {
         /// How many boots to time per path (more → tighter tail percentiles). Default 100 — the
         /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
@@ -107,16 +107,16 @@ enum Cmd {
         runs: usize,
     },
     /// Measure time-to-first-result (percentiles) of the three start paths: a cold boot (per-VM
-    /// rootfs copy, the Phase-1-style baseline), a prewarmed-snapshot restore, and a prewarmed-pool take,
+    /// rootfs copy, the full-copy baseline), a prewarmed-snapshot restore, and a prewarmed-pool take,
     /// each timed from "start a sandbox" to "a Python one-liner's output is back on the host"
-    /// (P5.7). Needs `/dev/kvm` + the built agent rootfs.
+    ///. Needs `/dev/kvm` + the built agent rootfs.
     BenchWarm {
         /// How many runs to time per path (more → tighter tail percentiles). Default 100, the
         /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
-    /// Measure the syscall-tracing overhead (P9.5): the per-`openat` cost with no probes attached, vs
+    /// Measure the syscall-tracing overhead: the per-`openat` cost with no probes attached, vs
     /// probes attached but filtered out, vs probes attached and writing each event to the ring buffer.
     /// The delta is the honest cost of tracing. Needs `CAP_BPF`+`CAP_PERFMON` + `cargo xtask
     /// build-probes` (not KVM).
@@ -126,7 +126,7 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
-    /// Measure the resource-metering overhead (P12.4): the added per-context-switch cost of the attached
+    /// Measure the resource-metering overhead: the added per-context-switch cost of the attached
     /// `sched_switch` accounting probe, with no meter vs attached-but-not-metering-us vs
     /// attached-and-metering-us, on a ping-pong micro-workload. The delta is the honest cost; one shared
     /// program means it stays bounded under many sandboxes. Needs `CAP_BPF`+`CAP_PERFMON` + `cargo xtask
@@ -137,7 +137,7 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
-    /// The Phase 9 exit-gate demo: boot a real sandbox and stream its host syscall footprint,
+    /// The syscall-trace demo: boot a real sandbox and stream its host syscall footprint,
     /// attributed to the sandbox's cgroup (the VMM's host syscalls — the guest's stay in-guest).
     /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
     TraceSandbox {
@@ -146,7 +146,7 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         seconds: u64,
     },
-    /// The Phase 10 exit-gate demo: boot a real networked sandbox, attach a `tc` monitor to its tap
+    /// The network-observability demo: boot a real networked sandbox, attach a `tc` monitor to its tap
     /// inside its netns, drive guest traffic, and print the per-VM network flows and totals it counts.
     /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + `cargo xtask build-probes`.
     WatchSandbox {
@@ -155,11 +155,11 @@ enum Cmd {
         #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
         rounds: u64,
     },
-    /// The Phase 11 exit-gate demo: boot a real networked sandbox, arm a deny-by-default egress policy
+    /// The egress-enforcement demo: boot a real networked sandbox, arm a deny-by-default egress policy
     /// allowing one endpoint, and show the allow-listed traffic passing while everything else is dropped
     /// at the tap and recorded. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
     EnforceSandbox,
-    /// The Phase 12 exit-gate demo: boot a real sandbox, meter its cgroup with the `sched_switch`
+    /// The resource-metering demo: boot a real sandbox, meter its cgroup with the `sched_switch`
     /// accounting probe, and show an idle guest charging near-zero host CPU while a CPU-heavy guest charges
     /// most of a core — plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
     /// `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
@@ -265,7 +265,7 @@ fn ci() -> Result<()> {
         &[("RUSTDOCFLAGS", "-D warnings")],
     )?;
     cargo(&["deny", "check"])?;
-    // P8.7: the eBPF object build is part of the CI gate. Host-safe and guarded — it skips with a note
+    // The eBPF object build is part of the CI gate. Host-safe and guarded — it skips with a note
     // when `bpf-linker`/`rustup` are absent, so `ci` still runs everywhere, but on a set-up dev box a
     // probe that fails to compile (or drops its BTF) now fails here, not later at load.
     build_probes()?;
@@ -318,11 +318,11 @@ fn ci_privileged() -> Result<()> {
     // makes this the reproducibility gate: it builds twice, asserts byte-identical, and fails on
     // package-closure drift from the lockfile.
     rootfs::build_rootfs(true, false)?;
-    // The runtime-agnostic test (P3.9) injects a static native binary; build it here (musl), like the
+    // The runtime-agnostic test injects a static native binary; build it here (musl), like the
     // agent — the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
     // not part of the image, so it's built separately, not baked into the rootfs.
     guest_bins::build_guest_example()?;
-    // The eBPF probe tests (P8.3/P8.4) load the object built from `crates/probes`; build it here (the
+    // The eBPF probe tests load the object built from `crates/probes`; build it here (the
     // same "don't shell a nightly `cargo build` from a `#[test]`" rule). Guarded, so a privileged host
     // without `bpf-linker` skips the build and the probe tests then self-skip on the missing object.
     build_probes()?;
@@ -385,7 +385,7 @@ fn setup() -> Result<()> {
         kernel_path().is_file() && boot_rootfs_path().is_file(),
     );
 
-    // The degradation matrix (P6.9b): what each missing capability above costs, in one place, so
+    // The degradation matrix: what each missing capability above costs, in one place, so
     // a mismatched host explains itself *before* the first boot discovers it. The split is decision
     // 013's: resource caps and leak-proofing fail open (they're DoS mitigation), the isolation
     // boundary never does.
@@ -422,7 +422,7 @@ fn setup() -> Result<()> {
         "                  across tenants (quota/fairness) is platform policy, above the engine"
     );
 
-    println!("\neBPF probes (Phase 8+): loading + attaching needs CAP_BPF + CAP_PERFMON, not full");
+    println!("\neBPF probes: loading + attaching needs CAP_BPF + CAP_PERFMON, not full");
     println!("             root — grant a loader binary just those with `setcap cap_bpf,cap_perfmon+ep`.");
     println!(
         "             A host without kernel BTF or those caps is named by a typed error, not a"
@@ -433,7 +433,7 @@ fn setup() -> Result<()> {
     Ok(())
 }
 
-/// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker` (P8.1). The
+/// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker`. The
 /// crate is **excluded** from the workspace and builds under its own nightly toolchain with
 /// `-Z build-std` (rustup ships no prebuilt `core` for the BPF target), so this drives its build
 /// directly rather than through the workspace `cargo`.
@@ -442,7 +442,7 @@ fn setup() -> Result<()> {
 /// (`bpf-linker`, `rustup`, or the nightly + `rust-src` the `build-std` build needs), it prints a
 /// note and returns `Ok` instead of failing — the everyday host gate must not require the eBPF
 /// toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); this step is folded
-/// into the `ci` gate (P8.7), and `ci-privileged` builds it before the probe tests.
+/// into the `ci` gate, and `ci-privileged` builds it before the probe tests.
 fn build_probes() -> Result<()> {
     if !in_path("bpf-linker") {
         println!(
@@ -487,7 +487,7 @@ fn build_probes() -> Result<()> {
              missing nightly toolchain / `rust-src` (see `cargo xtask setup`)"
         );
     }
-    // P8.5: the object must carry BTF (`bpf-linker --btf`) — the CO-RE portability + BTF map typing
+    // The object must carry BTF (`bpf-linker --btf`) — the CO-RE portability + BTF map typing
     // that lets aya relocate it against the running kernel. A missing `.BTF` section means the linker
     // arg regressed to a legacy-only, non-portable object; fail loudly rather than shipping it. The
     // check walks the ELF section headers for a section named exactly `.BTF` (not a raw byte scan,
@@ -623,7 +623,7 @@ fn artifacts_dir() -> PathBuf {
 
 /// The artifact filenames under [`artifacts_dir`], defined once so the many readers/writers
 /// (`build-rootfs`, `bench-boot`, `setup`, `fetch-artifacts`) can't drift apart: the pinned guest
-/// kernel, the Phase-1 boot rootfs (fetched), and the agent rootfs (`build-rootfs` output).
+/// kernel, the minimal boot rootfs (fetched), and the agent rootfs (`build-rootfs` output).
 fn kernel_path() -> PathBuf {
     artifacts_dir().join("vmlinux")
 }
@@ -679,7 +679,7 @@ fn in_path(bin: &str) -> bool {
 }
 
 /// Whether the cgroup v2 `cpu`+`memory` controllers are delegated to the cgroup root, so the jailer
-/// can set a jailed VM's CPU/memory limits (P6.2). A systemd host enables these by default; where they
+/// can set a jailed VM's CPU/memory limits. A systemd host enables these by default; where they
 /// aren't, jailed boots still run but without limits. Informational only.
 fn cgroup_controllers_delegated() -> bool {
     std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control")

@@ -1,4 +1,4 @@
-//! P10.6 end-to-end test: traffic from a guest shows up in the per-VM flow counters.
+//! End-to-end test: traffic from a guest shows up in the per-VM flow counters.
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches a `tc`
 //! program inside the VM's netns (needs `CAP_BPF`+`CAP_NET_ADMIN` + BTF + the built object). Run via
@@ -69,7 +69,7 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
         return;
     }
 
-    // Boot a networked sandbox. Unjailed on purpose: the P10.6 proof is about the tap counters, not the
+    // Boot a networked sandbox. Unjailed on purpose: the proof is about the tap counters, not the
     // jailer, and the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let netns = vm
@@ -82,7 +82,7 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
         .to_string();
     let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
 
-    // P10.4: bind the monitor to *this* sandbox's tap, inside its own netns.
+    // Bind the monitor to *this* sandbox's tap, inside its own netns.
     let monitor =
         TapMonitor::attach_in_netns(&netns, &tap).expect("attach the tap monitor in the VM netns");
 
@@ -121,14 +121,14 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
         "the guest's UDP packets must be counted on the tap's ingress; got {counts:?} for `{key}`"
     );
 
-    // P10.3: the per-VM rollup reflects it too.
+    // The per-VM rollup reflects it too.
     let totals = monitor.totals().expect("read the per-VM totals");
     assert!(
         totals.ingress_packets >= 1,
         "the per-VM ingress total must include the guest's traffic; got {totals:?}"
     );
 
-    // P10.5: close cleanly. Dropping the monitor frees its userspace handles; the VM shutdown tears the
+    // Close cleanly. Dropping the monitor frees its userspace handles; the VM shutdown tears the
     // netns down, which reclaims the tc filter (decision 023), leaving no dangling host state.
     drop(monitor);
     vm.shutdown().expect("shut the sandbox down");

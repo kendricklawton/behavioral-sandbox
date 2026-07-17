@@ -41,7 +41,7 @@ impl Vm {
     /// clones don't share RNG state. The guest's **wall clock is not fixed up**: it lags by the
     /// snapshot's age until the workload resyncs it.
     ///
-    /// With [`jail`](BootConfig::jail) set, the clone restores **under the jailer** (P7.0e): the
+    /// With [`jail`](BootConfig::jail) set, the clone restores **under the jailer**: the
     /// bundle is staged into the chroot — the state file copied, the memory file and a shared base
     /// disk bind-mounted read-only (so clones keep sharing one page cache), a private disk copy
     /// handed to the jailed uid — and a networked clone's netns is joined via `--netns`. Needs real
@@ -106,7 +106,7 @@ impl RunningVm {
         }
         // A jailed VM's root disk lives inside the chroot (torn down with the scratch dir) and its
         // path is chroot-relative, so a bundle would record an unrestorable backing. Deliberate, not
-        // just deferred (P7.0e): the clone story is snapshot an *unjailed* prewarmed source (it runs only
+        // just deferred: the clone story is snapshot an *unjailed* prewarmed source (it runs only
         // the embedder's warm-up), then restore **jailed** clones from it — the untrusted code runs
         // confined; the source needs no jail to protect the host from itself.
         if self.chroot.is_some() {
@@ -124,8 +124,7 @@ impl RunningVm {
         // snapshot no longer needs vsock (that requirement was decision 011's, now retired).
         if self.output.is_some() || self.has_input {
             return Err(VmmError::Vmm(
-                "snapshot of a VM with an input/output device is not yet supported (P5.4/P5.5)"
-                    .into(),
+                "snapshot of a VM with an input/output device is not yet supported".into(),
             ));
         }
         // The root disk is either a **private per-VM copy** (a read-write boot, whose backing lives

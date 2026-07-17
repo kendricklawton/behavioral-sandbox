@@ -1,10 +1,10 @@
-//! Privileged integration tests for the syscall tracer (P9.1 per-event ring buffer, P9.2 target
+//! Privileged integration tests for the syscall tracer (the per-event ring buffer, the target
 //! filter).
 //!
 //! `#[ignore]`d for the same reason as the counter tests: loading eBPF needs `CAP_BPF`+`CAP_PERFMON`
 //! (or root), a BTF-capable kernel, and the built object (`cargo xtask build-probes`). Run them via
 //! `cargo xtask ci-privileged` (as root), or grant the two caps to the test binary and run it
-//! unprivileged (P8.8). Each self-skips when its prerequisites are absent, so an unprivileged run
+//! unprivileged. Each self-skips when its prerequisites are absent, so an unprivileged run
 //! reports a clean skip, not a failure.
 #![allow(clippy::panic)]
 
@@ -35,9 +35,9 @@ fn skip_reason() -> Option<String> {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn tracer_captures_this_process_openat_with_its_path() {
-    // P9.1: the ring buffer carries per-event data, not just a count. Filter to our own pid, do an
+    // The ring buffer carries per-event data, not just a count. Filter to our own pid, do an
     // `openat` of a unique (nonexistent) path, and assert that exact event streams back — the path
-    // proves the per-event payload, and every captured event being our pid proves the P9.2 filter.
+    // proves the per-event payload, and every captured event being our pid proves the filter.
     if let Some(why) = skip_reason() {
         eprintln!("skipping tracer_captures_this_process_openat_with_its_path: {why}");
         return;
@@ -78,7 +78,7 @@ fn tracer_captures_this_process_openat_with_its_path() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn filter_hides_other_pids_then_watch_all_reveals_a_child_execve() {
-    // P9.2: a pid filter drops a child's events; clearing it reveals them. Spawn `/bin/true` (one
+    // A pid filter drops a child's events; clearing it reveals them. Spawn `/bin/true` (one
     // execve, in a child with a different tgid) under our-pid filter → not seen; then `watch_all` and
     // spawn again → its execve is seen. Proves the filter both excludes and, cleared, includes.
     if let Some(why) = skip_reason() {
@@ -129,7 +129,7 @@ fn filter_hides_other_pids_then_watch_all_reveals_a_child_execve() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn tracer_captures_a_connect_sockaddr() {
-    // P9.1: the connect program copies the leading sockaddr bytes. Connect (refused is fine) to a
+    // The connect program copies the leading sockaddr bytes. Connect (refused is fine) to a
     // known 127.0.0.1 address and assert the captured detail decodes to that IPv4 address.
     if let Some(why) = skip_reason() {
         eprintln!("skipping tracer_captures_a_connect_sockaddr: {why}");
@@ -169,7 +169,7 @@ fn sockaddr_is_ipv4(bytes: &[u8], ip: [u8; 4], port: u16) -> bool {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn attributes_events_to_this_process_cgroup() {
-    // P9.4: `cgroup_id_of_self` (the inode of our cgroup dir) must equal the `bpf_get_current_cgroup_id`
+    // `cgroup_id_of_self` (the inode of our cgroup dir) must equal the `bpf_get_current_cgroup_id`
     // the programs stamp on our events — the whole attribution bridge. Watch that cgroup and prove our
     // own openat comes back carrying it; an empty capture would mean the two ids disagree on this host.
     if let Some(why) = skip_reason() {
@@ -216,9 +216,9 @@ fn attributes_events_to_this_process_cgroup() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn a_workload_child_shows_up_attributed_to_its_cgroup() {
-    // P9.6 (the Phase 9 exit gate in miniature): launch a *workload* — a child process standing in for
+    // The exit gate in miniature: launch a *workload* — a child process standing in for
     // a sandbox's VMM — and assert its own `execve` and `openat` come back attributed to a cgroup id,
-    // the P9.4 sandbox-attribution axis. The child inherits our cgroup, so watching that id captures
+    // the sandbox-attribution axis. The child inherits our cgroup, so watching that id captures
     // the whole process tree (us + the workload) the way `watch_cgroup(vmm_cgroup)` captures a
     // sandbox's host footprint.
     if let Some(why) = skip_reason() {
@@ -227,7 +227,7 @@ fn a_workload_child_shows_up_attributed_to_its_cgroup() {
     }
     let my_cgroup = match cgroup_id_of_self() {
         Ok(id) => id,
-        // A cgroup-v1-only host has no unified `0::` line; skip rather than fail (as the P9.4 test).
+        // A cgroup-v1-only host has no unified `0::` line; skip rather than fail (as the cgroup-attribution test does).
         Err(e) => {
             eprintln!("skipping a_workload_child_shows_up_attributed_to_its_cgroup: {e}");
             return;
@@ -278,7 +278,7 @@ fn a_workload_child_shows_up_attributed_to_its_cgroup() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn stream_delivers_a_live_trace_over_a_window() {
-    // P9.3: `stream` must deliver events live and stop on the predicate. Filter to us, keep opening a
+    // `stream` must deliver events live and stop on the predicate. Filter to us, keep opening a
     // file from a background thread (same pid, so it passes the filter), stream for a short window, and
     // assert the callback saw events and the returned count matches.
     if let Some(why) = skip_reason() {

@@ -1,4 +1,4 @@
-//! Run Firecracker under its **jailer** (P6.1): the other half of the isolation story. Hardware
+//! Run Firecracker under its **jailer**: the other half of the isolation story. Hardware
 //! isolation (KVM) contains the *guest*; the jailer contains the *VMM process* on the host, so a
 //! Firecracker bug or a hostile guest that breaks out into the VMM still lands in a chroot, under a
 //! dropped uid/gid, in the jailer's mount namespace, reaching almost nothing.
@@ -22,13 +22,13 @@
 //! guest's envelope plus a fixed host-side **`pids.max`** cap (applied on cold boot when the host
 //! delegates the cgroup v2 controllers, each fail-open on its own), and Firecracker's built-in
 //! **seccomp** filters (on by default; we never pass `--no-seccomp`). Every
-//! boot feature composes with the jail (P7.0a-e): the **vsock exec channel** (its unix socket bound
+//! boot feature composes with the jail: the **vsock exec channel** (its unix socket bound
 //! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
 //! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`] — the shared-base path, not a
 //! full rootfs copy), a **NIC** (the tap lives in a per-VM netns the jailer joins via `--netns`,
 //! decision 017), **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
 //! (the bundle staged into the chroot; a confined prewarmed pool falls out). Leak-proof, cgroup-owned
-//! teardown lives in [`crate::lifetime`] (P6.7): the jailed VM's sentinel watches the jailer's
+//! teardown lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's
 //! cgroup at its precomputed path, so host death can't leak a jailed VMM either.
 
 use std::num::{NonZeroU32, NonZeroU8};
@@ -71,10 +71,10 @@ const CPU_PERIOD_US: u64 = 100_000;
 const MEMORY_OVERHEAD_MIB: u32 = 128;
 
 /// Confine the VMM under Firecracker's jailer. Opt-in via [`crate::BootConfig::jail`]; `None` (the
-/// default) boots Firecracker directly, as every phase before this one did.
+/// default) boots Firecracker directly, the original unjailed path.
 ///
 /// `#[non_exhaustive]`: construct via [`Jail::new`] / [`Jail::default`] and set fields, so later
-/// Phase-6 knobs (a netns, cgroup limits, seccomp level) can be added without breaking callers.
+/// further knobs (a netns, cgroup limits, seccomp level) can be added without breaking callers.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct Jail {
@@ -200,13 +200,13 @@ pub(crate) fn spawn_jailer(
         // hierarchy. The jailer always creates the microVM's cgroup (teardown removes it).
         .arg("--cgroup-version")
         .arg("2");
-    // CPU/memory limits (P6.2): the jailer writes each `<file>=<value>` into that cgroup. Empty when
+    // CPU/memory limits: the jailer writes each `<file>=<value>` into that cgroup. Empty when
     // the host doesn't delegate the cgroup v2 controllers (see `cgroup_limit_args`), so a jailed boot
     // still runs there, just without limits.
     for arg in cgroup_args {
         cmd.arg("--cgroup").arg(arg);
     }
-    // Networked boot (P7.0c): the jailer opens this netns handle and `setns`es into it (as root,
+    // Networked boot: the jailer opens this netns handle and `setns`es into it (as root,
     // before dropping privileges) so the confined Firecracker runs in the VM's own network namespace,
     // where its tap lives. The tap was created owned by the jailed uid, so the unprivileged VMM can
     // attach it.
@@ -214,7 +214,7 @@ pub(crate) fn spawn_jailer(
         cmd.arg("--netns").arg(netns);
     }
     // Everything after `--` is Firecracker's. No `--daemonize` (keep its stdout so the guest serial
-    // console still reaches the host) and no `--no-seccomp` (P6.3): Firecracker installs its built-in
+    // console still reaches the host) and no `--no-seccomp`: Firecracker installs its built-in
     // per-thread seccomp filters by default, and we deliberately never disable them.
     cmd.arg("--")
         .arg("--api-sock")
@@ -265,7 +265,7 @@ pub(crate) fn stage_into_chroot(
 
 /// Hand a chroot-resident file to the jailed uid: set `mode` and chown to `uid:gid`, so the
 /// dropped-privilege Firecracker can open it. The shared tail of [`stage_into_chroot`] (copied
-/// resources) and the P7.0d bulk-I/O images (built in place inside the chroot, nothing to copy).
+/// resources) and the bulk-I/O images (built in place inside the chroot, nothing to copy).
 /// `std::os::unix::fs::chown` is a safe wrapper (no `unsafe` on the host path).
 pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result<(), VmmError> {
     use std::os::unix::fs::PermissionsExt;
@@ -453,7 +453,7 @@ fn resolve_exec(firecracker: &Path) -> Result<PathBuf, VmmError> {
 /// The cgroup dir the jailer will create for a VM, computed **before** the jailer is spawned:
 /// `--cgroup-version 2` with no `--parent-cgroup` places the VMM at
 /// `<cgroup root>/<exec-file name>/<id>` (the jailer requires the exec-file name to contain
-/// "firecracker", so the component is stable). Precomputing it lets the lifetime sentinel (P6.7)
+/// "firecracker", so the component is stable). Precomputing it lets the lifetime sentinel
 /// watch the cgroup from the moment the jailer is spawned instead of after boot; `run_boot` still
 /// learns the *actual* dir from `/proc` and warns if they ever disagree.
 pub(crate) fn jailer_cgroup_dir(firecracker: &Path, id: &str) -> Option<PathBuf> {
@@ -490,7 +490,7 @@ pub(crate) fn remove_cgroup(dir: &Path) {
 
 /// Host-side cap on the number of tasks (processes + threads) the jailed VMM's cgroup may hold
 /// (`pids.max`). A guest fork-bomb is already bounded by `memory.max` and never reaches the host (its
-/// processes live in the guest's own kernel — P6.8); this is **defense in depth** for the narrow case
+/// processes live in the guest's own kernel); this is **defense in depth** for the narrow case
 /// of a hypervisor-level exploit that tries to fork *host* processes. Firecracker itself holds only a
 /// handful of tasks (an API + VMM thread and one per vCPU), so 1024 is enormous headroom that never
 /// trips a legitimate boot while still capping a runaway.
@@ -519,7 +519,7 @@ fn read_delegated() -> Delegated {
     }
 }
 
-/// Build the `--cgroup <file>=<value>` limits (P6.2, P15.7) from the delegation state — pure, so the
+/// Build the `--cgroup <file>=<value>` limits from the delegation state — pure, so the
 /// per-controller fail-open logic is unit-tested without a live cgroup fs. `cpu.max` bounds total CPU
 /// to `vcpus` cores and `memory.max` to the guest's RAM plus a fixed host-side overhead; both require
 /// the cpu **and** memory controllers, so a host missing either gets no limits at all (empty). The

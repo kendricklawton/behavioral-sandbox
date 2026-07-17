@@ -125,7 +125,7 @@ mod tests {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VmmError {
-    /// Not implemented yet — names the surface and the phase that lands it.
+    /// Not implemented yet — names the surface ahead of the implementation that lands it.
     Unimplemented(&'static str),
     /// The host can't do KVM (`/dev/kvm` missing or not permitted).
     NoKvm,
@@ -499,7 +499,7 @@ impl Sandbox {
     }
 
     /// The PID of the VMM process, for out-of-band supervision and the host-side observers (the
-    /// Phase-8 eBPF track); valid only while the sandbox lives. See [`RunningVm::vmm_pid`].
+    /// eBPF track); valid only while the sandbox lives. See [`RunningVm::vmm_pid`].
     #[must_use]
     pub fn vmm_pid(&self) -> u32 {
         self.vm.vmm_pid()
@@ -541,7 +541,7 @@ impl Sandbox {
     /// # Errors
     /// Currently never returns `Err` — teardown is best-effort and the guarantee lives in `Drop`
     /// (see [`RunningVm::shutdown`]) — but the signature stays fallible for the jailed/cgroup
-    /// teardown of later phases.
+    /// teardown that lands later.
     pub fn shutdown(self) -> Result<(), VmmError> {
         self.vm.shutdown()
     }

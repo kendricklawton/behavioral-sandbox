@@ -79,7 +79,7 @@ const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
 /// [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget onto the resource knobs.
 /// `#[non_exhaustive]`: construct via [`from_env`](BootConfig::from_env) /
-/// [`default`](BootConfig::default) and mutate fields — later phases add knobs (tap, jailer,
+/// [`default`](BootConfig::default) and mutate fields — new features add knobs (tap, jailer,
 /// snapshots) without breaking downstream literals.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -113,7 +113,7 @@ pub struct BootConfig {
     /// from [`Limits::output_cap`]. See [`Limits::output_cap`].
     pub output_cap: usize,
     /// Configure a virtio-vsock device with this guest context id, enabling the exec channel
-    /// ([`RunningVm::connect_agent`]). `None` (the default) boots with no vsock — the Phase 1
+    /// ([`RunningVm::connect_agent`]). `None` (the default) boots with no vsock — the boot-only
     /// demo path. Set to `Some(`[`DEFAULT_GUEST_CID`]`)` to enable exec.
     pub guest_cid: Option<u32>,
     /// Boot the base rootfs **read-only and shared** (no per-VM copy) under a per-run **tmpfs
@@ -124,13 +124,13 @@ pub struct BootConfig {
     /// default) keeps the copy-then-boot-read-write path. One concept, not two knobs: a read-only
     /// base *implies* the overlay (without it a read-only `/` would break the agent's `/tmp` workdir).
     pub read_only_root: bool,
-    /// A host directory to inject as **bulk read-only input** (P3.4): the driver builds an ext4 from
+    /// A host directory to inject as **bulk read-only input**: the driver builds an ext4 from
     /// it and attaches it as a second block device (`/dev/vdb`, `O_RDONLY`); the agent rootfs mounts
     /// it at `/input`, so a command reads it as `/input/...`. This is the whole-working-dir /
     /// large-file path — the vsock channel's [`Request::PutFile`](agent_channel::Request::PutFile) carries only small per-frame files.
     /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
     pub input_dir: Option<PathBuf>,
-    /// A host directory to receive **bulk output** (P3.5): the driver attaches a blank, **writable**
+    /// A host directory to receive **bulk output**: the driver attaches a blank, **writable**
     /// ext4 as a third block device (`/dev/vd?`, labelled `agent-output`); the agent rootfs mounts it
     /// read-write at `/output`, so a command's files under `/output/...` are pulled back here by
     /// [`RunningVm::collect_outputs`]. This is the whole-working-dir / large-file counterpart to the
@@ -138,18 +138,18 @@ pub struct BootConfig {
     /// device. Readback needs `e2fsck` + `debugfs` (e2fsprogs) on the host; the directory is created
     /// if missing and receives the guest's `/output` tree (host-escaping symlinks are dropped).
     pub output_dir: Option<PathBuf>,
-    /// Give the guest a **virtio-net** interface backed by a per-VM host **tap** device (P4.1). The
+    /// Give the guest a **virtio-net** interface backed by a per-VM host **tap** device. The
     /// driver creates the tap (`ip tuntap`, needs `CAP_NET_ADMIN`), attaches it via
     /// `PUT /network-interfaces`, and deletes it on teardown. `false` (the default) boots with **no
     /// NIC** — deny-by-default. Even when `true`, the guest gets an *unconfigured* `eth0`: this box
     /// adds no address, route, or masquerade (decision 008), so the guest reaches nothing until
     /// addressing lands. Needs `ip` (iproute2) on the host.
     pub enable_network: bool,
-    /// Run Firecracker under its **jailer** (P6.1): a chroot, a uid/gid drop, and the jailer's mount
+    /// Run Firecracker under its **jailer**: a chroot, a uid/gid drop, and the jailer's mount
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
     /// Firecracker directly. Setting it needs **real root** (the jailer `mknod`s device nodes, which
     /// `EPERM` in a non-initial user namespace) and the `jailer` binary. Composes with every other
-    /// boot feature (P7.0a-d): `guest_cid` (the vsock exec channel is staged chroot-relative under
+    /// boot feature: `guest_cid` (the vsock exec channel is staged chroot-relative under
     /// the dropped uid), `read_only_root` (the shared base is bind-mounted into the chroot),
     /// `enable_network` (the tap lives in a per-VM netns the jailer joins via `--netns`), and
     /// `input_dir`/`output_dir` (the images are built in place inside the chroot).
@@ -242,7 +242,7 @@ impl Default for BootConfig {
 
 /// A booted-and-ready microVM: the `firecracker` child, its API socket, scratch dir, and the
 /// captured console. Guaranteed teardown lives in `Drop`, so losing this value can't leak the VMM —
-/// and the cgroup-owned lifetime (the sentinel behind [`KillHandle`], P6.7) covers the paths `Drop`
+/// and the cgroup-owned lifetime (the sentinel behind [`KillHandle`]) covers the paths `Drop`
 /// can't: losing the whole *process* (Ctrl-C, SIGKILL, OOM) can't leak it either.
 #[derive(Debug)]
 #[must_use = "dropping a RunningVm kills its microVM"]
@@ -271,11 +271,11 @@ pub struct RunningVm {
     /// The per-VM host tap backing the guest's virtio-net, when the boot config set
     /// `enable_network`. Lives **outside** `workdir`, so teardown must delete it explicitly.
     pub(crate) tap: Option<Tap>,
-    /// The jail this VMM runs in, when the boot config set `jail` (P6.1). Its chroot lives under
+    /// The jail this VMM runs in, when the boot config set `jail`. Its chroot lives under
     /// `workdir` (reclaimed with it), but the jailer's cgroup is outside, so teardown removes it
     /// explicitly, like the tap.
     pub(crate) chroot: Option<Chroot>,
-    /// The cgroup-owned lifetime machinery (P6.7): the VM's lifetime cgroup, the armed sentinel
+    /// The cgroup-owned lifetime machinery: the VM's lifetime cgroup, the armed sentinel
     /// that reaps the VM if this *process* dies, and the [`KillHandle`] state. Torn down with the
     /// VM on every path.
     pub(crate) lifetime: VmLifetime,
@@ -364,7 +364,7 @@ impl Vm {
     /// [`VmmError::Vmm`] for any Firecracker API or process failure. On any error the child is
     /// killed and the scratch dir removed before returning.
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
-        // The jail composes with every boot feature now (P7.0a-d): vsock (socket staged
+        // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
         // (images built in place inside the chroot). The decision-013 deny-by-default refusal that
@@ -399,7 +399,7 @@ impl RunningVm {
     }
 
     /// The PID of the `firecracker` VMM process. Useful for out-of-band supervision — putting the VMM
-    /// in a cgroup (Phase 6), attaching host-side observers to it, or asserting it was reaped on
+    /// in a cgroup, attaching host-side observers to it, or asserting it was reaped on
     /// teardown. The process is killed and reaped when this `RunningVm` is dropped, so the PID is only
     /// valid for the VM's lifetime.
     #[must_use]
@@ -408,7 +408,7 @@ impl RunningVm {
     }
 
     /// A cheap, cloneable, `Send + Sync` [`KillHandle`] that force-kills this VM from any thread —
-    /// the **host-gave-up path** (P6.7). `exec` borrows `&self` and `shutdown` consumes `self`, so
+    /// the **host-gave-up path**. `exec` borrows `&self` and `shutdown` consumes `self`, so
     /// a caller blocked in `exec` can't otherwise be stopped; killing through the handle makes the
     /// VMM's vsock peer close, and the blocked call returns a typed error. The exec deadline covers
     /// the common timeout case; this covers the host abandoning the run entirely. After a kill,
@@ -435,7 +435,7 @@ impl RunningVm {
 
     /// The host tap interface backing this VM's NIC, when booted with
     /// [`enable_network`](BootConfig::enable_network); `None` otherwise. This is the handle the
-    /// host-side eBPF track (Phase 8) binds policy to. The tap lives **inside** this VM's network
+    /// host-side eBPF track binds policy to. The tap lives **inside** this VM's network
     /// namespace ([`netns`](Self::netns)), so the loader resolves it to an ifindex and attaches
     /// `tc`/XDP programs to *this* sandbox's traffic **within that netns** — pair it with `netns()`.
     #[must_use]
@@ -446,15 +446,15 @@ impl RunningVm {
     /// The per-VM **network namespace** name backing this VM's NIC, when booted with
     /// [`enable_network`](BootConfig::enable_network); `None` otherwise. The tap the guest's virtio-net
     /// rides ([`tap_name`](Self::tap_name)) lives inside it, isolated from the host and every other VM,
-    /// so the Phase-8 eBPF loader enters this netns (its handle is `/run/netns/<name>`) to attach to
-    /// the tap. Also the unit of isolation that replaces P4.4's per-VM /30 reservation.
+    /// so the eBPF loader enters this netns (its handle is `/run/netns/<name>`) to attach to
+    /// the tap. Also the unit of isolation that replaces the per-VM /30 reservation.
     #[must_use]
     pub fn netns(&self) -> Option<&str> {
         self.tap.as_ref().map(|t| t.netns.as_str())
     }
 
     /// Connect to the in-guest agent over vsock and complete the channel handshake, returning a
-    /// protocol-ready [`ClientConnection`]. This is the host side of the exec path (P2.4 builds
+    /// protocol-ready [`ClientConnection`]. This is the host side of the exec path (`exec` builds
     /// `exec` on top): it dials Firecracker's vsock socket, speaks the `CONNECT <port>` handshake,
     /// sets read/write deadlines, then does the channel handshake.
     ///
@@ -527,7 +527,7 @@ impl RunningVm {
     /// send, not just freed (best-effort: the caller's own buffers and the kernel's socket buffers
     /// are out of the engine's reach). What the *command* does with its inputs (echo them to stdout,
     /// write them to `/output`) is the run's own data in [`RunResult`], not an engine surface. The
-    /// audit log (Phase 13) will record *that* inputs were injected — paths/keys/sizes or
+    /// audit log will record *that* inputs were injected — paths/keys/sizes or
     /// hashes — never contents.
     ///
     /// # Errors
@@ -645,7 +645,7 @@ impl RunningVm {
     ///
     /// # Errors
     /// Currently never returns `Err` — teardown is best-effort — but the signature stays fallible
-    /// for the jailed/cgroup teardown of later phases.
+    /// for the jailed/cgroup teardown that lands later.
     pub fn shutdown(mut self) -> Result<(), VmmError> {
         // The kill in `Drop` is what actually guarantees no leak; this is just the polite ask.
         let _ = self.power_off_and_wait(Instant::now() + POWER_OFF_TIMEOUT);
@@ -765,7 +765,7 @@ mod tests {
     }
 
     // (`jail_refuses_half_confined_boots` lived here while some boot features were not yet jailed;
-    // it retired with P7.0d — the jail now composes with every feature, so there is nothing left to
+    // it retired once the jail composed with every feature, so there is nothing left to
     // refuse. If a future feature ships unjailed, reinstate the refusal in `Vm::boot` and this test.)
 
     #[test]

@@ -1,4 +1,4 @@
-//! The bulk input/output block devices (P3.4/P3.5): build their ext4 images rootless
+//! The bulk input/output block devices: build their ext4 images rootless
 //! (`mke2fs -d`), and read the output tree back from an untrusted image safely (fsck'd, bounded,
 //! symlink-sanitized) after the guest is dead.
 
@@ -15,7 +15,7 @@ use agent_channel::{INPUT_LABEL, OUTPUT_LABEL};
 use crate::paths::path_str;
 use crate::VmmError;
 
-/// Size of the blank writable output image (P3.5). A fixed cap for now — it's the natural bulk-output
+/// Size of the blank writable output image. A fixed cap for now — it's the natural bulk-output
 /// bound (the guest can't write more than the filesystem holds), mirroring the channel path's
 /// [`MAX_EXEC_OUTPUT`]. Built with `lazy_itable_init=0` so the guest kernel never balloons the
 /// metadata: a fresh image is ~a few MiB of real host blocks, growing only with what's written.
@@ -38,7 +38,7 @@ pub(crate) struct OutputDevice {
     pub(crate) image: PathBuf,
     pub(crate) dest: PathBuf,
 }
-/// Build a read-only ext4 from `src_dir` for the bulk-input block device (P3.4), populated
+/// Build a read-only ext4 from `src_dir` for the bulk-input block device, populated
 /// **rootless** via `mke2fs -d` (no loopback, no `sudo`). Sized from the tree's byte total with
 /// slack and given enough inodes for its file count; the image lands in `workdir` (the per-VM
 /// scratch dir) so teardown reclaims it. Returns the image path.
@@ -82,7 +82,7 @@ pub(crate) fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBu
     Ok(image)
 }
 
-/// Build a **blank, writable** ext4 for the bulk-output block device (P3.5), rootless via `mke2fs`.
+/// Build a **blank, writable** ext4 for the bulk-output block device, rootless via `mke2fs`.
 /// No `-d` (nothing to seed) and `lazy_itable_init=0`/`lazy_journal_init=0` so the guest kernel never
 /// lazily zeroes the inode table at runtime — that would balloon the sparse image toward its full
 /// [`OUTPUT_IMAGE_MIB`] on the host regardless of how little the command writes. Labelled

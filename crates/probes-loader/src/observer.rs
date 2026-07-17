@@ -1,12 +1,12 @@
-//! The attach bundle (P13.1/P13.5): bind the three host-side probes to one sandbox and roll their
-//! output into a [`RunRecord`], and detach + finalize on close (P13.3).
+//! The attach bundle: bind the three host-side probes to one sandbox and roll their
+//! output into a [`RunRecord`], and detach + finalize on close.
 //!
 //! `agent-vmm` stays independent of this crate (decisions 024/026/028), so the bundle takes **plain
 //! values** the driver already exposes — the VMM pid (→ its cgroup, for the syscall tracer and the CPU
 //! meter) and the netns + tap names (for the network monitor) — never a `Sandbox`. The composition is
 //! the caller's (the CLI/daemon later): a short launch sequence around `Sandbox::open`.
 //!
-//! **Both host-wide probes are shared, not per-VM (P13.5).** The `sched_switch` meter (decision 026) and
+//! **Both host-wide probes are shared, not per-VM.** The `sched_switch` meter (decision 026) and
 //! the three `sys_enter_*` tracepoints are *global*: a fresh copy per sandbox would run *N* programs on
 //! every context switch / syscall (O(sandboxes) — the shape decision 026 rejects). So each is loaded
 //! **once** for the host — [`SharedMeter`] and [`SharedTracer`] — and every sandbox registers its cgroup
@@ -54,7 +54,7 @@ impl SharedMeter {
     }
 }
 
-/// A process-shared [`SyscallTracer`] (P13.5): loaded **once**, switched to set mode, and handed to every
+/// A process-shared [`SyscallTracer`]: loaded **once**, switched to set mode, and handed to every
 /// sandbox's [`attach`](SandboxProbes::attach). One shared tracer serves all sandboxes — each registers
 /// its cgroup as a target and gets a private [`SyscallFold`]; a single drain routes each event to the
 /// matching cgroup's fold, so concurrent sandboxes stay independent (a sandbox reads only its own cgroup's
@@ -145,7 +145,7 @@ fn drain_route(inner: &mut TracerInner) {
 }
 
 /// Live bundle for one VM: a target registration on the shared tracer + meter, the per-VM tap, and the
-/// coverage gaps seen so far. [`collect`](Self::collect) finalizes it into a [`RunRecord`] (P13.3) while
+/// coverage gaps seen so far. [`collect`](Self::collect) finalizes it into a [`RunRecord`] while
 /// the sandbox is still alive; dropping without collecting detaches (RAII) and unregisters both shared
 /// targets so a dead sandbox leaves no residue.
 #[must_use = "dropping SandboxProbes detaches this run's probes; call collect() first to finalize the record"]
@@ -165,7 +165,7 @@ pub struct SandboxProbes {
 }
 
 impl SandboxProbes {
-    /// P13.1/P13.5, post-boot. Bind every available probe to this one VM by plain values:
+    /// Post-boot: bind every available probe to this one VM by plain values:
     /// - resolve the VMM's cgroup id and register it on the shared syscall tracer (its host-syscall
     ///   footprint accrues from here);
     /// - if `netns` + `tap` are present, attach a per-VM tap monitor — enforcing `egress` (armed before
@@ -257,7 +257,7 @@ impl SandboxProbes {
         }
     }
 
-    /// P13.2/P13.3. **Finalize + detach on close**: read the three probes into a [`RunRecord`] and
+    /// **Finalize + detach on close**: read the three probes into a [`RunRecord`] and
     /// unregister this run's cgroup from the shared tracer + meter. **Must run while the sandbox is still
     /// alive** — the cgroup dir and map fds must be live. `timing` comes from the caller
     /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `agent-vmm`.

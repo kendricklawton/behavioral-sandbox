@@ -10,6 +10,7 @@
 /artifacts/
 # Local .md files
 FIX.md
+MASTER.md
 # mdBook output (`mdbook build docs`) — the book renders from the committed docs/*.md
 /docs/book/
 # cargo-fuzz working data (the `fuzz/` crate is excluded from the workspace; `fuzz/target` is already
