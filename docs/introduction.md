@@ -75,8 +75,8 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 Early, under active development, nothing here is production yet. The staged plan and live
 progress live in [`ROADMAP.md`](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md)
-(its checkboxes are the state); hard-to-reverse choices are recorded as dated decisions in
-[Architecture decisions](./contributing-architecture.md). Every
+(its checkboxes are the state); hard-to-reverse choices are recorded as dated
+[decision records](./adr/README.md). Every
 completed phase ships a working demo, so each capability documented in this book is proven
 running end to end, not just asserted.
 

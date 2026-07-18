@@ -341,8 +341,8 @@ impl SyscallFold {
     pub fn finish(self) -> SyscallFootprint {
         let notable: Vec<NotableSyscall> = self
             .notable
-            .into_iter()
-            .flat_map(|(_, by_detail)| by_detail)
+            .into_values()
+            .flatten()
             .map(|(detail, acc)| NotableSyscall {
                 kind: acc.kind,
                 detail,

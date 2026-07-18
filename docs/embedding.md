@@ -6,8 +6,8 @@ API. The rustdoc on each item is the reference; this is the contract's shape and
 The second half draws the line this project refuses to cross, what the engine deliberately is
 **not**, because a runtime that quietly grows platform features stops being embeddable.
 
-Numbers in parentheses (013, 015, …) are dated decision entries in
-[Architecture decisions](./contributing-architecture.md); each records the rationale and the alternatives that
+Numbers in parentheses (013, 015, …) are dated
+[decision records](./adr/README.md); each ADR records the rationale and the alternatives that
 lost.
 
 ## The lifecycle

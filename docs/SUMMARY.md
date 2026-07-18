@@ -16,7 +16,7 @@
 - [Security](./security.md)
   - [Threat model](./threat-model.md)
 - [Contributing](./contributing.md)
-  - [Architecture & decisions](./contributing-architecture.md)
+  - [Architecture overview](./contributing-architecture.md)
     - [Decision records](./adr/README.md)
     - [001. Drive Firecracker via its HTTP API over a unix socket](./adr/001-drive-firecracker-via-its-http-api-over-a-unix-socket.md)
     - [002. Host↔guest channel: vsock + a tiny guest agent](./adr/002-host-guest-channel-vsock-a-tiny-guest-agent.md)

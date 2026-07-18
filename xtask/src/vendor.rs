@@ -1,7 +1,7 @@
 //! `cargo xtask vendor`, snapshot every sha-pinned upstream input into a **local mirror**, so a
 //! fresh host builds the engine without the Firecracker S3 bucket or the Alpine CDN staying alive.
 //!
-//! This is the durable hardening [decision 007](../../docs/contributing-architecture.md) deferred:
+//! This is the durable hardening [decision 007](../../docs/adr/007-a-byte-for-byte-reproducible-rootfs-build.md) deferred:
 //! the boot kernel + rootfs (Firecracker CI), the Alpine minirootfs, the static `apk` tool, **and**
 //! the resolved `.apk` package closure are all fetched once, sha-verified, and written under the
 //! vendor dir alongside a [`MANIFEST_NAME`] recording each file's hash. Afterwards, setting

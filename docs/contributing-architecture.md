@@ -1,29 +1,16 @@
-# Architecture decisions
+# Architecture overview
 
-The record [`ROADMAP.md`](../ROADMAP.md) references: every roadmap item tagged `(decision)`
-produces a dated, numbered entry here, the decision, the alternatives considered, and the why,
-so the reasoning outlives the diff. Each entry is keyed by its own number and date (not a phase),
-so it stands on its own as the roadmap evolves. Entries are append-only; reversing one is a new entry, not an
-edit. (Roadmap *re-scopes*, cut phases and why, live in the roadmap's notes, not here.)
+The engine's shape in one page: the crates, and how the isolation / observability / driver
+boundaries divide them. The hard-to-reverse **decisions** (each one's rationale, the alternatives
+considered, and the why) live separately as **ADRs** under [`docs/adr/`](./adr/README.md), one
+dated, numbered `NNN-*.md` file per choice; the roadmap's `(decision)` tags point at those numbers,
+and reversing one is a new ADR, not an edit.
 
-**The Firecracker + aya sandbox engine.** This decision log covers the self-hostable, isolated
-**code-execution sandbox**: **Firecracker** microVMs for hardware isolation, **aya/eBPF** for
-host-side observability and enforcement (see `.rules`, `ROADMAP.md`). The guiding properties are
-the four core properties: *isolation is hardware · observe & enforce from the host · engine not platform ·
-measured, not marketed.*
-
-Decisions queued by the (sandbox) roadmap, to be recorded here as they're made:
-
-- **P11.6**, where egress policy lives and its schema (engine *mechanism*, not org policy).
-- **P15.6**, the security boundary and its trust assumptions (what's trusted: CPU/KVM/host
-  kernel; what isn't: the guest).
-- **P16.2**, the driver daemon's wire API surface: JSON-over-unix-socket vs gRPC.
-- **P20.1**, freeze + version the wire API as the language-agnostic **SDK contract** (schema,
-  error taxonomy, semver compat policy). *(vNext; the SDKs live in their own repos, see roadmap
-  Phase 20.)*
-- **P21.1**, the **Wasmtime sibling** is a separate repo that reuses the driver API + audit-log
-  format, **not a plug-in backend** here (so *isolation is hardware* is never traded in
-  this engine). *(vNext, see roadmap Phase 21.)*
+**The Firecracker + aya sandbox engine.** A self-hostable, isolated **code-execution sandbox**:
+**Firecracker** microVMs for hardware isolation, **aya/eBPF** for host-side observability and
+enforcement (see `.rules`, `ROADMAP.md`). The guiding properties are the four core properties:
+*isolation is hardware · observe & enforce from the host · engine not platform · measured, not
+marketed.*
 
 ---
 

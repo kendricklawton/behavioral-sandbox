@@ -128,8 +128,7 @@ never part of its trust boundary, and never traded against the hardware-isolatio
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
-[documentation](docs/contributing.md). The operating manual is [`.rules`](.rules); the staged
-plan is [`ROADMAP.md`](ROADMAP.md); decisions are recorded in [docs/contributing-architecture.md](docs/contributing-architecture.md).
+[documentation](docs/contributing.md). The operating manual for agents is [`.rules`](.rules); decisions are recorded in [docs/adr/contributing-architecture.md](docs/contributing-architecture.md).
 
 ## License
 

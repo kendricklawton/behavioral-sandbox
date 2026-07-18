@@ -214,7 +214,7 @@ fn io_err(ctx: &str, e: &std::io::Error) -> VmmError {
 }
 
 // ---- API request bodies (serialized to the JSON Firecracker expects) --------------------------
-// Field names and shapes are pinned to Firecracker v1.9 (see docs/contributing-architecture.md, decision 001); the API
+// Field names and shapes are pinned to Firecracker v1.9 (decision 001, an ADR under docs/adr/); the API
 // schema has drifted across versions, so a version bump means re-checking these.
 
 /// `PUT /boot-source`, the guest kernel and its command line.

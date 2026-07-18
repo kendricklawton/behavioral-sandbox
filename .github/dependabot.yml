@@ -1,0 +1,20 @@
+# Dependabot keeps the third-party GitHub Actions current. Each `uses:` in the workflows is pinned
+# to a full commit SHA (a floating tag can be repointed at malicious code, and it runs with our
+# GITHUB_TOKEN, on the self-hosted KVM box for the privileged gate); a pinned SHA then goes stale
+# on its own, so this opens a weekly PR bumping the SHA and its version comment. One grouped PR, so
+# a routine bump is a single review, not five.
+#
+# Actions only, on purpose: the Rust dependency lock is hand-pinned and mirrored offline (the
+# vendored mirror plus audit.yml's daily RustSec check), so Cargo bumps stay a manual, reviewed
+# step, never an automated PR. Nothing here lands without a human merge either; Dependabot only
+# proposes.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

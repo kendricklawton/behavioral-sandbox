@@ -44,7 +44,7 @@ crates/
                  `Sandbox` lifecycle API. No `unsafe` on the host path; a hostile guest is a
                  typed error, never a panic/hang/leak.
   channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
-                 shared by the driver and the guest agent. See `docs/contributing-architecture.md` decision 002.
+                 shared by the driver and the guest agent. See decision 002 (an ADR under `docs/adr/`).
   guest-agent/   the in-guest agent (`agent-guest`): runs one command per connection and streams
                  stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at
                  Phase 3. Exec/IO convenience only, never the security boundary.

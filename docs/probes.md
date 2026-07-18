@@ -295,7 +295,7 @@ turns that into a real **stream of per-event records**:
 - **Filter to one sandbox.** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
-  the default watches the whole host. See `docs/contributing-architecture.md` decision 021.
+  the default watches the whole host. See decision 021 (an ADR under `docs/adr/`).
 - **Or a *set* of sandboxes, for one shared tracer.** A `TRACE_TARGETS` cgroup set + a
   `TRACE_SET` mode toggle (the `METER_TARGETS`/`METER_ALL` pattern) let **one** attached tracer serve
   every concurrent sandbox, each registers its cgroup with `SyscallTracer::add_target`, and only those

@@ -11,8 +11,8 @@ Work is organized into sequentially-gated phases in
 [`ROADMAP.md`](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md), the **single source
 of truth for progress** (its checkboxes are the state). Work the first unchecked box in ID order,
 one item per iteration; a phase isn't left until its **Exit gate** passes (a working demo). Items
-tagged `(decision)` record the hard-to-reverse choice as a dated, numbered entry in
-[Architecture decisions](./contributing-architecture.md), so the reasoning outlives the diff.
+tagged `(decision)` record the hard-to-reverse choice as a dated, numbered
+[ADR under `docs/adr/`](./adr/README.md), so the reasoning outlives the diff.
 
 ## The invariants (never trade these away)
 

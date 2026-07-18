@@ -38,8 +38,11 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       # Everything `cargo xtask ci` needs, so none of its layers soft-skip here: stable
       # fmt/clippy, and the probes' nightly + rust-src (`build-std` for bpfel-unknown-none).
@@ -48,7 +51,7 @@ jobs:
           rustup component add rustfmt clippy
           rustup toolchain install nightly --profile minimal --component rust-src
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           # The probes are their own workspace (own toolchain, own target dir); cache both.
           workspaces: |
@@ -57,7 +60,7 @@ jobs:
 
       # Prebuilt binary (both arches), so the gate's `cargo deny check` layer has its tool.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-deny
 
@@ -76,6 +79,7 @@ jobs:
     if: always()
     needs: [gate]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Verify every job passed
         run: jq --exit-status 'all(.result == "success" or .result == "skipped")' <<< '${{ toJson(needs) }}'

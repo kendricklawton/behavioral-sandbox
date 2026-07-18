@@ -32,7 +32,7 @@ compatibility note: the parts the isolation-and-audit thesis rests on are **hard
 rest **degrade with a stated consequence**. `agent doctor` reports exactly where your host sits and
 exits non-zero if a hard requirement is missing.
 
-**Hard requirements** (off these, the host is not supported, [decision 036](./contributing-architecture.md)):
+**Hard requirements** (off these, the host is not supported, [decision 036](./adr/036-supported-platforms-two-architectures-a-security.md)):
 
 | | Requirement | Why |
 |---|---|---|
@@ -52,7 +52,7 @@ tracks their supported set.
 - No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
   egress enforcement refuses** rather than running unenforced.
 - **cgroup v2** controllers not delegated → jailed VMs run without CPU/memory caps (a fail-open DoS
-  mitigation, not the isolation boundary, [decision 013](./contributing-architecture.md)).
+  mitigation, not the isolation boundary, [decision 013](./adr/013-per-run-resource-policy-one-limits-struct-of.md)).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
@@ -133,4 +133,4 @@ The mirror is **not** committed (it holds downloaded images, like `artifacts/`);
 offline convenience, produced once. The `.apk` closure is pinned at vendor time (Alpine branch repos
 delete old package revisions, so there is no stable per-package URL to pin in source), which makes an
 offline build **more** reproducible than the live-CDN one, it installs from the frozen cache the
-manifest hashes. See [decision 037](./contributing-architecture.md) for the full rationale.
+manifest hashes. See [decision 037](./adr/037-single-command-self-host-a-vendored-offline-mirror-of.md) for the full rationale.
