@@ -1,0 +1,6 @@
+# actionlint config: declare the self-hosted runner labels ci-privileged.yml targets, so the
+# linter can check them. `kvm` is the custom label to set when registering the KVM-capable
+# bare-metal box as a self-hosted runner.
+self-hosted-runner:
+  labels:
+    - kvm

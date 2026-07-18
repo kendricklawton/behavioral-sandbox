@@ -1,0 +1,57 @@
+name: Feature request
+description: Something the engine should do that it doesn't.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        One scope note before you write: this repo is **an engine, not a platform**. Multi-tenant
+        auth, billing, fleet scheduling, and dashboards are deliberately out of scope — they belong
+        to whatever hosts the engine (see the non-goals in `docs/embedding.md`). Requests inside
+        that line are very welcome.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >-
+        What are you trying to do that the engine can't (or makes harder than it should be)?
+        Describe the use case, not just the missing knob — sometimes there's a better shape for it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape (optional)
+      description: >-
+        If you have a concrete API/CLI/wire shape in mind, sketch it. If it touches the pinned
+        public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`, the channel wire protocol) or the
+        audit-record format, say so — those change deliberately.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface does it touch?
+      options:
+        - CLI (agent run / shell / doctor)
+        - agentd daemon + wire API
+        - engine API (the vmm library)
+        - probes / audit record
+        - benchmarks / docs / tooling
+        - not sure
+      multiple: true
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: >-
+            This is engine work — not tenancy, auth, billing, fleet scheduling, or a dashboard
+            (those are the hoster's job, out of scope by design).
+          required: true

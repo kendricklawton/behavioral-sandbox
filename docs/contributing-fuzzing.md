@@ -29,12 +29,15 @@ thousands of inputs at the decoders each run: arbitrary bytes, well-framed frame
 frame. Fixed seeds make any failure reproduce exactly, so it never flakes. This is the continuous
 guard.
 
-**Deep, on demand (`fuzz/`, nightly + libFuzzer).** A `cargo fuzz` harness for long, coverage-guided
-runs that explore far more of the input space than the in-gate pass. It lives in `fuzz/`, a crate
+**Deep, scheduled + on demand (`fuzz/`, nightly + libFuzzer).** A `cargo fuzz` harness for long,
+coverage-guided runs that explore far more of the input space than the in-gate pass. It lives in
+`fuzz/`, a crate
 **excluded from the workspace** with its own `[workspace]` table, so nightly and libFuzzer never touch
 the everyday stable gate. It reaches the internal decoders through the channel crate's off-by-default
 `fuzzing` feature (module `agent_channel::fuzz`), which exposes them without changing the default
-build or the wire contract.
+build or the wire contract. CI runs this tier every night (`.github/workflows/fuzz.yml`): a bounded
+15 minutes per target through the same `cargo xtask fuzz` a dev box uses; a crash fails the run and
+uploads the reproducing input as a workflow artifact.
 
 ## Running it
 

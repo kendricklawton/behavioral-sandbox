@@ -1,0 +1,10 @@
+# Issue intake routing. The one rule that matters: suspected vulnerabilities go to the private
+# security-advisory form, never a public issue — isolation and the audit trail are the product.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/kendricklawton/agent/security/advisories/new
+    about: >-
+      Please do NOT open a public issue for a suspected vulnerability. This link goes to GitHub's
+      private reporting form; the security model and what counts as a security bug are in
+      docs/security.md.

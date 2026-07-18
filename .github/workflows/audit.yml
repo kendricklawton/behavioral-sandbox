@@ -1,0 +1,23 @@
+# Advisories age: a new RustSec advisory can land against the *pinned* Cargo.lock with no push to
+# trigger CI, so the advisory half of the supply-chain check also runs on a schedule — the same
+# tool the gate uses (`cargo deny check` reads the same RustSec database `cargo-audit` does, plus
+# bans/licenses/sources on every push; this cron re-checks only the half that goes stale).
+name: audit
+
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: advisories (pinned lock vs RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories

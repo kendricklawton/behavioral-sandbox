@@ -1,0 +1,52 @@
+# The deep fuzzing tier (docs/contributing-fuzzing.md): coverage-guided libFuzzer over the
+# host↔guest channel decoders — the one place attacker-controlled bytes meet the host path. The CI
+# gate runs the cheap dependency-free property tests on every push; this runs the real fuzzer
+# nightly, a bounded 15 minutes per target, through the same `cargo xtask fuzz` a dev box uses. A
+# crash fails the run and uploads the reproducing input from fuzz/artifacts/ — feed the minimized
+# reproducer back as a `crates/channel` unit test when fixing it.
+name: fuzz
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  libfuzzer:
+    name: fuzz ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ordered by value: channel_response is the host reading guest-controlled bytes.
+        target: [channel_response, channel_request, channel_frame, channel_handshake]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The fuzz harness is its own workspace; cache it alongside the root (for xtask).
+          workspaces: |
+            .
+            fuzz
+
+      # No prebuilt binary; compiled once per cache key, then served from the cached ~/.cargo/bin.
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz for 15 minutes
+        run: cargo xtask fuzz ${{ matrix.target }} --seconds 900
+
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

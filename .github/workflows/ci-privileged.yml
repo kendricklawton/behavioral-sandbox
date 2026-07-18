@@ -1,0 +1,45 @@
+# The privileged gate — `cargo xtask ci-privileged` on a self-hosted KVM box: boot a real microVM,
+# exec through it, attach the eBPF probes, assert the observed record. This is the half of the
+# engine the hosted gate can't touch (stock runners for the arm64 leg have no /dev/kvm, and the
+# jailer wants real root), so it runs on your own metal, registered as a self-hosted runner with
+# the labels below.
+#
+# SECURITY: dispatch-only, and it must NEVER gain a `pull_request` trigger — a self-hosted runner
+# executing fork PRs is arbitrary code on your metal. Flip on the schedule once the runner is
+# registered; keep triggers to code that is already yours (schedule / manual dispatch).
+#
+# Box prep (one-time, checked by `cargo xtask setup`): /dev/kvm + KVM group access, real root for
+# the jailed tests, CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN for the probe tests, `readelf` (binutils),
+# and the built artifacts — `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`. The gate
+# fails with its own clear message if any of these are missing.
+name: CI (privileged)
+
+on:
+  workflow_dispatch:
+  # Uncomment once the self-hosted runner is registered; until then a schedule would just queue
+  # nightly red X's against a runner that doesn't exist.
+  # schedule:
+  #   - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+# One run at a time: two privileged gates racing on the same box would fight over taps, netns
+# names, and the KVM headroom the benches assume.
+concurrency:
+  group: ci-privileged
+  cancel-in-progress: false
+
+jobs:
+  privileged:
+    name: VM boot + probe attach (self-hosted)
+    runs-on: [self-hosted, linux, kvm]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host check
+        run: cargo xtask setup
+
+      - name: Run the privileged gate
+        run: cargo xtask ci-privileged

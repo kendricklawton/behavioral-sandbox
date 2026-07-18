@@ -1,0 +1,76 @@
+name: Bug report
+description: Something the engine does wrong — a boot, exec, snapshot, probe, or audit-record misbehavior.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for the report. One check first: if this is a **suspected vulnerability** (an
+        isolation escape, a way to tamper with the audit log, a host-path panic from guest input),
+        please use the private
+        [security-advisory form](https://github.com/kendricklawton/agent/security/advisories/new)
+        instead of a public issue.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened, and what did you expect?
+      description: The observed behavior vs the expected one. Exact error text beats a paraphrase.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce it
+      description: >-
+        The exact command line (`agent run …` / `agent shell …` / `agentd` + client verbs) or the
+        embedding code, plus the workload that triggers it. The smaller the repro, the faster the fix.
+      placeholder: |
+        agent run --net -- python3 -c '...'
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`agent doctor` output"
+      description: >-
+        Paste the full output — it captures KVM, Firecracker, jailer, cgroup, and eBPF readiness in
+        one shot, which answers most environment questions up front.
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: host
+    attributes:
+      label: Host kernel and architecture
+      description: "`uname -srm` (e.g. `Linux 6.12.1-arch1 x86_64`)."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface?
+      options:
+        - CLI, jailed (the default)
+        - CLI, --unjailed
+        - agentd daemon
+        - embedded (the vmm library API)
+      multiple: true
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        stderr (the `tracing` output) and, if relevant, the run's JSON result/audit record from
+        stdout. Trim to the interesting window if it's long.
+      render: text
+    validations:
+      required: false

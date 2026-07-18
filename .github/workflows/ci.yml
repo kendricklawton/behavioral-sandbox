@@ -1,9 +1,13 @@
-# CI — the host-safe gate: fmt, clippy, build, test, docs, and supply-chain. Needs no KVM, root,
-# or network, so it runs on a stock runner. Mirror it locally with `cargo xtask ci`.
+# CI — the host-safe gate, one definition: every job runs `cargo xtask ci`, the same command a dev
+# box runs, so this workflow cannot drift from the local gate. (It once did: this file used to
+# hand-mirror the steps and silently missed the eBPF object build.) The matrix runs the gate on
+# x86_64 and aarch64 — Firecracker's two architectures — on real hardware, no KVM needed, so
+# type-width/layout/cfg drift on either arch is caught on every push.
 #
 # The privileged tests (booting a microVM, loading/attaching eBPF) need /dev/kvm + elevated caps
-# and cannot run on a stock GitHub runner — a standard cloud VM can't nest KVM. They run under
-# `cargo xtask ci-privileged` on a bare-metal / nested-virt (or self-hosted) runner, added later.
+# and run under `cargo xtask ci-privileged` on a bare-metal / self-hosted runner — never gating
+# the everyday loop. Scheduled companions: audit.yml (advisories vs the pinned lock, daily) and
+# fuzz.yml (the deep libFuzzer tier, nightly).
 name: CI
 
 on:
@@ -21,54 +25,56 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Deny compiler warnings on build/test too, not just clippy. Dependency warnings are `--cap-lints`
-  # capped by cargo, so only our own crates are held to this — keeping CI == the local gate.
-  RUSTFLAGS: -D warnings
 
 jobs:
-  check:
-    name: build · lint · test
-    runs-on: ubuntu-latest
+  gate:
+    name: gate (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install the toolchain
-        run: rustup component add rustfmt clippy
+
+      # Everything `cargo xtask ci` needs, so none of its layers soft-skip here: stable
+      # fmt/clippy, and the probes' nightly + rust-src (`build-std` for bpfel-unknown-none).
+      - name: Install the toolchains
+        run: |
+          rustup component add rustfmt clippy
+          rustup toolchain install nightly --profile minimal --component rust-src
+
       - uses: Swatinem/rust-cache@v2
-
-      - name: Format
-        run: cargo fmt --all --check
-
-      # --locked everywhere: build from the committed Cargo.lock, so a stale lock fails CI here
-      # instead of surfacing at release time.
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-      - name: Build
-        run: cargo build --workspace --locked
-
-      - name: Test
-        run: cargo test --workspace --locked
-
-      - name: Docs
-        run: cargo doc --no-deps --workspace --locked
-        env:
-          RUSTDOCFLAGS: -D warnings
-
-  deny:
-    name: supply chain (cargo-deny)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check
+          # The probes are their own workspace (own toolchain, own target dir); cache both.
+          workspaces: |
+            .
+            crates/probes
+
+      # Prebuilt binary (both arches), so the gate's `cargo deny check` layer has its tool.
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # No prebuilt binaries published; compiled once per cache key, then served from the
+      # cached ~/.cargo/bin.
+      - name: Install bpf-linker
+        run: cargo install bpf-linker --locked
+
+      - name: Run the gate
+        run: cargo xtask ci
 
   # The single check to require in branch protection. Green only if every job above succeeded or
   # was skipped — add a job above and it's covered here automatically, no branch-rule edit needed.
   ci-status:
     name: CI status
     if: always()
-    needs: [check, deny]
+    needs: [gate]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every job passed
