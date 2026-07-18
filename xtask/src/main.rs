@@ -11,8 +11,17 @@
 //!   when `bpf-linker`/`rustup` are absent.
 //! - **`build-rootfs`** — assemble the reproducible guest rootfs (Alpine base + baked-in agent).
 //! - **`bench-boot`** — measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
-//! - **`bench-warm`** — time-to-first-result percentiles: cold boot vs prewarmed-snapshot restore vs
-//!   prewarmed-pool take. Needs KVM + the built agent rootfs.
+//! - **`bench-warm`** — the three start paths' latency percentiles: cold boot vs prewarmed-snapshot
+//!   restore vs prewarmed-pool take, each split into its isolated start and its time-to-first-result.
+//!   Needs KVM + the built agent rootfs.
+//! - **`bench-density`** — memory-sharing under concurrency: summed Rss vs Pss as prewarmed clones
+//!   stack up, and how many fit before it degrades. Needs KVM + the built agent rootfs.
+//! - **`bench-footprint`** — per-sandbox memory footprint and the overlay/rootfs choice's effect:
+//!   per-VM Pss + whole-host cost per sandbox for cold RW-copy vs cold shared-base vs restore. Needs
+//!   KVM + the built agent rootfs.
+//! - **`bench-all`** — the whole suite as one reproducible report, methodology stated + host recorded;
+//!   sections whose prerequisite is missing are skipped with the reason. The written report is
+//!   `docs/benchmarks.md`.
 //! - **`bench-trace`** — the syscall-tracing overhead: per-`openat` cost with no probes vs
 //!   attached-but-filtered-out vs attached-and-capturing. Needs `CAP_BPF`+`CAP_PERFMON` + the built
 //!   object (not KVM).
@@ -26,6 +35,9 @@
 //! - **`bench-meter`** — the resource-metering overhead: per-context-switch cost with no meter vs
 //!   attached-but-not-metering-us vs attached-and-metering-us. Needs `CAP_BPF`+`CAP_PERFMON` + the built
 //!   object (not KVM).
+//! - **`bench-scale`** — the probe overhead *under load*: per-event cost as the watched-target set
+//!   (concurrent sandboxes) grows 1 → 512, showing it stays flat (O(1) lookup). Same needs as
+//!   `bench-meter`.
 //! - **`meter-sandbox`** — the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
@@ -106,14 +118,47 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
-    /// Measure time-to-first-result (percentiles) of the three start paths: a cold boot (per-VM
-    /// rootfs copy, the full-copy baseline), a prewarmed-snapshot restore, and a prewarmed-pool take,
-    /// each timed from "start a sandbox" to "a Python one-liner's output is back on the host"
-    ///. Needs `/dev/kvm` + the built agent rootfs.
+    /// Measure the latency (percentiles) of the three start paths: a cold boot (per-VM rootfs copy,
+    /// the full-copy baseline), a prewarmed-snapshot restore, and a prewarmed-pool take, each
+    /// decomposed into its isolated start (begin a sandbox → exec-ready) and its time-to-first-result
+    /// (start + a Python one-liner's output back on the host). Needs `/dev/kvm` + the built agent
+    /// rootfs.
     BenchWarm {
         /// How many runs to time per path (more → tighter tail percentiles). Default 100, the
         /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
         #[arg(long, default_value_t = 100)]
+        runs: usize,
+    },
+    /// Measure memory-sharing under concurrency: restore prewarmed clones one at a time (each sharing
+    /// the read-only base disk and the snapshot memory file) and, keeping them all alive, sample the
+    /// summed Rss (naive) vs Pss (true, shared pages divided) plus host MemAvailable. Reports how many
+    /// concurrent microVMs fit before it degrades (target / restore failure / a memory floor) and the
+    /// sharing density. Needs `/dev/kvm` + the built agent rootfs.
+    BenchDensity {
+        /// Target number of concurrent clones to stack (it stops earlier on a restore failure or the
+        /// memory floor, whichever comes first).
+        #[arg(long, default_value_t = 64)]
+        count: usize,
+    },
+    /// Measure the per-sandbox memory footprint and how the overlay/rootfs choice moves it: bring up a
+    /// cohort per strategy (cold boot with a per-VM RW copy, cold boot on the shared RO base, snapshot
+    /// restore) and report the per-VM Pss (percentiles) plus the whole-host MemAvailable drop per
+    /// sandbox. The RW-copy-vs-shared-base gap is the rootfs choice made a number. Needs `/dev/kvm` +
+    /// the built agent rootfs.
+    BenchFootprint {
+        /// How many identical sandboxes to bring up per strategy (it stops earlier at the memory
+        /// floor). Default 4.
+        #[arg(long, default_value_t = 4)]
+        count: usize,
+    },
+    /// Run the whole benchmark suite as one reproducible report: boot, warm, footprint, density, and
+    /// the three probe benches, in order, with the methodology stated and the host recorded. Sections
+    /// whose host prerequisite is missing (`/dev/kvm`, or `CAP_BPF`+`CAP_PERFMON` + the built object)
+    /// are skipped with the reason, never silently dropped. The written report is `docs/benchmarks.md`.
+    BenchAll {
+        /// How many runs/bursts for the percentile benches (the concurrency benches use fixed cohort
+        /// sizes). Default 30 to keep the full suite tractable; bump the individual command for tails.
+        #[arg(long, default_value_t = 30)]
         runs: usize,
     },
     /// Measure the syscall-tracing overhead: the per-`openat` cost with no probes attached, vs
@@ -134,6 +179,15 @@ enum Cmd {
     BenchMeter {
         /// How many bursts to time per condition (more → tighter tail percentiles). Default 100, the
         /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
+        #[arg(long, default_value_t = 100)]
+        runs: usize,
+    },
+    /// Measure the eBPF overhead under load: sweep the watched-target-set size (1 → 512) for the shared
+    /// syscall tracer and `sched_switch` meter and show the per-event cost stays flat — an O(1) map
+    /// lookup, so overhead scales with the event rate, not the number of concurrent sandboxes. Needs
+    /// `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes` (not KVM).
+    BenchScale {
+        /// How many bursts to time per set size (more → steadier p50). Default 100.
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
@@ -193,8 +247,12 @@ fn main() -> Result<()> {
         } => rootfs::build_rootfs(verify, update_lock),
         Cmd::BenchBoot { runs } => bench::bench_boot(runs),
         Cmd::BenchWarm { runs } => bench::bench_warm(runs),
+        Cmd::BenchDensity { count } => bench::bench_density(count),
+        Cmd::BenchFootprint { count } => bench::bench_footprint(count),
+        Cmd::BenchAll { runs } => bench::bench_all(runs),
         Cmd::BenchTrace { runs } => bench::bench_trace(runs),
         Cmd::BenchMeter { runs } => bench::bench_meter(runs),
+        Cmd::BenchScale { runs } => bench::bench_scale(runs),
         Cmd::TraceSandbox { seconds } => demo::trace_sandbox(seconds),
         Cmd::WatchSandbox { rounds } => demo::watch_sandbox(rounds),
         Cmd::EnforceSandbox => demo::enforce_sandbox(),

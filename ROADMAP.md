@@ -1838,14 +1838,78 @@ A local daemon others drive over a socket: still engine, not PaaS.
 
 Make the numbers real — the benchmarks that back every claim.
 
-- [ ] **P17.1** Benchmarks: cold boot, snapshot restore, pre-warmed-pool `exec` latency (p50/p99).
-- [ ] **P17.2** Memory-sharing: how many concurrent microVMs per host before it degrades.
-- [ ] **P17.3** eBPF overhead: cost of the probes under load.
-- [ ] **P17.4** Memory footprint per sandbox; the effect of overlay/rootfs choices.
-- [ ] **P17.5** A reproducible bench harness + a results report vs the honest baselines.
-- [ ] **P17.6** Find + fix the top bottleneck the numbers reveal.
+- [x] **P17.1** Benchmarks: cold boot, snapshot restore, pre-warmed-pool `exec` latency (p50/p99).
+      *(`cargo xtask bench-warm [--runs N]` (needs KVM + the built agent rootfs), sharpening the
+      baseline bench so each of the three start paths is **decomposed** into its isolated **start**
+      (begin a sandbox → exec-ready) and its **time-to-first-result** (start + the first exec's
+      round-trip), reported with the same honest nearest-rank percentiles (`p99` prints `—` below
+      n=100, so a short run can't dress its max up as a tail). This isolates the three headline
+      latencies P17 names — cold boot, snapshot restore, pool take — instead of folding each into one
+      composite, the resolution P17.6's bottleneck hunt needs. Demoed on a KVM host: snapshot-restore
+      start is roughly an order of magnitude under cold boot, and a pool take is near-instant, with
+      the exec round-trip added in the composite series. Enhances the existing bench, non-`api:`.)*
+- [x] **P17.2** Memory-sharing: how many concurrent microVMs per host before it degrades.
+      *(`cargo xtask bench-density [--count N]` (needs KVM + the built agent rootfs): restores prewarmed
+      clones one at a time from a single snapshot — each sharing the **read-only base disk** and the
+      **snapshot memory file**, so a clone's only private cost is its copy-on-write dirty pages — and
+      keeps **every clone alive** while sampling, at power-of-two checkpoints, the summed **Rss** (naive,
+      counts the shared base per VM) vs summed **Pss** (proportional set size, the true footprint, from
+      each VMM's `smaps_rollup`) plus the host's `MemAvailable`. The Rss/Pss gap **is** the memory-
+      sharing benefit, made a number. It stops at the target, on a restore failure, or when free memory
+      would cross a floor (max(1 GiB, 5% of RAM), so it never swaps the host), and reports **which** — so
+      "how many concurrent before it degrades" is measured, not guessed, and the summary states the
+      marginal Pss per added clone and the sharing density (Rss vs Pss at the top count). Enhances the
+      bench module, non-`api:`.)*
+- [x] **P17.3** eBPF overhead: cost of the probes under load.
+      *(`bench-trace` (P9.5) and `bench-meter` (P12.4) already measure the *per-event* cost of the two
+      shared probes for one watched sandbox; the missing **under-load** dimension is whether that cost
+      stays bounded as **many** sandboxes are watched at once — the "one shared program, O(1) map lookup,
+      independent of sandbox count" design claim, previously asserted in prose. New `cargo xtask
+      bench-scale [--runs N]` (needs `CAP_BPF`+`CAP_PERFMON` + the built object, not KVM) makes it a
+      measured curve: it sweeps the **watched-target-set size** (1 → 512, within the 1024 `MAX_CGROUPS`
+      target maps) for both the syscall tracer and the `sched_switch` meter — the set is our own cgroup
+      (the watched path) padded with never-matching dummies — and prints the p50 per-event cost at each
+      size on the same `openat`/ping-pong micro-workloads the other benches use. A flat column is the
+      evidence that total probe overhead scales with the **event rate**, not the number of concurrent
+      sandboxes. Enhances the bench module, non-`api:`.)*
+- [x] **P17.4** Memory footprint per sandbox; the effect of overlay/rootfs choices.
+      *(`cargo xtask bench-footprint [--count N]` (needs KVM + the built agent rootfs): brings up a
+      cohort of identical sandboxes on each of the three disk strategies — a cold boot with a **per-VM
+      read-write copy** of the image, a cold boot on the **shared read-only base** (writes to a guest
+      tmpfs overlay), and a **snapshot restore** (shared base + copy-on-write memory file) — and
+      reports the per-VM VMM `Pss` (nearest-rank percentiles) plus the whole-host `MemAvailable` drop
+      per sandbox. The RW copy lives in tmpfs **outside** the VMM's address space, so its Pss undercounts
+      it: whole-host is the honest meter, and the bench proves that (identical 46 MiB Pss for both cold
+      paths, but 262 vs 47 MiB/sandbox whole-host). Demoed: the rootfs choice moves per-sandbox host
+      cost from ~262 MiB (per-VM RW copy) to ~47 MiB (shared RO base) to ~0 (restore, only dirtied
+      pages); guest RAM dominates the rest. Enhances the bench module, non-`api:`.)*
+- [x] **P17.5** A reproducible bench harness + a results report vs the honest baselines.
+      *(Two parts. The harness: `cargo xtask bench-all [--runs N]` runs the whole suite (boot, warm,
+      footprint, density, and the three probe benches) in order as one report, records the host it ran
+      on, states the methodology up front (nearest-rank percentiles, never averages; `p99` prints `—`
+      below n=100), and **skips** any section whose host prerequisite is missing (`/dev/kvm`, or
+      `CAP_BPF`+`CAP_PERFMON` + the built object) with the reason, never silently — so a run says exactly
+      what it did and didn't measure. The report: `docs/benchmarks.md` (a new mdBook page) records the
+      measured numbers, each stated **against its honest baseline** — restore/pool-take vs a cold boot,
+      summed Pss vs the naive Rss, a shared base vs a per-VM copy — with the full methodology and the
+      one-command reproducer. Enhances the bench module + docs, non-`api:`.)*
+- [x] **P17.6** Find + fix the top bottleneck the numbers reveal.
+      *(The P17.1 latency decomposition made the bottleneck legible: the driver's three readiness waits
+      (`await_api_socket`, `await_userspace`, and restore's `await_agent_ready`) polled on a **fixed
+      20 ms / 10 ms interval**, so every start paid up to a whole interval (~10 ms average) of pure
+      quantization — readiness had happened but the next poll tick hadn't. On a ~40 ms restore that's a
+      large slice; on the boot tail it's needless jitter. Fixed with a small adaptive `PollBackoff`
+      (starts at 1 ms, doubles to a 5 ms cap) shared by all three loops, so readiness is caught within
+      ~1 ms when it comes quickly while a long cold boot still polls cheaply; unit-tested progression,
+      host-path `unsafe`-free. Re-measured back-to-back on a quiet host: **restore start p50 40 → 22 ms
+      (~45% faster), max 56 → 32 ms**; restore+exec 103 → 79 ms; the pool-take tail 148 → 67 ms. Cold
+      boot is unchanged at the median (guest kernel/init dominates) but its tail tightened. Internal to
+      `spawn.rs`, non-`api:`.)*
 - **Exit gate:** documented latency/memory-sharing/overhead numbers, with the methodology stated
-  (percentiles, not averages).
+  (percentiles, not averages). **Met:** `docs/benchmarks.md` records the measured latency, memory-
+  sharing, per-sandbox-footprint, and (reproduce-command) probe-overhead numbers, each against its
+  honest baseline, with the nearest-rank-percentile methodology stated; `cargo xtask bench-all`
+  reproduces the suite as one report.
 
 ## Phase 18 — AI-native surfaces (the runtime for agent-generated code)
 

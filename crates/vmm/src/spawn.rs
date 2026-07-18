@@ -697,6 +697,7 @@ impl Spawned {
     /// exec-ready when it's handed back. The probe connection is dropped immediately (the agent serves
     /// one connection then loops back to accept, so a connect-and-close just cycles it).
     fn await_agent_ready(&mut self, uds: &Path, deadline: Instant) -> Result<(), VmmError> {
+        let mut backoff = PollBackoff::new();
         loop {
             match connect_agent_at(uds, AGENT_VSOCK_PORT, Duration::from_millis(200)) {
                 Ok(_probe) => return Ok(()),
@@ -709,7 +710,7 @@ impl Spawned {
                     if Instant::now() >= deadline {
                         return Err(e);
                     }
-                    std::thread::sleep(Duration::from_millis(20));
+                    backoff.sleep();
                 }
             }
         }
@@ -987,6 +988,7 @@ impl Spawned {
     /// Poll `connect()` (not path-existence — the file can appear before `listen()`) until the API
     /// answers, failing fast if Firecracker already exited.
     fn await_api_socket(&mut self, deadline: Instant) -> Result<(), VmmError> {
+        let mut backoff = PollBackoff::new();
         loop {
             if let Some(status) = self.exited()? {
                 return Err(VmmError::Vmm(format!(
@@ -1001,13 +1003,14 @@ impl Spawned {
                     "firecracker API socket never became ready".into(),
                 ));
             }
-            std::thread::sleep(Duration::from_millis(10));
+            backoff.sleep();
         }
     }
 
     /// Wait for the console to show the userspace marker, bounded by `deadline` and by the child
     /// exiting early (a guest that panics before userspace).
     fn await_userspace(&mut self, marker: &str, deadline: Instant) -> Result<(), VmmError> {
+        let mut backoff = PollBackoff::new();
         loop {
             if self.console.contains(marker) {
                 return Ok(());
@@ -1022,7 +1025,7 @@ impl Spawned {
                     "guest did not reach userspace (marker {marker:?}) within the boot deadline"
                 )));
             }
-            std::thread::sleep(Duration::from_millis(20));
+            backoff.sleep();
         }
     }
 
@@ -1398,6 +1401,45 @@ fn overlay_size_mib(mem_mib: NonZeroU32) -> u32 {
     (mem_mib.get() / 2).max(1)
 }
 
+/// A readiness-poll interval that starts tight and backs off to a cap. A wait that resolves quickly (a
+/// snapshot resume whose agent is already reachable, an API socket already up) is caught within ~a
+/// millisecond of becoming ready instead of being quantized to a coarse fixed interval; a long wait (a
+/// cold boot to userspace) settles at the cap and keeps polling cheaply. Motivated by the latency
+/// decomposition: a flat 20 ms poll adds up to 20 ms (~10 ms on average) of pure quantization to every
+/// start — a large slice of a ~40 ms restore, and needless jitter on the boot tail. The `contains`/
+/// `connect` check each tick is cheap, so a finer interval near readiness costs nothing that matters.
+struct PollBackoff {
+    next: Duration,
+}
+
+impl PollBackoff {
+    /// The first interval: tight enough to catch near-immediate readiness within ~a millisecond.
+    const INITIAL: Duration = Duration::from_millis(1);
+    /// The interval cap: coarse enough to poll cheaply through the long waits (a cold boot to
+    /// userspace), still 4x finer than the fixed 20 ms tick it replaced.
+    const CAP: Duration = Duration::from_millis(5);
+
+    /// Start at [`INITIAL`](Self::INITIAL), so a near-immediate readiness is caught almost at once.
+    fn new() -> Self {
+        Self {
+            next: Self::INITIAL,
+        }
+    }
+
+    /// Return the current interval, then double it toward the [`CAP`](Self::CAP). Split from
+    /// [`sleep`](Self::sleep) so the progression is unit-testable without spending wall-clock.
+    fn bump(&mut self) -> Duration {
+        let current = self.next;
+        self.next = (self.next * 2).min(Self::CAP);
+        current
+    }
+
+    /// Sleep the current interval, then advance toward the cap.
+    fn sleep(&mut self) {
+        std::thread::sleep(self.bump());
+    }
+}
+
 /// Fail fast if the boot deadline has already passed before the next step (`what`). Each API call is
 /// individually time-capped by the client, but their *sum* must also respect the boot deadline, or a
 /// slow VMM could stretch `boot` well past `wall`.
@@ -1432,6 +1474,21 @@ mod version_tests {
 mod tests {
     use super::*;
     use crate::test_util::TestDir;
+
+    #[test]
+    fn poll_backoff_starts_tight_and_caps() {
+        // Starts at 1 ms so near-immediate readiness is caught almost at once, doubles, and never
+        // exceeds the 5 ms cap no matter how long the wait runs — the property the readiness polls
+        // rely on to stay both responsive and cheap. `bump` returns the current interval and advances.
+        let mut b = PollBackoff::new();
+        let ms = |n| Duration::from_millis(n);
+        assert_eq!(b.bump(), ms(1));
+        assert_eq!(b.bump(), ms(2));
+        assert_eq!(b.bump(), ms(4));
+        // 4 → 8 clamps to the 5 ms cap, and stays there for every subsequent poll.
+        assert_eq!(b.bump(), ms(5));
+        assert_eq!(b.bump(), ms(5), "the cap holds");
+    }
 
     #[test]
     fn dead_vmm_fails_fast_with_its_stderr_tail() {

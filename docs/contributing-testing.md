@@ -16,10 +16,16 @@ Four layers, cheapest first — the split exists so the everyday loop never wait
 
    ```console
    cargo xtask bench-boot     # boot-to-userspace latency, shared-base vs per-VM copy
-   cargo xtask bench-warm     # time-to-first-result: cold boot vs snapshot restore vs pool take
+   cargo xtask bench-warm     # cold boot vs snapshot restore vs pool take: start + time-to-first-result
+   cargo xtask bench-density  # memory-sharing: summed Rss vs Pss as concurrent clones stack up
+   cargo xtask bench-footprint # per-sandbox footprint + the overlay/rootfs choice's effect
    cargo xtask bench-trace    # per-syscall tracing overhead (no probes / filtered out / recording)
    cargo xtask bench-meter    # per-context-switch resource-metering overhead
+   cargo xtask bench-scale    # probe overhead under load: per-event cost vs watched-sandbox count
+   cargo xtask bench-all      # the whole suite as one reproducible report (skips missing-prereq sections)
    ```
+
+   The recorded numbers and full methodology live in the [Benchmarks](./benchmarks.md) report.
 
 A fifth layer, **fuzzing**, guards the one place attacker-controlled bytes meet the host path (the
 host↔guest channel decoders): a dependency-free property test runs in the `ci` gate above, and a
