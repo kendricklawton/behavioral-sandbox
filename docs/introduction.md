@@ -13,13 +13,17 @@ engine for exactly that — the code stays on your own infrastructure (air-gappe
 fine), and the watching and the policy live in the host kernel, outside the guest, so the record
 can't be forged by the code it is recording.
 
+The engine can be driven three ways: as the **`agent` CLI** (one sandbox per command), as a
+**Rust library** embedded in a larger application, or programmatically over a unix socket through
+the **`agentd` daemon** and its versioned wire API.
+
 ## How it fits together
 
 ```
 untrusted code
       → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
       → host-side eBPF (aya): syscalls · the VM's tap device (tc/XDP) · its cgroup
-      → per-run audit log (network flows · notable syscalls · resources · denials)
+      → per-run audit record (network flows · notable syscalls · resources · denials)
 ```
 
 The guest runs the code; the **host kernel** sees and governs it. That split — hardware isolation
@@ -48,6 +52,9 @@ the engine — the full non-goals list is in [Using the engine API](./embedding.
 - **[Using the engine API](./embedding.md)** — the embedder's contract: the `Sandbox` lifecycle,
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
+- **[Using the agentd daemon](./daemon.md)** — drive the engine over a unix socket: the versioned
+  wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`), the pre-warmed pool for fast
+  `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
 - **[Examples](./examples.md)** — worked, end-to-end walkthroughs: [running untrusted
   code](./examples-untrusted-code.md) and [observing a run from the
   host](./examples-observe-a-run.md).
@@ -67,3 +74,7 @@ progress live in [`ROADMAP.md`](https://github.com/kendricklawton/agent/blob/mai
 [Architecture decisions](./contributing-architecture.md). Every
 completed phase ships a working demo, so each capability documented in this book is proven
 running end to end, not just asserted.
+
+The source for this book lives in the repository's
+[`docs/` directory](https://github.com/kendricklawton/agent/tree/main/docs) and contributions are
+welcome — see [Contributing](./contributing.md).

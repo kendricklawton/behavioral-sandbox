@@ -50,12 +50,12 @@ Assumptions), or physical/side-channel attacks.
 
 | Attack | Contained by | Proven in |
 |--------|--------------|-----------|
-| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, seccomp, namespaces) as defense in depth | `vmm` jail-escape tests (P6.6) |
-| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter, so a disk-thrasher can't starve a co-resident run); guest processes never become host threads | `vmm` confinement suite (P6.8); the consolidated exhaustion test (P15.3) |
-| Network exfiltration / flood | Deny-by-default egress policy enforced in-kernel at the tap, armed before the guest's first packet; drops are counted | `net_enforce.rs` (P4.7/P11); the hostile-guest + flood tests (P15.1, P15.3) |
-| Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap — the guest has no handle to reach them | `hardening.rs` (P15.2) |
-| Leak a run on driver death | A cgroup-owned lifetime + sentinel kills the VM when its driver dies; an own-euid orphan sweep reclaims residue | `vmm` confinement suite (P6.7, P6.9a) |
-| State bleed between clones | Each restored clone has its own in-RAM overlay and guest RAM; the shared base is read-only | `snapshot.rs` (P15.4) |
+| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, seccomp, namespaces) as defense in depth | the jail-escape tests in `vmm`'s `confinement.rs` |
+| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter, so a disk-thrasher can't starve a co-resident run); guest processes never become host threads | the fork-bomb/mem-hog and consolidated exhaustion tests in `confinement.rs` |
+| Network exfiltration / flood | Deny-by-default egress policy enforced in-kernel at the tap, armed before the guest's first packet; drops are counted | `net_enforce.rs`; the hostile-guest and flood tests in `confinement.rs` |
+| Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap — the guest has no handle to reach them | `hardening.rs` |
+| Leak a run on driver death | A cgroup-owned lifetime + sentinel kills the VM when its driver dies; an own-euid orphan sweep reclaims residue | the sentinel and orphan-sweep tests in `confinement.rs` |
+| State bleed between clones | Each restored clone has its own in-RAM overlay and guest RAM; the shared base is read-only | `snapshot.rs` |
 | Secret disclosure | Injected `--env` values and file contents are never logged or written to the serial console | driver + CLI secret-handling tests |
 
 The **consolidated** proof is that these hold *together*, against one hostile guest doing its worst
@@ -86,6 +86,6 @@ authentication, authorization, quotas, billing, fleet scheduling, and a manageme
 **hoster's** responsibility, not a vulnerability in the engine. The engine's own commitment is
 narrower and testable: its privileged tools cannot be weaponized (euid-scoped, authorship not
 policy), and it self-limits by default (deny-by-default network, a dropped-uid jail, an own-euid
-sweep). Turning that into a safe multi-tenant service is the deployer's job.
+sweep). Turning that into a safe multi-tenant service is the hoster's job.
 
 See [Security](./security.md) for what counts as a security bug and how to report one.

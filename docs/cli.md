@@ -1,4 +1,4 @@
-# Using the agent CLI
+# Using the `agent` CLI
 
 `agent` is the reference embedder of the engine: the whole sandbox lifecycle — open (confined by
 default), exec with inputs, collect artifacts, close — in one command. If you haven't set up the
@@ -193,9 +193,10 @@ few orthogonal verbs, or named below as deliberately out of scope. The map:
 **Deliberately not in the CLI — daemon-scoped, embedding-API, or platform, by design** (their absence
 is intent, not omission):
 
-- **Snapshots + the pre-warmed pool** — a warm pool is a long-lived-process concern; it belongs to
-  the `agentd` daemon, not a one-shot CLI.
-- **The wire API** — the programmatic driver surface is the daemon's, not a subcommand.
+- **Snapshots + the pre-warmed pool** — a pre-warmed pool is a long-lived-process concern; it lives
+  in the [`agentd` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
+- **The wire API** — the programmatic driver surface is the
+  [daemon's](./daemon.md#the-wire-protocol-versioned-json-schema-1), not a subcommand.
 - **Bulk block-device I/O** (`BootConfig::input_dir`/`output_dir` — whole directories / large files
   as ext4 devices) and **out-of-band control** (`KillHandle` — force-kill a blocked exec from another
   thread) are *embedding-API* capabilities. The CLI's file path is per-frame `--put`/`--get` (small,

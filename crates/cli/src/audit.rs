@@ -166,6 +166,34 @@ impl RunProbes {
             .unwrap_or_default()
     }
 
+    /// A **non-destructive** [`RunRecord`] of the run so far — the daemon's `trace` verb, which a
+    /// client may ask for repeatedly mid-session. Unlike [`collect`](Self::collect) it neither
+    /// consumes the bundle nor detaches the probes, so observation continues after it; each call is a
+    /// fresh point-in-time reading built from a live [`snapshot`](SandboxProbes::snapshot) plus the
+    /// coverage gaps recorded so far. Without a bundle it is the honest empty record (every absence
+    /// explained), exactly like `collect`'s fail-open path.
+    pub fn live_record(&self, timing: Timing) -> RunRecord {
+        match &self.probes {
+            Some(probes) => {
+                let snap = probes.snapshot();
+                RunRecord::from_parts(
+                    snap.network,
+                    snap.resources.unwrap_or_default(),
+                    snap.host_syscalls.unwrap_or_default(),
+                    timing,
+                    probes.coverage().to_vec(),
+                )
+            }
+            None => RunRecord::from_parts(
+                None,
+                ResourceSummary::default(),
+                SyscallFootprint::default(),
+                timing,
+                self.gaps.clone(),
+            ),
+        }
+    }
+
     /// Finalize the run's record — **while the sandbox is still alive** (the attached bundle reads
     /// the live cgroup + maps). Without a bundle, the record is the honest empty one: no axes, every
     /// absence explained in coverage.

@@ -124,7 +124,10 @@ a visible bump, never drift.
 `agent run` is the lifecycle in one command: piped stdin, `--env`, `--put`/`--get`, `--wall`,
 `--output-cap`, `--json` (the structured result as one JSON object on stdout — stderr carries the
 logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `agent shell` holds one sandbox
-open as an interactive stateful session. If you're writing an SDK, its shape is the one to copy.
+open as an interactive stateful session. If you're writing an SDK, start from the daemon's
+[reference client](./daemon.md#the-reference-client) (`agentd-client`) — it drives the same
+lifecycle over the wire API with nothing of the engine linked, which is exactly the surface a
+non-Rust SDK has.
 
 ## Where the engine ends (the engine/PaaS line)
 
@@ -140,12 +143,14 @@ non-goals — these belong to whatever hosts the engine, and PRs adding them are
 - **No fleet scheduling.** One engine drives sandboxes on one host. Bin-packing across hosts,
   queues, and autoscaling are the hoster's: the engine runs sandboxes on its host; it doesn't
   schedule a cluster.
-- **No dashboard, no network API.** The surface is a Rust library and a CLI. A daemon that speaks
-  HTTP is a *hoster* even when this repo later ships one (`agentd` is scoped as exactly that: a
-  thin host of the same library's public API).
+- **No dashboard, no platform API.** The programmatic surface is the Rust library, the CLI, and
+  the [`agentd` daemon](./daemon.md) — a *local* driver daemon over a unix socket, a thin host of
+  the same library's public API, with no auth and no tenancy (access control is the socket
+  directory's permissions). A daemon that grows multi-tenant identity or a public HTTP surface is
+  a *hoster*, not this repo.
 
 The line is a security boundary too (016): everything the engine ships is inert without host
-privileges the *deployer* grants — it self-limits (deny-by-default network, dropped-uid jail,
+privileges the *hoster* grants — it self-limits (deny-by-default network, dropped-uid jail,
 own-euid sweep), and turning its tools into a multi-tenant service safely is the hoster's job.
 
 What the engine *does* owe a long-lived host, and ships: typed errors instead of panics on every

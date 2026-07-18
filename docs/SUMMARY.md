@@ -3,6 +3,7 @@
 - [Introduction](./introduction.md)
 - [Using the agent CLI](./cli.md)
   - [Installation](./cli-install.md)
+- [Using the agentd daemon](./daemon.md)
 - [Using the engine API](./embedding.md)
 - [Examples](./examples.md)
   - [Running untrusted code](./examples-untrusted-code.md)

@@ -11,11 +11,21 @@ description = "The `agent` CLI — drive the Firecracker + aya code-execution sa
 name = "agent"
 path = "src/main.rs"
 
+# The driver daemon: exposes the sandbox lifecycle over a unix socket (newline-JSON). Ships in the
+# same crate as the `agent` CLI (both thin hosts of the `agent-vmm` public API); its own module tree
+# under `src/agentd/`, so it shares nothing with the CLI's `src/main.rs` bin beyond the library deps.
+[[bin]]
+name = "agentd"
+path = "src/agentd/main.rs"
+
 [dependencies]
 # The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
 # tracks — it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
 agent-probes-loader = { path = "../probes-loader" }
 agent-vmm = { path = "../vmm" }
+# The `agentd` daemon's wire protocol — the versioned newline-JSON contract it shares with the
+# reference client and the polyglot SDKs (decision 034). A serde-only leaf, no engine internals.
+agentd-protocol = { path = "../agentd-protocol" }
 clap = { workspace = true }
 # `agent run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
@@ -27,6 +37,12 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+# The reference client (P16.4), used by the daemon's e2e demo to prove a caller drives `agentd`
+# over the wire API alone. A dev-dep so the daemon crate can spawn `agentd` (it owns the artifacts)
+# while the client itself stays free of `agent-vmm`.
+agentd-client = { path = "../agentd-client" }
 
 [lints]
 workspace = true

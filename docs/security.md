@@ -47,7 +47,7 @@ Because this is an **engine, not a platform**, multi-tenant concerns it delibera
 (tenant authentication, quotas, billing) are the hoster's responsibility, not a bug here. The
 engine's job is that its own tools cannot be weaponized and that it self-limits (deny-by-default
 network, a dropped-uid jail, an own-euid orphan sweep); turning them into a safe multi-tenant
-service is the deployer's.
+service is the hoster's.
 
 ## Reporting a vulnerability
 

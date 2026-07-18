@@ -24,8 +24,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
-use crate::audit::RunProbes;
 use crate::trace::{human_bytes, human_duration, proto_name, syscall_name};
+use agent_cli::audit::RunProbes;
 
 /// What the header identifies the run by — plain values captured before the sandbox moves to the
 /// exec worker thread.

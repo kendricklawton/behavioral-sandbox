@@ -1,0 +1,20 @@
+[package]
+name = "agentd-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+description = "The reference Rust client for the agentd wire API: drives a sandbox session over a unix socket using only the wire contract, no engine internals. The seed the polyglot SDKs (Phase 20) harden."
+
+# The whole point of the reference client is to **prove a non-Rust caller can drive `agentd`** with
+# nothing but the wire contract: it depends on `agentd-protocol` (the shared JSON shapes) and
+# `serde_json` (the opaque `trace` record) — and deliberately **not** on `agent-vmm`. If this ever
+# links the engine, the proof is void: reimplementing it in Go/Python/Node/C# must need only a JSON
+# library and a unix socket, which is exactly what this dependency set models.
+[dependencies]
+agentd-protocol = { path = "../agentd-protocol" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

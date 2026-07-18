@@ -1740,14 +1740,77 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
 
 A local daemon others drive over a socket: still engine, not PaaS.
 
-- [ ] **P16.1** `agentd`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
-- [ ] **P16.2** A **versioned** wire API (JSON/gRPC — `(decision)`): open/exec/put/get/snapshot/
+- [x] **P16.1** `agentd`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
+      *(A second binary in the `agent-cli` crate (`src/agentd/`), a thin host of the same
+      `agent-vmm` public API — engine, not platform (no auth/tenancy/billing). One connection is one
+      sandbox **session** (the VM is the session, decision 019), served on its own thread
+      (synchronous, no async runtime): `open` boots it, `exec`* run commands sharing one working dir,
+      `close` (or a hung-up connection) tears it down. The wire is a **provisional** newline-JSON
+      protocol (`protocol.rs`, host-safe unit-tested: round-trips, blank-line/EOF handling, and a
+      bounded `fill_buf` line reader so a lying/oversize line is a typed `TooLarge`, never a panic or
+      unbounded alloc — guardrail 5); the versioned SDK contract with the full verb set is P16.2, so
+      this carries **no schema number**. Confinement is the **daemon's** launch posture (jailed by
+      default, `--unjailed` opt-out), never a client's — a caller can't weaken the jail. Teardown is
+      crash-only: a session's `Sandbox` drops with its connection, and daemon-process death can't leak
+      a VM (the lifetime sentinel, decision 014). Demoed by `tests/agentd_e2e.rs`: spawns the real
+      daemon and drives a full session over the socket (open → exec `echo`/`cat`/stateful writes → a
+      non-fatal guest fault the session survives → close → a fresh independent session), plus
+      `docs/daemon.md`. `#[ignore]`d/privileged. Access control (socket-dir perms) and the wire-API
+      freeze stay the hoster's / later boxes.)*
+- [x] **P16.2** A **versioned** wire API (JSON/gRPC — `(decision)`): open/exec/put/get/snapshot/
       close/trace. This is the **SDK contract** — Phase 20 freezes and spec's it.
-- [ ] **P16.3** Pre-warmed-pool management lives in the daemon (fast `exec`).
-- [ ] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agentd` over the
+      *(Decision 034: newline-JSON, **not gRPC** — the daemon is synchronous with no async runtime,
+      and the peer is a local trusted-ish client, so hand-debuggability (`socat`) and "any language +
+      a JSON lib + a socket" beat a compact wire. Every message carries a leading `schema` field,
+      rejected on mismatch **before the body is trusted** — the seam Phase 20 freezes against (distinct
+      from the audit-record and `--json` schemas). Lives in a new **`agentd-protocol`** crate
+      (serde-only, **no `agent-vmm`**): the shared `Request`/`Response`/`Envelope` shapes + a bounded,
+      typed line codec (guardrail 5, host-safe unit-tested — round-trips, schema-gate, blank-line/EOF,
+      over-cap). The full verb set landed on the daemon (`session.rs`, now on `RunningVm` so a pooled
+      clone and a cold boot serve identically): `put`/`get` ride the engine's only file seam (a no-op
+      exec that injects/returns a file); `snapshot` is a typed refusal for a jailed session (faithful
+      to `Sandbox::snapshot`), returning the bundle's daemon-host dir; `trace` builds the `RunRecord`
+      **non-destructively** from a live probe snapshot (fail-open, repeatable mid-session). Non-`api:`
+      — the pinned `agent-vmm` surface is untouched; the daemon only consumes it.)*
+- [x] **P16.3** Pre-warmed-pool management lives in the daemon (fast `exec`).
+      *(`agentd --prewarm N`: at startup the daemon boots one **unjailed** prewarm source (a jailed
+      disk can't be snapshotted), snapshots it, and restores `N` clones under the daemon's confinement
+      posture into an `agent-vmm::Pool` behind a `Mutex` (sessions are thread-per-connection). A
+      **bare-default** `open` pops a warm clone — `opened{pooled:true}` — since the clones carry the
+      default profile; any custom knob (or a pool that's empty/poisoned/dry) cold-boots. The pool tops
+      up on session close, off the hot path (the moment the `Pool` doc reserves for restore cost).
+      Fail-open: a host that can't build the pool (no KVM, no root) logs one warning and every session
+      cold-boots. Non-`api:`.)*
+- [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agentd` over the
       wire API — the seed the **polyglot SDKs (Phase 20)** harden into Go/Python/Node/C#. (The full
       SDK set is post-`v0.1.0`.)
-- [ ] **P16.5** Structured logs + a metrics endpoint (Prometheus) — for the *hoster* to scrape.
+      *(New **`agentd-client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
+      `snapshot`/`trace`/`close`) with typed errors, no panics. Depends on `agentd-protocol` + a JSON
+      value **only, never `agent-vmm`** — that dependency set *is* the proof a caller needs nothing of
+      the engine but the wire. Demoed by `tests/agentd_e2e.rs`, now three angles: the full versioned
+      API hand-driven as raw JSON (the wire is socat-debuggable, every message schema-stamped, a
+      wrong schema is a fatal error), the **same daemon driven through the reference client**, and a
+      `--prewarm 1` daemon answering a bare `open` `pooled:true`. Plus `docs/daemon.md` rewritten for
+      the versioned API + pool + client. `#[ignore]`d/privileged. Non-`api:`.)*
+- [x] **P16.5** Structured logs + a metrics endpoint (Prometheus) — for the *hoster* to scrape.
+      *(Logs: the daemon's `tracing` events (already structured — `vmm_pid`/`boot_ms`/`pooled`) gain a
+      machine encoding, `--log-json` / `AGENT_LOG_FORMAT=json` (one JSON object per line for a log
+      shipper; same events, different framing) via `tracing-subscriber`'s `json` feature. Metrics:
+      `agentd --metrics ADDR` serves the Prometheus **text-exposition** format at `GET /metrics` from
+      a **hand-rolled**, bounded HTTP/1.1 responder on one thread (`agentd/metrics.rs`) — no async
+      stack or metrics crate for one GET route, same discipline as the driver's hand-rolled FC client;
+      the request head is byte-capped + socket-timed so a hostile scraper is a dropped connection
+      (guardrail 5). The registry is plain atomics (no lock on the session hot path): sessions
+      opened{pooled}/active/open-failures, requests{verb}, request-errors{guest|infra},
+      protocol-errors, and **base-unit seconds** histograms for boot + guest-command wall
+      (Prometheus-default buckets, cumulative `le` + `+Inf` + `_sum`/`_count`), plus `build_info` and
+      a pool_ready gauge that is **absent, not zero**, without a pool. Off by default; a requested
+      address that can't bind refuses startup (the `--allow` posture: an asked-for operational surface
+      is never silently absent); no auth — bind loopback (docs/daemon.md "Observability for the
+      hoster"). Host-safe unit-tested (cumulative rendering, HELP/TYPE coverage, gauge clamp,
+      absent-vs-zero pool, request-line parse, and a real ephemeral-port scrape); the privileged
+      wire-API e2e now also launches `--metrics` and asserts the scraped counters match the session
+      it just drove. Non-`api:`.)*
 - [ ] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
 - [ ] **P16.7** Golden: the CLI and the daemon API produce identical run results.
 - **Exit gate:** a self-hostable sandbox daemon with a clean API; the client/server boundary, and

@@ -4,9 +4,9 @@ The engine has two halves. [Using the engine API](./embedding.md) documents the 
 driver: the hardware-isolation boundary that *contains* untrusted code. This document is the
 other half: the host-side eBPF that
 *observes and enforces* what that code does, from outside the guest where it can't be reached (core
-property 2). Phase 8 establishes the foundation the later phases build on: build, load, attach, and
-read one program end to end (syscalls P9, tap network P10/P11, cgroup P12, fused into the audit
-log P13).
+property 2). It starts with the foundation — build, load, attach, and read one program end to
+end — then builds out each axis: the syscall trace, network observation and egress enforcement on
+the tap, resource accounting from the cgroup, and the fused per-run audit record.
 
 The worked example is a counter: `count_execve` attaches to the `sys_enter_execve` tracepoint and
 tallies how many `execve`s the host does, into two maps. It is deliberately small; the point is the
@@ -29,11 +29,11 @@ path, not the payload.
 ## eBPF program types
 
 An eBPF program is attached to a *hook*, and its type is the hook's shape: what context it gets and
-what it may do. Phase 8 uses a **tracepoint** (`#[tracepoint]`), a stable kernel-defined event with a
-stable argument format — here `syscalls/sys_enter_execve`. Its context is read-only; it returns 0.
-The later phases use other types: **tc/`classifier`** and **XDP** on a VM's tap (P10/P11), where the
-context is a packet the program may inspect and drop; and **cgroup** hooks for per-sandbox accounting
-(P12). Same load/attach/map machinery, different hook.
+what it may do. The counter uses a **tracepoint** (`#[tracepoint]`), a stable kernel-defined event
+with a stable argument format — here `syscalls/sys_enter_execve`. Its context is read-only; it
+returns 0. The later sections use other types: **tc/`classifier`** on a VM's tap, where the
+context is a packet the program may inspect and drop; and the global scheduler tracepoint that
+powers per-sandbox accounting. Same load/attach/map machinery, different hook.
 
 ## Maps
 
@@ -81,8 +81,8 @@ the `.BTF` section is present):
   from debug info) *and* the target passes **`bpf-linker --btf`** (off by default), via a
   `[target.bpfel-unknown-none]` link-arg.
 - The counter reads no kernel struct fields yet, so it needs no *field-offset* relocations. Those
-  arrive in Phase 9 (reading kernel structs). Here BTF is the map typing plus the load-time relocation
-  path — the portability mechanism the later phases build on.
+  come with the per-event syscall trace (below), which reads kernel structs. Here BTF is the map
+  typing plus the load-time relocation path — the portability mechanism the later sections build on.
 
 ## Lifetime: no pinned residue
 
@@ -90,7 +90,7 @@ The aya `Ebpf` owns the program, its maps, and the live attachment. Dropping the
 detaches the program and frees the maps. Nothing is **pinned** into `/sys/fs/bpf`, so a crashed loader
 leaves no kernel residue — the eBPF analogue of the driver's no-leak teardown (which reclaims taps,
 netns, cgroups, and scratch dirs). Pinning stays opt-in, added only where a program must outlive its
-loader (not on this path). This discipline matters more in P10/P11, where a leaked `tc` filter would
+loader (not on this path). This discipline matters more on the tap, where a leaked `tc` filter would
 dangle on a torn-down sandbox's tap.
 
 ## Capabilities and the support probe
@@ -110,15 +110,16 @@ probe): before a load it checks kernel BTF and the two capabilities and, if eith
 a **legible typed error naming the requirement** (`ProbeError::Unsupported`) rather than letting the
 load fail with a cryptic verifier reject or `EPERM`. A host that can't run the probes says so plainly.
 
-## Network observation on the tap (Phase 10)
+## Network observation on the tap
 
 `count_execve` sees only the *host's* syscalls, but a microVM's **network** is different: every packet
 the guest sends or receives crosses its **tap** device on the host, so a program on the tap sees the
 guest's own traffic directly. `TapMonitor` attaches two `tc`/clsact classifiers — `tap_ingress` and
 `tap_egress`, the two hooks clsact adds to a device — and each parses the frame's IPv4 5-tuple and adds
 the packet to that flow's per-direction byte/packet counters in the `FLOWS` map. `tc` (not XDP) because
-clsact gives *both* directions uniformly on any device, and because Phase 11 enforcement (drop a denied
-flow) lives at the same hook; P10 is observe-only (both hooks return `TC_ACT_OK`). The flow record
+clsact gives *both* directions uniformly on any device, and because egress enforcement (dropping a
+denied flow — the next section) lives at the same hook; observation alone is exactly that, observe-only
+(both hooks return `TC_ACT_OK`). The flow record
 (`FlowKey` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
 the loader stays `#![forbid(unsafe_code)]` (decision 023). A sandbox's tap lives in its own network
 namespace (decision 017), so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
@@ -126,11 +127,11 @@ safe wrapper, decision 024) to bind the monitor to one sandbox's `fc0`, and `tot
 into a per-VM rollup. Dropping the monitor frees its userspace handles; the sandbox's netns teardown
 reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host residue. `cargo xtask
 watch-sandbox` boots a real networked sandbox and prints the per-VM flows its guest actually generated
-— Phase 10's live view.
+— this axis's live view.
 
-## Egress enforcement in the kernel (Phase 11)
+## Egress enforcement in the kernel
 
-Phase 10 observes; Phase 11 turns the same tap hook into **control**. The ingress classifier (a frame
+Observation watches; enforcement turns the same tap hook into **control**. The ingress classifier (a frame
 the guest *sends*) now also consults a per-sandbox allow-list — the `POLICY` map of `PolicyRule`s
 (destination CIDR + optional port/proto), single-sourced in `crates/probes-common` next to the flow
 record. When the `ENFORCE` toggle is on, a guest-sent IPv4 packet whose destination matches no active
@@ -145,7 +146,7 @@ Two deliberate carve-outs keep deny-by-default from being deny-*everything*: **A
 **egress hook** (a reply arriving *to* the guest) always accepts, since egress policy governs what the
 guest sends and replies to allowed traffic must return. Enforcement is **opt-in and per VM**: each
 `TapMonitor` owns its own maps, and a monitor that never sets a policy stays observe-only (both hooks
-accept, exactly the Phase 10 behavior).
+accept, exactly the observe-only behavior above).
 
 The userspace schema is `EgressPolicy` — an allow-list built from friendly `Ipv4Addr` CIDRs and ports,
 lowered to the `PolicyRule`s the map holds. Its **deny-by-default** is the safe default: the empty
@@ -159,15 +160,15 @@ packet is already policed). Rules go in as raw bytes (`PolicyRule::to_bytes`, so
 
 Every dropped packet is **recorded** before the drop: the classifier counts it against its destination
 in a `DENIALS` map, which `TapMonitor::denials()` reads back — the audit trail of which endpoints a
-sandbox was blocked from (P11.5), which Phase 13 folds into the per-run record. The whole mechanism (map,
+sandbox was blocked from, folded into the per-run record (below). The whole mechanism (map,
 schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is decision 025; `net_enforce.rs`
-(ignored/privileged) proves a guest reaches an allow-listed endpoint and is blocked from everything else
-(P11.7); and `cargo xtask enforce-sandbox` is the live exit-gate demo. Folding attach-and-enforce into
-`Sandbox::open` at launch is Phase 13's convergence.
+(ignored/privileged) proves a guest reaches an allow-listed endpoint and is blocked from everything
+else; and `cargo xtask enforce-sandbox` is the live demo. Folding attach-and-enforce into the launch
+path is the fused record's convergence (below).
 
-## Resource accounting from the cgroup (Phase 12)
+## Resource accounting from the cgroup
 
-Where Phases 10/11 watch the tap, Phase 12 meters the **cgroup**: how much host CPU, memory, and IO a
+Where the tap sections watch the network, this axis meters the **cgroup**: how much host CPU, memory, and IO a
 sandbox's VMM consumes running the guest. The CPU axis is the eBPF part — `account_sched_switch`
 attaches to the `sched/sched_switch` tracepoint and, on every context switch, charges the on-CPU
 nanoseconds the outgoing task just ran to that task's cgroup id in the `CPU_NS` map. It works because at
@@ -194,16 +195,17 @@ cgroup, so `CgroupStats::read` reads `memory.peak`/`memory.current`, `io.stat` (
 `cpu.stat`'s `usage_usec` (an independent cross-check on the eBPF CPU total) straight from the cgroup dir,
 best-effort (every field an `Option`, so a missing controller or older kernel is a `None`, never an error
 — accounting fails open, decision 013). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
-`ResourceSummary` for one sandbox. That is the "cgroup-bpf **or** cgroup + tracepoints" the phase allows:
+`ResourceSummary` for one sandbox. The split is deliberate — "cgroup-bpf **or** cgroup + tracepoints":
 eBPF where per-event timing earns its keep (CPU), the kernel's own counters where they already exist
 (memory, IO). The whole mechanism is decision 026; `resource_meter.rs` (ignored/privileged) proves a
-CPU-heavy run reports more CPU than an idle one attributed to the sandbox (P12.5); `cargo xtask
-meter-sandbox` is the live exit-gate demo. The engine *measures*; the hoster *bills*.
+CPU-heavy run reports more CPU than an idle one attributed to the sandbox; `cargo xtask
+meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 
-## The fused audit record (Phase 13)
+## The fused audit record
 
-Phases 9–12 each drive one probe standalone; Phase 13 binds all three to a launched sandbox and fuses
-their output into one per-run **audit record**, host-observed from outside the guest. It lives in
+The sections above each drive one probe standalone; the fused record binds all three to a launched
+sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
+guest. It lives in
 `probes-loader` (not `agent-vmm`, decisions 024/026/028), bridged to the driver only by plain values:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
@@ -222,7 +224,7 @@ their output into one per-run **audit record**, host-observed from outside the g
   unavailable. Its core is network + resources + denials — the signals host eBPF observes strongly.
 - **Deterministic JSON.** `RunRecord::to_json` is a hand-rolled, compact, byte-stable serializer (fixed
   key order, arrays pre-sorted, integer-nanosecond durations) — the machine-readable audit surface the
-  language SDKs parse and Phase 14 pretty-prints. Pinned by a golden test.
+  language SDKs parse and the CLI's `--trace` pretty-prints. Pinned by a golden test.
 
 The privileged `audit_record.rs` proves it end to end: a guest that touches the network + reads a file
 yields a record whose flows show the network **exactly**, while the in-guest file read correctly never
@@ -238,8 +240,8 @@ CLI's `--watch` live view redraws from without ever disturbing the record. The C
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so
 untrusted code's syscalls are serviced *in-guest* and never trap to a host tracepoint. This is the
 price of core property 1 (isolation is hardware): host-side syscall visibility is inherently coarse
-for a microVM. The strong cross-boundary signals are **network** (the tap, P10/P11) and **resources**
-(the cgroup, P12), which the host observes directly. We say this plainly rather than promise in-guest
+for a microVM. The strong cross-boundary signals are **network** (the tap) and **resources**
+(the cgroup), which the host observes directly. We say this plainly rather than promise in-guest
 syscall introspection the boundary can't deliver.
 
 ## Try it
@@ -259,24 +261,23 @@ cargo test -p agent-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
 ```
 
-The per-phase exit-gate demos each boot a real sandbox and show one probe end to end (all need
+The per-axis demos each boot a real sandbox and show one probe end to end (all need
 `/dev/kvm` + the agent rootfs + the built object, run as root or with the named caps):
 
 ```console
-cargo xtask trace-sandbox      # P9:  the sandbox's host syscall footprint, by cgroup
-cargo xtask watch-sandbox      # P10: the guest's per-VM network flows on its tap
-cargo xtask enforce-sandbox    # P11: deny-by-default egress, allow-listed, enforced at the tap
-cargo xtask meter-sandbox      # P12: per-sandbox CPU (eBPF) + memory/IO (cgroup v2)
-cargo xtask bench-meter        # P12.4: the metering overhead, measured (no KVM needed)
+cargo xtask trace-sandbox      # the sandbox's host syscall footprint, by cgroup
+cargo xtask watch-sandbox      # the guest's per-VM network flows on its tap
+cargo xtask enforce-sandbox    # deny-by-default egress, allow-listed, enforced at the tap
+cargo xtask meter-sandbox      # per-sandbox CPU (eBPF) + memory/IO (cgroup v2)
+cargo xtask bench-meter        # the metering overhead, measured (no KVM needed)
 ```
 
-## Beyond the counter: a per-event syscall trace (Phase 9, in progress)
+## Beyond the counter: the per-event syscall trace
 
-Phase 8's counter proves the load→attach→read→drop path with the smallest possible payload. Phase 9
-turns that into a real **stream of per-event records** (this section is extended as the phase
-completes; here is the shape so far):
+The counter proves the load→attach→read→drop path with the smallest possible payload; the tracer
+turns that into a real **stream of per-event records**:
 
-- **A ring buffer, not a counter (P9.1).** Three tracepoint programs (`trace_execve` / `trace_openat`
+- **A ring buffer, not a counter.** Three tracepoint programs (`trace_execve` / `trace_openat`
   / `trace_connect`, on the matching `sys_enter_*` hooks) push a whole `SyscallEvent` — pid, tid,
   cgroup id, `comm`, and the opened path or connected sockaddr — into one `BPF_MAP_TYPE_RINGBUF`. The
   ring buffer is the modern (5.8+) replacement for the per-CPU perf array: a single ordered MPSC queue
@@ -285,17 +286,17 @@ completes; here is the shape so far):
 - **A shared, single-sourced record.** `SyscallEvent` lives in one dependency-free `#![no_std]` crate
   (`crates/probes-common`) that both the kernel writer and the userspace reader depend on, so the
   `#[repr(C)]` layout can't drift between them — the reader parses it field by field, no `unsafe`.
-- **Filter to one sandbox (P9.2).** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
+- **Filter to one sandbox.** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
   the default watches the whole host. See `docs/contributing-architecture.md` decision 021.
-- **Or a *set* of sandboxes, for one shared tracer (P13.5).** A `TRACE_TARGETS` cgroup set + a
+- **Or a *set* of sandboxes, for one shared tracer.** A `TRACE_TARGETS` cgroup set + a
   `TRACE_SET` mode toggle (the `METER_TARGETS`/`METER_ALL` pattern) let **one** attached tracer serve
   every concurrent sandbox — each registers its cgroup with `SyscallTracer::add_target`, and only those
   cgroups' events are emitted. A tracer-per-sandbox would instead run *N* copies of each `sys_enter_*`
   on every syscall (O(sandboxes)); the set keeps it one hash lookup. Off by default, so the single-target
   path above is unchanged. Decision 028.
-- **A live trace, attributed to a sandbox (P9.3/P9.4).** `SyscallTracer::stream` loops the drain,
+- **A live trace, attributed to a sandbox.** `SyscallTracer::stream` loops the drain,
   decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` sockaddr) and handing
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop
   with the Firecracker track: it resolves a VMM pid to its cgroup id (the inode of the cgroup dir,

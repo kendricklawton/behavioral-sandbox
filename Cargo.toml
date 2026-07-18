@@ -6,6 +6,8 @@ members = [
     "crates/guest-agent",
     "crates/probes-common",
     "crates/probes-loader",
+    "crates/agentd-protocol",
+    "crates/agentd-client",
     "crates/cli",
     "crates/test-support",
     "xtask",
@@ -39,7 +41,8 @@ serde_json = "1"
 toml = "0.8"
 # Structured logging to stderr; stdout stays reserved for a run's result / audit log.
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# `json`: the daemon's `--log-json` machine-readable encoding of the same structured events.
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # No-panic discipline on the host path: a hostile or crashing guest, a failed probe, or a broken
 # channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`

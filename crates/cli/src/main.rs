@@ -11,7 +11,7 @@
 //! agent rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
-mod audit;
+use agent_cli::audit;
 mod config;
 mod doctor;
 mod trace;

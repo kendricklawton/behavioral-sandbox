@@ -13,7 +13,7 @@ The **host↔guest channel decoders** (`crates/channel`). A hostile guest fully 
 agent, so every time the host reads a `Response` it is parsing bytes an attacker chose. The decoders
 must, for *any* input, return a value or a typed `ChannelError`, and never panic, loop unboundedly,
 or allocate past `MAX_PAYLOAD`. The guest-side `Request` decoder is fuzzed too as defense in depth
-(the host is trusted, but the guest agent should be just as unpanicky).
+(the host is trusted, but the in-guest agent should be just as unpanicky).
 
 Lower-value targets (the Firecracker HTTP response parser, the eBPF record parsers) read
 host/kernel-sourced input, not attacker-controlled input, so they are robustness hygiene, not a
