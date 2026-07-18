@@ -1,6 +1,7 @@
 //! `cargo xtask <cmd>`, dev orchestration for the agent sandbox engine.
 //!
-//! - **`ci`**, the host-safe gate (fmt · clippy `-D warnings` · build · test · docs · `deny`).
+//! - **`ci`**, the host-safe gate (fmt · prose-drift · clippy `-D warnings` · build · test ·
+//!   docs · `deny`).
 //!   Runs everywhere, needs no KVM or root, and mirrors `.github/workflows/ci.yml`.
 //! - **`ci-privileged`**, the KVM/eBPF integration tests (the `#[ignore]`d ones). Needs
 //!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop. Builds the guest
@@ -64,6 +65,7 @@
 mod artifacts;
 mod bench;
 mod demo;
+mod drift;
 mod guest_bins;
 mod rootfs;
 mod selfhost;
@@ -88,7 +90,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Host-safe gate: fmt · clippy `-D warnings` · build · test · docs · cargo-deny.
+    /// Host-safe gate: fmt · prose-drift · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
     /// Privileged integration tests (KVM + eBPF), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
     CiPrivileged,
@@ -339,6 +341,9 @@ fn cargo_fuzz_available() -> bool {
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.
 fn ci() -> Result<()> {
     cargo(&["fmt", "--all", "--check"])?;
+    // The prose-drift lint runs early: it is sub-second, and a broken decision citation or a
+    // comment pointing at a renamed file should surface before the slow compile steps.
+    drift::check(workspace_root())?;
     cargo(&[
         "clippy",
         "--workspace",

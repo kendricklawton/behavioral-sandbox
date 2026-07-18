@@ -91,8 +91,9 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   **≥ 5.15** (a security-maintained LTS floor, untrusted code on an unpatched kernel is a
   threat-model hole; `agent doctor` enforces it, decision 036). The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
-- **Two gates.** `cargo xtask ci` is host-safe (fmt · clippy `-D warnings` · build · unit tests ·
-  docs · `deny`; the eBPF object build joins at Phase 8) and runs everywhere. `cargo xtask ci-privileged` runs
+- **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
+  build · unit tests · docs · `deny`; the eBPF object build joins at Phase 8) and runs everywhere.
+  `cargo xtask ci-privileged` runs
   the VM-boot + eBPF-load integration tests and needs `/dev/kvm` + `CAP_NET_ADMIN`/`CAP_BPF`
   (your dev box or a bare-metal/nested-virt runner, a stock cloud VM can't nest KVM). Never gate
   the everyday loop on a privileged runner.
@@ -100,6 +101,12 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   `agent run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`AGENT_*`) >
   file (`.agent.toml`, the nearest one walking up from the cwd) > defaults** (decision 031).
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
+- **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
+  show, in the fewest sentences that carry it; it never restates what the next lines visibly do.
+  A prose *promise* ("can't drift", "never logged") belongs in a type or a test, with the comment
+  pointing at it; a mechanical claim (a `decision NNN` citation, a repo path, a Markdown link)
+  is checked by the gate's prose-drift lint. State the threat-model framing once per module
+  (rustdoc on the item that owns it), not at every call site.
 - **No em-dashes in prose.** Repo docs, code comments, decision entries, and commit messages use
   colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*

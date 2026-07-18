@@ -78,8 +78,7 @@ pub fn render(record: &RunRecord) -> String {
         opt_bytes(res.cgroup.io_wbytes)
     );
 
-    // The host-syscall axis is the VMM's footprint, a microVM services the guest's syscalls
-    // in-guest, so their absence here is the isolation working, and the label says so.
+    // No guest syscalls here is the isolation working; the printed label carries the explanation.
     let sys = &record.host_syscalls;
     let _ = writeln!(
         out,

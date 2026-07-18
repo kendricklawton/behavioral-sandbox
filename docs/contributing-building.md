@@ -24,9 +24,12 @@ cargo xtask ci
 ```
 
 `cargo xtask ci` is the **host-safe gate** and runs everywhere, no KVM or caps needed:
-fmt · clippy `-D warnings` · build · unit tests · docs · `cargo deny` · the eBPF object build
-(which asserts the object keeps its `.BTF` section, so a probe that won't compile or that drops
-its BTF fails fast here).
+fmt · the prose-drift lint · clippy `-D warnings` · build · unit tests · docs · `cargo deny` ·
+the eBPF object build (which asserts the object keeps its `.BTF` section, so a probe that won't
+compile or that drops its BTF fails fast here). The prose-drift lint keeps checkable claims in
+prose honest: every `decision NNN` citation must exist in the decision log, every backticked repo
+path in a Rust comment must point at something in the tree, and every relative Markdown link must
+resolve; a rename or renumber fails the gate instead of silently orphaning the references.
 
 ## The privileged gate
 

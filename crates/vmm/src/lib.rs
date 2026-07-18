@@ -151,9 +151,9 @@ pub enum VmmError {
     GuestExec(String),
     /// The guest **violated the wire contract** on an otherwise-healthy channel: a returned artifact
     /// path that is absolute or climbs out of the working tree, or a well-framed response the exec
-    /// loop never expects there. The guest agent is not the trust boundary, so the host rejects the
-    /// misbehaving guest rather than trusting it, a guest fault, distinct from a command that merely
-    /// failed to run ([`GuestExec`](VmmError::GuestExec)) or a transport-level [`Channel`](VmmError::Channel) break.
+    /// loop never expects there. The host rejects the misbehaving guest rather than trusting it, a
+    /// guest fault, distinct from a command that merely failed to run
+    /// ([`GuestExec`](VmmError::GuestExec)) or a transport-level [`Channel`](VmmError::Channel) break.
     GuestProtocol(String),
     /// A command's captured output exceeded the host's `limit`-byte cap.
     OutputCap { limit: usize },

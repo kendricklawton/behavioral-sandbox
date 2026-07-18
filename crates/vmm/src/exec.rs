@@ -172,11 +172,7 @@ pub(crate) fn run_exec<S: Read + Write>(
                 stderr.extend_from_slice(&b);
             }
             Response::File { path, data } => {
-                // The guest names the artifact paths, and the guest agent is not the trust boundary
-                // (`guest-agent/src/lib.rs`): a hostile or buggy guest can return `/etc/passwd` or
-                // `../../etc/cron.d/x`. Reject anything that isn't a relative, non-climbing path
-                // *here*, at the public API, so every embedder that writes `RunResult.files` to disk (the
-                // pinned SDKs, not just the CLI) inherits the containment instead of re-deriving it.
+                // The guest names these paths; `artifact_path_is_safe` owns the containment story.
                 if !artifact_path_is_safe(&path) {
                     return Err(VmmError::GuestProtocol(format!(
                         "guest returned artifact path {path:?} that is absolute or escapes the \

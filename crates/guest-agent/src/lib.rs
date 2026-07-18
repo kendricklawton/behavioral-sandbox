@@ -535,8 +535,9 @@ impl RunDir {
     /// The command ran *before* this read and may have planted a symlink inside the run dir pointing
     /// outside it (`ln -s /etc/passwd out`); a bare `fs::read` would follow it and hand the host an
     /// out-of-tree file. So require the link-resolved real path to stay within the run dir, treating
-    /// an escape as "no such artifact" (omitted, not fatal). The agent is not the security boundary,
-    /// but this keeps it from leaking files a de-privileged command couldn't otherwise reach.
+    /// an escape as "no such artifact" (omitted, not fatal). Defense-in-depth (the microVM stays
+    /// the boundary): this keeps the agent from leaking files a de-privileged command couldn't
+    /// otherwise reach.
     fn get(&self, rel: &str) -> Result<Option<Vec<u8>>, AgentError> {
         let src = self.resolve(rel)?;
         let (real, root) = match (src.canonicalize(), self.path.canonicalize()) {
