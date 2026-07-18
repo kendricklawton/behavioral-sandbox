@@ -2,7 +2,7 @@
 //! runtimes + the static agent + a vsock init, assembled rootless into an ext4 image that two
 //! builds reproduce byte-identically.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
@@ -10,7 +10,13 @@ use anyhow::{bail, Context, Result};
 use crate::artifacts::{fetch_one, sha256_of, Artifact};
 use crate::bench::image_used_bytes;
 use crate::guest_bins::build_guest_agent;
-use crate::{agent_rootfs_path, artifacts_dir, run_tool, run_tool_env, workspace_root};
+use crate::{agent_rootfs_path, artifacts_dir, run_tool, run_tool_env, vendor_dir, workspace_root};
+
+/// The apk cache subdirectory (under a build's `artifacts/` or a vendor mirror): the `.apk` closure +
+/// its `APKINDEX`, populated online once and installed from offline thereafter. Defined here with the
+/// rest of the apk machinery; `vendor` imports it (so the module edge points one way, `vendor` →
+/// `rootfs`, not a cycle).
+pub(crate) const APK_CACHE_SUBDIR: &str = "apk-cache";
 
 /// A fixed rootfs UUID so repeated builds don't churn it (Firecracker roots by device, not UUID).
 /// Reused as the ext4 directory-hash seed: the seed only guards against adversarial
@@ -127,7 +133,7 @@ exec chroot . /sbin/init
 /// `apk` adds the [`GUEST_PACKAGES`] runtimes). A *build input*, deliberately separate from
 /// [`artifacts`](crate::artifacts::artifacts) (the boot kernel+rootfs the `ci-privileged`
 /// hash-guard requires present).
-fn alpine_artifact() -> Result<Artifact> {
+pub(crate) fn alpine_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
         "x86_64" => Ok(Artifact {
@@ -144,7 +150,7 @@ fn alpine_artifact() -> Result<Artifact> {
 
 /// The pinned static `apk` (from Alpine's `apk-tools-static` package — itself a tarball): the
 /// installer that puts [`GUEST_PACKAGES`] into the staging dir **rootless**, on any host distro.
-fn apk_tools_artifact() -> Result<Artifact> {
+pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
         "x86_64" => Ok(Artifact {
@@ -426,51 +432,39 @@ fn check_packages_lock(built: &[String], hard: bool) -> Result<()> {
     Ok(())
 }
 
+/// Where `apk.static` sources the guest packages, the one axis that differs between the online build,
+/// an offline vendored build, and the `vendor` snapshot that populates the mirror.
+enum ApkSource<'a> {
+    /// Fetch from the pinned Alpine CDN, caching nothing — the default online build.
+    Network,
+    /// Install **offline** from a vendored apk cache (`--cache-dir <dir> --no-network`), so a fresh
+    /// host never reaches the CDN. The cache holds the sha-pinned `.apk` closure + its `APKINDEX`.
+    VendorCache(&'a Path),
+    /// Fetch from the CDN **and** populate `<dir>` with the resolved `.apk`s + index — what
+    /// `cargo xtask vendor` runs once to snapshot the closure for later offline installs.
+    PopulateCache(&'a Path),
+}
+
 /// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static` — no chroot, no
-/// root, no host `apk`. The `.apk` is a tarball; its `sbin/apk.static` is extracted to a scratch
-/// dir that's removed after the install (the packages land in `staging`, the tool is ephemeral).
+/// root, no host `apk`. Vendor-aware: with `AGENT_VENDOR_DIR` set it installs offline from the
+/// vendored apk cache, otherwise it fetches from the pinned Alpine CDN. The `.apk` is a tarball; its
+/// `sbin/apk.static` is extracted to a scratch dir removed after the install (the packages land in
+/// `staging`, the tool is ephemeral).
 fn install_guest_packages(staging: &Path) -> Result<()> {
     if GUEST_PACKAGES.is_empty() {
         return Ok(());
     }
     let tools = apk_tools_artifact()?;
     fetch_one(&tools)?;
+    let (tooldir, apk) = extract_apk_static(&tools.dest, &artifacts_dir())?;
 
-    let tooldir = artifacts_dir().join("apk-tools");
-    if tooldir.exists() {
-        std::fs::remove_dir_all(&tooldir)?;
-    }
-    std::fs::create_dir_all(&tooldir)?;
-    run_tool(
-        "tar",
-        &[
-            OsStr::new("xzf"),
-            tools.dest.as_os_str(),
-            OsStr::new("-C"),
-            tooldir.as_os_str(),
-        ],
-    )?;
-
-    let apk = tooldir.join("sbin/apk.static");
-    let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main");
-    // The host's arch, not a literal: Alpine's arch names match Rust's for the arches we'll pin
-    // (x86_64/aarch64), and the pinned-artifact fns above already bail on anything unpinned — so
-    // this stays correct by itself when a second arch lands, instead of silently installing
-    // x86_64 packages into an aarch64 image.
-    let mut args: Vec<&OsStr> = vec![
-        OsStr::new("--root"),
-        staging.as_os_str(),
-        OsStr::new("--arch"),
-        OsStr::new(std::env::consts::ARCH),
-        OsStr::new("--repository"),
-        OsStr::new(&repo),
-        OsStr::new("--no-scripts"),
-        OsStr::new("--no-cache"),
-        OsStr::new("add"),
-    ];
-    args.extend(GUEST_PACKAGES.iter().map(OsStr::new));
-    let apk_str = apk.to_string_lossy().into_owned();
-    let result = run_tool(&apk_str, &args);
+    // Bind the cache path so an `ApkSource` borrow can point at it for the whole call.
+    let vendored_cache = vendor_dir().map(|v| v.join(APK_CACHE_SUBDIR));
+    let source = match &vendored_cache {
+        Some(dir) => ApkSource::VendorCache(dir),
+        None => ApkSource::Network,
+    };
+    let result = run_apk_add(&apk, staging, &source);
 
     // The tool is scratch either way — clean it before propagating any install failure.
     let _ = std::fs::remove_dir_all(&tooldir);
@@ -484,6 +478,153 @@ fn install_guest_packages(staging: &Path) -> Result<()> {
         std::fs::remove_file(&apk_log).with_context(|| format!("remove {}", apk_log.display()))?;
     }
     Ok(())
+}
+
+/// Extract the pinned static `apk` from its (already-fetched) tarball into `<scratch_base>/apk-tools`,
+/// returning `(tooldir, apk_static_path)`. The caller removes `tooldir` when done — the tool is
+/// ephemeral, the packages it installs are the product. `scratch_base` is caller-chosen so the
+/// `vendor` command keeps its scratch inside the mirror dir, not the workspace `artifacts/`.
+fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf, PathBuf)> {
+    let tooldir = scratch_base.join("apk-tools");
+    if tooldir.exists() {
+        std::fs::remove_dir_all(&tooldir)?;
+    }
+    std::fs::create_dir_all(&tooldir)?;
+    run_tool(
+        "tar",
+        &[
+            OsStr::new("xzf"),
+            tools_tar.as_os_str(),
+            OsStr::new("-C"),
+            tooldir.as_os_str(),
+        ],
+    )?;
+    let apk = tooldir.join("sbin/apk.static");
+    Ok((tooldir, apk))
+}
+
+/// Run `apk.static add` for [`GUEST_PACKAGES`] into `staging`, sourced per [`ApkSource`]. The
+/// package set, arch, and repo are identical across sources — only the fetch/cache flags differ — so
+/// the resolved closure (and thus [`resolved_packages`]) is the same whether built online or from the
+/// vendored cache, keeping the lockfile contract intact.
+fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
+    let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main");
+    // The host's arch, not a literal: Alpine's arch names match Rust's for the arches we pin
+    // (x86_64/aarch64), and the pinned-artifact fns bail on anything unpinned — so this stays
+    // correct by itself when a second arch lands, not silently installing x86_64 into an aarch64 image.
+    let mut args: Vec<OsString> = vec![
+        OsString::from("--root"),
+        staging.as_os_str().to_owned(),
+        OsString::from("--arch"),
+        OsString::from(std::env::consts::ARCH),
+        OsString::from("--repository"),
+        OsString::from(&repo),
+        OsString::from("--no-scripts"),
+    ];
+    match source {
+        // `--no-cache`: don't leave apk's cache behind on an ordinary online build.
+        ApkSource::Network => args.push(OsString::from("--no-cache")),
+        // `--no-network`: install purely from the vendored cache (the sha-pinned closure + index).
+        ApkSource::VendorCache(dir) => {
+            args.push(OsString::from("--cache-dir"));
+            args.push(absolute(dir).into_os_string());
+            args.push(OsString::from("--no-network"));
+        }
+        // Online, but keep every fetched `.apk` + the index in the cache dir — the vendor snapshot.
+        ApkSource::PopulateCache(dir) => {
+            args.push(OsString::from("--cache-dir"));
+            args.push(absolute(dir).into_os_string());
+        }
+    }
+    args.push(OsString::from("add"));
+    args.extend(GUEST_PACKAGES.iter().map(|p| OsString::from(*p)));
+
+    let apk_str = apk.to_string_lossy().into_owned();
+    let arg_refs: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    run_tool(&apk_str, &arg_refs)
+}
+
+/// `apk.static update` into `cache_dir` — fetch + cache the repo's `APKINDEX` so a later offline
+/// `add --no-network` can resolve against it. A plain `add --cache-dir` caches the packages it pulls
+/// but not necessarily the index, so the vendor snapshot seeds it explicitly.
+fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path) -> Result<()> {
+    let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main");
+    let args: Vec<OsString> = vec![
+        OsString::from("--root"),
+        staging.as_os_str().to_owned(),
+        OsString::from("--arch"),
+        OsString::from(std::env::consts::ARCH),
+        OsString::from("--repository"),
+        OsString::from(&repo),
+        OsString::from("--cache-dir"),
+        absolute(cache_dir).into_os_string(),
+        OsString::from("update"),
+    ];
+    let apk_str = apk.to_string_lossy().into_owned();
+    let arg_refs: Vec<&OsStr> = args.iter().map(OsString::as_os_str).collect();
+    run_tool(&apk_str, &arg_refs)
+}
+
+/// Make `path` absolute (against the current dir — `xtask` runs from the workspace root). apk
+/// resolves a *relative* `--cache-dir` against its `--root`, which would put the cache inside the
+/// staging tree instead of where the packages actually live, so every cache path handed to apk goes
+/// through here first.
+fn absolute(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Populate a vendored apk cache with the resolved guest-package closure (the `.apk` files **and**
+/// the `APKINDEX`) by running one **online** `apk add` into a throwaway root. Called by
+/// `cargo xtask vendor`; afterwards an offline build installs from this cache (`--no-network`), so a
+/// fresh host never touches the Alpine CDN — the durable hardening decision 007 deferred. The
+/// throwaway root exists only so apk has the base's `/etc/apk/keys` to verify signatures against; it
+/// is removed, leaving just the cache. `base_tar`/`apk_tools_tar` are the (already sha-verified)
+/// vendored tarballs, so this reuses them rather than re-downloading.
+pub(crate) fn populate_apk_cache(
+    cache_dir: &Path,
+    base_tar: &Path,
+    apk_tools_tar: &Path,
+) -> Result<()> {
+    if GUEST_PACKAGES.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(cache_dir)
+        .with_context(|| format!("create apk cache {}", cache_dir.display()))?;
+
+    // Keep all scratch inside the mirror dir (the cache's parent), not the workspace `artifacts/`, so
+    // `vendor --dir /elsewhere` is self-contained and can't clobber a concurrent build's scratch.
+    let scratch = cache_dir.parent().unwrap_or(cache_dir);
+
+    // A throwaway staging with the pinned Alpine base, so apk installs into a real root (its keys +
+    // db). Removed after; only the cache is the product.
+    let staging = scratch.join("apk-cache-root");
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)?;
+    }
+    std::fs::create_dir_all(&staging)?;
+    run_tool(
+        "tar",
+        &[
+            OsStr::new("xzf"),
+            base_tar.as_os_str(),
+            OsStr::new("-C"),
+            staging.as_os_str(),
+        ],
+    )?;
+
+    let (tooldir, apk) = extract_apk_static(apk_tools_tar, scratch)?;
+    // Seed the index first (`update`), then the packages (`add`), both into the cache — so a later
+    // offline `add --no-network` can resolve the closure against the cached `APKINDEX`.
+    let result = run_apk_update(&apk, &staging, cache_dir)
+        .and_then(|()| run_apk_add(&apk, &staging, &ApkSource::PopulateCache(cache_dir)));
+    let _ = std::fs::remove_dir_all(&tooldir);
+    let _ = std::fs::remove_dir_all(&staging);
+    result
 }
 
 /// `chmod 0755` — the agent must be executable inside the image even if the copy didn't preserve it.

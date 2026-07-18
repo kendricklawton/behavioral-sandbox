@@ -1998,10 +1998,22 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
 
 Ship it as a thing others can run: packaged, documented, and self-hostable.
 
-- [ ] **P19.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
+- [x] **P19.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
       *(Includes vendoring the sha-pinned upstream inputs — the Firecracker CI kernel/rootfs and the
       `.apk` closure (decision 007's note, P6.9d's recording) — so a fresh host's setup no longer
       depends on the FC S3 bucket or the Alpine CDN staying alive.)*
+      *(**Done** as decision 037. `cargo xtask self-host` is the single command: it obtains the pinned
+      kernel + rootfs, builds the guest image + eBPF object, installs `agent`/`agentd` into a prefix
+      (`~/.local/bin` default, `--prefix DIR`), and on a KVM host boots one sandbox to prove it
+      (`--no-run` prints the proof command instead). `cargo xtask vendor` snapshots all four
+      sha-pinned inputs **plus the resolved `.apk` closure** (the fetched-not-pinned piece decision
+      007 deferred) into a gitignored mirror with a sha `vendor-manifest.txt`; `--verify` re-checks it
+      offline. `AGENT_VENDOR_DIR` is the one seam: `fetch_one` restores binary artifacts from the
+      mirror and the rootfs build installs packages from the vendored apk cache
+      (`apk.static --cache-dir … --no-network`), so the whole build runs with the FC S3 bucket and the
+      Alpine CDN dark. Vendor-aware via `fetch_one` (zero call-site churn); manifest parse/round-trip
+      unit-tested; `docs/cli-install.md` gains Self-host + Vendoring sections. non-`api:` (xtask + docs
+      only). The network/KVM steps run on the self-hoster's box, not the host-safe gate.)*
 - [ ] **P19.2** `curl | sh` / container / release binaries with checksums.
       *(What actually ships: the release binaries plus the xtask-built rootfs, guest kernel, and
       eBPF objects — gitignored, never carried in the source tree, assembled and checksummed at
@@ -2017,8 +2029,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 - [ ] **P19.5** A **reference integration**: a small host application embedding the engine end to end.
 - [ ] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
 - [ ] **P19.7** Security policy + responsible-disclosure notes.
-- [ ] **P19.8** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
-- [x] **P19.9** `(decision)` **Supported-platform policy**: the hard floor (architectures, a
+- [x] **P19.8** `(decision)` **Supported-platform policy**: the hard floor (architectures, a
       security-maintained host-kernel LTS) vs the documented degradations, and the pinned upstream
       versions (Firecracker + the guest kernel that tracks its support list).
       *(Pulled forward from packaging: a self-hostable security engine has to state what it runs on
@@ -2031,8 +2042,10 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
       matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
       internal doctor row + docs).)*
+- [ ] **P19.9** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
   and read the eBPF-observed audit trail.
+
 
 ---
 

@@ -6,6 +6,12 @@
 //!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop. Builds the guest
 //!   agent + the agent rootfs first, so the in-VM exec test has something to boot.
 //! - **`setup`** — checks the host can do KVM + eBPF and reports what's missing.
+//! - **`self-host`** — the single self-host command: obtain the pinned kernel + rootfs, build the
+//!   guest image + eBPF object, install `agent`/`agentd`, and (on a KVM host) boot one sandbox to
+//!   prove it. Offline when `AGENT_VENDOR_DIR` points at a `vendor` mirror.
+//! - **`vendor`** — snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
+//!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
+//!   bucket or the Alpine CDN; `--verify` re-checks the mirror offline.
 //! - **`build-probes`** — build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via
 //!   `bpf-linker`, under the crate's own nightly toolchain. Host-safe (no KVM); skips with a note
 //!   when `bpf-linker`/`rustup` are absent.
@@ -46,8 +52,9 @@
 //!   (the in-gate coverage is `crates/channel`'s dependency-free `fuzz_tests`).
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
-//! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch); the
-//! gates and the shared plumbing (paths, `cargo`/tool runners) live here.
+//! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch), `vendor`
+//! (the offline mirror of all pinned inputs), `selfhost` (the single stand-up command); the gates
+//! and the shared plumbing (paths, `cargo`/tool runners) live here.
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
 //! workspace; `build-probes` builds its object (with BTF) and is folded **into** `ci` (guarded, so
@@ -59,6 +66,8 @@ mod bench;
 mod demo;
 mod guest_bins;
 mod rootfs;
+mod selfhost;
+mod vendor;
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -85,6 +94,29 @@ enum Cmd {
     CiPrivileged,
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
+    /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
+    /// object, install the `agent`/`agentd` binaries, and (on a KVM host) boot one sandbox to prove
+    /// it. Offline when `AGENT_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
+    SelfHost {
+        /// Where to install the `agent`/`agentd` binaries (default `~/.local/bin`).
+        #[arg(long, value_name = "DIR")]
+        prefix: Option<PathBuf>,
+        /// Build + install only; skip the sandbox boot proof (it just prints the command).
+        #[arg(long)]
+        no_run: bool,
+    },
+    /// Snapshot every sha-pinned upstream input (guest kernel + rootfs, Alpine base, the `.apk`
+    /// closure) into a local mirror, so a fresh host builds offline — no Firecracker S3 bucket, no
+    /// Alpine CDN. Writes a sha manifest; re-verify it offline with `--verify`.
+    Vendor {
+        /// The mirror directory to populate or verify (default `vendor/` under the workspace root).
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Re-verify an existing mirror against its manifest (every file must still match its hash)
+        /// instead of (re)downloading — an offline integrity check, no upstream contact.
+        #[arg(long)]
+        verify: bool,
+    },
     /// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker`, under the
     /// crate's own nightly toolchain (`build-std`). Host-safe; skips with a note when `bpf-linker` or
     /// `rustup` is missing. The object lands at `crates/probes/target/bpfel-unknown-none/release/probes`.
@@ -237,6 +269,14 @@ fn main() -> Result<()> {
         Cmd::Ci => ci(),
         Cmd::CiPrivileged => ci_privileged(),
         Cmd::Setup => setup(),
+        Cmd::SelfHost { prefix, no_run } => selfhost::self_host(prefix, no_run),
+        Cmd::Vendor { dir, verify } => {
+            if verify {
+                vendor::verify(&dir.unwrap_or_else(vendor::default_vendor_dir))
+            } else {
+                vendor::vendor(dir)
+            }
+        }
         Cmd::BuildProbes => build_probes(),
         Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
         Cmd::BuildGuestAgent => guest_bins::build_guest_agent().map(|_| ()),
@@ -628,6 +668,15 @@ fn workspace_root() -> &'static Path {
 /// `artifacts/` under the workspace root.
 fn artifacts_dir() -> PathBuf {
     workspace_root().join("artifacts")
+}
+
+/// The local vendor mirror, if the operator set `AGENT_VENDOR_DIR`: the offline source for every
+/// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Firecracker S3
+/// bucket or the Alpine CDN. `None` means fetch from pinned upstream (the default).
+fn vendor_dir() -> Option<PathBuf> {
+    std::env::var_os("AGENT_VENDOR_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
 }
 
 /// The artifact filenames under [`artifacts_dir`], defined once so the many readers/writers

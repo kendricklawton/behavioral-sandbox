@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::{artifacts_dir, boot_rootfs_path, kernel_path};
+use crate::{artifacts_dir, boot_rootfs_path, kernel_path, vendor_dir};
 
 /// A pinned boot artifact: a stable URL, its expected sha256 (the real contract — the URL is
 /// replaceable), and where it lands under `artifacts/`.
@@ -50,10 +50,66 @@ pub(crate) fn fetch_artifacts() -> Result<()> {
     Ok(())
 }
 
-/// Fetch one artifact into place if it isn't already present with the right hash. Downloads to a
-/// `.part` and renames only after the hash verifies, so an interrupted download can never leave a
-/// plausible-looking file at the final path (`ci-privileged` gates on presence alone).
+/// Obtain one artifact into place. **Vendor-aware:** if `AGENT_VENDOR_DIR` is set, the artifact is
+/// restored from the local vendor mirror (a sha-verified copy, no network); otherwise it is
+/// downloaded from its pinned upstream URL. Either way the sha256 is the contract, so a corrupt or
+/// substituted file fails here. Every build path (`build-rootfs`, `fetch-artifacts`, `self-host`)
+/// goes through here, so setting `AGENT_VENDOR_DIR` takes all of them offline at once.
 pub(crate) fn fetch_one(a: &Artifact) -> Result<()> {
+    match vendor_dir() {
+        Some(v) => restore_from_vendor(a, &v),
+        None => download_one(a),
+    }
+}
+
+/// The final path component of an artifact's `dest`, as a display string — the name it carries both
+/// under `artifacts/` and in the vendor mirror.
+fn artifact_name(a: &Artifact) -> String {
+    a.dest.file_name().map_or_else(
+        || a.dest.to_string_lossy().into_owned(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// Restore one artifact from the local vendor mirror `<vendor>/<name>` — a sha-verified copy, no
+/// network — so an offline host builds from the vendored inputs. A missing vendored file is a clear
+/// error naming `cargo xtask vendor`, never a silent fallback to the network (which would defeat the
+/// point of pinning the host offline).
+fn restore_from_vendor(a: &Artifact, vendor: &Path) -> Result<()> {
+    let name = artifact_name(a);
+    if a.dest.is_file() && sha256_of(&a.dest)? == a.sha256 {
+        println!("✓ {name} already present (sha256 ok)");
+        return Ok(());
+    }
+    let src = vendor.join(&name);
+    if !src.is_file() {
+        bail!(
+            "vendored input {name} not found in {} — run `cargo xtask vendor` to populate the \
+             mirror (or unset AGENT_VENDOR_DIR to fetch from upstream)",
+            vendor.display()
+        );
+    }
+    let got = sha256_of(&src)?;
+    if got != a.sha256 {
+        bail!(
+            "vendored {name} sha256 mismatch: expected {}, got {got}",
+            a.sha256
+        );
+    }
+    if let Some(parent) = a.dest.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    std::fs::copy(&src, &a.dest).with_context(|| format!("copy vendored {name} into place"))?;
+    println!("✓ {name} restored from vendor (sha256 ok)");
+    Ok(())
+}
+
+/// Download one artifact into place if it isn't already present with the right hash. Downloads to a
+/// `.part` and renames only after the hash verifies, so an interrupted download can never leave a
+/// plausible-looking file at the final path (`ci-privileged` gates on presence alone). This is the
+/// raw upstream fetch; `cargo xtask vendor` calls it directly (bypassing the vendor mirror) to
+/// populate that mirror in the first place.
+pub(crate) fn download_one(a: &Artifact) -> Result<()> {
     let name = a
         .dest
         .file_name()

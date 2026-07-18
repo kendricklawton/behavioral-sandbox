@@ -8,8 +8,11 @@ code can't see or subvert you. Every run yields a tamper-resistant, host-observe
 **Scope: the engine, not the platform.** A runtime + a clean driver API you self-host: the boring,
 embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed
 audit log. **This is an engine, not a PaaS** — multi-tenant auth, billing, fleet scheduling, and a
-dashboard are the *hoster's* job, out of scope. If a change pulls tenancy/billing/scheduling into this
-repo, or moves the security boundary into the guest, the design is wrong.
+dashboard are the *hoster's* job, out of scope. The **AI model / agent loop is out too**: the model
+is always the *caller* driving the engine from outside, never an engine component (decision 035); the
+engine's job is to contain what the model's code does and hand back the record. If a change pulls
+tenancy/billing/scheduling or a model into this repo, or moves the security boundary into the guest,
+the design is wrong.
 
 The **language SDKs** (Go/Python/Node/C#) and the **Wasmtime sibling** are separate repos built on
 this engine's frozen wire API + audit-log format — thin clients / a sibling, never in this
@@ -53,7 +56,9 @@ crates/
                  so the two sides can't drift.
   probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
                  maps, stream events into the audit log.
-  cli/           the `agent` binary (`run`, `shell`, `--log`); later the `agentd` daemon.
+  cli/           two binaries: `agent` (the CLI — `run`, `shell`, `doctor`; the audit record on
+                 `--trace`/`--record`/`--record-summary`/`--watch`) and `agentd` (the driver
+                 daemon: the versioned newline-JSON wire API over a unix socket — decision 034).
 docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): running the engine
                  (`cli*.md`), the embedder contract (`embedding.md`), the eBPF half (`probes.md`),
                  and the contributing chapters (incl. `contributing-architecture.md`, the decision
@@ -82,7 +87,9 @@ xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF 
 
 ## Conventions
 
-- **Rust**, stable, one workspace. Linux-only (it needs KVM). The eBPF programs build for their
+- **Rust**, stable, one workspace. Linux-only (it needs KVM), `x86_64`/`aarch64`, host kernel
+  **≥ 5.15** (a security-maintained LTS floor — untrusted code on an unpatched kernel is a
+  threat-model hole; `agent doctor` enforces it, decision 036). The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · clippy `-D warnings` · build · unit tests ·
   docs · `deny`; the eBPF object build joins at Phase 8) and runs everywhere. `cargo xtask ci-privileged` runs
@@ -91,8 +98,7 @@ xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF 
   the everyday loop on a privileged runner.
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
   `agent run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`AGENT_*`) >
-  file (`.agent.toml`) > defaults** — env > defaults exists today; the flags and `.agent.toml`
-  layers land with the engine-surface phases (P7+).
+  file (`.agent.toml`, the nearest one walking up from the cwd) > defaults** (decision 031).
 - Don't commit built rootfs/kernel images or generated eBPF objects — they're built by `xtask`.
 - **Git is human-driven.** The user makes every commit and push; the **coding agent** (Claude,
   Gemini, Codex — as opposed to `agent`, this project) never runs `git commit` / `git push` (or

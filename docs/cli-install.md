@@ -3,6 +3,28 @@
 The engine is **Linux-only** (it needs KVM). There is no packaged release yet — you build from
 source, and `cargo xtask setup` tells you what your host is missing at every step.
 
+## Self-host in one command
+
+Once you have the [prerequisites](#prerequisites), the whole stand-up is a single command:
+
+```console
+cargo xtask self-host           # obtain the pinned kernel + rootfs, build the guest image + eBPF
+                                # object, install `agent`/`agentd`, then boot one sandbox to prove it
+```
+
+It installs the `agent` and `agentd` binaries into `~/.local/bin` (override with `--prefix DIR`) and,
+on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
+host without KVM it does everything except the boot and prints the exact command to run the proof on a
+KVM box. `--no-run` skips the boot proof (build + install only).
+
+To build **offline** — no Firecracker S3 bucket, no Alpine CDN — point it at a vendored mirror first
+(see [Vendoring for offline builds](#vendoring-for-offline-builds)):
+
+```console
+cargo xtask vendor                                  # snapshot every pinned input into ./vendor
+AGENT_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
+```
+
 ## Supported platforms
 
 The engine runs untrusted code, so its platform floor is part of its security posture, not just a
@@ -85,3 +107,30 @@ cargo xtask build-probes       # the eBPF object, for the observability demos (n
 ```
 
 You're ready — head to [Using the agent CLI](./cli.md) to run something.
+
+## Vendoring for offline builds
+
+A build otherwise fetches four sha-pinned inputs from two upstreams: the guest kernel + boot rootfs
+from Firecracker's CI S3 bucket, and the Alpine minirootfs + the guest package (`.apk`) closure from
+the Alpine CDN. `cargo xtask vendor` snapshots **all** of them into a local mirror so a fresh host
+builds without either upstream staying alive:
+
+```console
+cargo xtask vendor                    # download every pinned input into ./vendor, sha-verified,
+                                      # and write vendor/vendor-manifest.txt (one sha256 per file)
+cargo xtask vendor --dir /srv/mirror  # populate a mirror elsewhere
+cargo xtask vendor --verify           # re-check an existing mirror against its manifest (offline)
+```
+
+Then set `AGENT_VENDOR_DIR` to the mirror and every build path resolves from it — no network:
+
+```console
+AGENT_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
+AGENT_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
+```
+
+The mirror is **not** committed (it holds downloaded images, like `artifacts/`); it is a self-hoster's
+offline convenience, produced once. The `.apk` closure is pinned at vendor time (Alpine branch repos
+delete old package revisions, so there is no stable per-package URL to pin in source), which makes an
+offline build **more** reproducible than the live-CDN one — it installs from the frozen cache the
+manifest hashes. See [decision 037](./contributing-architecture.md) for the full rationale.
