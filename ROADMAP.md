@@ -1811,8 +1811,26 @@ A local daemon others drive over a socket: still engine, not PaaS.
       absent-vs-zero pool, request-line parse, and a real ephemeral-port scrape); the privileged
       wire-API e2e now also launches `--metrics` and asserts the scraped counters match the session
       it just drove. Non-`api:`.)*
-- [ ] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
-- [ ] **P16.7** Golden: the CLI and the daemon API produce identical run results.
+- [x] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
+      *(Restated where the programmatic interface actually lives: a **crate-level non-goals paragraph**
+      on `agentd-protocol` (the wire is the SDK contract, so the API surface is the code itself) —
+      the protocol carries no tenant/credential/quota/price/host-to-schedule field, and that absence
+      is a design commitment (guardrail 4), a schema bump adds a verb never a tenancy field. Plus a
+      dedicated **"Non-goals: where a PaaS would begin"** section in `docs/daemon.md` (no
+      tenancy/auth/billing/scheduling/public-HTTP; access control is the socket-dir perms; the line
+      is a security boundary too), cross-linked to `embedding.md`'s embedding-side "Where the engine
+      ends". Docs/comments only, non-`api:`.)*
+- [x] **P16.7** Golden: the CLI and the daemon API produce identical run results.
+      *(`tests/cli_daemon_golden.rs`: the same command through both faces — `agent run --json` and
+      `agentd` driven by the reference client — must render an **identical** `(exit_code, stdout,
+      stderr)`, since both are thin hosts of one `agent-vmm` lifecycle; the two agree with each other
+      **and** with the expected literal, so a shared bug can't pass by matching itself. Cases: a plain
+      success, a command that runs and exits non-zero writing both streams (a faithful result, not an
+      error, on both), and a stdin passthrough. A guest fault that yields no result (an unspawnable
+      binary) is out of scope by design — the CLI renders it as an operational error, the daemon as a
+      non-fatal `error` reply, two faithful renderings of a non-result. `#[ignore]`d/privileged; both
+      faces unjailed + default profile so any divergence is the rendering, not a differing knob.
+      Non-`api:`.)*
 - **Exit gate:** a self-hostable sandbox daemon with a clean API; the client/server boundary, and
   where a PaaS would begin (and why it's not here), are documented.
 
@@ -1881,6 +1899,15 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       `.apk` closure (decision 007's note, P6.9d's recording) — so a fresh host's setup no longer
       depends on the FC S3 bucket or the Alpine CDN staying alive.)*
 - [ ] **P19.2** `curl | sh` / container / release binaries with checksums.
+      *(What actually ships: the release binaries plus the xtask-built rootfs, guest kernel, and
+      eBPF objects — gitignored, never carried in the source tree, assembled and checksummed at
+      package time. Tests are **not** a shipped-artifact cost: `#[cfg(test)]` modules and `tests/`
+      compile only under `cargo test` and are stripped from every release binary, so the ~⅓ of LOC
+      that is tests is a repo-size cost, not a binary-size one. Publishing a crate to crates.io is
+      **not** the plan — embedders pin this crate by git rev (see `embedding.md`); if that ever
+      changes, trim the package tarball via `Cargo.toml` `include`/`exclude`: integration `tests/`
+      are packaged by default and can be dropped, while inline `src/` unit tests cannot be split out
+      without moving them.)*
 - [ ] **P19.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
 - [ ] **P19.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
 - [ ] **P19.5** A **reference integration**: a small host application embedding the engine end to end.

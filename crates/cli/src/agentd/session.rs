@@ -23,6 +23,7 @@
 use std::io::BufReader;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::os::unix::net::UnixStream;
+use std::sync::TryLockError;
 use std::time::Duration;
 
 use agent_cli::audit::RunProbes;
@@ -280,9 +281,13 @@ fn serve_run(
 
 /// Boot the session's VM. A **bare** `open` (every knob defaulted) is served from the pre-warmed pool
 /// when the daemon has one — the fast path — since the pool's clones carry the default profile. Any
-/// custom resource knob (or no pool) is a cold boot with the requested envelope. A pool that is
-/// empty, poisoned, or fails a take falls back to a cold boot rather than failing an `open` a fresh
-/// boot could serve.
+/// custom resource knob (or no pool) is a cold boot with the requested envelope.
+///
+/// The lock is held only to pop **ready stock** (an O(1) pop), never across a `Vm::restore` (16-A):
+/// an empty (or poisoned) pool cold-boots rather than restoring a clone under the lock, so one dry
+/// `open` can't serialize every other bare `open` behind its restore. A dry cold boot pays its own
+/// latency and the pool refills between sessions; the trade is a `pooled: false` on the transient
+/// dry window instead of a lock-held inline restore.
 fn boot_session_vm(
     server: &Server,
     limits: Limits,
@@ -291,12 +296,20 @@ fn boot_session_vm(
     if bare {
         if let Some(pool) = &server.pool {
             match pool.lock() {
-                Ok(mut p) => match p.take() {
-                    Ok(vm) => return Ok((vm, true)),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "pool take failed; cold-booting this session")
+                Ok(mut p) => {
+                    // Pop only when there is ready stock — `Pool::take` would otherwise restore
+                    // inline under this lock (the 16-A serialization). No stock ⇒ fall through to a
+                    // lock-free cold boot below.
+                    if p.ready() > 0 {
+                        match p.take() {
+                            Ok(vm) => return Ok((vm, true)),
+                            Err(e) => tracing::warn!(
+                                error = %e,
+                                "pool take failed; cold-booting this session"
+                            ),
+                        }
                     }
-                },
+                }
                 Err(_) => tracing::warn!("pool lock poisoned; cold-booting this session"),
             }
         }
@@ -334,6 +347,12 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
 /// between sessions — the moment the [`Pool`](agent_vmm::Pool) doc reserves for restore cost).
+///
+/// The refill is **best-effort and non-blocking** (16-A): `try_lock`, and skip if the pool is
+/// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
+/// another's restore. Stock recovers on the next uncontended close (the holder refills all the way to
+/// target), and any bare `open` that meanwhile finds the pool dry cold-boots — correct, just not
+/// pooled.
 fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _pooled: bool) {
     server.metrics.session_closed();
     drop(probes); // detach from the shared tracer/meter (its own `Drop`)
@@ -341,13 +360,16 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
         tracing::debug!(error = %e, "session VM shutdown reported an error");
     }
     if let Some(pool) = &server.pool {
-        match pool.lock() {
+        match pool.try_lock() {
             Ok(mut p) => match p.refill() {
                 Ok(n) if n > 0 => tracing::debug!(restored = n, "pool refilled after session"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error = %e, "pool refill failed"),
             },
-            Err(_) => tracing::warn!("pool lock poisoned; not refilling"),
+            Err(TryLockError::WouldBlock) => {
+                tracing::debug!("pool busy; skipping refill on this close")
+            }
+            Err(TryLockError::Poisoned(_)) => tracing::warn!("pool lock poisoned; not refilling"),
         }
     }
 }

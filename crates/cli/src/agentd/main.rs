@@ -195,10 +195,15 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
         .name("agentd-metrics".into())
         .spawn(move || {
             metrics::serve(listener, registry, move || {
+                // `try_lock`, never a blocking acquire (16-C): the scrape must not stall behind a
+                // session's pool refill/restore. On contention (or poison) the sample is omitted for
+                // this scrape — `agentd_pool_ready` is momentarily absent, the same absent-not-zero
+                // shape the endpoint already uses for a daemon with no pool — rather than the
+                // visibility surface freezing under the load it exists to report on.
                 sampled
                     .pool
                     .as_ref()
-                    .and_then(|p| p.lock().ok())
+                    .and_then(|p| p.try_lock().ok())
                     .map(|pool| u64::try_from(pool.ready()).unwrap_or(u64::MAX))
             })
         });
@@ -264,7 +269,11 @@ fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, Vm
         .map_err(|e| VmmError::Vmm(format!("create prewarm dir {}: {e}", snap_dir.display())))?;
     let snapshot = source.snapshot(&snap_dir)?;
     // The source has served its purpose (its state is captured); tear it down before the pool fills.
-    source.shutdown()?;
+    // Best-effort (16-D): the snapshot is the artifact that matters and it is already on disk, so a
+    // teardown error must not discard a working pool. `Drop` reclaims the source either way.
+    if let Err(e) = source.shutdown() {
+        tracing::warn!(error = %e, "prewarm source teardown reported an error; snapshot already captured");
+    }
 
     // 3. Restore `target` clones under the daemon's confinement posture (jailed by default). The
     //    clones inherit the snapshot's vsock, so sessions exec over it exactly like a cold boot.

@@ -23,6 +23,18 @@
 //! **UTF-8 strings**, lossy on the way out exactly like `agent run --json` (so the daemon and the CLI
 //! render a run identically). Bulk or binary I/O is the block-device path
 //! (`BootConfig::input_dir`/`output_dir`), an embedding-API concern, never this per-message line.
+//!
+//! **Non-goals: this is the *engine's* wire, not a *platform's* (guardrail 4).** The protocol
+//! deliberately carries **no** notion of a *tenant*, a *credential*, a *quota*, a *price*, or a
+//! *host to schedule onto*: there is no identity field, no auth handshake, no account or billing
+//! token, no request routing. One connection drives one sandbox on the one host the daemon runs on,
+//! and the daemon trusts whoever can reach its socket completely. That absence is a design
+//! commitment, not a gap to fill: the moment the wire grew a tenant id or an auth token it would
+//! stop being an embeddable engine and start being a PaaS, and multi-tenant identity, authorization,
+//! quotas, billing, and fleet scheduling all belong to the **hoster** layered *above* this, never in
+//! these shapes. Access control is the unix socket's directory permissions; a schema bump adds a
+//! verb, never a tenancy field. (The embedding-side statement of the same line is
+//! `docs/embedding.md` "Where the engine ends".)
 
 use std::io::{BufRead, Write};
 
@@ -109,8 +121,12 @@ pub enum Request {
     /// disk lives in the chroot) — the prewarm-source flow is unjailed, mirroring the engine API.
     Snapshot,
     /// Ask for the session's **host-observed audit record** so far ([`Response::Trace`]): the same
-    /// `RunRecord` the CLI's `--record` writes, as a JSON object. Fail-open — a host that couldn't
-    /// attach the probes answers a record with coverage gaps, never an error.
+    /// `RunRecord` shape the CLI's `--record` writes, as a JSON object, but sampled **live** — a
+    /// non-destructive snapshot, repeatable mid-session. So its `coverage` reflects **attach time**,
+    /// and an axis that is absent may be a *transient* read (a momentary tap/meter miss) rather than a
+    /// finalized gap, unlike the CLI's `--record`, which finalizes the record at session end and
+    /// records read failures as gaps. Fail-open — a host that couldn't attach the probes answers a
+    /// coverage-gapped record, never an error.
     Trace,
     /// End the session: tear the sandbox down and close the connection. Dropping the connection
     /// without this does the same teardown; `close` just makes it explicit and acknowledged.

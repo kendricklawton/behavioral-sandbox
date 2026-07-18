@@ -113,6 +113,13 @@ impl Histogram {
     /// Record one observation.
     fn observe(&self, d: Duration) {
         let secs = d.as_secs_f64();
+        // Bump `count` (the `+Inf` cumulative) *before* the per-bucket slot. `render` sums the
+        // buckets first and reads `count` last, so this ordering lets a concurrent scrape only ever
+        // see `count` ≥ every bucket cumulative: a mid-`observe` scrape momentarily *under*-counts one
+        // bucket (valid — buckets ≤ +Inf) instead of over-counting it (a non-monotonic histogram the
+        // exposition spec forbids). On x86's store order the counter is visible before the slot; the
+        // loads stay `Relaxed` since this is a best-effort consistency nudge, not a synchronization.
+        self.count.fetch_add(1, Ordering::Relaxed);
         if let Some(i) = BUCKET_BOUNDS.iter().position(|(bound, _)| secs <= *bound) {
             self.buckets[i].fetch_add(1, Ordering::Relaxed);
         }
@@ -120,7 +127,6 @@ impl Histogram {
             u64::try_from(d.as_micros()).unwrap_or(u64::MAX),
             Ordering::Relaxed,
         );
-        self.count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Append the family's samples: cumulative `_bucket{le=…}` lines, `+Inf`, `_sum` (seconds),

@@ -65,7 +65,7 @@ the same shapes.
 | `{"schema":1,"op":"put","path":"in.txt","content":"data\n"}` | Write a UTF-8 file into the working directory, for a later `exec`/`get`. |
 | `{"schema":1,"op":"get","path":"out.txt"}` | Read a working-directory file back. A missing file is `present:false`, not an error. |
 | `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle (a typed refusal for a jailed session). |
-| `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. |
+| `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. Sampled **live** (repeatable mid-session): its coverage reflects attach time, and an absent axis may be a transient read, not a finalized gap (unlike the CLI's `--record`). |
 | `{"schema":1,"op":"close"}` | End the session and tear the sandbox down (a hung-up connection does the same). |
 
 `put`/`get` carry **UTF-8 text**; bulk or binary I/O is the block-device path
@@ -170,6 +170,33 @@ client.put("input.txt", "payload\n")?;              // stage a file for a later 
 let record = client.trace()?;                       // the host-observed audit record (a JSON value)
 client.close()?;                                    // tear the sandbox down
 ```
+
+## Non-goals: where a PaaS would begin
+
+The daemon is the engine's *programmatic interface*, and it stops exactly where a platform would
+start. These are the features a hoster builds **above** `agentd`, deliberately absent from the wire
+and the daemon, and PRs adding them are wrong by design (engine, not platform):
+
+- **No tenancy or identity.** No message carries a tenant, account, or user. One connection drives
+  one sandbox; two callers are two connections to two VMs. *Whose* run is whose is the hoster's
+  bookkeeping, above the socket.
+- **No authentication or authorization.** The daemon does no auth handshake and trusts whoever can
+  reach the socket completely. Who may connect is the filesystem permissions on the socket and its
+  directory (place it where only trusted local clients can reach it) — an access-control layer the
+  hoster owns, not a field on the wire.
+- **No billing or quotas.** The daemon *measures* (the [metrics endpoint](#metrics-prometheus),
+  host-observed) but never *charges* or *caps by account*. Turning numbers into a bill or a per-tenant
+  limit is the hoster's.
+- **No fleet scheduling.** One `agentd` drives sandboxes on its one host. Bin-packing across hosts,
+  queues, and autoscaling are the hoster's scheduler; the daemon has no notion of another host.
+- **No public/HTTP platform API.** The surface is a *local* unix socket speaking newline-JSON. A
+  daemon that grew a multi-tenant identity model or a public HTTP surface would be a **hoster**, not
+  this repo.
+
+The line is a security boundary too: everything the daemon ships is inert without the host
+privileges the hoster grants, and the confinement posture is fixed at launch so a client can never
+weaken it. This restates, at the wire-API layer, the embedding-side
+[Where the engine ends](./embedding.md#where-the-engine-ends-the-enginepaas-line).
 
 ## Teardown
 
