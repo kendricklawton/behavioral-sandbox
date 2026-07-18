@@ -256,6 +256,20 @@ impl Client {
         }
     }
 
+    /// Fetch the session's model-legible **summary** so far, as the projection JSON object — the same
+    /// compact face the CLI's `--record-summary` writes, shaped for an agent's observe→act loop.
+    /// Carried opaquely like [`trace`](Self::trace); parse it with `serde_json`.
+    ///
+    /// # Errors
+    /// [`ClientError`] on a decode fault or a remote error.
+    pub fn trace_summary(&mut self) -> Result<serde_json::Value, ClientError> {
+        self.send(&Request::TraceSummary)?;
+        match self.recv()? {
+            Response::TraceSummary { summary } => Ok(summary),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// End the session: ask the daemon to tear the sandbox down and acknowledge. Dropping the client
     /// does the same teardown without the acknowledgement.
     ///

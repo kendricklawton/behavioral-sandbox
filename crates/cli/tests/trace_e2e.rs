@@ -71,6 +71,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     let root = workspace_root();
     let scratch = TestDir::new();
     let record_path = scratch.0.join("record.json");
+    let summary_path = scratch.0.join("summary.json");
 
     // A workload that touches a file in-guest and prints — interesting enough to leave a footprint
     // on every axis the CLI surfaces. Unjailed on purpose: the proof here is the audit face, and
@@ -81,6 +82,8 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         .env("AGENT_MARKER", "AGENT-GUEST-READY")
         .args(["run", "--unjailed", "--net", "--trace", "--record"])
         .arg(&record_path)
+        .arg("--record-summary")
+        .arg(&summary_path)
         .args([
             "--",
             "python3",
@@ -129,6 +132,32 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         record["coverage"].as_array().map(Vec::len),
         Some(0),
         "every axis binds on a capable host: {json}"
+    );
+
+    // The model-legible summary is a parseable one-line projection of the *same* run, materially
+    // smaller than the full record (it drops the forensic detail), with its own schema and the
+    // agent-loop fields present.
+    let summary_raw =
+        std::fs::read_to_string(&summary_path).expect("read the --record-summary file");
+    assert_eq!(summary_raw.lines().count(), 1, "one line: {summary_raw}");
+    assert!(
+        summary_raw.trim_end().len() < json.trim_end().len(),
+        "the summary is smaller than the full record: {} vs {}",
+        summary_raw.trim_end().len(),
+        json.trim_end().len()
+    );
+    let summary: serde_json::Value = serde_json::from_str(&summary_raw).expect("summary parses");
+    assert!(
+        summary["schema"].is_u64(),
+        "summary is versioned: {summary_raw}"
+    );
+    assert!(
+        summary["network"]["reached"].is_array(),
+        "the summary carries the reached list: {summary_raw}"
+    );
+    assert!(
+        summary["resources"]["cpu_ns"].is_u64(),
+        "the summary carries the resource envelope: {summary_raw}"
     );
 }
 
@@ -327,5 +356,124 @@ print('p14-9f-complete')
     assert_eq!(
         got, "STDIN|INJECTED",
         "stdin + --put round-tripped via --get"
+    );
+}
+
+/// Phase 18 exit gate — the reference **agent-containment** example, as a CI-reproducible proof.
+/// The scripted agent (`docs/examples/agent-tool-loop.py`, no model, no secrets) runs in a sandbox
+/// egress-policed to **one** endpoint, calls one allowed "tool" and one forbidden one, and the
+/// host-observed record + its model-legible summary prove **exactly what it reached and what was
+/// blocked** — even though the agent's own transcript, blind to the tap, reports both as `sent`.
+#[test]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
+    if let Some(why) = skip_reason() {
+        eprintln!(
+            "skipping scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked: {why}"
+        );
+        return;
+    }
+    let root = workspace_root();
+    let scratch = TestDir::new();
+    let record_path = scratch.0.join("record.json");
+    let summary_path = scratch.0.join("summary.json");
+
+    // The very script the docs example ships — one source of truth for "the agent," exercised here.
+    let agent = std::fs::read_to_string(root.join("docs/examples/agent-tool-loop.py"))
+        .expect("read the scripted agent");
+
+    // Allow only the `search-index` tool (10.200.0.1:9000/udp); the `exfil-webhook` (:9100) is
+    // deny-by-default. `--record` + `--record-summary` capture both faces of the one host-observed
+    // record.
+    let out = Command::new(env!("CARGO_BIN_EXE_agent"))
+        .current_dir(&root)
+        .env("AGENT_ROOTFS", root.join("artifacts/rootfs-agent.ext4"))
+        .env("AGENT_MARKER", "AGENT-GUEST-READY")
+        .args([
+            "run",
+            "--unjailed",
+            "--net",
+            "--allow",
+            "10.200.0.1:9000/udp",
+            "--record",
+        ])
+        .arg(&record_path)
+        .arg("--record-summary")
+        .arg(&summary_path)
+        .args(["--", "python3", "-c", &agent])
+        .output()
+        .expect("run the scripted agent");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "the contained agent run failed ({}): {}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The agent's *self-report*: blind to the tap, it believes **both** tool calls were sent. This is
+    // the gap the host record closes — the agent cannot be trusted to report its own containment.
+    let transcript: serde_json::Value = stdout
+        .lines()
+        .find_map(|l| serde_json::from_str(l).ok())
+        .unwrap_or_else(|| panic!("the agent printed a JSON transcript: {stdout}"));
+    let calls = transcript["transcript"]
+        .as_array()
+        .expect("transcript array");
+    assert_eq!(calls.len(), 2, "two tool calls: {transcript}");
+    assert!(
+        calls.iter().all(|c| c["result"] == "sent"),
+        "the agent believes both calls were sent (it can't see the drop): {transcript}"
+    );
+
+    // The full record — the ground truth from outside the guest. Enforcement armed (no coverage gap),
+    // the allowed tool is a flow, the forbidden one is a denial.
+    let json = std::fs::read_to_string(&record_path).expect("read the --record file");
+    let record: serde_json::Value = serde_json::from_str(&json).expect("record parses");
+    assert_eq!(
+        record["coverage"].as_array().map(Vec::len),
+        Some(0),
+        "enforcement arms cleanly on a capable host: {json}"
+    );
+    let flows = record["network"]["flows"].as_array().expect("flows");
+    assert!(
+        flows
+            .iter()
+            .any(|f| f["dst"] == "10.200.0.1" && f["dst_port"] == 9000),
+        "the allowed tool reached the tap: {json}"
+    );
+    let denials = record["network"]["denials"].as_array().expect("denials");
+    assert!(
+        denials
+            .iter()
+            .any(|d| d["dst"] == "10.200.0.1" && d["dst_port"] == 9100),
+        "the forbidden tool was blocked: {json}"
+    );
+
+    // The model-legible summary — the face an agent's supervisor reads back: `reached` names the
+    // allowed endpoint, `denied` names the blocked one, and it is materially smaller than the full
+    // record (the "compact is a number" property, measured here on a real run).
+    let summary_raw =
+        std::fs::read_to_string(&summary_path).expect("read the --record-summary file");
+    let summary: serde_json::Value = serde_json::from_str(&summary_raw).expect("summary parses");
+    let reached = summary["network"]["reached"]
+        .as_array()
+        .expect("reached array");
+    assert!(
+        reached.iter().any(|e| e == "10.200.0.1:9000/udp"),
+        "the summary shows what it reached: {summary_raw}"
+    );
+    let denied = summary["network"]["denied"]
+        .as_array()
+        .expect("denied array");
+    assert!(
+        denied.iter().any(|e| e == "10.200.0.1:9100/udp"),
+        "the summary shows what was blocked: {summary_raw}"
+    );
+    assert!(
+        summary_raw.trim_end().len() < json.trim_end().len(),
+        "the summary is smaller than the full record: {} vs {}",
+        summary_raw.trim_end().len(),
+        json.trim_end().len()
     );
 }

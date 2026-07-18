@@ -46,6 +46,7 @@ agent run [FLAGS] -- <cmd> [args…]
 | `--allow IP[/CIDR][:PORT][/PROTO]` | Allow one egress destination past the deny-by-default tap (repeatable) — e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires `--net`; builds the run's egress policy, armed before the tap goes live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced run. |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
 | `--record FILE` | Attach the probes and write the run's deterministic **audit record** (one line of byte-stable JSON) to `FILE` for later inspection. |
+| `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record (what it reached, what egress was denied, its resource envelope, any coverage gap) shaped for an agent's observe→act loop. |
 | `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues (after the command finishes, the view stays up until closed). |
 | `--log FILTER` | Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`. |
 
@@ -119,11 +120,11 @@ the host-side eBPF probes to the sandbox at launch and fuse what they saw into o
 record — observed from *outside* the guest, where the code can't forge or disable it.
 
 ```console
-# Watch it live, read the trail after, keep the machine record:
-agent run --unjailed --net --watch --trace --record run.json -- python3 -c '…'
+# Watch it live, read the trail after, keep the machine record + the agent-legible summary:
+agent run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
 ```
 
-Three surfaces, one record:
+Four faces, one record:
 
 - **`--watch`** — the live view, drawn on stderr (stdout stays the run's result): the guest's
   network flows and egress denials as they happen, its CPU/memory/IO, the VMM's host-syscall
@@ -134,9 +135,16 @@ Three surfaces, one record:
 - **`--record FILE`** — the machine surface: the record as one line of deterministic, byte-stable
   JSON (integer nanoseconds, no floats; addresses and protocols by name). This is the format
   downstream SDKs parse; the pretty trail makes no stability promise.
+- **`--record-summary FILE`** — the **model-legible** face: a compact projection of the same record
+  for an agent's observe→act loop — what it *reached* (distinct destinations, flows collapsed to
+  their endpoint), what egress was *denied*, its resource envelope, and any coverage gap, with the
+  forensic detail (per-flow counters, per-syscall `comm`/hits) dropped. A *view* of the record, not
+  new observation: measurably compact (well under half the full record on a busy run), deterministic,
+  and byte-stable, so an agent gets a small, stable summary to feed back into its next turn.
 
-Both machine JSON surfaces carry a leading integer **`schema`** field (the `--json` run result and
-the `--record` audit record version independently, each starting at `1`). The compatibility policy:
+Each machine JSON surface carries a leading integer **`schema`** field — the `--json` run result, the
+`--record` audit record, and the `--record-summary` projection version **independently**, each
+starting at `1`. The compatibility policy:
 **within a version, changes are additive only** — a new field a consumer can ignore; **renaming or
 removing a field, or changing a value's meaning, bumps the version.** A parser keys on `schema` to
 know which shape it is reading. This is versioned *before* anything external parses it, so the wire
@@ -185,7 +193,7 @@ few orthogonal verbs, or named below as deliberately out of scope. The map:
 | Artifact retrieval | `--get` (deny-by-default) |
 | Networking (NIC) | `--net` |
 | Egress policy (`EgressPolicy`) | `--allow IP[/CIDR][:PORT][/PROTO]` |
-| Host-observed audit record | `--trace` (human), `--record FILE` (JSON), `--watch` (live) |
+| Host-observed audit record | `--trace` (human), `--record FILE` (JSON), `--record-summary FILE` (model-legible), `--watch` (live) |
 | Structured run result | `--json` |
 | Host readiness | `agent doctor` |
 | Config layering | flags > env (`AGENT_*`) > `.agent.toml` > defaults |

@@ -10,6 +10,9 @@ built the agent rootfs (`cargo xtask build-rootfs`).
 - **[Observing a run from the host](./examples-observe-a-run.md)** — run something and watch what it
   did from outside the guest: its syscalls, its network, its resource use, and deny-by-default
   egress enforcement.
+- **[Containing an agent](./examples-agent-containment.md)** — run a scripted agent (no model, no
+  secrets) egress-policed to one endpoint, and prove from the host record exactly what it reached and
+  what was blocked — even though the agent's own transcript can't tell the difference.
 
 More example workloads (an untrusted binary under analysis, a CI job) land as the engine reaches
 its packaging milestone.

@@ -1,5 +1,6 @@
 //! Phase 16 demo, as tests: drive the real `agentd` daemon over its unix socket through the full
-//! **versioned wire API** — `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`.
+//! **versioned wire API** — `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
+//! `trace_summary`)\* → `close`.
 //! Three angles:
 //!
 //! 1. [`agentd_serves_the_full_wire_api_over_a_unix_socket`] drives it with **hand-built JSON lines**
@@ -281,6 +282,22 @@ fn agentd_serves_the_full_wire_api_over_a_unix_socket() {
         "the record carries its audit schema: {traced}"
     );
 
+    // trace_summary: the model-legible projection over the wire — its own summary schema, and the
+    // agent-loop shape (a `reached` list, a resource envelope), a smaller line than the full record.
+    client.send("{\"op\":\"trace_summary\"}");
+    let summarized = client.recv();
+    assert_eq!(summarized["reply"], "trace_summary", "{summarized}");
+    assert!(
+        summarized["summary"]["schema"].as_u64().is_some(),
+        "the summary carries its own schema: {summarized}"
+    );
+    assert!(
+        summarized["summary"]["resources"]["cpu_ns"]
+            .as_u64()
+            .is_some(),
+        "the summary carries the resource envelope over the wire: {summarized}"
+    );
+
     // A guest fault (an unrunnable command) is a non-fatal error the session survives.
     client.send("{\"op\":\"exec\",\"argv\":[\"definitely-not-a-real-binary-zzz\"]}");
     let faulted = client.recv();
@@ -412,6 +429,15 @@ fn the_reference_client_drives_a_full_session() {
     assert!(
         record["schema"].as_u64().is_some(),
         "the trace record carries its audit schema: {record}"
+    );
+
+    // The reference client exposes the projection too — the model-legible face over the wire.
+    let summary = client
+        .trace_summary()
+        .unwrap_or_else(|e| panic!("trace_summary: {e}"));
+    assert!(
+        summary["schema"].as_u64().is_some(),
+        "the summary carries its own schema: {summary}"
     );
 
     let dir = client

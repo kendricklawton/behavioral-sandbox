@@ -229,6 +229,27 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     break;
                 }
             }
+            Ok(Some(Request::TraceSummary)) => {
+                server.metrics.request(Verb::TraceSummary);
+                let timing = Timing {
+                    boot,
+                    exec_wall: total_exec_wall,
+                };
+                // The same live, non-destructive record snapshot as `trace`, projected to the
+                // model-legible summary the CLI's `--record-summary` writes.
+                let resp = match probes.as_ref() {
+                    Some(p) => Response::TraceSummary {
+                        summary: record_to_value(&p.live_record(timing).to_summary_json()),
+                    },
+                    None => {
+                        server.metrics.request_failed(true);
+                        nonfatal("audit probes are not attached for this session")
+                    }
+                };
+                if !send(&mut writer, &resp) {
+                    break;
+                }
+            }
             // A malformed/oversize line is the client's fault and per-request; the session survives.
             // A wrong wire schema means the peer speaks another protocol — end the session. A
             // transport I/O error means the connection itself is broken — stop.

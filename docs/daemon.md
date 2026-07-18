@@ -66,6 +66,7 @@ the same shapes.
 | `{"schema":1,"op":"get","path":"out.txt"}` | Read a working-directory file back. A missing file is `present:false`, not an error. |
 | `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle (a typed refusal for a jailed session). |
 | `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. Sampled **live** (repeatable mid-session): its coverage reflects attach time, and an absent axis may be a transient read, not a finalized gap (unlike the CLI's `--record`). |
+| `{"schema":1,"op":"trace_summary"}` | Return the **model-legible summary** so far — the compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied, its resource envelope, any coverage gap), sampled live like `trace`. The face an agent reads between turns. |
 | `{"schema":1,"op":"close"}` | End the session and tear the sandbox down (a hung-up connection does the same). |
 
 `put`/`get` carry **UTF-8 text**; bulk or binary I/O is the block-device path
@@ -81,6 +82,7 @@ the same shapes.
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
 | `{"schema":1,"reply":"snapshotted","dir":"/tmp/agentd-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
 | `{"schema":1,"reply":"trace","record":{…}}` | The audit record as its own JSON object (with its own `schema` field, the *record* version). |
+| `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
 | `{"schema":1,"reply":"error","message":"…","fatal":false}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. |
 

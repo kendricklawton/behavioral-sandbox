@@ -1,6 +1,6 @@
 //! The `agent` CLI — drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
 //! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
-//! **audit surface** on flags (`--trace`/`--record`/`--watch` — see [`audit`]).
+//! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch` — see [`audit`]).
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
 //! or the `--json` structured result / audit log), so `agent run … 2>/dev/null` stays
@@ -56,8 +56,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Boot a microVM and run one command inside it.
-    Run(RunArgs),
+    /// Boot a microVM and run one command inside it. Boxed: `run` carries far more flags than the
+    /// other subcommands, so keeping it behind an indirection stops the whole `Cmd` enum from being
+    /// sized to it (the `clippy::large_enum_variant` this would otherwise trip).
+    Run(Box<RunArgs>),
     /// Open an interactive session in a microVM: one command per line, state persists on the
     /// session's filesystem until you exit (shell process state like `cd`/variables does not —
     /// each line is its own exec).
@@ -128,6 +130,11 @@ struct RunArgs {
     /// JSON, the machine surface) to this file for later inspection.
     #[arg(long, value_name = "FILE", conflicts_with = "demo_boot")]
     record: Option<PathBuf>,
+    /// Attach the host-side probes and write the run's **model-legible summary** (one line of JSON, a
+    /// compact projection of the audit record shaped for an agent's observe→act loop: what it reached,
+    /// what egress was denied, its resource envelope, and any coverage gap) to this file.
+    #[arg(long, value_name = "FILE", conflicts_with = "demo_boot")]
+    record_summary: Option<PathBuf>,
     /// Watch the run live: a full-screen view on stderr (network flows and denials, resources,
     /// the VMM's host syscalls, a timeline) while the command runs. Needs stderr on a terminal.
     /// `q` closes the view (the run continues); after the command finishes, the view stays up
@@ -178,7 +185,7 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
     match cmd {
-        Cmd::Run(args) => run_command(args, file),
+        Cmd::Run(args) => run_command(*args, file),
         Cmd::Shell(args) => shell(args, file),
         Cmd::Doctor => Ok(doctor::report(&base_config(file))),
     }
@@ -195,9 +202,10 @@ fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
 }
 
 /// `agent run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
-/// `--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed under `--watch`) →
-/// write the requested artifacts → finalize the audit record while the sandbox is alive → close →
-/// report (raw relay or the `--json` structured result, then the `--trace` trail / `--record` file).
+/// `--record-summary`/`--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed
+/// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
+/// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
+/// / `--record` full JSON / `--record-summary` model-legible projection — the three faces of one record).
 fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
     let mut limits = limits_with(args.vcpus, args.mem);
     if let Some(secs) = args.wall {
@@ -252,7 +260,11 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     // probes-loader documents, composed here in the caller. `--allow` enforces (arming the tap before
     // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
     // enforcement is a typed refusal (`attach`).
-    let observing = args.trace || args.record.is_some() || args.watch || egress.is_some();
+    let observing = args.trace
+        || args.record.is_some()
+        || args.record_summary.is_some()
+        || args.watch
+        || egress.is_some();
     let probes = if observing {
         Some(audit::Observability::load().attach(
             sandbox.vmm_pid(),
@@ -364,6 +376,13 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             std::fs::write(path, record.to_json() + "\n")
                 .map_err(|e| VmmError::Artifact(format!("--record {}: {e}", path.display())))?;
             tracing::info!(path = %path.display(), "wrote audit record");
+        }
+        if let Some(path) = &args.record_summary {
+            // The model-legible projection — a compact, byte-stable view of the same record.
+            std::fs::write(path, record.to_summary_json() + "\n").map_err(|e| {
+                VmmError::Artifact(format!("--record-summary {}: {e}", path.display()))
+            })?;
+            tracing::info!(path = %path.display(), "wrote record summary");
         }
     }
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))

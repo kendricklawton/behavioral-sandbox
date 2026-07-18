@@ -68,7 +68,8 @@ pub struct Envelope<T> {
 
 /// A client → daemon message. Internally tagged by an `op` field, so a line reads
 /// `{"schema":1,"op":"exec","argv":["echo","hi"]}` — self-describing and hand-writable. The verb set
-/// is the versioned lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`.
+/// is the versioned lifecycle:
+/// `open` → (`exec` | `put` | `get` | `snapshot` | `trace` | `trace_summary`)\* → `close`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
@@ -128,6 +129,12 @@ pub enum Request {
     /// records read failures as gaps. Fail-open — a host that couldn't attach the probes answers a
     /// coverage-gapped record, never an error.
     Trace,
+    /// Ask for the session's **model-legible summary** so far ([`Response::TraceSummary`]): the same
+    /// compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied,
+    /// its resource envelope, any coverage gap), sampled **live** and non-destructively like
+    /// [`Trace`](Self::Trace) — the face an agent driving `agentd` reads between turns, so the wire
+    /// exposes the projection, not just the full record. Fail-open, same as `trace`.
+    TraceSummary,
     /// End the session: tear the sandbox down and close the connection. Dropping the connection
     /// without this does the same teardown; `close` just makes it explicit and acknowledged.
     Close,
@@ -186,6 +193,13 @@ pub enum Response {
         /// The `RunRecord` as a JSON object (its own `schema` field is the *record* schema, distinct
         /// from this wire [`WIRE_SCHEMA`]).
         record: serde_json::Value,
+    },
+    /// The session's model-legible summary (answering [`Request::TraceSummary`]), as the projection's
+    /// JSON object — carried opaquely, same as [`Trace`](Self::Trace).
+    TraceSummary {
+        /// The record summary as a JSON object (its own leading `schema` is the *summary* schema,
+        /// distinct from the record schema and this wire [`WIRE_SCHEMA`]).
+        summary: serde_json::Value,
     },
     /// The session ended cleanly (acknowledging a [`Request::Close`]).
     Closed,
@@ -399,6 +413,7 @@ mod tests {
             },
             Request::Snapshot,
             Request::Trace,
+            Request::TraceSummary,
             Request::Close,
         ] {
             assert_eq!(roundtrip_request(&req), req);
@@ -431,6 +446,9 @@ mod tests {
             },
             Response::Trace {
                 record: serde_json::json!({"schema": 1, "timing": {}}),
+            },
+            Response::TraceSummary {
+                summary: serde_json::json!({"schema": 1, "network": null}),
             },
             Response::Closed,
             Response::Error {

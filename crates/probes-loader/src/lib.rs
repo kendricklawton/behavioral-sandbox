@@ -103,6 +103,9 @@ mod observer;
 /// The per-run audit record: the fused, deterministically-ordered view of what one run did,
 /// aggregated from the three probes. Pure (no aya), so its whole aggregation is unit-tested host-safe.
 mod record;
+/// The model-legible projection of the record (`RunRecord::to_summary_json`): the compact, third face
+/// for an agent's observe→act loop. A pure view of the record (decision 035), golden-tested host-safe.
+mod summary;
 
 pub use json::AUDIT_SCHEMA_VERSION;
 pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
@@ -110,6 +113,7 @@ pub use record::{
     AxisGap, DenialRecord, FlowRecord, NetSection, NotableSyscall, RunRecord, SyscallCounts,
     SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
 };
+pub use summary::SUMMARY_SCHEMA_VERSION;
 
 /// Env override for the compiled BPF object's location — for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`

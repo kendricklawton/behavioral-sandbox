@@ -6,9 +6,11 @@
 //! Each [`Check`] is one prerequisite with a [`CheckStatus`]: [`Ok`](CheckStatus::Ok) present,
 //! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open —
 //! decision 013), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
-//! it). The split mirrors the engine's own error discipline: the isolation boundary is never a
-//! degradation, so `/dev/kvm` and the boot artifacts are hard, while the jailer, resource caps, and
-//! networking tools fail open with a named consequence.
+//! it, or the host is off the supported platform). The split mirrors the engine's own error
+//! discipline: the isolation boundary is never a degradation, so `/dev/kvm`, the boot artifacts, and
+//! the **supported-platform floor** (architecture + a security-maintained host-kernel LTS, decision
+//! 036) are hard, while the jailer, resource caps, and networking tools fail open with a named
+//! consequence.
 //!
 //! The eBPF-observability capability check (`CAP_BPF`/`CAP_PERFMON` + kernel BTF) lives in the probe
 //! loader, out of this crate (decisions 024/026); each entry point appends it. This module is
@@ -17,6 +19,17 @@
 use std::path::Path;
 
 use crate::BootConfig;
+
+/// The **supported host-kernel floor** (`major.minor`), a hard requirement: the engine refuses to
+/// certify a host below a security-maintained LTS, because running untrusted code on an unpatched
+/// kernel is a threat-model hole, not a convenience gap (decision 036). 5.15 is a maintained LTS that
+/// also guarantees `cgroup.kill` (5.14, decision 014); bump it here to tighten the floor.
+const MIN_KERNEL: (u64, u64) = (5, 15);
+
+/// The **supported CPU architectures** — Firecracker's two (decision 036). The engine builds for no
+/// others, so for a shipped binary this is decided at compile time; the check names an unsupported
+/// cross-compile rather than letting it fail obscurely at first boot.
+const SUPPORTED_ARCHES: [&str; 2] = ["x86_64", "aarch64"];
 
 /// The outcome of one host [`Check`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +78,27 @@ impl Check {
 pub fn checks(config: &BootConfig) -> Vec<Check> {
     let fc = config.firecracker.to_string_lossy();
     vec![
+        // The supported platform — hard: off it, the engine is not certified to isolate (decision 036).
+        Check::new(
+            &format!(
+                "architecture is {} (x86_64 or aarch64)",
+                std::env::consts::ARCH
+            ),
+            SUPPORTED_ARCHES.contains(&std::env::consts::ARCH),
+            false,
+            "unsupported architecture: the engine builds and is tested only for x86_64 and aarch64 (decision 036)",
+        ),
+        Check::new(
+            &format!(
+                "host kernel >= {}.{} (security-maintained LTS floor)",
+                MIN_KERNEL.0, MIN_KERNEL.1
+            ),
+            kernel_at_least(MIN_KERNEL.0, MIN_KERNEL.1),
+            false,
+            "unsupported kernel: below the security-maintained LTS floor the engine requires for \
+             running untrusted code (decision 036); it also provides cgroup.kill for crash-safe \
+             teardown (decision 014)",
+        ),
         // The hardware isolation boundary — never a degradation.
         Check::new(
             "/dev/kvm present",
@@ -122,12 +156,6 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "jailed VMs run WITHOUT cpu/memory caps (decision 013) — a fail-open DoS mitigation",
         ),
-        Check::new(
-            "kernel >= 5.14 (cgroup.kill — crash-safe teardown)",
-            kernel_at_least(5, 14),
-            true,
-            "the lifetime sentinel can't kill the VM tree on a SIGKILLed driver (decision 014)",
-        ),
         // Networking + bulk-I/O tooling — fails open: only the runs that use them need them.
         Check::new(
             "ip (iproute2 — the per-VM tap for --net)",
@@ -159,10 +187,10 @@ pub fn matrix() -> Vec<&'static str> {
         "  firecracker not v1.9         -> boots continue; API bodies may not match (decision 001)",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (decision 013)",
-        "  kernel < 5.14                -> no cgroup.kill: a SIGKILLed driver can leak its VM (decision 014)",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
         "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
+        "  unsupported arch / kernel    -> off the supported platform: refused (decision 036)",
         "  /dev/kvm missing/unwritable  -> every boot fails: NoKvm (isolation is hardware)",
         "  kernel or rootfs missing     -> nothing to boot: fetch/build the artifacts first",
         "  firecracker missing          -> no VMM to launch: a typed Vmm error",
@@ -294,5 +322,20 @@ mod tests {
             .find(|c| c.label.contains("jailer"))
             .expect("a jailer check");
         assert!(matches!(jailer.status, CheckStatus::Ok | CheckStatus::Warn));
+        // The supported-platform floor (decision 036) is present and **hard** — architecture and a
+        // kernel LTS are never degradations, so an off-platform host is refused, not warned.
+        let arch = checks
+            .iter()
+            .find(|c| c.label.contains("architecture"))
+            .expect("an architecture check");
+        assert_ne!(
+            arch.status,
+            CheckStatus::Warn,
+            "the platform floor is hard, never a degradation"
+        );
+        assert!(
+            checks.iter().any(|c| c.label.contains("LTS floor")),
+            "the host-kernel LTS floor is a stated check"
+        );
     }
 }

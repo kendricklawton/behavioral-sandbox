@@ -59,16 +59,18 @@ pub enum Verb {
     Get,
     Snapshot,
     Trace,
+    TraceSummary,
 }
 
 impl Verb {
     /// Every verb, in the fixed order the counter array and the rendering share.
-    const ALL: [Verb; 5] = [
+    const ALL: [Verb; 6] = [
         Verb::Exec,
         Verb::Put,
         Verb::Get,
         Verb::Snapshot,
         Verb::Trace,
+        Verb::TraceSummary,
     ];
 
     /// The `verb` label value.
@@ -79,6 +81,7 @@ impl Verb {
             Verb::Get => "get",
             Verb::Snapshot => "snapshot",
             Verb::Trace => "trace",
+            Verb::TraceSummary => "trace_summary",
         }
     }
 
@@ -90,6 +93,7 @@ impl Verb {
             Verb::Get => 2,
             Verb::Snapshot => 3,
             Verb::Trace => 4,
+            Verb::TraceSummary => 5,
         }
     }
 }

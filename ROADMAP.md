@@ -1923,14 +1923,20 @@ is. This phase puts a **model-legible face** on the record the engine already bu
 containment story end to end — no new isolation, no bundled model — leaning on the documented threat
 model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through.
 
-- [ ] **P18.1** `(decision)` **The AI-scope boundary** → `docs/contributing-architecture.md`: the
+- [x] **P18.1** `(decision)` **The AI-scope boundary** → `docs/contributing-architecture.md`: the
       model is always the **caller**, never an engine component; the engine's whole contribution is
       hardware containment plus a host-observed, **model-legible** record; the reference example
       drives the engine with a **deterministic scripted agent**, not a live model (so the demo is
       CI-reproducible and needs no API keys). Records why embedding a model, or letting one decide
       policy, would break invariants 1 / 3 / 4 — so the line is auditable and can't drift into a
-      slap-on.
-- [ ] **P18.2** A **model-legible projection of the audit record** — a third face alongside `--trace`
+      slap-on. *(**Recorded as decision 035**: the model is the caller, never an engine component;
+      the AI-native surface adds a **reader** of the host-observed record (the P18.2 projection), never
+      a new **authority** — so invariant 2 is served, not strained, and only invariants 1/3/4 are the
+      ones a model-in-the-engine would break (probabilistic software boundary / platform concern /
+      un-benchmarkable). The scripted-agent choice is itself invariant-preservation: CI-reproducible
+      containment, no model or secrets in the host path. The AI-workload face of decisions 016 and 033
+      — the model sits outside the trust boundary, where tenancy and scheduling already sit.)*
+- [x] **P18.2** A **model-legible projection of the audit record** — a third face alongside `--trace`
       (human) and `--record` (machine JSON), surfaced as `agent run --record-summary FILE` and a
       `RunRecord` method: a compact, semantically-labelled summary shaped to feed straight back into
       an agent's observe→act loop (what it read/wrote, which flows it opened, what egress was
@@ -1938,10 +1944,31 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       not new machinery: deterministic, byte-stable, carrying its own leading `schema` field, and
       **golden-tested** like the full record. Its size is **measured and bounded** against the full
       record, so "compact" is a number, not a claim (invariant 4).
-- [ ] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
+      *(`RunRecord::to_summary_json` in a new `probes-loader/src/summary.rs`, a **pure projection** of
+      the record (decision 035: a reader, no new observation) reusing the `json.rs` writers. It keeps
+      the decision-relevant signal — `reached` (flows collapsed to distinct **destinations**, the
+      ephemeral source dropped), `denied`, the guest-view byte rollup, the resource envelope, a
+      cap-16 host-syscall sample, and coverage flattened to `"axis: reason"` — and drops the forensic
+      detail (per-flow counters, per-syscall `comm`/hits, `memory.current`, the `cpu.stat` cross-check).
+      Guest-centric vocabulary (`sent`/`recv`), its own leading `schema` (`SUMMARY_SCHEMA_VERSION`,
+      independent of the record's and the run-result's), byte-stable, golden + stability + dedup +
+      null-network tested. **Compact is a number**: a size test pins it under half the full record on a
+      busy run (41% on the representative record), and the notable cap bounds its growth. CLI
+      `--record-summary FILE`, the privileged `trace_e2e` writes + validates it, `docs/cli.md` gains the
+      fourth face. `Cmd::Run` boxed to keep the added flag under `clippy::large_enum_variant`.
+      non-`api:` (probes-loader + CLI, not the pinned `vmm` surface).)*
+- [x] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
       **Phase 20 SDKs** expose it as part of the SDK contract — an agent driving `agentd` from any
       language reads the same model-legible observation the CLI writes, not a CLI-only convenience.
-- [ ] **P18.4** A **reference agent-containment example** (`docs/examples`): a **scripted agent** (a
+      *(New `trace_summary` verb in `agentd-protocol`, parallel to `trace`: `Request::TraceSummary` →
+      `Response::TraceSummary { summary }` (the projection JSON carried opaquely, so the protocol crate
+      stays free of the probes-loader types), sampled **live** and non-destructively like `trace`,
+      fail-open. The daemon handler projects the same live record via `to_summary_json`; the reference
+      `agentd-client` gains `trace_summary()`; the `Verb` metrics enum + `agentd_e2e` (raw-JSON *and*
+      client paths) + `docs/daemon.md` verb/response tables all extended. Additive under `WIRE_SCHEMA`
+      (a new verb, old messages unchanged); the pinned `vmm`/`channel` surfaces are untouched, so
+      non-`api:`.)*
+- [x] **P18.4** A **reference agent-containment example** (`docs/examples`): a **scripted agent** (a
       deterministic stand-in for an LLM's tool loop — no model, no secrets) runs inside a sandbox,
       egress-policed with `--allow` to only its permitted tool / MCP endpoints, makes one allowed call
       and one that is **denied**, and the host-observed record + projection prove **exactly what it
@@ -1949,10 +1976,23 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       / `--record` + P18.2). This is the thesis applied to the workload of the moment — the
       tamper-resistant, host-observed audit trail a supervisor needs to trust an agent, which the
       pure-execution sandboxes can't offer.
+      *(The scripted agent is `docs/examples/agent-tool-loop.py` — a deterministic UDP tool loop, no
+      model/secrets, calling a `search-index` tool (allow-listed) and an `exfil-webhook` (not). The
+      demonstration's edge: fire-and-forget UDP looks sent from in-guest even when the host drops it,
+      so the agent's own transcript reports **both** as `sent` — the gap the host record closes. The
+      docs page `examples-agent-containment.md` walks it (CLI `--record`/`--record-summary`, the wire
+      `trace_summary` for a remote supervisor), wired into `SUMMARY.md`/`examples.md`. The
+      `trace_e2e` privileged test `scripted_agent_is_contained_...` is the CI-reproducible proof:
+      `reached` = the allowed endpoint, `denied` = the blocked one, in both the full record and the
+      summary, summary size measured < full. non-`api:` (docs + a test).)*
 - **Exit gate:** the scripted agent runs contained and **CI-reproducibly** — its egress policed to an
   allow-list, one permitted tool call succeeding and one denied — and the **model-legible record**
   (from the CLI and over the wire API) shows what it did and what was blocked, its size measured
-  against the full record, **with no model anywhere in the host path.**
+  against the full record, **with no model anywhere in the host path.** **Met:** decision 035 fixes
+  the AI-scope boundary (model is the caller); `RunRecord::to_summary_json` (P18.2) is the projection,
+  golden + size-bound tested; `agentd`'s `trace_summary` verb (P18.3) serves it over the wire; and the
+  scripted-agent example + its privileged e2e (P18.4) prove containment with the record showing
+  reached-vs-blocked, no model in the host path.
 
 ## Phase 19 — Packaging & docs
 
@@ -1978,6 +2018,19 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 - [ ] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
 - [ ] **P19.7** Security policy + responsible-disclosure notes.
 - [ ] **P19.8** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
+- [x] **P19.9** `(decision)` **Supported-platform policy**: the hard floor (architectures, a
+      security-maintained host-kernel LTS) vs the documented degradations, and the pinned upstream
+      versions (Firecracker + the guest kernel that tracks its support list).
+      *(Pulled forward from packaging: a self-hostable security engine has to state what it runs on
+      before people run untrusted code on it. **Decision 036** fixes it — `x86_64`/`aarch64` and host
+      kernel **≥ 5.15** (a maintained LTS, one `MIN_KERNEL` const) are **hard** (off them, refused),
+      while cgroup-v2 caps (decision 013), the jailer, BTF/eBPF, and net/bulk tooling stay documented
+      **degradations**; Firecracker stays pinned v1.9 and the baked-in guest kernel tracks Firecracker's
+      supported set (the P6.9d maintenance coupling, named for the guest kernel). `agent doctor` gained
+      the two hard-floor rows (arch + kernel LTS) as the operator enforcement surface (it is not a
+      brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
+      matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
+      internal doctor row + docs).)*
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
   and read the eBPF-observed audit trail.
 

@@ -8,6 +8,7 @@
 - [Examples](./examples.md)
   - [Running untrusted code](./examples-untrusted-code.md)
   - [Observing a run from the host](./examples-observe-a-run.md)
+  - [Containing an agent](./examples-agent-containment.md)
 - [Host-side observability & enforcement](./probes.md)
 - [Benchmarks](./benchmarks.md)
 - [Security](./security.md)

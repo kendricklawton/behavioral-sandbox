@@ -208,7 +208,7 @@ fn gap_to_json(out: &mut String, gap: &AxisGap) {
     out.push('}');
 }
 
-fn proto_name(out: &mut String, proto: u8) {
+pub(crate) fn proto_name(out: &mut String, proto: u8) {
     match proto {
         agent_probes_common::IPPROTO_TCP => out.push_str("tcp"),
         agent_probes_common::IPPROTO_UDP => out.push_str("udp"),
@@ -218,7 +218,7 @@ fn proto_name(out: &mut String, proto: u8) {
     }
 }
 
-fn syscall_name(out: &mut String, kind: Syscall) {
+pub(crate) fn syscall_name(out: &mut String, kind: Syscall) {
     out.push_str(match kind {
         Syscall::Execve => "execve",
         Syscall::Openat => "openat",
@@ -228,7 +228,7 @@ fn syscall_name(out: &mut String, kind: Syscall) {
 
 /// Write `,"key":<value>` (or `"key":<value>` when `first`) for any unquoted-rendering value — the
 /// integer fields all funnel through here, one helper instead of one per width.
-fn field<T: Display>(out: &mut String, key: &str, value: T, first: bool) {
+pub(crate) fn field<T: Display>(out: &mut String, key: &str, value: T, first: bool) {
     if !first {
         out.push(',');
     }
@@ -237,13 +237,13 @@ fn field<T: Display>(out: &mut String, key: &str, value: T, first: bool) {
 
 /// A duration as **u64 nanoseconds**, saturating at `u64::MAX` (~584 years) — the documented numeric
 /// ceiling of the JSON surface, so consumers can parse with ordinary 64-bit integers.
-fn clamped_ns(d: Duration) -> u64 {
+pub(crate) fn clamped_ns(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Write `,"key":<n|null>` — an absent counter (a cgroup file a kernel doesn't have) renders `null`,
 /// distinct from a real `0`.
-fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, first: bool) {
+pub(crate) fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, first: bool) {
     if !first {
         out.push(',');
     }
@@ -257,7 +257,7 @@ fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, first: bool) {
 /// and every control byte below 0x20 (as `\n`/`\t`/… or a `\u00XX` escape). The record's strings are
 /// already lossy-UTF-8 (`detail_display`/`comm_lossy`), so this only has to make them JSON-safe, never
 /// re-validate UTF-8.
-fn json_str(out: &mut String, s: &str) {
+pub(crate) fn json_str(out: &mut String, s: &str) {
     out.push('"');
     for ch in s.chars() {
         match ch {
