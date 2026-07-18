@@ -7,7 +7,7 @@
 //! two VMs holding an identically-named tap on `10.200.0.1/30` never collide, and a restored clone
 //! wakes with the snapshot's baked-in identity already correct in its own netns (no re-addressing).
 //! That is what retires the one-live-networked-clone limit (v1.9 has no `network_overrides`, so restore
-//! must present the baked tap name — fine when each clone owns a private netns). Teardown is one op:
+//! must present the baked tap name, fine when each clone owns a private netns). Teardown is one op:
 //! `ip netns del <name>` reclaims the netns and the tap in it.
 
 use std::net::Ipv4Addr;
@@ -22,12 +22,12 @@ use crate::VmmError;
 pub(crate) const TAP_NAME: &str = "fc0";
 
 /// The guest NIC's MAC: a locally-administered unicast address (first octet `0x02`: LAA bit set,
-/// multicast bit clear). Fixed per VM — each tap is its own L2 segment in its own netns, so MAC
+/// multicast bit clear). Fixed per VM, each tap is its own L2 segment in its own netns, so MAC
 /// uniqueness across VMs is irrelevant.
 const GUEST_MAC: &str = "02:00:00:00:00:02";
 
 /// The host end of the point-to-point link, assigned to the tap inside the netns. The guest reaches
-/// this (and nothing else — deny-by-default, decision 008); it is unreachable from the host's own
+/// this (and nothing else, deny-by-default, decision 008); it is unreachable from the host's own
 /// netns, which is by design (the driver talks to the guest over vsock, never IP).
 const HOST_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
 
@@ -85,7 +85,7 @@ impl Tap {
         })
     }
 
-    /// Bring up `lo`, create + up the tap, and assign the host /30 end — all *inside* the netns.
+    /// Bring up `lo`, create + up the tap, and assign the host /30 end, all *inside* the netns.
     fn build_tap(netns: &str, owner: Option<(u32, u32)>) -> Result<(), VmmError> {
         ip_in_ns(netns, &["link", "set", "dev", "lo", "up"])?;
         let (uid, gid);
@@ -115,7 +115,7 @@ impl Tap {
         netns_del(&self.netns);
     }
 
-    /// Whether this VM's netns still exists — teardown checks it after [`delete`](Self::delete) so it
+    /// Whether this VM's netns still exists, teardown checks it after [`delete`](Self::delete) so it
     /// only reclaims the scratch dir once the netns is confirmed gone (an undeleted netns must keep
     /// its dir to stay visible to the dir-keyed orphan sweep).
     pub(crate) fn netns_exists(&self) -> bool {
@@ -131,11 +131,11 @@ pub(crate) fn netns_path(name: &str) -> PathBuf {
 
 /// `ip netns add <name>`, creating the per-VM network namespace. The name is `agent-<pid>-<seq>` with
 /// **our own** pid (`std::process::id()`), so a collision can only be residue from a *prior* process
-/// that shared our pid — necessarily dead, since pids are unique among the living, and its teardown
+/// that shared our pid, necessarily dead, since pids are unique among the living, and its teardown
 /// left the netns behind (e.g. a dir-less orphan the sweep never saw). So on collision we reclaim the
 /// stale namespace and retry once: this can never delete a live peer's netns (the name embeds our pid),
 /// and it stops an unreclaimed orphan from permanently blocking pid reuse with a "File exists". A
-/// second failure — or a failure that is *not* a collision (perms, missing `ip`) — is the typed error.
+/// second failure, or a failure that is *not* a collision (perms, missing `ip`), is the typed error.
 fn netns_add(name: &str) -> Result<(), VmmError> {
     match ip_netns_add(name) {
         Ok(()) => Ok(()),

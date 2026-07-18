@@ -3,13 +3,13 @@
 //!
 //! This is the *third face* of the one record, alongside the human trail (`--trace`) and the full
 //! machine JSON (`--record`, [`RunRecord::to_json`](crate::RunRecord::to_json)). It is a **pure view**
-//! of the existing record — no new observation, no new machinery (decision 035: the AI-native surface
+//! of the existing record, no new observation, no new machinery (decision 035: the AI-native surface
 //! adds a *reader* of the host-observed record, never a new *authority*). It answers the questions a
 //! supervising agent asks between turns: *what did my sandboxed code reach, what was blocked, what did
 //! it cost, and what couldn't the host see?*
 //!
-//! **How it is compact.** It drops the record's *forensic* detail — per-flow byte/packet counters,
-//! per-syscall `comm`/`hits`, the transient `memory.current` and the `cpu.stat` cross-check — and
+//! **How it is compact.** It drops the record's *forensic* detail, per-flow byte/packet counters,
+//! per-syscall `comm`/`hits`, the transient `memory.current` and the `cpu.stat` cross-check, and
 //! keeps the *decision-relevant* signal: the distinct destinations reached (flows collapsed to their
 //! destinations, the ephemeral source dropped), the destinations **denied**, the resource envelope, a
 //! bounded host-syscall sample, and any coverage gap. "Compact" is a **measured number**, not a claim:
@@ -17,7 +17,7 @@
 //!
 //! **Vocabulary is guest-centric.** The record names traffic from the *tap's* view (ingress = what the
 //! guest sent); the summary relabels to the *guest's* view (`sent`/`recv`) because that is how an agent
-//! reasons about its own code. The host-syscall counts stay labelled `host_syscalls` — they are the
+//! reasons about its own code. The host-syscall counts stay labelled `host_syscalls`, they are the
 //! **VMM's** host-boundary footprint, not the guest's in-guest file I/O (which a microVM services
 //! itself, out of host view; decision 033), and the projection does not pretend otherwise.
 //!
@@ -38,13 +38,13 @@ use crate::record::{AxisGap, NetSection, RunRecord};
 /// rename/removal or a changed meaning bumps this integer.
 pub const SUMMARY_SCHEMA_VERSION: u32 = 1;
 
-/// The projection's own cap on notable host syscalls — tighter than the record's
+/// The projection's own cap on notable host syscalls, tighter than the record's
 /// [`MAX_NOTABLE`](crate::MAX_NOTABLE) (64), because the summary is a context-window artifact, not a
 /// forensic one. Beyond it the projection sets `truncated`, so "there was more" is never silent.
 const SUMMARY_NOTABLE_CAP: usize = 16;
 
 impl RunRecord {
-    /// Render this record as the compact, model-legible **summary** — one line of deterministic JSON,
+    /// Render this record as the compact, model-legible **summary**, one line of deterministic JSON,
     /// a pure projection of the record for an agent's observe→act loop (what it reached, what egress
     /// was denied, its resource envelope, any coverage gap; the forensic detail dropped). A *view* of
     /// the record, not new machinery (decision 035). The leading `schema` field is
@@ -54,10 +54,10 @@ impl RunRecord {
         let mut out = String::with_capacity(256);
         out.push('{');
 
-        // schema — first, so a consumer reads it before anything else.
+        // schema, first, so a consumer reads it before anything else.
         field(&mut out, "schema", SUMMARY_SCHEMA_VERSION, true);
 
-        // timing — the two durations the caller supplied, verbatim ns (no lossy rounding).
+        // timing, the two durations the caller supplied, verbatim ns (no lossy rounding).
         out.push_str(",\"timing\":{");
         field(&mut out, "boot_ns", clamped_ns(self.timing.boot), true);
         field(
@@ -68,7 +68,7 @@ impl RunRecord {
         );
         out.push('}');
 
-        // network — reached vs denied (the core "what it did / what was blocked"), plus the guest-view
+        // network, reached vs denied (the core "what it did / what was blocked"), plus the guest-view
         // byte rollup. null when the sandbox had no NIC, same distinction the full record draws.
         out.push_str(",\"network\":");
         match &self.network {
@@ -76,11 +76,11 @@ impl RunRecord {
             None => out.push_str("null"),
         }
 
-        // host_syscalls — the VMM's host-boundary footprint, counts + a bounded notable sample.
+        // host_syscalls, the VMM's host-boundary footprint, counts + a bounded notable sample.
         out.push_str(",\"host_syscalls\":");
         syscalls_summary(&mut out, self);
 
-        // resources — the envelope: eBPF CPU, peak memory, IO bytes. The transient/ cross-check fields
+        // resources, the envelope: eBPF CPU, peak memory, IO bytes. The transient/ cross-check fields
         // are dropped.
         out.push_str(",\"resources\":{");
         field(
@@ -109,7 +109,7 @@ impl RunRecord {
         );
         out.push('}');
 
-        // gaps — coverage flattened to "axis: reason" strings, in the record's own (deterministic) order.
+        // gaps, coverage flattened to "axis: reason" strings, in the record's own (deterministic) order.
         out.push_str(",\"gaps\":[");
         for (i, gap) in self.coverage.iter().enumerate() {
             if i > 0 {
@@ -128,7 +128,7 @@ impl RunRecord {
 /// to their destination triple and sorted), `denied` (blocked destinations, already dst-aggregated and
 /// sorted by the builder), and the guest-view byte rollup.
 fn net_summary(out: &mut String, net: &NetSection) {
-    // Collapse flows to distinct destinations — an agent cares *which endpoint* it reached, not the
+    // Collapse flows to distinct destinations, an agent cares *which endpoint* it reached, not the
     // ephemeral source port. A BTreeSet dedups and yields them in total (dst, port, proto) order.
     let dests: BTreeSet<(u32, u16, u8)> = net
         .flows
@@ -170,7 +170,7 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
         if i > 0 {
             out.push(',');
         }
-        // "kind detail" as one escaped string — build it, then json_str (detail may hold metacharacters).
+        // "kind detail" as one escaped string, build it, then json_str (detail may hold metacharacters).
         let mut line = String::new();
         syscall_name(&mut line, n.kind);
         line.push(' ');
@@ -183,7 +183,7 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
     out.push('}');
 }
 
-/// One coverage gap as `"axis: reason"` — the flat, model-legible form of an [`AxisGap`].
+/// One coverage gap as `"axis: reason"`, the flat, model-legible form of an [`AxisGap`].
 fn gap_line(gap: &AxisGap) -> String {
     match gap {
         AxisGap::HostSyscalls(r) => format!("host_syscalls: {r}"),
@@ -192,7 +192,7 @@ fn gap_line(gap: &AxisGap) -> String {
     }
 }
 
-/// A destination as one compact JSON string, `"1.1.1.1:443/tcp"` — the dotted quad, the L4 port, and
+/// A destination as one compact JSON string, `"1.1.1.1:443/tcp"`, the dotted quad, the L4 port, and
 /// the protocol name (via the shared [`proto_name`]).
 fn endpoint(out: &mut String, addr: u32, port: u16, proto: u8) {
     let b = addr.to_be_bytes();
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn reached_collapses_flows_to_distinct_destinations() {
         // Two flows to the *same* destination from different ephemeral source ports collapse to one
-        // reached entry — the agent-relevant axis is the endpoint, not the source.
+        // reached entry, the agent-relevant axis is the endpoint, not the source.
         let record = sample(vec![
             flow([10, 200, 0, 2], 40000, [8, 8, 8, 8], 443, IPPROTO_TCP),
             flow([10, 200, 0, 2], 55555, [8, 8, 8, 8], 443, IPPROTO_TCP),
@@ -367,8 +367,8 @@ mod tests {
 
     #[test]
     fn summary_is_measurably_compact_against_the_full_record() {
-        // "Compact" is a measured number, not a claim (invariant 4). Build a busy record — many flows
-        // to distinct destinations plus a full notable set — and assert the projection is a small
+        // "Compact" is a measured number, not a claim (invariant 4). Build a busy record, many flows
+        // to distinct destinations plus a full notable set, and assert the projection is a small
         // fraction of the full JSON, and that it grows sub-linearly (the source-port and per-flow
         // detail the full record carries do not appear in the summary).
         let flows: Vec<_> = (0..40u16)

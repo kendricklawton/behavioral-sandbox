@@ -1,11 +1,11 @@
-//! The live view (`agent run --watch`): a full-screen terminal UI over one running sandbox —
+//! The live view (`agent run --watch`): a full-screen terminal UI over one running sandbox,
 //! its network flows and denials, its resources, the VMM's host-syscall footprint, and a running
 //! timeline of what changed. Drawn on **stderr** (stdout stays reserved for the run's result, the
 //! pipe-clean convention), redrawn from non-destructive [`LiveSnapshot`] polls, so watching never
 //! disturbs the record that [`collect`](agent_probes_loader::SandboxProbes::collect) finalizes.
 //!
 //! The guest command runs on a worker thread the whole time; this view is a *reader*. `q`/`Esc`
-//! closes the view (the run continues headless) — it never cancels the run.
+//! closes the view (the run continues headless), it never cancels the run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +27,7 @@ use ratatui::{Frame, Terminal};
 use crate::trace::{human_bytes, human_duration, proto_name, syscall_name};
 use agent_cli::audit::RunProbes;
 
-/// What the header identifies the run by — plain values captured before the sandbox moves to the
+/// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.
 pub struct WatchMeta {
     pub vmm_pid: u32,
@@ -40,7 +40,7 @@ const TICK: Duration = Duration::from_millis(120);
 /// Timeline memory: enough to scroll history off-screen without growing unbounded.
 const MAX_TIMELINE: usize = 256;
 
-/// The run's event timeline, derived by **diffing successive snapshots** — a new flow, a denial
+/// The run's event timeline, derived by **diffing successive snapshots**, a new flow, a denial
 /// count moving, a new distinct notable syscall each become one timestamped entry. Pure (no
 /// terminal, no probes), so the diffing is unit-tested host-safe.
 pub struct Timeline {
@@ -123,7 +123,7 @@ impl Timeline {
 }
 
 /// Raw-mode + alternate-screen guard: however the view exits (return, error, panic-unwind), the
-/// terminal is restored — a wrecked terminal would violate the "no host wreckage" spirit of the
+/// terminal is restored, a wrecked terminal would violate the "no host wreckage" spirit of the
 /// no-panic path.
 struct Term {
     terminal: Terminal<ratatui::backend::CrosstermBackend<std::io::Stderr>>,
@@ -156,10 +156,10 @@ impl Drop for Term {
 }
 
 /// Run the live view until the command finishes (then one keypress closes it) or the user detaches
-/// early with `q`/`Esc`/`Ctrl-C` — the run itself continues either way; this is a reader.
+/// early with `q`/`Esc`/`Ctrl-C`, the run itself continues either way; this is a reader.
 ///
 /// # Errors
-/// [`VmmError::Vmm`] if the terminal can't be entered or drawn — the caller logs and lets the run
+/// [`VmmError::Vmm`] if the terminal can't be entered or drawn, the caller logs and lets the run
 /// finish headless (a broken TUI must not fail a working run).
 pub fn live(probes: &RunProbes, meta: &WatchMeta, done: &AtomicBool) -> Result<(), VmmError> {
     let mut term = Term::new()?;
@@ -201,7 +201,7 @@ pub fn live(probes: &RunProbes, meta: &WatchMeta, done: &AtomicBool) -> Result<(
             .draw(|f| ui(f, meta, start.elapsed(), finished, &last, &timeline))
             .map_err(|e| VmmError::Vmm(format!("draw live view: {e}")))?;
         // Keyboard: q/Esc/Ctrl-C closes the view (never the run). Poll errors are treated as
-        // "no input" — input trouble must not kill a healthy run.
+        // "no input", input trouble must not kill a healthy run.
         if event::poll(TICK).unwrap_or(false) {
             if let Ok(Event::Key(key)) = event::read() {
                 let quit = key.kind == KeyEventKind::Press

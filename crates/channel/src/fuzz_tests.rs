@@ -1,4 +1,4 @@
-//! Dependency-free fuzz-style property tests for the wire decoders — the in-gate half of the
+//! Dependency-free fuzz-style property tests for the wire decoders, the in-gate half of the
 //! channel's fuzzing (the deep, nightly `cargo fuzz` half lives in `fuzz/`; see
 //! `docs/contributing-fuzzing.md`).
 //!
@@ -16,7 +16,7 @@
 
 use super::*;
 
-/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic — it only has
+/// A `xorshift64*` PRNG: deterministic, seedable, zero-dependency. Not cryptographic, it only has
 /// to spray varied bytes at the decoders reproducibly.
 struct Rng(u64);
 
@@ -52,7 +52,7 @@ impl Rng {
         (0..len).map(|_| self.byte()).collect()
     }
 
-    /// A byte vector of a random length in `0..max` — the two draws are sequenced so neither borrows
+    /// A byte vector of a random length in `0..max`, the two draws are sequenced so neither borrows
     /// `self` inside the other's call.
     fn bytes_upto(&mut self, max: usize) -> Vec<u8> {
         let len = self.below(max);
@@ -77,7 +77,7 @@ fn rand_string(rng: &mut Rng) -> String {
 /// covering far more shapes than the hand-written unit tests.
 const ITERS: usize = 20_000;
 
-/// Every host-visible decoder must return a `Result` for arbitrary bytes — never panic, never hang.
+/// Every host-visible decoder must return a `Result` for arbitrary bytes, never panic, never hang.
 /// Short inputs are deliberate: they stress the fixed-size header and mid-field EOF edges.
 #[test]
 fn decoders_never_panic_on_arbitrary_bytes() {
@@ -133,7 +133,7 @@ fn decoders_never_panic_on_well_framed_random_bodies() {
 }
 
 fn rand_request(rng: &mut Rng) -> Request {
-    // Only the two sendable variants — `Unknown` is decode-only (`write_request` rejects it).
+    // Only the two sendable variants, `Unknown` is decode-only (`write_request` rejects it).
     if rng.below(2) == 0 {
         Request::PutFile {
             path: rand_string(rng),
@@ -173,7 +173,7 @@ fn rand_response(rng: &mut Rng) -> Response {
     }
 }
 
-/// Encode then decode is the identity for every well-formed message — the encoder and decoder can't
+/// Encode then decode is the identity for every well-formed message, the encoder and decoder can't
 /// silently disagree on the framing.
 #[test]
 fn request_and_response_encode_decode_round_trip() {
@@ -192,7 +192,7 @@ fn request_and_response_encode_decode_round_trip() {
 }
 
 /// Every truncation of a valid frame decodes to a typed error (or, for a zero-length body, a value)
-/// and never panics — the "peer closed mid-frame" path a hostile guest can force at will.
+/// and never panics, the "peer closed mid-frame" path a hostile guest can force at will.
 #[test]
 fn truncations_of_valid_frames_never_panic() {
     let mut rng = Rng::new(0x0F0F_0F0F_1234_9999);

@@ -1,10 +1,10 @@
 //! Demo: attach the tap flow monitor to an interface, wait, and print the per-flow
-//! byte/packet counters. This is the network half of the observability story — the guest's *own*
+//! byte/packet counters. This is the network half of the observability story, the guest's *own*
 //! traffic, counted at its tap on the host (unlike the syscall trace, which sees only the host's
 //! footprint).
 //!
 //! Needs `CAP_BPF`+`CAP_NET_ADMIN` (or root), a BTF kernel, and the built object
-//! (`cargo xtask build-probes`). Point it at an interface that carries traffic — a VM's `fc0` inside
+//! (`cargo xtask build-probes`). Point it at an interface that carries traffic, a VM's `fc0` inside
 //! its netns, or any ethernet device in the current netns:
 //!
 //! ```console

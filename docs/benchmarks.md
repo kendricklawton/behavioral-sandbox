@@ -64,8 +64,8 @@ matters more than steady-state throughput, restore-per-request is the steadier c
 ### Bottleneck found and fixed
 
 The decomposition above is what makes a bottleneck legible: the three start paths, isolated. It showed
-the driver's **readiness waits** — the loops that poll for the API socket, the userspace marker, and
-(on restore) the guest agent — sleeping on a fixed 20 ms / 10 ms interval between checks. A fixed
+the driver's **readiness waits**, the loops that poll for the API socket, the userspace marker, and
+(on restore) the guest agent, sleeping on a fixed 20 ms / 10 ms interval between checks. A fixed
 interval adds up to a whole interval (about half of it on average) of pure *quantization* to every
 start: readiness has already happened, but the poll won't notice until its next tick. On a ~40 ms
 restore that is a large slice; on the boot tail it is needless jitter.
@@ -81,15 +81,15 @@ polls cheaply. Measured back-to-back on the same quiet host (start latency, ms):
 
 Restore start dropped ~45% (40 → 22 ms) and its worst case tightened (56 → 32 ms); restore-plus-exec
 fell from 103 to 79 ms, and the pool-take tail from a 148 ms worst case to 67 ms. Cold boot is
-unchanged at the median — it is dominated by the guest's own kernel-and-init time, where the poll is a
-small fraction — but its tail tightened too. The lesson the numbers taught: on the paths the snapshot
+unchanged at the median, it is dominated by the guest's own kernel-and-init time, where the poll is a
+small fraction, but its tail tightened too. The lesson the numbers taught: on the paths the snapshot
 machinery makes fast, a coarse *host-side poll* had become a meaningful fraction of the whole start.
 
 ## Memory-sharing density: how many concurrent microVMs before it degrades
 
 `cargo xtask bench-density --count 32`. Restores clones one at a time from a single prewarmed snapshot,
-keeps **every clone alive**, and samples the summed **Rss** (naive — counts the shared base in full for
-every VM) against the summed **Pss** (proportional set size — shared pages divided across their
+keeps **every clone alive**, and samples the summed **Rss** (naive, counts the shared base in full for
+every VM) against the summed **Pss** (proportional set size, shared pages divided across their
 sharers, the true host footprint). The Rss/Pss gap *is* the memory-sharing benefit, made a number. It
 stops at the target, a restore failure, or a memory floor (`max(1 GiB, 5% of RAM)`, so it never swaps
 the host).
@@ -104,7 +104,7 @@ the host).
 |     32 |           755 |            68 |
 
 **Result:** at 32 concurrent clones the naive Rss reads 755 MiB, but only **68 MiB** is actually
-resident — **11× denser** than if nothing were shared. The marginal cost of one more clone is ~1 MiB
+resident, **11× denser** than if nothing were shared. The marginal cost of one more clone is ~1 MiB
 of Pss (its copy-on-write dirty pages); the read-only base disk and the 256 MiB snapshot memory file
 stay page-cache-deduped across the whole fleet, not copied per VM.
 
@@ -112,7 +112,7 @@ stay page-cache-deduped across the whole fleet, not copied per VM.
 
 `cargo xtask bench-footprint --count 4`. Brings up a cohort of identical sandboxes on each disk
 strategy and reports the per-VM VMM `Pss` plus the whole-host `MemAvailable` drop per sandbox. A per-VM
-read-write copy lives in tmpfs *outside* the VMM's address space, so its Pss alone undercounts it —
+read-write copy lives in tmpfs *outside* the VMM's address space, so its Pss alone undercounts it,
 whole-host is the honest meter here (and the bench proves it: identical 46 MiB Pss for both cold paths,
 wildly different whole-host cost).
 
@@ -131,7 +131,7 @@ boot time (see [`bench-boot`](./contributing-testing.md#benchmarks)).
 One caveat, which the harness itself demonstrates: the whole-host number attributes the *first touch*
 of shared files, so a page-cache-warm base shrinks the shared-base row. The numbers above are from a
 standalone run on a settled host; `bench-all`'s footprint section runs after other benches have already
-cached the base and reports a lower shared-base cost for exactly that reason — the shared cost is paid
+cached the base and reports a lower shared-base cost for exactly that reason, the shared cost is paid
 once per host, and whichever cohort touches the base first pays it.
 
 ## eBPF probe overhead
@@ -148,17 +148,17 @@ cargo xtask bench-scale --runs 100   # per-event cost vs watched-sandbox count (
 
 What each measures, and the claim it backs:
 
-- **`bench-trace`** — the syscall tracer's added cost per `openat`, in three conditions: no probe
+- **`bench-trace`**, the syscall tracer's added cost per `openat`, in three conditions: no probe
   (baseline), attached-but-filtered-out (the cost every *other* process on the box pays for the probe
-  being live — an in-kernel filter check that drops the event), and attached-and-capturing (the cost
-  the *one sandbox you watch* pays — a full event written to the ring buffer). A microVM's own syscalls
+  being live, an in-kernel filter check that drops the event), and attached-and-capturing (the cost
+  the *one sandbox you watch* pays, a full event written to the ring buffer). A microVM's own syscalls
   never trap here; they stay in-guest, so this bounds the cost on the VMM's host footprint, not on
   guest code.
-- **`bench-meter`** — the resource meter's added cost per context switch, in the same
+- **`bench-meter`**, the resource meter's added cost per context switch, in the same
   baseline / not-metering-us / metering-us shape on a ping-pong workload.
-- **`bench-scale`** — the *under-load* dimension: sweeps the watched-target-set size from 1 to 512 and
+- **`bench-scale`**, the *under-load* dimension: sweeps the watched-target-set size from 1 to 512 and
   shows the per-event cost stays **flat**. One shared program is attached to the global tracepoint, so
-  each event is a single O(1) hash lookup no matter how many sandboxes are watched — total probe
+  each event is a single O(1) hash lookup no matter how many sandboxes are watched, total probe
   overhead scales with the **event rate**, not with the number of concurrent sandboxes.
 
 Run these on your host and record the deltas; the design guarantee is that both per-event costs are

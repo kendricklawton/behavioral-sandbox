@@ -2,8 +2,8 @@
 
 The highest-value untrusted workload for this engine is **AI-generated code and autonomous agents**:
 dynamic, possibly-misaligned code you did not write and cannot fully predict. This example runs a
-**scripted agent** — a deterministic stand-in for an LLM's tool loop, with *no model and no secrets*,
-so it runs the same way every time — inside a sandbox, egress-policed to exactly the endpoints it is
+**scripted agent**, a deterministic stand-in for an LLM's tool loop, with *no model and no secrets*,
+so it runs the same way every time, inside a sandbox, egress-policed to exactly the endpoints it is
 allowed to reach. It calls one permitted tool and one forbidden one, and the host-observed record
 proves **exactly what it reached and what was blocked**.
 
@@ -14,7 +14,7 @@ nothing in the host path runs inference or holds a key, which is exactly why thi
 CI-reproducible.
 
 Needs `/dev/kvm`, the agent rootfs (`cargo xtask build-rootfs`), the built probe object
-(`cargo xtask build-probes`), and `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` — run as root or grant the
+(`cargo xtask build-probes`), and `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN`, run as root or grant the
 caps.
 
 ## The agent
@@ -32,7 +32,7 @@ TOOLS = [
 ```
 
 The trap this example exposes: **fire-and-forget UDP succeeds locally even when the host drops it at
-the tap.** So the agent cannot tell from inside the guest which call actually left the box — its own
+the tap.** So the agent cannot tell from inside the guest which call actually left the box, its own
 transcript reports *both* tools as `sent`. The ground truth lives only in the host record.
 
 ## Run it, contained
@@ -47,7 +47,7 @@ agent run --unjailed --net \
     -- python3 -c "$(cat docs/examples/agent-tool-loop.py)"
 ```
 
-The agent's own stdout — its self-report — claims success on both:
+The agent's own stdout, its self-report, claims success on both:
 
 ```json
 {"agent":"scripted-tool-loop","transcript":[
@@ -58,7 +58,7 @@ The agent's own stdout — its self-report — claims success on both:
 ## What the host actually saw
 
 The **model-legible summary** (`summary.json`) is the face a supervising agent reads back between
-turns — compact, and shaped for exactly this question:
+turns, compact, and shaped for exactly this question:
 
 ```json
 {
@@ -77,11 +77,11 @@ turns — compact, and shaped for exactly this question:
 
 `reached` names the endpoint the allow-list permitted; `denied` names the one the tap dropped. The
 agent believed both calls went out; the host record shows one did and one did not. **That gap is the
-whole point** — a supervisor cannot trust an agent's self-report about its own containment, and does
+whole point**, a supervisor cannot trust an agent's self-report about its own containment, and does
 not have to: the record is observed from *outside* the guest, where the agent can neither see nor
 forge it.
 
-The full record (`record.json`) carries the same facts with the forensic detail — the per-flow byte
+The full record (`record.json`) carries the same facts with the forensic detail, the per-flow byte
 and packet counts, the dropped-packet count on the denial, the VMM's host-syscall footprint. The
 summary is a **view** of it (no new observation; [decision 035](./contributing-architecture.md)),
 measurably smaller so it fits back into an agent's context. See
@@ -92,7 +92,7 @@ measurably smaller so it fits back into an agent's context. See
 An agent driving the daemon reads the same projection, not a CLI-only convenience: `agentd` serves it
 as the `trace_summary` verb (alongside `trace` for the full record), so a supervisor written in any
 language gets the identical model-legible observation over the socket. See
-[Using the agentd daemon](./daemon.md). (Daemon sessions are observe-only — the `--allow`
+[Using the agentd daemon](./daemon.md). (Daemon sessions are observe-only, the `--allow`
 *enforcement* that blocks the forbidden tool is the CLI/embedding path; the daemon serves the
 *observation* of any session bound to the probes.)
 
@@ -100,7 +100,7 @@ language gets the identical model-legible observation over the socket. See
 
 A pure-execution sandbox can run the agent's code safely, but it cannot *tell you what the code did*
 in a way you can trust. This engine can: hardware isolation for the containment, host-side eBPF for a
-tamper-resistant record, and a model-legible projection of that record to feed the supervising loop —
+tamper-resistant record, and a model-legible projection of that record to feed the supervising loop,
 with no model anywhere in the host path. That trustworthy, host-observed audit trail is what a
 supervisor needs to actually let an agent run.
 

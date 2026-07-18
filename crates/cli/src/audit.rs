@@ -1,4 +1,4 @@
-//! The CLI's audit face: compose the two tracks the way the engine intends — boot the sandbox
+//! The CLI's audit face: compose the two tracks the way the engine intends, boot the sandbox
 //! (`agent-vmm`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
 //! (`vmm_pid`/`netns`/`tap_name`) and fuse their output into the per-run [`RunRecord`].
 //!
@@ -8,7 +8,7 @@
 //! **Observation fails open; enforcement does not.** A host that can't load the shared probes (no
 //! `CAP_BPF`/`CAP_PERFMON`, no BTF, the object not built) still runs the sandbox; the record it
 //! yields is thinner and says exactly why in its coverage section. `--trace` on an unprivileged dev
-//! box is a working command with an honest, mostly-gap record — never a refused run. An egress
+//! box is a working command with an honest, mostly-gap record, never a refused run. An egress
 //! *policy* (`--allow`) is the exception: it is a security control, so a run that asked to enforce
 //! one and couldn't arm the tap is a typed refusal, never a silent unenforced run.
 
@@ -19,13 +19,13 @@ use agent_probes_loader::{
 use agent_vmm::VmmError;
 
 /// The host-wide shared probes, loaded **once** per process (one `sched_switch` meter, one set of
-/// `sys_enter_*` tracepoints — the bounded-overhead shared model) and handed to every run's
+/// `sys_enter_*` tracepoints, the bounded-overhead shared model) and handed to every run's
 /// [`attach`](Observability::attach). Each probe that fails to load is a recorded [`AxisGap`], not
 /// an error: observability degrades, the run never blocks.
 pub struct Observability {
     tracer: Option<SharedTracer>,
     meter: Option<SharedMeter>,
-    /// Why a shared probe is absent — folded into any record produced without an attached bundle.
+    /// Why a shared probe is absent, folded into any record produced without an attached bundle.
     load_gaps: Vec<AxisGap>,
 }
 
@@ -140,7 +140,7 @@ fn gap_reason(gap: &AxisGap) -> &str {
     }
 }
 
-/// The reason string of a [`AxisGap::Network`] gap, else `None` — the enforcement-armed check.
+/// The reason string of a [`AxisGap::Network`] gap, else `None`, the enforcement-armed check.
 fn network_gap_reason(gap: &AxisGap) -> Option<&str> {
     match gap {
         AxisGap::Network(r) => Some(r),
@@ -148,11 +148,11 @@ fn network_gap_reason(gap: &AxisGap) -> Option<&str> {
     }
 }
 
-/// One run's live probe handle: the attached [`SandboxProbes`] bundle, or — fail-open — nothing but
+/// One run's live probe handle: the attached [`SandboxProbes`] bundle, or, fail-open, nothing but
 /// the gaps that explain why. Either way [`collect`](Self::collect) yields a [`RunRecord`].
 pub struct RunProbes {
     probes: Option<SandboxProbes>,
-    /// The coverage carried into the record when no bundle attached (empty otherwise — an attached
+    /// The coverage carried into the record when no bundle attached (empty otherwise, an attached
     /// bundle records its own gaps).
     gaps: Vec<AxisGap>,
 }
@@ -166,7 +166,7 @@ impl RunProbes {
             .unwrap_or_default()
     }
 
-    /// A **non-destructive** [`RunRecord`] of the run so far — the daemon's `trace` verb, which a
+    /// A **non-destructive** [`RunRecord`] of the run so far, the daemon's `trace` verb, which a
     /// client may ask for repeatedly mid-session. Unlike [`collect`](Self::collect) it neither
     /// consumes the bundle nor detaches the probes, so observation continues after it; each call is a
     /// fresh point-in-time reading built from a live [`snapshot`](SandboxProbes::snapshot) plus the
@@ -194,7 +194,7 @@ impl RunProbes {
         }
     }
 
-    /// Finalize the run's record — **while the sandbox is still alive** (the attached bundle reads
+    /// Finalize the run's record, **while the sandbox is still alive** (the attached bundle reads
     /// the live cgroup + maps). Without a bundle, the record is the honest empty one: no axes, every
     /// absence explained in coverage.
     pub fn collect(self, timing: Timing) -> RunRecord {

@@ -2,14 +2,14 @@
 //! output into a [`RunRecord`], and detach + finalize on close.
 //!
 //! `agent-vmm` stays independent of this crate (decisions 024/026/028), so the bundle takes **plain
-//! values** the driver already exposes — the VMM pid (→ its cgroup, for the syscall tracer and the CPU
-//! meter) and the netns + tap names (for the network monitor) — never a `Sandbox`. The composition is
+//! values** the driver already exposes, the VMM pid (→ its cgroup, for the syscall tracer and the CPU
+//! meter) and the netns + tap names (for the network monitor), never a `Sandbox`. The composition is
 //! the caller's (the CLI/daemon later): a short launch sequence around `Sandbox::open`.
 //!
 //! **Both host-wide probes are shared, not per-VM.** The `sched_switch` meter (decision 026) and
 //! the three `sys_enter_*` tracepoints are *global*: a fresh copy per sandbox would run *N* programs on
-//! every context switch / syscall (O(sandboxes) — the shape decision 026 rejects). So each is loaded
-//! **once** for the host — [`SharedMeter`] and [`SharedTracer`] — and every sandbox registers its cgroup
+//! every context switch / syscall (O(sandboxes), the shape decision 026 rejects). So each is loaded
+//! **once** for the host, [`SharedMeter`] and [`SharedTracer`], and every sandbox registers its cgroup
 //! as a *target* on both; the per-event cost stays a single hash lookup regardless of how many sandboxes
 //! are live, and each shared map only ever holds the registered cgroups. The tap monitor is legitimately
 //! per-VM (one tap, one sandbox) and owned by the bundle.
@@ -18,7 +18,7 @@
 //! only *registers its cgroup* (which exists once the jailer creates it during boot), there is no
 //! per-VM program to stand up before boot: [`SandboxProbes::attach`] runs once, after `open`. The syscall
 //! tracer therefore observes the VMM's host footprint from **registration onward**, not the pre-boot
-//! window — a deliberate trade for the bounded-overhead shared model (decision 028); the record's core
+//! window, a deliberate trade for the bounded-overhead shared model (decision 028); the record's core
 //! (network + resources + denials) is unaffected.
 //!
 //! **Fail-open.** Every axis degrades independently to a recorded [`AxisGap`]; a host missing caps, BTF,
@@ -55,7 +55,7 @@ impl SharedMeter {
 }
 
 /// A process-shared [`SyscallTracer`]: loaded **once**, switched to set mode, and handed to every
-/// sandbox's [`attach`](SandboxProbes::attach). One shared tracer serves all sandboxes — each registers
+/// sandbox's [`attach`](SandboxProbes::attach). One shared tracer serves all sandboxes, each registers
 /// its cgroup as a target and gets a private [`SyscallFold`]; a single drain routes each event to the
 /// matching cgroup's fold, so concurrent sandboxes stay independent (a sandbox reads only its own cgroup's
 /// footprint, and unregistering one leaves the others untouched). Cheap, thread-safe clone.
@@ -71,7 +71,7 @@ struct TracerInner {
 
 impl SharedTracer {
     /// Load + attach the three `sys_enter_*` tracepoints once and switch to **set mode** with an empty
-    /// target set — so nothing is emitted until a sandbox is registered via
+    /// target set, so nothing is emitted until a sandbox is registered via
     /// [`attach`](SandboxProbes::attach) (needs `CAP_BPF`+`CAP_PERFMON` + the object).
     ///
     /// # Errors
@@ -81,7 +81,7 @@ impl SharedTracer {
         tracer.use_target_set()?;
         // Clear the load-window baseline: between the (unfiltered) attach inside `load()` and the mode
         // flip above, the whole host's events streamed into the ring buffer. Drain and discard them so
-        // the buffer starts empty — residue would occupy space (a full buffer drops *new* events) and
+        // the buffer starts empty, residue would occupy space (a full buffer drops *new* events) and
         // could even misattribute onto a later sandbox whose recycled cgroup id collides.
         let _ = tracer.drain(|_| {});
         Ok(Self(Arc::new(Mutex::new(TracerInner {
@@ -94,7 +94,7 @@ impl SharedTracer {
     /// return how many were delivered (0 if the lock is poisoned). The buffer is drained automatically at
     /// each [`attach`](SandboxProbes::attach) and [`collect`](SandboxProbes::collect); a long-lived host
     /// process (the daemon later) calls this periodically between them so a busy VMM can't fill the
-    /// buffer — a drop is counted by the kernel and surfaces as a coverage gap, but polling is what
+    /// buffer, a drop is counted by the kernel and surfaces as a coverage gap, but polling is what
     /// prevents it.
     pub fn poll(&self) -> usize {
         self.with(drain_route).unwrap_or(0)
@@ -102,7 +102,7 @@ impl SharedTracer {
 
     /// Register one sandbox's cgroup: route pending events to their current owners, add the cgroup to
     /// the kernel target set, and open a **fresh** fold (replacing, not reusing, any stale fold a
-    /// failed teardown left behind — cgroup ids are inode numbers and can recycle, and inheriting a
+    /// failed teardown left behind, cgroup ids are inode numbers and can recycle, and inheriting a
     /// dead run's fold would misattribute its events onto the new run).
     ///
     /// # Errors
@@ -120,7 +120,7 @@ impl SharedTracer {
 
     /// Finalize one sandbox: drain every pending event (routing all cgroups' events to their folds so no
     /// sandbox loses events to another's collect), then remove + finish this cgroup's fold and unregister
-    /// it from the kernel set. `None` if the lock is poisoned or the fold is gone — the caller records
+    /// it from the kernel set. `None` if the lock is poisoned or the fold is gone, the caller records
     /// that as a coverage gap rather than passing off an empty footprint as a quiet run.
     fn finalize(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
@@ -210,7 +210,7 @@ impl SandboxProbes {
     /// Post-boot: bind every available probe to this one VM by plain values:
     /// - resolve the VMM's cgroup id and register it on the shared syscall tracer (its host-syscall
     ///   footprint accrues from here);
-    /// - if `netns` + `tap` are present, attach a per-VM tap monitor — enforcing `egress` (armed before
+    /// - if `netns` + `tap` are present, attach a per-VM tap monitor, enforcing `egress` (armed before
     ///   the tc programs go live) when given, else observe-only;
     /// - register the cgroup as a target on the shared meter.
     ///
@@ -302,7 +302,7 @@ impl SandboxProbes {
 
     /// **Finalize + detach on close**: read the three probes into a [`RunRecord`] and
     /// unregister this run's cgroup from the shared tracer + meter. **Must run while the sandbox is still
-    /// alive** — the cgroup dir and map fds must be live. `timing` comes from the caller
+    /// alive**, the cgroup dir and map fds must be live. `timing` comes from the caller
     /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `agent-vmm`.
     /// Each axis degrades to a recorded gap on a read error.
     pub fn collect(mut self, timing: Timing) -> RunRecord {
@@ -325,7 +325,7 @@ impl SandboxProbes {
         self.traced = false;
 
         // The shared ring buffer is host-global; if the kernel counted drops during this run's window,
-        // the footprint may undercount — say so instead of looking exact.
+        // the footprint may undercount, say so instead of looking exact.
         if let (Some(before), Some(after)) = (self.drops_at_attach, self.tracer.drops()) {
             if after > before {
                 self.gaps.push(AxisGap::HostSyscalls(format!(
@@ -364,7 +364,7 @@ impl SandboxProbes {
         };
 
         // Resources: read the shared meter's CPU + the cgroup's native memory/IO *before* unregistering
-        // (the cgroup dir must still be live). Every failure is a recorded gap — a record showing zero
+        // (the cgroup dir must still be live). Every failure is a recorded gap, a record showing zero
         // CPU must mean "the sandbox used none", never "the read silently failed".
         let resources = match self.meter.with(|m| m.summary_for_pid(self.vmm_pid)) {
             Some(Ok(summary)) => summary,
@@ -396,11 +396,11 @@ impl SandboxProbes {
         )
     }
 
-    /// A **live, non-destructive** read of this sandbox's probes so far — the watcher's poll (a live
+    /// A **live, non-destructive** read of this sandbox's probes so far, the watcher's poll (a live
     /// view redraws from these mid-run). Each axis is a point-in-time reading: the syscall footprint
     /// accrued so far (a finished *clone*; the underlying fold keeps accumulating), the tap's
     /// flows/totals/denials now, and the meter's resource summary now. A transiently unreadable axis is
-    /// `None` — the watcher keeps its last good view; the *authoritative*, gap-recording read is
+    /// `None`, the watcher keeps its last good view; the *authoritative*, gap-recording read is
     /// [`collect`](Self::collect), which this never disturbs.
     #[must_use]
     pub fn snapshot(&self) -> LiveSnapshot {
@@ -425,7 +425,7 @@ impl SandboxProbes {
         }
     }
 
-    /// The gaps recorded so far (which axes are unavailable and why) — useful to a caller before
+    /// The gaps recorded so far (which axes are unavailable and why), useful to a caller before
     /// `collect`, e.g. to warn.
     #[must_use]
     pub fn coverage(&self) -> &[AxisGap] {
@@ -433,7 +433,7 @@ impl SandboxProbes {
     }
 }
 
-/// One point-in-time reading of a live sandbox's probes, from [`SandboxProbes::snapshot`] — what a
+/// One point-in-time reading of a live sandbox's probes, from [`SandboxProbes::snapshot`], what a
 /// live view (the CLI's `--watch` TUI, a daemon's stream) redraws from between attach and collect.
 /// Pure data (no aya), so consumers that transform it (timeline diffing, rendering) stay host-safe
 /// testable. An axis that couldn't be read *right now* is `None`; honesty about *why* an axis is

@@ -1,24 +1,24 @@
-//! `agentd` — the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
+//! `agentd`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
 //! [wire API](agentd_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
 //! socket**, so a local client drives microVMs without linking the `agent-vmm` library itself. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
-//! use, **still engine, not platform** — no tenancy, no auth, no billing, no scheduler (those are the
+//! use, **still engine, not platform**, no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
 //! **Shape.** One connection is one sandbox **session** (the VM *is* the session, decision 019),
-//! served on its own thread — synchronous, no async runtime, matching the driver's posture. The wire
+//! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
 //! is the versioned newline-JSON contract in the shared [`agentd_protocol`] crate (decision 034);
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
 //! **Fast `open`.** With `--prewarm N` the daemon keeps a [`Pool`] of pre-warmed
 //! clones and serves a bare-default `open` from it in milliseconds; a custom resource profile (or no
-//! pool) cold-boots. Building the pool needs KVM (and root, for jailed clones); it is **fail-open** —
+//! pool) cold-boots. Building the pool needs KVM (and root, for jailed clones); it is **fail-open**,
 //! a host that can't build it logs one warning and every session cold-boots.
 //!
 //! **Observable by the hoster.** Logs are structured `tracing` lines on stderr (human text by
 //! default, JSON with `--log-json` for a log shipper), and `--metrics ADDR` serves a Prometheus
-//! text-exposition endpoint ([`metrics`]) the hoster scrapes — sessions, verbs, faults, boot and
+//! text-exposition endpoint ([`metrics`]) the hoster scrapes, sessions, verbs, faults, boot and
 //! exec latency histograms, pool stock. The daemon exposes its numbers; dashboards and alerting are
 //! the hoster's (engine, not platform).
 //!
@@ -26,11 +26,11 @@
 //! may connect is governed by the filesystem permissions on the socket and its directory, which the
 //! deploying hoster sets. Place the socket where only trusted local clients can reach it. The same
 //! goes for the metrics endpoint: it serves plain HTTP with no auth, so bind it to loopback (or a
-//! private scrape network) — never a public interface.
+//! private scrape network), never a public interface.
 //!
 //! **Teardown is crash-only.** A live session's VM drops when its connection ends, tearing the microVM
 //! down; and losing the whole daemon process (SIGKILL, OOM, a supervisor's SIGTERM) can't leak a VM
-//! either — the lifetime sentinel (decision 014) reaps it, and the next start clears a stale socket
+//! either, the lifetime sentinel (decision 014) reaps it, and the next start clears a stale socket
 //! file. A graceful drain of in-flight sessions on shutdown is a later ops concern.
 #![forbid(unsafe_code)]
 
@@ -54,7 +54,7 @@ use crate::metrics::Metrics;
 /// same convention the `agent` CLI and the guest agent use.
 const EXIT_OPERATIONAL: u8 = 2;
 
-/// `agentd` — drive the sandbox lifecycle over a unix socket.
+/// `agentd`, drive the sandbox lifecycle over a unix socket.
 #[derive(Parser)]
 #[command(
     name = "agentd",
@@ -62,7 +62,7 @@ const EXIT_OPERATIONAL: u8 = 2;
 )]
 struct Cli {
     /// The unix socket to listen on. Its directory's permissions are the access control (the daemon
-    /// does no auth — a recorded non-goal), so place it where only trusted local clients can reach.
+    /// does no auth, a recorded non-goal), so place it where only trusted local clients can reach.
     #[arg(long, value_name = "PATH")]
     socket: PathBuf,
     /// Keep a pre-warmed pool of this many clones for fast `open`. A bare-default `open` pops a
@@ -70,13 +70,13 @@ struct Cli {
     /// built (no KVM, no root for jailed clones), every session cold-boots. Omit (or `0`) to disable.
     #[arg(long, value_name = "N")]
     prewarm: Option<usize>,
-    /// Run every session's VMM without the jailer. The default is confined (jailed — decision 015,
+    /// Run every session's VMM without the jailer. The default is confined (jailed, decision 015,
     /// needs real root + the `jailer` binary); this is the daemon-wide opt-out for hosts that can't
-    /// jail. A **client never chooses this** — the confinement posture is the hoster's, set here.
+    /// jail. A **client never chooses this**, the confinement posture is the hoster's, set here.
     #[arg(long)]
     unjailed: bool,
     /// Serve a Prometheus metrics endpoint at this address (e.g. `127.0.0.1:9920`) for the hoster to
-    /// scrape (`GET /metrics`). Plain HTTP, no auth — bind loopback or a private scrape network. Off
+    /// scrape (`GET /metrics`). Plain HTTP, no auth, bind loopback or a private scrape network. Off
     /// when omitted.
     #[arg(long, value_name = "ADDR")]
     metrics: Option<SocketAddr>,
@@ -91,12 +91,12 @@ struct Cli {
 
 /// The daemon's shared context, handed by `Arc` to every session thread: the env-layered base config
 /// each session boots from, the launch-time confinement posture, the process-wide host-side probes
-/// (loaded once — one `sched_switch` meter, one tracer, the bounded-overhead shared model), the
+/// (loaded once, one `sched_switch` meter, one tracer, the bounded-overhead shared model), the
 /// optional pre-warmed pool, and a monotonic source of snapshot-bundle directories.
 struct Server {
     /// The env-layered base config; a session's `open` folds its resource knobs on top.
     base: BootConfig,
-    /// `true` unless launched `--unjailed` — the confinement posture no client can weaken.
+    /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     jailed: bool,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
     observ: Observability,
@@ -137,7 +137,7 @@ fn main() -> ExitCode {
         }
     };
     // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
-    // explicitly either works or the daemon refuses to start — an operational surface the hoster
+    // explicitly either works or the daemon refuses to start, an operational surface the hoster
     // requested must not silently be absent (the same posture as `--allow`'s enforcement refusal).
     let metrics_listener = match cli.metrics.map(TcpListener::bind).transpose() {
         Ok(l) => l,
@@ -147,7 +147,7 @@ fn main() -> ExitCode {
         }
     };
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
-    // on top). The daemon has no `.agent.toml` cwd discovery — that's a CLI-in-a-project convenience;
+    // on top). The daemon has no `.agent.toml` cwd discovery, that's a CLI-in-a-project convenience;
     // a daemon's config is its own flags + environment.
     let base = BootConfig::from_env();
     let jailed = !cli.unjailed;
@@ -178,7 +178,7 @@ fn main() -> ExitCode {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => spawn_session(stream, Arc::clone(&server)),
-            // A transient accept error must not end the daemon — log and keep serving.
+            // A transient accept error must not end the daemon, log and keep serving.
             Err(e) => tracing::warn!(error = %e, "accept failed"),
         }
     }
@@ -186,7 +186,7 @@ fn main() -> ExitCode {
 }
 
 /// Serve the metrics endpoint on its own thread, sampling the pool's live stock per scrape. The
-/// thread runs for the daemon's whole life (the endpoint has no drain to manage — crash-only, like
+/// thread runs for the daemon's whole life (the endpoint has no drain to manage, crash-only, like
 /// the sessions).
 fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
     let registry = Arc::clone(&server.metrics);
@@ -197,8 +197,8 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
             metrics::serve(listener, registry, move || {
                 // `try_lock`, never a blocking acquire (16-C): the scrape must not stall behind a
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
-                // this scrape — `agentd_pool_ready` is momentarily absent, the same absent-not-zero
-                // shape the endpoint already uses for a daemon with no pool — rather than the
+                // this scrape, `agentd_pool_ready` is momentarily absent, the same absent-not-zero
+                // shape the endpoint already uses for a daemon with no pool, rather than the
                 // visibility surface freezing under the load it exists to report on.
                 sampled
                     .pool
@@ -209,7 +209,7 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
         });
     if let Err(e) = spawned {
         // The listener was bound (the hoster's ask is satisfiable); a spawn failure here is the
-        // same transient-resource class as a session-thread failure — log loudly, keep serving.
+        // same transient-resource class as a session-thread failure, log loudly, keep serving.
         tracing::error!(error = %e, "cannot spawn the metrics thread; endpoint will not answer");
     }
 }
@@ -226,7 +226,7 @@ fn spawn_session(stream: UnixStream, server: Arc<Server>) {
 }
 
 /// Build the pre-warmed pool when `--prewarm N` (N > 0) asked for one, degrading any failure to
-/// `None` (every session then cold-boots) — a warning, never a refusal to start, since a pool is a
+/// `None` (every session then cold-boots), a warning, never a refusal to start, since a pool is a
 /// latency optimization, not a correctness requirement.
 fn build_optional_pool(
     prewarm: Option<usize>,
@@ -254,11 +254,11 @@ fn build_optional_pool(
 }
 
 /// Prewarm the pool: boot an **unjailed** source with the default profile (a jailed disk can't be
-/// snapshotted — it lives in the chroot), snapshot it, then restore `target` clones under the
+/// snapshotted, it lives in the chroot), snapshot it, then restore `target` clones under the
 /// daemon's confinement posture. The clones carry the default profile, which is why only a
 /// bare-default `open` is pool-eligible (`session::boot_session_vm`).
 fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, VmmError> {
-    // 1. An unjailed prewarm source running only the default profile (no untrusted code — the source
+    // 1. An unjailed prewarm source running only the default profile (no untrusted code, the source
     //    is the daemon's own, its clones are where sessions run).
     let source_config = base.clone().with_limits(Limits::default());
     let source = Sandbox::open_unjailed(source_config)?;
@@ -318,7 +318,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
 
 /// stderr logging, filter from `--log` else `AGENT_LOG` else `info`. `info` (not the CLI's `warn`):
 /// a daemon's per-session boot/close lines are its operational trace. `json` switches the *encoding*
-/// of the same structured events — one JSON object per line, fields intact, for a log shipper — the
+/// of the same structured events, one JSON object per line, fields intact, for a log shipper, the
 /// events themselves are identical either way. `try_init` + a fallback so a bad filter or a
 /// double-init can never panic the daemon.
 fn init_tracing(flag: Option<&str>, json: bool) {

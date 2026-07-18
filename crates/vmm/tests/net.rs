@@ -78,7 +78,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
     );
 
     // Deny-by-default: the guest has no default route (addressing adds a connected /30, never a route to
-    // the world) — `ip route` lists no `default`.
+    // the world), `ip route` lists no `default`.
     let routes = vm
         .exec(&["ip".into(), "route".into()], b"")
         .expect("list guest routes");
@@ -95,7 +95,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn addresses_the_guest_and_routes_host_to_guest() {
     // Static addressing over the tap. The kernel configures `eth0` with the guest's /30 IP via
-    // the `ip=` boot param, giving a connected route to the host end and NO default route — so
+    // the `ip=` boot param, giving a connected route to the host end and NO default route, so
     // host<->guest works but the guest reaches nothing else (deny-by-default). Needs CAP_NET_ADMIN.
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
@@ -148,7 +148,7 @@ fn addresses_the_guest_and_routes_host_to_guest() {
         vm.console()
     );
 
-    // Deny-by-default: an off-subnet address is unreachable (a fast ENETUNREACH, no route — not a
+    // Deny-by-default: an off-subnet address is unreachable (a fast ENETUNREACH, no route, not a
     // timeout), proving there's no default route or masquerade opening the guest to the world.
     let off = vm
         .exec(
@@ -204,7 +204,7 @@ fn two_networked_vms_run_in_isolated_netns() {
     );
 
     // A's tap is invisible from B's netns: `ip link show` for A's netns-local link, run inside B's
-    // netns, must fail (no such interface) — the two stacks share nothing. (Both taps are named the
+    // netns, must fail (no such interface), the two stacks share nothing. (Both taps are named the
     // same, so this checks presence-in-the-right-stack, which the addresses below make unambiguous.)
     // Deny-by-default holds per VM: neither guest can reach an off-/30 address, and the other VM lives
     // entirely in a separate netns, so it is off every route either guest has.

@@ -1,18 +1,18 @@
 //! Phase 16 golden: the **CLI** (`agent run --json`) and the **daemon wire API** (`agentd`, driven
-//! through the reference [`agentd_client::Client`]) render the *same* command **identically** — same
+//! through the reference [`agentd_client::Client`]) render the *same* command **identically**, same
 //! exit code, same stdout, same stderr. The two faces are thin hosts of one `agent-vmm` lifecycle, so
 //! a run must never depend on which door it came through; this pins that invariant against drift (a
 //! stream captured differently, an exit code mapped differently, a default limit that diverged).
 //!
 //! It compares only what is a *run result* on both faces: a command that **runs** and returns a
-//! [`RunResult`](agent_vmm) — exit code (zero or not), stdout, stderr. A guest fault that never
+//! [`RunResult`](agent_vmm), exit code (zero or not), stdout, stderr. A guest fault that never
 //! produces a result (an unspawnable binary) is deliberately *out* of scope: the CLI renders it as an
-//! operational error (exit 2, a stderr diagnostic), the daemon as a non-fatal `error` reply — two
+//! operational error (exit 2, a stderr diagnostic), the daemon as a non-fatal `error` reply, two
 //! faithful renderings of a non-result, not a golden mismatch.
 //!
 //! `#[ignore]`d: boots real microVMs (needs `/dev/kvm` + the agent rootfs). Run via
 //! `cargo xtask ci-privileged` or `cargo test -p agent-cli -- --ignored`. Both faces run
-//! **unjailed** — the golden is the run-result rendering, not the jailer (that has its own suite),
+//! **unjailed**, the golden is the run-result rendering, not the jailer (that has its own suite),
 //! and unjailed needs no root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
 // deny doesn't auto-exempt outside `#[test]` fns.
@@ -45,7 +45,7 @@ fn skip_reason() -> Option<String> {
     None
 }
 
-/// A run result reduced to the three fields both faces render — the golden comparison surface.
+/// A run result reduced to the three fields both faces render, the golden comparison surface.
 #[derive(Debug, PartialEq, Eq)]
 struct RunOutcome {
     exit_code: i32,
@@ -213,7 +213,7 @@ fn the_cli_and_the_daemon_render_a_run_identically() {
 
     // One daemon session drives every case (the commands are stateless; a fresh CLI process boots per
     // case, since that is how the CLI is used). Both open with the default profile, so both boot the
-    // same conservative `Limits::default()` — no divergence hides in a differing knob.
+    // same conservative `Limits::default()`, no divergence hides in a differing knob.
     let (_daemon, socket) = launch_daemon();
     let mut client = Client::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
     if let Err(e) = client.set_read_timeout(Some(Duration::from_secs(45))) {

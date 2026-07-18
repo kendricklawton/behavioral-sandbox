@@ -1,10 +1,10 @@
-//! Boot a Firecracker microVM and read its serial console — the raw VM lifecycle beneath
+//! Boot a Firecracker microVM and read its serial console, the raw VM lifecycle beneath
 //! [`crate::Sandbox`].
 //!
 //! [`Vm::boot`] spawns a `firecracker` child, drives its API socket through the boot sequence
 //! (boot-source → root drive → machine-config → `InstanceStart`), and waits until the guest's
-//! serial console shows it reached userspace. [`RunningVm`] owns the running child; dropping it —
-//! or calling [`RunningVm::shutdown`] — kills the VMM and reclaims its scratch dir, so a run can
+//! serial console shows it reached userspace. [`RunningVm`] owns the running child; dropping it,
+//! or calling [`RunningVm::shutdown`], kills the VMM and reclaims its scratch dir, so a run can
 //! never leak a process or socket.
 //!
 //! **Host path only, `unsafe`-free.** Firecracker wires the guest's `ttyS0` to its own stdout, so
@@ -42,7 +42,7 @@ const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.t
 
 /// Substring that marks the guest reached userspace. The pinned Ubuntu rootfs prints its getty
 /// prompt (`ubuntu-fc-uvm login:`) once init is up; no earlier boot line contains `login:`. This
-/// is tied to the pinned rootfs — a new rootfs pin may need a new marker (overridable via env).
+/// is tied to the pinned rootfs, a new rootfs pin may need a new marker (overridable via env).
 const DEFAULT_USERSPACE_MARKER: &str = "login:";
 
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
@@ -55,7 +55,7 @@ pub(crate) const FC_STDERR: &str = "fc.stderr";
 /// the exec channel; overridable per-VM via [`BootConfig::guest_cid`].
 pub const DEFAULT_GUEST_CID: u32 = 3;
 
-/// The vsock port the in-guest agent listens on for exec connections — defined in `agent-channel`
+/// The vsock port the in-guest agent listens on for exec connections, defined in `agent-channel`
 /// (it's a host↔guest contract value: the rootfs build writes it into the guest's init line, and
 /// the host dials it through Firecracker's vsock unix socket). Re-exported here for callers.
 pub use agent_channel::AGENT_VSOCK_PORT;
@@ -79,7 +79,7 @@ const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
 /// [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget onto the resource knobs.
 /// `#[non_exhaustive]`: construct via [`from_env`](BootConfig::from_env) /
-/// [`default`](BootConfig::default) and mutate fields — new features add knobs (tap, jailer,
+/// [`default`](BootConfig::default) and mutate fields, new features add knobs (tap, jailer,
 /// snapshots) without breaking downstream literals.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -104,7 +104,7 @@ pub struct BootConfig {
     pub boot_timeout: Duration,
     /// Wall-clock budget for each command run through this VM's `exec`: the guest agent kills the
     /// command past it, and the host's own give-up deadline is derived from it. At the public API this is
-    /// [`Limits::wall`] — one wall for the whole run (decision 013), which
+    /// [`Limits::wall`], one wall for the whole run (decision 013), which
     /// [`with_limits`](BootConfig::with_limits) folds into both `boot_timeout` and this; the split
     /// exists at this layer so a driver-level caller can give boot and exec different ceilings.
     /// See [`Limits::wall`] for the semantics (including the nonzero requirement).
@@ -113,7 +113,7 @@ pub struct BootConfig {
     /// from [`Limits::output_cap`]. See [`Limits::output_cap`].
     pub output_cap: usize,
     /// Configure a virtio-vsock device with this guest context id, enabling the exec channel
-    /// ([`RunningVm::connect_agent`]). `None` (the default) boots with no vsock — the boot-only
+    /// ([`RunningVm::connect_agent`]). `None` (the default) boots with no vsock, the boot-only
     /// demo path. Set to `Some(`[`DEFAULT_GUEST_CID`]`)` to enable exec.
     pub guest_cid: Option<u32>,
     /// Boot the base rootfs **read-only and shared** (no per-VM copy) under a per-run **tmpfs
@@ -127,7 +127,7 @@ pub struct BootConfig {
     /// A host directory to inject as **bulk read-only input**: the driver builds an ext4 from
     /// it and attaches it as a second block device (`/dev/vdb`, `O_RDONLY`); the agent rootfs mounts
     /// it at `/input`, so a command reads it as `/input/...`. This is the whole-working-dir /
-    /// large-file path — the vsock channel's [`Request::PutFile`](agent_channel::Request::PutFile) carries only small per-frame files.
+    /// large-file path, the vsock channel's [`Request::PutFile`](agent_channel::Request::PutFile) carries only small per-frame files.
     /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
     pub input_dir: Option<PathBuf>,
     /// A host directory to receive **bulk output**: the driver attaches a blank, **writable**
@@ -141,7 +141,7 @@ pub struct BootConfig {
     /// Give the guest a **virtio-net** interface backed by a per-VM host **tap** device. The
     /// driver creates the tap (`ip tuntap`, needs `CAP_NET_ADMIN`), attaches it via
     /// `PUT /network-interfaces`, and deletes it on teardown. `false` (the default) boots with **no
-    /// NIC** — deny-by-default. Even when `true`, the guest gets an *unconfigured* `eth0`: this box
+    /// NIC**, deny-by-default. Even when `true`, the guest gets an *unconfigured* `eth0`: this box
     /// adds no address, route, or masquerade (decision 008), so the guest reaches nothing until
     /// addressing lands. Needs `ip` (iproute2) on the host.
     pub enable_network: bool,
@@ -157,7 +157,7 @@ pub struct BootConfig {
     /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/agent-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
     /// (overridable via `AGENT_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
-    /// often `tmpfs` (host RAM), so a read-write boot's full-rootfs copy is charged to RAM — on a
+    /// often `tmpfs` (host RAM), so a read-write boot's full-rootfs copy is charged to RAM, on a
     /// small box that alone can exhaust memory (or `ENOSPC` a small tmpfs) and fail the boot. Point
     /// this at real disk to bound RAM use, or prefer [`read_only_root`](BootConfig::read_only_root),
     /// which shares the base with **no** copy. The base must already exist; each VM's own subdir is
@@ -166,8 +166,8 @@ pub struct BootConfig {
 }
 
 impl BootConfig {
-    /// Layer the environment overrides — `AGENT_FIRECRACKER`, `AGENT_KERNEL`, `AGENT_ROOTFS`,
-    /// `AGENT_MARKER` — onto [`BootConfig::default`]. The resource knobs (`vcpus`, `mem_mib`,
+    /// Layer the environment overrides, `AGENT_FIRECRACKER`, `AGENT_KERNEL`, `AGENT_ROOTFS`,
+    /// `AGENT_MARKER`, onto [`BootConfig::default`]. The resource knobs (`vcpus`, `mem_mib`,
     /// `boot_timeout`) have no env key; they come from [`Limits`] via
     /// [`with_limits`](BootConfig::with_limits).
     pub fn from_env() -> Self {
@@ -178,7 +178,7 @@ impl BootConfig {
     /// `lookup`, keyed by the `AGENT_*` env name. Two uses: precedence is unit-testable without
     /// mutating the process environment (which races under the parallel runner and is `unsafe` from
     /// edition 2024); and a caller can **layer another source under the environment** by returning
-    /// the real env var if set, else its own value — e.g. the CLI's `.agent.toml` file layer resolves
+    /// the real env var if set, else its own value, e.g. the CLI's `.agent.toml` file layer resolves
     /// `env > file > defaults` by composing `std::env::var_os(key).or_else(|| file.get(key))`.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
         let mut cfg = Self::default();
@@ -202,7 +202,7 @@ impl BootConfig {
     }
 
     /// Fold a per-sandbox [`Limits`] budget onto the config: vCPUs, memory, the wall (one wall for
-    /// the whole run, decision 013 — it becomes both the boot deadline *and* the per-exec budget),
+    /// the whole run, decision 013, it becomes both the boot deadline *and* the per-exec budget),
     /// and the output cap.
     #[must_use]
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -216,7 +216,7 @@ impl BootConfig {
 }
 
 impl Default for BootConfig {
-    /// The pure pinned defaults — no environment reads (that's [`BootConfig::from_env`]), so
+    /// The pure pinned defaults, no environment reads (that's [`BootConfig::from_env`]), so
     /// `default()` is deterministic. The resource knobs mirror [`Limits::default`] so the two
     /// baselines cannot silently diverge.
     fn default() -> Self {
@@ -244,7 +244,7 @@ impl Default for BootConfig {
 }
 
 /// A booted-and-ready microVM: the `firecracker` child, its API socket, scratch dir, and the
-/// captured console. Guaranteed teardown lives in `Drop`, so losing this value can't leak the VMM —
+/// captured console. Guaranteed teardown lives in `Drop`, so losing this value can't leak the VMM,
 /// and the cgroup-owned lifetime (the sentinel behind [`KillHandle`]) covers the paths `Drop`
 /// can't: losing the whole *process* (Ctrl-C, SIGKILL, OOM) can't leak it either.
 #[derive(Debug)]
@@ -264,7 +264,7 @@ pub struct RunningVm {
     pub(crate) restored: bool,
     /// This VM has a bulk **input** block device (from `input_dir`), whose image lives in the scratch
     /// dir. A snapshot bakes in that path, but the scratch dir is gone after teardown, so the VM can't
-    /// be restored — `snapshot` refuses it. (The input image itself is reclaimed with the workdir.)
+    /// be restored, `snapshot` refuses it. (The input image itself is reclaimed with the workdir.)
     pub(crate) has_input: bool,
     /// The vsock unix socket Firecracker created, if this VM was booted with a `guest_cid`.
     pub(crate) vsock_uds: Option<PathBuf>,
@@ -290,7 +290,7 @@ pub struct RunningVm {
     /// The guest's vCPU count as configured at boot ([`BootConfig::vcpus`], what
     /// `PUT /machine-config` set), recorded into a [`Snapshot`]'s envelope so a jailed restore can
     /// derive its `cpu.max` from the clone's *true* parallelism. On a restore this mirrors the
-    /// restoring `config` and is never read — a restored VM refuses snapshotting.
+    /// restoring `config` and is never read, a restored VM refuses snapshotting.
     pub(crate) vcpus: NonZeroU8,
 }
 
@@ -324,13 +324,13 @@ pub struct Snapshot {
     pub(crate) has_vsock: bool,
     /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
     /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
-    /// restore must recreate a tap with **exactly this name** — trivially satisfied by the netns
+    /// restore must recreate a tap with **exactly this name**, trivially satisfied by the netns
     /// model (decision 017): each clone recreates the fixed-name tap inside its **own per-VM network
     /// namespace**, so any number of networked clones coexist (no name collision across namespaces)
     /// and the snapshot's baked-in guest address/MAC/routes are already correct in each, with no
     /// re-addressing needed. (This retired decision 011's one-live-networked-clone limit.)
     pub(crate) tap_name: Option<String>,
-    /// The source's vCPU count — the restored clone's **true** parallelism, since the vCPUs come
+    /// The source's vCPU count, the restored clone's **true** parallelism, since the vCPUs come
     /// from the snapshot state (restore issues no `PUT /machine-config`) and nothing forces the
     /// restoring `config` to agree. A jailed restore derives its `cpu.max` from this, the CPU
     /// analogue of deriving `memory.max` from the memory file's true size: the cap tracks what the
@@ -359,7 +359,7 @@ impl Snapshot {
         &self.root_drive
     }
 
-    /// The source's vCPU count — what a clone restored from this bundle actually runs (the vCPUs
+    /// The source's vCPU count, what a clone restored from this bundle actually runs (the vCPUs
     /// come from the snapshot state, not the restoring config). A jailed restore's `cpu.max` is
     /// derived from this; exposed so an embedder sizing a pool can read a bundle's CPU envelope.
     #[must_use]
@@ -368,7 +368,7 @@ impl Snapshot {
     }
 }
 
-/// Boot entry point — `Vm::boot(config) -> RunningVm`.
+/// Boot entry point, `Vm::boot(config) -> RunningVm`.
 #[derive(Debug)]
 pub struct Vm;
 
@@ -378,7 +378,7 @@ impl Vm {
     /// By default copies the base rootfs into a fresh per-VM scratch dir and boots the copy
     /// read-write, so repeated runs stay independent and the pinned base is never mutated. With
     /// [`read_only_root`](BootConfig::read_only_root) it instead shares the base read-only (no copy)
-    /// and the guest layers a per-run tmpfs overlay over it — same "base never mutated" guarantee,
+    /// and the guest layers a per-run tmpfs overlay over it, same "base never mutated" guarantee,
     /// far less per-VM cost.
     ///
     /// # Errors
@@ -409,7 +409,7 @@ impl Vm {
 }
 
 impl RunningVm {
-    /// Boot-to-userspace latency — the number that matters (measured from `InstanceStart`).
+    /// Boot-to-userspace latency, the number that matters (measured from `InstanceStart`).
     #[must_use]
     pub fn boot_latency(&self) -> Duration {
         self.boot_latency
@@ -421,7 +421,7 @@ impl RunningVm {
         self.console.snapshot()
     }
 
-    /// The PID of the `firecracker` VMM process. Useful for out-of-band supervision — putting the VMM
+    /// The PID of the `firecracker` VMM process. Useful for out-of-band supervision, putting the VMM
     /// in a cgroup, attaching host-side observers to it, or asserting it was reaped on
     /// teardown. The process is killed and reaped when this `RunningVm` is dropped, so the PID is only
     /// valid for the VM's lifetime.
@@ -430,7 +430,7 @@ impl RunningVm {
         self.child.id()
     }
 
-    /// A cheap, cloneable, `Send + Sync` [`KillHandle`] that force-kills this VM from any thread —
+    /// A cheap, cloneable, `Send + Sync` [`KillHandle`] that force-kills this VM from any thread,
     /// the **host-gave-up path**. `exec` borrows `&self` and `shutdown` consumes `self`, so
     /// a caller blocked in `exec` can't otherwise be stopped; killing through the handle makes the
     /// VMM's vsock peer close, and the blocked call returns a typed error. The exec deadline covers
@@ -443,7 +443,7 @@ impl RunningVm {
 
     /// The host end of the per-VM point-to-point link, when booted with
     /// [`enable_network`](BootConfig::enable_network); `None` otherwise. The guest can reach this
-    /// address over its `eth0` (and nothing beyond it — deny-by-default).
+    /// address over its `eth0` (and nothing beyond it, deny-by-default).
     #[must_use]
     pub fn host_ip(&self) -> Option<Ipv4Addr> {
         self.tap.as_ref().map(|t| t.host_ip)
@@ -460,7 +460,7 @@ impl RunningVm {
     /// [`enable_network`](BootConfig::enable_network); `None` otherwise. This is the handle the
     /// host-side eBPF track binds policy to. The tap lives **inside** this VM's network
     /// namespace ([`netns`](Self::netns)), so the loader resolves it to an ifindex and attaches
-    /// `tc`/XDP programs to *this* sandbox's traffic **within that netns** — pair it with `netns()`.
+    /// `tc`/XDP programs to *this* sandbox's traffic **within that netns**, pair it with `netns()`.
     #[must_use]
     pub fn tap_name(&self) -> Option<&str> {
         self.tap.as_ref().map(|t| t.name.as_str())
@@ -483,7 +483,7 @@ impl RunningVm {
     ///
     /// # Errors
     /// [`VmmError::GuestUnavailable`] if nothing is listening on `port` in the guest (not up yet, or
-    /// not anymore) — the retryable case; [`VmmError::Vmm`] if the VM was booted without a
+    /// not anymore), the retryable case; [`VmmError::Vmm`] if the VM was booted without a
     /// `guest_cid` or on any other I/O or channel failure; [`VmmError::Timeout`] if the connect
     /// exceeds the deadline.
     pub fn connect_agent(&self, port: u32) -> Result<ClientConnection<UnixStream>, VmmError> {
@@ -493,8 +493,8 @@ impl RunningVm {
     /// Probe the exec channel: connect to the guest agent and complete the handshakes, discarding
     /// the connection (the agent serves one connection then loops back to accept, so a
     /// connect-and-close just cycles it). The prewarmed [`Pool`](crate::Pool)'s health check on a clone
-    /// that has been sitting idle: a dead or wedged clone surfaces as a typed error — most
-    /// specifically [`VmmError::GuestUnavailable`] — so the pool can discard it and serve another.
+    /// that has been sitting idle: a dead or wedged clone surfaces as a typed error, most
+    /// specifically [`VmmError::GuestUnavailable`], so the pool can discard it and serve another.
     /// Deliberately short-deadlined: an idle, healthy agent accepts immediately.
     pub(crate) fn probe_agent(&self) -> Result<(), VmmError> {
         connect_agent_at(self.require_vsock()?, AGENT_VSOCK_PORT, PROBE_TIMEOUT).map(|_| ())
@@ -520,11 +520,11 @@ impl RunningVm {
     /// visible to the next, until the VM (and its overlay) is torn down.
     ///
     /// # Errors
-    /// A typed [`VmmError`] across the taxonomy's three buckets: **establishment** —
+    /// A typed [`VmmError`] across the taxonomy's three buckets: **establishment**,
     /// [`VmmError::GuestUnavailable`] if the agent isn't listening (retryable), [`VmmError::Vmm`] if
     /// the VM has no vsock, [`VmmError::Timeout`]
-    /// on a stalled connect/ack; **steady-state transport** — [`VmmError::Channel`] on a mid-exec
-    /// framing/IO fault; **guest fault** — [`VmmError::GuestExec`] if the agent couldn't run the
+    /// on a stalled connect/ack; **steady-state transport**, [`VmmError::Channel`] on a mid-exec
+    /// framing/IO fault; **guest fault**, [`VmmError::GuestExec`] if the agent couldn't run the
     /// command, [`VmmError::ExecTimeout`] if it outran its budget, [`VmmError::OutputCap`] if it
     /// flooded output. A command that merely exits non-zero (even by signal) is a normal
     /// [`RunResult`], not an error.
@@ -539,19 +539,19 @@ impl RunningVm {
     /// bounded by the channel's per-frame cap, and the total captured output+artifacts is bounded
     /// by this VM's [`BootConfig::output_cap`] (default 16 MiB).
     ///
-    /// **Env scope.** The variables are set on the **spawned command only** — the guest agent
-    /// applies them via `Command::env`, never its own process — so one run's environment can't
+    /// **Env scope.** The variables are set on the **spawned command only**, the guest agent
+    /// applies them via `Command::env`, never its own process, so one run's environment can't
     /// bleed into the agent or a later run.
     ///
     /// **Secret hygiene (pinned contract).** Injected file contents and env *values* are treated as
     /// secrets: they never appear in an engine log line, in any [`VmmError`]'s `Display`/`Debug`, or
-    /// on the serial console ([`console`](Self::console)) — an error path may name a file *path* or
-    /// an env *key*, never a value — and the wire copies the driver builds are zero-wiped after
+    /// on the serial console ([`console`](Self::console)), an error path may name a file *path* or
+    /// an env *key*, never a value, and the wire copies the driver builds are zero-wiped after
     /// send, not just freed (best-effort: the caller's own buffers and the kernel's socket buffers
     /// are out of the engine's reach). What the *command* does with its inputs (echo them to stdout,
     /// write them to `/output`) is the run's own data in [`RunResult`], not an engine surface. The
-    /// audit log will record *that* inputs were injected — paths/keys/sizes or
-    /// hashes — never contents.
+    /// audit log will record *that* inputs were injected, paths/keys/sizes or
+    /// hashes, never contents.
     ///
     /// # Errors
     /// As [`exec`](Self::exec).
@@ -568,7 +568,7 @@ impl RunningVm {
         // booted with) plus the agent's kill+report margin. Derived from the *actual* budget so a
         // raised budget can't leave the socket idle timeout cutting off a long quiet command. Used
         // both as the socket's per-read idle timeout and, inside `run_exec`, as the wall-clock
-        // deadline on the loop — so the agent's `TimedOut` (at `budget`) reaches us first, and a
+        // deadline on the loop, so the agent's `TimedOut` (at `budget`) reaches us first, and a
         // silent guest can't park us.
         let budget = self.exec_wall;
         let wall = budget.saturating_add(EXEC_KILL_SLACK);
@@ -593,10 +593,10 @@ impl RunningVm {
     ///
     /// The bulk counterpart to the per-file [`RunResult::files`] channel path: the guest wrote to a
     /// writable block device (mounted at `/output`), and here the driver reads that image back. It
-    /// **consumes the VM** — the VMM is stopped first (a cooperative power-off, then a hard kill) so
+    /// **consumes the VM**, the VMM is stopped first (a cooperative power-off, then a hard kill) so
     /// it has released the image and flushed the guest's writes; reading a live, VMM-held image would
     /// race the guest and corrupt the ext4 journal `e2fsck` replays. Read-back is fully **rootless**:
-    /// `e2fsck` recovers the journal, then `debugfs rdump` extracts the tree — no loopback, no
+    /// `e2fsck` recovers the journal, then `debugfs rdump` extracts the tree, no loopback, no
     /// `mount`, no `sudo`.
     ///
     /// Guest-controlled contents are sanitised: `lost+found` is dropped; symlinks whose target
@@ -631,7 +631,7 @@ impl RunningVm {
     fn power_off_and_wait(&mut self, deadline: Instant) -> bool {
         // Flag teardown before any reap below (this loop's `try_wait`, or the caller's kill). A
         // degraded-host `KillHandle` falls back to signalling a raw pid, and `collect_outputs` reaps
-        // the VMM here then runs a multi-second image readback before this VM drops into `teardown` —
+        // the VMM here then runs a multi-second image readback before this VM drops into `teardown`,
         // so without marking down now, the reaped (recyclable) pid stays "killable" for that whole
         // window and a fired handle could `kill -9` an unrelated process. Idempotent with the later
         // `teardown`/`abort` calls.
@@ -667,7 +667,7 @@ impl RunningVm {
     /// (kill + scratch-dir removal) then runs in `Drop`, so this is best-effort and infallible.
     ///
     /// # Errors
-    /// Currently never returns `Err` — teardown is best-effort — but the signature stays fallible
+    /// Currently never returns `Err`, teardown is best-effort, but the signature stays fallible
     /// for the jailed/cgroup teardown that lands later.
     pub fn shutdown(mut self) -> Result<(), VmmError> {
         // The kill in `Drop` is what actually guarantees no leak; this is just the polite ask.

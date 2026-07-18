@@ -1,10 +1,10 @@
 //! One client connection = one sandbox **session**. Mirrors `agent shell`'s lifecycle over the wire:
-//! the first message opens the sandbox (jailed by default — the daemon's launch posture, never the
+//! the first message opens the sandbox (jailed by default, the daemon's launch posture, never the
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
 //! session, decision 019), until `close` (or a hung-up connection) tears it down.
 //!
 //! The session runs on an owned [`RunningVm`], not a [`Sandbox`](agent_vmm::Sandbox), so a warm clone
-//! popped from the pool and a cold boot serve through the exact same code — the only difference the
+//! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
 //! **The verbs** (the versioned wire API, P16.2): `open` boots; `exec` runs a command; `put`/`get`
@@ -12,13 +12,13 @@
 //! the engine's only file seam); `snapshot` writes a bundle (a typed refusal for a jailed session);
 //! `trace` returns the host-observed audit record (`RunRecord`) so far; `close` ends it.
 //!
-//! No-panic host path (guardrail 5): a hostile or buggy client — bad JSON, a wrong first message, a
-//! wrong wire schema, a command that can't spawn, a mid-session hang-up — is a typed
+//! No-panic host path (guardrail 5): a hostile or buggy client, bad JSON, a wrong first message, a
+//! wrong wire schema, a command that can't spawn, a mid-session hang-up, is a typed
 //! [`Response::Error`] or a dropped connection, never a daemon panic. The exec-fault taxonomy follows
 //! the CLI's shell: a **guest** fault (a bad command, a timeout, a flooded cap) is per-request and the
 //! session survives it, while an **infra/transport** fault means the VM itself is gone, so the session
 //! ends and its VM drops (tearing the microVM down). Losing the whole daemon process can't leak a VM
-//! either — the lifetime sentinel (decision 014) owns that.
+//! either, the lifetime sentinel (decision 014) owns that.
 
 use std::io::BufReader;
 use std::num::{NonZeroU32, NonZeroU8};
@@ -35,7 +35,7 @@ use crate::metrics::{Metrics, Verb};
 use crate::Server;
 
 /// Firecracker v1.9 caps a microVM at 32 vCPUs (decision 001); reject an over-cap `open` up front as
-/// a typed error rather than surfacing a late boot failure — the daemon mirror of the CLI's guard.
+/// a typed error rather than surfacing a late boot failure, the daemon mirror of the CLI's guard.
 const MAX_VCPUS: u8 = 32;
 
 /// The no-op command `put`/`get` run: the engine injects files and returns artifacts only *around an
@@ -44,7 +44,7 @@ const MAX_VCPUS: u8 = 32;
 const NOOP_ARGV: &str = "true";
 
 /// Serve one connection to completion: open the session's sandbox, act on it, tear down. Never
-/// returns an error — every failure is reported to the client (best-effort) and logged, so one bad
+/// returns an error, every failure is reported to the client (best-effort) and logged, so one bad
 /// connection can't take the daemon down.
 pub fn serve(stream: UnixStream, server: &Server) {
     // A second handle for writing, so the read side can sit in a `BufReader` while we still reply.
@@ -57,8 +57,8 @@ pub fn serve(stream: UnixStream, server: &Server) {
     };
     let mut reader = BufReader::new(stream);
 
-    // The first message must be `open` (carrying the session's resource envelope). Anything else —
-    // EOF, a stray verb, a malformed/wrong-schema line — ends the connection before any VM is booted.
+    // The first message must be `open` (carrying the session's resource envelope). Anything else,
+    // EOF, a stray verb, a malformed/wrong-schema line, ends the connection before any VM is booted.
     let open = match read_message::<Request>(&mut reader) {
         Ok(Some(req)) => req,
         Ok(None) => return, // client hung up before opening; nothing to tear down
@@ -119,7 +119,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
     let mut total_exec_wall = Duration::ZERO;
     loop {
         match read_message::<Request>(&mut reader) {
-            Ok(None) => break, // clean EOF — teardown below
+            Ok(None) => break, // clean EOF, teardown below
             Ok(Some(Request::Close)) => {
                 let _ = send(&mut writer, &Response::Closed);
                 break;
@@ -251,8 +251,8 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 }
             }
             // A malformed/oversize line is the client's fault and per-request; the session survives.
-            // A wrong wire schema means the peer speaks another protocol — end the session. A
-            // transport I/O error means the connection itself is broken — stop.
+            // A wrong wire schema means the peer speaks another protocol, end the session. A
+            // transport I/O error means the connection itself is broken, stop.
             Err(ProtocolError::Io(e)) => {
                 tracing::warn!(error = %e, "connection read failed; ending session");
                 break;
@@ -276,7 +276,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
 
 /// Reply to a verb that ran a guest command (`exec`/`put`/`get`): on success accumulate the exec
 /// wall and send `to_response(result)`; on failure send a typed error. Returns `false` when the loop
-/// should stop — the connection broke, or the fault is session-ending (an **infra/transport** fault
+/// should stop, the connection broke, or the fault is session-ending (an **infra/transport** fault
 /// means the VM is gone; a **guest** fault the session survives).
 fn serve_run(
     w: &mut UnixStream,
@@ -301,7 +301,7 @@ fn serve_run(
 }
 
 /// Boot the session's VM. A **bare** `open` (every knob defaulted) is served from the pre-warmed pool
-/// when the daemon has one — the fast path — since the pool's clones carry the default profile. Any
+/// when the daemon has one, the fast path, since the pool's clones carry the default profile. Any
 /// custom resource knob (or no pool) is a cold boot with the requested envelope.
 ///
 /// The lock is held only to pop **ready stock** (an O(1) pop), never across a `Vm::restore` (16-A):
@@ -318,7 +318,7 @@ fn boot_session_vm(
         if let Some(pool) = &server.pool {
             match pool.lock() {
                 Ok(mut p) => {
-                    // Pop only when there is ready stock — `Pool::take` would otherwise restore
+                    // Pop only when there is ready stock, `Pool::take` would otherwise restore
                     // inline under this lock (the 16-A serialization). No stock ⇒ fall through to a
                     // lock-free cold boot below.
                     if p.ready() > 0 {
@@ -340,8 +340,8 @@ fn boot_session_vm(
 }
 
 /// Cold-boot a `RunningVm` with the daemon's confinement posture, replicating what
-/// [`Sandbox::open`](agent_vmm::Sandbox::open) does before booting — force the vsock exec channel on,
-/// and set (or clear) the jail — so a cold session and a pooled one are the same shape of VM.
+/// [`Sandbox::open`](agent_vmm::Sandbox::open) does before booting, force the vsock exec channel on,
+/// and set (or clear) the jail, so a cold session and a pooled one are the same shape of VM.
 fn cold_boot(mut config: BootConfig, jailed: bool) -> Result<RunningVm, VmmError> {
     config.jail = if jailed {
         Some(config.jail.unwrap_or_default())
@@ -361,18 +361,18 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
     std::fs::create_dir_all(&dir)
         .map_err(|e| VmmError::Vmm(format!("create snapshot dir {}: {e}", dir.display())))?;
     // The returned `Snapshot` is just metadata pointing at the on-disk bundle; the client gets the
-    // directory (the bundle stays on the daemon host — decision 034 keeps bulk bytes off this line).
+    // directory (the bundle stays on the daemon host, decision 034 keeps bulk bytes off this line).
     let _snapshot = vm.snapshot(&dir)?;
     Ok(dir.to_string_lossy().into_owned())
 }
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
-/// between sessions — the moment the [`Pool`](agent_vmm::Pool) doc reserves for restore cost).
+/// between sessions, the moment the [`Pool`](agent_vmm::Pool) doc reserves for restore cost).
 ///
 /// The refill is **best-effort and non-blocking** (16-A): `try_lock`, and skip if the pool is
 /// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
 /// another's restore. Stock recovers on the next uncontended close (the holder refills all the way to
-/// target), and any bare `open` that meanwhile finds the pool dry cold-boots — correct, just not
+/// target), and any bare `open` that meanwhile finds the pool dry cold-boots, correct, just not
 /// pooled.
 fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _pooled: bool) {
     server.metrics.session_closed();
@@ -440,7 +440,7 @@ fn record_to_value(json: &str) -> serde_json::Value {
         .unwrap_or_else(|_| serde_json::json!({ "error": "record serialization failed" }))
 }
 
-/// Send a response, returning `false` (so the caller stops) if the write failed — a broken pipe is a
+/// Send a response, returning `false` (so the caller stops) if the write failed, a broken pipe is a
 /// gone client, not a daemon fault.
 fn send(w: &mut UnixStream, resp: &Response) -> bool {
     match write_response(w, resp) {
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn a_single_knob_makes_the_open_non_bare() {
-        // Even one custom knob means the pool's default-profile clone can't serve it — cold boot.
+        // Even one custom knob means the pool's default-profile clone can't serve it, cold boot.
         let (_, bare) = open_limits(&Request::Open {
             vcpus: None,
             mem_mib: Some(512),

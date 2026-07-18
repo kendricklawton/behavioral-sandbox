@@ -3,7 +3,7 @@
 //!
 //! Hand-rolled, dependency-free, and **compact** (no incidental whitespace), for the same reasons the
 //! host↔guest wire is hand-framed (decision 002): the audit-log format is a contract downstream SDKs
-//! parse, so pinning the exact bytes here — rather than trusting a derive's field order — is the
+//! parse, so pinning the exact bytes here, rather than trusting a derive's field order, is the
 //! point. The output is **byte-stable**: object keys are written in a fixed order and every array the
 //! record carries is already sorted by its builder ([`NetSection::from_tap`](crate::NetSection),
 //! [`SyscallFold::finish`](crate::SyscallFold)), so the same observations always render the same bytes.
@@ -12,7 +12,7 @@
 //! No floats (durations are integer nanoseconds, byte counts are integers), so there is no
 //! locale/precision wobble; IPv4 addresses render as dotted quads and protocols/syscalls as their
 //! names, so the record reads without a decoder ring. Durations are clamped to **u64 nanoseconds**
-//! (a ~584-year ceiling — the numeric bound consumers can rely on; parse these with 64-bit integers,
+//! (a ~584-year ceiling, the numeric bound consumers can rely on; parse these with 64-bit integers,
 //! not doubles). The human-facing view (a TUI, a pretty-printer) is the live view's job; this is the
 //! machine surface it and the SDKs build on.
 
@@ -29,11 +29,11 @@ use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
 /// [`RunRecord::to_json`]. **Compatibility policy:** within a version, changes are *additive only*
 /// (a new field a consumer may ignore); renaming or removing a field, or changing a value's meaning,
 /// bumps this integer. A parser keys on this to know which shape it is reading. This is the seed the
-/// wire API and the language-SDK freeze harden — versioned *before* anything external parses it.
+/// wire API and the language-SDK freeze harden, versioned *before* anything external parses it.
 pub const AUDIT_SCHEMA_VERSION: u32 = 1;
 
 impl RunRecord {
-    /// Render this record as one line of deterministic, compact JSON — the structured output. The
+    /// Render this record as one line of deterministic, compact JSON, the structured output. The
     /// schema is stable and byte-for-byte reproducible across map-iteration order (see the module doc);
     /// The live view pretty-prints it for people, and the language SDKs parse it as the audit-log format.
     /// The leading `schema` field ([`AUDIT_SCHEMA_VERSION`]) versions the format.
@@ -42,7 +42,7 @@ impl RunRecord {
         let mut out = String::with_capacity(512);
         out.push('{');
 
-        // schema version — first, so a consumer reads it before anything else.
+        // schema version, first, so a consumer reads it before anything else.
         field(&mut out, "schema", AUDIT_SCHEMA_VERSION, true);
 
         // timing
@@ -226,7 +226,7 @@ pub(crate) fn syscall_name(out: &mut String, kind: Syscall) {
     });
 }
 
-/// Write `,"key":<value>` (or `"key":<value>` when `first`) for any unquoted-rendering value — the
+/// Write `,"key":<value>` (or `"key":<value>` when `first`) for any unquoted-rendering value, the
 /// integer fields all funnel through here, one helper instead of one per width.
 pub(crate) fn field<T: Display>(out: &mut String, key: &str, value: T, first: bool) {
     if !first {
@@ -235,13 +235,13 @@ pub(crate) fn field<T: Display>(out: &mut String, key: &str, value: T, first: bo
     let _ = write!(out, "\"{key}\":{value}");
 }
 
-/// A duration as **u64 nanoseconds**, saturating at `u64::MAX` (~584 years) — the documented numeric
+/// A duration as **u64 nanoseconds**, saturating at `u64::MAX` (~584 years), the documented numeric
 /// ceiling of the JSON surface, so consumers can parse with ordinary 64-bit integers.
 pub(crate) fn clamped_ns(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// Write `,"key":<n|null>` — an absent counter (a cgroup file a kernel doesn't have) renders `null`,
+/// Write `,"key":<n|null>`, an absent counter (a cgroup file a kernel doesn't have) renders `null`,
 /// distinct from a real `0`.
 pub(crate) fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, first: bool) {
     if !first {

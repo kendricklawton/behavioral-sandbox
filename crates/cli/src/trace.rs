@@ -1,7 +1,7 @@
 //! The human-readable audit trail (`agent run --trace`): a pretty rendering of the per-run
 //! [`RunRecord`] for people at a terminal. The **machine** surface is the record's deterministic
 //! JSON (`--record`, `RunRecord::to_json`); this rendering makes no stability promise beyond
-//! being deterministic for the same record — parse the JSON, read this.
+//! being deterministic for the same record, parse the JSON, read this.
 //!
 //! Pure `record -> String`, so it is unit-tested host-safe against a golden.
 
@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use agent_probes_loader::{AxisGap, RunRecord, Syscall};
 
-/// How many notable host syscalls the trail prints before folding the rest into a count — the
+/// How many notable host syscalls the trail prints before folding the rest into a count, the
 /// record itself already caps and truncation-flags the full set; this is only about screen space.
 const MAX_TRAIL_NOTABLE: usize = 10;
 
 /// Render the run's audit trail. Deterministic (the record's collections are pre-sorted by their
-/// builders; the one re-sort here — notable syscalls by hits — breaks ties on the record's own
+/// builders; the one re-sort here, notable syscalls by hits, breaks ties on the record's own
 /// order), multi-line, self-labeling: every axis says what it is, absence says why (coverage).
 pub fn render(record: &RunRecord) -> String {
     let mut out = String::with_capacity(1024);
@@ -78,7 +78,7 @@ pub fn render(record: &RunRecord) -> String {
         opt_bytes(res.cgroup.io_wbytes)
     );
 
-    // The host-syscall axis is the VMM's footprint — a microVM services the guest's syscalls
+    // The host-syscall axis is the VMM's footprint, a microVM services the guest's syscalls
     // in-guest, so their absence here is the isolation working, and the label says so.
     let sys = &record.host_syscalls;
     let _ = writeln!(
@@ -151,7 +151,7 @@ pub fn human_bytes(b: u64) -> String {
     }
 }
 
-/// An optional counter (a cgroup file this kernel may not have): the value, or an honest `n/a` —
+/// An optional counter (a cgroup file this kernel may not have): the value, or an honest `n/a`,
 /// never a fake zero.
 fn opt_bytes(v: Option<u64>) -> String {
     v.map_or_else(|| "n/a".to_string(), human_bytes)

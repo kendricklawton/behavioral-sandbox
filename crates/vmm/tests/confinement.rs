@@ -25,7 +25,7 @@ use common::{agent_rootfs_config, cgroup_of, config, have_jailer_privileges, hav
 const HELPER_ENV: &str = "AGENT_CONFINEMENT_HELPER";
 
 /// The env var that turns `helper_boot_networked_and_park` into the sweep test's victim: a
-/// **networked** boot, so the crash leaves the residue that matters — a per-VM netns holding a tap.
+/// **networked** boot, so the crash leaves the residue that matters, a per-VM netns holding a tap.
 const HELPER_NET_ENV: &str = "AGENT_CONFINEMENT_HELPER_NET";
 
 /// Whether `pid` is still a live `firecracker` process (same discipline as `boot.rs`: keyed on the
@@ -51,7 +51,7 @@ fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
 }
 
 /// The crash-test victim, run **as a subprocess** by `driver_death_cannot_leak_a_vm`: boot a VM,
-/// report the VMM's pid and cgroup on stdout, then park forever — so the parent can `SIGKILL` this
+/// report the VMM's pid and cgroup on stdout, then park forever, so the parent can `SIGKILL` this
 /// whole process mid-run and watch what the sentinel does. `Drop` never runs here; that's the point.
 #[test]
 #[ignore = "crash-test helper; only meaningful under driver_death_cannot_leak_a_vm"]
@@ -80,7 +80,7 @@ fn helper_boot_and_park() {
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn driver_death_cannot_leak_a_vm() {
     // The cgroup-owned-lifetime headline claim, tested with a real crash: a driver process SIGKILLed mid-run (the one
-    // signal no handler can catch — the stand-in for Ctrl-C, OOM, a panic-abort) does not leak its
+    // signal no handler can catch, the stand-in for Ctrl-C, OOM, a panic-abort) does not leak its
     // VMM. The sentinel outlives the driver, wakes on the pipe EOF the kernel delivers for us, and
     // kills + removes the VM's cgroup. Run the driver as a subprocess (this same test binary,
     // invoking the parked helper above) so the kill is real, not simulated.
@@ -160,7 +160,7 @@ fn driver_death_cannot_leak_a_vm() {
     let _ = child.wait();
 
     // The sentinel (a child of the victim, in its own process group, now orphaned) must kill the
-    // VMM via its cgroup and remove the cgroup dir — promptly, not eventually.
+    // VMM via its cgroup and remove the cgroup dir, promptly, not eventually.
     assert!(
         eventually(Duration::from_secs(10), || !is_firecracker(vmm_pid)),
         "VMM {vmm_pid} must die when its driver dies (sentinel failed?)"
@@ -174,7 +174,7 @@ fn driver_death_cannot_leak_a_vm() {
 }
 
 /// The sweep crash-test victim: like [`helper_boot_and_park`], but a **networked** boot, so the
-/// crash leaves the residue the sweep exists for — a per-VM network namespace holding an orphan tap.
+/// crash leaves the residue the sweep exists for, a per-VM network namespace holding an orphan tap.
 #[test]
 #[ignore = "crash-test helper; only meaningful under sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir"]
 fn helper_boot_networked_and_park() {
@@ -215,7 +215,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
     // (holding an orphan tap), left behind when its driver dies without teardown. It is no longer a
     // finite-pool reservation (each netns reuses a fixed /30), but still residue worth reclaiming. The
     // sweep must reclaim a dead driver's netns + scratch dir while sparing a concurrently-live
-    // driver's — ownership by liveness, not by pattern.
+    // driver's, ownership by liveness, not by pattern.
     if !have_net_admin() {
         eprintln!(
             "skipping sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir: no CAP_NET_ADMIN"
@@ -279,7 +279,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
     child.kill().expect("SIGKILL the victim");
     let _ = child.wait();
 
-    // The sweep owns fs/net residue, never processes: those are the sentinel's — and where the
+    // The sweep owns fs/net residue, never processes: those are the sentinel's, and where the
     // sentinel is degraded (no writable cgroup v2, e.g. under a plain userns), the leaked VMM is
     // reaped here by hand so the sweep's still-running-VMM guard doesn't (correctly) skip the dir.
     if !eventually(Duration::from_secs(10), || !is_firecracker(vmm_pid)) {
@@ -292,7 +292,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
         );
     }
 
-    // The residue is really there before the sweep — otherwise the test would pass vacuously.
+    // The residue is really there before the sweep, otherwise the test would pass vacuously.
     assert!(
         netns_exists(&victim_netns),
         "the crashed driver's netns {victim_netns} should linger until swept"
@@ -324,7 +324,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
         "report counts the dir: {report:?}"
     );
 
-    // The live sibling is untouched — and still fully functional, not just present.
+    // The live sibling is untouched, and still fully functional, not just present.
     assert!(
         netns_exists(&live_netns),
         "sweep must spare the live driver's netns {live_netns}"
@@ -342,7 +342,7 @@ fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
 fn kill_handle_unblocks_a_wedged_exec() {
     // The embedder kill handle: `exec` borrows `&self` and `shutdown` consumes `self`, so a
     // thread blocked in a long exec can't be stopped through the VM's own API. The handle is the
-    // out-of-band path: cloneable, Send, and it kills through the cgroup file — so firing it from
+    // out-of-band path: cloneable, Send, and it kills through the cgroup file, so firing it from
     // another thread makes the VMM die, the vsock peer close, and the blocked exec return a typed
     // error long before its 30 s command (or budget) would have.
     let vm = Vm::boot(agent_rootfs_config()).expect("agent microVM should boot");
@@ -379,7 +379,7 @@ fn kill_handle_unblocks_a_wedged_exec() {
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn guest_mem_hog_is_bounded_by_the_cgroup() {
     // Memory half: a guest allocating everything it can reach pushes the VMM's host memory
-    // toward its cap, and the cap holds — accounted memory never passes `memory.max`, the kernel
+    // toward its cap, and the cap holds, accounted memory never passes `memory.max`, the kernel
     // never OOM-kills the VMM (the guest's *own* OOM killer eats the hog first, inside the
     // hardware boundary), and the VM stays responsive afterwards. Host unaffected, by observation.
     if !have_jailer_privileges() {
@@ -398,7 +398,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
     cg.enter(vm.vmm_pid());
 
     // Touch pages, don't just reserve them: `bytearray` zero-fills, so every chunk is real guest
-    // RAM the VMM must back with host memory — charged to the limited cgroup. The hog ends either
+    // RAM the VMM must back with host memory, charged to the limited cgroup. The hog ends either
     // in Python's MemoryError or under the guest kernel's OOM killer; both are fine, both are
     // *inside the VM*. What must not happen is the exec channel dying or the host cap breaking.
     // One literal with explicit `\n`s and single-space block indents: a Rust `\`-continuation would
@@ -458,7 +458,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn guest_fork_bomb_is_bounded_by_the_cgroup() {
     // CPU half: a storm of spinning guest processes. Two bounds hold at once. Hardware
-    // isolation means guest processes simply don't exist on the host — the VMM's thread count
+    // isolation means guest processes simply don't exist on the host, the VMM's thread count
     // stays flat no matter how hard the guest forks. And the cgroup's cpu.max means the whole VM
     // (vCPUs + VMM overhead threads) cannot burn more than its quota of host CPU. The storm's own
     // exit also exercises tree reaping: its spinners are reaped by the guest agent's per-exec cgroup, so
@@ -484,7 +484,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
 
     // 100 spinning shells for 3 s: a bounded storm rather than the classic unbounded `:(){ :|:& };:`
     // so the guest agent stays schedulable and the run is measurable (the *unbounded* variant would
-    // starve the agent inside the guest — a guest-availability problem, while this test is about
+    // starve the agent inside the guest, a guest-availability problem, while this test is about
     // what the host feels). The spinners outlive their parent command on purpose: the agent's tree
     // reaping is what cleans them up.
     let storm = [
@@ -537,7 +537,7 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
     // a well-behaved run on the *same host* can neither **starve** it (the victim's work still
     // completes, correctly and within a bound) nor **observe** it (distinct VMMs; network isolation is
     // the per-VM netns's job, net.rs). Each run is capped at its own cgroup, so the attacker cannot
-    // take more than its quota — the victim's share is protected *by construction*; the wall-clock
+    // take more than its quota, the victim's share is protected *by construction*; the wall-clock
     // ceiling is a sanity check layered on top of that guarantee, not the guarantee itself.
     if !have_jailer_privileges() {
         eprintln!(
@@ -555,7 +555,7 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
         return;
     };
 
-    // Two co-resident runs, each in its own capped cgroup — the per-run isolation a hoster relies on.
+    // Two co-resident runs, each in its own capped cgroup, the per-run isolation a hoster relies on.
     let victim = Vm::boot(cfg.clone()).expect("victim microVM should boot");
     victim_cg.enter(victim.vmm_pid());
     let attacker = Vm::boot(cfg).expect("attacker microVM should boot");
@@ -627,7 +627,7 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
         "the attacker's storm command should exit 0"
     );
 
-    // The attacker stayed within its cgroup CPU quota — it could not monopolize the host, so the
+    // The attacker stayed within its cgroup CPU quota, it could not monopolize the host, so the
     // victim's share was protected by the cap regardless of the scheduler.
     let attacker_cpu = attacker_cg.stat("cpu.stat", "usage_usec") - usage_before;
     let cpu_cap = attack_wall.as_micros() as u64 * u64::from(vcpus) + 2_000_000;

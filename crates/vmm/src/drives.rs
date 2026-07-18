@@ -9,13 +9,13 @@ use std::time::{Duration, Instant};
 
 /// The filesystem labels the driver stamps on the data devices so the guest mounts them by label,
 /// not by enumeration-order `/dev/vdX` (a boot may attach input, output, both, or neither). Defined
-/// in `agent-channel` — the one host↔guest contract both the driver and the rootfs build consume.
+/// in `agent-channel`, the one host↔guest contract both the driver and the rootfs build consume.
 use agent_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
 use crate::paths::path_str;
 use crate::VmmError;
 
-/// Size of the blank writable output image. A fixed cap for now — it's the natural bulk-output
+/// Size of the blank writable output image. A fixed cap for now, it's the natural bulk-output
 /// bound (the guest can't write more than the filesystem holds), mirroring the channel path's
 /// [`MAX_EXEC_OUTPUT`]. Built with `lazy_itable_init=0` so the guest kernel never balloons the
 /// metadata: a fresh image is ~a few MiB of real host blocks, growing only with what's written.
@@ -23,7 +23,7 @@ const OUTPUT_IMAGE_MIB: u32 = 256;
 
 /// Hard ceiling on the **real host bytes** [`RunningVm::collect_outputs`] will write while extracting
 /// the output image. `debugfs rdump` materialises filesystem holes as zeros, so a hostile guest could
-/// stage a sparse file with a huge logical size inside the capped image and inflate the readback — a
+/// stage a sparse file with a huge logical size inside the capped image and inflate the readback, a
 /// watcher aborts once the extracted tree's allocated blocks pass this bound. Generous headroom over
 /// [`OUTPUT_IMAGE_MIB`] (a legitimate tree's real bytes can't exceed the image), so only abuse trips.
 const OUTPUT_EXTRACT_CAP: u64 = 2 * (OUTPUT_IMAGE_MIB as u64) * 1024 * 1024; // 512 MiB
@@ -84,7 +84,7 @@ pub(crate) fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBu
 
 /// Build a **blank, writable** ext4 for the bulk-output block device, rootless via `mke2fs`.
 /// No `-d` (nothing to seed) and `lazy_itable_init=0`/`lazy_journal_init=0` so the guest kernel never
-/// lazily zeroes the inode table at runtime — that would balloon the sparse image toward its full
+/// lazily zeroes the inode table at runtime, that would balloon the sparse image toward its full
 /// [`OUTPUT_IMAGE_MIB`] on the host regardless of how little the command writes. Labelled
 /// [`OUTPUT_LABEL`] so the guest mounts it by label. The image lands in `workdir` (reclaimed on
 /// teardown); [`RunningVm::collect_outputs`] reads it back after the VMM exits.
@@ -119,7 +119,7 @@ pub(crate) fn build_output_image(workdir: &Path) -> Result<PathBuf, VmmError> {
 
 /// One walk of `dir` for `(total_bytes, file_count)`, to size the input image. Bounded: an input
 /// past a sane ceiling is a typed error, not a giant image. Symlinks are counted (each is an inode)
-/// but not descended — `mke2fs -d` copies them verbatim, so a link resolves inside the *guest* fs,
+/// but not descended, `mke2fs -d` copies them verbatim, so a link resolves inside the *guest* fs,
 /// never the host's, and there's no symlink-loop or host-escape via traversal.
 fn measure_tree(dir: &Path) -> Result<(u64, u64), VmmError> {
     const MAX_INPUT_BYTES: u64 = 2 * 1024 * 1024 * 1024; // 2 GiB bulk-input ceiling
@@ -165,7 +165,7 @@ fn require_dir(path: &Path, what: &str) -> Result<(), VmmError> {
 }
 
 /// Run a host build tool (`truncate`/`mke2fs`) for a data block device. A missing tool is a typed
-/// [`VmmError::Artifact`] — the driver's only other external process is `firecracker`, so these are
+/// [`VmmError::Artifact`], the driver's only other external process is `firecracker`, so these are
 /// real new runtime dependencies, surfaced clearly rather than as a cryptic spawn failure.
 fn run_host_tool(program: &str, args: &[&OsStr]) -> Result<(), VmmError> {
     let status = Command::new(program)
@@ -211,7 +211,7 @@ pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<Stri
 
 /// `e2fsck -fy` the image: force a full check and auto-answer, recovering the journal and clearing the
 /// "not cleanly unmounted" state a hard-killed guest leaves, so `debugfs` sees a consistent tree. The
-/// exit status is a bitmask — 0 clean, 1 errors corrected, 2 corrected + reboot advised (moot for an
+/// exit status is a bitmask, 0 clean, 1 errors corrected, 2 corrected + reboot advised (moot for an
 /// image file); `>= 4` means errors left uncorrected or an operational failure, which is a real error.
 fn fsck_output_image(image: &Path) -> Result<(), VmmError> {
     let status = Command::new("e2fsck")
@@ -243,17 +243,17 @@ fn fsck_output_image(image: &Path) -> Result<(), VmmError> {
 
 /// Extract the image tree into `dest` with `debugfs rdump`, bounded so a hostile guest can't blow up
 /// the host. `debugfs` materialises filesystem holes as real zeros, so a sparse file staged in the
-/// capped image could still inflate the readback — a poll loop aborts the extraction once `dest`'s
+/// capped image could still inflate the readback, a poll loop aborts the extraction once `dest`'s
 /// **allocated** bytes pass `byte_cap`, or once it outruns `timeout`. rdump prints benign
 /// "changing ownership" warnings when run non-root (it can't chown to the guest's uids) and still
-/// exits 0; those are ignored — only a non-zero exit or a tripped bound is an error.
+/// exits 0; those are ignored, only a non-zero exit or a tripped bound is an error.
 fn rdump_capped(
     image: &Path,
     dest: &Path,
     byte_cap: u64,
     timeout: Duration,
 ) -> Result<(), VmmError> {
-    // debugfs parses its `-R` request by whitespace, with no quoting — reject a whitespace dest
+    // debugfs parses its `-R` request by whitespace, with no quoting, reject a whitespace dest
     // rather than silently truncate the path (the dest is operator-set, so this is a clear config
     // error, not a guest-reachable one).
     let dest_str = path_str(dest)?;
@@ -314,7 +314,7 @@ fn rdump_capped(
 
 /// Sum of **allocated** bytes (`blocks * 512`, real host disk, not logical size) under `dir`. Walks
 /// with `file_type`/`DirEntry::metadata` (both `lstat`-like), so a guest symlink is counted as the
-/// link itself and never followed — the walk can't be lured onto the host filesystem while sizing.
+/// link itself and never followed, the walk can't be lured onto the host filesystem while sizing.
 fn dir_alloc_bytes(dir: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
     let mut total = 0u64;
@@ -340,13 +340,13 @@ fn dir_alloc_bytes(dir: &Path) -> u64 {
 
 /// Remove every symlink under `dest` whose target escapes `dest`. `debugfs rdump` recreates a guest
 /// symlink verbatim as a **host** symlink, so an un-sanitised `link -> /etc/shadow` (or one that
-/// climbs out with `..`) would make a later host read of the results read host files — the inverse of
+/// climbs out with `..`) would make a later host read of the results read host files, the inverse of
 /// the input side, where `mke2fs -d` resolves links inside the guest image. In-tree links (e.g.
 /// `a -> sub/b`) are kept.
 ///
 /// Containment is checked by **canonical resolution**, not lexically: a lexical `..`-depth count is
-/// unsound because a kept in-tree symlink makes a `Normal` path component *not* descend a real level
-/// — a guest can chain `d -> .` with `evil -> d/../../etc/shadow` to pass a lexical check while
+/// unsound because a kept in-tree symlink makes a `Normal` path component *not* descend a real level,
+/// a guest can chain `d -> .` with `evil -> d/../../etc/shadow` to pass a lexical check while
 /// resolving above `dest`. `Path::canonicalize` follows every intermediate link to the real target,
 /// which we require to sit under the canonical `dest`; a target that doesn't resolve (dangling, or
 /// pointing outside to a nonexistent path) can't be proven in-tree, so it's dropped. Safe from
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn output_dir_with_whitespace_is_rejected_before_debugfs() {
         // A whitespace dest would be split by debugfs's `-R` parser; catch it as a typed error rather
-        // than silently truncating the extraction path. (No debugfs is spawned — the guard fires first.)
+        // than silently truncating the extraction path. (No debugfs is spawned, the guard fires first.)
         let err = rdump_capped(
             Path::new("/nonexistent/img.ext4"),
             Path::new("/tmp/has a space"),

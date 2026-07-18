@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::{artifacts_dir, boot_rootfs_path, kernel_path, vendor_dir};
 
-/// A pinned boot artifact: a stable URL, its expected sha256 (the real contract — the URL is
+/// A pinned boot artifact: a stable URL, its expected sha256 (the real contract, the URL is
 /// replaceable), and where it lands under `artifacts/`.
 pub(crate) struct Artifact {
     pub(crate) url: String,
@@ -62,7 +62,7 @@ pub(crate) fn fetch_one(a: &Artifact) -> Result<()> {
     }
 }
 
-/// The final path component of an artifact's `dest`, as a display string — the name it carries both
+/// The final path component of an artifact's `dest`, as a display string, the name it carries both
 /// under `artifacts/` and in the vendor mirror.
 fn artifact_name(a: &Artifact) -> String {
     a.dest.file_name().map_or_else(
@@ -71,8 +71,8 @@ fn artifact_name(a: &Artifact) -> String {
     )
 }
 
-/// Restore one artifact from the local vendor mirror `<vendor>/<name>` — a sha-verified copy, no
-/// network — so an offline host builds from the vendored inputs. A missing vendored file is a clear
+/// Restore one artifact from the local vendor mirror `<vendor>/<name>`, a sha-verified copy, no
+/// network, so an offline host builds from the vendored inputs. A missing vendored file is a clear
 /// error naming `cargo xtask vendor`, never a silent fallback to the network (which would defeat the
 /// point of pinning the host offline).
 fn restore_from_vendor(a: &Artifact, vendor: &Path) -> Result<()> {

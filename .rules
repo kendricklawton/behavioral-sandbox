@@ -2,12 +2,12 @@
 
 **A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
-enforces what it does — syscalls, its network, its cgroup — from *outside* the guest, where the
-code can't see or subvert you. Every run yields a tamper-resistant, host-observed **audit log** of exactly what happened. This file is the operating manual — read it every session.
+enforces what it does, syscalls, its network, its cgroup, from *outside* the guest, where the
+code can't see or subvert you. Every run yields a tamper-resistant, host-observed **audit log** of exactly what happened. This file is the operating manual, read it every session.
 
 **Scope: the engine, not the platform.** A runtime + a clean driver API you self-host: the boring,
 embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed
-audit log. **This is an engine, not a PaaS** — multi-tenant auth, billing, fleet scheduling, and a
+audit log. **This is an engine, not a PaaS**, multi-tenant auth, billing, fleet scheduling, and a
 dashboard are the *hoster's* job, out of scope. The **AI model / agent loop is out too**: the model
 is always the *caller* driving the engine from outside, never an engine component (decision 035); the
 engine's job is to contain what the model's code does and hand back the record. If a change pulls
@@ -15,7 +15,7 @@ tenancy/billing/scheduling or a model into this repo, or moves the security boun
 the design is wrong.
 
 The **language SDKs** (Go/Python/Node/C#) and the **Wasmtime sibling** are separate repos built on
-this engine's frozen wire API + audit-log format — thin clients / a sibling, never in this
+this engine's frozen wire API + audit-log format, thin clients / a sibling, never in this
 repo. The Wasmtime variant is a *sibling, not a backend*, so *isolation is hardware* holds here
 without exception. (They're a forward map in `ROADMAP.md` Phases 20–21; their code lives elsewhere.)
 
@@ -47,7 +47,7 @@ crates/
                  shared by the driver and the guest agent. See `docs/contributing-architecture.md` decision 002.
   guest-agent/   the in-guest agent (`agent-guest`): runs one command per connection and streams
                  stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at
-                 Phase 3. Exec/IO convenience only — never the security boundary.
+                 Phase 3. Exec/IO convenience only, never the security boundary.
   probes/        the eBPF programs (`#![no_std]`, built for `bpfel-unknown-none` via
                  `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting.
                  CO-RE/BTF so they're portable across kernels.
@@ -56,15 +56,15 @@ crates/
                  so the two sides can't drift.
   probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
                  maps, stream events into the audit log.
-  cli/           two binaries: `agent` (the CLI — `run`, `shell`, `doctor`; the audit record on
+  cli/           two binaries: `agent` (the CLI, `run`, `shell`, `doctor`; the audit record on
                  `--trace`/`--record`/`--record-summary`/`--watch`) and `agentd` (the driver
-                 daemon: the versioned newline-JSON wire API over a unix socket — decision 034).
+                 daemon: the versioned newline-JSON wire API over a unix socket, decision 034).
 docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): running the engine
                  (`cli*.md`), the embedder contract (`embedding.md`), the eBPF half (`probes.md`),
                  and the contributing chapters (incl. `contributing-architecture.md`, the decision
                  log). Root keeps
                  only the standard meta files (README/CONTRIBUTING/SECURITY/…) plus ROADMAP.md.
-xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF build at P8),
+xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF build at P8),
                  `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
                  and the rootfs/kernel build. Never shipped.
 ```
@@ -81,29 +81,33 @@ xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF 
 4. **Engine, not platform.** No tenancy, auth, billing, fleet scheduler, or dashboard in this
    repo. Those belong to whatever hosts the engine.
 5. **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken
-   channel is a typed error — never a host panic, hang, or leak.
+   channel is a typed error, never a host panic, hang, or leak.
 6. **Measured, not marketed.** Boot/restore/memory-sharing/overhead are benchmarked with percentiles;
    no hand-waved performance claims.
 
 ## Conventions
 
 - **Rust**, stable, one workspace. Linux-only (it needs KVM), `x86_64`/`aarch64`, host kernel
-  **≥ 5.15** (a security-maintained LTS floor — untrusted code on an unpatched kernel is a
+  **≥ 5.15** (a security-maintained LTS floor, untrusted code on an unpatched kernel is a
   threat-model hole; `agent doctor` enforces it, decision 036). The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · clippy `-D warnings` · build · unit tests ·
   docs · `deny`; the eBPF object build joins at Phase 8) and runs everywhere. `cargo xtask ci-privileged` runs
   the VM-boot + eBPF-load integration tests and needs `/dev/kvm` + `CAP_NET_ADMIN`/`CAP_BPF`
-  (your dev box or a bare-metal/nested-virt runner — a stock cloud VM can't nest KVM). Never gate
+  (your dev box or a bare-metal/nested-virt runner, a stock cloud VM can't nest KVM). Never gate
   the everyday loop on a privileged runner.
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
   `agent run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`AGENT_*`) >
   file (`.agent.toml`, the nearest one walking up from the cwd) > defaults** (decision 031).
-- Don't commit built rootfs/kernel images or generated eBPF objects — they're built by `xtask`.
+- Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
+- **No em-dashes in prose.** Repo docs, code comments, decision entries, and commit messages use
+  colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
+  inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
+  are a separate call, not covered here.
 - **Git is human-driven.** The user makes every commit and push; the **coding agent** (Claude,
-  Gemini, Codex — as opposed to `agent`, this project) never runs `git commit` / `git push` (or
+  Gemini, Codex, as opposed to `agent`, this project) never runs `git commit` / `git push` (or
   any other CI-triggering action). The coding agent's job ends at: changes made, demo working,
-  roadmap box checked in the working tree, and — **only when asked** — a commit message drafted
+  roadmap box checked in the working tree, and, **only when asked**, a commit message drafted
   (imperative subject describing **what was done**; do **not** reference phase IDs, the roadmap
   can change; never an AI co-author/attribution trailer).
 - **Public-API changes are called out in the commit subject.** The engine is embedded downstream at
@@ -118,7 +122,7 @@ xtask/           dev orchestration — `cargo xtask ci` (host-safe gate; + eBPF 
 The phase-by-phase plan is the single source of truth in **`ROADMAP.md`** (its **checkboxes are
 the state**). Work it per its §0.5 loop: first unchecked box in ID order, one item per
 iteration, and the box checked **together with the work** so they land in one commit. The
-**user** makes that commit. A phase isn't left until its **Exit gate** passes — *a working demo.*
-Don't duplicate phase status here — update the roadmap. Hard-to-reverse
+**user** makes that commit. A phase isn't left until its **Exit gate** passes, *a working demo.*
+Don't duplicate phase status here, update the roadmap. Hard-to-reverse
 choices land as `(decision)` entries in `docs/contributing-architecture.md`, keyed by their own sequential
 number and date (never a phase ID, so each entry stands on its own as the roadmap evolves).

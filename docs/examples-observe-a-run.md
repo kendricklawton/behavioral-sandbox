@@ -7,7 +7,7 @@ is a real demo that boots a sandbox, attaches one probe, drives a workload, and 
 The mechanics (program types, maps, the verifier, capabilities) are in [Host-side observability &
 enforcement](./probes.md); this page is the workflow. All of these need `/dev/kvm`, the agent
 rootfs, the built probe object (`cargo xtask build-probes`), and the eBPF capabilities
-(`CAP_BPF`+`CAP_PERFMON`, plus `CAP_NET_ADMIN` for the network ones) — run as root or grant the
+(`CAP_BPF`+`CAP_PERFMON`, plus `CAP_NET_ADMIN` for the network ones), run as root or grant the
 named caps.
 
 ## The whole run, fused
@@ -25,12 +25,12 @@ agent run --unjailed --net --watch --trace --record run.json -- \
   as they happen, its resources, the VMM's host-syscall footprint, and a timeline. `q` closes the
   view; the run continues.
 - `--trace` prints the human-readable audit trail on stdout after the run.
-- `--record run.json` writes the deterministic JSON record — the machine surface downstream tools
+- `--record run.json` writes the deterministic JSON record, the machine surface downstream tools
   parse (byte-stable; see [Using the agent CLI](./cli.md)).
 
 All of it is fail-open: without the eBPF capabilities the run still works and the record says
 exactly which axes are missing and why. The per-axis demos below are the same probes driven one at
-a time — useful when you want to study a single mechanism.
+a time, useful when you want to study a single mechanism.
 
 ## Its syscalls
 

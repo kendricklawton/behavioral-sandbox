@@ -25,7 +25,7 @@ fn boots_to_userspace_and_shuts_down() {
     let marker = cfg.userspace_marker.clone();
     let vm = Vm::boot(cfg).expect("microVM should boot to userspace");
 
-    // Boot returns only after the marker is seen, so this is guaranteed — but assert it anyway to
+    // Boot returns only after the marker is seen, so this is guaranteed, but assert it anyway to
     // document what "reached userspace" means, and that the console was actually captured.
     assert!(
         vm.console().contains(&marker),
@@ -146,8 +146,8 @@ fn boots_under_the_jailer() {
 
     // Chroot: the jailer pivot_roots the VMM into its per-VM jail (`<scratch>/firecracker/<id>/root`),
     // so the VMM's filesystem root is not the host `/` and it cannot name a host path. The link *text*
-    // of `/proc/<pid>/root` is useless here — after a pivot_root in the VMM's own mount namespace it
-    // renders as literally `/` (measured) — so compare filesystem *identity* instead: following the
+    // of `/proc/<pid>/root` is useless here, after a pivot_root in the VMM's own mount namespace it
+    // renders as literally `/` (measured), so compare filesystem *identity* instead: following the
     // link stats the directory the VMM's root actually is, and its `(st_dev, st_ino)` must differ from
     // this process's root. Same-inode would mean no chroot at all.
     {
@@ -214,7 +214,7 @@ fn boots_under_the_jailer() {
 
     vm.shutdown().expect("jailed shutdown should succeed");
 
-    // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup — no
+    // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup, no
     // `/tmp/agent-<pid>-*` survives.
     let prefix = format!("agent-{}-", std::process::id());
     let scratch_leaks = std::fs::read_dir("/tmp")
@@ -320,7 +320,7 @@ fn jailed_overlay_is_dense_and_base_is_untouched() {
     );
 
     // Overlay writable: writing a path that lives on the read-only base succeeds only via the tmpfs
-    // upper the guest's `overlay-init` stacks — the same overlay the unjailed shared-base path uses.
+    // upper the guest's `overlay-init` stacks, the same overlay the unjailed shared-base path uses.
     let out = vm
         .exec(
             &[
@@ -343,7 +343,7 @@ fn jailed_overlay_is_dense_and_base_is_untouched() {
     vm.shutdown()
         .expect("jailed overlay shutdown should succeed");
 
-    // The base is byte-for-byte untouched, and teardown unmounted the bind mount — no leaked mount, so
+    // The base is byte-for-byte untouched, and teardown unmounted the bind mount, no leaked mount, so
     // `remove_dir_all` reclaimed the chroot (a lingering mount would `EBUSY` and leak it).
     let after = std::fs::metadata(&base).expect("stat base again");
     assert_eq!(after.len(), base_len, "base image size must not change");
@@ -400,7 +400,7 @@ fn path_is_mounted(path: &Path) -> bool {
 
 /// Per-VM network namespaces this process owns that are currently present (`/run/netns/agent-<pid>-*`),
 /// for the leak assertion below. Under the netns model the tap lives inside the netns, so a leaked
-/// *netns* — not a host `fc*` interface — is the network residue to check for.
+/// *netns*, not a host `fc*` interface, is the network residue to check for.
 fn agent_netns() -> std::collections::BTreeSet<String> {
     let prefix = format!("agent-{}-", std::process::id());
     std::fs::read_dir("/run/netns")
@@ -441,7 +441,7 @@ fn repeated_boots_leave_no_leaks() {
         let vm = Vm::boot(cfg).unwrap_or_else(|e| panic!("boot {i} failed: {e}"));
         vmm_pids.push(vm.vmm_pid());
         // `shutdown` consumes the VM, so its `Drop` (kill + reap + reclaim) has run by the time it
-        // returns — the leak checks below therefore observe the fully-torn-down state.
+        // returns, the leak checks below therefore observe the fully-torn-down state.
         vm.shutdown()
             .unwrap_or_else(|e| panic!("shutdown {i} failed: {e}"));
     }
@@ -457,7 +457,7 @@ fn repeated_boots_leave_no_leaks() {
         .unwrap_or(0);
     assert_eq!(leftovers, 0, "per-VM scratch dirs should be cleaned up");
 
-    // Every firecracker VMM we booted must have been killed and reaped — no orphaned process.
+    // Every firecracker VMM we booted must have been killed and reaped, no orphaned process.
     let orphans: Vec<_> = vmm_pids
         .iter()
         .copied()
@@ -488,7 +488,7 @@ fn open_fds() -> usize {
 fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     // Each live VM costs the embedder driver-side fds; at the default 1024 soft ulimit an
     // unstated budget fails as an illegible mid-boot EMFILE a few hundred VMs in. This pins the
-    // budget (`FDS_PER_VM`) per start path — cold, networked, prewarmed restore — and, just as
+    // budget (`FDS_PER_VM`) per start path, cold, networked, prewarmed restore, and, just as
     // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any
     // long-lived embedder into EMFILE regardless of the per-VM budget).
     use agent_vmm::{sweep_orphans, FDS_PER_VM};
@@ -534,7 +534,7 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
         eprintln!("fd footprint: skipping the networked leg (no CAP_NET_ADMIN)");
     }
 
-    // Pre-warmed restore (the pool's start path — the one an embedder multiplies hardest).
+    // Pre-warmed restore (the pool's start path, the one an embedder multiplies hardest).
     let agent_rootfs =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
     if agent_rootfs.is_file() {

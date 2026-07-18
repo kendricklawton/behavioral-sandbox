@@ -20,13 +20,13 @@ pub(crate) const APK_CACHE_SUBDIR: &str = "apk-cache";
 
 /// A fixed rootfs UUID so repeated builds don't churn it (Firecracker roots by device, not UUID).
 /// Reused as the ext4 directory-hash seed: the seed only guards against adversarial
-/// directory-hash flooding, which a trusted, pinned build-time image doesn't face — so a fixed seed
+/// directory-hash flooding, which a trusted, pinned build-time image doesn't face, so a fixed seed
 /// costs nothing and buys byte-for-byte determinism.
 const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
 
 /// A fixed build epoch for the rootfs image. `mke2fs` honours `SOURCE_DATE_EPOCH`: it stamps
 /// the filesystem's create/write/check times with it and **clamps every `-d`-copied file mtime down
-/// to it**, so repeated builds don't churn timestamps. A constant, deliberately — a `git log` or
+/// to it**, so repeated builds don't churn timestamps. A constant, deliberately, a `git log` or
 /// wall-clock date would vary across shallow clones and over time, defeating the purpose. Together
 /// with the fixed UUID + hash seed, this makes two builds byte-identical. 2024-01-01T00:00:00Z.
 const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
@@ -38,16 +38,16 @@ const ROOTFS_SIZE_MIB: u32 = 256;
 /// Soft ceiling on the base rootfs's real footprint ("keep the base small"). `build-rootfs`
 /// fails past it, a regression guard against accidental bloat. The image is ~132 MiB (Alpine +
 /// python3 + **Node** + the agent); this leaves ~28 MiB headroom. Adding another runtime is a
-/// deliberate bump of this *and* `ROOTFS_SIZE_MIB`, not a silent creep — and a prompt to ask whether
+/// deliberate bump of this *and* `ROOTFS_SIZE_MIB`, not a silent creep, and a prompt to ask whether
 /// the base is still "small."
 const ROOTFS_BUDGET_MIB: u64 = 160;
 
 /// The init the image ships, replacing Alpine's OpenRC `inittab`. busybox is PID 1 (it reaps
 /// orphans and a crashed child is respawned, neither of which the `forbid(unsafe_code)` agent should
-/// own). `sysinit` mounts the pseudo-filesystems a fresh ext4 lacks — a rootless `mke2fs -d` seeds
+/// own). `sysinit` mounts the pseudo-filesystems a fresh ext4 lacks, a rootless `mke2fs -d` seeds
 /// no device nodes, so `devtmpfs` is what provides `/dev/ttyS0` + the vsock device (the guest kernel
 /// must auto-mount it, `CONFIG_DEVTMPFS_MOUNT`, for PID 1's own console). The agent then respawns on
-/// the contract vsock port (`agent_channel::AGENT_VSOCK_PORT` — the same constant the host dials,
+/// the contract vsock port (`agent_channel::AGENT_VSOCK_PORT`, the same constant the host dials,
 /// so the two sides can't drift), attached to `ttyS0` so its readiness line reaches the serial
 /// console the host scans.
 fn rootfs_inittab() -> String {
@@ -73,7 +73,7 @@ ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
     )
 }
 
-/// `/sbin/mount-drives` — mounts the driver-attached data block devices (input + output) by
+/// `/sbin/mount-drives`, mounts the driver-attached data block devices (input + output) by
 /// **filesystem label**, so their `/dev/vdX` enumeration order is irrelevant (a boot may attach
 /// input, output, both, or neither). `findfs LABEL=…` resolves each label from the superblock via
 /// busybox's volume_id (no udev / `/dev/disk/by-label` needed); a label with no matching device
@@ -99,10 +99,10 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 const ALPINE_BRANCH: &str = "v3.24";
 
 /// The language runtimes baked into the guest image: python3 (the reference runtime) + **nodejs** (its
-/// second, differently-shaped interpreter, proving the rootfs isn't Python-specific — a static native
+/// second, differently-shaped interpreter, proving the rootfs isn't Python-specific, a static native
 /// ELF is injected at runtime rather than baked, so it isn't listed here). Installed by `apk.static`
 /// from the pinned branch. The install **floats** within that stable
-/// branch — Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN`
+/// branch, Alpine branch repos carry only the latest revision per package, so an exact `pkg=ver-rN`
 /// pin would just *fail* the build the day upstream bumps (the old `.apk` is gone from the CDN), not
 /// reproduce it. Instead the build **records** the resolved closure in a committed lockfile and detects
 /// drift (`build-rootfs --verify`), keeping the everyday build working; durable pinning would mean
@@ -113,7 +113,7 @@ const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
 /// **read-only** (`BootConfig::read_only_root`). It stacks a per-run tmpfs over the read-only base
 /// so `/` is writable but the base is never mutated, then `pivot_root`s in and `exec`s the real
 /// init. `pivot_root` (not `switch_root`): the base stays mounted as the overlay lowerdir, shadowed
-/// at `/rom` — `switch_root` would try to free a root that's still in use. PATH is set explicitly
+/// at `/rom`, `switch_root` would try to free a root that's still in use. PATH is set explicitly
 /// because the kernel gives PID 1 no PATH; `$overlay_size` arrives from the kernel command line (the
 /// driver appends `overlay_size=<N>M`, which the kernel routes into PID 1's environment).
 const OVERLAY_INIT: &str = "\
@@ -129,7 +129,7 @@ pivot_root . rom
 exec chroot . /sbin/init
 ";
 
-/// The pinned Alpine minirootfs — a real musl+busybox userland (so init and a shell just work, and
+/// The pinned Alpine minirootfs, a real musl+busybox userland (so init and a shell just work, and
 /// `apk` adds the [`GUEST_PACKAGES`] runtimes). A *build input*, deliberately separate from
 /// [`artifacts`](crate::artifacts::artifacts) (the boot kernel+rootfs the `ci-privileged`
 /// hash-guard requires present).
@@ -148,7 +148,7 @@ pub(crate) fn alpine_artifact() -> Result<Artifact> {
     }
 }
 
-/// The pinned static `apk` (from Alpine's `apk-tools-static` package — itself a tarball): the
+/// The pinned static `apk` (from Alpine's `apk-tools-static` package, itself a tarball): the
 /// installer that puts [`GUEST_PACKAGES`] into the staging dir **rootless**, on any host distro.
 pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
@@ -167,7 +167,7 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
 
 /// One full rootfs assembly into `out_image`: extract the pinned Alpine base, install the guest
 /// packages, bake the static agent + init in, and build the ext4 from the staging dir with
-/// `mke2fs -d` (rootless — no loopback, no `sudo`). A distinct output path from the pinned Ubuntu
+/// `mke2fs -d` (rootless, no loopback, no `sudo`). A distinct output path from the pinned Ubuntu
 /// `rootfs.ext4`, so its hash-guard + the `login:` boot test are untouched. Returns the
 /// image's sha256 and the resolved package closure, so [`build_rootfs`] can check reproducibility.
 fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
@@ -195,7 +195,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
         ],
     )?;
 
-    // Install the guest runtimes (python3) into the staging root with the pinned static apk —
+    // Install the guest runtimes (python3) into the staging root with the pinned static apk,
     // rootless, on any host distro. Packages are signature-verified against the keys the minirootfs
     // itself ships (`/etc/apk/keys`). `--no-scripts` because pre/post-install scripts need a chroot
     // (root); the runtime packages are file payloads, and the in-VM exec test proves they run.
@@ -215,7 +215,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     // Bake the overlay init + its mountpoint: when the driver boots this image read-only, the
     // kernel runs `/sbin/overlay-init` (PID 1), which stacks a per-run tmpfs over the RO base so `/`
     // is writable, then hands off to the real init. `/overlay` must exist in the image because the
-    // root is read-only at that point — you can't `mkdir` a mountpoint on a read-only `/`.
+    // root is read-only at that point, you can't `mkdir` a mountpoint on a read-only `/`.
     let overlay_init = staging.join("sbin/overlay-init");
     std::fs::write(&overlay_init, OVERLAY_INIT).context("write /sbin/overlay-init")?;
     set_mode_0755(&overlay_init)?;
@@ -230,9 +230,9 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     std::fs::create_dir_all(staging.join("input")).context("create /input mountpoint")?;
     std::fs::create_dir_all(staging.join("output")).context("create /output mountpoint")?;
 
-    // Build the ext4 from the staging dir — rootless, via `mke2fs -d`, and **deterministic**:
-    // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` — which stamps the superblock
-    // create/write/check times and clamps the copied file mtimes down to the epoch — make two builds
+    // Build the ext4 from the staging dir, rootless, via `mke2fs -d`, and **deterministic**:
+    // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH`, which stamps the superblock
+    // create/write/check times and clamps the copied file mtimes down to the epoch, make two builds
     // byte-identical. `lazy_itable_init=0` writes the inode table eagerly, so its bytes are fixed here
     // rather than finished non-deterministically by the guest kernel on first mount.
     let _ = std::fs::remove_file(out_image);
@@ -269,7 +269,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
 
     // Record the resolved package closure before the staging tree (with its apk db) is removed.
     let packages = resolved_packages(&staging)?;
-    // The image is the product — don't leave the extracted staging tree behind.
+    // The image is the product, don't leave the extracted staging tree behind.
     std::fs::remove_dir_all(&staging)
         .with_context(|| format!("clean up staging {}", staging.display()))?;
 
@@ -289,7 +289,7 @@ struct RootfsBuild {
 /// `cargo xtask build-rootfs [--verify] [--update-lock]`. The default (no flags) is one command: it
 /// assembles the deterministic image, prints its sha256, and warns if the package closure drifted
 /// from the committed lockfile. `--update-lock` re-records that lockfile (the "re-pin" after an
-/// upstream bump); `--verify` proves reproducibility — a second build must be byte-identical — and
+/// upstream bump); `--verify` proves reproducibility, a second build must be byte-identical, and
 /// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the CI gate.
 pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     let out = agent_rootfs_path();
@@ -344,7 +344,7 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
 }
 
 /// The committed lockfile recording the exact guest package closure. Lives next to the build
-/// code — **not** in the gitignored `artifacts/` — so it's version-controlled and a diff shows
+/// code, **not** in the gitignored `artifacts/`, so it's version-controlled and a diff shows
 /// exactly when Alpine's branch repo moved a package under the floating install.
 fn packages_lock_path() -> PathBuf {
     workspace_root().join("xtask/rootfs-packages.lock")
@@ -353,7 +353,7 @@ fn packages_lock_path() -> PathBuf {
 /// The resolved package closure from a staging tree's apk database: every installed package (the
 /// pinned base + the `apk add` dependency closure) as sorted `name-version-rN`. The db content is
 /// deterministic for a given set of package revisions, so this is a stable fingerprint of the
-/// rootfs's software — it changes only when a package revision does.
+/// rootfs's software, it changes only when a package revision does.
 fn resolved_packages(staging: &Path) -> Result<Vec<String>> {
     let db = staging.join("lib/apk/db/installed");
     let text =
@@ -435,17 +435,17 @@ fn check_packages_lock(built: &[String], hard: bool) -> Result<()> {
 /// Where `apk.static` sources the guest packages, the one axis that differs between the online build,
 /// an offline vendored build, and the `vendor` snapshot that populates the mirror.
 enum ApkSource<'a> {
-    /// Fetch from the pinned Alpine CDN, caching nothing — the default online build.
+    /// Fetch from the pinned Alpine CDN, caching nothing, the default online build.
     Network,
     /// Install **offline** from a vendored apk cache (`--cache-dir <dir> --no-network`), so a fresh
     /// host never reaches the CDN. The cache holds the sha-pinned `.apk` closure + its `APKINDEX`.
     VendorCache(&'a Path),
-    /// Fetch from the CDN **and** populate `<dir>` with the resolved `.apk`s + index — what
+    /// Fetch from the CDN **and** populate `<dir>` with the resolved `.apk`s + index, what
     /// `cargo xtask vendor` runs once to snapshot the closure for later offline installs.
     PopulateCache(&'a Path),
 }
 
-/// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static` — no chroot, no
+/// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static`, no chroot, no
 /// root, no host `apk`. Vendor-aware: with `AGENT_VENDOR_DIR` set it installs offline from the
 /// vendored apk cache, otherwise it fetches from the pinned Alpine CDN. The `.apk` is a tarball; its
 /// `sbin/apk.static` is extracted to a scratch dir removed after the install (the packages land in
@@ -466,7 +466,7 @@ fn install_guest_packages(staging: &Path) -> Result<()> {
     };
     let result = run_apk_add(&apk, staging, &source);
 
-    // The tool is scratch either way — clean it before propagating any install failure.
+    // The tool is scratch either way, clean it before propagating any install failure.
     let _ = std::fs::remove_dir_all(&tooldir);
     result?;
 
@@ -481,7 +481,7 @@ fn install_guest_packages(staging: &Path) -> Result<()> {
 }
 
 /// Extract the pinned static `apk` from its (already-fetched) tarball into `<scratch_base>/apk-tools`,
-/// returning `(tooldir, apk_static_path)`. The caller removes `tooldir` when done — the tool is
+/// returning `(tooldir, apk_static_path)`. The caller removes `tooldir` when done, the tool is
 /// ephemeral, the packages it installs are the product. `scratch_base` is caller-chosen so the
 /// `vendor` command keeps its scratch inside the mirror dir, not the workspace `artifacts/`.
 fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf, PathBuf)> {
@@ -504,13 +504,13 @@ fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf,
 }
 
 /// Run `apk.static add` for [`GUEST_PACKAGES`] into `staging`, sourced per [`ApkSource`]. The
-/// package set, arch, and repo are identical across sources — only the fetch/cache flags differ — so
+/// package set, arch, and repo are identical across sources, only the fetch/cache flags differ, so
 /// the resolved closure (and thus [`resolved_packages`]) is the same whether built online or from the
 /// vendored cache, keeping the lockfile contract intact.
 fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
     let repo = format!("https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main");
     // The host's arch, not a literal: Alpine's arch names match Rust's for the arches we pin
-    // (x86_64/aarch64), and the pinned-artifact fns bail on anything unpinned — so this stays
+    // (x86_64/aarch64), and the pinned-artifact fns bail on anything unpinned, so this stays
     // correct by itself when a second arch lands, not silently installing x86_64 into an aarch64 image.
     let mut args: Vec<OsString> = vec![
         OsString::from("--root"),
@@ -530,7 +530,7 @@ fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
             args.push(absolute(dir).into_os_string());
             args.push(OsString::from("--no-network"));
         }
-        // Online, but keep every fetched `.apk` + the index in the cache dir — the vendor snapshot.
+        // Online, but keep every fetched `.apk` + the index in the cache dir, the vendor snapshot.
         ApkSource::PopulateCache(dir) => {
             args.push(OsString::from("--cache-dir"));
             args.push(absolute(dir).into_os_string());
@@ -544,7 +544,7 @@ fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
     run_tool(&apk_str, &arg_refs)
 }
 
-/// `apk.static update` into `cache_dir` — fetch + cache the repo's `APKINDEX` so a later offline
+/// `apk.static update` into `cache_dir`, fetch + cache the repo's `APKINDEX` so a later offline
 /// `add --no-network` can resolve against it. A plain `add --cache-dir` caches the packages it pulls
 /// but not necessarily the index, so the vendor snapshot seeds it explicitly.
 fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path) -> Result<()> {
@@ -565,7 +565,7 @@ fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path) -> Result<()> {
     run_tool(&apk_str, &arg_refs)
 }
 
-/// Make `path` absolute (against the current dir — `xtask` runs from the workspace root). apk
+/// Make `path` absolute (against the current dir, `xtask` runs from the workspace root). apk
 /// resolves a *relative* `--cache-dir` against its `--root`, which would put the cache inside the
 /// staging tree instead of where the packages actually live, so every cache path handed to apk goes
 /// through here first.
@@ -581,7 +581,7 @@ fn absolute(path: &Path) -> PathBuf {
 /// Populate a vendored apk cache with the resolved guest-package closure (the `.apk` files **and**
 /// the `APKINDEX`) by running one **online** `apk add` into a throwaway root. Called by
 /// `cargo xtask vendor`; afterwards an offline build installs from this cache (`--no-network`), so a
-/// fresh host never touches the Alpine CDN — the durable hardening decision 007 deferred. The
+/// fresh host never touches the Alpine CDN, the durable hardening decision 007 deferred. The
 /// throwaway root exists only so apk has the base's `/etc/apk/keys` to verify signatures against; it
 /// is removed, leaving just the cache. `base_tar`/`apk_tools_tar` are the (already sha-verified)
 /// vendored tarballs, so this reuses them rather than re-downloading.
@@ -618,7 +618,7 @@ pub(crate) fn populate_apk_cache(
     )?;
 
     let (tooldir, apk) = extract_apk_static(apk_tools_tar, scratch)?;
-    // Seed the index first (`update`), then the packages (`add`), both into the cache — so a later
+    // Seed the index first (`update`), then the packages (`add`), both into the cache, so a later
     // offline `add --no-network` can resolve the closure against the cached `APKINDEX`.
     let result = run_apk_update(&apk, &staging, cache_dir)
         .and_then(|()| run_apk_add(&apk, &staging, &ApkSource::PopulateCache(cache_dir)));
@@ -627,7 +627,7 @@ pub(crate) fn populate_apk_cache(
     result
 }
 
-/// `chmod 0755` — the agent must be executable inside the image even if the copy didn't preserve it.
+/// `chmod 0755`, the agent must be executable inside the image even if the copy didn't preserve it.
 fn set_mode_0755(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(path)

@@ -35,7 +35,7 @@ enum GuestBin {
 
 impl GuestBin {
     /// The cargo target selector, the built binary's path under `target/<triple>/release/`, and a
-    /// human label — the only things that differ between the two builds.
+    /// human label, the only things that differ between the two builds.
     fn spec(&self) -> (&'static [&'static str], &'static str, &'static str) {
         match self {
             GuestBin::Agent => (
@@ -71,7 +71,7 @@ fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
     Ok(bin)
 }
 
-/// Fail with a clear fix if the guest musl target isn't installed — cargo would otherwise error more
+/// Fail with a clear fix if the guest musl target isn't installed, cargo would otherwise error more
 /// obscurely deep in the build.
 fn ensure_guest_target() -> Result<()> {
     let installed = Command::new("rustup")
@@ -87,11 +87,11 @@ fn ensure_guest_target() -> Result<()> {
     Ok(())
 }
 
-/// Verify the built binary is actually statically linked — "measured, not marketed." A sys-crate or
+/// Verify the built binary is actually statically linked, "measured, not marketed." A sys-crate or
 /// `build.rs` can silently reintroduce a `NEEDED` dynamic dependency, and a dynamically-linked
 /// binary baked into a scratch rootfs would fail at boot with a confusing loader error. Two checks,
 /// so the guarantee matches the claim: `readelf -d` finds no `(NEEDED)` shared objects, **and**
-/// `readelf -l` finds no `INTERP` program header — a fully static binary needs no runtime loader, so
+/// `readelf -l` finds no `INTERP` program header, a fully static binary needs no runtime loader, so
 /// a static-PIE (no `NEEDED` but with an interpreter) is also rejected.
 fn verify_static(bin: &Path, what: &str) -> Result<()> {
     // `readelf -d` (dynamic section): a static binary lists no `(NEEDED)` shared objects.
@@ -119,7 +119,7 @@ fn verify_static(bin: &Path, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run `readelf <flag> <bin>` and return its stdout, or `None` if `readelf` is absent/failed — the
+/// Run `readelf <flag> <bin>` and return its stdout, or `None` if `readelf` is absent/failed, the
 /// caller decides whether a missing tool is a soft skip (we don't fake a guarantee we can't check).
 fn readelf(bin: &Path, flag: &str) -> Option<String> {
     match Command::new("readelf").arg(flag).arg(bin).output() {

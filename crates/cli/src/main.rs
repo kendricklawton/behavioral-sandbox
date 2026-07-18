@@ -1,13 +1,13 @@
-//! The `agent` CLI — drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
+//! The `agent` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
 //! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
-//! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch` — see [`audit`]).
+//! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch`, see [`audit`]).
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
 //! or the `--json` structured result / audit log), so `agent run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
 //! flags > env (`AGENT_LOG`) > default. Both subcommands run
 //! **jailed by default** (decision 015) with `--unjailed` as the explicit opt-out, and both point
-//! at the env-layered artifacts (`AGENT_ROOTFS`/`AGENT_KERNEL`/`AGENT_MARKER` — exec needs the
+//! at the env-layered artifacts (`AGENT_ROOTFS`/`AGENT_KERNEL`/`AGENT_MARKER`, exec needs the
 //! agent rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
@@ -32,12 +32,12 @@ use clap::{Parser, Subcommand};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
 /// command's own exit code): conventional "2", named so the intent is legible at the
-/// `ExitCode::from` site — the same convention (and name) as the guest agent's.
+/// `ExitCode::from` site, the same convention (and name) as the guest agent's.
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The version of the `--json` **run-result** contract (exit code, streams, artifacts, metrics,
 /// limits). Distinct from the audit record's `agent_probes_loader::AUDIT_SCHEMA_VERSION`: two
-/// surfaces, two independent versions. Same policy — additive within a version, a rename/removal
+/// surfaces, two independent versions. Same policy, additive within a version, a rename/removal
 /// bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
 
@@ -61,21 +61,21 @@ enum Cmd {
     /// sized to it (the `clippy::large_enum_variant` this would otherwise trip).
     Run(Box<RunArgs>),
     /// Open an interactive session in a microVM: one command per line, state persists on the
-    /// session's filesystem until you exit (shell process state like `cd`/variables does not —
+    /// session's filesystem until you exit (shell process state like `cd`/variables does not,
     /// each line is its own exec).
     Shell(ShellArgs),
-    /// Check this host's readiness to run the engine — KVM, the jailer, tools, artifacts, eBPF
-    /// capabilities — and print what will work, degrade, or refuse before the first sandbox.
+    /// Check this host's readiness to run the engine, KVM, the jailer, tools, artifacts, eBPF
+    /// capabilities, and print what will work, degrade, or refuse before the first sandbox.
     Doctor,
 }
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// Just boot a microVM and read its console — no command (the boot-only demo).
+    /// Just boot a microVM and read its console, no command (the boot-only demo).
     #[arg(long)]
     demo_boot: bool,
     /// Run the VMM without the jailer. The default is confined (jailed, which needs real root and
-    /// the `jailer` binary — decision 015); this is the explicit opt-out for hosts that can't jail.
+    /// the `jailer` binary, decision 015); this is the explicit opt-out for hosts that can't jail.
     #[arg(long)]
     unjailed: bool,
     /// Set an environment variable on the guest command (repeatable). Values are treated as
@@ -90,7 +90,7 @@ struct RunArgs {
     #[arg(long, value_name = "PATH")]
     get: Vec<String>,
     /// Wall-clock budget in seconds (default 30, minimum 1): the boot deadline and the command's
-    /// runtime budget alike — the guest kills the command past it. Zero is rejected at parse
+    /// runtime budget alike, the guest kills the command past it. Zero is rejected at parse
     /// (there is no "no limit"), never silently rounded up.
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
     wall: Option<u64>,
@@ -115,7 +115,7 @@ struct RunArgs {
     #[arg(long, conflicts_with = "demo_boot")]
     net: bool,
     /// Allow one egress destination past the deny-by-default tap (repeatable), as
-    /// `IP[/CIDR][:PORT][/PROTO]` — e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires
+    /// `IP[/CIDR][:PORT][/PROTO]`, e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires
     /// `--net`; the allowances build the run's egress policy, armed before the tap goes live. A
     /// host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced
     /// run.
@@ -161,7 +161,7 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The `.agent.toml` file layer is discovered once, from the cwd — a mistyped key is a loud
+    // The `.agent.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
     // failure here, before any boot (config typos must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let file = match config::AgentToml::discover(&cwd) {
@@ -191,7 +191,7 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError>
     }
 }
 
-/// The env+file-layered base config — `env > file > defaults` — over which each subcommand applies
+/// The env+file-layered base config, `env > file > defaults`, over which each subcommand applies
 /// its flags. Composes a single lookup that prefers the real environment, then the `.agent.toml`
 /// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
 /// stay one vocabulary keyed by the `AGENT_*` names.
@@ -205,7 +205,7 @@ fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
 /// `--record-summary`/`--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed
 /// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
 /// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
-/// / `--record` full JSON / `--record-summary` model-legible projection — the three faces of one record).
+/// / `--record` full JSON / `--record-summary` model-legible projection, the three faces of one record).
 fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
     let mut limits = limits_with(args.vcpus, args.mem);
     if let Some(secs) = args.wall {
@@ -223,7 +223,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         ));
     }
     // Build the egress policy from `--allow` (clap already required `--net`). Enforcement needs the
-    // eBPF probes, so refuse up front on a host that plainly can't load them — before paying a boot,
+    // eBPF probes, so refuse up front on a host that plainly can't load them, before paying a boot,
     // and never degrading to an unenforced run (the tap-attach cap check `attach` does catches the
     // residual CAP_NET_ADMIN case that this cheap pre-flight can't).
     let egress = if args.allow.is_empty() {
@@ -244,7 +244,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     config.enable_network = args.net;
     let sandbox = open(config, args.unjailed)?;
     if args.demo_boot {
-        // The run result goes to stdout (stderr is reserved for logs). Not `println!` —
+        // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
         // it panics on a closed pipe (`agent run … | head -0`), and a no-panic host path
         // includes the shell pipeline case.
         let _ = writeln!(
@@ -256,7 +256,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     }
 
     // The audit surface, when a flag asked for it (a plain `agent run` pays nothing): load the shared
-    // probes and bind them to this sandbox by the plain values it exposes — the launch sequence the
+    // probes and bind them to this sandbox by the plain values it exposes, the launch sequence the
     // probes-loader documents, composed here in the caller. `--allow` enforces (arming the tap before
     // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
     // enforcement is a typed refusal (`attach`).
@@ -329,12 +329,12 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     sandbox.shutdown()?;
 
     if args.json {
-        // The structured run result, one JSON object on stdout — the machine-readable form of the
+        // The structured run result, one JSON object on stdout, the machine-readable form of the
         // pipe-clean convention (stderr already carries the logs). Byte streams are lossy UTF-8
         // here; exact bytes ride the artifact files, which are on disk by now.
         let structured = serde_json::json!({
             // Versions the run-result contract (distinct from the audit record's own `schema`).
-            // Additive changes keep this integer; a rename/removal bumps it — see docs/cli.md.
+            // Additive changes keep this integer; a rename/removal bumps it, see docs/cli.md.
             "schema": RUN_RESULT_SCHEMA,
             "exit_code": result.exit_code,
             "stdout": String::from_utf8_lossy(&result.stdout),
@@ -348,7 +348,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
                 "boot_ms": boot_latency.as_millis() as u64,
                 "exec_wall_ms": result.metrics.wall.as_millis() as u64,
             },
-            // The effective limits this run actually booted with — the flag values folded onto the
+            // The effective limits this run actually booted with, the flag values folded onto the
             // defaults, echoed back so a `--json` caller sees what it got, not just what it asked.
             "limits": {
                 "vcpus": limits.vcpus.get(),
@@ -359,7 +359,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         });
         let _ = writeln!(std::io::stdout(), "{structured}");
     } else {
-        // Relay the guest's output on our own stdout/stderr — the whole point of `exec`. Ignore
+        // Relay the guest's output on our own stdout/stderr, the whole point of `exec`. Ignore
         // write errors (a closed pipe is not our failure); the guest exit code is what we return.
         let _ = std::io::stdout().write_all(&result.stdout);
         let _ = std::io::stderr().write_all(&result.stderr);
@@ -367,18 +367,18 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     if let Some(record) = record {
         if args.trace {
             // The human-readable audit trail, after the guest's own output: a requested run
-            // result, so it belongs on stdout like the rest (never mixed with `--json` — clap
+            // result, so it belongs on stdout like the rest (never mixed with `--json`, clap
             // makes the two conflict; machine consumers take `--record`).
             let _ = writeln!(std::io::stdout(), "\n{}", trace::render(&record).trim_end());
         }
         if let Some(path) = &args.record {
-            // The deterministic JSON record — the machine surface, one line, byte-stable.
+            // The deterministic JSON record, the machine surface, one line, byte-stable.
             std::fs::write(path, record.to_json() + "\n")
                 .map_err(|e| VmmError::Artifact(format!("--record {}: {e}", path.display())))?;
             tracing::info!(path = %path.display(), "wrote audit record");
         }
         if let Some(path) = &args.record_summary {
-            // The model-legible projection — a compact, byte-stable view of the same record.
+            // The model-legible projection, a compact, byte-stable view of the same record.
             std::fs::write(path, record.to_summary_json() + "\n").map_err(|e| {
                 VmmError::Artifact(format!("--record-summary {}: {e}", path.display()))
             })?;
@@ -388,7 +388,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
 }
 
-/// `agent shell`: one sandbox held open, one `sh -c` exec per input line — a stateful session
+/// `agent shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
@@ -434,7 +434,7 @@ fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, 
                 }
             }
             // A guest fault (a timeout, a flooded cap, an unrunnable command) belongs to that one
-            // line; the session survives it. Infra/transport means the VM itself is gone — end the
+            // line; the session survives it. Infra/transport means the VM itself is gone, end the
             // session with the typed error.
             Err(e) if e.kind() == ErrorKind::Guest => {
                 let _ = writeln!(err_out, "agent: {e}");
@@ -449,7 +449,7 @@ fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, 
     sandbox.shutdown().map(|()| ExitCode::SUCCESS)
 }
 
-/// Open the sandbox jailed by default, unjailed on the explicit flag — the CLI face of the
+/// Open the sandbox jailed by default, unjailed on the explicit flag, the CLI face of the
 /// library's differently-named constructors.
 fn open(config: BootConfig, unjailed: bool) -> Result<Sandbox, VmmError> {
     if unjailed {
@@ -532,7 +532,7 @@ fn build_egress(allows: &[AllowRule]) -> Result<EgressPolicy, VmmError> {
 /// CLI edge rather than surfacing a late Firecracker API error mid-boot.
 const MAX_VCPUS: u8 = 32;
 
-/// Fold the `--vcpus`/`--mem` overrides onto the default [`Limits`] — the two resource knobs both
+/// Fold the `--vcpus`/`--mem` overrides onto the default [`Limits`], the two resource knobs both
 /// `run` and `shell` project. An unset flag keeps the (deliberately conservative) default; a set one
 /// carries the already-validated [`NonZeroU8`]/[`NonZeroU32`] the parsers produced. `run` layers its
 /// own `--wall`/`--output-cap` on top of the result.
@@ -549,7 +549,7 @@ fn limits_with(vcpus: Option<NonZeroU8>, mem_mib: Option<NonZeroU32>) -> Limits 
 
 /// Parse `--vcpus`: a whole number in `1..=32` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing
 /// straight into the non-zero type rejects `0` (and any non-number / u8 overflow); the explicit cap
-/// check rejects an over-32 value. Either way it is a **typed CLI error, never a silent clamp** — the
+/// check rejects an over-32 value. Either way it is a **typed CLI error, never a silent clamp**, the
 /// value is refused at parse, not narrowed behind the caller's back or surfaced as a late boot error.
 fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
     let vcpus: NonZeroU8 = s
@@ -618,7 +618,7 @@ fn write_artifacts_in(
     requested: &[String],
 ) -> Result<(), VmmError> {
     for (path, data) in files {
-        // Deny-by-default: the guest doesn't get to choose what lands on the host — only a name the
+        // Deny-by-default: the guest doesn't get to choose what lands on the host, only a name the
         // operator requested with `--get` is eligible. An honest guest only ever returns requested
         // paths (it echoes the request's artifact list), so a mismatch is a misbehaving guest.
         if !requested.iter().any(|r| r == path) {
@@ -647,8 +647,8 @@ fn write_artifacts_in(
 
 /// Resolve `rel` (already checked relative and non-climbing) against `base` into an absolute
 /// destination, creating intermediate directories but **refusing to follow a symlink** at any
-/// component. `symlink_metadata` is `lstat` (no traversal), so a pre-existing symlinked directory —
-/// or a symlinked final name — is rejected rather than written through, closing the
+/// component. `symlink_metadata` is `lstat` (no traversal), so a pre-existing symlinked directory,
+/// or a symlinked final name, is rejected rather than written through, closing the
 /// `out -> /etc` escape that a string-only check misses.
 fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, VmmError> {
     let names: Vec<_> = rel
@@ -697,7 +697,7 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, VmmError> {
 /// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `agent run`
 /// shouldn't block waiting for EOF). The read is **bounded at one frame + 1 byte**: the exec request
 /// is a single frame, so anything past the channel's cap is rejected as a typed `PayloadTooLarge`
-/// regardless — reading it all first would let `cat 10GB.bin | agent run …` balloon host RAM before
+/// regardless, reading it all first would let `cat 10GB.bin | agent run …` balloon host RAM before
 /// the same error. The `+ 1` still overshoots the cap by a byte so the oversize case is caught rather
 /// than silently truncated to exactly the cap. Bulk data belongs on the block-device path anyway.
 fn piped_stdin() -> Vec<u8> {
@@ -741,7 +741,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// A scratch dir removed on drop, so a panicking assertion can't leak it. Unique per (pid, tag,
-    /// counter) so parallel tests don't collide — the artifact tests write real files.
+    /// counter) so parallel tests don't collide, the artifact tests write real files.
     struct TestDir(PathBuf);
     impl TestDir {
         fn new(tag: &str) -> Self {
@@ -883,7 +883,7 @@ mod tests {
 
     #[test]
     fn build_egress_denies_by_default_and_caps_the_rule_count() {
-        // No rules is still a policy — deny-everything.
+        // No rules is still a policy, deny-everything.
         assert!(build_egress(&[]).expect("empty is valid").is_deny_all());
         // Each allow becomes one rule.
         let one = parse_allow("1.1.1.1:443/tcp").expect("valid");
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn symlinked_component_cannot_escape_the_base() {
         // A pre-existing symlinked directory in the cwd must not let a `Normal`-component path be
-        // written through it — the string check can't see the on-disk symlink, `confined_dest` can.
+        // written through it, the string check can't see the on-disk symlink, `confined_dest` can.
         let base = TestDir::new("symlink");
         let outside = TestDir::new("symlink-outside");
         // `out -> <outside>`, then a requested `out/x.txt` would land in `outside` if followed.

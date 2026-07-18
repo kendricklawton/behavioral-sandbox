@@ -40,7 +40,7 @@ fn snapshots_a_running_microvm() {
             .unwrap_or_else(|e| panic!("{label} file {path:?} should exist: {e}"));
         assert!(meta.len() > 0, "{label} file should be non-empty");
     }
-    // The memory file is roughly the guest's RAM (256 MiB default) — a sanity floor, not an exact
+    // The memory file is roughly the guest's RAM (256 MiB default), a sanity floor, not an exact
     // size, so this doesn't couple to Firecracker's exact memory-file layout.
     let mem_len = std::fs::metadata(snap.mem_path()).expect("mem meta").len();
     assert!(
@@ -95,7 +95,7 @@ fn restores_a_snapshot_onto_a_fresh_vmm() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn prewarmed_snapshot_restores_and_runs_code() {
     // Snapshot a prewarmed agent VM (runtime loaded), throw the source away, restore a clone off the
-    // shared read-only base, and run Python on it — the exec channel survives the snapshot (Firecracker
+    // shared read-only base, and run Python on it, the exec channel survives the snapshot (Firecracker
     // re-binds vsock on restore), so a prewarmed clone runs code without paying the cold boot.
     let bundle = TmpDir::new("snap-warm");
     let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
@@ -137,7 +137,7 @@ fn prewarmed_snapshot_restores_and_runs_code() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
     // Restore several clones from one prewarmed snapshot and keep them all alive at once. Each shares
-    // the read-only base (memory-sharing) but is an independent VM — its own vsock socket (bound relative to
+    // the read-only base (memory-sharing) but is an independent VM, its own vsock socket (bound relative to
     // its own scratch dir, so no collision) and its own in-RAM overlay. Prove it by running a distinct
     // computation on each concurrently-alive clone and getting each clone's own answer back.
     const N: usize = 3;
@@ -197,7 +197,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
         })
         .collect();
 
-    // Each clone drives its own thread (ownership moves in), so the writes race concurrently — the
+    // Each clone drives its own thread (ownership moves in), so the writes race concurrently, the
     // "under load" that would expose a shared disk. Spawn all N before joining any.
     let readbacks: Vec<(String, String)> = clones
         .into_iter()
@@ -245,7 +245,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
 fn restored_networked_clones_coexist_each_in_its_own_netns() {
     // Retires decision 011's one-live-networked-clone limit. On v1.9 (no `network_overrides`)
     // every clone must present the snapshot's baked-in tap name, which in a shared host netns could
-    // exist only once — so only one networked clone could be live. Under the netns model each clone
+    // exist only once, so only one networked clone could be live. Under the netns model each clone
     // recreates that tap in its **own** network namespace, where the baked-in identity is already
     // correct, so N networked clones run at once. This proves two concurrent networked clones, each
     // isolated in its own netns, each carrying the baked identity, each reaching its own host end.
@@ -254,7 +254,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
         return;
     }
 
-    // Source: networked + vsock + prewarmed. Snapshot it, then drop it — under the netns model neither the
+    // Source: networked + vsock + prewarmed. Snapshot it, then drop it, under the netns model neither the
     // tap name nor the /30 is a shared reservation, so the source's lifetime doesn't gate the clones'.
     let mut cfg = agent_rootfs_config();
     cfg.enable_network = true;
@@ -267,11 +267,11 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
         .expect("networked prewarmed snapshot should succeed");
     source.shutdown().expect("source shutdown");
 
-    // Two clones, live simultaneously — impossible before this box.
+    // Two clones, live simultaneously, impossible before this box.
     let clone_a = Vm::restore(&snap, &cfg).expect("networked clone A should resume");
     let clone_b = Vm::restore(&snap, &cfg).expect("networked clone B should resume");
 
-    // Each reuses the snapshot's baked identity (same tap name + guest IP — collision-free because
+    // Each reuses the snapshot's baked identity (same tap name + guest IP, collision-free because
     // each lives in its own netns), and the two netns are distinct (the isolation boundary).
     for clone in [&clone_a, &clone_b] {
         assert_eq!(
@@ -340,8 +340,8 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
-    // Prewarmed start and confinement compose. The prewarmed source runs unjailed — it executes only
-    // the embedder's warm-up, and a jailed VM refuses snapshotting — and every *clone* restores
+    // Prewarmed start and confinement compose. The prewarmed source runs unjailed, it executes only
+    // the embedder's warm-up, and a jailed VM refuses snapshotting, and every *clone* restores
     // under the jailer: the bundle is staged into the chroot (state copied in; the memory file and
     // the shared base disk bind-mounted read-only, so clones keep sharing one page cache), vsock is
     // re-bound inside the chroot, and the VMM runs as the dropped uid. This drives one direct jailed
@@ -358,7 +358,7 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
     let mut cfg = agent_rootfs_config();
     cfg.jail = Some(Jail::default());
 
-    // The VMM behind `pid` runs as the dropped jail uid — the confinement actually holding.
+    // The VMM behind `pid` runs as the dropped jail uid, the confinement actually holding.
     let vmm_uid = |pid: u32| {
         std::fs::read_to_string(format!("/proc/{pid}/status"))
             .ok()
@@ -413,10 +413,10 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
 #[ignore = "needs /dev/kvm + real root + the jailer + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     // The `cpu.max` a jailed restore re-applies must come from the snapshot's **recorded** vCPU
-    // count — the clone's true parallelism, since the vCPUs come from the snapshot state (restore
+    // count, the clone's true parallelism, since the vCPUs come from the snapshot state (restore
     // issues no `PUT /machine-config`) and nothing forces the restoring `config` to agree. A
     // 2-vCPU source restored under a default (1-vCPU) config must be capped at 2 cores' worth,
-    // not silently throttled to 1 — the CPU analogue of `restore_mem_mib`'s never-below-the-true-RAM
+    // not silently throttled to 1, the CPU analogue of `restore_mem_mib`'s never-below-the-true-RAM
     // guarantee.
     if !have_jailer_privileges() {
         eprintln!(
@@ -449,7 +449,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     let mut fields = cpu_max.split_whitespace();
     let quota = fields.next().expect("cpu.max quota field");
     if quota == "max" {
-        // No cap was written at all — the fail-open path (cpu/memory not delegated). The derivation
+        // No cap was written at all, the fail-open path (cpu/memory not delegated). The derivation
         // under test never ran, so skip rather than pass vacuously.
         eprintln!(
             "skipping restored_clone_cpu_cap_follows_the_snapshot_not_the_config: cgroup \
@@ -487,7 +487,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     // Decision 011, entropy + clocks. Every clone wakes from the same memory image, so if the
-    // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical — the
+    // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical, the
     // classic clone-entropy vulnerability (shared session keys/nonces/UUIDs). The pinned stack has
     // both halves of the fix (Firecracker v1.9 ships VMGenID; kernel 6.1 has the vmgenid driver,
     // which reseeds the CRNG on a generation bump): this proves it end to end. Clock skew is
@@ -503,7 +503,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
                 &[
                     "python3".into(),
                     "-c".into(),
-                    // One read, immediately after restore — the dangerous window, before any natural
+                    // One read, immediately after restore, the dangerous window, before any natural
                     // interrupt-entropy reseed could paper over shared CRNG state.
                     "import os, time; print(os.urandom(16).hex()); print(int(time.time()))".into(),
                 ],
@@ -549,9 +549,9 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     // The prewarmed Pool. Prefill keeps clones exec-ready so `take` is a pop (µs) plus a fast
-    // health probe — not a cold boot. A clone that died while pooled is a typed GuestUnavailable
+    // health probe, not a cold boot. A clone that died while pooled is a typed GuestUnavailable
     // from the probe, so `take` discards it and serves the next (or restores inline when dry)
-    // instead of surfacing an infra failure — the retry semantics the deferral promised.
+    // instead of surfacing an infra failure, the retry semantics the deferral promised.
     use agent_vmm::Pool;
 
     let bundle = TmpDir::new("snap-pool");
@@ -579,7 +579,7 @@ fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     assert_eq!(pool.ready(), 1, "take should consume ready stock");
 
     // Kill the remaining pooled clone's VMM behind the pool's back: the next take must *not* hand
-    // out the corpse — the probe fails typed, the corpse is discarded, and (the pool now being dry)
+    // out the corpse, the probe fails typed, the corpse is discarded, and (the pool now being dry)
     // a fresh clone is restored inline and served.
     let pids = pool.vmm_pids();
     assert_eq!(pids.len(), 1);

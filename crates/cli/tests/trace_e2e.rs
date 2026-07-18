@@ -1,7 +1,7 @@
 //! End-to-end test of the CLI's audit face: `agent run --net --trace --record` on a real
 //! sandbox yields the guest's output, a human-readable audit trail, and a parseable, deterministic
-//! JSON record — the flag plumbing over the engine's convergence (whose *substance* — flows showing
-//! up exactly, every axis bound — is proven by the loader's own `audit_record` e2e).
+//! JSON record, the flag plumbing over the engine's convergence (whose *substance*, flows showing
+//! up exactly, every axis bound, is proven by the loader's own `audit_record` e2e).
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches the
 //! host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
@@ -73,7 +73,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     let record_path = scratch.0.join("record.json");
     let summary_path = scratch.0.join("summary.json");
 
-    // A workload that touches a file in-guest and prints — interesting enough to leave a footprint
+    // A workload that touches a file in-guest and prints, interesting enough to leave a footprint
     // on every axis the CLI surfaces. Unjailed on purpose: the proof here is the audit face, and
     // the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let out = Command::new(env!("CARGO_BIN_EXE_agent"))
@@ -100,7 +100,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         out.status
     );
 
-    // The guest's own output is relayed first, then the human trail — both on stdout.
+    // The guest's own output is relayed first, then the human trail, both on stdout.
     assert!(stdout.contains("p14-audit-demo"), "guest output: {stdout}");
     assert!(
         stdout.contains("audit trail (host-observed"),
@@ -173,7 +173,7 @@ fn allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial() 
     let record_path = scratch.0.join("record.json");
 
     // The host end of every VM's fixed point-to-point /30 is `10.200.0.1` (the guest is `.2`), so the
-    // gateway address is known from outside — no per-run allocation to discover. Allow it on **one**
+    // gateway address is known from outside, no per-run allocation to discover. Allow it on **one**
     // UDP port and deny another: the guest can route to `10.200.0.1` (its connected /30), so both
     // datagrams reach the tap, where the policy passes 9999 (a flow) and drops 8888 (a denial).
     let workload = "\
@@ -217,7 +217,7 @@ print('p14-9b-egress')
 
     let json = std::fs::read_to_string(&record_path).expect("read the --record file");
     let record: serde_json::Value = serde_json::from_str(&json).expect("record parses");
-    // Enforcement armed — no coverage gap (the --allow refusal path did not fire on a capable host).
+    // Enforcement armed, no coverage gap (the --allow refusal path did not fire on a capable host).
     assert_eq!(
         record["coverage"].as_array().map(Vec::len),
         Some(0),
@@ -349,7 +349,7 @@ print('p14-9f-complete')
         "the guest ran: {result}"
     );
 
-    // The retrieved artifact (--get) landed under the cwd and folds stdin + the injected file — so
+    // The retrieved artifact (--get) landed under the cwd and folds stdin + the injected file, so
     // --put, --get, and stdin all round-tripped through the one run.
     let got =
         std::fs::read_to_string(scratch.0.join("result.txt")).expect("--get wrote result.txt");
@@ -359,11 +359,11 @@ print('p14-9f-complete')
     );
 }
 
-/// Phase 18 exit gate — the reference **agent-containment** example, as a CI-reproducible proof.
+/// Phase 18 exit gate, the reference **agent-containment** example, as a CI-reproducible proof.
 /// The scripted agent (`docs/examples/agent-tool-loop.py`, no model, no secrets) runs in a sandbox
 /// egress-policed to **one** endpoint, calls one allowed "tool" and one forbidden one, and the
 /// host-observed record + its model-legible summary prove **exactly what it reached and what was
-/// blocked** — even though the agent's own transcript, blind to the tap, reports both as `sent`.
+/// blocked**, even though the agent's own transcript, blind to the tap, reports both as `sent`.
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
@@ -378,7 +378,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     let record_path = scratch.0.join("record.json");
     let summary_path = scratch.0.join("summary.json");
 
-    // The very script the docs example ships — one source of truth for "the agent," exercised here.
+    // The very script the docs example ships, one source of truth for "the agent," exercised here.
     let agent = std::fs::read_to_string(root.join("docs/examples/agent-tool-loop.py"))
         .expect("read the scripted agent");
 
@@ -412,7 +412,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     );
 
     // The agent's *self-report*: blind to the tap, it believes **both** tool calls were sent. This is
-    // the gap the host record closes — the agent cannot be trusted to report its own containment.
+    // the gap the host record closes, the agent cannot be trusted to report its own containment.
     let transcript: serde_json::Value = stdout
         .lines()
         .find_map(|l| serde_json::from_str(l).ok())
@@ -426,7 +426,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
         "the agent believes both calls were sent (it can't see the drop): {transcript}"
     );
 
-    // The full record — the ground truth from outside the guest. Enforcement armed (no coverage gap),
+    // The full record, the ground truth from outside the guest. Enforcement armed (no coverage gap),
     // the allowed tool is a flow, the forbidden one is a denial.
     let json = std::fs::read_to_string(&record_path).expect("read the --record file");
     let record: serde_json::Value = serde_json::from_str(&json).expect("record parses");
@@ -450,7 +450,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
         "the forbidden tool was blocked: {json}"
     );
 
-    // The model-legible summary — the face an agent's supervisor reads back: `reached` names the
+    // The model-legible summary, the face an agent's supervisor reads back: `reached` names the
     // allowed endpoint, `denied` names the blocked one, and it is materially smaller than the full
     // record (the "compact is a number" property, measured here on a real run).
     let summary_raw =

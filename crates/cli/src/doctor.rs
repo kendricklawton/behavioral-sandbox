@@ -1,7 +1,7 @@
 //! `agent doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
 //! checks ([`agent_vmm::doctor`]) plus the eBPF-observability capability row (owned by the probe
 //! loader, out of `agent-vmm`), so a fresh host reads exactly what will work, degrade, or refuse
-//! *before* the first sandbox. `cargo xtask setup` renders the same shared checks — one source of
+//! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
 //! truth for "ready", two entry points.
 
 use std::io::Write;
@@ -43,7 +43,7 @@ pub fn report(config: &BootConfig) -> ExitCode {
         let _ = writeln!(out, "\nReady: this host can boot a sandbox.");
         ExitCode::SUCCESS
     } else {
-        // A hard prerequisite is missing — say so on stderr (the report itself is the stdout result),
+        // A hard prerequisite is missing, say so on stderr (the report itself is the stdout result),
         // and exit non-zero so a script can gate on it.
         let _ = writeln!(
             std::io::stderr(),

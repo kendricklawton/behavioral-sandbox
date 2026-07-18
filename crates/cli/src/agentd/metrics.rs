@@ -1,11 +1,11 @@
 //! The daemon's metrics: a small atomic registry ([`Metrics`]) the session threads increment, and a
-//! **Prometheus text-exposition endpoint** ([`serve`]) the *hoster* scrapes — the operational face of
+//! **Prometheus text-exposition endpoint** ([`serve`]) the *hoster* scrapes, the operational face of
 //! "engine, not platform" (the daemon exposes its own numbers; dashboards, alerting, and retention
 //! are the hoster's, above the engine).
 //!
 //! **Hand-rolled on purpose.** The exposition format is a few lines of stable text, and the daemon is
 //! synchronous with no async runtime (decision 034's posture), so the endpoint is a plain
-//! `TcpListener` + a bounded HTTP/1.1 responder on one thread — the same discipline as the driver's
+//! `TcpListener` + a bounded HTTP/1.1 responder on one thread, the same discipline as the driver's
 //! hand-rolled Firecracker HTTP client, not a `tokio`/framework import for one GET route. Scrapes are
 //! served sequentially (a scraper polls every few seconds; there is no fan-in to manage), each under
 //! a read/write timeout so a stalled peer can't wedge the endpoint.
@@ -13,7 +13,7 @@
 //! **Prometheus conventions, followed.** Base units (**seconds**, never milliseconds), `_total`
 //! suffixes on counters, `# HELP`/`# TYPE` for every family, cumulative histogram buckets with an
 //! explicit `+Inf` plus `_sum`/`_count`, an `agentd_build_info` gauge carrying the version as a
-//! label, and deliberately **low label cardinality** (fixed `pooled`/`verb`/`kind` sets — nothing
+//! label, and deliberately **low label cardinality** (fixed `pooled`/`verb`/`kind` sets, nothing
 //! per-session or per-client, which would grow without bound).
 //!
 //! Guardrail 5 applies to the scraper too: the request head is read through a hard byte cap and a
@@ -120,7 +120,7 @@ impl Histogram {
         // Bump `count` (the `+Inf` cumulative) *before* the per-bucket slot. `render` sums the
         // buckets first and reads `count` last, so this ordering lets a concurrent scrape only ever
         // see `count` ≥ every bucket cumulative: a mid-`observe` scrape momentarily *under*-counts one
-        // bucket (valid — buckets ≤ +Inf) instead of over-counting it (a non-monotonic histogram the
+        // bucket (valid, buckets ≤ +Inf) instead of over-counting it (a non-monotonic histogram the
         // exposition spec forbids). On x86's store order the counter is visible before the slot; the
         // loads stay `Relaxed` since this is a best-effort consistency nudge, not a synchronization.
         self.count.fetch_add(1, Ordering::Relaxed);
@@ -164,7 +164,7 @@ pub struct Metrics {
     /// Requests served, one slot per [`Verb`].
     requests: [AtomicU64; Verb::ALL.len()],
     /// Requests answered with an error, split by the fault taxonomy: `guest` (per-request, the
-    /// session survives) vs `infra` (session-ending — the VM is gone).
+    /// session survives) vs `infra` (session-ending, the VM is gone).
     errors_guest: AtomicU64,
     errors_infra: AtomicU64,
     /// Lines that failed to decode (malformed, oversize, wrong schema).
@@ -228,7 +228,7 @@ impl Metrics {
 
     /// Render the whole registry in the Prometheus text exposition format (version 0.0.4).
     /// `pool_ready` is the warm pool's current stock, or `None` when the daemon runs without a pool
-    /// (the family is then absent — absent, not zero, so "no pool" and "empty pool" stay
+    /// (the family is then absent, absent, not zero, so "no pool" and "empty pool" stay
     /// distinguishable to an alert).
     pub fn render(&self, pool_ready: Option<u64>) -> String {
         let mut out = String::with_capacity(2048);
@@ -441,7 +441,7 @@ fn answer_scrape(
     stream.write_all(response.as_bytes())
 }
 
-/// Read the request head — through the end of the headers (`\r\n\r\n`) — capped at
+/// Read the request head, through the end of the headers (`\r\n\r\n`), capped at
 /// [`MAX_REQUEST_BYTES`]. A peer that never finishes its head inside the cap (or the socket
 /// timeout) is an error, so it can't grow memory or hold the endpoint (guardrail 5).
 fn read_request_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {

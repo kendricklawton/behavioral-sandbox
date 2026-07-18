@@ -1,10 +1,10 @@
-//! The orphan sweep — the engine's garbage collector for crashed-driver residue.
+//! The orphan sweep, the engine's garbage collector for crashed-driver residue.
 //!
 //! Teardown is `Drop`-based and the lifetime sentinel (decision 014) owns the VM *process tree*,
 //! but a driver that dies without `Drop` (SIGKILL, OOM) still leaves filesystem and network
 //! residue: its per-VM scratch dirs and its per-VM **network namespaces** (each holding the VM's
 //! tap). The netns model retired the finite-`/30`-pool exhaustion an earlier tap-in-the-host-netns
-//! design risked — every netns reuses the same fixed `/30`, so there is no shared pool to clog — but
+//! design risked, every netns reuses the same fixed `/30`, so there is no shared pool to clog, but
 //! an orphaned netns is still residue (a namespace, a tap, a `/run/netns/<name>` handle) worth
 //! reclaiming. [`sweep_orphans`] reclaims both dir and netns, the garbage collection a long-running
 //! runtime owes its host for the residue a crashed sibling leaves behind.
@@ -25,7 +25,7 @@
 //!   direction is always "kept too long", never "reclaimed a live VM's resources".
 //! - A dead dir with a **still-running VMM** (only possible where the sentinel degraded: no
 //!   writable cgroup v2) is skipped with a warning. The sweep owns fs/net residue; processes are
-//!   the sentinel's (decision 014) — it never kills.
+//!   the sentinel's (decision 014), it never kills.
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
@@ -43,7 +43,7 @@ pub struct SweepReport {
     pub dirs_reclaimed: usize,
     /// Orphaned per-VM network namespaces deleted (each cascading its tap away).
     pub netns_reclaimed: usize,
-    /// Scratch dirs skipped because their owner pid is alive (a live driver, or a recycled pid —
+    /// Scratch dirs skipped because their owner pid is alive (a live driver, or a recycled pid,
     /// indistinguishable, so both are kept).
     pub live_skipped: usize,
 }
@@ -53,18 +53,18 @@ pub struct SweepReport {
 /// them (each holding an orphaned tap). Never touches a live driver's resources; see the module doc
 /// for the ownership rules.
 ///
-/// Safe to run at any time — embedder startup is the natural moment (the analogue of a container
-/// runtime's boot-time GC) — and concurrently with live drivers: liveness is checked per dir, and
+/// Safe to run at any time, embedder startup is the natural moment (the analogue of a container
+/// runtime's boot-time GC), and concurrently with live drivers: liveness is checked per dir, and
 /// everything a live pid owns is skipped. Per-entry failures are logged and skipped, never fatal,
 /// so one undeletable dir can't shadow the rest of the sweep.
 ///
 /// **The hoster's half (decision 016).** The engine guarantees this call can't be weaponized (it
 /// only ever reclaims dirs the calling euid owns), but *deploying* it is the caller's:
-/// - **Schedule it.** Nothing calls this for you — a self-refilling janitor daemon is platform
+/// - **Schedule it.** Nothing calls this for you, a self-refilling janitor daemon is platform
 ///   territory. Run it at startup and periodically.
 /// - **One per identity.** It reclaims only what the calling euid owns, so if drivers run as
 ///   several users, each must run its own sweep; one root sweep does **not** cover a user driver's
-///   residue (nor should it — that would be the weaponization the ownership check prevents).
+///   residue (nor should it, that would be the weaponization the ownership check prevents).
 /// - **Harden the base.** Prefer a scratch base only the engine user can write (via
 ///   [`BootConfig::scratch_dir`]) over the world-writable `/tmp` default, so no other local user
 ///   can even plant a decoy for the ownership check to reject.
@@ -154,7 +154,7 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
 }
 
 /// Detach (lazy, best-effort) every mount whose mount point lies under `dir`, deepest first, so a
-/// following `remove_dir_all` can't `EBUSY` on a mount a crashed driver left behind — today that is
+/// following `remove_dir_all` can't `EBUSY` on a mount a crashed driver left behind, today that is
 /// the read-only base a jailed overlay boot bind-mounts into its chroot. Reads `/proc/self/mountinfo`
 /// (mount point is its 5th space-separated field); paths a self-hosted scratch dir carries have no
 /// spaces, so the octal-escape edge (`\040`) is not decoded. A no-op when `dir` holds no mounts.
@@ -177,8 +177,8 @@ fn detach_mounts_under(dir: &Path) {
 }
 
 /// The owner pid embedded in a per-VM scratch-dir name, iff `name` matches the exact
-/// `agent-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else —
-/// including the test suite's `agent-<tag>-<pid>` temp dirs — is not a sweep candidate.
+/// `agent-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else,
+/// including the test suite's `agent-<tag>-<pid>` temp dirs, is not a sweep candidate.
 fn owner_pid(name: &str) -> Option<u32> {
     let rest = name.strip_prefix("agent-")?;
     let (pid, seq) = rest.split_once('-')?;
@@ -189,14 +189,14 @@ fn owner_pid(name: &str) -> Option<u32> {
 }
 
 /// Whether `pid` currently exists. Deliberately not comm-checked: the driver is the *embedder's*
-/// process, whose name we can't know — so a recycled pid reads as alive and its dir is kept
+/// process, whose name we can't know, so a recycled pid reads as alive and its dir is kept
 /// (the conservative direction; a later sweep gets it).
 fn pid_alive(pid: u32) -> bool {
     Path::new("/proc").join(pid.to_string()).exists()
 }
 
 /// This process's **effective** uid, from `/proc/self/status` (`Uid:` is real/effective/saved/fs;
-/// effective is the second field) — no `unsafe`, no libc, the same read the test helpers use.
+/// effective is the second field), no `unsafe`, no libc, the same read the test helpers use.
 /// The euid is what names the files this process creates, so it's the identity `create_workdir`'s
 /// dirs carry and the one the candidate filter must match.
 fn own_euid() -> Option<u32> {
@@ -208,7 +208,7 @@ fn own_euid() -> Option<u32> {
 /// The pid of a `firecracker`/`jailer` process whose cwd is inside `dir`, if one is running. An
 /// unjailed VMM's cwd *is* its scratch dir (`spawn_fc` sets it for the relative vsock path); a
 /// jailed VMM's cwd is its chroot root, `<dir>/<exec-name>/<id>/root`. Identity is compared by
-/// `(st_dev, st_ino)` through the `/proc/<pid>/cwd` magic link — the link *text* is
+/// `(st_dev, st_ino)` through the `/proc/<pid>/cwd` magic link, the link *text* is
 /// namespace-relative after a pivot_root (the finding), but `metadata` resolves through it.
 /// Processes whose cwd we can't stat (another user's) are ignored; jailed boots need root, so a
 /// sweep of jailed residue runs as root and can see them.
@@ -324,7 +324,7 @@ mod tests {
     fn own_euid_matches_what_our_files_carry() {
         // The candidate filter compares dir ownership against this value, so the two must agree:
         // a dir this process creates (like every real workdir) must pass the filter. (The
-        // rejection side — a foreign-uid decoy — needs a second uid, so it can't be unit-tested
+        // rejection side, a foreign-uid decoy, needs a second uid, so it can't be unit-tested
         // unprivileged; the filter's equality is the whole mechanism.)
         let dir = TestDir::new("agent-sweep-uid");
         let dir_uid = std::fs::metadata(dir.path()).expect("stat test dir").uid();

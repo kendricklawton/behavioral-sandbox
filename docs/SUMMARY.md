@@ -1,6 +1,8 @@
 # Summary
 
 - [Introduction](./introduction.md)
+- [Quickstart](./quickstart.md)
+- [Non-goals](./non-goals.md)
 - [Using the agent CLI](./cli.md)
   - [Installation](./cli-install.md)
 - [Using the agentd daemon](./daemon.md)
@@ -9,6 +11,8 @@
   - [Running untrusted code](./examples-untrusted-code.md)
   - [Observing a run from the host](./examples-observe-a-run.md)
   - [Containing an agent](./examples-agent-containment.md)
+  - [Analyzing an untrusted binary](./examples-untrusted-binary.md)
+  - [Running a CI job from a fork](./examples-ci-job.md)
 - [Host-side observability & enforcement](./probes.md)
 - [Benchmarks](./benchmarks.md)
 - [Security](./security.md)

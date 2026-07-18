@@ -1,14 +1,14 @@
 //! The `agent-guest` binary: listen for connections and [`serve`](agent_guest::serve) one command
 //! each.
 //!
-//! **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`) — the in-VM
+//! **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`), the in-VM
 //! channel the host reaches through Firecracker's vsock socket. For host-side development and tests
 //! it can also listen on a **unix socket** (`unix:<path>`), which makes the whole exec path runnable
 //! with no VM. `serve` is transport-agnostic (any `Read`+`Write`); only the listener differs.
 //!
-//! `tracing` goes to stderr. The agent writes exactly one line to **stdout** — the readiness
+//! `tracing` goes to stderr. The agent writes exactly one line to **stdout**, the readiness
 //! sentinel ([`GUEST_READY_MARKER`](agent_channel::GUEST_READY_MARKER)) emitted once its vsock
-//! listener is bound — because the guest's stdout is the serial console the host scans to learn the
+//! listener is bound, because the guest's stdout is the serial console the host scans to learn the
 //! agent is up. One connection = one command, so the loop just accepts, serves, logs, and continues;
 //! every connection serves from the same working directory ([`session_dir`]), so repeated execs
 //! against one VM compose into a **stateful session**.
@@ -24,7 +24,7 @@ use vsock::{VsockListener, VMADDR_CID_ANY};
 
 /// Read/write deadline on each served connection. Liveness is the transport's job: with a deadline
 /// set, a dead-or-stalled host surfaces as a typed timeout in `serve` instead of hanging the agent.
-/// Generous, because a real host reads continuously — anything this slow is a broken peer.
+/// Generous, because a real host reads continuously, anything this slow is a broken peer.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Exit code for an operational failure (bad usage, a bind/serve error): conventional "2", named so
@@ -71,7 +71,7 @@ fn run(spec: &str) -> Result<(), String> {
     }
 }
 
-/// Serve connections from a bound `AF_VSOCK` listener — the in-VM transport. Announces readiness on
+/// Serve connections from a bound `AF_VSOCK` listener, the in-VM transport. Announces readiness on
 /// the console *after* the bind, so the host never dials before we're accepting.
 fn run_vsock(port: u32) -> Result<(), String> {
     let listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, port)
@@ -81,7 +81,7 @@ fn run_vsock(port: u32) -> Result<(), String> {
 
     for conn in listener.incoming() {
         match conn {
-            // Refuse a connection we can't bound — the no-hang guarantee depends on the deadline
+            // Refuse a connection we can't bound, the no-hang guarantee depends on the deadline
             // (see `agent_guest::serve`). `VsockStream`'s setters return `nix::Error`.
             Ok(stream) => match stream
                 .set_read_timeout(Some(IO_TIMEOUT))
@@ -96,10 +96,10 @@ fn run_vsock(port: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Serve connections from a unix socket — the host-side dev/test transport (no VM).
+/// Serve connections from a unix socket, the host-side dev/test transport (no VM).
 fn run_unix(path: &str) -> Result<(), String> {
     // A stale socket file (from a previous run) would make `bind` fail with EADDRINUSE; the path is
-    // ours, so clear it first — the same "own your scratch path" discipline as the VMM driver.
+    // ours, so clear it first, the same "own your scratch path" discipline as the VMM driver.
     if Path::new(path).exists() {
         let _ = std::fs::remove_file(path);
     }
@@ -118,13 +118,13 @@ fn run_unix(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The one working directory every connection this process serves runs in — which is what makes a
+/// The one working directory every connection this process serves runs in, which is what makes a
 /// sequence of execs against one agent a **stateful session**: a file injected or written by one
 /// command is visible to the next, and the state's lifetime is the VM's (its overlay discards
 /// everything at teardown). One agent process per VM, so the VM *is* the session; snapshot clones
 /// each get their own copy-on-write view of whatever state the source had accumulated. The pid in
 /// the name is for the host-side `unix:` dev transport, where several agent processes may share
-/// one `/tmp` — in a guest it changes nothing (and a snapshot clone keeps its pid, so the path is
+/// one `/tmp`, in a guest it changes nothing (and a snapshot clone keeps its pid, so the path is
 /// stable across restore).
 fn session_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("agent-session-{}", std::process::id()))

@@ -1,5 +1,5 @@
 //! The consolidated **trust-story** suite: one hostile guest run, contained on every axis, and the
-//! containment **shown in the host-observed audit record** — plus the proof that the guest can
+//! containment **shown in the host-observed audit record**, plus the proof that the guest can
 //! neither see nor disable the probes doing the observing.
 //!
 //! `#[ignore]`d: each boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches all
@@ -7,9 +7,9 @@
 //! object). Run via `cargo xtask ci-privileged`. Uses `agent-vmm` as a **dev-dependency only**, so
 //! the loader library stays independent of the driver: the two tracks bridge by plain values.
 //!
-//! These fuse constituents that already pass individually — deny-by-default egress with an
+//! These fuse constituents that already pass individually, deny-by-default egress with an
 //! allow-listed exception (`net_enforce.rs`), a fork storm that creates no host threads (hardware
-//! isolation), and the faithful record (`audit_record.rs`) — into **one hostile guest**, and add the
+//! isolation), and the faithful record (`audit_record.rs`), into **one hostile guest**, and add the
 //! part those pieces don't: the record is the evidence. Full VM/jail escape and the cgroup
 //! cpu/mem/pid caps are proven under real root by the `agent-vmm` confinement suite (a mem-hog /
 //! fork-bomb bounded by `memory.max`/`cpu.max`); this suite runs on the probe-capability path and
@@ -29,10 +29,10 @@ use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 /// IP protocol number for UDP, for the raw flow/denial-key comparisons the loader doesn't re-export
 /// a const for.
 const IPPROTO_UDP: u8 = Protocol::Udp as u8;
-/// The one endpoint the hostile guest is permitted to reach on its host end — the allow-listed
+/// The one endpoint the hostile guest is permitted to reach on its host end, the allow-listed
 /// exception. Every other destination is denied by the deny-by-default policy.
 const ALLOWED_PORT: u16 = 9999;
-/// A port the guest is **not** allowed to reach — the exfiltration attempt that must be dropped at
+/// A port the guest is **not** allowed to reach, the exfiltration attempt that must be dropped at
 /// the tap and land in the record's denial trail.
 const BLOCKED_PORT: u16 = 8888;
 
@@ -41,7 +41,7 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Why this host can't run the suite (a skip reason), or `None` when it can — so it prints *why* it
+/// Why this host can't run the suite (a skip reason), or `None` when it can, so it prints *why* it
 /// skipped, like the other probe tests.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {
@@ -87,7 +87,7 @@ fn networked_agent_config() -> BootConfig {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_hostile_guest_is_contained_and_the_record_shows_it() {
-    // P15.1 — the consolidated adversarial suite as one hostile guest: it tries to **exfiltrate**
+    // P15.1, the consolidated adversarial suite as one hostile guest: it tries to **exfiltrate**
     // (reach a blocked endpoint) and to **DoS** the host (a fork storm), and every attempt is both
     // *contained* and *recorded*. Exfiltration is denied at the tap and the drop lands in the audit
     // record; the storm creates zero host threads (hardware isolation) and the VM stays responsive;
@@ -124,7 +124,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
         probes.coverage()
     );
 
-    // Attack 1 — exfiltrate. The guest sends UDP to its host end on both the one allowed port and a
+    // Attack 1, exfiltrate. The guest sends UDP to its host end on both the one allowed port and a
     // blocked one. No listener is needed (the verdict is at the tap, before delivery); Python is in
     // the agent rootfs, so this is deterministic. The `for` body is 4-space-indented via a leading
     // `\x20` so Rust's `\`-continuation can't strip Python's indentation.
@@ -147,8 +147,8 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Attack 2 — DoS via a fork storm. 50 spinning shells for 2 s: a bounded storm (not the
-    // unbounded `:(){ :|:& };:`, which would starve the in-guest agent — a guest-availability
+    // Attack 2, DoS via a fork storm. 50 spinning shells for 2 s: a bounded storm (not the
+    // unbounded `:(){ :|:& };:`, which would starve the in-guest agent, a guest-availability
     // problem, while the host-facing claim is what this asserts). Hardware isolation means those 50
     // guest processes never become host threads.
     let threads_before = process_threads(vm.vmm_pid());
@@ -245,11 +245,11 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_guest_cannot_see_or_disable_the_host_side_probes() {
-    // P15.2 — the guest can neither see nor disable the host-side observation. It runs its **own**
+    // P15.2, the guest can neither see nor disable the host-side observation. It runs its **own**
     // kernel inside the microVM; the eBPF probes live in the **host** kernel, and the tap monitor
     // sits on the **host** end of the VM's tap, outside the guest. There is no in-guest syscall,
     // file, or device that reaches any of it. The proof is behavioural: a guest that spends its run
-    // looking for the observability and then generating traffic is still fully recorded — because it
+    // looking for the observability and then generating traffic is still fully recorded, because it
     // never had a handle on the probe to begin with.
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_guest_cannot_see_or_disable_the_host_side_probes: {why}");
@@ -279,8 +279,8 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
     );
 
     // The guest looks for the host's eBPF (its own bpffs, if mounted at all, holds only what the
-    // guest pinned — nothing; host BPF is in the host kernel, unreachable), reports what it found,
-    // then sends identifiable traffic. The host tap must record that traffic regardless — proving
+    // guest pinned, nothing; host BPF is in the host kernel, unreachable), reports what it found,
+    // then sends identifiable traffic. The host tap must record that traffic regardless, proving
     // the guest could not blind it.
     let probe_hunt = format!(
         "import os, socket, time\n\
@@ -332,7 +332,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
         "the host must still record the guest's flow after its probe-hunt: {:?}",
         network.flows
     );
-    // No axis was knocked out — the observation survived intact, not silently thinned.
+    // No axis was knocked out, the observation survived intact, not silently thinned.
     assert!(
         record.coverage.is_empty(),
         "the guest must not have induced any coverage gap; gaps: {:?}",
@@ -345,7 +345,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged` as root)"]
 fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
-    // P15.3 — one hostile guest attacks on every exhaustion axis at once, and the engine's two
+    // P15.3, one hostile guest attacks on every exhaustion axis at once, and the engine's two
     // enforcement mechanisms bound all of them: the **cgroup** caps compute + memory (a memory hog
     // stays under `memory.max` without the host OOM-killing the VMM; a fork storm burns no more than
     // its CPU quota and creates zero host threads), and the **egress policy** caps the network (a
@@ -395,9 +395,9 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         probes.coverage()
     );
 
-    // Vector 1 — memory exhaustion. Touch pages (bytearray zero-fills), so every chunk is real guest
+    // Vector 1, memory exhaustion. Touch pages (bytearray zero-fills), so every chunk is real guest
     // RAM the VMM must back with host memory, charged to the limited cgroup. The hog ends in the
-    // guest's MemoryError or its own OOM killer — inside the hardware boundary — never the VMM's
+    // guest's MemoryError or its own OOM killer, inside the hardware boundary, never the VMM's
     // death. One literal with explicit `\n`s + single-space block indents (a `\`-continuation would
     // strip Python's indentation).
     let hog = [
@@ -437,7 +437,7 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         "the host cap must bound the VMM without OOM-killing it"
     );
 
-    // Vector 2 — a fork storm. Hardware isolation means the guest's processes never become host
+    // Vector 2, a fork storm. Hardware isolation means the guest's processes never become host
     // threads, and cpu.max means the whole VM can't burn more than its quota.
     let threads_before = process_threads(vm.vmm_pid());
     let usage_before = cg.stat("cpu.stat", "usage_usec");
@@ -465,7 +465,7 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         "host CPU burned ({cpu_used} usec) must stay within the cgroup quota ({cpu_cap} usec)"
     );
 
-    // Vector 3 — a network flood. Blast packets at a blocked endpoint (and the one allowed one). The
+    // Vector 3, a network flood. Blast packets at a blocked endpoint (and the one allowed one). The
     // egress policy drops the flood at the tap, at volume, and the drops are recorded.
     let flood = format!(
         "import socket\n\
@@ -494,7 +494,7 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         .expect("a networked sandbox has a network section");
 
     // The flood was bounded by the egress policy: many packets to the blocked endpoint, all dropped
-    // and counted (a high denial count, not a trickle — enforcement held under volume).
+    // and counted (a high denial count, not a trickle, enforcement held under volume).
     let denial = network
         .denials
         .iter()

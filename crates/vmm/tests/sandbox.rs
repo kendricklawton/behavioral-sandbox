@@ -32,7 +32,7 @@ fn vmm_uid(pid: u32) -> Option<String> {
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn sandbox_opens_jailed_by_default() {
     // The decision-015 polarity flip, proven at the public API: the config sets *no* jail, and `open`
-    // confines anyway — the VMM runs as the dropped uid and still serves an exec. The unjailed
+    // confines anyway, the VMM runs as the dropped uid and still serves an exec. The unjailed
     // path below is only reachable by writing `open_unjailed`.
     if !have_jailer_privileges() {
         eprintln!("skipping sandbox_opens_jailed_by_default: needs real root (euid 0)");
@@ -60,8 +60,8 @@ fn sandbox_opens_jailed_by_default() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn lifecycle_runs_inputs_and_collects_outputs() {
     // The embedder's whole loop without ever touching `RunningVm`: open (with a bulk output dir),
-    // one exec carrying every input the public API takes — stdin, an injected file, env, an artifact
-    // request — and a bulk write to `/output`, then collect the outputs on close.
+    // one exec carrying every input the public API takes, stdin, an injected file, env, an artifact
+    // request, and a bulk write to `/output`, then collect the outputs on close.
     // (`open_unjailed`: the explicit dev-host opt-out; the jailed default is proven root-gated
     // above, and the two differ only in confinement, not in this surface.)
     let out_dir = TmpDir::new("sandbox-outputs");
@@ -104,7 +104,7 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
 fn kill_handle_stays_inert_during_output_readback() {
     // `collect_outputs` reaps the VMM, then runs a multi-second `e2fsck`/`debugfs` readback before
     // the sandbox drops into teardown. `power_off_and_wait` marks teardown down *before* that reap,
-    // so a `KillHandle` fired across the readback finds `torn_down` already set and no-ops — it can
+    // so a `KillHandle` fired across the readback finds `torn_down` already set and no-ops, it can
     // never signal the reaped (recyclable) pid (the degraded-host `kill -9 <pid>` fallback). Fire it
     // hard from another thread for the whole call and assert the outputs still come back clean and
     // every `kill()` is a no-op `Ok` (never the "could not reach VMM pid" error). On a cgroup host
@@ -147,7 +147,7 @@ fn kill_handle_stays_inert_during_output_readback() {
 fn session_state_persists_across_execs() {
     // Stateful sessions against a real guest: the VM is the session. Every exec serves
     // from the agent's one persistent working directory, so a file injected before exec 1 and a
-    // file exec 1 writes are both visible to exec 2 — and the guest filesystem beyond the workdir
+    // file exec 1 writes are both visible to exec 2, and the guest filesystem beyond the workdir
     // (here /root, on the boot's tmpfs overlay) accumulates too. State's lifetime is the VM's:
     // teardown discards the overlay, so nothing outlives the session.
     let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
@@ -192,7 +192,7 @@ fn session_state_persists_across_execs() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn exec_budgets_are_per_sandbox_knobs() {
     // The two budgets as knobs, driven end to end through Limits → BootConfig → every exec:
-    // a 2 s wall makes a long sleep the cooperative ExecTimeout (the guest killed it — the
+    // a 2 s wall makes a long sleep the cooperative ExecTimeout (the guest killed it, the
     // unchanged semantics), and a 4 KiB output cap makes a flood the typed OutputCap. Same
     // sandbox, both knobs, plus a within-budget exec proving the knobs don't false-positive.
     let mut limits = Limits::default();
@@ -236,8 +236,8 @@ fn exec_budgets_are_per_sandbox_knobs() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn many_sandboxes_run_concurrently_without_interference() {
-    // Concurrency: several sandboxes boot and exec *at the same time* — from threads, so
-    // the boots genuinely overlap — and each result is exactly its own: no cross-talk on the vsock
+    // Concurrency: several sandboxes boot and exec *at the same time*, from threads, so
+    // the boots genuinely overlap, and each result is exactly its own: no cross-talk on the vsock
     // channels, no scratch-dir or netns collisions, no wedge. (Concurrent *clones* are proven in
     // tests/snapshot.rs; this is concurrent independent sandboxes, the embedder's fan-out shape.)
     let workers: Vec<_> = (0..3)
@@ -362,7 +362,7 @@ fn snapshot_yields_a_restorable_bundle() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn injected_secrets_never_reach_the_console_or_host_logs() {
     // The VM half of the leak gate: a sentinel rides in as an env value and as an injected
-    // file against a *real* guest, and is then grepped out of every observable engine surface —
+    // file against a *real* guest, and is then grepped out of every observable engine surface,
     // the serial console (where the guest agent's own log lands), the host's log stream (captured
     // at TRACE around the calls), and a failing injection's error rendering. The run's own
     // RunResult is the one surface allowed to carry it.
@@ -408,7 +408,7 @@ fn injected_secrets_never_reach_the_console_or_host_logs() {
             )
             .expect("exec with the sentinel inputs");
         // Env is per-exec: a later command must not see it (the agent's own process, which spawned
-        // it, was never polluted — in a real guest, not just the unit harness).
+        // it, was never polluted, in a real guest, not just the unit harness).
         let after = sandbox
             .exec(
                 &[
@@ -436,7 +436,7 @@ fn injected_secrets_never_reach_the_console_or_host_logs() {
         (received, err)
     });
 
-    // The guest received both inputs — RunResult is the caller's data, the allowed surface.
+    // The guest received both inputs, RunResult is the caller's data, the allowed surface.
     assert_eq!(
         String::from_utf8_lossy(&received.stdout),
         format!("{SENTINEL} {SENTINEL}")

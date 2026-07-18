@@ -1,13 +1,13 @@
-//! A runtime-agnostic **fixture** — *not* a usage example of the agent.
+//! A runtime-agnostic **fixture**, *not* a usage example of the agent.
 //!
 //! A minimal, **statically linked** native binary (musl, no dynamic libc, no interpreter, no
 //! `PT_INTERP`) that the driver injects into a microVM read-only and executes, to prove the engine
-//! runs an *arbitrary* Linux ELF handed to it at runtime — not just the baked-in Python/Node
+//! runs an *arbitrary* Linux ELF handed to it at runtime, not just the baked-in Python/Node
 //! interpreters. Built static by `cargo xtask build-guest-example`; the privileged test
 //! `runs_a_static_native_binary_and_captures_its_artifact` injects it via a block device and runs it.
 //!
 //! It writes a known payload to the path in `argv[1]` (the guest's writable `/output`) and prints a
-//! marker line — the same inject → run → capture loop the interpreter tests exercise, but with a
+//! marker line, the same inject → run → capture loop the interpreter tests exercise, but with a
 //! native binary that carries no runtime of its own.
 #![forbid(unsafe_code)]
 

@@ -12,7 +12,7 @@
 //! `deny_unknown_fields`, so a misspelled key (`kernal = …`) fails loudly rather than being ignored.
 //!
 //! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](agent_vmm::BootConfig::from_env_with): return the
-//! real env var if set, else the file's value — which resolves `env > file > defaults` for the
+//! real env var if set, else the file's value, which resolves `env > file > defaults` for the
 //! artifact/scratch keys with zero duplication of the engine's env-key logic or defaults. The `log`
 //! key has no `BootConfig` field (it drives `tracing`), so the CLI reads it from here directly.
 
@@ -51,7 +51,7 @@ impl AgentToml {
     ///
     /// # Errors
     /// [`VmmError::Vmm`] if a file is found but can't be read or has an unknown/mistyped key or bad
-    /// TOML — a config the operator wrote but got wrong must fail loudly, not be skipped.
+    /// TOML, a config the operator wrote but got wrong must fail loudly, not be skipped.
     pub fn discover(start: &Path) -> Result<Option<Self>, VmmError> {
         let mut dir = Some(start);
         while let Some(d) = dir {
@@ -78,7 +78,7 @@ impl AgentToml {
     }
 
     /// The file's value for an `AGENT_*` env key, as an [`OsString`], or `None` if the key is unset
-    /// in the file — the shape [`from_env_with`](agent_vmm::BootConfig::from_env_with) consumes, so
+    /// in the file, the shape [`from_env_with`](agent_vmm::BootConfig::from_env_with) consumes, so
     /// the file slots in *under* the environment in one composed lookup.
     #[must_use]
     pub fn env_value(&self, key: &str) -> Option<OsString> {

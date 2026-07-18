@@ -7,7 +7,7 @@
 //!
 //! The proof is at the enforcement point (the tap): the guest sends UDP to two ports of its host end, one
 //! allow-listed and one not. The blocked port shows up in the `DENIALS` audit trail (dropped); the
-//! allowed port does not (accepted). Deny-by-default with a single-endpoint allow-list — the guest can
+//! allowed port does not (accepted). Deny-by-default with a single-endpoint allow-list, the guest can
 //! reach exactly what the policy admits and nothing more.
 #![allow(clippy::panic)]
 
@@ -21,7 +21,7 @@ use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 /// The one port the guest is allowed to reach on its host end; every other port is denied.
 const ALLOWED_PORT: u16 = 9999;
-/// A port the guest is *not* allowed to reach — the "blocked from everything else" half.
+/// A port the guest is *not* allowed to reach, the "blocked from everything else" half.
 const BLOCKED_PORT: u16 = 8888;
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
@@ -29,7 +29,7 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Why this host can't run the test (a skip reason), or `None` when it can — so it prints *why* it
+/// Why this host can't run the test (a skip reason), or `None` when it can, so it prints *why* it
 /// skipped, like the other probe tests.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {
@@ -91,7 +91,7 @@ fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
         .to_string();
     let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
 
-    // Launch enforcement with a single-endpoint allow-list — only host_ip:ALLOWED_PORT/udp.
+    // Launch enforcement with a single-endpoint allow-list, only host_ip:ALLOWED_PORT/udp.
     // `enforce_in_netns` arms the policy before the tc programs go live, so there is no un-enforced window.
     let policy =
         EgressPolicy::deny_all().allow_host(host_ip, Some(ALLOWED_PORT), Some(Protocol::Udp));
@@ -146,7 +146,7 @@ fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
     );
 
     // Both were seen on the tap (counting runs before the verdict), so the allowed one really was sent and
-    // let through rather than never generated — the flow counters corroborate the enforcement.
+    // let through rather than never generated, the flow counters corroborate the enforcement.
     let flows = monitor.flows().expect("read the flow map");
     assert!(
         flows.iter().any(|(k, c)| k.dst_addr == host_u32

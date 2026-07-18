@@ -34,7 +34,7 @@ fn skip_reason() -> Option<String> {
 #[ignore = "needs /dev/kvm-class privilege (CAP_BPF/root) + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn execve_counter_counts_host_execve_events() {
     // Load + attach the tracepoint, read its per-CPU map, and prove the counter tracks the
-    // host's `execve`s — spawn N processes and assert the total rose by at least N.
+    // host's `execve`s, spawn N processes and assert the total rose by at least N.
     if let Some(why) = skip_reason() {
         eprintln!("skipping execve_counter_counts_host_execve_events: {why}");
         return;
@@ -44,7 +44,7 @@ fn execve_counter_counts_host_execve_events() {
 
     const SPAWNS: u64 = 10;
     for _ in 0..SPAWNS {
-        // Each spawn is one `execve` of `/bin/true` — exactly what the tracepoint counts.
+        // Each spawn is one `execve` of `/bin/true`, exactly what the tracepoint counts.
         let _ = Command::new("true").status().expect("spawn `true`");
     }
 
@@ -70,7 +70,7 @@ fn execve_counter_counts_host_execve_events() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn counter_drops_without_pinned_residue() {
-    // The loader owns the program/map/link; dropping it must leave no residue — nothing pinned
+    // The loader owns the program/map/link; dropping it must leave no residue, nothing pinned
     // into `/sys/fs/bpf`, and no dangling attachment. The real no-dangling-attachment proof is that
     // the `count_execve` program is *gone from the kernel* after the drop: a leaked link would pin its
     // program alive (kept enumerable by `loaded_programs`), so the resident count returning to baseline
@@ -85,7 +85,7 @@ fn counter_drops_without_pinned_residue() {
     {
         let counter = ExecveCounter::load().expect("first load");
         counter.count().expect("read the counter while loaded");
-        // While loaded, exactly one more `count_execve` is resident — the strong check's precondition.
+        // While loaded, exactly one more `count_execve` is resident, the strong check's precondition.
         if let (Some(before), Some(now)) = (resident_before, resident_count_execve()) {
             assert_eq!(
                 now,
@@ -132,7 +132,7 @@ fn resident_count_execve() -> Option<usize> {
     let mut n = 0usize;
     for info in aya::programs::loaded_programs() {
         // A read error (unprivileged/unsupported enumeration, or a program that vanished mid-scan)
-        // means we can't make this a hard assertion here — signal "unknown" rather than false-fail.
+        // means we can't make this a hard assertion here, signal "unknown" rather than false-fail.
         if info.ok()?.name_as_str() == Some("count_execve") {
             n += 1;
         }
@@ -141,7 +141,7 @@ fn resident_count_execve() -> Option<usize> {
 }
 
 /// The sorted top-level entries under `/sys/fs/bpf` (the bpffs pin root). Empty when the fs isn't
-/// mounted — then "no residue" holds vacuously. Used to prove [`ExecveCounter`] pins nothing.
+/// mounted, then "no residue" holds vacuously. Used to prove [`ExecveCounter`] pins nothing.
 fn bpf_pins() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir("/sys/fs/bpf") else {
         return Vec::new();

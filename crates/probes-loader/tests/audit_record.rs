@@ -6,13 +6,13 @@
 //! via `cargo xtask ci-privileged`. Uses `agent-vmm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a VMM pid, a netns, a tap).
 //!
-//! This is the convergence proof — the microVM and the eBPF observability as **one system**. It drives
+//! This is the convergence proof, the microVM and the eBPF observability as **one system**. It drives
 //! the exact launch sequence a caller (the CLI/daemon, later) will: load the shared tracer + meter once,
 //! boot the sandbox, `attach` the bundle to it by plain values, run the guest workload, then `collect`
 //! the fused [`RunRecord`] while the sandbox is still alive and serialize it to deterministic JSON.
 //!
 //! **What the host can and can't see, by design.** The guest's outbound packets cross the tap on the
-//! host, so the **network** touch shows up *exactly* in the record's flows — the strong cross-boundary
+//! host, so the **network** touch shows up *exactly* in the record's flows, the strong cross-boundary
 //! signal. The guest's **file** read happens in-guest and does *not* trap to the host's
 //! syscall tracepoints (a microVM services its own syscalls): that is the isolation
 //! working, not a gap. The record's host-syscall axis is the **VMM's** host footprint, and the test
@@ -37,7 +37,7 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Why this host can't run the test (a skip reason), or `None` when it can — so it prints *why* it
+/// Why this host can't run the test (a skip reason), or `None` when it can, so it prints *why* it
 /// skipped, like the other probe tests.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {
@@ -96,7 +96,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
 
-    // Attach the bundle to *this* sandbox by the plain values the driver exposes — the exact
+    // Attach the bundle to *this* sandbox by the plain values the driver exposes, the exact
     // arm-free, single post-boot `attach` a caller will use. Observe-only (no egress policy).
     let probes = SandboxProbes::attach(
         vm.vmm_pid(),
@@ -106,7 +106,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
         &tracer,
         &meter,
     );
-    // Every axis we asked for must have bound — a networked sandbox on a capable host has no reason to
+    // Every axis we asked for must have bound, a networked sandbox on a capable host has no reason to
     // gap the network or host-syscall axis. (Absence here is the fail-open honesty working.)
     assert!(
         probes.coverage().is_empty(),
@@ -116,7 +116,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 
     // The workload: read a file *in-guest* (touches files) and send UDP to the host end (touches the
     // network). Python is in the agent rootfs, so this is deterministic where a busybox applet's
-    // raw-socket permissions might not be. No listener is needed — the datagrams still cross the tap.
+    // raw-socket permissions might not be. No listener is needed, the datagrams still cross the tap.
     let workload = format!(
         "import socket, time\n\
          open('/etc/hostname').read()\n\
@@ -173,7 +173,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 
     // --- Every axis bound, and the record is honest about coverage -----------------------------------
     // No axis gap survived to the record (the network + host-syscall + CPU axes all attached). The
-    // guest's in-guest file read is *not* a host syscall — its absence from `host_syscalls`
+    // guest's in-guest file read is *not* a host syscall, its absence from `host_syscalls`
     // is the isolation working, so we assert the axis *bound*, not that guest file ops appear.
     assert!(
         !record
@@ -189,8 +189,8 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     );
 
     // --- The record serializes to deterministic JSON, showing the flow -------------------------------
-    // (Byte-stability across shuffled inputs is pinned by the host-safe unit tests —
-    // `json_is_byte_stable_across_input_order` — so it isn't re-proven here.)
+    // (Byte-stability across shuffled inputs is pinned by the host-safe unit tests,
+    // `json_is_byte_stable_across_input_order`, so it isn't re-proven here.)
     let json = record.to_json();
     assert!(
         json.contains(&format!("\"dst\":\"{host_ip}\"")) && json.contains("\"proto\":\"udp\""),

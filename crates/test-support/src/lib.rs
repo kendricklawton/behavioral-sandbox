@@ -6,7 +6,7 @@
 //! It is **never shipped** (`publish = false`, a dev-dependency only) and pure-std (no engine deps),
 //! so it stays a leaf both the driver and the loader suites can borrow without coupling.
 // A test-support crate: `enter` panics as the idiomatic test assertion (the caller treats it like an
-// `assert`), which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns —
+// `assert`), which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns,
 // the same file-level opt-out the integration-test binaries carry.
 #![allow(clippy::panic)]
 
@@ -22,7 +22,7 @@ const CPU_PERIOD_US: u64 = 100_000;
 
 /// A cgroup carrying the engine's own limit derivation (decision 013): `cpu.max` = `vcpus` cores,
 /// `memory.max` = guest RAM + the fixed VMM overhead. Built by the test because those limits normally
-/// arrive via the jailer, and exec-under-jail is a later migration — so this pins the *same-derived*
+/// arrive via the jailer, and exec-under-jail is a later migration, so this pins the *same-derived*
 /// caps onto an exec-capable boot path and proves they bind under load. `None` (skip) where cgroup v2
 /// isn't writable/delegated. Reclaims its dirs on drop (declare it *before* the VM, so it drops after).
 pub struct LimitCgroup {
@@ -59,7 +59,7 @@ impl LimitCgroup {
         Some(this)
     }
 
-    /// Move `pid` (its whole thread group) into the limited cgroup. Panics if the write fails — the
+    /// Move `pid` (its whole thread group) into the limited cgroup. Panics if the write fails, the
     /// idiomatic test assertion (the caller treats this like an `assert`).
     pub fn enter(&self, pid: u32) {
         if let Err(e) = std::fs::write(self.dir.join("cgroup.procs"), pid.to_string()) {
@@ -102,7 +102,7 @@ pub const CAP_NET_ADMIN: u32 = 12;
 /// Whether this process's **effective** capability set holds `cap` (a capability bit number, e.g.
 /// [`CAP_NET_ADMIN`]). Reads the `CapEff:` hex mask from `/proc/self/status`; a privileged test
 /// *skips* (never fails) when this is false, so the parse must never read a capable host as
-/// incapable — a false "no caps" here is a test that silently proves nothing.
+/// incapable, a false "no caps" here is a test that silently proves nothing.
 #[must_use]
 pub fn have_cap(cap: u32) -> bool {
     std::fs::read_to_string("/proc/self/status")
@@ -129,7 +129,7 @@ fn parse_cap_eff(status: &str) -> Option<u64> {
     u64::from_str_radix(low64, 16).ok()
 }
 
-/// Whether this process is real root (effective uid 0) — the gate for putting a VMM under a test
+/// Whether this process is real root (effective uid 0), the gate for putting a VMM under a test
 /// cgroup. Reads `/proc/self/status`; a privileged test *skips* (never fails) when this is false.
 #[must_use]
 pub fn have_real_root() -> bool {
@@ -186,7 +186,7 @@ mod tests {
     #[test]
     fn cap_eff_reads_low_64_bits_of_a_hypothetically_wider_field() {
         // The finding this helper exists for: a `CapEff` wider than 16 hex digits must not overflow
-        // the `u64` parse into `None` — which a skip-gated test would read as "no caps" and
+        // the `u64` parse into `None`, which a skip-gated test would read as "no caps" and
         // silently skip on a fully capable host. Only the low 64 bits (where CAP_NET_ADMIN lives)
         // are read.
         let mask = 1u64 << CAP_NET_ADMIN;

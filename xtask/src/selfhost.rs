@@ -1,11 +1,11 @@
-//! `cargo xtask self-host` — the one command a self-hoster runs to stand the engine up end to end:
+//! `cargo xtask self-host`, the one command a self-hoster runs to stand the engine up end to end:
 //! obtain the pinned guest kernel + rootfs, build the guest image and the eBPF probe object, install
 //! the `agent` and `agentd` binaries, and (on a KVM host) boot one sandbox to prove it works.
 //!
 //! Every step reuses the same tested building blocks the individual `xtask` commands do, so this is
 //! orchestration, not a second code path. **Vendor-aware:** with `AGENT_VENDOR_DIR` set, the fetch +
-//! rootfs steps resolve from the local mirror (`cargo xtask vendor`), so the whole build runs offline
-//! — no Firecracker S3 bucket, no Alpine CDN.
+//! rootfs steps resolve from the local mirror (`cargo xtask vendor`), so the whole build runs offline,
+//! no Firecracker S3 bucket, no Alpine CDN.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -106,7 +106,7 @@ fn install_binaries(prefix: &Path) -> Result<PathBuf> {
     agent.context("the `agent` binary was not among the installed set")
 }
 
-/// Boot one sandbox with the just-installed `agent` to prove the whole stack runs — or, when there's
+/// Boot one sandbox with the just-installed `agent` to prove the whole stack runs, or, when there's
 /// no KVM (or `--no-run`), print the exact command so the proof is one copy-paste away. Runs
 /// `--unjailed` (the jailed default needs real root); production self-hosts run jailed, behind the
 /// same KVM boundary.

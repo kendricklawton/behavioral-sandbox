@@ -1,13 +1,13 @@
 //! The syscall-trace demo (`trace-sandbox`): a **live syscall trace of a running sandbox**.
 //!
-//! Binds the two tracks an embedder binds — boot a real microVM sandbox (the Firecracker driver,
+//! Binds the two tracks an embedder binds, boot a real microVM sandbox (the Firecracker driver,
 //! `agent-vmm`) and watch its host footprint with the eBPF syscall tracer (`agent-probes-loader`),
 //! attributed to the sandbox's cgroup. It is deliberately the *VMM's host footprint* (the
 //! jailer/Firecracker `execve`, the drive/tap/socket `openat`s), not the guest's own syscalls: a
 //! microVM services those in-guest and they never trap to the host (the hardware-isolation
 //! consequence stated up front).
 //!
-//! Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object — a
+//! Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
 //! privileged, user-run demo like `bench-boot`, never part of the host-safe gate.
 
 use std::path::Path;
@@ -21,7 +21,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::{agent_rootfs_path, kernel_path};
 
-/// The effective uid from `/proc/self/status` (`Uid:`'s second field), or `None` if unreadable — so
+/// The effective uid from `/proc/self/status` (`Uid:`'s second field), or `None` if unreadable, so
 /// the demo confines when it can (root → jailed) and still runs on a dev host (unjailed) when it
 /// can't, no `libc`/`unsafe`.
 fn effective_uid() -> Option<u32> {
@@ -33,7 +33,7 @@ fn effective_uid() -> Option<u32> {
         .and_then(|u| u.parse().ok())
 }
 
-/// Boot a sandbox and stream its cgroup-attributed host syscall footprint — the syscall-trace exit-gate
+/// Boot a sandbox and stream its cgroup-attributed host syscall footprint, the syscall-trace exit-gate
 /// demo. `seconds` is the length of the live tail after the boot+exec window is printed.
 pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
@@ -62,7 +62,7 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
 
     // Attach the tracer BEFORE boot, watching the whole host: the jailer creates the sandbox's cgroup
     // *during* boot, so we can't filter on its id up front. Capture host-wide, learn the id once the
-    // VMM is up, and keep only that sandbox's events — each event already carries its cgroup id, so the
+    // VMM is up, and keep only that sandbox's events, each event already carries its cgroup id, so the
     // attribution is exact after the fact.
     let mut tracer = SyscallTracer::load().context("load + attach the syscall tracer")?;
     tracer.watch_all().context("watch the whole host")?;
@@ -161,7 +161,7 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
 /// scoped to the sandbox's own netns (decision 017). Unlike the syscall trace, this is the guest's
 /// *own* packets: they cross the tap on the host, so the host sees every one.
 ///
-/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object — a
+/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
 /// privileged, user-run demo like `trace-sandbox`. `rounds` is how many guest-traffic bursts to send
 /// (watching the counters climb each one).
 pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
@@ -279,7 +279,7 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
 /// send to that endpoint and to a blocked one, and show the allow-listed traffic passing while everything
 /// else is dropped at the tap and recorded in the denials audit trail.
 ///
-/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object — a
+/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
 /// privileged, user-run demo like `watch-sandbox`.
 pub(crate) fn enforce_sandbox() -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
@@ -380,7 +380,7 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
     }
 
     // The flow counters show the allowed endpoint was seen and let through (both are counted before the
-    // verdict, so a blocked flow appears here too — but only the blocked one appears under denials).
+    // verdict, so a blocked flow appears here too, but only the blocked one appears under denials).
     let flows = monitor.flows().context("read the flow map")?;
     println!(
         "\n# flows seen on the tap (allowed traffic passes; blocked is counted then dropped):"
@@ -410,11 +410,11 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
 
 /// The resource-metering exit-gate demo (`meter-sandbox`): **per-sandbox resource metrics from eBPF**. Boot a
 /// real sandbox, meter its cgroup with the `sched_switch` accounting probe, and show an idle guest
-/// charging near-zero host CPU while a CPU-heavy guest charges most of a core — the engine *measures*,
+/// charging near-zero host CPU while a CPU-heavy guest charges most of a core, the engine *measures*,
 /// the hoster *bills*. Prints the full `ResourceSummary` (CPU from eBPF, memory/IO from the kernel's
 /// cgroup v2 counters) for the busy run.
 ///
-/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object — a
+/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
 /// privileged, user-run demo like `trace-sandbox`.
 pub(crate) fn meter_sandbox() -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
@@ -442,7 +442,7 @@ pub(crate) fn meter_sandbox() -> Result<()> {
     }
 
     // Boot a sandbox on the agent rootfs (jailed as root, else the unjailed opt-out so a dev host still
-    // runs it). Its VMM runs in a per-VM lifetime cgroup — the cgroup the meter attributes to.
+    // runs it). Its VMM runs in a per-VM lifetime cgroup, the cgroup the meter attributes to.
     let mut cfg = BootConfig::from_env();
     cfg.kernel = kernel.clone();
     cfg.rootfs = rootfs.clone();
@@ -478,7 +478,7 @@ pub(crate) fn meter_sandbox() -> Result<()> {
     // once the guest idles and the vCPU thread blocks, so give that chain a moment before each read.
     let settle = Duration::from_millis(300);
 
-    // Idle: the guest sleeps, the VMM parks its vCPU — near-zero host CPU charged to the cgroup. Python
+    // Idle: the guest sleeps, the VMM parks its vCPU, near-zero host CPU charged to the cgroup. Python
     // for both phases (same interpreter, only the workload differs), not busybox `sleep`, whose float
     // support is a build option.
     meter.reset(cgroup).context("zero the idle baseline")?;
@@ -499,7 +499,7 @@ pub(crate) fn meter_sandbox() -> Result<()> {
     let idle_cpu = meter.cpu_time(cgroup).context("read idle CPU")?;
     println!("# idle guest (time.sleep({secs})): charged {idle_cpu:?} of host CPU to the sandbox");
 
-    // Busy: a Python loop pegs a vCPU flat out for the same wall time — the VMM's vCPU thread runs hot.
+    // Busy: a Python loop pegs a vCPU flat out for the same wall time, the VMM's vCPU thread runs hot.
     meter.reset(cgroup).context("zero the busy baseline")?;
     let busy_src = format!(
         "import time\nend = time.monotonic() + {secs}\nwhile time.monotonic() < end:\n    pass\n"

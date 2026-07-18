@@ -20,7 +20,7 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Why this host can't run the test (a skip reason), or `None` when it can — so it prints *why* it
+/// Why this host can't run the test (a skip reason), or `None` when it can, so it prints *why* it
 /// skipped, like the other probe tests.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {

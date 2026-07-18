@@ -13,7 +13,7 @@ use agent_channel::{ClientConnection, Response};
 use crate::{ExecMetrics, RunResult, VmmError};
 
 /// Deadline for the vsock connect + `CONNECT` handshake, and the read/write timeout the exec
-/// connection carries — so a dead-or-stalled guest is a typed timeout, never a host hang
+/// connection carries, so a dead-or-stalled guest is a typed timeout, never a host hang
 /// (decision 002: liveness is the transport's job).
 pub(crate) const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -22,10 +22,10 @@ pub(crate) const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// clone before discarding it and serving the next.
 pub(crate) const PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Default cap on the stdout+stderr+artifacts the host buffers for one `exec` — the
+/// Default cap on the stdout+stderr+artifacts the host buffers for one `exec`, the
 /// [`Limits::output_cap`](crate::Limits::output_cap) default. Each frame is already
 /// `≤ MAX_PAYLOAD`, but a guest can send *unboundedly many* frames (`yes`), so the aggregate is
-/// capped too — a hostile guest never grows host memory without bound. (A command's *runtime* is a
+/// capped too, a hostile guest never grows host memory without bound. (A command's *runtime* is a
 /// separate axis, bounded by the exec wall budget below.) The knob is per-sandbox: it rides
 /// `Limits` → `BootConfig` → `RunningVm` and every exec on that VM enforces it.
 pub(crate) const MAX_EXEC_OUTPUT: usize = 16 << 20; // 16 MiB
@@ -34,11 +34,11 @@ pub(crate) const MAX_EXEC_OUTPUT: usize = 16 << 20; // 16 MiB
 /// frames can't spin the collect loop or grow the artifact list without advancing the cap.
 const FRAME_FLOOR: usize = 64;
 
-/// Default wall-clock budget for one command — the [`Limits::wall`](crate::Limits::wall)
+/// Default wall-clock budget for one command, the [`Limits::wall`](crate::Limits::wall)
 /// default (folded into [`BootConfig::exec_wall`](crate::BootConfig::exec_wall)). Sent to the guest agent, which kills the command past it (and clamps any request to its
 /// own 1 h ceiling). The knob is per-sandbox (`Limits` → `BootConfig` → `RunningVm`), and both the
-/// socket idle timeout *and* the host give-up deadline are derived from the *configured* value —
-/// `budget + EXEC_KILL_SLACK`, see `RunningVm::exec_with_files` — never from this const, so a raised
+/// socket idle timeout *and* the host give-up deadline are derived from the *configured* value,
+/// `budget + EXEC_KILL_SLACK`, see `RunningVm::exec_with_files`, never from this const, so a raised
 /// budget can't leave a long quiet command cut off by the transport.
 pub(crate) const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -47,13 +47,13 @@ pub(crate) const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// back. The host's total patience is `budget + EXEC_KILL_SLACK`, used both as the exec socket's
 /// per-read idle timeout (so a legitimately long-but-quiet command isn't cut off by the transport)
 /// and as the wall-clock deadline on the collect loop (so a silent-or-hostile guest that never
-/// self-reports can't park `exec` forever — decision 002: liveness is the transport's job, not the
+/// self-reports can't park `exec` forever, decision 002: liveness is the transport's job, not the
 /// guest's). Ordered so the guest's cooperative `TimedOut` (fired at `budget`) always beats the host
 /// deadline for a legitimate timeout; the host fires only when the guest fails to report.
 pub(crate) const EXEC_KILL_SLACK: Duration = Duration::from_secs(5);
 
 /// Dial Firecracker's vsock socket, speak the `CONNECT <port>` handshake, and complete the channel
-/// handshake — the whole host side of reaching the guest agent. Factored out of
+/// handshake, the whole host side of reaching the guest agent. Factored out of
 /// [`RunningVm::connect_agent`] so it can be tested against a fake vsock socket without a VM.
 pub(crate) fn connect_agent_at(
     uds: &Path,
@@ -69,8 +69,8 @@ pub(crate) fn connect_agent_at(
 /// response stream into a [`RunResult`]. Bounded on two axes so a flooding *or* dribbling guest can't
 /// hurt the host: `max_output` caps buffered bytes, and `wall` is the host's own wall-clock deadline
 /// on the collect loop (`timeout` is the guest's command budget; `wall` = `timeout` + kill slack).
-/// A guest that keeps the per-read idle timer alive by dribbling tiny frames — never sending its
-/// terminal `Exit`/`TimedOut` — trips `wall` and yields [`VmmError::ExecUnresponsive`], rather than
+/// A guest that keeps the per-read idle timer alive by dribbling tiny frames, never sending its
+/// terminal `Exit`/`TimedOut`, trips `wall` and yields [`VmmError::ExecUnresponsive`], rather than
 /// parking the caller indefinitely. Factored out of [`RunningVm::exec`] so it can be tested without a VM.
 /// The host-enforced bounds on one exec, bundled so they travel together (and to keep `run_exec`
 /// under the argument-count limit). Seeds the hoster-tunable per-run resource policy the timeout
@@ -79,7 +79,7 @@ pub(crate) struct ExecBounds {
     /// The guest's command wall-clock budget, sent to the agent as `timeout_ms`; the agent kills the
     /// command past it and reports `TimedOut`.
     pub(crate) timeout: Duration,
-    /// The *host's* own deadline on the collect loop — `timeout` + kill slack — so a guest that never
+    /// The *host's* own deadline on the collect loop, `timeout` + kill slack, so a guest that never
     /// reports the command's end can't park `exec` forever. Trips [`VmmError::ExecUnresponsive`].
     pub(crate) wall: Duration,
     /// Aggregate cap on buffered stdout+stderr+artifacts, so a flooding guest can't grow host memory.
@@ -87,9 +87,9 @@ pub(crate) struct ExecBounds {
 }
 
 /// Encode a command budget as the wire `timeout_ms`, **floored at 1 ms**. The guest reads a
-/// `timeout_ms` of `0` as "no limit — use my 1 h `MAX_EXEC_TIMEOUT` ceiling" (`budget_from`), so a
+/// `timeout_ms` of `0` as "no limit, use my 1 h `MAX_EXEC_TIMEOUT` ceiling" (`budget_from`), so a
 /// nonzero-but-sub-millisecond budget (e.g. `Duration::from_micros(500)`) must not truncate to `0`
-/// and silently become *unbounded*, inverting the timeout ladder — the host's `ExecUnresponsive`
+/// and silently become *unbounded*, inverting the timeout ladder, the host's `ExecUnresponsive`
 /// backstop would then be what cuts the run, not the cooperative `ExecTimeout`. The host never means
 /// "unlimited" (every exec carries a real budget), so the floor is unconditional: a real budget
 /// always encodes to a real, nonzero limit. Saturates rather than wraps for absurd budgets.
@@ -110,12 +110,12 @@ pub(crate) fn run_exec<S: Read + Write>(
 ) -> Result<RunResult, VmmError> {
     // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
     // operator's stderr), keyed by argv so `agent run` failures are diagnosable host-side. The env
-    // *count* only — never a value, and not even the key list — per the secret-hygiene contract.
+    // *count* only, never a value, and not even the key list, per the secret-hygiene contract.
     let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _span = span.enter();
     let started = Instant::now();
     // The host's own deadline, independent of the socket's per-read idle timeout. A `Duration::MAX`
-    // "no limit" must stay a *bounded* wait, not an `Instant + Duration` overflow panic — clamp to a
+    // "no limit" must stay a *bounded* wait, not an `Instant + Duration` overflow panic, clamp to a
     // day (mirrors the boot deadline).
     let deadline = started
         .checked_add(bounds.wall)
@@ -125,7 +125,7 @@ pub(crate) fn run_exec<S: Read + Write>(
     // presumption (the secret-hygiene contract on `RunningVm::exec_with_files`): the borrowed-send
     // path serializes straight from the caller's slices into a single exact-sized wire buffer that
     // the channel wipes after each send (decision 018), so the engine keeps no extra copy of a file
-    // body or env value to strand — and nothing on this path logs one. `?` yields
+    // body or env value to strand, and nothing on this path logs one. `?` yields
     // `VmmError::Channel(..)`, preserving the source.
     for (path, data) in files_in {
         conn.send_put_file(path, data)?;
@@ -142,11 +142,11 @@ pub(crate) fn run_exec<S: Read + Write>(
     loop {
         // The host's own wall-clock deadline, checked *before* each blocking read. The socket's
         // per-read idle timeout is reset by every frame, so a guest that dribbles tiny well-formed
-        // frames — never sending its terminal `Exit`/`TimedOut` — would otherwise keep this loop
+        // frames, never sending its terminal `Exit`/`TimedOut`, would otherwise keep this loop
         // alive indefinitely under the output cap. `wall` outlasts the guest's own `TimedOut`, so a
         // legitimate timeout still arrives as `ExecTimeout`; this only fires for a non-reporting
         // guest. Worst case the loop is parked in `recv_response` when the deadline passes, so the
-        // real bound is `deadline + one idle period` — bounded, not a hang.
+        // real bound is `deadline + one idle period`, bounded, not a hang.
         if Instant::now() >= deadline {
             return Err(VmmError::ExecUnresponsive { limit: bounds.wall });
         }
@@ -207,11 +207,11 @@ pub(crate) fn run_exec<S: Read + Write>(
                     limit: bounds.timeout,
                 });
             }
-            // A guest-side fault on a healthy channel — distinct from a transport failure.
+            // A guest-side fault on a healthy channel, distinct from a transport failure.
             Response::Error(msg) => return Err(VmmError::GuestExec(msg)),
             // A well-framed frame the exec loop never expects here (a stray `PutFile` echo, a
             // second handshake): the channel is intact but the guest is off-script. A protocol
-            // violation, same bucket as a bad artifact path — the guest's fault, not the host's.
+            // violation, same bucket as a bad artifact path, the guest's fault, not the host's.
             _ => {
                 return Err(VmmError::GuestProtocol(
                     "unexpected response frame from guest agent".into(),
@@ -227,7 +227,7 @@ pub(crate) fn run_exec<S: Read + Write>(
 }
 
 /// Whether a guest-returned artifact path is safe to hand an embedder: a non-empty **relative** path
-/// whose every component is a plain name or `.` — no absolute root, no `..` climb. The guest names
+/// whose every component is a plain name or `.`, no absolute root, no `..` climb. The guest names
 /// these paths and the guest agent is not the trust boundary, so this is the public API's containment
 /// guarantee: `RunResult.files` never carries a path that would write outside a caller's working
 /// tree. Mirrors the check the CLI's `write_artifacts` used to be the sole owner of, lifted here so
@@ -244,10 +244,10 @@ fn artifact_path_is_safe(path: &str) -> bool {
 /// ack, with read/write deadlines set.
 fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream, VmmError> {
     // `connect` is the one step without a deadline (std has no `UnixStream::connect_timeout`), but
-    // the peer is Firecracker's own vsock socket — created pre-`InstanceStart` and accepting
-    // promptly — so it returns or refuses at once; every step after this is deadline-bounded.
+    // the peer is Firecracker's own vsock socket, created pre-`InstanceStart` and accepting
+    // promptly, so it returns or refuses at once; every step after this is deadline-bounded.
     // ECONNREFUSED means the socket file exists but nothing accepts: a dead VMM's stale socket (a
-    // pooled clone that crashed) — the retryable/discard signal, not broken infra.
+    // pooled clone that crashed), the retryable/discard signal, not broken infra.
     let mut stream = UnixStream::connect(uds).map_err(|e| {
         let detail = format!("connect vsock socket {}: {e}", uds.display());
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
@@ -278,7 +278,7 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
         match stream.read(&mut byte) {
             Ok(0) => {
                 // Firecracker closes the connection with no ack when nothing is listening on the
-                // guest port — the canonical "agent not up yet / not anymore" signal, typed so a
+                // guest port, the canonical "agent not up yet / not anymore" signal, typed so a
                 // retry/pool caller can branch on it (the deferred variant, landed with the pool).
                 return Err(VmmError::GuestUnavailable(format!(
                     "vsock CONNECT {port}: peer closed before ack (is the guest agent listening?)"
@@ -311,7 +311,7 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
     if ack.starts_with("OK ") {
         Ok(())
     } else {
-        // A well-formed non-OK ack is Firecracker refusing the port — same "nothing listening"
+        // A well-formed non-OK ack is Firecracker refusing the port, same "nothing listening"
         // semantics as the peer-close above, so the same retryable variant.
         Err(VmmError::GuestUnavailable(format!(
             "vsock CONNECT {port} refused: {ack:?} (is the guest agent listening?)"
@@ -337,7 +337,7 @@ mod tests {
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept");
-            // Read `CONNECT <port>\n` one byte at a time — mustn't over-read the client handshake.
+            // Read `CONNECT <port>\n` one byte at a time, mustn't over-read the client handshake.
             let mut b = [0u8; 1];
             loop {
                 stream.read_exact(&mut b).expect("read CONNECT");
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn exec_over_fake_vsock_runs_a_command() {
-        // Happy path: `exec("echo hi")` → `hi`, exit 0 — through the *real* agent (only the
+        // Happy path: `exec("echo hi")` → `hi`, exit 0, through the *real* agent (only the
         // Firecracker vsock UDS is faked).
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-echo");
         let mut conn =
@@ -510,7 +510,7 @@ mod tests {
         hostile.join().expect("hostile server thread");
     }
 
-    /// A `Write` sink appending into a shared buffer — the capture target for the leak test's
+    /// A `Write` sink appending into a shared buffer, the capture target for the leak test's
     /// tracing subscribers (`with_default` is thread-local, so each thread installs its own
     /// subscriber over one shared buffer).
     #[derive(Clone, Default)]
@@ -550,7 +550,7 @@ mod tests {
     fn injected_secrets_reach_no_observable_surface() {
         // The secret-hygiene leak test (host half): drive a succeeding exec whose
         // env value and injected file hold a sentinel, and a failing injection whose *data* holds
-        // it, while capturing — at TRACE — every log line the driver and the in-process real agent
+        // it, while capturing, at TRACE, every log line the driver and the in-process real agent
         // emit. The sentinel may appear only in the RunResult (the caller's own data); never in a
         // log line, never in an error's Display/Debug (which may name the *path*). The console
         // surface needs a real VM; that half lives in the integration suite (tests/sandbox.rs).
@@ -619,7 +619,7 @@ mod tests {
         });
         server.join().expect("server thread");
 
-        // The run received both inputs — RunResult is the caller's data, the one allowed surface.
+        // The run received both inputs, RunResult is the caller's data, the one allowed surface.
         let stdout = String::from_utf8_lossy(&result.stdout);
         assert_eq!(stdout, format!("{SENTINEL} {SENTINEL}"));
         // The failure is typed, names the path, and carries none of the data.
@@ -633,7 +633,7 @@ mod tests {
             display.contains("escape.txt"),
             "the error should still name the offending path: {display}"
         );
-        // Every captured log line, both sides, at TRACE: non-empty (the capture worked — the two
+        // Every captured log line, both sides, at TRACE: non-empty (the capture worked, the two
         // exec spans are in there) and sentinel-free.
         let logs = sink.contents();
         assert!(
@@ -675,7 +675,7 @@ mod tests {
     #[test]
     fn exec_signal_death_is_a_faithful_result_not_an_error() {
         // The load-bearing taxonomy semantic: a command that *runs and crashes* (here SIGKILL via
-        // `kill -9 $$`) is NOT a `VmmError` — the agent maps signal death to `128+sig` and the host
+        // `kill -9 $$`) is NOT a `VmmError`, the agent maps signal death to `128+sig` and the host
         // returns a faithful `RunResult{exit_code: 137}`. This pins the *host*-side mapping in
         // `run_exec`; the guest-agent-layer version lives in crates/guest-agent/tests/exec.rs.
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-signal");
@@ -700,7 +700,7 @@ mod tests {
     }
 
     /// A fake vsock peer that answers `CONNECT`, does the channel handshake, then hands the
-    /// [`ServerConnection`](agent_channel::ServerConnection) to `handler` — so a test can craft the
+    /// [`ServerConnection`](agent_channel::ServerConnection) to `handler`, so a test can craft the
     /// exact response stream (unlike `fake_vsock_agent`, which runs the real agent).
     fn fake_vsock_server<F>(
         tag: &str,
@@ -766,7 +766,7 @@ mod tests {
         // conversion at the vmm layer.
         let (_dir, uds, server) = fake_vsock_server("agent-vsock-drop", |mut conn| {
             let _ = conn.recv_request();
-            drop(conn); // no response frames — the host's next read sees a clean EOF
+            drop(conn); // no response frames, the host's next read sees a clean EOF
         });
         let mut conn =
             connect_agent_at(&uds, AGENT_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
@@ -830,7 +830,7 @@ mod tests {
     #[test]
     fn exec_maps_guest_timeout_to_typed_timeout() {
         // The agent's terminal `TimedOut` (command killed at its deadline) becomes the distinct
-        // VmmError::ExecTimeout — not conflated with a channel/transport timeout.
+        // VmmError::ExecTimeout, not conflated with a channel/transport timeout.
         let (_dir, uds, server) = fake_vsock_server("agent-vsock-timeout", |mut conn| {
             let _ = conn.recv_request();
             let _ = conn.send_response(&Response::TimedOut { elapsed_ms: 1000 });
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn output_cap_counts_file_path_bytes_not_just_data() {
         // Regression: a guest flooding File frames whose budget is spent on `path` (empty `data`)
-        // must still trip the cap — path bytes and a per-frame floor count toward it.
+        // must still trip the cap, path bytes and a per-frame floor count toward it.
         let (_dir, uds, server) = fake_vsock_server("agent-vsock-pathflood", |mut conn| {
             let _ = conn.recv_request();
             let big_path = "p".repeat(4096);
@@ -898,7 +898,7 @@ mod tests {
         // under the output cap. The host's own `wall` must give up with `ExecUnresponsive`, fast.
         let (_dir, uds, server) = fake_vsock_server("agent-vsock-dribble", |mut conn| {
             let _ = conn.recv_request();
-            // Dribble every 50 ms — well under the 200 ms idle timeout, so the idle timer never
+            // Dribble every 50 ms, well under the 200 ms idle timeout, so the idle timer never
             // fires; only the host's wall deadline can end this.
             while conn.send_response(&Response::Stdout(vec![b'x'; 8])).is_ok() {
                 std::thread::sleep(Duration::from_millis(50));
@@ -918,7 +918,7 @@ mod tests {
             &[],
             ExecBounds {
                 timeout: Duration::from_millis(100), // guest budget (the fake server ignores it)
-                wall: Duration::from_millis(150),    // host wall deadline — under test
+                wall: Duration::from_millis(150),    // host wall deadline, under test
                 max_output: MAX_EXEC_OUTPUT,
             },
         )

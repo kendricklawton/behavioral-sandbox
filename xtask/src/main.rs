@@ -1,53 +1,53 @@
-//! `cargo xtask <cmd>` — dev orchestration for the agent sandbox engine.
+//! `cargo xtask <cmd>`, dev orchestration for the agent sandbox engine.
 //!
-//! - **`ci`** — the host-safe gate (fmt · clippy `-D warnings` · build · test · docs · `deny`).
+//! - **`ci`**, the host-safe gate (fmt · clippy `-D warnings` · build · test · docs · `deny`).
 //!   Runs everywhere, needs no KVM or root, and mirrors `.github/workflows/ci.yml`.
-//! - **`ci-privileged`** — the KVM/eBPF integration tests (the `#[ignore]`d ones). Needs
+//! - **`ci-privileged`**, the KVM/eBPF integration tests (the `#[ignore]`d ones). Needs
 //!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop. Builds the guest
 //!   agent + the agent rootfs first, so the in-VM exec test has something to boot.
-//! - **`setup`** — checks the host can do KVM + eBPF and reports what's missing.
-//! - **`self-host`** — the single self-host command: obtain the pinned kernel + rootfs, build the
+//! - **`setup`**, checks the host can do KVM + eBPF and reports what's missing.
+//! - **`self-host`**, the single self-host command: obtain the pinned kernel + rootfs, build the
 //!   guest image + eBPF object, install `agent`/`agentd`, and (on a KVM host) boot one sandbox to
 //!   prove it. Offline when `AGENT_VENDOR_DIR` points at a `vendor` mirror.
-//! - **`vendor`** — snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
+//! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
 //!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
 //!   bucket or the Alpine CDN; `--verify` re-checks the mirror offline.
-//! - **`build-probes`** — build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via
+//! - **`build-probes`**, build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via
 //!   `bpf-linker`, under the crate's own nightly toolchain. Host-safe (no KVM); skips with a note
 //!   when `bpf-linker`/`rustup` are absent.
-//! - **`build-rootfs`** — assemble the reproducible guest rootfs (Alpine base + baked-in agent).
-//! - **`bench-boot`** — measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
-//! - **`bench-warm`** — the three start paths' latency percentiles: cold boot vs prewarmed-snapshot
+//! - **`build-rootfs`**, assemble the reproducible guest rootfs (Alpine base + baked-in agent).
+//! - **`bench-boot`**, measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
+//! - **`bench-warm`**, the three start paths' latency percentiles: cold boot vs prewarmed-snapshot
 //!   restore vs prewarmed-pool take, each split into its isolated start and its time-to-first-result.
 //!   Needs KVM + the built agent rootfs.
-//! - **`bench-density`** — memory-sharing under concurrency: summed Rss vs Pss as prewarmed clones
+//! - **`bench-density`**, memory-sharing under concurrency: summed Rss vs Pss as prewarmed clones
 //!   stack up, and how many fit before it degrades. Needs KVM + the built agent rootfs.
-//! - **`bench-footprint`** — per-sandbox memory footprint and the overlay/rootfs choice's effect:
+//! - **`bench-footprint`**, per-sandbox memory footprint and the overlay/rootfs choice's effect:
 //!   per-VM Pss + whole-host cost per sandbox for cold RW-copy vs cold shared-base vs restore. Needs
 //!   KVM + the built agent rootfs.
-//! - **`bench-all`** — the whole suite as one reproducible report, methodology stated + host recorded;
+//! - **`bench-all`**, the whole suite as one reproducible report, methodology stated + host recorded;
 //!   sections whose prerequisite is missing are skipped with the reason. The written report is
 //!   `docs/benchmarks.md`.
-//! - **`bench-trace`** — the syscall-tracing overhead: per-`openat` cost with no probes vs
+//! - **`bench-trace`**, the syscall-tracing overhead: per-`openat` cost with no probes vs
 //!   attached-but-filtered-out vs attached-and-capturing. Needs `CAP_BPF`+`CAP_PERFMON` + the built
 //!   object (not KVM).
-//! - **`trace-sandbox`** — the syscall-trace demo: boot a real sandbox and stream its
+//! - **`trace-sandbox`**, the syscall-trace demo: boot a real sandbox and stream its
 //!   cgroup-attributed host syscall footprint. Needs KVM + the agent rootfs + `CAP_BPF` + the object.
-//! - **`watch-sandbox`** — the network-observability demo: boot a real networked sandbox and watch its
+//! - **`watch-sandbox`**, the network-observability demo: boot a real networked sandbox and watch its
 //!   per-VM network flows on the tap. Needs KVM + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
-//! - **`enforce-sandbox`** — the egress-enforcement demo: boot a real networked sandbox, arm a
+//! - **`enforce-sandbox`**, the egress-enforcement demo: boot a real networked sandbox, arm a
 //!   deny-by-default egress policy allowing one endpoint, and show the allow-listed traffic passing while
 //!   everything else is dropped at the tap and logged. Same needs as `watch-sandbox`.
-//! - **`bench-meter`** — the resource-metering overhead: per-context-switch cost with no meter vs
+//! - **`bench-meter`**, the resource-metering overhead: per-context-switch cost with no meter vs
 //!   attached-but-not-metering-us vs attached-and-metering-us. Needs `CAP_BPF`+`CAP_PERFMON` + the built
 //!   object (not KVM).
-//! - **`bench-scale`** — the probe overhead *under load*: per-event cost as the watched-target set
+//! - **`bench-scale`**, the probe overhead *under load*: per-event cost as the watched-target set
 //!   (concurrent sandboxes) grows 1 → 512, showing it stays flat (O(1) lookup). Same needs as
 //!   `bench-meter`.
-//! - **`meter-sandbox`** — the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
+//! - **`meter-sandbox`**, the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
-//! - **`fuzz`** — deep `cargo fuzz` (libFuzzer) runs against the host↔guest channel decoders (the
+//! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the host↔guest channel decoders (the
 //!   guest→host untrusted-input boundary). Nightly + `cargo install cargo-fuzz`; never part of `ci`
 //!   (the in-gate coverage is `crates/channel`'s dependency-free `fuzz_tests`).
 //!
@@ -90,7 +90,7 @@ struct Cli {
 enum Cmd {
     /// Host-safe gate: fmt · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
-    /// Privileged integration tests (KVM + eBPF) — the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
+    /// Privileged integration tests (KVM + eBPF), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
     CiPrivileged,
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
@@ -106,14 +106,14 @@ enum Cmd {
         no_run: bool,
     },
     /// Snapshot every sha-pinned upstream input (guest kernel + rootfs, Alpine base, the `.apk`
-    /// closure) into a local mirror, so a fresh host builds offline — no Firecracker S3 bucket, no
+    /// closure) into a local mirror, so a fresh host builds offline, no Firecracker S3 bucket, no
     /// Alpine CDN. Writes a sha manifest; re-verify it offline with `--verify`.
     Vendor {
         /// The mirror directory to populate or verify (default `vendor/` under the workspace root).
         #[arg(long, value_name = "DIR")]
         dir: Option<PathBuf>,
         /// Re-verify an existing mirror against its manifest (every file must still match its hash)
-        /// instead of (re)downloading — an offline integrity check, no upstream contact.
+        /// instead of (re)downloading, an offline integrity check, no upstream contact.
         #[arg(long)]
         verify: bool,
     },
@@ -125,7 +125,7 @@ enum Cmd {
     FetchArtifacts,
     /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
     BuildGuestAgent,
-    /// Build the static native-ELF fixture (`examples/writefile`) for the guest target — the
+    /// Build the static native-ELF fixture (`examples/writefile`) for the guest target, the
     /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
     BuildGuestExample,
     /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
@@ -136,7 +136,7 @@ enum Cmd {
         /// package closure has drifted from the committed lockfile. The reproducibility gate.
         #[arg(long)]
         verify: bool,
-        /// Re-record the resolved package closure into the committed lockfile — the "re-pin" step
+        /// Re-record the resolved package closure into the committed lockfile, the "re-pin" step
         /// after Alpine's branch repo bumps a package out from under the floating install.
         #[arg(long)]
         update_lock: bool,
@@ -145,7 +145,7 @@ enum Cmd {
     /// shared base and the read-write per-VM copy, so the base **size**'s effect on boot is visible
     ///. Needs `/dev/kvm` + the built agent rootfs.
     BenchBoot {
-        /// How many boots to time per path (more → tighter tail percentiles). Default 100 — the
+        /// How many boots to time per path (more → tighter tail percentiles). Default 100, the
         /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
         #[arg(long, default_value_t = 100)]
         runs: usize,
@@ -215,7 +215,7 @@ enum Cmd {
         runs: usize,
     },
     /// Measure the eBPF overhead under load: sweep the watched-target-set size (1 → 512) for the shared
-    /// syscall tracer and `sched_switch` meter and show the per-event cost stays flat — an O(1) map
+    /// syscall tracer and `sched_switch` meter and show the per-event cost stays flat, an O(1) map
     /// lookup, so overhead scales with the event rate, not the number of concurrent sandboxes. Needs
     /// `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes` (not KVM).
     BenchScale {
@@ -224,7 +224,7 @@ enum Cmd {
         runs: usize,
     },
     /// The syscall-trace demo: boot a real sandbox and stream its host syscall footprint,
-    /// attributed to the sandbox's cgroup (the VMM's host syscalls — the guest's stay in-guest).
+    /// attributed to the sandbox's cgroup (the VMM's host syscalls, the guest's stay in-guest).
     /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
     TraceSandbox {
         /// Seconds to keep streaming the live trace after the boot+exec window is printed (`0` = just
@@ -247,10 +247,10 @@ enum Cmd {
     EnforceSandbox,
     /// The resource-metering demo: boot a real sandbox, meter its cgroup with the `sched_switch`
     /// accounting probe, and show an idle guest charging near-zero host CPU while a CPU-heavy guest charges
-    /// most of a core — plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
+    /// most of a core, plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
     /// `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
     MeterSandbox,
-    /// Fuzz the host↔guest channel decoders with `cargo fuzz` (libFuzzer) — the deep, nightly-only
+    /// Fuzz the host↔guest channel decoders with `cargo fuzz` (libFuzzer), the deep, nightly-only
     /// counterpart to the channel crate's in-gate `fuzz_tests`. Needs `cargo install cargo-fuzz` + a
     /// nightly toolchain; never part of `ci`. Targets: `channel_response` (default), `channel_request`,
     /// `channel_frame`, `channel_handshake`.
@@ -303,7 +303,7 @@ fn main() -> Result<()> {
 
 /// Run a `cargo fuzz` (libFuzzer) target against the channel decoders. cargo-fuzz drives libFuzzer
 /// under a nightly toolchain, both opt-in installs, so this bails with guidance rather than
-/// pretending — and it is never wired into `ci` (the in-gate coverage is the channel crate's
+/// pretending, and it is never wired into `ci` (the in-gate coverage is the channel crate's
 /// dependency-free `fuzz_tests`). See `docs/contributing-fuzzing.md`.
 fn fuzz(target: &str, seconds: u64) -> Result<()> {
     if !cargo_fuzz_available() {
@@ -363,7 +363,7 @@ fn ci() -> Result<()> {
         &[("RUSTDOCFLAGS", "-D warnings")],
     )?;
     cargo(&["deny", "check"])?;
-    // The eBPF object build is part of the CI gate. Host-safe and guarded — it skips with a note
+    // The eBPF object build is part of the CI gate. Host-safe and guarded, it skips with a note
     // when `bpf-linker`/`rustup` are absent, so `ci` still runs everywhere, but on a set-up dev box a
     // probe that fails to compile (or drops its BTF) now fails here, not later at load.
     build_probes()?;
@@ -380,7 +380,7 @@ fn ci_privileged() -> Result<()> {
     // This gate builds and verifies the static guest agent (below), and that verification is the
     // *only* thing standing between a silently-reintroduced dynamic dependency and a confusing
     // in-guest loader failure. `verify_static` soft-skips when `readelf` is absent (so ad-hoc
-    // `build-rootfs` still works), so require it *here* — a missing binutils must fail the CI gate
+    // `build-rootfs` still works), so require it *here*, a missing binutils must fail the CI gate
     // loudly, not quietly disarm the check.
     if !in_path("readelf") {
         bail!(
@@ -390,7 +390,7 @@ fn ci_privileged() -> Result<()> {
     }
     // The boot tests need the pinned kernel + rootfs; fail with the fix rather than a cryptic
     // boot error. `fetch-artifacts` (not this gate) does the network download; here we verify
-    // the hashes too — the sha256 is the contract, and a hand-placed or corrupted artifact
+    // the hashes too, the sha256 is the contract, and a hand-placed or corrupted artifact
     // should fail this gate, not the boot inside it.
     for a in artifacts::artifacts()? {
         if !a.dest.is_file() {
@@ -410,14 +410,14 @@ fn ci_privileged() -> Result<()> {
             );
         }
     }
-    // The in-VM exec test boots a rootfs with the agent baked in — build it here (not from inside a
+    // The in-VM exec test boots a rootfs with the agent baked in, build it here (not from inside a
     // `#[test]`, which mustn't shell out to a musl `cargo build`). Idempotent: the Alpine base is
     // cached by sha256, so this is a rebuild of the agent + the image, not a re-download. `--verify`
     // makes this the reproducibility gate: it builds twice, asserts byte-identical, and fails on
     // package-closure drift from the lockfile.
     rootfs::build_rootfs(true, false)?;
     // The runtime-agnostic test injects a static native binary; build it here (musl), like the
-    // agent — the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
+    // agent, the same "don't shell a musl `cargo build` from a `#[test]`" rule. It is a *fixture*,
     // not part of the image, so it's built separately, not baked into the rootfs.
     guest_bins::build_guest_example()?;
     // The eBPF probe tests load the object built from `crates/probes`; build it here (the
@@ -459,7 +459,7 @@ fn setup() -> Result<()> {
         agent_probes_loader::check_support().is_ok(),
     );
 
-    // Dev-toolchain checks — only `xtask` needs these (building the eBPF object, the guest agent,
+    // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
     // verifying static links); an operator running the shipped engine does not, so they are not in
     // the shared `agent doctor` set.
     println!("\ndev toolchain (for building, not running):");
@@ -473,7 +473,7 @@ fn setup() -> Result<()> {
         in_path("readelf"),
     );
 
-    // The degradation matrix — the same fails-open-vs-hard split `agent doctor` prints, from the one
+    // The degradation matrix, the same fails-open-vs-hard split `agent doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.
     println!("\nDegradation matrix — what a missing item above means at runtime:");
     for line in agent_vmm::doctor::matrix() {
@@ -481,7 +481,7 @@ fn setup() -> Result<()> {
     }
 
     // The engine/hoster line (decision 016): the engine guarantees its own privileged tools can't
-    // be weaponized; *deploying* them — as whom, when, over what directory — is the hoster's, and
+    // be weaponized; *deploying* them, as whom, when, over what directory, is the hoster's, and
     // these are the four calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
     println!("\nHardening — the hoster's responsibility (the engine can't decide these for you):");
@@ -518,7 +518,7 @@ fn setup() -> Result<()> {
 ///
 /// Guarded so `cargo xtask` stays runnable everywhere: on a host missing any of the toolchain
 /// (`bpf-linker`, `rustup`, or the nightly + `rust-src` the `build-std` build needs), it prints a
-/// note and returns `Ok` instead of failing — the everyday host gate must not require the eBPF
+/// note and returns `Ok` instead of failing, the everyday host gate must not require the eBPF
 /// toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); this step is folded
 /// into the `ci` gate, and `ci-privileged` builds it before the probe tests.
 fn build_probes() -> Result<()> {
@@ -538,7 +538,7 @@ fn build_probes() -> Result<()> {
     }
     // The build below runs `rustup run nightly cargo build -Z build-std`, which needs the nightly
     // toolchain *and* its `rust-src` component. A host with `rustup` + `bpf-linker` but no nightly
-    // would otherwise fall through to the build and `bail!`, failing the everyday gate — the exact
+    // would otherwise fall through to the build and `bail!`, failing the everyday gate, the exact
     // thing this guard exists to prevent (`ci` must run everywhere). Skip cleanly instead.
     if !nightly_ebpf_ready() {
         println!(
@@ -565,7 +565,7 @@ fn build_probes() -> Result<()> {
              missing nightly toolchain / `rust-src` (see `cargo xtask setup`)"
         );
     }
-    // The object must carry BTF (`bpf-linker --btf`) — the CO-RE portability + BTF map typing
+    // The object must carry BTF (`bpf-linker --btf`), the CO-RE portability + BTF map typing
     // that lets aya relocate it against the running kernel. A missing `.BTF` section means the linker
     // arg regressed to a legacy-only, non-portable object; fail loudly rather than shipping it. The
     // check walks the ELF section headers for a section named exactly `.BTF` (not a raw byte scan,
@@ -587,7 +587,7 @@ fn build_probes() -> Result<()> {
 /// Whether the ELF object in `bytes` has a section named exactly `name` (e.g. `.BTF`). A
 /// dependency-free ELF64 little-endian section-header walk: read the section-header table, resolve
 /// each section's name against the section-header string table, and compare. Precise where a raw
-/// byte-substring scan is not — `.BTF.ext` alone or a coincidental byte run won't satisfy it. Returns
+/// byte-substring scan is not, `.BTF.ext` alone or a coincidental byte run won't satisfy it. Returns
 /// `false` on any malformed or non-ELF64-LE buffer, the safe direction for the build guard (a weird
 /// object fails the check rather than passing it).
 fn elf_has_section(bytes: &[u8], name: &str) -> bool {

@@ -1,4 +1,4 @@
-//! `cargo xtask vendor` — snapshot every sha-pinned upstream input into a **local mirror**, so a
+//! `cargo xtask vendor`, snapshot every sha-pinned upstream input into a **local mirror**, so a
 //! fresh host builds the engine without the Firecracker S3 bucket or the Alpine CDN staying alive.
 //!
 //! This is the durable hardening [decision 007](../../docs/contributing-architecture.md) deferred:
@@ -9,7 +9,7 @@
 //! restores the binary artifacts from the mirror, and the rootfs build installs the packages from the
 //! vendored apk cache (`--no-network`) instead of the CDN.
 //!
-//! The mirror is **not** committed (it's gitignored, like `artifacts/` — the guardrail against
+//! The mirror is **not** committed (it's gitignored, like `artifacts/`, the guardrail against
 //! carrying built/downloaded images in the tree). A self-hoster produces it once and can then rebuild
 //! offline forever; the manifest makes the vendored set auditable and offline-re-verifiable.
 
@@ -53,7 +53,7 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
         download_one(&retarget(a, &dir))?;
     }
 
-    // The `.apk` closure + index — an online `apk add` into a throwaway root, caching every package.
+    // The `.apk` closure + index, an online `apk add` into a throwaway root, caching every package.
     // This is the piece decision 007 called out as "fetched-not-pinned"; the manifest below pins it.
     println!("\n↓ resolving + caching the guest package closure ...");
     populate_apk_cache(&dir.join(APK_CACHE_SUBDIR), &alpine_tar, &apk_tools_tar)?;
@@ -73,7 +73,7 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-/// Re-verify a vendored mirror against its manifest — every listed file must still hash to its
+/// Re-verify a vendored mirror against its manifest, every listed file must still hash to its
 /// recorded sha256. Offline (no upstream contact), so a self-hoster can prove the mirror is intact
 /// before an offline build, and a bit-rotted or tampered file fails loudly here.
 pub(crate) fn verify(dir: &Path) -> Result<()> {
@@ -106,7 +106,7 @@ pub(crate) fn verify(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The final path component of an artifact's `dest`, as a `String` — the name it carries in the
+/// The final path component of an artifact's `dest`, as a `String`, the name it carries in the
 /// vendor mirror.
 fn artifact_name(a: &Artifact) -> String {
     a.dest
@@ -125,7 +125,7 @@ fn retarget(a: Artifact, dir: &Path) -> Artifact {
     }
 }
 
-/// Every file under `root` (recursively), as sorted `(sha256, relative_path)` pairs — the manifest
+/// Every file under `root` (recursively), as sorted `(sha256, relative_path)` pairs, the manifest
 /// body. The manifest file itself is skipped (it can't record its own hash).
 fn hash_tree(root: &Path) -> Result<Vec<(String, String)>> {
     let mut files = Vec::new();
@@ -177,7 +177,7 @@ fn render_manifest(entries: &[(String, String)]) -> String {
     out
 }
 
-/// Parse a manifest back into `(sha256, relpath)` pairs, skipping comments and blank lines — the
+/// Parse a manifest back into `(sha256, relpath)` pairs, skipping comments and blank lines, the
 /// inverse of [`render_manifest`].
 fn parse_manifest(text: &str) -> Vec<(String, String)> {
     text.lines()

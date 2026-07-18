@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use crate::VmmError;
 
 /// Cap on the captured console (the most recent bytes are kept). A guest that floods its serial
-/// port must not grow host memory without bound — a hostile guest never causes a leak. Boot output
+/// port must not grow host memory without bound, a hostile guest never causes a leak. Boot output
 /// is tens of KiB, so the userspace marker is never dropped while it still matters.
 const CONSOLE_CAP: usize = 1 << 20; // 1 MiB
 /// The captured serial console: a background thread appends the child's stdout into a shared
@@ -25,7 +25,7 @@ impl Console {
     /// and a chatty boot would deadlock the guest if we only read after starting it.
     ///
     /// # Errors
-    /// [`VmmError::Vmm`] if the OS refuses a new thread (`thread::spawn` would *panic* on that —
+    /// [`VmmError::Vmm`] if the OS refuses a new thread (`thread::spawn` would *panic* on that,
     /// EAGAIN is a real state under many-sandbox load, so it must stay a typed error).
     pub(crate) fn spawn(stdout: Option<ChildStdout>) -> Result<Self, VmmError> {
         let buf: Arc<Mutex<Vec<u8>>> = Arc::default();
@@ -79,7 +79,7 @@ impl Console {
     }
 }
 
-/// The last `n` non-empty lines of `text`, oldest first, joined with ` | ` — `None` if there are
+/// The last `n` non-empty lines of `text`, oldest first, joined with ` | `, `None` if there are
 /// none. Diagnostic tails for error enrichment.
 pub(crate) fn last_lines(text: &str, n: usize) -> Option<String> {
     let tail: Vec<&str> = text

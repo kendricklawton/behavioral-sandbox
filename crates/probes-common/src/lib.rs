@@ -6,7 +6,7 @@
 //!
 //! The type is `#[repr(C)]` with fields ordered large-to-small so the layout is padding-free and
 //! stable, and both sides run on the same host (one kernel, one userspace) so native byte order is
-//! shared — [`from_bytes`](SyscallEvent::from_bytes) reads each field with `from_ne_bytes`, no
+//! shared, [`from_bytes`](SyscallEvent::from_bytes) reads each field with `from_ne_bytes`, no
 //! `unsafe`, no transmute. `#![no_std]` with zero dependencies so it compiles for the BPF target
 //! unchanged; the `std` feature (enabled by the userspace loader, and by the crate's own tests) opts
 //! back into `std` for the ergonomic [`SyscallEvent::comm_lossy`] helper.
@@ -22,7 +22,7 @@ pub const COMM_CAP: usize = 16;
 pub const DETAIL_CAP: usize = 128;
 
 /// How many leading bytes of a `connect` sockaddr the probe copies into [`SyscallEvent::detail`].
-/// 16 is `sizeof(struct sockaddr_in)` — a full IPv4 address (family + port + addr); an IPv6 sockaddr
+/// 16 is `sizeof(struct sockaddr_in)`, a full IPv4 address (family + port + addr); an IPv6 sockaddr
 /// is captured only up to here (family + port + the first 8 bytes), enough to identify the family and
 /// port without risking an over-read past a short user buffer.
 pub const SOCKADDR_SNAP: usize = 16;
@@ -45,12 +45,12 @@ pub enum Syscall {
 /// One host syscall observed by the probes, as written into the ring buffer. `#[repr(C)]` and
 /// padding-free (fields large-to-small: the `u64` first, then the `u32`s, then the byte arrays), so
 /// [`from_bytes`](Self::from_bytes) can read it field by field at fixed offsets. This is the **host's**
-/// footprint (a microVM services its own syscalls in-guest and they never trap here — see the crate
+/// footprint (a microVM services its own syscalls in-guest and they never trap here, see the crate
 /// docs).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SyscallEvent {
-    /// The cgroup id of the process that made the syscall (`bpf_get_current_cgroup_id`) — the axis a
+    /// The cgroup id of the process that made the syscall (`bpf_get_current_cgroup_id`), the axis a
     /// sandbox's host footprint is attributed and filtered on.
     pub cgroup_id: u64,
     /// The thread-group id (the userspace "pid") of the process.
@@ -74,7 +74,7 @@ pub const EVENT_SIZE: usize = core::mem::size_of::<SyscallEvent>();
 
 impl SyscallEvent {
     /// Reconstruct an event from a ring-buffer record's raw bytes, or `None` if the slice is too
-    /// short. Reads each field at its fixed `#[repr(C)]` offset with `from_ne_bytes` — safe, no
+    /// short. Reads each field at its fixed `#[repr(C)]` offset with `from_ne_bytes`, safe, no
     /// transmute, and defined next to the field list so it can't drift from the kernel writer.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
@@ -203,7 +203,7 @@ pub const ETH_P_IP: u16 = 0x0800;
 /// EtherType for ARP. Egress enforcement lets ARP through even under deny-by-default: the guest must
 /// resolve its on-link gateway (`10.200.0.1`, decision 017) before it can reach *any* allowed endpoint.
 pub const ETH_P_ARP: u16 = 0x0806;
-/// An L4 protocol an egress rule (or a flow) is matched on — the typed face of the raw IP protocol
+/// An L4 protocol an egress rule (or a flow) is matched on, the typed face of the raw IP protocol
 /// number the wire carries. A caller writes `Protocol::Udp`, never `17`. Only the two protocols the
 /// parser reads ports for; "any protocol" is [`None`], not a variant (see [`PolicyRule`]). `#[repr(u8)]`
 /// with the on-wire IP protocol number as the discriminant, so [`as_u8`](Self::as_u8) is the value the
@@ -218,7 +218,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    /// The on-wire IP protocol number (`6`/`17`) — the byte the kernel matches and the map stores.
+    /// The on-wire IP protocol number (`6`/`17`), the byte the kernel matches and the map stores.
     #[must_use]
     pub fn as_u8(self) -> u8 {
         self as u8
@@ -243,7 +243,7 @@ pub const IPPROTO_TCP: u8 = Protocol::Tcp as u8;
 pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 
 /// One **directional** network flow's identity: the IPv4 5-tuple, in host byte order (so a consumer
-/// formats `src_addr` straight to dotted-quad). `#[repr(C)]` and padding-free — the trailing `_pad` is
+/// formats `src_addr` straight to dotted-quad). `#[repr(C)]` and padding-free, the trailing `_pad` is
 /// explicit and always zero because this is a BPF **hash-map key**: an uninitialized pad byte would
 /// make two identical flows hash to different slots. 16 bytes; build it with [`FlowKey::new`], which
 /// zeroes the pad.
@@ -283,7 +283,7 @@ impl FlowKey {
 
     /// Reconstruct a key from a map key's raw bytes (as the loader reads them), or `None` if the slice
     /// is too short. Reads each field at its fixed `#[repr(C)]` offset with `from_ne_bytes` (same host,
-    /// shared byte order) — no `unsafe`, no transmute, defined next to the fields so it can't drift from
+    /// shared byte order), no `unsafe`, no transmute, defined next to the fields so it can't drift from
     /// the kernel writer.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
@@ -389,7 +389,7 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
 // a guest-sent packet. Single-sourced here so the in-kernel matcher and the host-tested one can't drift.
 // ---------------------------------------------------------------------------
 
-/// How many egress allow-rules a sandbox's policy holds — a fixed bound, because the tc program scans
+/// How many egress allow-rules a sandbox's policy holds, a fixed bound, because the tc program scans
 /// the whole array in a **bounded loop** (the verifier needs a compile-time cap) and BPF maps are sized
 /// at load. Comfortably covers a per-sandbox allow-list of a handful of endpoints.
 pub const MAX_POLICY_RULES: usize = 16;
@@ -448,7 +448,7 @@ impl PolicyRule {
         b
     }
 
-    /// Reconstruct a rule from a map value's raw bytes, or `None` if the slice is too short — the
+    /// Reconstruct a rule from a map value's raw bytes, or `None` if the slice is too short, the
     /// read-side twin of [`to_bytes`](Self::to_bytes), defined next to the fields so it can't drift.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {

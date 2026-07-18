@@ -1,17 +1,17 @@
 //! The reference **Rust client** for the `agentd` wire API (Phase 16): drive a sandbox **session**
-//! over a unix socket — `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close` — using
+//! over a unix socket, `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`, using
 //! nothing but the shared wire contract ([`agentd_protocol`]) and a JSON value for the opaque trace
 //! record.
 //!
 //! **This is the proof, and the seed.** The proof: it links **no `agent-vmm`**, so it demonstrates
-//! that a caller drives the daemon with only a JSON library and a unix socket — the exact surface a
+//! that a caller drives the daemon with only a JSON library and a unix socket, the exact surface a
 //! non-Rust SDK has. The seed: the polyglot SDKs (Go/Python/Node/C#, Phase 20) are this client's
 //! shape hardened per language, so its method set *is* the SDK's method set.
 //!
 //! **Synchronous and blocking**, matching the daemon: one [`Client`] owns one connection (one
 //! session), each call sends a request line and blocks for the one response line. Errors are typed
-//! ([`ClientError`]) — a decode fault, a remote [`Error`](agentd_protocol::Response::Error), or an
-//! unexpected reply — never a panic.
+//! ([`ClientError`]), a decode fault, a remote [`Error`](agentd_protocol::Response::Error), or an
+//! unexpected reply, never a panic.
 //!
 //! ```no_run
 //! use agentd_client::Client;
@@ -32,13 +32,13 @@ use std::time::Duration;
 
 use agentd_protocol::{read_message, write_message, ProtocolError, Request, Response};
 
-/// Everything a client call can fail with, typed — never a panic.
+/// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]
 pub enum ClientError {
     /// The wire framing/decoding failed (I/O, a malformed line, a schema mismatch, an over-cap line).
     Protocol(ProtocolError),
     /// The daemon answered with an [`Error`](Response::Error): the request could not be served.
-    /// `fatal` mirrors the daemon's meaning — `true` means the session is gone (reconnect), `false`
+    /// `fatal` mirrors the daemon's meaning, `true` means the session is gone (reconnect), `false`
     /// is a per-request fault the session survived.
     Remote {
         /// The daemon's human-readable reason.
@@ -127,7 +127,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to the daemon listening at `socket`. Does not open a session yet — call
+    /// Connect to the daemon listening at `socket`. Does not open a session yet, call
     /// [`open`](Self::open) first.
     ///
     /// # Errors
@@ -256,7 +256,7 @@ impl Client {
         }
     }
 
-    /// Fetch the session's model-legible **summary** so far, as the projection JSON object — the same
+    /// Fetch the session's model-legible **summary** so far, as the projection JSON object, the same
     /// compact face the CLI's `--record-summary` writes, shaped for an agent's observe→act loop.
     /// Carried opaquely like [`trace`](Self::trace); parse it with `serde_json`.
     ///

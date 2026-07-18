@@ -6,11 +6,11 @@
 //! [`observer`](crate::observer); keeping the record pure means its whole aggregation is unit-tested
 //! on the host gate with synthetic inputs, no KVM or caps.
 //!
-//! The record's **core is network + resources + denials** — the signals host-side eBPF observes
+//! The record's **core is network + resources + denials**, the signals host-side eBPF observes
 //! strongly across the hardware boundary. [`host_syscalls`](RunRecord::host_syscalls) is the **VMM's
 //! host footprint**, explicitly *not* the guest's syscalls (a microVM services those in-guest).
 //! Every collection is deterministically sorted, so a record built from the same
-//! observations is byte-stable regardless of map-iteration order — the property the JSON
+//! observations is byte-stable regardless of map-iteration order, the property the JSON
 //! output will rely on. Kept here, out of `agent-vmm`, so the driver stays independent of the eBPF
 //! loader (decisions 024/026); the two tracks bridge only by plain values.
 
@@ -36,18 +36,18 @@ pub struct RunRecord {
     pub network: Option<NetSection>,
     /// Host CPU (eBPF) + the cgroup's native memory/IO counters (reused verbatim from the resource meter).
     pub resources: ResourceSummary,
-    /// The VMM's **host** syscall footprint — not in-guest syscalls. Bounded.
+    /// The VMM's **host** syscall footprint, not in-guest syscalls. Bounded.
     pub host_syscalls: SyscallFootprint,
     /// Boot + exec wall time, supplied by the caller as plain [`Duration`]s (the record never depends
     /// on `agent-vmm` to learn them).
     pub timing: Timing,
-    /// Which axes were unavailable, and why — fail-open honesty, so a partial record is legible rather
+    /// Which axes were unavailable, and why, fail-open honesty, so a partial record is legible rather
     /// than silently thin.
     pub coverage: Vec<AxisGap>,
 }
 
 impl RunRecord {
-    /// Assemble a record from already-collected parts. Pure — no eBPF, no `agent-vmm`. This is what
+    /// Assemble a record from already-collected parts. Pure, no eBPF, no `agent-vmm`. This is what
     /// [`SandboxProbes::collect`](crate::observer::SandboxProbes::collect) calls after reading the
     /// probes, and what the unit tests exercise directly.
     #[must_use]
@@ -68,7 +68,7 @@ impl RunRecord {
     }
 }
 
-/// The network axis: per-VM totals, the per-flow breakdown, and the denied-egress trail — all read
+/// The network axis: per-VM totals, the per-flow breakdown, and the denied-egress trail, all read
 /// from the one per-VM tap monitor, so they belong together.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetSection {
@@ -76,7 +76,7 @@ pub struct NetSection {
     pub totals: NetStats,
     /// Per-flow byte/packet counters, sorted deterministically by destination then source.
     pub flows: Vec<FlowRecord>,
-    /// Destinations the egress policy blocked, with the dropped-packet count — the audit trail
+    /// Destinations the egress policy blocked, with the dropped-packet count, the audit trail
     /// decision 025 folds in here. **Aggregated by destination** (one row per blocked endpoint,
     /// summed across guest source ports) and sorted by that destination triple.
     pub denials: Vec<DenialRecord>,
@@ -84,7 +84,7 @@ pub struct NetSection {
 
 impl NetSection {
     /// Build a sorted section from the tap monitor's raw reads (`flows`, `totals`, `denials`). Flows
-    /// sort on the full 5-tuple; denials **aggregate by destination** — the kernel keys `DENIALS` by
+    /// sort on the full 5-tuple; denials **aggregate by destination**, the kernel keys `DENIALS` by
     /// the dropped packet's whole 5-tuple, so retries from different guest source ports arrive as
     /// separate entries, and summing them per `(dst, port, proto)` is what makes the trail both
     /// meaningful (one row per blocked endpoint) and totally ordered. Total orders on both
@@ -146,18 +146,18 @@ pub struct DenialRecord {
     pub count: u64,
 }
 
-/// Sort a flow by destination first (the meaningful axis), then source — the full 5-tuple, so the
+/// Sort a flow by destination first (the meaningful axis), then source, the full 5-tuple, so the
 /// order is total and the record byte-stable.
 fn flow_order(k: &FlowKey) -> (u32, u16, u8, u32, u16) {
     (k.dst_addr, k.dst_port, k.proto, k.src_addr, k.src_port)
 }
 
 /// The VMM's host syscall footprint: exact counts plus a bounded, de-duplicated sample of notable
-/// events. Both dimensions of unboundedness are closed — repetition collapses into a hit count, and
+/// events. Both dimensions of unboundedness are closed, repetition collapses into a hit count, and
 /// the distinct set is capped at [`MAX_NOTABLE`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyscallFootprint {
-    /// Every attributed event — an exact `u64` counter, always O(1) memory.
+    /// Every attributed event, an exact `u64` counter, always O(1) memory.
     pub total: u64,
     /// Counts by syscall kind (an unrecognized discriminant lands in `unknown`).
     pub by_kind: SyscallCounts,
@@ -168,8 +168,8 @@ pub struct SyscallFootprint {
     pub notable_truncated: bool,
     /// **Events** (not distinct keys) that overflowed the notable cap: they arrived after it was full
     /// and matched no stored entry, so every occurrence counts (one new path opened 1000 times past the
-    /// cap adds 1000). These are still tallied in [`by_kind`](Self::by_kind) — whose per-kind totals sum
-    /// to [`total`](Self::total) exactly, always — and absent only from the detailed [`notable`](Self::notable)
+    /// cap adds 1000). These are still tallied in [`by_kind`](Self::by_kind), whose per-kind totals sum
+    /// to [`total`](Self::total) exactly, always, and absent only from the detailed [`notable`](Self::notable)
     /// sample. So the count is what the sample omits, making the truncation honest rather than silent.
     /// 0 when not truncated.
     pub overflow_events: u64,
@@ -213,7 +213,7 @@ pub struct NotableSyscall {
 }
 
 /// A streaming accumulator for [`SyscallFootprint`]: [`record`](Self::record) it per event (e.g. from
-/// `SyscallTracer::drain`'s callback), then [`finish`](Self::finish). Bounds memory *during* the fold —
+/// `SyscallTracer::drain`'s callback), then [`finish`](Self::finish). Bounds memory *during* the fold,
 /// once [`MAX_NOTABLE`] distinct events are held, further distinct events are counted, not stored.
 #[derive(Debug, Clone)]
 pub struct SyscallFold {
@@ -314,14 +314,14 @@ impl SyscallFold {
 }
 
 /// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from
-/// `Sandbox::boot_latency` and `RunResult::metrics.wall` — so the record never depends on `agent-vmm`.
+/// `Sandbox::boot_latency` and `RunResult::metrics.wall`, so the record never depends on `agent-vmm`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
     pub boot: Duration,
     pub exec_wall: Duration,
 }
 
-/// One observation axis that was unavailable, and why — carried in [`RunRecord::coverage`] so a
+/// One observation axis that was unavailable, and why, carried in [`RunRecord::coverage`] so a
 /// fail-open partial record explains its own gaps instead of looking complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AxisGap {
@@ -434,21 +434,21 @@ mod tests {
             fold.record(&ev(Syscall::Openat as u32, CG, path.as_bytes(), "sh"));
         }
         // One *new* path, opened 3 times past the cap: every occurrence overflows (the field counts
-        // events, not distinct keys — that is its documented meaning).
+        // events, not distinct keys, that is its documented meaning).
         for _ in 0..3 {
             fold.record(&ev(Syscall::Openat as u32, CG, b"/late/arrival", "sh"));
         }
         // A repeat of a *stored* path still lands on its entry, not in the overflow.
         fold.record(&ev(Syscall::Openat as u32, CG, b"/cap/0", "sh"));
         // An unknown-discriminant event: tallied in `by_kind.unknown` + `total`, but never notable and
-        // never overflow (it has no notable key at all) — so `by_kind` stays exact while `notable` doesn't.
+        // never overflow (it has no notable key at all), so `by_kind` stays exact while `notable` doesn't.
         fold.record(&ev(999, CG, b"", "sh"));
         let f = fold.finish();
         assert_eq!(f.notable.len(), MAX_NOTABLE);
         assert!(f.notable_truncated);
         assert_eq!(f.overflow_events, 3);
         assert_eq!(f.total, (MAX_NOTABLE as u64) + 3 + 1 + 1);
-        // `by_kind` is always exact and complete — its per-kind totals sum to `total`, cap or not.
+        // `by_kind` is always exact and complete, its per-kind totals sum to `total`, cap or not.
         let by_kind = f.by_kind.execve + f.by_kind.openat + f.by_kind.connect + f.by_kind.unknown;
         assert_eq!(by_kind, f.total);
         // `notable`'s hits are the *known* events the sample kept: total minus the overflow it omitted

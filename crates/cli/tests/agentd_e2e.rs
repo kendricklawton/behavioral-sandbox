@@ -1,20 +1,20 @@
 //! Phase 16 demo, as tests: drive the real `agentd` daemon over its unix socket through the full
-//! **versioned wire API** — `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
+//! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.
 //! Three angles:
 //!
 //! 1. [`agentd_serves_the_full_wire_api_over_a_unix_socket`] drives it with **hand-built JSON lines**
-//!    (parsed with `serde_json::Value`, no access to the daemon's Rust types) — the proof the wire is
+//!    (parsed with `serde_json::Value`, no access to the daemon's Rust types), the proof the wire is
 //!    hand-debuggable and every message carries its `schema`.
 //! 2. [`the_reference_client_drives_a_full_session`] drives the same daemon through the **reference
-//!    client** ([`agentd_client::Client`]) — the P16.4 proof a caller needs only the wire contract
+//!    client** ([`agentd_client::Client`]), the P16.4 proof a caller needs only the wire contract
 //!    (the client links no `agent-vmm`).
 //! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agentd --prewarm 1` and asserts a bare
-//!    `open` comes back `pooled: true` — the P16.3 fast path.
+//!    `open` comes back `pooled: true`, the P16.3 fast path.
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the agent
 //! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p agent-cli -- --ignored`. Unjailed
-//! on purpose — the proof is the wire API, not the jailer (that has its own suite), and unjailed
+//! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
 // deny doesn't auto-exempt outside `#[test]` fns.
@@ -141,7 +141,7 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
 
 /// A tiny **raw-JSON** client over the daemon's newline protocol: send a request line, read one
 /// response object. Every line the daemon accepts must carry the `schema`, so [`send`](Self::send)
-/// takes only the body and stamps it — mirroring what a hand-typed `socat` session sends.
+/// takes only the body and stamps it, mirroring what a hand-typed `socat` session sends.
 struct RawClient {
     writer: UnixStream,
     reader: BufReader<UnixStream>,
@@ -282,7 +282,7 @@ fn agentd_serves_the_full_wire_api_over_a_unix_socket() {
         "the record carries its audit schema: {traced}"
     );
 
-    // trace_summary: the model-legible projection over the wire — its own summary schema, and the
+    // trace_summary: the model-legible projection over the wire, its own summary schema, and the
     // agent-loop shape (a `reached` list, a resource envelope), a smaller line than the full record.
     client.send("{\"op\":\"trace_summary\"}");
     let summarized = client.recv();
@@ -330,7 +330,7 @@ fn agentd_serves_the_full_wire_api_over_a_unix_socket() {
         "a schema mismatch ends the session: {rejected}"
     );
 
-    // A fresh connection opens a brand-new, independent session — the put file is gone.
+    // A fresh connection opens a brand-new, independent session, the put file is gone.
     let mut second = RawClient::connect(&socket);
     second.send("{\"op\":\"open\"}");
     assert_eq!(second.recv()["reply"], "opened");
@@ -388,7 +388,7 @@ fn the_reference_client_drives_a_full_session() {
     }
     let (_daemon, socket) = launch_daemon(None, None);
 
-    // The whole session over the reference client — the exact surface a non-Rust SDK reimplements.
+    // The whole session over the reference client, the exact surface a non-Rust SDK reimplements.
     let mut client = Client::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
     if let Err(e) = client.set_read_timeout(Some(Duration::from_secs(45))) {
         panic!("set read timeout: {e}");
@@ -431,7 +431,7 @@ fn the_reference_client_drives_a_full_session() {
         "the trace record carries its audit schema: {record}"
     );
 
-    // The reference client exposes the projection too — the model-legible face over the wire.
+    // The reference client exposes the projection too, the model-legible face over the wire.
     let summary = client
         .trace_summary()
         .unwrap_or_else(|e| panic!("trace_summary: {e}"));

@@ -13,7 +13,7 @@ cargo xtask fetch-artifacts  # the pinned guest kernel + boot rootfs (sha256-ver
 cargo xtask build-rootfs     # the agent rootfs (reproducible; --check asserts byte-identical)
 ```
 
-## Before you push — the local gate
+## Before you push, the local gate
 
 ```console
 cargo install bpf-linker cargo-deny    # one-time
@@ -34,7 +34,7 @@ Booting a microVM and loading/attaching eBPF need `/dev/kvm` and elevated caps, 
 cargo xtask ci-privileged
 ```
 
-on a machine that has them — your dev box, or a bare-metal/nested-virt CI runner (a stock cloud
+on a machine that has them, your dev box, or a bare-metal/nested-virt CI runner (a stock cloud
 VM usually can't nest KVM). **Never gate the everyday loop on a privileged runner.**
 
 ## The book
@@ -45,4 +45,4 @@ This documentation is an [mdBook](https://rust-lang.github.io/mdBook/):
 mdbook serve docs
 ```
 
-Building it is optional — the pages are plain Markdown and readable in place.
+Building it is optional, the pages are plain Markdown and readable in place.

@@ -21,13 +21,13 @@ agentd --socket ./agentd.sock --prewarm 4           # a pre-warmed pool of 4 clo
 
 Logs go to **stderr** (`--log` / `AGENT_LOG`, default `info`); the socket carries only the protocol.
 The guest kernel/rootfs come from the environment (`AGENT_KERNEL` / `AGENT_ROOTFS` / `AGENT_MARKER`),
-the same `AGENT_*` layer the CLI reads — a daemon has no `.agent.toml` cwd discovery.
+the same `AGENT_*` layer the CLI reads, a daemon has no `.agent.toml` cwd discovery.
 
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
 jail posture is fixed when the daemon launches, so a caller can never weaken it.
 
 **Access control is the hoster's.** The daemon does no authentication. Who may connect is governed by
-the filesystem permissions on the socket and its directory — place the socket where only trusted
+the filesystem permissions on the socket and its directory, place the socket where only trusted
 local clients can reach it.
 
 **Fast `open` with `--prewarm N`.** The daemon boots one unjailed pre-warmed source, snapshots it,
@@ -66,7 +66,7 @@ the same shapes.
 | `{"schema":1,"op":"get","path":"out.txt"}` | Read a working-directory file back. A missing file is `present:false`, not an error. |
 | `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle (a typed refusal for a jailed session). |
 | `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. Sampled **live** (repeatable mid-session): its coverage reflects attach time, and an absent axis may be a transient read, not a finalized gap (unlike the CLI's `--record`). |
-| `{"schema":1,"op":"trace_summary"}` | Return the **model-legible summary** so far — the compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied, its resource envelope, any coverage gap), sampled live like `trace`. The face an agent reads between turns. |
+| `{"schema":1,"op":"trace_summary"}` | Return the **model-legible summary** so far, the compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied, its resource envelope, any coverage gap), sampled live like `trace`. The face an agent reads between turns. |
 | `{"schema":1,"op":"close"}` | End the session and tear the sandbox down (a hung-up connection does the same). |
 
 `put`/`get` carry **UTF-8 text**; bulk or binary I/O is the block-device path
@@ -106,10 +106,10 @@ engine (engine, not platform).
 
 ### Structured logs
 
-Operational logs are structured `tracing` events on **stderr** — human-readable text by default,
+Operational logs are structured `tracing` events on **stderr**, human-readable text by default,
 or one JSON object per line with `--log-json` (or `AGENT_LOG_FORMAT=json`) for a log shipper. The
 events and their fields (`vmm_pid`, `boot_ms`, `pooled`, …) are identical in both encodings; the flag
-changes only the framing. The filter is `--log` / `AGENT_LOG` (default `info` — the per-session
+changes only the framing. The filter is `--log` / `AGENT_LOG` (default `info`, the per-session
 open/close lines are the daemon's operational trace).
 
 ```console
@@ -126,7 +126,7 @@ curl -s http://127.0.0.1:9920/metrics
 ```
 
 The endpoint is **off by default**, and it serves plain HTTP with **no auth** (the same posture as
-the unix socket: access control is the hoster's) — bind it to loopback or a private scrape network,
+the unix socket: access control is the hoster's), bind it to loopback or a private scrape network,
 never a public interface. If the requested address can't be bound, the daemon **refuses to start**
 (an operational surface you asked for must not silently be absent). Durations follow the Prometheus
 convention of base units: **seconds**, never milliseconds.
@@ -142,7 +142,7 @@ convention of base units: **seconds**, never milliseconds.
 | `agentd_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
 | `agentd_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
 | `agentd_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
-| `agentd_pool_ready` | gauge | Warm clones ready in the pool — **absent** (not zero) without a pool. |
+| `agentd_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
 
 A minimal scrape config:
 
@@ -157,7 +157,7 @@ scrape_configs:
 
 `agentd-client` is the **reference Rust client**: a `Client` type that drives the whole session
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over the socket. It depends on
-`agentd-protocol` and a JSON value **only — never `agent-vmm`** — which is the point: it proves a
+`agentd-protocol` and a JSON value **only, never `agent-vmm`**, which is the point: it proves a
 caller drives the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
 The polyglot SDKs (Go/Python/Node/C#, planned) are this client's method set hardened per language.
 
@@ -184,7 +184,7 @@ and the daemon, and PRs adding them are wrong by design (engine, not platform):
   bookkeeping, above the socket.
 - **No authentication or authorization.** The daemon does no auth handshake and trusts whoever can
   reach the socket completely. Who may connect is the filesystem permissions on the socket and its
-  directory (place it where only trusted local clients can reach it) — an access-control layer the
+  directory (place it where only trusted local clients can reach it), an access-control layer the
   hoster owns, not a field on the wire.
 - **No billing or quotas.** The daemon *measures* (the [metrics endpoint](#metrics-prometheus),
   host-observed) but never *charges* or *caps by account*. Turning numbers into a bill or a per-tenant
@@ -204,5 +204,5 @@ weaken it. This restates, at the wire-API layer, the embedding-side
 
 Teardown is crash-only, like the rest of the engine. A session's sandbox drops when its connection
 ends; and losing the whole daemon process (a supervisor's `SIGTERM`, `SIGKILL`, OOM) can't leak a VM
-either — the lifetime sentinel reaps it, and the next start clears a stale socket file. A graceful
+either, the lifetime sentinel reaps it, and the next start clears a stale socket file. A graceful
 drain of in-flight sessions on shutdown is a later operational concern.

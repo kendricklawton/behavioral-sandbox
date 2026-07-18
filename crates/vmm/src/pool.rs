@@ -30,14 +30,14 @@ const POOL_FD_HEADROOM: usize = 64;
 /// [`shutdown`](Pool::shutdown) is the graceful form. **Networked snapshots** pool without a
 /// concurrency limit: each clone recreates the baked-in tap in its own network namespace
 /// (decision 017). **Confined pool**: set [`jail`](crate::BootConfig::jail) on `config` and
-/// every pooled clone restores under the jailer — chroot, dropped uid, seccomp, its own netns —
+/// every pooled clone restores under the jailer, chroot, dropped uid, seccomp, its own netns,
 /// so prewarmed starts and confinement compose (needs real root, like any jailed boot).
 ///
 /// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
-/// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n` — state
+/// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n`, state
 /// the bound, don't discover it via `EMFILE` mid-restore. [`new`](Pool::new) enforces the
 /// *stating*: an over-budget target logs one `tracing::warn!` naming the numbers and the fix
-/// (raise `ulimit -n`, or shrink the target) before the prefill runs. A warning, not a refusal —
+/// (raise `ulimit -n`, or shrink the target) before the prefill runs. A warning, not a refusal,
 /// like the cgroup caps (decision 013), sizing is fairness hygiene, not the isolation boundary,
 /// and the soft limit may be raised by the embedder after this process was probed.
 #[derive(Debug)]
@@ -102,8 +102,8 @@ impl Pool {
     pub fn take(&mut self) -> Result<RunningVm, VmmError> {
         while let Some(vm) = self.ready.pop() {
             // The probe is a vsock health check. A snapshot without the exec channel has nothing to
-            // probe — `probe_agent` would return the *permanent* `require_vsock` error, a structural
-            // condition, not a dead-clone signal — so hand the popped clone out directly rather than
+            // probe, `probe_agent` would return the *permanent* `require_vsock` error, a structural
+            // condition, not a dead-clone signal, so hand the popped clone out directly rather than
             // reading that error as "unhealthy" and tearing down the whole pool on the first take.
             if !self.snapshot.has_vsock {
                 return Ok(vm);
@@ -176,7 +176,7 @@ fn fd_budget_excess(target: usize, soft: u64) -> Option<(usize, u64)> {
 
 /// This process's soft `RLIMIT_NOFILE`, read from `/proc/self/limits` (the host path takes no
 /// `libc`, and `getrlimit` has no `unsafe`-free std surface). `None` if the file is missing or
-/// unparseable — the sizing warning is then simply skipped, never a boot failure.
+/// unparseable, the sizing warning is then simply skipped, never a boot failure.
 fn nofile_soft_limit() -> Option<u64> {
     parse_nofile_soft(&std::fs::read_to_string("/proc/self/limits").ok()?)
 }
@@ -205,7 +205,7 @@ mod tests {
         // A target that oversubscribes a small limit: the warning carries the arithmetic.
         let need = 100 * FDS_PER_VM + POOL_FD_HEADROOM;
         assert_eq!(fd_budget_excess(100, 256), Some((need, 256)));
-        // Exactly at the bound is still within budget ("stays under with headroom" — the headroom
+        // Exactly at the bound is still within budget ("stays under with headroom", the headroom
         // is already inside `need`, so equality holds the line).
         let exact = (10 * FDS_PER_VM + POOL_FD_HEADROOM) as u64;
         assert_eq!(fd_budget_excess(10, exact), None);
@@ -234,7 +234,7 @@ mod tests {
 
     #[test]
     fn this_process_reports_a_soft_limit() {
-        // The /proc read itself: on any Linux dev box the row exists and is numeric or unlimited —
+        // The /proc read itself: on any Linux dev box the row exists and is numeric or unlimited,
         // either way the call must not panic; a numeric result must be nonzero.
         if let Some(soft) = super::nofile_soft_limit() {
             assert!(soft > 0);

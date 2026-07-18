@@ -31,7 +31,7 @@ impl Drop for TmpDir {
     }
 }
 
-/// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep — mirrors the input test's
+/// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep, mirrors the input test's
 /// host-side hash of the injected payload). A free helper (not a `#[test]` fn), so it uses explicit
 /// panics rather than `expect`, which the workspace lints only re-allow inside test functions.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -61,7 +61,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A boot config pointed at the workspace's fetched artifacts (absolute, so it's cwd-independent).
-/// Explicit `AGENT_KERNEL`/`AGENT_ROOTFS` overrides still win — they're the documented escape
+/// Explicit `AGENT_KERNEL`/`AGENT_ROOTFS` overrides still win, they're the documented escape
 /// hatch for hosts without the pinned artifacts (e.g. non-x86_64).
 pub fn config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -77,7 +77,7 @@ pub fn config() -> BootConfig {
 }
 
 /// A boot config pointed at the **agent rootfs** (`cargo xtask build-rootfs`): readiness is the
-/// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable — the
+/// agent's post-bind marker, and vsock is on. Deliberately not `AGENT_ROOTFS`-overridable, the
 /// in-VM exec tests are about *that* image specifically.
 pub fn agent_rootfs_config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -98,7 +98,7 @@ pub fn agent_rootfs_config() -> BootConfig {
 
 /// The agent rootfs booted **under the jailer**, with the vsock exec channel: the convergence of
 /// the jail with a code channel (a jailed VM that can actually run code). Deliberately *not*
-/// `read_only_root` — the jailer refuses the overlay for now (a later step stages a read-only base +
+/// `read_only_root`, the jailer refuses the overlay for now (a later step stages a read-only base +
 /// per-run tmpfs into the chroot), so this boots a plain read-write rootfs copy inside the chroot,
 /// which is enough to reach the agent's readiness marker and serve an exec. Needs real root (see
 /// [`have_jailer_privileges`]).
@@ -160,7 +160,7 @@ pub fn cgroup_of(pid: u32) -> Option<PathBuf> {
     Some(PathBuf::from("/sys/fs/cgroup").join(rel.trim_start_matches('/')))
 }
 
-/// Whether this process holds `CAP_NET_ADMIN` (effective) — needed to create a tap. Creating a tap
+/// Whether this process holds `CAP_NET_ADMIN` (effective), needed to create a tap. Creating a tap
 /// is privileged (unlike the rootless block-device builds), so the NIC tests skip without it rather
 /// than fail on a box that can do KVM but not net-admin. Delegates to `agent-test-support`'s
 /// audited `CapEff` parse (which reads only the low 64 bits, so a wider future field can't read a
@@ -171,7 +171,7 @@ pub fn have_net_admin() -> bool {
 
 /// Whether this process can run the **jailer**: effective uid 0 **in the initial user namespace**.
 /// The jailer `mknod`s device nodes, which `EPERM`s in a non-initial userns even with `CAP_MKNOD`, so
-/// the `unshare -Urn --map-root-user` trick that carries the other privileged tests is not enough —
+/// the `unshare -Urn --map-root-user` trick that carries the other privileged tests is not enough,
 /// the jailer test needs real root (or a privileged container). Skips otherwise, like
 /// [`have_net_admin`].
 pub fn have_jailer_privileges() -> bool {

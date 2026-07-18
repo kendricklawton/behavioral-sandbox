@@ -1,5 +1,5 @@
 //! The latency benchmarks: boot-to-userspace vs base size (`bench-boot`) and the three start paths'
-//! latency (`bench-warm`) — cold boot, snapshot restore, pre-warmed-pool take — each split into its
+//! latency (`bench-warm`), cold boot, snapshot restore, pre-warmed-pool take, each split into its
 //! isolated start and its time-to-first-result, reported as honest nearest-rank percentiles; plus
 //! `bench-density`, the memory-sharing curve (summed Rss vs Pss) as concurrent clones stack up, and
 //! `bench-footprint`, the per-sandbox memory cost and how the overlay/rootfs choice moves it.
@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 
 use crate::{agent_rootfs_path, kernel_path};
 
-/// Real (non-sparse) bytes an image occupies — the base's actual footprint, matching `du`. The ext4
+/// Real (non-sparse) bytes an image occupies, the base's actual footprint, matching `du`. The ext4
 /// carries free space, but `mke2fs`/`truncate` leave it unallocated, so allocated blocks ≈ the used
 /// payload.
 pub(crate) fn image_used_bytes(path: &Path) -> Result<u64> {
@@ -23,7 +23,7 @@ pub(crate) fn image_used_bytes(path: &Path) -> Result<u64> {
 }
 
 /// Measure boot-to-userspace latency of the agent rootfs. Boots `runs` times on **each** of
-/// two paths — the read-only *shared* base (no per-VM copy) and the read-write *copy* base — and
+/// two paths, the read-only *shared* base (no per-VM copy) and the read-write *copy* base, and
 /// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
 /// duplicates the whole image per boot, the shared path doesn't. "Measured, not marketed."
 pub(crate) fn bench_boot(runs: usize) -> Result<()> {
@@ -111,8 +111,8 @@ fn timed_python(vm: &RunningVm) -> Result<()> {
     Ok(())
 }
 
-/// Measure the latency of the three start paths — a **cold boot** (per-VM rootfs copy, the full-copy
-/// baseline), a **prewarmed-snapshot restore**, and a **prewarmed-pool take** — each decomposed into
+/// Measure the latency of the three start paths, a **cold boot** (per-VM rootfs copy, the full-copy
+/// baseline), a **prewarmed-snapshot restore**, and a **prewarmed-pool take**, each decomposed into
 /// two percentile series: the **start** (begin a sandbox → an exec-ready VM) and the
 /// **time-to-first-result** (that start plus a Python one-liner's output back on the host). Isolating
 /// the start makes the three headline latencies (cold boot, snapshot restore, pool take) legible on
@@ -162,7 +162,7 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
 
     // Each path splits into two per-run samples: the **start** (begin a sandbox → an exec-ready VM)
     // and the **time-to-first-result** (start + the first exec's round-trip). Reporting them apart
-    // makes the three headline start latencies — cold boot, snapshot restore, pool take — visible on
+    // makes the three headline start latencies, cold boot, snapshot restore, pool take, visible on
     // their own, not just folded into the composite, so it is legible where a run's latency goes.
 
     // Path 1: cold boot, on a private read-write copy of the image. The honest baseline: what every
@@ -180,7 +180,7 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     }
 
     // Path 2: restore a fresh clone from the prewarmed snapshot. The start here is the snapshot
-    // restore itself — bring a clone to exec-ready — the fast-start the whole snapshot machinery buys.
+    // restore itself, bring a clone to exec-ready, the fast-start the whole snapshot machinery buys.
     let restore_cfg = warm_bench_config(&kernel, &rootfs, true);
     let mut restore_start = Vec::with_capacity(runs);
     let mut restore_result = Vec::with_capacity(runs);
@@ -250,7 +250,7 @@ fn mem_available_kib() -> Result<u64> {
 /// `(Rss, Pss)` for a process (KiB), from its `smaps_rollup`. **Rss** counts every resident page in
 /// full; **Pss** (proportional set size) splits each shared page across its sharers. So a *sum of Pss*
 /// over the clones is the true host footprint, while a *sum of Rss* double-counts the read-only base
-/// every clone shares — the gap between them is exactly the memory-sharing benefit.
+/// every clone shares, the gap between them is exactly the memory-sharing benefit.
 fn rss_pss_kib(pid: u32) -> Result<(u64, u64)> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
         .with_context(|| format!("read smaps_rollup for pid {pid} (needs Linux ≥ 4.14)"))?;
@@ -259,13 +259,13 @@ fn rss_pss_kib(pid: u32) -> Result<(u64, u64)> {
     Ok((rss, pss))
 }
 
-/// Why [`bench_density`] stopped stacking clones — typed so the "how many concurrent before it
+/// Why [`bench_density`] stopped stacking clones, typed so the "how many concurrent before it
 /// degrades" answer always names its actual cause, rather than being an ad-hoc string a refactor
 /// could drift from the logic.
 enum StopReason {
     /// Every requested clone came up: the host wasn't the limit at this count.
     TargetReached(usize),
-    /// The memory floor would have been crossed — the honest "this is where it degrades" stop.
+    /// The memory floor would have been crossed, the honest "this is where it degrades" stop.
     FloorHit { clones: usize, avail_mib: u64 },
     /// A restore failed outright (`at` is the 1-based clone that failed).
     RestoreFailed { at: usize, err: VmmError },
@@ -286,12 +286,12 @@ impl std::fmt::Display for StopReason {
 
 /// Measure **memory-sharing under concurrency**: how the host's memory cost grows as prewarmed clones
 /// stack up, and how far that goes before it degrades. Restores clones one at a time from a single
-/// prewarmed snapshot — each sharing the read-only base disk and the snapshot memory file, so a
-/// clone's only private cost is its copy-on-write dirty pages — and keeps **every clone alive** while
+/// prewarmed snapshot, each sharing the read-only base disk and the snapshot memory file, so a
+/// clone's only private cost is its copy-on-write dirty pages, and keeps **every clone alive** while
 /// sampling, at checkpoints, the summed `Rss` (naive, double-counts the shared base), the summed `Pss`
 /// (proportional set size, the true footprint), and the host's `MemAvailable`. It stops at the target
 /// count, on a restore failure, or when free memory would cross a floor (so it can't drive the host
-/// into swap), and reports **which** — so "how many concurrent microVMs before it degrades" is a
+/// into swap), and reports **which**, so "how many concurrent microVMs before it degrades" is a
 /// measured number, not a guess. Needs KVM + the built agent rootfs.
 pub(crate) fn bench_density(count: usize) -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
@@ -352,7 +352,7 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
     let mut clones: Vec<RunningVm> = Vec::with_capacity(count);
     let mut rows: Vec<(usize, u64, u64)> = Vec::new(); // (clones, Rss sum, Pss sum) at checkpoints
     let mut stop_reason = StopReason::TargetReached(count);
-    // Print a row at 1, each power of two, and the final count — a curve without a line per clone.
+    // Print a row at 1, each power of two, and the final count, a curve without a line per clone.
     let is_checkpoint = |n: usize| n == 1 || n == count || n.is_power_of_two();
 
     for _ in 0..count {
@@ -427,16 +427,16 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
 /// Measure the **per-sandbox memory footprint** and how the **overlay/rootfs choice** moves it. The
 /// engine offers three ways to give a sandbox its disk, each with a different host-memory cost:
 ///
-/// 1. **cold boot, per-VM RW copy** (`read_only_root = false`) — each VM gets its own read-write copy
+/// 1. **cold boot, per-VM RW copy** (`read_only_root = false`), each VM gets its own read-write copy
 ///    of the whole rootfs image (on the scratch dir, host RAM when that's tmpfs); nothing is shared.
-/// 2. **cold boot, shared RO base** (`read_only_root = true`) — every VM mounts the *one* base image
+/// 2. **cold boot, shared RO base** (`read_only_root = true`), every VM mounts the *one* base image
 ///    read-only (its pages page-cache-shared across all VMs) and writes to a guest-side tmpfs overlay,
 ///    so the disk costs one shared copy no matter how many VMs run.
-/// 3. **snapshot restore** — the shared RO base *plus* a shared, copy-on-write memory file, so a
+/// 3. **snapshot restore**, the shared RO base *plus* a shared, copy-on-write memory file, so a
 ///    clone's only private cost is the pages it dirties.
 ///
 /// A per-VM RW copy lives in **tmpfs, outside the VMM's own address space**, so a VMM's `smaps` Pss
-/// can't see it — the honest per-sandbox cost is the whole-host `MemAvailable` drop for a cohort,
+/// can't see it, the honest per-sandbox cost is the whole-host `MemAvailable` drop for a cohort,
 /// divided by the cohort size. This brings up `count` identical sandboxes per strategy, samples the
 /// per-VM VMM Pss (percentiles, not an average) *and* the whole-host drop, then tears the cohort down
 /// before the next strategy. The RW-copy-minus-shared-base gap is the rootfs choice made a number.
@@ -524,8 +524,8 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
 
 /// One [`bench_footprint`] cohort: bring up `count` identical sandboxes with `spawn`, sample the
 /// per-VM VMM Pss and the whole-host `MemAvailable` drop, and tear the cohort down. Reads its own
-/// `before`, so page-cache drift between strategies can't leak into the delta. Stops early — with a
-/// printed note, so a smaller `n` is never silent — if free memory would cross `floor_kib`; a cohort
+/// `before`, so page-cache drift between strategies can't leak into the delta. Stops early, with a
+/// printed note, so a smaller `n` is never silent, if free memory would cross `floor_kib`; a cohort
 /// the floor prevented entirely is a typed error, not a zero-sandbox row with fabricated arithmetic.
 fn footprint_cohort(
     label: &str,
@@ -572,7 +572,7 @@ fn footprint_cohort(
 }
 
 /// Print min/p50/p90/p99/max of `samples` (in `unit`), sorting in place. Nearest-rank, no
-/// interpolation. A percentile whose rank lands on the last sample has no observation above it — it's
+/// interpolation. A percentile whose rank lands on the last sample has no observation above it, it's
 /// `max` relabeled, which is dishonest at small `n` (e.g. `p99` needs n≥100 to mean anything). Those
 /// print `—`, so a short bench can't dress up its slowest sample as a tail percentile.
 fn report_percentiles(label: &str, samples: &mut [u64], unit: &str) {
@@ -598,7 +598,7 @@ fn report_percentiles(label: &str, samples: &mut [u64], unit: &str) {
 
 /// Issue `n` `openat` syscalls against a fixed **nonexistent** path and return the elapsed time.
 /// `openat` is the cheapest syscall the tracer hooks, and `sys_enter_openat` fires whether or not the
-/// path exists — so a guaranteed-missing path is a pure, side-effect-free unit of the traced syscall:
+/// path exists, so a guaranteed-missing path is a pure, side-effect-free unit of the traced syscall:
 /// no file is created, read, closed, or left behind. The `Err` result is `black_box`ed so the loop
 /// can't be optimized away.
 fn openat_burst(path: &Path, n: usize) -> Duration {
@@ -610,7 +610,7 @@ fn openat_burst(path: &Path, n: usize) -> Duration {
     t0.elapsed()
 }
 
-/// The mean nanoseconds-per-`openat` over one `BATCH`-sized burst — the per-sample unit `bench_trace`
+/// The mean nanoseconds-per-`openat` over one `BATCH`-sized burst, the per-sample unit `bench_trace`
 /// feeds to [`report_percentiles`].
 fn ns_per_openat(path: &Path, batch: usize) -> u64 {
     (openat_burst(path, batch).as_nanos() / batch as u128) as u64
@@ -619,14 +619,14 @@ fn ns_per_openat(path: &Path, batch: usize) -> u64 {
 /// Measure the **tracing overhead**: the added per-syscall cost of the attached
 /// `sys_enter_*` tracepoints, in three conditions timed on the same `openat` micro-workload:
 ///
-/// 1. **baseline** — no probes attached at all;
-/// 2. **unwatched** — probes attached but the `FILTER` excludes us (the tracepoint fires on every
+/// 1. **baseline**, no probes attached at all;
+/// 2. **unwatched**, probes attached but the `FILTER` excludes us (the tracepoint fires on every
 ///    host `openat`, checks the filter, and drops ours in-kernel): the cost every *other* process on
 ///    the box pays just for the probes being live;
-/// 3. **watched** — the filter includes us, so every `openat` writes a whole `SyscallEvent` into the
+/// 3. **watched**, the filter includes us, so every `openat` writes a whole `SyscallEvent` into the
 ///    ring buffer: the cost the *one sandbox you watch* pays.
 ///
-/// The delta of (2)/(3) over (1) is the honest, measured overhead — "measured, not marketed". Needs
+/// The delta of (2)/(3) over (1) is the honest, measured overhead, "measured, not marketed". Needs
 /// `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM), so it runs on any eBPF-capable host.
 pub(crate) fn bench_trace(runs: usize) -> Result<()> {
     if let Err(e) = agent_probes_loader::check_support() {
@@ -645,7 +645,7 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
 
     // openats per timed burst. Kept below the 256 KiB ring buffer's capacity (~1480 records of 168 B
     // plus per-record header) so a *watched* burst never overflows and starts dropping before it's
-    // drained — we want the steady-state write cost, not the cheaper reserve-fails-when-full cost.
+    // drained, we want the steady-state write cost, not the cheaper reserve-fails-when-full cost.
     const BATCH: usize = 1000;
     // A path that does not (and will not) exist: every `File::open` is then a pure `openat`, no file
     // created or read. Named by pid so concurrent benches don't share a path.
@@ -663,7 +663,7 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
     let mut tracer = SyscallTracer::load().context("load + attach the syscall tracer")?;
 
     // 2. Unwatched: filter to a tgid that is never a real process (so every host openat is dropped
-    // in-kernel and the ring stays empty — no drain needed).
+    // in-kernel and the ring stays empty, no drain needed).
     tracer
         .watch_pid(u32::MAX)
         .context("set the exclude filter")?;
@@ -692,7 +692,7 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
     report_percentiles("unwatched (filtered out)", &mut unwatched, "ns/openat");
     report_percentiles("watched (event written)", &mut watched, "ns/openat");
 
-    // Deltas from the p50s — the same [`nearest_p50`] rule the columns above used, one shared
+    // Deltas from the p50s, the same [`nearest_p50`] rule the columns above used, one shared
     // definition (the vecs are already sorted, so its re-sort is a no-op).
     let base = nearest_p50(&mut baseline);
     let unwatched_cost = nearest_p50(&mut unwatched).saturating_sub(base);
@@ -713,7 +713,7 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
 
 /// A cross-thread **ping-pong** for a fixed number of round-trips, returning the wall-clock elapsed.
 /// Two rendezvous channels (`sync_channel(0)`, so a send blocks until the peer receives) hand a unit
-/// back and forth: each round-trip is one handoff each way, ~2 context switches — a reliable, portable
+/// back and forth: each round-trip is one handoff each way, ~2 context switches, a reliable, portable
 /// way to drive the scheduler (and thus the `sched_switch` tracepoint the meter hooks) without pinning
 /// threads or touching `unsafe`. A channel failure (the worker died) is a typed error, so a broken run
 /// can't masquerade as a fast one.
@@ -743,7 +743,7 @@ fn pingpong(rounds: usize) -> Result<Duration> {
 }
 
 /// Mean nanoseconds per **context switch** over one `rounds`-sized ping-pong burst (~2 switches per
-/// round-trip) — the per-sample unit `bench_meter` feeds to [`report_percentiles`].
+/// round-trip), the per-sample unit `bench_meter` feeds to [`report_percentiles`].
 fn ns_per_switch(rounds: usize) -> Result<u64> {
     let elapsed = pingpong(rounds)?;
     Ok((elapsed.as_nanos() / (rounds as u128 * 2)) as u64)
@@ -753,14 +753,14 @@ fn ns_per_switch(rounds: usize) -> Result<u64> {
 /// `sched_switch` accounting probe, in three conditions on the same ping-pong micro-workload (mirroring
 /// `bench-trace`'s baseline/unwatched/watched shape):
 ///
-/// 1. **baseline** — no meter attached;
-/// 2. **attached, not metering us** — the probe is live but our cgroup isn't a target, so every switch
+/// 1. **baseline**, no meter attached;
+/// 2. **attached, not metering us**, the probe is live but our cgroup isn't a target, so every switch
 ///    is a target-set lookup that misses and returns: the cost every *other* workload on the box pays
 ///    just for the meter being attached;
-/// 3. **attached, metering us** — our cgroup is a target, so every switch does the lookup **and**
+/// 3. **attached, metering us**, our cgroup is a target, so every switch does the lookup **and**
 ///    accumulates our on-CPU time: the cost the *one sandbox you meter* pays.
 ///
-/// The delta of (2)/(3) over (1) is the honest, measured overhead — "measured, not marketed", and the
+/// The delta of (2)/(3) over (1) is the honest, measured overhead, "measured, not marketed", and the
 /// evidence for the "bounded, sane under many sandboxes" claim: one shared program, a hash lookup per
 /// switch, independent of how many cgroups are metered. Needs `CAP_BPF`+`CAP_PERFMON` and the built
 /// object (not KVM), so it runs on any eBPF-capable host.
@@ -824,7 +824,7 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     );
     report_percentiles("attached (metering us)", &mut targeted, "ns/ctx-switch");
 
-    // Deltas from the p50s — the same [`nearest_p50`] rule the columns above used, one shared
+    // Deltas from the p50s, the same [`nearest_p50`] rule the columns above used, one shared
     // definition (the vecs are already sorted, so its re-sort is a no-op).
     let base = nearest_p50(&mut baseline);
     let untargeted_cost = nearest_p50(&mut untargeted).saturating_sub(base);
@@ -842,7 +842,7 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     Ok(())
 }
 
-/// The nearest-rank p50 of `samples`, sorting in place — the same rank rule
+/// The nearest-rank p50 of `samples`, sorting in place, the same rank rule
 /// [`report_percentiles`] uses, extracted so the delta lines in `bench-trace`/`bench-meter` and the
 /// scaling sweep's per-size columns all share one definition instead of re-deriving the formula.
 fn nearest_p50(samples: &mut [u64]) -> u64 {
@@ -854,7 +854,7 @@ fn nearest_p50(samples: &mut [u64]) -> u64 {
 /// Measure the **eBPF overhead under load**: does the per-event cost of the two shared probes stay
 /// bounded as the number of watched sandboxes grows? `bench-trace`/`bench-meter` measure the cost of
 /// watching *one* sandbox; this sweeps the **watched-target-set size** (1 → 512) and shows the cost is
-/// flat — the design claim ("one shared program, an O(1) map lookup per event, independent of how many
+/// flat, the design claim ("one shared program, an O(1) map lookup per event, independent of how many
 /// sandboxes are watched") turned into a measured curve rather than an assertion.
 ///
 /// For each size the set holds **our own cgroup** (so our events take the expensive watched path) plus
@@ -878,13 +878,13 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     }
 
     // openats per tracer burst (below the ring's capacity so a watched burst never overflows before
-    // it's drained) and round-trips per meter burst — the same units `bench-trace`/`bench-meter` use.
+    // it's drained) and round-trips per meter burst, the same units `bench-trace`/`bench-meter` use.
     const BATCH: usize = 1000;
     const ROUNDS: usize = 2000;
     // Watched-target-set sizes to sweep. All ≤ the probes' `MAX_CGROUPS` (1024) target map.
     const SIZES: [usize; 4] = [1, 8, 64, 512];
     // Synthetic cgroup ids that can't collide with a real one (no process lives in these), used only
-    // to pad the target set to a size — they never match, so they only enlarge the map.
+    // to pad the target set to a size, they never match, so they only enlarge the map.
     const DUMMY_BASE: u64 = 0xDEAD_0000_0000_0000;
 
     let me = agent_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
@@ -959,7 +959,7 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
 /// results as one report, with the methodology stated up front (nearest-rank percentiles, never
 /// averages; a `p99` prints `—` below n=100 so a short run can't dress its max as a tail) and the host
 /// it ran on recorded, so a run is legible and repeatable. Each section states what it measures
-/// **against its honest baseline** — restore/pool vs a cold boot, a probe's added cost vs no probe, a
+/// **against its honest baseline**, restore/pool vs a cold boot, a probe's added cost vs no probe, a
 /// shared clone's Pss vs the naive Rss. A section whose host prerequisite is missing (`/dev/kvm`, or
 /// `CAP_BPF`+`CAP_PERFMON` + the built object) is **skipped with the reason**, never silently dropped,
 /// so the report says exactly what it did and didn't measure. `runs` sizes the percentile benches; the
@@ -1063,10 +1063,10 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
     Ok(())
 }
 
-/// Run one `bench-all` section: the header, then the bench — or the skip note when `skip` names a
+/// Run one `bench-all` section: the header, then the bench, or the skip note when `skip` names a
 /// missing host prerequisite. Returns whether the section is healthy (ran clean *or* was skipped;
 /// a skip is a stated non-measurement, not a failure). A bench that errors mid-run is reported and
-/// the suite continues, so one failure can't blank the rest of the report — the caller folds the
+/// the suite continues, so one failure can't blank the rest of the report, the caller folds the
 /// returned flags into its exit code instead.
 fn run_section(name: &str, skip: Option<&str>, f: impl FnOnce() -> Result<()>) -> bool {
     println!("========== {name} ==========");

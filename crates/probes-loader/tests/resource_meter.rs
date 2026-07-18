@@ -8,7 +8,7 @@
 //!
 //! The proof is the metering primitive doing its job: with the meter targeting the VMM's cgroup, an idle
 //! guest (`sleep`) charges near-zero host CPU to that cgroup, while a guest pegging a vCPU (a busy Python
-//! loop) charges most of a core's worth — measured from the host's scheduler, attributed to exactly the
+//! loop) charges most of a core's worth, measured from the host's scheduler, attributed to exactly the
 //! sandbox's cgroup, never the driver's.
 #![allow(clippy::panic)]
 
@@ -23,7 +23,7 @@ fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Why this host can't run the test (a skip reason), or `None` when it can — so it prints *why* it
+/// Why this host can't run the test (a skip reason), or `None` when it can, so it prints *why* it
 /// skipped, like the other probe tests.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {
@@ -91,7 +91,7 @@ fn a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox()
     let vmm_pid = vm.vmm_pid();
     let cgroup = cgroup_id_of_pid(vmm_pid).expect("resolve the VMM's cgroup id");
 
-    // Attach the meter once and target this sandbox's cgroup — the bridge (VMM pid → cgroup id).
+    // Attach the meter once and target this sandbox's cgroup, the bridge (VMM pid → cgroup id).
     let mut meter = ResourceMeter::load().expect("load + attach the resource meter");
     meter.add_target(cgroup).expect("meter the sandbox cgroup");
 

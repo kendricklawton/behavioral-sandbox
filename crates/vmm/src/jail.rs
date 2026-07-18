@@ -14,7 +14,7 @@
 //! dir under `/tmp`, so teardown's `remove_dir_all` reclaims the whole jail; the cgroup the jailer
 //! creates lives outside it and is removed explicitly (like the tap). We don't `--daemonize`, so
 //! Firecracker keeps our piped stdout and the serial console still reaches [`crate::console`]. We
-//! don't mknod anything ourselves (the jailer does, which is why it needs real root — mknod of a
+//! don't mknod anything ourselves (the jailer does, which is why it needs real root, mknod of a
 //! device node is `EPERM` in a non-initial user namespace even with `CAP_MKNOD`).
 //!
 //! **Scope.** This confines both a jailed **cold boot** and a jailed **restore**: the chroot +
@@ -25,7 +25,7 @@
 //! **seccomp** filters (on by default; we never pass `--no-seccomp`). Every
 //! boot feature composes with the jail: the **vsock exec channel** (its unix socket bound
 //! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
-//! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`] — the shared-base path, not a
+//! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`], the shared-base path, not a
 //! full rootfs copy), a **NIC** (the tap lives in a per-VM netns the jailer joins via `--netns`,
 //! decision 017), **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
 //! (the bundle staged into the chroot; a confined prewarmed pool falls out). Leak-proof, cgroup-owned
@@ -181,7 +181,7 @@ pub(crate) fn spawn_jailer(
     // host the socket is `<chroot_root>/run/firecracker.socket`.
     let socket = chroot_root.join("run/firecracker.socket");
     // The jailer's chroot nests the socket deep under the scratch dir, so this is the path most
-    // likely to overflow `sun_path` — fail clearly now, not as a cryptic bind failure mid-boot.
+    // likely to overflow `sun_path`, fail clearly now, not as a cryptic bind failure mid-boot.
     check_sun_path(&socket)?;
 
     let fc_stderr = std::fs::File::create(workdir.join(FC_STDERR))
@@ -281,7 +281,7 @@ pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result
     })
 }
 
-/// Stage the **read-only shared base** into the chroot for a `read_only_root` jailed boot — the
+/// Stage the **read-only shared base** into the chroot for a `read_only_root` jailed boot, the
 /// shared-base path, the jailed counterpart of the unjailed read-only boot that references one base in
 /// place. Instead of a full per-VM copy ([`stage_into_chroot`]), **bind-mount** the one base file
 /// into the chroot, so every jailed VM shares its inode (and page cache); the guest layers a per-run
@@ -291,11 +291,11 @@ pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result
 /// `MS_SLAVE` mount namespace: a mount created under a **shared** host mount propagates *in*, so the
 /// jailed Firecracker sees it. When the scratch base is **not** a shared mount (a hoster pointed
 /// `scratch_dir` at a private mount, so the propagation can't reach the slave namespace), fall back
-/// to a read-only **copy** — correct and still base-immutable, just not page-cache-deduped. Memory-sharing is
+/// to a read-only **copy**, correct and still base-immutable, just not page-cache-deduped. Memory-sharing is
 /// a best-effort property; the isolation is not (decision 013/014), and the copy confines identically.
 ///
 /// Returns the chroot-relative path to name in the API, and `Some(host_mount_path)` when a bind mount
-/// was made — so teardown unmounts it before reclaiming the scratch dir (`None` for the copy fallback,
+/// was made, so teardown unmounts it before reclaiming the scratch dir (`None` for the copy fallback,
 /// which needs no unmount). Base perms must let the dropped uid read it (the pinned base is `0644`); a
 /// bind mount exposes the source's mode, so no chown is applied to a shared inode.
 pub(crate) fn stage_ro_base_into_chroot(
@@ -329,7 +329,7 @@ pub(crate) fn stage_ro_base_into_chroot(
 
 /// Bind-mount `src` onto `dst` **read-only**. Two steps on purpose: a bind mount is read-write
 /// regardless of a `-o ro` on the initial call, so a second `remount,ro,bind` is what actually drops
-/// write access — the base then can't be mutated through the chroot even before Firecracker opens it
+/// write access, the base then can't be mutated through the chroot even before Firecracker opens it
 /// `O_RDONLY`. Shells out to `mount` (as the tap path shells out to `ip`), keeping the host path
 /// `unsafe`-free. If the remount fails, the half-made bind mount is detached before returning, so a
 /// failure never leaks a mount.
@@ -415,8 +415,8 @@ fn mount_is_shared(mountinfo: &str, target: &Path) -> bool {
             .take_while(|f| **f != "-")
             .any(|f| f.starts_with("shared:"));
         let depth = mount_point.components().count();
-        // `>=`, not `>`: on an *overmount* (two mounts at the same point, so equal depth) the topmost
-        // — the **last** mountinfo line — governs what a later mount there inherits. Keeping the
+        // `>=`, not `>`: on an *overmount* (two mounts at the same point, so equal depth) the topmost,
+        // the **last** mountinfo line, governs what a later mount there inherits. Keeping the
         // first-seen line would read a point listed `shared:` first then private-later as shared, take
         // the bind path with no copy fallback, and hard-fail the jailed boot (the bind wouldn't
         // propagate). Later same-depth line wins; a strictly deeper mount point still wins over both.
@@ -520,7 +520,7 @@ fn read_delegated() -> Delegated {
     }
 }
 
-/// Build the `--cgroup <file>=<value>` limits from the delegation state — pure, so the
+/// Build the `--cgroup <file>=<value>` limits from the delegation state, pure, so the
 /// per-controller fail-open logic is unit-tested without a live cgroup fs. `cpu.max` bounds total CPU
 /// to `vcpus` cores and `memory.max` to the guest's RAM plus a fixed host-side overhead; both require
 /// the cpu **and** memory controllers, so a host missing either gets no limits at all (empty). The
@@ -564,7 +564,7 @@ pub(crate) fn cgroup_limit_args(vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<St
 /// The memory envelope to cap a **restored** jailed clone at: the larger of the caller's `config`
 /// value and the guest RAM the snapshot memory file implies (`mem_file_len` bytes, since a full
 /// snapshot's memory file *is* the guest's RAM). Deriving from the file's true guest RAM means the cap
-/// can never fall *below* what the restored guest actually uses — the exact hazard that kept restore
+/// can never fall *below* what the restored guest actually uses, the exact hazard that kept restore
 /// uncapped: a `config` under-declaring the envelope must not OOM-kill a legitimate clone. Pure, so
 /// the max logic is unit-tested without a real snapshot.
 pub(crate) fn restore_mem_mib(config_mem_mib: NonZeroU32, mem_file_len: u64) -> NonZeroU32 {
@@ -662,7 +662,7 @@ mod tests {
             restore_mem_mib(NonZeroU32::new(256).unwrap(), 512 * mib).get(),
             512
         );
-        // `config` is larger (a looser declared bound): keep it — still safe (never below the file).
+        // `config` is larger (a looser declared bound): keep it, still safe (never below the file).
         assert_eq!(
             restore_mem_mib(NonZeroU32::new(512).unwrap(), 256 * mib).get(),
             512
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn overmount_is_governed_by_the_topmost_entry() {
-        // Two mounts at the *same* point (an overmount): the effective propagation is the topmost —
+        // Two mounts at the *same* point (an overmount): the effective propagation is the topmost,
         // the last line. A point shared-first then private-later must read *not* shared (so the copy
         // fallback fires instead of a hard-failing bind); private-first then shared-later reads shared.
         let shared_then_private = "\

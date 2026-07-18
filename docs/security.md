@@ -21,7 +21,7 @@ The trust boundary is the CPU, not any software inside the guest:
 - **Trusted:** the host CPU's virtualization (KVM), the host kernel, and the driver running on the
   host (the VMM process, the jailer, and the host-side eBPF). The security-relevant observation and
   policy live here, out of the guest's reach.
-- **Not trusted:** everything inside the guest — the untrusted code, and the in-guest agent that
+- **Not trusted:** everything inside the guest, the untrusted code, and the in-guest agent that
   carries exec and I/O. The in-guest agent is a convenience, never a security boundary; a hostile
   guest is assumed to control it completely.
 

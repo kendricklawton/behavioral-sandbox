@@ -1,6 +1,6 @@
 # Roadmap
 
-> **What we're building:** a self-hostable, isolated **code-execution sandbox** — **Firecracker**
+> **What we're building:** a self-hostable, isolated **code-execution sandbox**, **Firecracker**
 > microVMs for hardware isolation, **aya/eBPF** for observability and network policy at the *host*
 > boundary (where the guest can't tamper with you). Run untrusted code in a microVM; watch and
 > enforce what it does from the kernel, outside the guest.
@@ -14,15 +14,15 @@
 > Multi-tenant auth, billing, scheduling across a fleet, a web dashboard: **out of scope**, the
 > hoster's job.
 >
-> **Scope of this repo:** the **core engine** — the Firecracker + eBPF sandbox of **Phases 0–19**,
+> **Scope of this repo:** the **core engine**, the Firecracker + eBPF sandbox of **Phases 0–19**,
 > defined by the four core properties (§0). The **vNext tracks** (Phases 20–21: the polyglot SDKs
-> and the software-isolation Wasmtime sibling) are **adjacent repos** — they build on this engine's
+> and the software-isolation Wasmtime sibling) are **adjacent repos**, they build on this engine's
 > frozen wire API + audit-log format, but their code lives **outside** this repo and is
 > tracked here only as a forward map. This repo never trades its core properties to accommodate them: the
 > Wasmtime variant is a *sibling, not a backend* (Phase 21), so *isolation is hardware* holds here
 > without exception.
 >
-> This file is the **single source of truth for progress** — of the core engine, and a map to its
+> This file is the **single source of truth for progress**, of the core engine, and a map to its
 > sibling repos. Its checkboxes are the state.
 
 ## §0 The core properties
@@ -32,7 +32,7 @@ Four properties every phase must protect:
 1. **Isolation is hardware, not software.** Untrusted code runs in a Firecracker microVM (KVM).
    The host trusts the CPU boundary, not the guest.
 2. **Observe & enforce from the host.** Visibility and policy live in **host-side eBPF** (syscalls,
-   the microVM's tap device, its cgroup) — the guest cannot see or subvert them.
+   the microVM's tap device, its cgroup), the guest cannot see or subvert them.
 3. **Engine, not platform.** A self-hostable runtime + a clean driver API. No auth/billing/
    dashboard/fleet-scheduler in this repo (note: that's the hoster's).
 4. **Measured, not marketed.** Boot time, memory-sharing, and eBPF overhead are benchmarked with
@@ -52,17 +52,17 @@ Four properties every phase must protect:
 
 ## §0.6 Versioning (the finish line)
 
-- **`v0.1.0` is the finish line** — the first real release, cut only once **every phase below is
+- **`v0.1.0` is the finish line**, the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; this is
   P19.8).
 - **The vNext tracks (Phases 20–21) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
   neither pulls tenancy/billing/scheduling into scope, and the Wasmtime sibling never dilutes this
-  engine's core properties (it's a separate artifact — see Phase 21).
+  engine's core properties (it's a separate artifact, see Phase 21).
 - **Everything until then is a pre-release `v0.0.x`.** Tag the foundation baseline (the engine
   boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
-  patch as they land. These are checkpoints, not releases — no stability promise.
+  patch as they land. These are checkpoints, not releases, no stability promise.
 - Tags are a **human git step** (§0.5): the coding agent checks boxes; the user cuts the tag.
 - **No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the roadmap checkboxes and
   `docs/contributing-architecture.md`'s decision log *are* the change record; a curated
@@ -70,14 +70,14 @@ Four properties every phase must protect:
 
 ## §0.75 Dev environment (one-time)
 
-A modern Linux box with `/dev/kvm` (the dev machine already has a bleeding-edge kernel + BTF —
+A modern Linux box with `/dev/kvm` (the dev machine already has a bleeding-edge kernel + BTF,
 ideal for both KVM and CO-RE eBPF). Prerequisites the first phase pins down: the `firecracker`
 binary + jailer, a guest kernel (`vmlinux`), a way to build a rootfs, and the aya toolchain
 (`bpf-linker`, the `bpfel-unknown-none` target, `CAP_BPF`/root for loading).
 
 ---
 
-## Phase 0 — Reset the repo to the sandbox engine
+## Phase 0, Reset the repo to the sandbox engine
 
 Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the git history.
 
@@ -92,11 +92,11 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
 - [x] **P0.4** Prerequisites pinned in `CONTRIBUTING.md` (KVM, BTF, `firecracker`+jailer, aya
       toolchain, caps); `cargo xtask setup` checks the host and reports what's missing.
 - [x] **P0.5** `cargo xtask ci` skeleton: fmt · clippy `-D warnings` · build · test · docs · deny
-      (the eBPF crate builds for its own target, gated separately — see P8).
+      (the eBPF crate builds for its own target, gated separately, see P8).
 - [x] **P0.6** Naming: keep the `agent` umbrella (binary + repo); crates are
       `vmm`/`probes`/`probes-loader`/`cli`.
 - [x] **P0.7** A home for the per-phase notes each phase feeds. *(No `CHANGELOG.md`
-      in the pre-release `v0.0.x` line — the roadmap's checkboxes are the record; the changelog is
+      in the pre-release `v0.0.x` line, the roadmap's checkboxes are the record; the changelog is
       first written at `v0.1.0`. See §0.6. Design notes live in the root `.md` files: these annotations
       + the decision log, per §0.5.)*
 - [x] **P0.8** `cargo xtask ci-privileged` runs the KVM/eBPF (`#[ignore]`d) tests behind a
@@ -106,9 +106,9 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
 
 ---
 
-## Firecracker track — hardware isolation
+## Firecracker track, hardware isolation
 
-## Phase 1 — Boot a microVM from Rust
+## Phase 1, Boot a microVM from Rust
 
 The "hello, KVM" moment: a program that boots a real Linux microVM and reads its console.
 
@@ -134,7 +134,7 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
 - **Exit gate:** a microVM boots to userspace from `cargo run` and shuts down clean.
   *(Demo: `agent run --demo-boot`, recorded in the box annotations above and decision 001.)*
 
-## Phase 2 — Run code in the guest & get results back
+## Phase 2, Run code in the guest & get results back
 
 Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
 
@@ -148,7 +148,7 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       *(`crates/guest-agent` + the shared `crates/channel` wire protocol, whose public API is a
       type-state `ClientConnection`/`ServerConnection`. `serve` is transport-agnostic (any
       `Read`+`Write`); it drains the child's pipes to discard-on-forward-error so a dead-or-stalled
-      host — **given the connection's read/write deadlines** — is a typed error, not a hang, and it
+      host, **given the connection's read/write deadlines**, is a typed error, not a hang, and it
       maps signal death to `128+sig`. Static build (verified) via `cargo xtask build-guest-agent`;
       unix-socket harness now, vsock transport in P2.3.)*
 - [x] **P2.3** Wire vsock in the VMM config; host side connects and speaks the protocol.
@@ -157,21 +157,21 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       so it can't swallow the guest's channel handshake), sets read/write deadlines, and returns a
       protocol-ready `ClientConnection`. Tested end-to-end KVM-free against the real guest agent
       behind a fake vsock socket; a privileged smoke test confirms real Firecracker boots with the
-      device. Full host→guest round trip needs the agent in the rootfs — P3.)*
+      device. Full host→guest round trip needs the agent in the rootfs, P3.)*
 - [x] **P2.4** `RunningVm::exec(cmd, stdin) -> {stdout, stderr, exit}`.
       *(`exec(argv, stdin)` connects over vsock and speaks the protocol: sends a bounded up-front
       stdin buffer, aggregates stdout/stderr/exit into `RunResult` under a 16 MiB output cap (a
       flooding guest can't grow host memory). Guest agent feeds stdin on its own thread, closing it
       for EOF. `Sandbox` now boots with vsock and wires `exec`. Tested KVM-free (echo + `cat`
-      stdin) against the real agent; full in-VM run needs the agent in the rootfs — P3.)*
-- [x] **P2.5** Push richer inputs in (injected files) and pull artifacts out — over the channel.
+      stdin) against the real agent; full in-VM run needs the agent in the rootfs, P3.)*
+- [x] **P2.5** Push richer inputs in (injected files) and pull artifacts out, over the channel.
       *(New `PutFile` request + `File` response frames; the agent gives each run a working dir,
       writes injected files in (path-checked against `..`/absolute escapes), runs the command with
-      that cwd, and returns the requested `artifacts` — collected into `RunResult.files` under the
+      that cwd, and returns the requested `artifacts`, collected into `RunResult.files` under the
       shared output cap. `exec_with_files` is the richer entry; plain `exec` stays. Unknown request
       tags now decode to `Request::Unknown` so the agent replies a typed "unsupported" instead of a
       fatal protocol error (the flagged forward-compat fix). Each file is one `≤1 MiB` frame;
-      **streaming/large I/O (chunked, whole working-dir) is the block-device path — P3.4/P3.5**.)*
+      **streaming/large I/O (chunked, whole working-dir) is the block-device path, P3.4/P3.5**.)*
 - [x] **P2.6** Timeouts + kill: a hung command is bounded and reaps cleanly.
       *(Guest-side self-timeout: the host sends a per-exec `timeout_ms`; the agent replaces the
       unbounded `child.wait()` with a deadline-polling `wait_bounded` that SIGKILLs + reaps the
@@ -181,16 +181,16 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       isn't cut off and the `TimedOut` reply arrives. Frees the accept loop for the direct-child
       hang. **Known gap:** `kill` hits only the direct child, so a command that double-forks a
       grandchild holding the stdout pipe still wedges the agent's connection until the grandchild
-      exits (the host stays bounded); the definitive fix is the cgroup killing the whole tree — see
+      exits (the host stays bounded); the definitive fix is the cgroup killing the whole tree, see
       Phase 6. Timeout is the distinct `VmmError::ExecTimeout`; the guest also self-clamps the
       budget. Also folded in the P2.5 review fixes: the output cap counts artifact `path` bytes +
       a per-frame floor (no empty/all-path flood), and an over-cap artifact is skipped, not fatal.)*
-- [x] **P2.7** Error taxonomy for the driver (boot failure, channel failure, guest crash) — typed,
+- [x] **P2.7** Error taxonomy for the driver (boot failure, channel failure, guest crash), typed,
       no panics on the host.
-      *(`VmmError` already carried the variants; this pass makes the taxonomy **legible** — a doc
+      *(`VmmError` already carried the variants; this pass makes the taxonomy **legible**, a doc
       that sorts every variant into three buckets: **boot/infra** (`NoKvm`/`Artifact`/`Timeout`/
-      `Vmm`, which also holds vsock **establishment** failures — connect + `CONNECT` ack + channel
-      handshake — since "the agent isn't listening yet" is infra), **channel/transport**
+      `Vmm`, which also holds vsock **establishment** failures, connect + `CONNECT` ack + channel
+      handshake, since "the agent isn't listening yet" is infra), **channel/transport**
       (`Channel`, reserved for a **steady-state** framing/IO fault mid-exec), and **guest fault**
       (`GuestExec`/`ExecTimeout`/`OutputCap`). States the load-bearing semantic: a command that
       merely exits non-zero **or dies by signal** (`128+sig`) is a faithful `RunResult`, not an
@@ -203,18 +203,18 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       *(Happy path `exec_over_fake_vsock_runs_a_command` drives `echo hi` through the **real** agent
       → `hi\n`, exit 0. "Crashing → typed error" is disambiguated with two tests that pin the
       boundary: a command the guest can't spawn → `VmmError::GuestExec` (typed error), and
-      `kill -9 $$` → `RunResult{exit_code:137}` (a faithful result, **not** an error — the
+      `kill -9 $$` → `RunResult{exit_code:137}` (a faithful result, **not** an error, the
       host-side mapping, distinct from the guest-agent-layer signal-death test). Added the
       previously-untested channel bucket: a guest that drops mid-exec →
       `VmmError::Channel` with `is_disconnect()`. All KVM-free, in the host gate.)*
 - **Exit gate:** `agent`-driven `exec` in a microVM returns real output.
   *(Recorded in the box annotations above and decision 002. The exec **engine** is
   complete and tested against the real guest agent (only the Firecracker vsock UDS is faked) + a privileged vsock-device boot smoke
-  test. The **"in a microVM" clause was provisional** here — the agent wasn't baked into the rootfs
-  or binding `AF_VSOCK` yet — and is now **closed by P3.1**: the literal in-VM `exec("echo hi") → hi,
+  test. The **"in a microVM" clause was provisional** here, the agent wasn't baked into the rootfs
+  or binding `AF_VSOCK` yet, and is now **closed by P3.1**: the literal in-VM `exec("echo hi") → hi,
   exit 0` runs against a real microVM.)*
 
-## Phase 3 — Rootfs & the language runtime
+## Phase 3, Rootfs & the language runtime
 
 Build the disk the guest runs, with a real runtime inside, natively. Python is
 the exit-gate demo, but the rootfs is **runtime-agnostic**: a real kernel + rootfs runs *any* Linux
@@ -225,21 +225,21 @@ binary, so adding a runtime is a packaging step, not an engine change.
       *(`cargo xtask build-rootfs` → `artifacts/rootfs-agent.ext4`: a sha256-pinned Alpine
       minirootfs (`decision 003`) with the static agent baked in at `/usr/local/bin`, a minimal
       busybox-init `/etc/inittab` that mounts the pseudo-fs and respawns the agent on vsock, built
-      with `mke2fs -d` — **rootless, no loopback, one command**. To make "agent baked in" real, the
+      with `mke2fs -d`, **rootless, no loopback, one command**. To make "agent baked in" real, the
       agent gained its **`AF_VSOCK` listener** (the `vsock` crate; `vsock:<port>` in `main`), and it
       prints the shared `GUEST_READY_MARKER` to the console **after `bind`** so boot-readiness means
       "the agent is accepting" (no connect-before-listen race). **Closes Phase 2's provisional gate:**
       a new privileged test boots this rootfs and runs `exec("echo hi") → hi, exit 0` **inside a real
       microVM** (~3.5 s), wired via `ci-privileged` (which builds the agent + rootfs before the
-      `#[ignore]` tests). Additive — the Ubuntu boot rootfs + its hash-guard + the `login:` test are
+      `#[ignore]` tests). Additive, the Ubuntu boot rootfs + its hash-guard + the `login:` test are
       untouched. Reproducibility rigor (content hash / byte-identical) is P3.6.)*
 - [x] **P3.2** Add the reference language runtime (**Python**) to the rootfs; prove
       `exec("python -c 'print(2+2)')`.
       *(`build-rootfs` now installs `python3` into the staging root with a **sha256-pinned static
-      `apk`** (`apk-tools-static`) — still rootless, on any host distro; packages are
+      `apk`** (`apk-tools-static`), still rootless, on any host distro; packages are
       signature-verified against the keys the minirootfs itself ships. `--no-scripts` because
       install scripts need a chroot (root); the in-VM test proves the payload runs. Versions float
-      *within* the pinned `v3.24` branch — Alpine branch repos carry only the latest revision per
+      *within* the pinned `v3.24` branch, Alpine branch repos carry only the latest revision per
       package, so an exact `pkg=ver-rN` pin would *break* the build on every upstream patch bump
       rather than reproduce it; **P3.6** instead records the resolved closure in a lockfile and detects
       drift. Image: 33 packages, ~50 MB in the 128 MiB ext4. Proof:
@@ -247,27 +247,27 @@ binary, so adding a runtime is a packaging step, not an engine change.
       exit 0, in a real microVM.)*
 - [x] **P3.3** Read-only base rootfs + a writable overlay per run (so runs don't mutate the base).
       *(New `BootConfig.read_only_root` (decision 004): attaches the base **read-only and shared**
-      (no per-VM copy — Firecracker opens it `O_RDONLY`), and the guest stacks a **per-run tmpfs
+      (no per-VM copy, Firecracker opens it `O_RDONLY`), and the guest stacks a **per-run tmpfs
       overlay** so `/` is writable but ephemeral. `build-rootfs` bakes `/sbin/overlay-init` (mounts a
       tmpfs, builds overlayfs lower=RO-base/upper=tmpfs, `pivot_root`s, `exec`s the real init) + the
       baked `/overlay` mountpoint (can't `mkdir` on a read-only `/`). Cap = `mem_mib/2` via an
       `overlay_size=` cmdline token the kernel routes into PID 1's env (guests have no swap → a
       near-RAM tmpfs OOMs). Read-only-base **implies** overlay (one flag: a bare read-only `/` would
-      break the agent's `/tmp` workdir). **Additive** — set in code (`agent_rootfs_config`), not an
+      break the agent's `/tmp` workdir). **Additive**, set in code (`agent_rootfs_config`), not an
       env var; the stock Ubuntu tests still boot copy+read-write. Proof: `overlay_is_writable_and_base_is_untouched`
       writes to `/etc` in-guest (works via the overlay) and asserts the base file's size+mtime are
       unchanged after two boots; the exec/python tests now run overlay-backed. Memory-sharing: the per-VM
       scratch dir no longer holds a rootfs copy. Second-block-device path stays for P3.4; byte-level
       reproducibility for P3.6.)*
 - [x] **P3.4** Inject a per-run working dir / files via a second **block device** (the
-      channel path — small per-file injection — already landed in P2.5; this is the whole-working-dir
+      channel path, small per-file injection, already landed in P2.5; this is the whole-working-dir
       / large-file mechanism).
       *(New `BootConfig.input_dir` (decision 005): the driver builds a **read-only** ext4 from a host
       dir (rootless `mke2fs -d`, in the per-VM scratch dir, sized from the tree + `-N` inodes) and
       attaches it as `/dev/vdb` `is_read_only:true`; the agent rootfs mounts it RO at `/input` via a
       best-effort `sysinit` line (baked `/input` mountpoint). Read-**only**, not a read-write working
       dir: RW would front-run P3.5 and its dirty-ext4-on-hard-kill readback problem, and `O_RDONLY`
-      makes the input provably immutable. **No guest-agent change** — `/input` is a path the command
+      makes the input provably immutable. **No guest-agent change**, `/input` is a path the command
       references; the per-exec `/tmp` `RunDir` is untouched. Proof: `injects_a_large_file_via_block_device`
       injects a **4 MiB** file (4× the 1 MiB channel frame cap) and the guest reads it back from
       `/input` with a matching byte count + sha256. New runtime dep (`mke2fs`/`truncate`, typed error
@@ -278,11 +278,11 @@ binary, so adding a runtime is a packaging step, not an engine change.
       *(New `BootConfig.output_dir` (decision 006): the driver attaches a blank **writable** ext4 as a
       third block device (labelled `agent-output`, `lazy_itable_init=0` so it stays sparse); the guest
       mounts it read-write `-o sync` at `/output`. `RunningVm::collect_outputs` (consumes the VM) stops
-      the VMM, then reads the image back **rootless** — `e2fsck -fy` to recover the journal, `debugfs
-      rdump` to extract — **after** the VMM has exited (a live `e2fsck` would race Firecracker). The
-      counterpart to P2.5's per-frame `Response::File`; **no guest-agent change** — `/output` is a path
+      the VMM, then reads the image back **rootless**, `e2fsck -fy` to recover the journal, `debugfs
+      rdump` to extract, **after** the VMM has exited (a live `e2fsck` would race Firecracker). The
+      counterpart to P2.5's per-frame `Response::File`; **no guest-agent change**, `/output` is a path
       the command writes. Order-robust: both data devices now mount by **label** (`findfs`), retiring
-      005's `/dev/vdb` order-dependence — so the P3.4 input mount moved to the same `/sbin/mount-drives`.
+      005's `/dev/vdb` order-dependence, so the P3.4 input mount moved to the same `/sbin/mount-drives`.
       Guest-controlled tree is sanitised: `lost+found` pruned and **host-escaping symlinks dropped**
       (`debugfs` recreates a guest `link -> /etc/shadow` as a live host symlink otherwise), and the
       extraction is byte- and time-capped so a sparse-file image can't exhaust host disk. New runtime
@@ -300,43 +300,43 @@ binary, so adding a runtime is a packaging step, not an engine change.
       already reproducible (`--locked` + pinned toolchain). A committed `xtask/rootfs-packages.lock`
       records the exact 33-package closure; `build-rootfs --verify` (run by `ci-privileged`) builds
       twice, asserts byte-identical, and fails on closure drift, `--update-lock` re-pins. **Exact
-      version pinning was rejected** — Alpine branch repos delete old `.apk`s on a bump, so a pin would
+      version pinning was rejected**, Alpine branch repos delete old `.apk`s on a bump, so a pin would
       *fail* the build, not reproduce it; the durable fix (vendoring the `.apk` closure as sha-pinned
       artifacts) is deferred. Default `build-rootfs` stays one command.)*
 - [x] **P3.7** Size/boot budget: keep the base small; measure its effect on boot time.
       *(**Size budget:** `build-rootfs` reports the base's real footprint (~69 MiB used: Alpine +
-      python3 + agent) and **fails past a 96 MiB budget** — a regression guard against accidental
+      python3 + agent) and **fails past a 96 MiB budget**, a regression guard against accidental
       bloat (Node/Go in P3.9 will raise it + the image size deliberately). **Boot measurement:** new
       `cargo xtask bench-boot [--runs N]` (needs KVM) times boot-to-userspace over N runs on **both**
-      the P3.3 read-only shared base *and* a read-write per-VM copy, reporting min/p50/p90/p99/max —
+      the P3.3 read-only shared base *and* a read-write per-VM copy, reporting min/p50/p90/p99/max,
       "measured, not marketed" (percentiles, nearest-rank, no averages). **The finding:** at 69 MiB
       both paths boot in **~0.5 s p50** (copy p50 ~520 ms, shared ~540 ms); the copy is *cheap* (the
       host page cache serves it) so the base size barely moves boot latency, and the shared path's
       slightly higher tail is **overlay-setup** variance, not size. So keeping the base small mainly
-      buys **memory-sharing** (page-cache dedup across VMs + disk), not boot time — the honest, measured
+      buys **memory-sharing** (page-cache dedup across VMs + disk), not boot time, the honest, measured
       result, not the assumed "bigger base = slower boot." Cold-boot p50/p99 as a tracked benchmark
       is P17.1; the reusable harness is P17.5.)*
 - [x] **P3.8** Test: run Python + a small script that writes a file → capture the file.
       *(Privileged `python_script_writes_a_file_and_we_capture_it`: injects a small Python script as a
       file (`PutFile`), runs the **real** interpreter on it in a microVM (`python3 script.py`, using
-      the `json` stdlib), and pulls back the `result.json` it wrote — the exec surface's
+      the `json` stdlib), and pulls back the `result.json` it wrote, the exec surface's
       inject → run → capture loop end to end with an actual language runtime, not a shell builtin.
       Uses the per-file **channel** path (`exec_with_files`, P2.5); the bulk block-device paths are
       P3.4/P3.5. Asserts the captured file holds what the script computed. 9 privileged tests now.)*
 - [x] **P3.9** **Runtime-agnostic proof:** a second, *differently-shaped* runtime runs unchanged
-      through the same `exec` path — a **static Go/Rust ELF** (no interpreter, no libc) and **Node**
-      (a different interpreter) — showing the rootfs isn't Python-specific and the engine runs any
+      through the same `exec` path, a **static Go/Rust ELF** (no interpreter, no libc) and **Node**
+      (a different interpreter), showing the rootfs isn't Python-specific and the engine runs any
       Linux binary. (Contrast the Wasmtime sibling, which needs code recompiled to wasm32.)
       *(Two proofs. **Static native ELF:** a fully-static musl Rust binary (`guest-agent`'s
-      `examples/writefile`, no `NEEDED`/`PT_INTERP` — verified) is **injected at runtime** on the
-      read-only `/input` device (P3.4, exec'd directly — the mount is `-o ro`, not `noexec`), writes
-      to the `/output` device, and the file is captured host-side (P3.5) — the engine runs **any**
+      `examples/writefile`, no `NEEDED`/`PT_INTERP`, verified) is **injected at runtime** on the
+      read-only `/input` device (P3.4, exec'd directly, the mount is `-o ro`, not `noexec`), writes
+      to the `/output` device, and the file is captured host-side (P3.5), the engine runs **any**
       binary handed in, no pre-provisioning. **Node:** `nodejs` joins the base (a **baked** interpreter,
       since it's a 44-package closure); a `.js` runs via the channel path and its output is captured,
       like the Python test. Baking Node grew the image ~69→132 MiB, so `ROOTFS_SIZE_MIB` 128→256 and
       the budget 96→160 moved deliberately (P3.7's pre-authorized bump), the lockfile regenerated (44
       pkgs, no npm), and P3.6 determinism re-verified byte-identical. Boot re-measured (n=100 so p99
-      is real, not max relabelled): ~380 ms p50, median copy≈shared — doubling the base didn't slow
+      is real, not max relabelled): ~380 ms p50, median copy≈shared, doubling the base didn't slow
       boot (page cache serves the copy), reinforcing P3.7; the shared/overlay path carries a heavier
       p99 (~670 vs ~410 ms) from per-run overlay setup, not image size.
       Tests: `runs_a_static_native_binary_and_captures_its_artifact`, `runs_node_a_second_interpreter`
@@ -345,11 +345,11 @@ binary, so adding a runtime is a packaging step, not an engine change.
       reproducibility, static-vs-dynamic linking, inject-vs-bake) are recorded in these annotations
       and decisions 006/007.)*
 - **Exit gate:** real Python **and a static native binary + Node** run in the microVM and
-  produce artifacts — the rootfs is runtime-agnostic.
+  produce artifacts, the rootfs is runtime-agnostic.
 
-## Phase 4 — Networking
+## Phase 4, Networking
 
-Give the microVM a network with per-VM isolation — the classic tap/bridge setup.
+Give the microVM a network with per-VM isolation, the classic tap/bridge setup.
 
 - [x] **P4.1** Create a **tap device** per VM on the host; attach it as virtio-net in the VMM config.
       *(New `BootConfig.enable_network` (decision 009): the driver creates a per-VM host tap by shelling
@@ -369,26 +369,26 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge setu
       under a user+net namespace). New host dep `ip` (iproute2; `setup` check). P4.3's direction was
       settled up front by decision 008.)*
 - [x] **P4.2** Address the guest (static or a tiny DHCP) and route host↔guest.
-      *(Static, via the kernel `ip=` param — the pinned kernel has `CONFIG_IP_PNP` (verified: the
+      *(Static, via the kernel `ip=` param, the pinned kernel has `CONFIG_IP_PNP` (verified: the
       `IP-Config:` strings are baked into `vmlinux`), so the guest configures `eth0` before userspace
       with **no rootfs change**. The P4.1 per-VM index now also yields a point-to-point **/30** from
       `10.200.0.0/16` (`subnet_for`: host = block+1, guest = block+2; the index folds the PID bits down
       so two processes both at `NET_SEQ=0` don't pick the same block). `Tap::create` assigns the host
       end (`ip addr add host_ip/30 dev tap`, which installs the connected route so the host reaches the
-      guest), and `run_boot` appends `ip=<guest_ip>:::255.255.255.252::eth0:off` — the **empty gateway**
+      guest), and `run_boot` appends `ip=<guest_ip>:::255.255.255.252::eth0:off`, the **empty gateway**
       is the deny-by-default lever: the kernel installs only the connected /30 route, **no default
       route**, so host↔guest works and the guest reaches nothing else. No new `BootConfig` knob (rides
-      `enable_network`); `RunningVm::host_ip()`/`guest_ip()` expose the pair. Teardown is unchanged —
+      `enable_network`); `RunningVm::host_ip()`/`guest_ip()` expose the pair. Teardown is unchanged,
       `ip link del` cascades away the address + route. Proof:
       `addresses_the_guest_and_routes_host_to_guest` asserts the guest has its IP, can ping the host
-      end, and **cannot** reach an off-subnet address (RFC 5737 TEST-NET-1) — a fast `ENETUNREACH`, not
+      end, and **cannot** reach an off-subnet address (RFC 5737 TEST-NET-1), a fast `ENETUNREACH`, not
       a timeout. `CAP_NET_ADMIN`-gated (skips without it; verified under a user+net namespace). Base
       `10.200/16` dodges the common host defaults; making it a hoster knob and per-VM netns isolation
       are P4.3/P4.4.)*
 - [x] **P4.3** `(decision)` egress model: **NAT to the world** vs **deny-by-default** →
       `docs/contributing-architecture.md`. (Default: deny-by-default; explicit allow later, enforced in BPF track.)
       *(Direction **pre-recorded as decision 008** (2026-07-12): deny-by-default, tap has no world
-      route, no default masquerade until eBPF enforcement (P8) — so this **blocks P4.1** (build denying,
+      route, no default masquerade until eBPF enforcement (P8), so this **blocks P4.1** (build denying,
       not opened-then-restricted). Closed here: decision 008 gained an "As shipped" note pinning the
       concrete mechanism (empty `ip=` gateway, so a connected-route-only guest with no default route, no
       masquerade, no `ip_forward`) and citing the `addresses_the_guest_and_routes_host_to_guest` proof.
@@ -406,7 +406,7 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge setu
 - [x] **P4.5** Teardown removes the tap + routes; no orphaned interfaces after many runs.
       *(Delivered across P4.1/P4.2 and finished here: the tap is the first per-VM resource **outside
       `workdir`**, so it's deleted (with its address + connected route, which `ip link del` cascades
-      away) in **all three** teardown paths (`RunningVm::drop`, `Spawned::drop`, `Spawned::abort`) — a
+      away) in **all three** teardown paths (`RunningVm::drop`, `Spawned::drop`, `Spawned::abort`), a
       boot that fails *after* tap-create still cleans up. Best-effort (`ip link del` can fail), no
       `Drop`-of-temp-dir safety net, which reinforces the Phase-6 jailer/cgroup ownership model.
       `repeated_boots_leave_no_leaks` now asserts **all three** leak dimensions after two cycles: no
@@ -441,9 +441,9 @@ Give the microVM a network with per-VM isolation — the classic tap/bridge setu
   NAT/forwarding as the road not taken, the atomic per-VM /30, and the P4.8 audit table. Working
   demo: the three `ci-privileged` network tests.)*
 
-## Phase 5 — Snapshots & pre-warmed start
+## Phase 5, Snapshots & pre-warmed start
 
-The fast-start magic: pause, snapshot, and restore — fork many VMs from one pre-warmed image.
+The fast-start magic: pause, snapshot, and restore, fork many VMs from one pre-warmed image.
 
 > **Design for the Phase-6 jailer now.** Snapshot save/restore takes host paths for the mem file,
 > state file, and block devices; under Phase 6's jailer those become chroot-relative and jailed-uid-
@@ -547,7 +547,7 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one pr
       pooled clone's VMM behind the pool's back, next take discards the corpse and serves a fresh
       restore, refill tops back to target. 22 privileged tests.)*
 - [x] **P5.7** Benchmark: cold boot vs snapshot restore vs pre-warmed-pool `exec` latency. *(Baseline
-      to beat: Phase 1 boots a full rootfs copy in `/tmp` — on a tmpfs host that's ≈300 MB of RAM
+      to beat: Phase 1 boots a full rootfs copy in `/tmp`, on a tmpfs host that's ≈300 MB of RAM
       per sandbox on top of guest memory; overlays should collapse that.)*
       *(`cargo xtask bench-warm [--runs N]`: **time-to-first-result** (start a sandbox → a Python
       one-liner's output back on the host) on the three start paths, reusing `bench-boot`'s honest
@@ -576,9 +576,9 @@ The fast-start magic: pause, snapshot, and restore — fork many VMs from one pr
   VMGenID entropy reseed proven by test, the documented wall-clock lag). Working demo:
   `cargo xtask bench-warm` plus the eight snapshot/restore/pool tests in `ci-privileged`.)*
 
-## Phase 6 — Confinement: jailer, cgroups, seccomp
+## Phase 6, Confinement: jailer, cgroups, seccomp
 
-Confine the VMM itself — the other half of the isolation story, and pure Linux internals.
+Confine the VMM itself, the other half of the isolation story, and pure Linux internals.
 
 - [x] **P6.1** Run Firecracker under its **jailer** (chroot, uid/gid drop, namespaces).
       *(New opt-in `BootConfig.jail` (decision 012): the driver spawns Firecracker's `jailer`, which
@@ -591,7 +591,7 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       and removed on teardown; the chroot rides inside the scratch dir that `remove_dir_all` reclaims.
       **Opt-in** so the 23 unjailed tests and the memory-sharing/snapshot paths are untouched; scoped to a
       **plain read-write cold boot** (jail + vsock/NIC/overlay/bulk-I/O is a typed error, snapshot of a
-      jailed VM is refused: all later Phase-6 steps). **Needs real root** — the jailer's `mknod`
+      jailed VM is refused: all later Phase-6 steps). **Needs real root**, the jailer's `mknod`
       `EPERM`s in a non-initial userns, so the `unshare -Urn` trick can't run it; `boots_under_the_jailer`
       gates on real root and skips otherwise. Proof: the full privileged suite (now **24 tests**) passes
       as real root in a privileged container, jailed boot ~4 s. Leak-proof cgroup-**owned** teardown
@@ -612,7 +612,7 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       unaffected" proof (a guest actually held to them under load) is P6.8.)*
 - [x] **P6.3** Apply Firecracker's **seccomp** filters; understand what syscalls it needs.
       *(Firecracker installs its built-in per-thread seccomp filters by default (the "advanced" level:
-      a curated syscall allowlist per thread category — API, VMM, vCPU — with a `SIGSYS` kill on
+      a curated syscall allowlist per thread category, API, VMM, vCPU, with a `SIGSYS` kill on
       anything else). We simply never pass `--no-seccomp`, so every boot (jailed or not) is filtered.
       The filters install at `InstanceStart`: the idle pre-boot process shows `Seccomp: 0`, but a
       running VM shows `Seccomp: 2` (filter mode) on **every** thread, **verified** by probing
@@ -628,7 +628,7 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       guest cgroup** (a `cgroup2` mount added to the rootfs init) and reaps the **whole tree** with
       `cgroup.kill` after the command exits or times out. cgroup membership is inherited by every fork
       and can't be escaped by `setsid`, so a double-forked grandchild or daemon that inherited the
-      stdout/stderr pipe is killed rather than left holding it open — which is exactly what used to
+      stdout/stderr pipe is killed rather than left holding it open, which is exactly what used to
       wedge the agent's exec connection (the output pumps never saw EOF), on **both** the exit and
       timeout paths. `cgroup.kill` is what a direct-child `kill` and even a `killpg` (a `setsid`
       daemon escapes the process group) miss. Best-effort: a guest without cgroup v2 falls back to the
@@ -662,10 +662,10 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       Running a hostile workload *inside* a jailed guest is now possible (P7.0a composed the jail with
       the vsock exec channel, `jailed_exec_runs_a_command`); at the time this box landed that waited on
       exec-under-jail, so the bar here was the VMM-side confinement layers plus the refusal.)*
-- [x] **P6.7** Clean cgroup/namespace teardown per run — and the leak-proofing this buys:
+- [x] **P6.7** Clean cgroup/namespace teardown per run, and the leak-proofing this buys:
       **host-process death (Ctrl-C, SIGKILL, OOM) cannot leak a VM**, because the cgroup owns its
       lifetime from outside the driver. (Until here, teardown is `Drop`-based: killing the driver
-      mid-run leaks the VMM — a signal handler would only paper over SIGINT, so we wait for the
+      mid-run leaks the VMM, a signal handler would only paper over SIGINT, so we wait for the
       real mechanism.) *(**Embedder kill handle:** expose a cheap, cloneable **cancellation token**
       that forces VM teardown from outside a blocked `exec` (the host-gave-up path, since
       `Sandbox::exec` borrows `&self` and `shutdown` consumes `self`, so a blocking caller can't
@@ -678,13 +678,13 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       process, so killing the VM's cgroup *is* the namespace cleanup; cgroup dirs are the one part the
       kernel won't reap for us. So: every directly-spawned VMM (cold boots, restores, pre-warmed-pool
       clones) is enrolled at spawn in a per-VM **lifetime cgroup** under the driver's own cgroup (no
-      controllers, so no delegation needed), and a per-VM **sentinel** — a `sh` child in its own process
-      group, blocked reading a pipe only the driver holds — wakes on the EOF the kernel delivers at
+      controllers, so no delegation needed), and a per-VM **sentinel**, a `sh` child in its own process
+      group, blocked reading a pipe only the driver holds, wakes on the EOF the kernel delivers at
       *any* driver death, `cgroup.kill`s the VM's cgroup(s), and removes them; a jailed VMM's sentinel
       watches the jailer's precomputed cgroup instead (enrolling would race the jailer's own placement).
       Clean teardown removes the cgroup first, so the disarmed sentinel wakes to nothing and exits.
       The **`KillHandle`** (public on `RunningVm`; `Sandbox` in P7) kills through the same `cgroup.kill`
-      file — cloneable, `Send + Sync`, no `unsafe` — with a pid fallback for cgroup-less hosts and a
+      file, cloneable, `Send + Sync`, no `unsafe`, with a pid fallback for cgroup-less hosts and a
       torn-down flag set before the reap so a late kill can't signal a recycled pid. **Proof:** the
       sentinel mechanism is unit-tested in the host gate (EOF → kill written, disarm → no action);
       `driver_death_cannot_leak_a_vm` SIGKILLs a real subprocess driver mid-run and the VMM dies + its
@@ -694,19 +694,19 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
       notes, not claims.)*
 - [x] **P6.8** Test: a fork-bomb / mem-hog in the guest is bounded by the cgroup, host unaffected.
       *(Both run against the exec-capable agent rootfs with the VMM under the **engine-derived** caps
-      (`cpu.max` = vcpus cores, `memory.max` = guest RAM + 128 MiB — the P6.2 derivation, pinned by the
+      (`cpu.max` = vcpus cores, `memory.max` = guest RAM + 128 MiB, the P6.2 derivation, pinned by the
       test since exec-under-jail was then a later migration, P7.0a/decision 015; real-root + delegation gated,
       skips elsewhere).
       **Mem-hog** (Python allocating touched pages until the guest dies): the guest's *own* OOM killer
       eats the hog (exit 137) inside the hardware boundary; the host cgroup **measured** peaking at
       ~208 MiB against the 384 MiB cap, zero host-side `oom_kill` events (the 128 MiB overhead budget
       held under worst-case load), and the VM stays exec-responsive. **Fork storm** (100 spinning
-      background shells for 3 s, deliberately bounded so the run is measurable — the unbounded classic
+      background shells for 3 s, deliberately bounded so the run is measurable, the unbounded classic
       would starve the guest agent, a guest-availability non-goal): the VMM's host thread count stays
       **4 → 4** (guest processes don't exist on the host: the hardware-isolation property, observed) and
       the storm burned 3.79 s of host CPU against a 5.85 s quota-derived bound; the orphaned spinners
       are then reaped by P6.4's tree kill and a follow-up exec answers immediately. **The adversarial
-      test earned its keep:** the storm exposed a real P6.4 race — the agent's parent-side
+      test earned its keep:** the storm exposed a real P6.4 race, the agent's parent-side
       `cgroup.procs` write landed *after* the already-running command's first forks (on 1 vCPU the
       child usually runs first), so pre-write forks escaped `cgroup.kill` and re-wedged the exec
       connection. Fixed by a `sh` **trampoline**: the child enrolls *itself* in the cgroup, then
@@ -717,7 +717,7 @@ Confine the VMM itself — the other half of the isolation story, and pure Linux
 - **Exit gate:** the VMM runs jailed + cgroup-limited (namespaces, cgroups v2, seccomp, and
   capabilities: the container-isolation primitives, via Firecracker).
 
-## Phase 6.9 — Field robustness (interphase: the engine survives long-lived hosts)
+## Phase 6.9, Field robustness (interphase: the engine survives long-lived hosts)
 
 An audit of Phases 0–6 found failure modes that live in none of the feature phases: residue that
 accumulates across embedder crashes until a *healthy* host refuses work, and dependency drift that
@@ -728,32 +728,32 @@ Phase 7 because the sweep and the guards become part of the operational contract
 surface freezes.
 
 - [x] **P6.9a** Orphan sweep (the runtime's GC). Decision 014 leaves a crashed driver's scratch dirs
-      and taps as residue for "a sweep" that nothing owns — and the tap half is **not** inert: an
+      and taps as residue for "a sweep" that nothing owns, and the tap half is **not** inert: an
       orphaned `fc*` interface still holds its `/30` host-address reservation (the allocator's
       atomicity, decision 009), so accumulated crashes clog the finite `10.200/16` pool until the
       allocator's bounded retry exhausts and **every networked boot on a healthy host fails**. Land a
       library sweep (public on the engine surface; `agent sweep` CLI wiring rides P7.4): enumerate
       `fc*` interfaces and per-VM scratch dirs, reclaim only those whose owning driver is **dead**
-      (liveness keyed on the recorded pid via `/proc/<pid>` + comm, the same key the leak test uses)
-      — never a live sibling's resources (safe by ownership check, not locks). Caller-owned snapshot
+      (liveness keyed on the recorded pid via `/proc/<pid>` + comm, the same key the leak test uses),
+     never a live sibling's resources (safe by ownership check, not locks). Caller-owned snapshot
       bundle dirs are out of scope (the caller chose where to put them). **Exit:** SIGKILL a driver
       mid-networked-run, sweep, and the tap + scratch dir are reclaimed while a concurrently *live*
       VM's are untouched; the allocator stays healthy across a crash loop.
       *(`agent_vmm::sweep_orphans(scratch_base) -> SweepReport` (`sweep.rs`). **Ownership is the
       dir, never the tap name:** the driver records the tap into its scratch dir (`<workdir>/tap`)
-      at creation — the name itself lies about ownership, since a restored clone's tap carries the
-      possibly-dead *source's* token (decision 011) — and the dir's `agent-<pid>-<n>` name carries
+      at creation, the name itself lies about ownership, since a restored clone's tap carries the
+      possibly-dead *source's* token (decision 011), and the dir's `agent-<pid>-<n>` name carries
       the owner. Deliberately no comm check on the driver pid: the embedder's process name is
       unknowable, so a recycled pid reads as alive and its dir is *kept* (the error direction is
       always retained-too-long, reclaimed by a later sweep, never a live VM's resources). Four
-      conservative guards: only dirs **owned by the sweeping euid** are candidates at all — the
+      conservative guards: only dirs **owned by the sweeping euid** are candidates at all, the
       scratch base is world-writable, so an unowned candidate set would be an attacker-writable
       kill list (a hostile local user plants a dead-looking dir whose record names a victim's
       live tap); `create_workdir`'s `0700` driver-owned dirs make ownership the authorship proof,
       at the deliberate cost that each uid sweeps only its own residue. Then: a live pid's dirs
       are skipped wholesale; a dead dir's recorded tap is left if any *live* dir records the same
       name; and a dead dir with a still-running VMM (the degraded-sentinel corner) is skipped
-      loudly — the sweep owns fs/net residue, processes stay the sentinel's (decision 014), it
+      loudly, the sweep owns fs/net residue, processes stay the sentinel's (decision 014), it
       never kills. The record is validated before it can reach
       `ip link del` (`fc`+hex, ≤ IFNAMSIZ-1; parse, don't trust), VMM-liveness is `(st_dev,
       st_ino)` identity through `/proc/<pid>/cwd` (the P6.6 finding: link text lies after
@@ -766,23 +766,23 @@ surface freezes.
       privileged tests.)*
 - [x] **P6.9b** Dependency guards: make the pins legible. Decision 001 pins the driver to
       Firecracker v1.9's API schema, but nothing checks the binary: a v1.13 on `PATH` fails
-      mid-boot with cryptic API errors (or silently different semantics — the class of drift the
+      mid-boot with cryptic API errors (or silently different semantics, the class of drift the
       `network_overrides` probe proved is real). Probe `firecracker --version` in `xtask setup`
       **and** once per driver process at first spawn: an unexpected major/minor logs a loud, typed
-      warning naming the pin (warn, not refuse — an embedder may knowingly run a compatible build).
+      warning naming the pin (warn, not refuse, an embedder may knowingly run a compatible build).
       Alongside it, `setup` reports the host-kernel features the engine degrades on (`cgroup.kill`
       needs ≥ 5.14; BTF and delegation are already checked) and prints the **degradation matrix** in
       one place: what fails open with a warning (resource caps, sentinel teardown, decision 013/014)
       vs what hard-errors (the jail, KVM). **Exit:** `setup` on a mismatched host names every
       degradation before the first boot does.
       *(Both halves. **Driver:** `warn_on_unpinned_firecracker` (`spawn.rs`) probes the configured
-      binary once per process (`std::sync::Once` — the pin is process-wide, the probe costs a child
+      binary once per process (`std::sync::Once`, the pin is process-wide, the probe costs a child
       spawn) at the head of `launch` and `launch_for_restore`, covering cold, jailed, and restore
       paths; a non-1.9 major/minor or an unparseable banner is a loud `tracing::warn!` naming the
       pin and decision 001, and a *missing* binary stays silent there because the spawn itself fails
       typed and legible moments later. Warn-not-refuse per the box (a knowingly-compatible build is
-      the embedder's call). **Setup:** two new checklist lines — the pinned-v1.9 probe and
-      `kernel >= 5.14` (`cgroup.kill`, from `/proc/sys/kernel/osrelease`) — plus the printed
+      the embedder's call). **Setup:** two new checklist lines, the pinned-v1.9 probe and
+      `kernel >= 5.14` (`cgroup.kill`, from `/proc/sys/kernel/osrelease`), plus the printed
       degradation matrix splitting fail-open (delegation → uncapped jailed VMs; unwritable cgroup2 →
       Drop-only teardown; pre-5.14 → no sentinel kill; unpinned FC → warned boots) from hard-error
       (no KVM, an unbuildable jail, missing host tools), the decision-013 line rendered as one
@@ -791,28 +791,28 @@ surface freezes.
 - [x] **P6.9c** The per-sandbox fd budget, measured and stated. Each live VM holds several host fds
       (child pipes, vsock UDS, the clones' mmap'd memory file, an API-socket connection per request);
       at the default 1024 soft `ulimit -n`, a few hundred concurrent VMs hit `EMFILE` mid-boot in
-      whatever syscall lands first — typed, but illegible. Measure the footprint per start path
+      whatever syscall lands first, typed, but illegible. Measure the footprint per start path
       (cold, pre-warmed clone, networked), document it as the budget P7.6's pool bound must respect
       (`pool_target × fds_per_vm < ulimit`, with headroom), and pin it with a test so it can't
       silently grow. No new mechanism: this is a number, stated honestly (core property 4).
       *(**Measured: 2 fds per live VM, on all three start paths** (cold, networked, pre-warmed restore;
-      dev box) — the console reader's pipe and the lifetime sentinel's pipe write end; the mmap'd
+      dev box), the console reader's pipe and the lifetime sentinel's pipe write end; the mmap'd
       memory file and the API/vsock connections turn out to be Firecracker's fds or transient, not
       held by the driver. Published as `agent_vmm::FDS_PER_VM = 8` (budget deliberately above the
       measurement so an fd added for cause is a visible constant bump, never silent growth), with
       the sizing rule on the `Pool` doc: `target × FDS_PER_VM` under `ulimit -n` with headroom.
       Pinned by `fd_footprint_per_vm_stays_within_budget_and_never_leaks`, which also asserts the
-      other half — **teardown returns to the exact fd baseline** on every path, since a per-run
+      other half, **teardown returns to the exact fd baseline** on every path, since a per-run
       leak would walk a long-lived embedder into `EMFILE` regardless of the per-VM number. 33
       privileged tests.)*
 - [x] **P6.9d** Record the un-vendored upstream inputs as a note. A fresh host's
       `fetch-artifacts`/`build-rootfs` depend on the Firecracker CI S3 bucket and the Alpine CDN:
-      sha256-pinned (tamper-safe) but **availability-fragile** — a deleted bucket bricks new-host
+      sha256-pinned (tamper-safe) but **availability-fragile**, a deleted bucket bricks new-host
       setup while existing artifact dirs keep working. Record the failure mode + the vendoring plan
       (decision 007 already notes the `.apk` closure half; this adds the kernel/base-image
       half), pointing at P19.1 where vendored artifacts ride the packaging work. Docs only.
       *(Recorded as a decision-007 consequence bullet: the kernel/base-image half joins the `.apk`
-      half in the same availability class — loud failure (hash-checked fetches never silently
+      half in the same availability class, loud failure (hash-checked fetches never silently
       substitute), fresh-host-only blast radius, vendored as release artifacts at P19.1 where the
       self-host bundle needs them offline anyway.)*
 - **Exit gate:** a crash-looped host stays serviceable (sweep demo) and a mismatched host
@@ -820,14 +820,14 @@ surface freezes.
   *(Done. Demos: `sweep_reclaims_a_crashed_drivers_tap_and_scratch_dir` (a real SIGKILLed driver,
   its tap + dir reclaimed, a live sibling spared and still functional) and `cargo xtask setup`
   (version/kernel checks + the printed degradation matrix). The rationale is recorded in the box
-  annotations above: GC is core runtime behavior because *not all residue is inert* — a scratch
+  annotations above: GC is core runtime behavior because *not all residue is inert*, a scratch
   dir merely holds disk, but an orphaned tap holds a **reservation** out of a finite pool, so
   accumulation becomes denial-of-service against future work on a healthy host; and ownership
   must key on **liveness** (the dir's embedded pid), never on resource names, because names can
   outlive and betray their creators (a restored clone's tap carries the dead source's token).
   Full suite: host gate + 33 privileged tests, green.)*
 
-## Phase 7 — The sandbox lifecycle API (the engine surface)
+## Phase 7, The sandbox lifecycle API (the engine surface)
 
 Wrap the FC track into a clean, self-hostable engine API.
 
@@ -879,7 +879,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       teardown left no mount behind. The `shared:`-tag parser has CI-safe unit tests.)*
 - [x] **P7.0c** Jailed networking: stage the tap into the VM's netns under the jailer; retire the
       one-live-networked-clone limit (decisions 009/011 note).
-      *(Done, as the per-VM network-namespace model, decision 017 — supersedes the 009/011 netns
+      *(Done, as the per-VM network-namespace model, decision 017, supersedes the 009/011 netns
       notes. Every networked VM now runs its tap in its **own netns** (`ip netns add`, named after
       the scratch dir): the jailer joins it via `--netns` (it `setns`es as root before dropping
       privileges), a direct boot via `ip netns exec <ns> firecracker` (the child pid is firecracker).
@@ -900,23 +900,23 @@ Wrap the FC track into a clean, self-hostable engine API.
       `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir`, and the in-netns host-endpoint listener.)*
 - [x] **P7.0d** Jailed bulk I/O: input/output block devices staged chroot-relative and read back
       post-teardown, or a recorded typed refusal if staging isn't worth it.
-      *(Done, staged — and cheaper than the box feared: the images are **built in place inside the
+      *(Done, staged, and cheaper than the box feared: the images are **built in place inside the
       chroot** (the P3.4/P3.5 builders are rootless `mke2fs` runs that take a target dir, so pointing
       them at the chroot root costs no copy and no mount), then handed to the jailed uid
       (`give_to_jail`, input 0444 / output 0600) and named chroot-relative in the API. Built in
-      `run_boot`, not `launch` — the chroot only exists once the jailer has run, and the API socket
+      `run_boot`, not `launch`, the chroot only exists once the jailer has run, and the API socket
       answering is the proof. `collect_outputs` is unchanged: the image's host-side path is under the
       workdir (the chroot nests in it), read after the VMM exits. This was the **last refused
       combination**, so `Vm::boot`'s deny-by-default refusal block and its
       `jail_refuses_half_confined_boots` unit test retired with it: the jail now composes with every
       boot feature (a future unjailed feature must reinstate the refusal, decision 013). Proof:
       `jailed_bulk_io_round_trips_through_the_chroot` (real-root gated) drives the full jailed matrix
-      at once — overlay + vsock + input + output — injecting a 2 MiB payload (past the vsock frame
+      at once, overlay + vsock + input + output, injecting a 2 MiB payload (past the vsock frame
       cap, so provably the block path) and capturing it back byte-for-byte from a confined VM.)*
 - [x] **P7.0e** Jailed snapshot/restore + pre-warmed pool: the bundle disk lives in the chroot (decision 010),
       so restore stages it jailed. Unblocks a confined pre-warmed pool.
       *(Done. `Vm::restore` honors `BootConfig.jail`: the clone spawns under the jailer and the bundle
-      is staged into the chroot once the API socket proves it exists — the state file copied in
+      is staged into the chroot once the API socket proves it exists, the state file copied in
       (small, 0444), the guest **memory bind-mounted read-only** (a per-clone copy would erase the
       pre-warmed-restore latency win and the clones' shared page cache; the P7.0b bind-or-copy machinery is
       reused, `Chroot.base_mount` generalized to a `mounts` vec), and the disk placed at the
@@ -926,17 +926,17 @@ Wrap the FC track into a clean, self-hostable engine API.
       cwd (the chroot root, chowned to the jailed uid so the bind can't EPERM); a networked clone's
       netns is joined via `--netns` (decision 017). **Snapshotting a jailed VM stays a typed
       refusal**, deliberately: the clone story is snapshot an *unjailed* pre-warmed source (it runs only the
-      embedder's warm-up) and restore **jailed** clones — the untrusted code runs confined (decision
+      embedder's warm-up) and restore **jailed** clones, the untrusted code runs confined (decision
       010 consequence). Cgroup **resource caps** are not applied on jailed restore (the guest's
       envelope lives in the snapshot, not restore's config; a documented fail-open on the cap side
-      only, decisions 013/014 — caps join when P7.1's `Limits` ride the snapshot); every isolation
+      only, decisions 013/014, caps join when P7.1's `Limits` ride the snapshot); every isolation
       wall is present. The confined pre-warmed pool falls out: `Pool` restores through `Vm::restore`, so
       `jail` on its config confines every pooled clone. Proof:
-      `restores_prewarmed_clones_under_the_jailer_and_pools_them` (real-root gated) — a direct jailed
+      `restores_prewarmed_clones_under_the_jailer_and_pools_them` (real-root gated), a direct jailed
       restore (dropped uid + pre-warmed Python exec) and a 2-deep jailed `Pool` whose taken clone execs.)*
 - [x] **P7.1** `Sandbox` lifecycle: `open → exec → put/get files → snapshot → close`, with **inputs at
-      the public API**. *(Assumes the jailed exec path (P7.0a); `Sandbox::exec` jails by default, decision 015.)* *(Lifts the bulk block-device file paths — P3.4 `input_dir`, P3.5
-      `output_dir`/`RunningVm::collect_outputs` — onto the `Sandbox` surface, since P3.4/P3.5 keep them
+      the public API**. *(Assumes the jailed exec path (P7.0a); `Sandbox::exec` jails by default, decision 015.)* *(Lifts the bulk block-device file paths, P3.4 `input_dir`, P3.5
+      `output_dir`/`RunningVm::collect_outputs`, onto the `Sandbox` surface, since P3.4/P3.5 keep them
       at the low-level `RunningVm` layer. **Embedder inputs:** promote `exec_with_files(argv, stdin,
       files, artifacts)` onto `Sandbox` so an embedder never reaches into `RunningVm`; add an **`env`**
       field to `Request::Exec` (bounded like `stdin`, set on the **spawned command only**, never the
@@ -948,13 +948,13 @@ Wrap the FC track into a clean, self-hostable engine API.
       exposes an exec taking files + env; a run receives both in-guest; the call stays synchronous and
       returns the same `RunResult` shape; and a **leak test** greps an injected sentinel value out of
       every observable surface (logs, every `VmmError` Display, `console()`) and finds nothing.)*
-      *(Landed as `Sandbox::open(BootConfig)` — **jailed by default**: an unset `jail` becomes
+      *(Landed as `Sandbox::open(BootConfig)`, **jailed by default**: an unset `jail` becomes
       `Jail::default()`, and the opt-out is the differently-named `Sandbox::open_unjailed` (plus the
       CLI's `--unjailed`), so an unconfined sandbox is greppable, never a forgotten flag; `boot(limits)`
       delegates to `open` and flips with it. Inputs: `exec_with_files(argv, stdin, files, env,
-      artifacts)` on `Sandbox` and `RunningVm`; `env` rides `Request::Exec` as **protocol v2** — the
+      artifacts)` on `Sandbox` and `RunningVm`; `env` rides `Request::Exec` as **protocol v2**, the
       handshake version gates the skew, because an old agent parses the new frame and silently runs
-      *without* the env, which for secrets/config is a correctness failure, not compat (decision 019) —
+      *without* the env, which for secrets/config is a correctness failure, not compat (decision 019),
       and the guest applies it via `Command::env` on the spawned command only, never its own process
       (proven in-process by `env_reaches_the_command_but_never_the_agents_own_process` and against a
       real guest by the per-exec-scope assertion in the leak test). `collect_outputs`, `snapshot`,
@@ -964,16 +964,16 @@ Wrap the FC track into a clean, self-hostable engine API.
       after send. Exit gate: `sandbox_opens_jailed_by_default` (real-root, self-skips) proves the
       polarity flip; `lifecycle_runs_inputs_and_collects_outputs` +
       `snapshot_yields_a_restorable_bundle` drive the full lifecycle; the leak test runs
-      twice — `injected_secrets_reach_no_observable_surface` (no VM: host logs at TRACE, the real
+      twice, `injected_secrets_reach_no_observable_surface` (no VM: host logs at TRACE, the real
       in-process agent's logs, every error's Display/Debug) and
       `injected_secrets_never_reach_the_console_or_host_logs` (real VM: the serial console with a
       positive control proving the agent's log lines do land there, host logs, the failing-injection
-      error path) — and finds the sentinel only in `RunResult`, the caller's own data.)*
+      error path), and finds the sentinel only in `RunResult`, the caller's own data.)*
 - [x] **P7.2** Stateful sessions: multiple `exec`s against one VM with a persistent overlay.
       *(The VM **is** the session (decision 019): the in-guest agent now serves every connection
       from **one persistent working directory** (`serve_session`, a stable dir the in-VM binary
       passes for its whole life) instead of a fresh-and-removed per-exec dir, so a file injected or
-      written by one exec is visible to the next — and the boot's tmpfs overlay already made the
+      written by one exec is visible to the next, and the boot's tmpfs overlay already made the
       wider guest filesystem accumulate. State's lifetime is the VM's: teardown discards the
       overlay, and snapshot clones each get their own copy-on-write view of the source's state. The
       library `serve` keeps the fresh-dir one-shot semantics for harness/test callers. Proven at the
@@ -990,7 +990,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       load-bearing-defaults doc already landed. **Exit gate:** the exec deadline is settable per run
       with unchanged timeout semantics, and the output cap is settable.)*
       *(Landed on the struct, in decision 013's exact shape: `Limits.wall` now means the **whole
-      run** — `with_limits` folds it into both the boot deadline and the per-exec budget — and
+      run**, `with_limits` folds it into both the boot deadline and the per-exec budget, and
       `Limits` gains `output_cap` as the fourth knob; both ride the existing fold (`Limits` →
       `BootConfig` → `RunningVm`), so every exec on that sandbox enforces them, and the restore path
       takes them from the restoring caller's config (the budgets are the host's, not the
@@ -1013,12 +1013,12 @@ Wrap the FC track into a clean, self-hostable engine API.
       `agent shell` replaces its "not implemented" stub with an interactive **stateful session** on
       one held-open sandbox: one `sh -c` exec per line, prompt and diagnostics on stderr, command
       output on stdout, files persisting across lines (P7.2; shell *process* state like `cd` does
-      not — each line is its own exec, stated in the help). A guest fault (timeout, cap,
+      not, each line is its own exec, stated in the help). A guest fault (timeout, cap,
       unrunnable) belongs to its line and the session survives; an infra/transport fault ends the
       session with the typed error, branching on `VmmError::kind()`.)*
 - [x] **P7.5** Structured run result (stdout/stderr/exit/artifacts/metrics).
-      *(`RunResult` gains the missing leg: a `metrics: ExecMetrics` field — host-measured, so a
-      hostile guest can't lie about it — starting with `wall`, the request-to-terminal-frame time
+      *(`RunResult` gains the missing leg: a `metrics: ExecMetrics` field, host-measured, so a
+      hostile guest can't lie about it, starting with `wall`, the request-to-terminal-frame time
       an embedder can bill on; `#[non_exhaustive]`, so cgroup cpu time and the audit log's
       numbers land as fields, not breaks. `agent run --json` emits the whole structured result as
       one JSON object on **stdout** (exit code, lossy stdout/stderr, artifact list with sizes,
@@ -1028,12 +1028,12 @@ Wrap the FC track into a clean, self-hostable engine API.
       bound respects the measured per-sandbox fd budget from P6.9c: `target × fds_per_vm` stays
       under `ulimit -n` with headroom, stated in the docs, not discovered via `EMFILE`.)*
       *(`many_sandboxes_run_concurrently_without_interference` boots three sandboxes from three
-      threads at once — genuinely overlapping boots, not sequential — and each exec's result is
+      threads at once, genuinely overlapping boots, not sequential, and each exec's result is
       exactly its own (concurrent *clones* were already proven in tests/snapshot.rs; this is the
       embedder's independent-sandbox fan-out). The fd rule is now *stated by the engine, not just
       the docs*: `Pool::new` reads the soft `ulimit -n` from `/proc/self/limits` (unsafe-free; the
       pure parser is unit-tested) and logs one warning naming target, `FDS_PER_VM`, headroom, and
-      the fix when a target oversubscribes the budget — a warning, not a refusal, the decision-013
+      the fix when a target oversubscribes the budget, a warning, not a refusal, the decision-013
       fail-open posture, since sizing is fairness hygiene, not the isolation boundary. The formula
       also lives in the `Pool` rustdoc and `docs/embedding.md`.)*
 - [x] **P7.7** Docs: the engine API and the explicit *non-goals* (no auth/billing/scheduler).
@@ -1049,7 +1049,7 @@ Wrap the FC track into a clean, self-hostable engine API.
 - [x] **P7.8** Test: two concurrent stateful sessions stay isolated and correct.
       *(`two_concurrent_stateful_sessions_stay_isolated`: two sandboxes live simultaneously, execs
       interleaved A1→B1→A2→B2 on the *same* relative filename, each session reads back exactly its
-      own accumulated state, and a file that exists only in B is absent in A — plus the negative
+      own accumulated state, and a file that exists only in B is absent in A, plus the negative
       probe exits non-zero. Two sessions are two VMs by construction (decision 019), so the
       isolation being pinned is KVM, not agent bookkeeping.)*
 - **Exit gate:** a clean `Sandbox` engine anyone can embed/self-host.
@@ -1060,9 +1060,9 @@ Wrap the FC track into a clean, self-hostable engine API.
 
 ---
 
-## eBPF / aya track — see and enforce from the host
+## eBPF / aya track, see and enforce from the host
 
-## Phase 8 — aya "hello, verifier"
+## Phase 8, aya "hello, verifier"
 
 The eBPF foundation: build, load, and read a map from a trivial program.
 
@@ -1070,16 +1070,16 @@ The eBPF foundation: build, load, and read a map from a trivial program.
       (userspace, aya) scaffolding; `bpf-linker` wired into `xtask`.
       *(Landed: `crates/probes` is a real `#![no_std]`/`#![no_main]` aya-ebpf crate with its own
       nightly toolchain + `.cargo/config.toml` (`build-std = ["core"]`), building a valid BPF ELF
-      via `bpf-linker` — one placeholder tracepoint proves a program section is emitted end to end;
+      via `bpf-linker`, one placeholder tracepoint proves a program section is emitted end to end;
       the counter is P8.2. `cargo xtask build-probes` drives that build via `rustup run nightly`
       (robust against the parent gate's `RUSTUP_TOOLCHAIN=stable`), guarded to skip cleanly when
       `bpf-linker`/`rustup` are absent so `ci` still runs everywhere; it folds **into** `ci` at
       P8.6. `setup` now reports the nightly+`rust-src` prereq. `crates/probes-loader` stays a
       skeleton pointing at the now-real object; `aya` (userspace) is added when first used at P8.3,
-      not before — the supply-chain gate keeps the tree minimal. Host gate green.)*
+      not before, the supply-chain gate keeps the tree minimal. Host gate green.)*
 - [x] **P8.2** A tracepoint/kprobe that **counts** an event (e.g. `sys_enter_execve`) into a map.
       *(Landed: `crates/probes` `count_execve` attaches to `syscalls/sys_enter_execve` and bumps a
-      single-slot **per-CPU** `PerCpuArray<u64>` — per-CPU so the increment needs no atomic. The
+      single-slot **per-CPU** `PerCpuArray<u64>`, per-CPU so the increment needs no atomic. The
       built object carries the `tracepoint` program section, the `maps` section (`EXECVE_COUNT`), and
       the relocation linking them.)*
 - [x] **P8.3** Loader attaches it, reads the map, prints counts.
@@ -1099,22 +1099,22 @@ The eBPF foundation: build, load, and read a map from a trivial program.
       load+drop leaves `/sys/fs/bpf` unchanged and a second load after the drop still succeeds. The
       privileged gate builds the object (`ci-privileged` calls `build-probes`) before these run.)*
 - [x] **P8.5** CO-RE/BTF: build against BTF so it's portable across kernels.
-      *(Landed: the object now carries `.BTF`/`.BTF.ext` — `bpf-linker --btf` (passed via a
+      *(Landed: the object now carries `.BTF`/`.BTF.ext`, `bpf-linker --btf` (passed via a
       `[target.bpfel-unknown-none]` link-arg) plus `debug = true` in the profile, which the linker
       derives BTF from. aya relocates the object against the running kernel's BTF at load, so one
       compiled object is portable across kernels. `build-probes` asserts the `.BTF` section is present
       (a regressed link-arg fails the build). The program reads no kernel struct fields yet, so it
-      needs no field-offset relocations — those arrive with Phase 9's struct reads; here BTF is the map
+      needs no field-offset relocations, those arrive with Phase 9's struct reads; here BTF is the map
       typing + load-time relocation path.)*
-- [x] **P8.6** Handle the verifier: bounded loops, map access patterns — its rules, hit on purpose.
-      *(Landed: `count_execve` gained a **bounded loop** (walk the fixed 16-byte `comm` to its NUL —
+- [x] **P8.6** Handle the verifier: bounded loops, map access patterns, its rules, hit on purpose.
+      *(Landed: `count_execve` gained a **bounded loop** (walk the fixed 16-byte `comm` to its NUL,
       the bound is a compile-time const, so termination is provable; an unbounded `while` is rejected)
       and a **map access pattern** (per-PID `HashMap` lookup-or-init, where the lookup result is only
       dereferenced inside the `Option` null-check the verifier demands). Surfaced as
       `ExecveCounter::counts_by_pid`; the privileged test asserts the per-PID counts cover the spawns.
       The verifier runs at load, so the proof is the privileged test passing.)*
 - [x] **P8.7** `xtask` builds the eBPF object as part of the CI gate (separate target).
-      *(Landed: `ci` now calls `build_probes()` after `deny` — guarded, so a host without
+      *(Landed: `ci` now calls `build_probes()` after `deny`, guarded, so a host without
       `bpf-linker`/`rustup` skips it and the CI gate still runs everywhere, but a set-up dev box now fails
       the CI gate on a probe that won't compile or that drops its BTF. `ci-privileged` already built it
       before the probe tests.)*
@@ -1145,7 +1145,7 @@ The eBPF foundation: build, load, and read a map from a trivial program.
   maps, the verifier, CO-RE/BTF, the no-pin lifetime, caps, and the hardware-isolation limit. Phase 8
   is complete.)*
 
-## Phase 9 — Syscall observability
+## Phase 9, Syscall observability
 
 Trace what a process (a firecracker/vhost worker, or the guest-adjacent host side) actually does.
 
@@ -1159,8 +1159,8 @@ Trace what a process (a firecracker/vhost worker, or the guest-adjacent host sid
 
 - [x] **P9.1** Tracepoints for `execve`/`openat`/`connect` with per-event data via a **ring buffer**.
       *(Landed: three tracepoint programs (`trace_execve`/`trace_openat`/`trace_connect`, on the
-      matching `sys_enter_*` hooks) `output` a whole `SyscallEvent` — pid, tid, cgroup id, `comm`, and
-      the opened path or connected sockaddr — into one 256 KiB `BPF_MAP_TYPE_RINGBUF`; the loader
+      matching `sys_enter_*` hooks) `output` a whole `SyscallEvent`, pid, tid, cgroup id, `comm`, and
+      the opened path or connected sockaddr, into one 256 KiB `BPF_MAP_TYPE_RINGBUF`; the loader
       drains it in order with `SyscallTracer::drain` (a single persistent consumer, so its position
       stays coherent across calls). The record type is single-sourced in a new dependency-free
       `crates/probes-common` so the kernel writer and userspace reader can't drift. The P8
@@ -1174,14 +1174,14 @@ Trace what a process (a firecracker/vhost worker, or the guest-adjacent host sid
 - [x] **P9.3** Userspace consumer: stream events, decode, print a live trace.
       *(Landed: `SyscallTracer::stream(idle, keep_going, on_event)` loops, draining greedily and
       sleeping `idle` only when the buffer is empty, until the caller predicate stops it (a deadline or
-      a Ctrl-C flag). The decode is centralized on the event — `SyscallEvent::describe` /
+      a Ctrl-C flag). The decode is centralized on the event, `SyscallEvent::describe` /
       `detail_display` / `syscall_name` render a path (execve/openat) or an `a.b.c.d:port` sockaddr
-      (connect) — so a consumer prints one line each. The `trace_syscalls` example is now the live
+      (connect), so a consumer prints one line each. The `trace_syscalls` example is now the live
       trace. Poll-with-sleep, not `epoll`, keeps the crate sync + `unsafe`-free + dependency-light; the
       fd is on `AsRawFd` for a zero-idle-latency consumer later.)*
 - [x] **P9.4** Attribute events to a sandbox (via cgroup id / PID from the FC track).
       *(Landed: `cgroup_id_of_pid(pid)` reads the process's unified cgroup path from
-      `/proc/<pid>/cgroup` and returns the inode of `/sys/fs/cgroup/<path>` — for cgroup v2 that inode
+      `/proc/<pid>/cgroup` and returns the inode of `/sys/fs/cgroup/<path>`, for cgroup v2 that inode
       *is* the `bpf_get_current_cgroup_id` a program stamps on events. Hand it the Firecracker track's
       VMM pid, `watch_cgroup` the result, and the trace is scoped to exactly that sandbox. Pure `std`
       fs, no crate coupling to `vmm` (plain `u32`/`u64` bridge the two tracks). Proven by a host-gate
@@ -1210,13 +1210,13 @@ Trace what a process (a firecracker/vhost worker, or the guest-adjacent host sid
   the host. The `trace_syscalls` example (point it at a booted VMM's pid) and the P9.6 test are the
   other two faces of the same demo. Run on a KVM + `CAP_BPF` host.)*
 
-## Phase 10 — Network observability on the tap (tc/XDP)
+## Phase 10, Network observability on the tap (tc/XDP)
 
-Watch every packet a microVM sends/receives — at its tap device, in the kernel.
+Watch every packet a microVM sends/receives, at its tap device, in the kernel.
 
 - [x] **P10.1** Attach a **tc** (or XDP) program to a VM's tap device.
       *(Landed: `TapMonitor::attach(interface)` adds a **clsact** qdisc and attaches two `tc`
-      classifiers — `tap_ingress`/`tap_egress`, the ingress and egress hooks clsact provides — to a tap
+      classifiers, `tap_ingress`/`tap_egress`, the ingress and egress hooks clsact provides, to a tap
       via aya `SchedClassifier`. `tc`/clsact over XDP so both directions are covered uniformly and
       Phase 11 enforcement can live at the same hook (decision 023). Drop-owned links, nothing pinned
       (decision 020); attaches by interface name in the current netns, with binding to a sandbox's own
@@ -1232,7 +1232,7 @@ Watch every packet a microVM sends/receives — at its tap device, in the kernel
       The live "guest traffic shows up in the counters" proof is P10.6.)*
 - [x] **P10.3** Export per-VM network stats to userspace via a map.
       *(Landed: `TapMonitor::flows` reads the `FLOWS` map into `(FlowKey, FlowCounts)` pairs (per
-      5-tuple), and `totals` sums them into a per-VM `NetStats` rollup (ingress/egress packets+bytes) —
+      5-tuple), and `totals` sums them into a per-VM `NetStats` rollup (ingress/egress packets+bytes),
       the two userspace export surfaces, per-flow detail and the sandbox-level summary a caller ships.)*
 - [x] **P10.4** Bind the program to the *specific* tap the FC track named for a sandbox.
       *(Landed: `TapMonitor::attach_in_netns(netns, iface)` enters the sandbox's own network namespace
@@ -1244,7 +1244,7 @@ Watch every packet a microVM sends/receives — at its tap device, in the kernel
 - [x] **P10.5** Handle attach/detach cleanly on sandbox open/close.
       *(Landed: attach-on-open is `attach_in_netns`; on close, dropping the monitor frees its userspace
       handles and the sandbox's netns teardown (`ip netns del`, decision 017) cascades the tap, clsact
-      qdisc, and `tc` filters away — no pinned residue (decision 020/023), no dangling filter even if the
+      qdisc, and `tc` filters away, no pinned residue (decision 020/023), no dangling filter even if the
       loader died first. Proven by the P10.6 test's clean shutdown.)*
 - [x] **P10.6** Test: traffic from a guest shows up in the per-VM counters.
       *(Landed: the `#[ignore]`d `guest_traffic_shows_up_in_the_per_vm_counters` boots a networked agent
@@ -1254,12 +1254,12 @@ Watch every packet a microVM sends/receives — at its tap device, in the kernel
 - **Exit gate:** live per-microVM network visibility.
   *(Demo: `cargo xtask watch-sandbox` boots a real networked sandbox (jailed as root, else the unjailed
   opt-out), attaches a `tc` monitor to its tap inside its netns, drives guest traffic in rounds, and
-  prints the per-VM totals climbing plus the per-flow breakdown — the guest's own packets, observed at
+  prints the per-VM totals climbing plus the per-flow breakdown, the guest's own packets, observed at
   its tap from the host and scoped by netns. Run on a KVM + `CAP_BPF`+`CAP_NET_ADMIN` host.)*
 
-## Phase 11 — Enforcement: egress policy in the kernel
+## Phase 11, Enforcement: egress policy in the kernel
 
-Turn observation into control — deny-by-default egress, allow-listed, enforced at the tap.
+Turn observation into control, deny-by-default egress, allow-listed, enforced at the tap.
 
 - [x] **P11.1** A policy map (allowed CIDRs/ports) the tc/XDP program consults.
       *(Landed: a `POLICY` map of `PolicyRule` (destination CIDR + optional port/proto, a padding-free
@@ -1270,7 +1270,7 @@ Turn observation into control — deny-by-default egress, allow-listed, enforced
       bytes via `PolicyRule::to_bytes`, no `unsafe` aya::Pod). Both maps are per-object, so the policy is
       naturally per VM. Matcher logic host-tested: /32 exact, CIDR ranges, wildcards, out-of-range prefix,
       deny-by-default.)*
-- [x] **P11.2** Drop packets that don't match; allow those that do — per VM.
+- [x] **P11.2** Drop packets that don't match; allow those that do, per VM.
       *(Landed: with `ENFORCE` on, the ingress hook (a frame the guest sends) returns `TC_ACT_SHOT` for a
       guest-sent IPv4 packet whose destination matches no active rule and `TC_ACT_OK` for a match, scanning
       the fixed rule array in a verifier-bounded loop (the mask built so the shift is always `< 32`).
@@ -1283,21 +1283,21 @@ Turn observation into control — deny-by-default egress, allow-listed, enforced
       *(Landed: `EgressPolicy`, the userspace allow-list schema, built from friendly `Ipv4Addr`
       CIDRs/ports (`deny_all().allow_host(..)/.allow_cidr(..)`) and lowered to the `PolicyRule`s the map
       holds (prefix clamped to /32). `TapMonitor::set_egress_policy(&EgressPolicy)` applies it to an
-      attached monitor; `TapMonitor::enforce_in_netns(netns, iface, &policy)` applies it **at launch** —
+      attached monitor; `TapMonitor::enforce_in_netns(netns, iface, &policy)` applies it **at launch**,
       arming the `POLICY`/`ENFORCE` maps *before* the tc programs attach to the tap, so there is no window
       where the tap is live but un-policed (the first guest packet is already policed). Rules written as
       raw bytes, no `unsafe` aya::Pod. Host-tested: building, chaining, prefix clamp, per-rule verdicts.
       Folding this into `Sandbox::open` is Phase 13's convergence; the launch primitive lives here.)*
 - [x] **P11.4** Deny-by-default: a sandbox with no policy reaches nothing.
       *(Landed: `EgressPolicy::deny_all()` (also the `Default`) is the empty allow-list, so a sandbox
-      launched with no explicit allowance drops every guest-sent packet once enforced — you must add each
+      launched with no explicit allowance drops every guest-sent packet once enforced, you must add each
       endpoint. This is the eBPF, host-observed complement to the driver's no-route-to-the-world
       deny-by-default (decision 008): the driver gives the guest no route out, and the tap drops anything
       unlisted where the host can see it. Host-tested that the default/`deny_all` allow nothing. The live
       allowed-vs-blocked proof is P11.7.)*
 - [x] **P11.5** Log denials (the audit trail feeds the audit log, Phase 13).
       *(Landed: a dropped IPv4 packet is counted per destination in a `DENIALS` map (keyed by the denied
-      `FlowKey`) before the drop, read back by `TapMonitor::denials()` as `(FlowKey, count)` pairs — the
+      `FlowKey`) before the drop, read back by `TapMonitor::denials()` as `(FlowKey, count)` pairs, the
       host-observed audit trail of which endpoints a sandbox was blocked from. Best-effort like `FLOWS`;
       empty until enforcement drops something. Non-IPv4/truncated drops have no 5-tuple to key on, so the
       denial log is the meaningful policy-miss case. Phase 13 folds this into the per-run record.)*
@@ -1319,27 +1319,27 @@ Turn observation into control — deny-by-default egress, allow-listed, enforced
 - **Exit gate:** kernel-enforced per-sandbox egress.
   *(Demo: `cargo xtask enforce-sandbox` boots a real networked sandbox, arms a deny-by-default egress
   policy allowing only its host end on UDP 9999, has the guest send to that endpoint and a blocked one,
-  and prints the denials audit trail plus the per-flow allow/deny verdicts — the allow-listed traffic
+  and prints the denials audit trail plus the per-flow allow/deny verdicts, the allow-listed traffic
   passes, everything else is dropped at the tap by host-side eBPF and recorded. Run on a KVM +
   `CAP_BPF`+`CAP_NET_ADMIN` host.)*
 
-## Phase 12 — Resource accounting via cgroup-bpf
+## Phase 12, Resource accounting via cgroup-bpf
 
-Per-sandbox CPU/mem/IO accounting from the kernel — the metering primitive (engine, not billing).
+Per-sandbox CPU/mem/IO accounting from the kernel, the metering primitive (engine, not billing).
 
 - [x] **P12.1** cgroup-attached eBPF (or cgroup + tracepoints) for per-sandbox CPU/mem/IO.
-      *(Landed: the CPU axis is eBPF — `account_sched_switch` attaches to the `sched/sched_switch`
+      *(Landed: the CPU axis is eBPF, `account_sched_switch` attaches to the `sched/sched_switch`
       tracepoint and charges each context switch's on-CPU nanoseconds to the outgoing task's cgroup in a
       `CPU_NS` map (keyed by cgroup id). It's correct because at that tracepoint the scheduler hasn't yet
       swapped `current` (still `prev`), so `bpf_get_current_cgroup_id` is the cgroup whose slice just
       ended; a per-CPU `LAST_SWITCH` cursor is always restamped so intervals stay exact, and a
-      `METER_TARGETS` *set* scopes accounting to the registered sandboxes — one shared program on the
+      `METER_TARGETS` *set* scopes accounting to the registered sandboxes, one shared program on the
       global tracepoint, a hash lookup per switch regardless of sandbox count (P12.4). The loader's
       `ResourceMeter` loads/attaches it, `add_target(id)` registers a sandbox, and `cpu_time(id)` reads
       the total; `id` is exactly what `cgroup_id_of_pid(vmm_pid)` resolves. Memory/IO ride the kernel's native cgroup v2
       counters (`CgroupStats::read`: `memory.peak`/`memory.current`, `io.stat` rbytes/wbytes, `cpu.stat`
       usage_usec as a cross-check), best-effort/`Option` so a missing controller fails open (decision
-      013) — the "or cgroup + tracepoints" half the box allows. The cgroup-file parsers are host-unit-
+      013), the "or cgroup + tracepoints" half the box allows. The cgroup-file parsers are host-unit-
       tested (`cpu.stat`/`io.stat`/single-int + a synthetic-dir `CgroupStats::read`); the live per-cgroup
       CPU accounting needs a privileged runner (P12.5). Correlating to the FC per-VM cgroup is P12.2, the
       run-result summary P12.3.)*
@@ -1351,47 +1351,47 @@ Per-sandbox CPU/mem/IO accounting from the kernel — the metering primitive (en
       one sandbox; the id equals the `bpf_get_current_cgroup_id` the kernel program records, so the two
       tracks line up exactly. `probes-loader` stays decoupled from `vmm` (bridged by plain values).)*
 - [x] **P12.3** Expose a per-run resource summary in the run result.
-      *(Landed: `ResourceSummary { cpu_time, cgroup: CgroupStats }` — the eBPF-measured CPU plus the
-      kernel's cgroup v2 memory/IO — assembled by `ResourceMeter::summary_for_pid(vmm_pid)`. It is the
+      *(Landed: `ResourceSummary { cpu_time, cgroup: CgroupStats }`, the eBPF-measured CPU plus the
+      kernel's cgroup v2 memory/IO, assembled by `ResourceMeter::summary_for_pid(vmm_pid)`. It is the
       per-run summary a caller ships with the run; folding it into the *persisted* per-run audit record
       (fused with the network denials and syscall trace) is Phase 13's convergence, kept out of
       `agent-vmm` so the driver stays independent of the eBPF loader. Decision 026.)*
 - [x] **P12.4** Bounded overhead; sane under many concurrent sandboxes.
       *(Landed by design + measurement: **one** program attached to the global `sched_switch`, metering a
       *set* (`METER_TARGETS`), so the per-switch cost is a single hash lookup regardless of how many
-      sandboxes are metered — a program-per-sandbox would run every program on every switch (O(N)).
+      sandboxes are metered, a program-per-sandbox would run every program on every switch (O(N)).
       `CPU_NS` holds only the registered cgroups. `cargo xtask bench-meter` measures the honest
       per-context-switch overhead in three conditions (no meter / attached-not-metering-us /
       attached-metering-us) on a ping-pong micro-workload, mirroring `bench-trace`. Decision 026.)*
 - [x] **P12.5** Test: a CPU-heavy run reports higher CPU than an idle one, attributed correctly.
       *(Landed: the `#[ignore]`d `a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox`
       (`resource_meter.rs`) boots a sandbox, meters its cgroup, and runs an idle guest then a CPU-heavy
-      one (both Python — `time.sleep` vs a vCPU-pegging loop — so only the workload differs) over equal
+      one (both Python, `time.sleep` vs a vCPU-pegging loop, so only the workload differs) over equal
       windows, reading each total after a short settle (a slice posts at **switch-out**, when
       `sched_switch` fires, so a pegged vCPU's whole window lands only once the guest idles and the vCPU
       thread blocks). Asserts the busy run charged far more host CPU (≥ half the wall window, > 3× idle)
-      and that the CPU map holds **exactly one** entry — this sandbox's cgroup, carrying the charge: the
+      and that the CPU map holds **exactly one** entry, this sandbox's cgroup, carrying the charge: the
       exclusivity is the attribution proof. `agent-vmm` a dev-dependency only.)*
 - **Exit gate:** per-sandbox resource metrics from eBPF (the engine *measures*, the hoster *bills*).
   *(Demo: `cargo xtask meter-sandbox` boots a real sandbox (jailed as root, else the unjailed opt-out),
   meters its cgroup, and shows an idle guest charging near-zero host CPU while a CPU-heavy guest charges
   most of a core, then prints the per-run `ResourceSummary` (CPU from the eBPF sched_switch meter,
-  memory/IO from the kernel's cgroup v2 counters) — per-sandbox resource metrics, host-measured. Run on a
+  memory/IO from the kernel's cgroup v2 counters), per-sandbox resource metrics, host-measured. Run on a
   KVM + `CAP_BPF`+`CAP_PERFMON` host.)*
 
 ---
 
-## Convergence — the fused engine
+## Convergence, the fused engine
 
-## Phase 13 — The audit log
+## Phase 13, The audit log
 
 Attach the eBPF programs to a sandbox at launch and produce a per-run **audit trail**.
 
 - [x] **P13.1** On `Sandbox::open`, attach syscall + network + accounting probes bound to that VM.
-      *(Landed: `agent-probes-loader`'s new `observer` module — `ArmedProbes::arm()` (pre-boot: load the
+      *(Landed: `agent-probes-loader`'s new `observer` module, `ArmedProbes::arm()` (pre-boot: load the
       syscall tracer host-wide, clear the baseline) → `bind(vmm_pid, netns, tap, egress, meter)`
       (post-boot: scope the tracer to the VMM's cgroup and fold the boot window, attach a per-VM
-      `TapMonitor` in the netns — enforcing when a policy is given — and register the cgroup as a target
+      `TapMonitor` in the netns, enforcing when a policy is given, and register the cgroup as a target
       on a shared `ResourceMeter`). Two-phase because the tracer must attach before boot but the tap/meter
       need the netns/cgroup that only exist after; "on `Sandbox::open`" is the caller's arm→open→bind
       sequence, kept **out of `agent-vmm`** (bridged only by the plain values `Sandbox` exposes:
@@ -1400,46 +1400,46 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       and `remove_target`s on drop. Every axis is fail-open (a missing cap/BTF/object → a recorded
       `AxisGap`, never a blocked run). **P13.5 later converged this**: the syscall tracer became shared
       too (`SharedTracer`), so the two-phase `arm`/`bind` collapsed to a single post-boot
-      `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)` — decision 028 supersedes the
+      `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)`, decision 028 supersedes the
       two-phase note here.)*
 - [x] **P13.2** Aggregate into one per-run record: network flows, resources, egress denials, timing,
       and notable **host-side** syscalls (the VMM's footprint, not in-guest syscalls; see Phase 9).
       The record's core is network + resources + denials, the signals host eBPF observes strongly
       across the hardware boundary.
-      *(Landed: `agent-probes-loader`'s new `record` module — `RunRecord { network: Option<NetSection>,
+      *(Landed: `agent-probes-loader`'s new `record` module, `RunRecord { network: Option<NetSection>,
       resources: ResourceSummary, host_syscalls: SyscallFootprint, timing: Timing, coverage: Vec<AxisGap> }`,
       assembled by `SandboxProbes::collect(timing)` from the three probes (timing supplied as plain
       `Duration`s the caller lifts from `Sandbox::boot_latency` + `RunResult::metrics.wall`, so the record
       never depends on `vmm`). `host_syscalls` is bounded (repeat events collapse to a hit count; distinct
       events cap at `MAX_NOTABLE = 64` by arrival order, with `overflow_events` counting every event past
       the cap so `total - overflow_events` is the exactly-attributed share) and every collection is
-      deterministically sorted with a **total** order — denials aggregate by destination triple (one row
-      per blocked endpoint, summed across guest source ports) — so the record is byte-stable. Pure module
+      deterministically sorted with a **total** order, denials aggregate by destination triple (one row
+      per blocked endpoint, summed across guest source ports), so the record is byte-stable. Pure module
       (no aya, no vmm): host-safe unit tests cover counts-by-kind incl. unknown, foreign-cgroup filtering,
       dedup+cap, overflow accounting, denial aggregation, deterministic sort, full-record equality across
       shuffled input, the no-network `None` case, and timing/resources passthrough.
       Decision 027. The deterministic JSON *output* surface is P13.4; the privileged end-to-end proof is
       P13.6.)*
 - [x] **P13.3** Detach + finalize the record on `close`.
-      *(Landed: `SandboxProbes::collect(timing)` is the close-time finalize — it reads the three probes
+      *(Landed: `SandboxProbes::collect(timing)` is the close-time finalize, it reads the three probes
       into the `RunRecord` **and** unregisters this run's cgroup from the shared tracer + meter, while the
       sandbox is still alive (cgroup dir + map fds must be live). `Drop` is the abandoned-path safety net
       (detach only, no record) and a no-op after `collect`, so the shared sets never accumulate dead
       cgroups whether the bundle is finalized or dropped. Decision 028.)*
 - [x] **P13.4** Deterministic, structured output (JSON) of "what this run did," from *outside* the guest.
-      *(Landed: `RunRecord::to_json` — a hand-rolled, dependency-free, compact serializer (the hand-framed
+      *(Landed: `RunRecord::to_json`, a hand-rolled, dependency-free, compact serializer (the hand-framed
       wire reasoning of decision 002: the audit-log format is a contract the SDKs parse, so the exact
       bytes are pinned by a golden test, not a derive). Byte-stable (fixed key order; arrays pre-sorted by
       their builders), float-free (durations as integer nanoseconds, clamped to u64 so consumers parse
       with ordinary 64-bit integers), addresses/protocols/syscalls by name. Phase 14 pretty-prints +
       exports it; this is the machine surface. Decision 028.)*
 - [x] **P13.5** Bound the overhead; keep concurrent sandboxes independent.
-      *(Landed: the syscall tracer now gets the meter's shared treatment (decision 026) — a `TRACE_TARGETS`
+      *(Landed: the syscall tracer now gets the meter's shared treatment (decision 026), a `TRACE_TARGETS`
       cgroup **set** + a `TRACE_SET` mode toggle in the kernel program, one shared `SyscallTracer` loaded
       once, every sandbox registering its cgroup. So one attachment serves all sandboxes (a program-per-VM
-      would run *N* copies of each `sys_enter_*` on every syscall — O(sandboxes)); the per-event cost is a
+      would run *N* copies of each `sys_enter_*` on every syscall, O(sandboxes)); the per-event cost is a
       single hash lookup and only target cgroups are emitted. A single drain routes each event to that
-      cgroup's private `SyscallFold`, so concurrent sandboxes stay independent — proven host-safe by
+      cgroup's private `SyscallFold`, so concurrent sandboxes stay independent, proven host-safe by
       `concurrent_folds_stay_independent`, and the two-phase attach collapses to one post-boot
       `SandboxProbes::attach`. `TRACE_SET` defaults off (the `watch_*` setters switch back, so the mode
       always matches the last setter used and neither filter model can silently no-op). Loss is honest:
@@ -1448,29 +1448,29 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       load-window baseline), at every attach, and on demand via `SharedTracer::poll`. Decision 028.)*
 - [x] **P13.6** Test: run a workload that touches network + files → the record shows exactly that.
       *(Landed: the `#[ignore]`d `a_networked_file_touching_run_yields_a_faithful_audit_record`
-      (`audit_record.rs`) drives the real launch sequence — load the shared tracer + meter, boot a
+      (`audit_record.rs`) drives the real launch sequence, load the shared tracer + meter, boot a
       networked sandbox, `attach` the bundle by plain values, run a guest workload that reads `/etc/hostname`
       and sends UDP to the host end, then `collect` the record and serialize it. Asserts the guest's network
       touch shows up **exactly** in the record's flows + per-VM totals, every axis bound (no coverage gap),
       and the deterministic JSON shows the flow. The guest's in-guest file read correctly does **not**
-      appear in the host-syscall axis (a microVM services its own syscalls, Phase 9 — the isolation working,
+      appear in the host-syscall axis (a microVM services its own syscalls, Phase 9, the isolation working,
       not a gap): the host observes the guest's network strongly and the VMM's host footprint, never the
       guest's syscalls. `agent-vmm` a dev-dependency only.)*
 - **Exit gate:** every run yields a tamper-resistant, host-observed audit trail (microVM + eBPF
   observability as one system).
   *(Met: `SandboxProbes::attach` binds the three host-side probes to a launched sandbox and
-  `collect` fuses them into one deterministic, host-observed `RunRecord` — network flows + egress denials
+  `collect` fuses them into one deterministic, host-observed `RunRecord`, network flows + egress denials
   (tap), CPU + memory/IO (shared meter + cgroup v2), and the VMM's host-syscall footprint (shared tracer),
-  serialized to stable JSON — all from **outside** the guest, where the code can't see or subvert it. The
+  serialized to stable JSON, all from **outside** the guest, where the code can't see or subvert it. The
   privileged P13.6 test proves it end to end: the microVM and the eBPF observability as one system. The
   live view + `agent run --trace` are the Phase 14 face.)*
 
-## Phase 14 — Observability output (a face for it)
+## Phase 14, Observability output (a face for it)
 
-Make what a run did *legible* — the payoff demo.
+Make what a run did *legible*, the payoff demo.
 
 - [x] **P14.1** A live TUI (ratatui) or structured stream: sandboxes, their syscalls, network, resources.
-      *(Landed: `agent run --watch` — a ratatui full-screen live view over the running sandbox, drawn on
+      *(Landed: `agent run --watch`, a ratatui full-screen live view over the running sandbox, drawn on
       **stderr** so stdout stays the run's result (the pipe-clean rule extended to the screen; decision
       029). Panels: the sandbox (pid, boot, elapsed, state), its network, its resources, the VMM's
       host-syscall footprint. Fed by a new **non-destructive** `SandboxProbes::snapshot() ->
@@ -1478,60 +1478,60 @@ Make what a run did *legible* — the payoff demo.
       never disturbs the record `collect` finalizes; the exec runs on a worker thread that owns the
       `Sandbox`. `q` closes the view, the run continues; terminal state restores via a drop guard on
       every exit path, and a broken TUI degrades to a headless run, never a failed one. The structured
-      *stream* alternative was rejected as a second premature machine contract — decision 029.)*
+      *stream* alternative was rejected as a second premature machine contract, decision 029.)*
 - [x] **P14.2** Per-sandbox drill-down: this run's flows, denials, timeline.
-      *(Landed: the live view's detail panes — the per-flow table (5-tuple + per-direction
+      *(Landed: the live view's detail panes, the per-flow table (5-tuple + per-direction
       packets/bytes), the denial rows (blocked endpoint + drop count, red), and a **timeline** derived
       by diffing successive snapshots: each new flow, denial-count delta, and new distinct notable
       syscall becomes one timestamped entry (pure, host-safe-tested `Timeline::observe`); boot/finish
       are lifecycle entries. The CLI drives one sandbox per run, so the drill-down *is* the screen;
       many-sandbox rollup is the daemon's later.)*
 - [x] **P14.3** `agent run --trace` prints the audit log after a run.
-      *(Landed: `--trace` binds the probes at launch (the decision-028 sequence composed in the CLI —
+      *(Landed: `--trace` binds the probes at launch (the decision-028 sequence composed in the CLI,
       load shared tracer+meter, `attach` by plain values, `collect` while the sandbox is alive) and
       prints the human-readable trail on **stdout** after the guest's own output: timing, per-flow
       traffic, denials, resources, notable host syscalls (labeled the VMM's, not the guest's), and a
       `gap` line per unbound axis. Fail-open end to end: a capless host still runs and the trail
       explains every absence. Conflicts with `--json` (machine consumers take `--record`); the pretty
-      trail makes no byte-stability promise — that contract stays `to_json`'s alone. New `--net` flag
+      trail makes no byte-stability promise, that contract stays `to_json`'s alone. New `--net` flag
       boots the NIC so there is a tap to observe (observe-only; the `--allow` policy projection stays
       in the CLI-completeness phase, which inherits `--net` shipped).)*
 - [x] **P14.4** Export the record (JSON) for later inspection.
-      *(Landed: `--record FILE` writes the run's `RunRecord::to_json` — one line, deterministic,
-      byte-stable (the machine surface the SDKs will parse) — composable with `--json`, `--trace`,
+      *(Landed: `--record FILE` writes the run's `RunRecord::to_json`, one line, deterministic,
+      byte-stable (the machine surface the SDKs will parse), composable with `--json`, `--trace`,
       and `--watch`.)*
 - [x] **P14.5** Test/demo: run something interesting, watch it live, read the trace after.
-      *(Landed: the demo is one command — `agent run --unjailed --net --watch --trace --record
-      run.json -- python3 …` (docs/cli.md + docs/examples-observe-a-run.md, "The whole run, fused") —
+      *(Landed: the demo is one command, `agent run --unjailed --net --watch --trace --record
+      run.json -- python3 …` (docs/cli.md + docs/examples-observe-a-run.md, "The whole run, fused"),
       watch the flows/denials/resources/syscalls live, read the trail after, keep the JSON. Proven by
       the `#[ignore]`d CLI e2e `run_with_trace_and_record_yields_trail_and_json` (`ci-privileged`):
       drives the **built `agent` binary** on a real networked sandbox and asserts the guest output +
       trail render on stdout, the record parses, and every axis binds (no coverage gap). Host-safe
       unit tests pin the trail's golden text and the timeline diffing.)*
 - **Exit gate:** a compelling live view of hardware-isolated runs; the demo you show people.
-  *(Met: one flag set on `agent run` shows a hardware-isolated run live — its flows as the guest
-  makes them, denials as policy drops them, resources, the VMM's footprint, a timeline — then leaves
+  *(Met: one flag set on `agent run` shows a hardware-isolated run live, its flows as the guest
+  makes them, denials as policy drops them, resources, the VMM's footprint, a timeline, then leaves
   behind the human trail and the machine record, all host-observed from outside the guest.
   Decision 029.)*
 
-## Phase 14.9 — CLI completeness (interphase: the reference embedder, finished)
+## Phase 14.9, CLI completeness (interphase: the reference embedder, finished)
 
 The CLI is the **reference embedder**, and the bar for a reference is *projection completeness*:
-every engine capability reachable from the command line through a few orthogonal verbs — never flag
+every engine capability reachable from the command line through a few orthogonal verbs, never flag
 sprawl, never platform features. Today three library capabilities have no CLI face (limits, network
 + egress policy, host diagnosis), the config file layer is still a promise, and the JSON the CLI
 emits is an unversioned de-facto contract. This interphase closes exactly that gap and nothing
-more. The deliberate exclusions stay excluded: snapshot/pool verbs are the daemon's (P16.3 — a warm
+more. The deliberate exclusions stay excluded: snapshot/pool verbs are the daemon's (P16.3, a warm
 pool is a long-lived-process concern, wrong for a one-shot CLI), the wire API is P16.2, and image/
 registry management is platform territory (guardrail 4) that never lands. The design rule this
-phase pins: **grow verbs, not modes** — `run`, `shell`, `doctor`, later `agentd`; not twenty
+phase pins: **grow verbs, not modes**, `run`, `shell`, `doctor`, later `agentd`; not twenty
 interacting flags on `run`.
 
 - [x] **P14.9a** Project `Limits` onto the CLI: `--vcpus N` / `--mem MIB` on `run` and `shell`,
       with clap ranges matching the `NonZeroU8`/`NonZeroU32` types so a refused value is a typed
       CLI error, never a silent clamp. `--json` reports the effective limits back.
       *(Landed: `--vcpus N` / `--mem MIB` on both `run` and `shell`, parsed by `parse_vcpus` /
-      `parse_mem_mib` straight into the `Limits` non-zero types — parsing *into* `NonZeroU8`/
+      `parse_mem_mib` straight into the `Limits` non-zero types, parsing *into* `NonZeroU8`/
       `NonZeroU32` rejects `0` (and non-numbers / overflow) as a typed clap error, and `--vcpus`
       additionally caps at 32 (`MAX_VCPUS`, the pinned Firecracker v1.9 microVM ceiling, decision
       001). A refused value is an error at parse, never a silent clamp nor a late boot-time API
@@ -1541,11 +1541,11 @@ interacting flags on `run`.
       caller sees what it got. Host-safe unit tests cover the parse domain (0/33/300/non-number
       refused, 1 and 32 accepted, 1 MiB floor) and the default-fold precedence.)*
 - [x] **P14.9b** Project the network + egress policy: `--net` boots with a NIC (unchanged
-      deny-by-default: a `--net` run with no allowance reaches nothing but the host /30 — **this
+      deny-by-default: a `--net` run with no allowance reaches nothing but the host /30, **this
       half already landed with the observability face**, P14.3/decision 029, observe-only), and a
       repeatable `--allow IP[/CIDR][:PORT][/PROTO]` builds the `EgressPolicy`, armed **before** the
       tap goes live (the no-unpoliced-window property, decision 025). Every allowance is explicit
-      on the command line — the greppable audit line guardrail 3 asks for — and lands in the run's
+      on the command line, the greppable audit line guardrail 3 asks for, and lands in the run's
       denial/flow record. This is the CLI composing both tracks (driver + probes) the way the
       audit-bundle launch sequence does; `--allow` without `--net`, or enforcement without the
       needed caps, is a typed refusal, not a degradation.
@@ -1558,7 +1558,7 @@ interacting flags on `run`.
       live (decision 025). **Enforcement doesn't fail open** (unlike observation, decision 029): a
       cheap pre-boot `check_support()` refuses on a host missing BTF/`CAP_BPF`/`CAP_PERFMON`, and the
       CLI's `Observability::attach` refuses post-attach if the *network* axis gapped (the residual
-      `CAP_NET_ADMIN`/tc case) — a policed run that can't arm is a typed error, never a silent
+      `CAP_NET_ADMIN`/tc case), a policed run that can't arm is a typed error, never a silent
       unenforced run. Host-safe unit tests cover the parse grammar (every field combination + each
       malformed field), the deny-by-default fold + rule cap, and the enforcement-refusal keying on
       the network axis alone; the `#[ignore]`d CLI e2e
@@ -1570,7 +1570,7 @@ interacting flags on `run`.
       up from the cwd, keys mirroring the env names 1:1 so the three layers stay one vocabulary);
       unknown keys are a typed error (config typos must not silently no-op). Precedence proven by
       unit tests per layer pair.
-      *(Landed: `agent-cli`'s new `config` module — the nearest `.agent.toml` walking up from the cwd,
+      *(Landed: `agent-cli`'s new `config` module, the nearest `.agent.toml` walking up from the cwd,
       `serde(deny_unknown_fields)` so a typo is a typed error naming the valid keys (not a silent
       no-op), keys mirroring the `AGENT_*` names 1:1. The layering reuses the engine, not a
       reimplementation: `BootConfig::from_env_with` is made public and the CLI composes
@@ -1578,13 +1578,13 @@ interacting flags on `run`.
       engine's env-key logic or pinned defaults; the fieldless `log` value gets a parallel
       `flag > env > file > default` resolver. Host-safe unit tests cover each layer pair (env>file,
       file>default), the deny-unknown-fields error, and nearest-up-from-cwd discovery. Decision 031.)*
-- [x] **P14.9d** `agent doctor`: ship the host check as an engine subcommand — KVM, the jailer
+- [x] **P14.9d** `agent doctor`: ship the host check as an engine subcommand, KVM, the jailer
       binary + real-root, iproute2/e2fsprogs, kernel BTF + `CAP_BPF`/`CAP_PERFMON`, artifact
       presence, and the degrades-vs-hard-errors matrix (P6.9b's content, today locked in dev-only
       `xtask setup`). An operator on a fresh host runs `agent doctor` *before* the first sandbox
       and reads exactly what will work, degrade, or refuse. `xtask setup` delegates to it (one
       implementation, two entry points).
-      *(Landed: the shared implementation is `agent-vmm::doctor` — a structured `Vec<Check>` with an
+      *(Landed: the shared implementation is `agent-vmm::doctor`, a structured `Vec<Check>` with an
       `Ok`/`Warn`/`Fail` status + the degradation matrix, the engine-runtime prerequisites in the
       engine's own crate. `agent doctor` renders it + the eBPF-capability row (from the probe loader,
       out of `agent-vmm`, decisions 024/026) and exits non-zero on any hard `Fail` so
@@ -1596,17 +1596,17 @@ interacting flags on `run`.
 - [x] **P14.9e** Version the JSON surface: a `schema` field (integer, starting at `1`) on the
       `--json` run result **and** the audit-record JSON, plus a written compatibility policy
       (additive within a version; field rename/removal bumps it). This is the seed the wire API
-      (P16.2) and the SDK freeze (Phase 20) harden — versioning lands *before* anything external
+      (P16.2) and the SDK freeze (Phase 20) harden, versioning lands *before* anything external
       parses these bytes, not after. (The audit record's open field questions are already settled:
       `overflow_events` semantics and the u64-nanosecond ceiling, decision 028's hardening pass.)
-      *(Landed: a leading `schema` field on both surfaces — `RUN_RESULT_SCHEMA` on the `--json` run
+      *(Landed: a leading `schema` field on both surfaces, `RUN_RESULT_SCHEMA` on the `--json` run
       result and `AUDIT_SCHEMA_VERSION` on `RunRecord::to_json`, each starting at `1` and versioned
-      independently (two contracts). The compatibility policy — additive within a version, a
-      rename/removal bumps it — is written in `docs/cli.md`. The audit-record golden test pins the
+      independently (two contracts). The compatibility policy, additive within a version, a
+      rename/removal bumps it, is written in `docs/cli.md`. The audit-record golden test pins the
       new leading bytes. Decision 032.)*
 - [x] **P14.9f** Prove completeness end to end: on a fresh host, `agent doctor` → one `agent run`
       driving every projection at once (limits + `--net`/`--allow` + `--put`/`--get` + stdin +
-      `--json`, with `--trace` if P14.3 has landed) — and `docs/cli.md` rewritten to document the
+      `--json`, with `--trace` if P14.3 has landed), and `docs/cli.md` rewritten to document the
       finished surface, including the capability↔flag map and the explicit "daemon-scoped, by
       design" list (snapshots, pool, wire API) so absence reads as intent, not omission.
       *(Landed: the `#[ignore]`d CLI e2e `doctor_passes_then_one_run_drives_every_projection_at_once`
@@ -1619,18 +1619,18 @@ interacting flags on `run`.
 - **Exit gate:** every engine capability is reachable from the CLI or named as deliberately
   daemon-scoped; config layers all four levels; a fresh host self-diagnoses with `agent doctor`;
   and the JSON the CLI emits is a versioned contract.
-  *(Met: the capability↔flag map in `docs/cli.md` accounts for every library capability — projected
+  *(Met: the capability↔flag map in `docs/cli.md` accounts for every library capability, projected
   as a flag/verb, or named daemon-scoped/platform; `flags > env > .agent.toml > defaults` layers all
   four levels; `agent doctor` self-diagnoses a fresh host (and gates via its exit code); both `--json`
   and the audit record carry a versioned `schema`. Decisions 031, 032.)*
 
-## Phase 15 — Hardening & the trust story (multi-tenant safety)
+## Phase 15, Hardening & the trust story (multi-tenant safety)
 
 Prove the isolation + observation claims hold under adversarial workloads: that **any run is fully
 contained from every other run and from the host**, so a hoster can place mutually-distrusting callers
 on one shared host. This is the *consolidated* adversarial suite. Its constituents already pass
-individually — jail escape (P6.6), fork-bomb / mem-hog bounded by the cgroup (P6.8), deny-by-default
-egress with an allow-listed exception (P4.7), no-leak teardown of a killed/crashed run (P6.7, P6.9a) —
+individually, jail escape (P6.6), fork-bomb / mem-hog bounded by the cgroup (P6.8), deny-by-default
+egress with an allow-listed exception (P4.7), no-leak teardown of a killed/crashed run (P6.7, P6.9a),
 and this phase runs them as one hostile guest and closes the last gaps. Tenant-agnostic throughout: the
 engine guarantees per-run containment; whose run is whose is the hoster's (decisions 016, 022).
 
@@ -1638,32 +1638,32 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       *(Landed as `probes-loader/tests/hardening.rs::a_hostile_guest_is_contained_and_the_record_shows_it`:
       one hostile guest **exfiltrates** to a blocked endpoint (dropped at the tap, the drop recorded in
       the fused `RunRecord`'s denial trail) and **DoS**es the host with a 50-process fork storm (which
-      creates zero host threads — hardware isolation), while the allow-listed exception and a clean
+      creates zero host threads, hardware isolation), while the allow-listed exception and a clean
       coverage set show in the *same* record and the VM stays exec-responsive afterward. The cgroup
       cpu/mem/pid caps under real hostile load are the `agent-vmm` confinement suite's real-root
       mem-hog/fork-bomb (P6.8) and full VM/jail escape is P6.6; this consolidates the observed-and-
-      recorded dimensions on the probe-capability path, adding the part those pieces lack — the record
+      recorded dimensions on the probe-capability path, adding the part those pieces lack, the record
       as the evidence.)*
 - [x] **P15.2** Confirm the guest cannot see or disable the host-side probes.
       *(Landed as `hardening.rs::a_guest_cannot_see_or_disable_the_host_side_probes`: the guest runs its
       **own** kernel inside the microVM while the eBPF lives in the **host** kernel and the tap monitor
-      sits on the host end of the VM's tap — outside the guest — so a guest that hunts for the
+      sits on the host end of the VM's tap, outside the guest, so a guest that hunts for the
       observability (finds zero BPF objects in its view) and then sends identifiable traffic is **still
       fully recorded** with clean coverage. It can't disable what it can't reach; the proof is
-      behavioural — the host keeps recording across the guest's attempts.)*
+      behavioural, the host keeps recording across the guest's attempts.)*
 - [x] **P15.3** Resource-exhaustion, fork-bomb, network-flood → bounded by cgroup + egress policy.
       *(Landed as `hardening.rs::all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy`:
-      one hostile guest under both a cgroup cap and an enforcing egress policy hits every axis at once
-      — a memory hog (stays under `memory.max`, no host OOM-kill of the VMM), a fork storm (zero host
+      one hostile guest under both a cgroup cap and an enforcing egress policy hits every axis at once,
+     a memory hog (stays under `memory.max`, no host OOM-kill of the VMM), a fork storm (zero host
       threads, host CPU within the `cpu.max` quota), and a 200-packet network flood to a blocked
-      endpoint (dropped at the tap at volume, a high denial count in the record) — while the
+      endpoint (dropped at the tap at volume, a high denial count in the record), while the
       allow-listed endpoint keeps working and the VM stays responsive. Real-root + probe-caps gated,
       skips with a reason otherwise. The two enforcement mechanisms bound all three vectors together.)*
 - [x] **P15.4** Snapshot-restore correctness under load (no state bleed between clones).
       *(Landed as `snapshot.rs::restored_clones_do_not_bleed_state_under_load`: N clones restored from
       one prewarmed snapshot each write a **distinct** secret to the same guest path and read it back,
       all in flight at once (each clone drives its own thread). A shared writable disk would let a
-      sibling's concurrent write clobber the path; instead each reads back exactly its own — per-clone
+      sibling's concurrent write clobber the path; instead each reads back exactly its own, per-clone
       in-RAM overlay + guest RAM, shared base read-only, no bleed. Guards against a vacuous pass by
       asserting the secrets were distinct.)*
 - [x] **P15.5** Document the **threat model**: what's trusted (CPU/KVM/host kernel), what isn't.
@@ -1676,7 +1676,7 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       by decision 016, the engine/hoster line the P6.9a sweep forced: the engine guarantees its
       privileged tools can't be weaponized (euid-scoped, authorship not policy), the hoster owns
       deployment (scheduling, per-identity sweeps, base hardening, dividing the /16 pool). **Closed as
-      decision 033**: the whole boundary written down — trusted (CPU/KVM/host kernel/driver/host-eBPF)
+      decision 033**: the whole boundary written down, trusted (CPU/KVM/host kernel/driver/host-eBPF)
       vs not (the guest incl. its own kernel + the in-guest agent), the fully-hostile-guest adversary,
       the assumptions/residual risk (KVM + host-kernel soundness, side channels, fair scheduling), and
       the map from each attack class to the test that proves it. `docs/threat-model.md` (P15.5) is its
@@ -1688,33 +1688,33 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       by `memory.max` and never reaches the host (P6.8), but a hypervisor-level exploit that forked
       *host* processes is now capped. **IO bandwidth is now bounded** via Firecracker's per-drive
       **virtio-blk rate limiter** (the engine-native control, not host `io.max`): a derived default
-      (`RateLimiter::default_guest_io` — 256 MiB/s with a 1 GiB `one_time_burst` sized past any rootfs,
+      (`RateLimiter::default_guest_io`, 256 MiB/s with a 1 GiB `one_time_burst` sized past any rootfs,
       so a cold boot's read fits the burst and runs unthrottled *by construction*; only *sustained*
       thrashing is throttled), set on every drive at cold-boot `put_drive`, host-safe unit-tested for
       both the wire shape and the numbers. It **rides restore**: a clone reopens the drive from the
-      snapshot state file, which carries the limiter. (The cgroup caps used *not* to ride restore — a
+      snapshot state file, which carries the limiter. (The cgroup caps used *not* to ride restore, a
       pre-existing gap now closed under P15.8.) An **internal derived default,
       not a new `Limits` knob** (decision 013), so the public contract is unchanged and this is
       non-`api:`; the measured boot-latency-is-unchanged confirmation and a throttle readback stay
       pending on a privileged host, like `pids.max`. Decision 033 records the boundary this sits in.
 - [x] **P15.8** **Co-resident interference test:** launch a hostile run (cpu/mem/pid/io/network storm)
       alongside a well-behaved run on the same host and assert the victim run is not starved, slowed
-      past a bound, or observable by the attacker — the explicitly multi-tenant assertion the hoster
+      past a bound, or observable by the attacker, the explicitly multi-tenant assertion the hoster
       gates on (still tenant-agnostic: two *runs*, no tenant concept).
       *(Two parts. First, the **prerequisite fix**: a jailed **restore** now re-applies the cgroup caps
-      (`spawn.rs`), so a restored clone — where untrusted code runs — is confined, not just isolated.
+      (`spawn.rs`), so a restored clone, where untrusted code runs, is confined, not just isolated.
       Both caps derive from the *snapshot's* true envelope, never `config`'s declaration (the clone's
       vCPUs and RAM come from the snapshot state; restore issues no `PUT /machine-config`): `memory.max`
-      from the memory file's true guest RAM (`jail::restore_mem_mib`, unit-tested — the old OOM hazard),
+      from the memory file's true guest RAM (`jail::restore_mem_mib`, unit-tested, the old OOM hazard),
       `cpu.max` from the vCPU count recorded in the bundle (`Snapshot::vcpus`, so a config defaulting to
-      fewer vCPUs than the source can't silently throttle a clone — proven by
+      fewer vCPUs than the source can't silently throttle a clone, proven by
       `snapshot.rs::restored_clone_cpu_cap_follows_the_snapshot_not_the_config`), constant `pids.max`.
       Then the test,
       `confinement.rs::a_hostile_run_cannot_starve_or_observe_a_co_resident_run`: two co-resident runs
       each in its own capped cgroup; the attacker storms 100 spinning processes while the victim reruns
       a CPU-bound workload, and the victim's result stays **correct** and within a generous wall-clock
       ceiling, while the attacker's host CPU stays **within its cgroup quota** (so it can't monopolize
-      the host — the victim's share is protected by construction). Distinct VMMs prove non-observability
+      the host, the victim's share is protected by construction). Distinct VMMs prove non-observability
       of the process; network non-observability between runs is the per-VM netns (net.rs, decision 017).
       Real-root + delegated-cgroups gated.)*
 - [x] **P15.9** **Fuzz the untrusted-input boundary:** the host↔guest channel decoders, where a hostile
@@ -1722,13 +1722,13 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       cgroup/egress checks the intro lists. Two tiers: a **dependency-free property harness in the `ci`
       gate** (`crates/channel` `fuzz_tests`: arbitrary bytes, well-framed random bodies, encode/decode
       round-trips, and every truncation of a valid frame, asserting the decoders never panic, hang, or
-      allocate past `MAX_PAYLOAD` — guardrail 5, on stable, deterministic seeds so it can't flake); and
+      allocate past `MAX_PAYLOAD`, guardrail 5, on stable, deterministic seeds so it can't flake); and
       a **`cargo fuzz` (libFuzzer) harness** in the workspace-excluded `fuzz/` crate for deep nightly
       runs (`cargo xtask fuzz`), reaching the decoders via the channel crate's off-by-default `fuzzing`
       feature so the wire crate stays dependency-free. Documented in `docs/contributing-fuzzing.md`.)*
-- **Exit gate:** the **containment suite is green** — one hostile guest tries to escape the VM, reach
+- **Exit gate:** the **containment suite is green**, one hostile guest tries to escape the VM, reach
   the network, exceed its cpu/mem/pid/io caps, exhaust the host, and interfere with a co-resident run,
-  and **each attempt fails** — so the engine is safe to host mutually-distrusting callers on a shared
+  and **each attempt fails**, so the engine is safe to host mutually-distrusting callers on a shared
   host; the **threat model** is documented. ("Safe for multi-tenant hosting" means exactly this suite
   green, nothing less.)
 
@@ -1736,68 +1736,68 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
 
 ## Cross-cutting
 
-## Phase 16 — The driver daemon + wire API (the engine's interface)
+## Phase 16, The driver daemon + wire API (the engine's interface)
 
 A local daemon others drive over a socket: still engine, not PaaS.
 
 - [x] **P16.1** `agentd`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
       *(A second binary in the `agent-cli` crate (`src/agentd/`), a thin host of the same
-      `agent-vmm` public API — engine, not platform (no auth/tenancy/billing). One connection is one
+      `agent-vmm` public API, engine, not platform (no auth/tenancy/billing). One connection is one
       sandbox **session** (the VM is the session, decision 019), served on its own thread
       (synchronous, no async runtime): `open` boots it, `exec`* run commands sharing one working dir,
       `close` (or a hung-up connection) tears it down. The wire is a **provisional** newline-JSON
       protocol (`protocol.rs`, host-safe unit-tested: round-trips, blank-line/EOF handling, and a
       bounded `fill_buf` line reader so a lying/oversize line is a typed `TooLarge`, never a panic or
-      unbounded alloc — guardrail 5); the versioned SDK contract with the full verb set is P16.2, so
+      unbounded alloc, guardrail 5); the versioned SDK contract with the full verb set is P16.2, so
       this carries **no schema number**. Confinement is the **daemon's** launch posture (jailed by
-      default, `--unjailed` opt-out), never a client's — a caller can't weaken the jail. Teardown is
+      default, `--unjailed` opt-out), never a client's, a caller can't weaken the jail. Teardown is
       crash-only: a session's `Sandbox` drops with its connection, and daemon-process death can't leak
       a VM (the lifetime sentinel, decision 014). Demoed by `tests/agentd_e2e.rs`: spawns the real
       daemon and drives a full session over the socket (open → exec `echo`/`cat`/stateful writes → a
       non-fatal guest fault the session survives → close → a fresh independent session), plus
       `docs/daemon.md`. `#[ignore]`d/privileged. Access control (socket-dir perms) and the wire-API
       freeze stay the hoster's / later boxes.)*
-- [x] **P16.2** A **versioned** wire API (JSON/gRPC — `(decision)`): open/exec/put/get/snapshot/
-      close/trace. This is the **SDK contract** — Phase 20 freezes and spec's it.
-      *(Decision 034: newline-JSON, **not gRPC** — the daemon is synchronous with no async runtime,
+- [x] **P16.2** A **versioned** wire API (JSON/gRPC, `(decision)`): open/exec/put/get/snapshot/
+      close/trace. This is the **SDK contract**, Phase 20 freezes and spec's it.
+      *(Decision 034: newline-JSON, **not gRPC**, the daemon is synchronous with no async runtime,
       and the peer is a local trusted-ish client, so hand-debuggability (`socat`) and "any language +
       a JSON lib + a socket" beat a compact wire. Every message carries a leading `schema` field,
-      rejected on mismatch **before the body is trusted** — the seam Phase 20 freezes against (distinct
+      rejected on mismatch **before the body is trusted**, the seam Phase 20 freezes against (distinct
       from the audit-record and `--json` schemas). Lives in a new **`agentd-protocol`** crate
       (serde-only, **no `agent-vmm`**): the shared `Request`/`Response`/`Envelope` shapes + a bounded,
-      typed line codec (guardrail 5, host-safe unit-tested — round-trips, schema-gate, blank-line/EOF,
+      typed line codec (guardrail 5, host-safe unit-tested, round-trips, schema-gate, blank-line/EOF,
       over-cap). The full verb set landed on the daemon (`session.rs`, now on `RunningVm` so a pooled
       clone and a cold boot serve identically): `put`/`get` ride the engine's only file seam (a no-op
       exec that injects/returns a file); `snapshot` is a typed refusal for a jailed session (faithful
       to `Sandbox::snapshot`), returning the bundle's daemon-host dir; `trace` builds the `RunRecord`
-      **non-destructively** from a live probe snapshot (fail-open, repeatable mid-session). Non-`api:`
-      — the pinned `agent-vmm` surface is untouched; the daemon only consumes it.)*
+      **non-destructively** from a live probe snapshot (fail-open, repeatable mid-session). Non-`api:`,
+     the pinned `agent-vmm` surface is untouched; the daemon only consumes it.)*
 - [x] **P16.3** Pre-warmed-pool management lives in the daemon (fast `exec`).
       *(`agentd --prewarm N`: at startup the daemon boots one **unjailed** prewarm source (a jailed
       disk can't be snapshotted), snapshots it, and restores `N` clones under the daemon's confinement
       posture into an `agent-vmm::Pool` behind a `Mutex` (sessions are thread-per-connection). A
-      **bare-default** `open` pops a warm clone — `opened{pooled:true}` — since the clones carry the
+      **bare-default** `open` pops a warm clone, `opened{pooled:true}`, since the clones carry the
       default profile; any custom knob (or a pool that's empty/poisoned/dry) cold-boots. The pool tops
       up on session close, off the hot path (the moment the `Pool` doc reserves for restore cost).
       Fail-open: a host that can't build the pool (no KVM, no root) logs one warning and every session
       cold-boots. Non-`api:`.)*
 - [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agentd` over the
-      wire API — the seed the **polyglot SDKs (Phase 20)** harden into Go/Python/Node/C#. (The full
+      wire API, the seed the **polyglot SDKs (Phase 20)** harden into Go/Python/Node/C#. (The full
       SDK set is post-`v0.1.0`.)
       *(New **`agentd-client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
       `snapshot`/`trace`/`close`) with typed errors, no panics. Depends on `agentd-protocol` + a JSON
-      value **only, never `agent-vmm`** — that dependency set *is* the proof a caller needs nothing of
+      value **only, never `agent-vmm`**, that dependency set *is* the proof a caller needs nothing of
       the engine but the wire. Demoed by `tests/agentd_e2e.rs`, now three angles: the full versioned
       API hand-driven as raw JSON (the wire is socat-debuggable, every message schema-stamped, a
       wrong schema is a fatal error), the **same daemon driven through the reference client**, and a
       `--prewarm 1` daemon answering a bare `open` `pooled:true`. Plus `docs/daemon.md` rewritten for
       the versioned API + pool + client. `#[ignore]`d/privileged. Non-`api:`.)*
-- [x] **P16.5** Structured logs + a metrics endpoint (Prometheus) — for the *hoster* to scrape.
-      *(Logs: the daemon's `tracing` events (already structured — `vmm_pid`/`boot_ms`/`pooled`) gain a
+- [x] **P16.5** Structured logs + a metrics endpoint (Prometheus), for the *hoster* to scrape.
+      *(Logs: the daemon's `tracing` events (already structured, `vmm_pid`/`boot_ms`/`pooled`) gain a
       machine encoding, `--log-json` / `AGENT_LOG_FORMAT=json` (one JSON object per line for a log
       shipper; same events, different framing) via `tracing-subscriber`'s `json` feature. Metrics:
       `agentd --metrics ADDR` serves the Prometheus **text-exposition** format at `GET /metrics` from
-      a **hand-rolled**, bounded HTTP/1.1 responder on one thread (`agentd/metrics.rs`) — no async
+      a **hand-rolled**, bounded HTTP/1.1 responder on one thread (`agentd/metrics.rs`), no async
       stack or metrics crate for one GET route, same discipline as the driver's hand-rolled FC client;
       the request head is byte-capped + socket-timed so a hostile scraper is a dropped connection
       (guardrail 5). The registry is plain atomics (no lock on the session hot path): sessions
@@ -1806,14 +1806,14 @@ A local daemon others drive over a socket: still engine, not PaaS.
       (Prometheus-default buckets, cumulative `le` + `+Inf` + `_sum`/`_count`), plus `build_info` and
       a pool_ready gauge that is **absent, not zero**, without a pool. Off by default; a requested
       address that can't bind refuses startup (the `--allow` posture: an asked-for operational surface
-      is never silently absent); no auth — bind loopback (docs/daemon.md "Observability for the
+      is never silently absent); no auth, bind loopback (docs/daemon.md "Observability for the
       hoster"). Host-safe unit-tested (cumulative rendering, HELP/TYPE coverage, gauge clamp,
       absent-vs-zero pool, request-line parse, and a real ephemeral-port scrape); the privileged
       wire-API e2e now also launches `--metrics` and asserts the scraped counters match the session
       it just drove. Non-`api:`.)*
 - [x] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
       *(Restated where the programmatic interface actually lives: a **crate-level non-goals paragraph**
-      on `agentd-protocol` (the wire is the SDK contract, so the API surface is the code itself) —
+      on `agentd-protocol` (the wire is the SDK contract, so the API surface is the code itself),
       the protocol carries no tenant/credential/quota/price/host-to-schedule field, and that absence
       is a design commitment (guardrail 4), a schema bump adds a verb never a tenancy field. Plus a
       dedicated **"Non-goals: where a PaaS would begin"** section in `docs/daemon.md` (no
@@ -1821,22 +1821,22 @@ A local daemon others drive over a socket: still engine, not PaaS.
       is a security boundary too), cross-linked to `embedding.md`'s embedding-side "Where the engine
       ends". Docs/comments only, non-`api:`.)*
 - [x] **P16.7** Golden: the CLI and the daemon API produce identical run results.
-      *(`tests/cli_daemon_golden.rs`: the same command through both faces — `agent run --json` and
-      `agentd` driven by the reference client — must render an **identical** `(exit_code, stdout,
+      *(`tests/cli_daemon_golden.rs`: the same command through both faces, `agent run --json` and
+      `agentd` driven by the reference client, must render an **identical** `(exit_code, stdout,
       stderr)`, since both are thin hosts of one `agent-vmm` lifecycle; the two agree with each other
       **and** with the expected literal, so a shared bug can't pass by matching itself. Cases: a plain
       success, a command that runs and exits non-zero writing both streams (a faithful result, not an
       error, on both), and a stdin passthrough. A guest fault that yields no result (an unspawnable
-      binary) is out of scope by design — the CLI renders it as an operational error, the daemon as a
+      binary) is out of scope by design, the CLI renders it as an operational error, the daemon as a
       non-fatal `error` reply, two faithful renderings of a non-result. `#[ignore]`d/privileged; both
       faces unjailed + default profile so any divergence is the rendering, not a differing knob.
       Non-`api:`.)*
 - **Exit gate:** a self-hostable sandbox daemon with a clean API; the client/server boundary, and
   where a PaaS would begin (and why it's not here), are documented.
 
-## Phase 17 — Performance & scale
+## Phase 17, Performance & scale
 
-Make the numbers real — the benchmarks that back every claim.
+Make the numbers real, the benchmarks that back every claim.
 
 - [x] **P17.1** Benchmarks: cold boot, snapshot restore, pre-warmed-pool `exec` latency (p50/p99).
       *(`cargo xtask bench-warm [--runs N]` (needs KVM + the built agent rootfs), sharpening the
@@ -1844,39 +1844,39 @@ Make the numbers real — the benchmarks that back every claim.
       (begin a sandbox → exec-ready) and its **time-to-first-result** (start + the first exec's
       round-trip), reported with the same honest nearest-rank percentiles (`p99` prints `—` below
       n=100, so a short run can't dress its max up as a tail). This isolates the three headline
-      latencies P17 names — cold boot, snapshot restore, pool take — instead of folding each into one
+      latencies P17 names, cold boot, snapshot restore, pool take, instead of folding each into one
       composite, the resolution P17.6's bottleneck hunt needs. Demoed on a KVM host: snapshot-restore
       start is roughly an order of magnitude under cold boot, and a pool take is near-instant, with
       the exec round-trip added in the composite series. Enhances the existing bench, non-`api:`.)*
 - [x] **P17.2** Memory-sharing: how many concurrent microVMs per host before it degrades.
       *(`cargo xtask bench-density [--count N]` (needs KVM + the built agent rootfs): restores prewarmed
-      clones one at a time from a single snapshot — each sharing the **read-only base disk** and the
-      **snapshot memory file**, so a clone's only private cost is its copy-on-write dirty pages — and
+      clones one at a time from a single snapshot, each sharing the **read-only base disk** and the
+      **snapshot memory file**, so a clone's only private cost is its copy-on-write dirty pages, and
       keeps **every clone alive** while sampling, at power-of-two checkpoints, the summed **Rss** (naive,
       counts the shared base per VM) vs summed **Pss** (proportional set size, the true footprint, from
       each VMM's `smaps_rollup`) plus the host's `MemAvailable`. The Rss/Pss gap **is** the memory-
       sharing benefit, made a number. It stops at the target, on a restore failure, or when free memory
-      would cross a floor (max(1 GiB, 5% of RAM), so it never swaps the host), and reports **which** — so
+      would cross a floor (max(1 GiB, 5% of RAM), so it never swaps the host), and reports **which**, so
       "how many concurrent before it degrades" is measured, not guessed, and the summary states the
       marginal Pss per added clone and the sharing density (Rss vs Pss at the top count). Enhances the
       bench module, non-`api:`.)*
 - [x] **P17.3** eBPF overhead: cost of the probes under load.
       *(`bench-trace` (P9.5) and `bench-meter` (P12.4) already measure the *per-event* cost of the two
       shared probes for one watched sandbox; the missing **under-load** dimension is whether that cost
-      stays bounded as **many** sandboxes are watched at once — the "one shared program, O(1) map lookup,
+      stays bounded as **many** sandboxes are watched at once, the "one shared program, O(1) map lookup,
       independent of sandbox count" design claim, previously asserted in prose. New `cargo xtask
       bench-scale [--runs N]` (needs `CAP_BPF`+`CAP_PERFMON` + the built object, not KVM) makes it a
       measured curve: it sweeps the **watched-target-set size** (1 → 512, within the 1024 `MAX_CGROUPS`
-      target maps) for both the syscall tracer and the `sched_switch` meter — the set is our own cgroup
-      (the watched path) padded with never-matching dummies — and prints the p50 per-event cost at each
+      target maps) for both the syscall tracer and the `sched_switch` meter, the set is our own cgroup
+      (the watched path) padded with never-matching dummies, and prints the p50 per-event cost at each
       size on the same `openat`/ping-pong micro-workloads the other benches use. A flat column is the
       evidence that total probe overhead scales with the **event rate**, not the number of concurrent
       sandboxes. Enhances the bench module, non-`api:`.)*
 - [x] **P17.4** Memory footprint per sandbox; the effect of overlay/rootfs choices.
       *(`cargo xtask bench-footprint [--count N]` (needs KVM + the built agent rootfs): brings up a
-      cohort of identical sandboxes on each of the three disk strategies — a cold boot with a **per-VM
+      cohort of identical sandboxes on each of the three disk strategies, a cold boot with a **per-VM
       read-write copy** of the image, a cold boot on the **shared read-only base** (writes to a guest
-      tmpfs overlay), and a **snapshot restore** (shared base + copy-on-write memory file) — and
+      tmpfs overlay), and a **snapshot restore** (shared base + copy-on-write memory file), and
       reports the per-VM VMM `Pss` (nearest-rank percentiles) plus the whole-host `MemAvailable` drop
       per sandbox. The RW copy lives in tmpfs **outside** the VMM's address space, so its Pss undercounts
       it: whole-host is the honest meter, and the bench proves that (identical 46 MiB Pss for both cold
@@ -1888,16 +1888,16 @@ Make the numbers real — the benchmarks that back every claim.
       footprint, density, and the three probe benches) in order as one report, records the host it ran
       on, states the methodology up front (nearest-rank percentiles, never averages; `p99` prints `—`
       below n=100), and **skips** any section whose host prerequisite is missing (`/dev/kvm`, or
-      `CAP_BPF`+`CAP_PERFMON` + the built object) with the reason, never silently — so a run says exactly
+      `CAP_BPF`+`CAP_PERFMON` + the built object) with the reason, never silently, so a run says exactly
       what it did and didn't measure. The report: `docs/benchmarks.md` (a new mdBook page) records the
-      measured numbers, each stated **against its honest baseline** — restore/pool-take vs a cold boot,
-      summed Pss vs the naive Rss, a shared base vs a per-VM copy — with the full methodology and the
+      measured numbers, each stated **against its honest baseline**, restore/pool-take vs a cold boot,
+      summed Pss vs the naive Rss, a shared base vs a per-VM copy, with the full methodology and the
       one-command reproducer. Enhances the bench module + docs, non-`api:`.)*
 - [x] **P17.6** Find + fix the top bottleneck the numbers reveal.
       *(The P17.1 latency decomposition made the bottleneck legible: the driver's three readiness waits
       (`await_api_socket`, `await_userspace`, and restore's `await_agent_ready`) polled on a **fixed
       20 ms / 10 ms interval**, so every start paid up to a whole interval (~10 ms average) of pure
-      quantization — readiness had happened but the next poll tick hadn't. On a ~40 ms restore that's a
+      quantization, readiness had happened but the next poll tick hadn't. On a ~40 ms restore that's a
       large slice; on the boot tail it's needless jitter. Fixed with a small adaptive `PollBackoff`
       (starts at 1 ms, doubles to a 5 ms cap) shared by all three loops, so readiness is caught within
       ~1 ms when it comes quickly while a long cold boot still polls cheaply; unit-tested progression,
@@ -1911,16 +1911,16 @@ Make the numbers real — the benchmarks that back every claim.
   honest baseline, with the nearest-rank-percentile methodology stated; `cargo xtask bench-all`
   reproduces the suite as one report.
 
-## Phase 18 — AI-native surfaces (the runtime for agent-generated code)
+## Phase 18, AI-native surfaces (the runtime for agent-generated code)
 
-The engine's highest-value untrusted workload is **AI-generated code and autonomous agents** — the
+The engine's highest-value untrusted workload is **AI-generated code and autonomous agents**, the
 dynamic, possibly-misaligned input the isolation-and-audit thesis was built to contain. Make that a
 first-class fit **without embedding a model.** A model in the host path is not an isolation boundary
 (invariant 1), and dragging inference (unbounded, un-benchmarkable) or model-driven policy into the
 engine would break "engine, not platform" and "measured, not marketed" (invariants 3, 4). So the
 model always stays the **caller's**; the engine stays the containment-and-audit substrate it already
 is. This phase puts a **model-legible face** on the record the engine already builds and proves the
-containment story end to end — no new isolation, no bundled model — leaning on the documented threat
+containment story end to end, no new isolation, no bundled model, leaning on the documented threat
 model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through.
 
 - [x] **P18.1** `(decision)` **The AI-scope boundary** → `docs/contributing-architecture.md`: the
@@ -1928,15 +1928,15 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       hardware containment plus a host-observed, **model-legible** record; the reference example
       drives the engine with a **deterministic scripted agent**, not a live model (so the demo is
       CI-reproducible and needs no API keys). Records why embedding a model, or letting one decide
-      policy, would break invariants 1 / 3 / 4 — so the line is auditable and can't drift into a
+      policy, would break invariants 1 / 3 / 4, so the line is auditable and can't drift into a
       slap-on. *(**Recorded as decision 035**: the model is the caller, never an engine component;
       the AI-native surface adds a **reader** of the host-observed record (the P18.2 projection), never
-      a new **authority** — so invariant 2 is served, not strained, and only invariants 1/3/4 are the
+      a new **authority**, so invariant 2 is served, not strained, and only invariants 1/3/4 are the
       ones a model-in-the-engine would break (probabilistic software boundary / platform concern /
       un-benchmarkable). The scripted-agent choice is itself invariant-preservation: CI-reproducible
-      containment, no model or secrets in the host path. The AI-workload face of decisions 016 and 033
-      — the model sits outside the trust boundary, where tenancy and scheduling already sit.)*
-- [x] **P18.2** A **model-legible projection of the audit record** — a third face alongside `--trace`
+      containment, no model or secrets in the host path. The AI-workload face of decisions 016 and 033,
+     the model sits outside the trust boundary, where tenancy and scheduling already sit.)*
+- [x] **P18.2** A **model-legible projection of the audit record**, a third face alongside `--trace`
       (human) and `--record` (machine JSON), surfaced as `agent run --record-summary FILE` and a
       `RunRecord` method: a compact, semantically-labelled summary shaped to feed straight back into
       an agent's observe→act loop (what it read/wrote, which flows it opened, what egress was
@@ -1946,9 +1946,9 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       record, so "compact" is a number, not a claim (invariant 4).
       *(`RunRecord::to_summary_json` in a new `probes-loader/src/summary.rs`, a **pure projection** of
       the record (decision 035: a reader, no new observation) reusing the `json.rs` writers. It keeps
-      the decision-relevant signal — `reached` (flows collapsed to distinct **destinations**, the
+      the decision-relevant signal, `reached` (flows collapsed to distinct **destinations**, the
       ephemeral source dropped), `denied`, the guest-view byte rollup, the resource envelope, a
-      cap-16 host-syscall sample, and coverage flattened to `"axis: reason"` — and drops the forensic
+      cap-16 host-syscall sample, and coverage flattened to `"axis: reason"`, and drops the forensic
       detail (per-flow counters, per-syscall `comm`/hits, `memory.current`, the `cpu.stat` cross-check).
       Guest-centric vocabulary (`sent`/`recv`), its own leading `schema` (`SUMMARY_SCHEMA_VERSION`,
       independent of the record's and the run-result's), byte-stable, golden + stability + dedup +
@@ -1958,7 +1958,7 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       fourth face. `Cmd::Run` boxed to keep the added flag under `clippy::large_enum_variant`.
       non-`api:` (probes-loader + CLI, not the pinned `vmm` surface).)*
 - [x] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
-      **Phase 20 SDKs** expose it as part of the SDK contract — an agent driving `agentd` from any
+      **Phase 20 SDKs** expose it as part of the SDK contract, an agent driving `agentd` from any
       language reads the same model-legible observation the CLI writes, not a CLI-only convenience.
       *(New `trace_summary` verb in `agentd-protocol`, parallel to `trace`: `Request::TraceSummary` →
       `Response::TraceSummary { summary }` (the projection JSON carried opaquely, so the protocol crate
@@ -1969,24 +1969,24 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       (a new verb, old messages unchanged); the pinned `vmm`/`channel` surfaces are untouched, so
       non-`api:`.)*
 - [x] **P18.4** A **reference agent-containment example** (`docs/examples`): a **scripted agent** (a
-      deterministic stand-in for an LLM's tool loop — no model, no secrets) runs inside a sandbox,
+      deterministic stand-in for an LLM's tool loop, no model, no secrets) runs inside a sandbox,
       egress-policed with `--allow` to only its permitted tool / MCP endpoints, makes one allowed call
       and one that is **denied**, and the host-observed record + projection prove **exactly what it
       reached and what was blocked**. Uses only surfaces the engine already ships (`--net` / `--allow`
-      / `--record` + P18.2). This is the thesis applied to the workload of the moment — the
+      / `--record` + P18.2). This is the thesis applied to the workload of the moment, the
       tamper-resistant, host-observed audit trail a supervisor needs to trust an agent, which the
       pure-execution sandboxes can't offer.
-      *(The scripted agent is `docs/examples/agent-tool-loop.py` — a deterministic UDP tool loop, no
+      *(The scripted agent is `docs/examples/agent-tool-loop.py`, a deterministic UDP tool loop, no
       model/secrets, calling a `search-index` tool (allow-listed) and an `exfil-webhook` (not). The
       demonstration's edge: fire-and-forget UDP looks sent from in-guest even when the host drops it,
-      so the agent's own transcript reports **both** as `sent` — the gap the host record closes. The
+      so the agent's own transcript reports **both** as `sent`, the gap the host record closes. The
       docs page `examples-agent-containment.md` walks it (CLI `--record`/`--record-summary`, the wire
       `trace_summary` for a remote supervisor), wired into `SUMMARY.md`/`examples.md`. The
       `trace_e2e` privileged test `scripted_agent_is_contained_...` is the CI-reproducible proof:
       `reached` = the allowed endpoint, `denied` = the blocked one, in both the full record and the
       summary, summary size measured < full. non-`api:` (docs + a test).)*
-- **Exit gate:** the scripted agent runs contained and **CI-reproducibly** — its egress policed to an
-  allow-list, one permitted tool call succeeding and one denied — and the **model-legible record**
+- **Exit gate:** the scripted agent runs contained and **CI-reproducibly**, its egress policed to an
+  allow-list, one permitted tool call succeeding and one denied, and the **model-legible record**
   (from the CLI and over the wire API) shows what it did and what was blocked, its size measured
   against the full record, **with no model anywhere in the host path.** **Met:** decision 035 fixes
   the AI-scope boundary (model is the caller); `RunRecord::to_summary_json` (P18.2) is the projection,
@@ -1994,13 +1994,13 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
   scripted-agent example + its privileged e2e (P18.4) prove containment with the record showing
   reached-vs-blocked, no model in the host path.
 
-## Phase 19 — Packaging & docs
+## Phase 19, Packaging & docs
 
 Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 - [x] **P19.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
-      *(Includes vendoring the sha-pinned upstream inputs — the Firecracker CI kernel/rootfs and the
-      `.apk` closure (decision 007's note, P6.9d's recording) — so a fresh host's setup no longer
+      *(Includes vendoring the sha-pinned upstream inputs, the Firecracker CI kernel/rootfs and the
+      `.apk` closure (decision 007's note, P6.9d's recording), so a fresh host's setup no longer
       depends on the FC S3 bucket or the Alpine CDN staying alive.)*
       *(**Done** as decision 037. `cargo xtask self-host` is the single command: it obtains the pinned
       kernel + rootfs, builds the guest image + eBPF object, installs `agent`/`agentd` into a prefix
@@ -2016,24 +2016,46 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       only). The network/KVM steps run on the self-hoster's box, not the host-safe gate.)*
 - [ ] **P19.2** `curl | sh` / container / release binaries with checksums.
       *(What actually ships: the release binaries plus the xtask-built rootfs, guest kernel, and
-      eBPF objects — gitignored, never carried in the source tree, assembled and checksummed at
+      eBPF objects, gitignored, never carried in the source tree, assembled and checksummed at
       package time. Tests are **not** a shipped-artifact cost: `#[cfg(test)]` modules and `tests/`
       compile only under `cargo test` and are stripped from every release binary, so the ~⅓ of LOC
       that is tests is a repo-size cost, not a binary-size one. Publishing a crate to crates.io is
-      **not** the plan — embedders pin this crate by git rev (see `embedding.md`); if that ever
+      **not** the plan, embedders pin this crate by git rev (see `embedding.md`); if that ever
       changes, trim the package tarball via `Cargo.toml` `include`/`exclude`: integration `tests/`
       are packaged by default and can be dropped, while inline `src/` unit tests cannot be split out
       without moving them.)*
-- [ ] **P19.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
+- [x] **P19.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
+      *(**Done.** The docs are already an mdBook (`book.toml`, `SUMMARY.md`); this adds the two
+      first-class destinations the box names that were missing as dedicated pages. `quickstart.md`:
+      fresh clone → `self-host` → run untrusted code → observe it (reached/denied/`--record-summary`),
+      copy-pasteable, cross-linked. `non-goals.md`: the recorded non-goals consolidated into one page
+      (engine-not-platform: no tenancy/auth/billing/scheduling/dashboard; the model is the caller;
+      isolation is hardware; deny-by-default + the platform floor; SDKs/Wasmtime sibling live
+      elsewhere), each linked to its decision (016/033/034/035/036). The engine API
+      (`embedding.md`) and threat model (`threat-model.md`) already existed; both are now surfaced
+      alongside the two new pages in `SUMMARY.md` + the introduction's map. `mdbook build` is clean
+      and every cross-page anchor resolves. Publishing (GitHub Pages deploy) is left to launch
+      (P19.2/P19.4). Docs only, non-`api:`.)*
 - [ ] **P19.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
 - [ ] **P19.5** A **reference integration**: a small host application embedding the engine end to end.
-- [ ] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
+- [x] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
+      *(**Done.** Untrusted Python was already the [Running untrusted code](docs/examples-untrusted-code.md)
+      demo; this adds the two the examples index promised. `examples-untrusted-binary.md`: build a
+      static ELF stand-in (inline source, nothing binary committed), run it under `--net --trace`, and
+      the host record shows every `openat`/`connect` it made with its phone-home dropped at the tap,
+      the malware-sandbox use case. `examples-ci-job.md` + `examples/ci-job.sh`: run an untrusted
+      fork's `unittest` suite in a deny-by-default sandbox (no `--net`), `--get` the report, and
+      `--record-summary` proves `network: null` so a leaked secret was never possible, plus the
+      `--net --allow <registry-ip>` variant for jobs that must fetch deps. Both wired into
+      `examples.md` + `SUMMARY.md`; the "land later" note is retired. `mdbook build` clean, all
+      cross-links resolve. Docs only, non-`api:`. The commands run on a KVM host; the example output
+      shown is representative.)*
 - [ ] **P19.7** Security policy + responsible-disclosure notes.
 - [x] **P19.8** `(decision)` **Supported-platform policy**: the hard floor (architectures, a
       security-maintained host-kernel LTS) vs the documented degradations, and the pinned upstream
       versions (Firecracker + the guest kernel that tracks its support list).
       *(Pulled forward from packaging: a self-hostable security engine has to state what it runs on
-      before people run untrusted code on it. **Decision 036** fixes it — `x86_64`/`aarch64` and host
+      before people run untrusted code on it. **Decision 036** fixes it, `x86_64`/`aarch64` and host
       kernel **≥ 5.15** (a maintained LTS, one `MIN_KERNEL` const) are **hard** (off them, refused),
       while cgroup-v2 caps (decision 013), the jailer, BTF/eBPF, and net/bulk tooling stay documented
       **degradations**; Firecracker stays pinned v1.9 and the baked-in guest kernel tracks Firecracker's
@@ -2049,28 +2071,28 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 ---
 
-## Post-v0.1.0 — vNext tracks
+## Post-v0.1.0, vNext tracks
 
 > These land **after** the `v0.1.0` finish line (P19.8) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
-> — without pulling tenancy/billing/scheduling into scope, and without diluting the
+>, without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.
 >
-> **Each ships as its own repository** — the four SDKs and the Wasmtime engine are all separate
+> **Each ships as its own repository**, the four SDKs and the Wasmtime engine are all separate
 > repos. This repo owns only the **contract** they build against: the versioned wire API, the
 > cross-language conformance suite, and a reference Rust client. So the boxes below track *that
-> contract (and its certification) landing here* — the SDK/engine **code lives in its sibling
+> contract (and its certification) landing here*, the SDK/engine **code lives in its sibling
 > repo**, gated by the conformance suite this repo publishes.
 
-## Phase 20 — Polyglot SDKs (Go · Python · C# · Node.js)
+## Phase 20, Polyglot SDKs (Go · Python · C# · Node.js)
 
-Thin, idiomatic clients so non-Rust callers can drive `agentd` — a client-SDK surface, still
+Thin, idiomatic clients so non-Rust callers can drive `agentd`, a client-SDK surface, still
 **engine, not platform**.
 
 - [ ] **P20.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
       SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/contributing-architecture.md`.
 - [ ] **P20.2** A **cross-language conformance suite** (golden request/response + audit-log
-      round-trips) every SDK must pass — the single source of SDK correctness, run in CI.
+      round-trips) every SDK must pass, the single source of SDK correctness, run in CI.
 - [ ] **P20.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
 - [ ] **P20.4** **Python** SDK (own repo; sync + async).
 - [ ] **P20.5** **Node.js / TypeScript** SDK (own repo).
@@ -2078,15 +2100,15 @@ Thin, idiomatic clients so non-Rust callers can drive `agentd` — a client-SDK 
 - [ ] **P20.7** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
       to a wire-API version, certified by the P20.2 conformance suite, and published to its language
       registry with checksums.
-- [ ] **P20.8** Each SDK is a **thin protocol client** — no tenancy/auth/billing/scheduling; deny-by-
+- [ ] **P20.8** Each SDK is a **thin protocol client**, no tenancy/auth/billing/scheduling; deny-by-
       default and the non-goals hold at the SDK layer too (note).
 - **Exit gate:** four languages run the same golden `exec` and read the same host-observed
   audit log through `agentd`, against one stable polyglot wire API with a shared conformance suite.
 
-## Phase 21 — The Wasmtime sibling (a second isolation boundary)
+## Phase 21, The Wasmtime sibling (a second isolation boundary)
 
 A **separate** engine that reuses this one's driver API + audit-log format but swaps the
-isolation boundary from **hardware (KVM)** to **software (Wasmtime SFI)** — a second isolation
+isolation boundary from **hardware (KVM)** to **software (Wasmtime SFI)**, a second isolation
 option, not a replacement for this repo.
 
 - [ ] **P21.1** `(decision)` **Sibling repo, not a backend here.** Core property 1 (*isolation is
@@ -2101,7 +2123,7 @@ option, not a replacement for this repo.
 - [ ] **P21.4** Reuse the `Sandbox` lifecycle shape + the audit-log **JSON schema**, so a caller
       (and the Phase 20 SDKs) can drive either engine.
 - [ ] **P21.5** Comparative benchmarks: **instantiate latency + fuel overhead + memory-sharing** vs the
-      microVM's boot/restore/memory-sharing — same harness, honest numbers.
+      microVM's boot/restore/memory-sharing, same harness, honest numbers.
 - [ ] **P21.6** Test: the same untrusted program on both engines yields comparable audit-log
       records; where they *can't* be comparable, document why.
 - **Exit gate:** two engines, one API, two isolation boundaries, with a documented **hardware vs
@@ -2116,7 +2138,7 @@ option, not a replacement for this repo.
 2. **Observe & enforce from the host.** Visibility and policy live in host-side eBPF, which the
    guest cannot see or disable. In-guest agents are for convenience (exec/IO), never for security.
 3. **Engine, not platform.** A self-hostable runtime + a driver API. Multi-tenant auth, billing,
-   fleet scheduling, and dashboards are **out of scope** — the hoster's job. (A recorded non-goal.)
+   fleet scheduling, and dashboards are **out of scope**, the hoster's job. (A recorded non-goal.)
 4. **Measured, not marketed.** Boot/restore/memory-sharing/overhead are benchmarked with percentiles; no
    hand-waved performance claims.
 5. **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken channel

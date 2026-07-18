@@ -1,7 +1,7 @@
-//! `agent-channel` — the host↔guest wire protocol for the exec channel.
+//! `agent-channel`, the host↔guest wire protocol for the exec channel.
 //!
 //! One command in, its `stdout`/`stderr`/exit out, over a single bidirectional byte stream (vsock
-//! in the guest, a unix socket in tests — the protocol doesn't care). The transport is chosen in
+//! in the guest, a unix socket in tests, the protocol doesn't care). The transport is chosen in
 //! `docs/contributing-architecture.md` decision 002; this crate is only the framing, so it stays dependency-free
 //! and unit-testable without a VM.
 //!
@@ -10,7 +10,7 @@
 //!   version skew between a separately-built host and guest agent fails fast and clearly instead of
 //!   mis-parsing later. New message types are added as new tags (the enums are `#[non_exhaustive]`),
 //!   so the two halves can evolve without a lockstep release.
-//! - Every message is a **length-prefixed frame** — `tag(u8) · len(u32-le) · payload` — never a
+//! - Every message is a **length-prefixed frame**, `tag(u8) · len(u32-le) · payload`, never a
 //!   read-to-EOF or a delimiter scan. `len` is checked against [`MAX_PAYLOAD`] *before* allocating,
 //!   so a hostile or buggy peer cannot drive an unbounded read (the same discipline as the HTTP
 //!   client in `agent-vmm`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
@@ -18,7 +18,7 @@
 //!
 //! **The API is type-state, not free functions.** [`ClientConnection`] (host) and
 //! [`ServerConnection`] (guest) each perform the handshake on construction and then expose only
-//! their role's operations — a client sends a [`Request`] and reads [`Response`]s ending in
+//! their role's operations, a client sends a [`Request`] and reads [`Response`]s ending in
 //! [`Response::Exit`]/[`Response::Error`]; a server does the mirror. You cannot send a message
 //! before the handshake, and a client cannot `recv_request`; the raw codec is internal. **Liveness
 //! is the transport's job**: set read/write deadlines on the stream before constructing, so a
@@ -32,7 +32,7 @@ use std::io::{Read, Write};
 pub(crate) const MAGIC: [u8; 4] = *b"AGCH";
 
 /// The wire-protocol version. Bump on any breaking framing/message change; the handshake rejects a
-/// peer that doesn't match. v2 added `env` to [`Request::Exec`] — a mismatched peer would otherwise
+/// peer that doesn't match. v2 added `env` to [`Request::Exec`], a mismatched peer would otherwise
 /// silently run the command *without* its environment (an old agent's parser ignores trailing
 /// bytes), which for injected secrets/config is a correctness failure, so the skew must fail the
 /// handshake, not degrade.
@@ -44,7 +44,7 @@ pub const MAX_PAYLOAD: usize = 1 << 20; // 1 MiB
 
 /// The boot-readiness sentinel: the in-guest agent prints this to its stdout (the serial console)
 /// **after** it has bound its vsock listener, and the host scans the console for it to know the
-/// agent is accepting connections. It's the pre-connection half of the host↔guest contract —
+/// agent is accepting connections. It's the pre-connection half of the host↔guest contract,
 /// emitting it post-`bind` (not from init before the agent starts) is what removes the
 /// connect-before-listen race. Both the guest agent (which prints it) and the driver (which waits
 /// for it) reference this one constant.
@@ -53,12 +53,12 @@ pub const GUEST_READY_MARKER: &str = "AGENT-GUEST-READY";
 /// The vsock port the guest agent listens on and the host dials. Like [`GUEST_READY_MARKER`],
 /// it's a pre-connection half of the host↔guest contract, so it lives here where **both** sides
 /// (the driver that connects, and the rootfs build that writes the guest's init line) consume the
-/// one definition — a drifted copy would strand the host dialing a port nobody binds.
+/// one definition, a drifted copy would strand the host dialing a port nobody binds.
 pub const AGENT_VSOCK_PORT: u32 = 1024;
 
 /// Filesystem labels the driver stamps on the data block devices it attaches, and the guest mounts
 /// by. A boot may attach a bulk-input device, a bulk-output device, both, or neither, which shifts
-/// the `/dev/vdX` letters — so the guest resolves each device by **label** (`findfs LABEL=…`) rather
+/// the `/dev/vdX` letters, so the guest resolves each device by **label** (`findfs LABEL=…`) rather
 /// than by enumeration order. Like the vsock port above, these are a host↔guest contract: the driver
 /// (which builds the images) and the rootfs build (whose `mount-drives` mounts them) share the one
 /// definition, so a drifted copy can't leave the guest silently skipping a mount.
@@ -76,7 +76,7 @@ const TAG_FILE: u8 = 7;
 const TAG_TIMEDOUT: u8 = 8;
 
 /// A host→guest message. `#[non_exhaustive]`: new request types are added as new tags without
-/// breaking an older guest agent — an unknown tag becomes [`Unknown`](Request::Unknown), which the
+/// breaking an older guest agent, an unknown tag becomes [`Unknown`](Request::Unknown), which the
 /// agent answers with a typed "unsupported" rather than a fatal protocol error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -87,11 +87,11 @@ pub enum Request {
     PutFile { path: String, data: Vec<u8> },
     /// Run `argv` in the guest (`argv[0]` is the program), feeding `stdin` to it, then return the
     /// files named in `artifacts` (paths relative to the working dir). `stdin` is a bounded up-front
-    /// buffer — larger/streaming input goes via the block-device path. `env` is set on the **spawned
+    /// buffer, larger/streaming input goes via the block-device path. `env` is set on the **spawned
     /// command only**, never the agent's own process, and is bounded like `stdin` (the whole request
-    /// is one `≤ MAX_PAYLOAD` frame); values are secrets by presumption — neither peer may log one
+    /// is one `≤ MAX_PAYLOAD` frame); values are secrets by presumption, neither peer may log one
     /// or echo one into an error (an error may name a *key*). `timeout_ms` bounds the
-    /// command's wall-clock runtime — the agent kills it and replies [`Response::TimedOut`] past
+    /// command's wall-clock runtime, the agent kills it and replies [`Response::TimedOut`] past
     /// the deadline; **`0` means "use the agent's ceiling"**, not "no time". Empty argv is rejected.
     Exec {
         argv: Vec<String>,
@@ -100,7 +100,7 @@ pub enum Request {
         artifacts: Vec<String>,
         timeout_ms: u32,
     },
-    /// A well-framed request whose tag this build doesn't know — a *newer* host speaking a request
+    /// A well-framed request whose tag this build doesn't know, a *newer* host speaking a request
     /// type we don't implement. Not a protocol error; the agent replies with a typed "unsupported".
     Unknown { tag: u8 },
 }
@@ -120,12 +120,12 @@ pub enum Response {
     /// The command finished. Struct-form so a later revision can add a field (e.g. a separate
     /// `signal`) without a breaking change; `code` is `128 + signal` on signal death today.
     Exit { code: i32 },
-    /// The command exceeded its `timeout_ms` deadline and was killed by the agent — terminal, no
+    /// The command exceeded its `timeout_ms` deadline and was killed by the agent, terminal, no
     /// exit follows. Distinct from a channel timeout: the command ran, it just ran too long.
     /// Struct-form (like [`Exit`](Response::Exit)) so fields can be added without a break; carries
     /// the actual runtime the agent measured.
     TimedOut { elapsed_ms: u32 },
-    /// The agent could not run the command at all (e.g. spawn failed) — terminal, no exit follows.
+    /// The agent could not run the command at all (e.g. spawn failed), terminal, no exit follows.
     Error(String),
 }
 
@@ -139,7 +139,7 @@ pub enum ChannelError {
     /// The peer violated the protocol: bad magic, an unsupported version, an unknown tag, a
     /// malformed body, or non-UTF-8 where text was required.
     Protocol(String),
-    /// A frame's declared length exceeds [`MAX_PAYLOAD`] — rejected before allocating.
+    /// A frame's declared length exceeds [`MAX_PAYLOAD`], rejected before allocating.
     PayloadTooLarge { tag: u8, len: usize },
 }
 
@@ -174,7 +174,7 @@ impl From<std::io::Error> for ChannelError {
 }
 
 impl ChannelError {
-    /// Whether this is the peer going away (EOF) rather than a live protocol/IO fault — so a caller
+    /// Whether this is the peer going away (EOF) rather than a live protocol/IO fault, so a caller
     /// can treat a clean hang-up as normal shutdown. Note a mid-frame truncation also reports EOF,
     /// so this means "peer closed, possibly mid-message," not "closed exactly on a frame boundary."
     #[must_use]
@@ -255,7 +255,7 @@ fn read_frame(r: &mut impl Read) -> Result<(u8, Vec<u8>), ChannelError> {
     Ok((tag, payload))
 }
 
-/// Append a little-endian `u32` to `payload` — the write-side counterpart of [`Body::u32`], so both
+/// Append a little-endian `u32` to `payload`, the write-side counterpart of [`Body::u32`], so both
 /// halves of the framing keep their integer encoding in one place.
 fn put_u32(payload: &mut Vec<u8>, value: u32) {
     payload.extend_from_slice(&value.to_le_bytes());
@@ -269,7 +269,7 @@ fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
 
 /// The encoded size of one [`put_blob`] (its 4-byte length prefix + the bytes). Used to size the
 /// payload buffer *exactly* up front (see [`write_exec`]/[`write_put_file`]): a secret-bearing
-/// payload must live in **one** buffer so the post-send `fill(0)` wipes every copy — a `Vec` that
+/// payload must live in **one** buffer so the post-send `fill(0)` wipes every copy, a `Vec` that
 /// grew would strand unwiped plaintext prefixes in the reallocations it freed (decision 018).
 fn blob_len(bytes: &[u8]) -> usize {
     4 + bytes.len()
@@ -297,7 +297,7 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
     }
 }
 
-/// Serialize and send a `PutFile` from **borrowed** parts — no owned [`Request`] to clone the
+/// Serialize and send a `PutFile` from **borrowed** parts, no owned [`Request`] to clone the
 /// secret bytes into first. The payload is sized exactly (one buffer, no growth) so the post-send
 /// `fill(0)` wipes the engine's only copy of the injected bytes before it returns to the allocator
 /// (decision 018; the kernel socket buffer is out of reach, best-effort by design).
@@ -485,7 +485,7 @@ fn handshake<S: Read + Write>(stream: &mut S) -> Result<(), ChannelError> {
 ///
 /// Type-state, not convention: you can only reach these methods *after* [`connect`](Self::connect)
 /// has completed the handshake, and the role split means a client can never accidentally
-/// `recv_request`. Set any read/write deadlines on the stream **before** constructing — liveness is
+/// `recv_request`. Set any read/write deadlines on the stream **before** constructing, liveness is
 /// the transport's responsibility (a stalled peer then surfaces as a [`ChannelError::Io`] timeout,
 /// not a hang), and this wrapper can't set transport-specific socket timeouts itself.
 #[derive(Debug)]
@@ -505,7 +505,7 @@ impl<S: Read + Write> ClientConnection<S> {
 
     /// Send a request, cloning the caller's data into an owned [`Request`] first. For secret-bearing
     /// requests (`PutFile`/`Exec`) prefer [`send_put_file`](Self::send_put_file) /
-    /// [`send_exec`](Self::send_exec), which serialize from borrowed slices — no extra owned copy of
+    /// [`send_exec`](Self::send_exec), which serialize from borrowed slices, no extra owned copy of
     /// the secret to wipe.
     ///
     /// # Errors
@@ -514,7 +514,7 @@ impl<S: Read + Write> ClientConnection<S> {
         write_request(&mut self.stream, req)
     }
 
-    /// Send a `PutFile` from borrowed parts — the injected bytes are serialized (and the wire buffer
+    /// Send a `PutFile` from borrowed parts, the injected bytes are serialized (and the wire buffer
     /// wiped) without an intermediate owned copy the caller would have to wipe too.
     ///
     /// # Errors
@@ -584,7 +584,7 @@ impl<S: Read + Write> ServerConnection<S> {
     }
 }
 
-/// A bounds-checked cursor over a frame payload — every read is guarded, so a truncated or lying
+/// A bounds-checked cursor over a frame payload, every read is guarded, so a truncated or lying
 /// body is a typed `Protocol` error, never a panic.
 struct Body<'a> {
     buf: &'a [u8],
@@ -631,7 +631,7 @@ impl<'a> Body<'a> {
 /// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
 /// bytes straight to the internal wire decoders so a `cargo fuzz` (libFuzzer) target can explore
 /// them. A panic, hang, or unbounded allocation on any input is the bug being hunted (guardrail 5).
-/// Not built by default and not part of the wire contract — the harness lives in `fuzz/` (excluded
+/// Not built by default and not part of the wire contract, the harness lives in `fuzz/` (excluded
 /// from the workspace); see `docs/contributing-fuzzing.md`. The in-gate, dependency-free counterpart
 /// is [`fuzz_tests`].
 #[cfg(feature = "fuzzing")]
@@ -644,7 +644,7 @@ pub mod fuzz {
         let _ = read_request(&mut data);
     }
 
-    /// Decode one guest→host [`Response`](crate::Response) from `data` — the highest-value target,
+    /// Decode one guest→host [`Response`](crate::Response) from `data`, the highest-value target,
     /// since a hostile guest chooses these bytes and the host parses them.
     pub fn decode_response(mut data: &[u8]) {
         let _ = read_response(&mut data);

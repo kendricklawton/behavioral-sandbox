@@ -23,7 +23,7 @@ use common::{
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn execs_a_command_in_the_microvm() {
     // Closes the provisional "in a microVM" gate: the agent baked into `rootfs-agent.ext4`
-    // actually binds vsock in a real guest, so `exec` round-trips end to end — not against a faked
+    // actually binds vsock in a real guest, so `exec` round-trips end to end, not against a faked
     // socket. Boot returns once the agent's readiness marker reaches the console, so the connect
     // can't race the bind.
     let vm = Vm::boot(agent_rootfs_config())
@@ -46,7 +46,7 @@ fn execs_a_command_in_the_microvm() {
 fn jailed_exec_runs_a_command() {
     // The convergence proof: a VM confined by the jailer (chroot + dropped uid/gid + mount namespace
     // + cgroup limits + seccomp) can *also* run code. Before this, the exec channel (vsock) and the
-    // jail were mutually exclusive — you got a code channel or VMM confinement, never both. Now the
+    // jail were mutually exclusive, you got a code channel or VMM confinement, never both. Now the
     // vsock unix socket is bound chroot-relative under the dropped uid, so `exec` round-trips through
     // the same jailed VMM. Needs real root (the jailer `mknod`s device nodes); skip rather than fail
     // where KVM is available but real root isn't (the `unshare -Urn` trick can't `mknod`).
@@ -86,7 +86,7 @@ fn jailed_exec_runs_a_command() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn jailed_bulk_io_round_trips_through_the_chroot() {
-    // The bulk input/output block devices compose with the jailer — the last boot feature to.
+    // The bulk input/output block devices compose with the jailer, the last boot feature to.
     // The images are built in place *inside the chroot* (rootless mke2fs runs pointed at the chroot
     // root, no copy or mount) and handed to the jailed uid, so the dropped-privilege Firecracker can
     // open them. This drives the full jailed feature matrix at once: overlay (read_only_root) + vsock
@@ -174,7 +174,7 @@ fn jailed_bulk_io_round_trips_through_the_chroot() {
 fn execs_python_in_the_microvm() {
     // The reference language runtime: `build-rootfs` installs python3 from the pinned Alpine
     // branch, and a real interpreter (dynamic musl binary + its stdlib, not a shell builtin) runs
-    // in the guest and computes — proving the image carries a working userland, not just busybox.
+    // in the guest and computes, proving the image carries a working userland, not just busybox.
     let vm = Vm::boot(agent_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
     let out = vm
@@ -194,7 +194,7 @@ fn execs_python_in_the_microvm() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn python_script_writes_a_file_and_we_capture_it() {
     // The runtime payoff, end to end: inject a small **Python script** as a file, run the real
-    // interpreter on it inside a microVM, and pull back the file it wrote — the exec surface's
+    // interpreter on it inside a microVM, and pull back the file it wrote, the exec surface's
     // inject → run → capture loop with an actual language runtime (using the stdlib, `json`), not a
     // shell builtin. This is the per-file channel path; the bulk block-device paths are
     // covered by the input/output-disk tests below.
@@ -238,7 +238,7 @@ fn python_script_writes_a_file_and_we_capture_it() {
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn runs_node_a_second_interpreter() {
     // Runtime-agnostic proof, second half: a *different* interpreter (Node) runs unchanged
-    // through the same exec path as Python — the rootfs isn't Python-specific. Inject a small `.js`,
+    // through the same exec path as Python, the rootfs isn't Python-specific. Inject a small `.js`,
     // run the real `node` on it, and capture the file it writes (the per-file channel path).
     let vm = Vm::boot(agent_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
@@ -279,7 +279,7 @@ fn runs_node_a_second_interpreter() {
 fn runs_a_static_native_binary_and_captures_its_artifact() {
     // Runtime-agnostic proof: a **static native ELF** (no interpreter, no libc, no loader) runs
     // unchanged through the same exec path. Inject the binary read-only via a block device,
-    // exec it, and capture the file it writes via the output device — showing the engine runs
+    // exec it, and capture the file it writes via the output device, showing the engine runs
     // *any* Linux binary handed in at runtime, not just the baked-in interpreters. (Contrast the
     // Wasmtime sibling, which needs code recompiled to wasm32.)
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -391,10 +391,10 @@ fn injects_a_large_file_via_block_device() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn collects_outputs_via_block_device() {
-    // The whole-working-dir / large-file *output* path the vsock channel can't carry — the
+    // The whole-working-dir / large-file *output* path the vsock channel can't carry, the
     // counterpart to `injects_a_large_file_via_block_device`. Boot with a writable output device, have
     // the guest write a file **larger than the 1 MiB channel frame cap**, a nested file, and a
-    // host-escaping symlink into `/output`; pull the tree back and prove it arrived byte-for-byte —
+    // host-escaping symlink into `/output`; pull the tree back and prove it arrived byte-for-byte,
     // and that the escaping symlink was dropped, not recreated live on the host.
     let dir = TmpDir::new("p35");
 

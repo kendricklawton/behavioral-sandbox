@@ -21,7 +21,7 @@ the record can't be forged by the code it is recording.
 
 - **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. The trust
   boundary is the CPU, not guest-side software.
-- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF — the guest
+- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF, the guest
   cannot disable what it cannot reach. In-guest agents exist for convenience (exec/IO), never
   for security.
 - **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
@@ -29,25 +29,25 @@ the record can't be forged by the code it is recording.
 - **Engine, not platform.** A runtime + a clean driver API you self-host. *It's an engine, not a
   PaaS.*
 - **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
-  benchmarked with percentiles — never hand-waved.
+  benchmarked with percentiles, never hand-waved.
 
 ## Documentation
 
-The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook — `mdbook serve docs`, or read the
+The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook, `mdbook serve docs`, or read the
 Markdown in place):
 
-- **[Introduction](docs/introduction.md)** — what this is and how the pieces fit.
-- **[Using the agent CLI](docs/cli.md)** — how to run the engine:
+- **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
+- **[Using the agent CLI](docs/cli.md)**, how to run the engine:
   [installation](docs/cli-install.md), building the guest artifacts, `agent run`, `agent shell`.
-- **[Using the engine API](docs/embedding.md)** — the embedder's contract: the `Sandbox`
+- **[Using the engine API](docs/embedding.md)**, the embedder's contract: the `Sandbox`
   lifecycle, budgets, typed errors, snapshots/pool, and the engine's deliberate non-goals.
-- **[Examples](docs/examples.md)** — worked walkthroughs: [running untrusted
+- **[Examples](docs/examples.md)**, worked walkthroughs: [running untrusted
   code](docs/examples-untrusted-code.md), [observing a run](docs/examples-observe-a-run.md).
-- **[Host-side observability & enforcement](docs/probes.md)** — the eBPF half: syscall tracing,
+- **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
-- **[Security](docs/security.md)** — the security model: what's trusted, what counts as a bug,
+- **[Security](docs/security.md)**, the security model: what's trusted, what counts as a bug,
   how to report one.
-- **[Contributing](docs/contributing.md)** — orientation,
+- **[Contributing](docs/contributing.md)**, orientation,
   [architecture & the decision log](docs/contributing-architecture.md) (every hard-to-reverse
   choice, its rationale, and the alternatives that lost),
   [building](docs/contributing-building.md), [testing](docs/contributing-testing.md),
@@ -55,7 +55,7 @@ Markdown in place):
 
 ## Status
 
-**Early, under active development — nothing here is production yet.** The staged plan and live
+**Early, under active development, nothing here is production yet.** The staged plan and live
 progress are in [`ROADMAP.md`](ROADMAP.md); its checkboxes are the state. So far: a microVM boots
 to userspace and runs real Python, Node, and static binaries from a purpose-built rootfs with
 captured stdout/stderr/exit; gets a per-VM deny-by-default network; snapshots and restores from a
@@ -63,7 +63,7 @@ pre-warmed pool in milliseconds; runs confined under the jailer (chroot, dropped
 cgroup limits, seccomp); and is wrapped in the embedder-facing `Sandbox` lifecycle
 ([docs/embedding.md](docs/embedding.md)). The host-side eBPF track observes a running sandbox's
 host syscall footprint and its per-VM network flows, enforces deny-by-default egress in the
-kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)) — each with a
+kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)), each with a
 measured overhead and a live demo. The audit log that fuses these into one per-run record is the
 track that follows.
 
@@ -76,8 +76,8 @@ untrusted code
       → per-run audit log (network flows · notable syscalls · resources · denials)
 ```
 
-The guest runs the code; the **host kernel** sees and governs it. That split — hardware
-isolation *plus* out-of-guest observability and enforcement — is the whole idea.
+The guest runs the code; the **host kernel** sees and governs it. That split, hardware
+isolation *plus* out-of-guest observability and enforcement, is the whole idea.
 
 ## Layout
 
@@ -91,19 +91,19 @@ isolation *plus* out-of-guest observability and enforcement — is the whole ide
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
 | `crates/cli` | The `agent` binary (`run`, `shell`, `--log`) and later the `agentd` daemon. |
 | `docs` | This documentation, as an mdBook. |
-| `xtask` | Dev orchestration — `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
+| `xtask` | Dev orchestration, `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 
-## Scope — engine, not platform
+## Scope, engine, not platform
 
 **In scope:** the sandbox runtime (Firecracker), host-side observability + enforcement (eBPF),
 the sandbox lifecycle API, a self-hostable driver daemon, and the benchmarks that back the
 claims. **Out of scope, by design:** multi-tenant auth, billing, fleet scheduling, and a web
-dashboard — that's whatever *hosts* the engine. The lifecycle
+dashboard, that's whatever *hosts* the engine. The lifecycle
 contract and the full non-goals list live in [docs/embedding.md](docs/embedding.md).
 
 **Adjacent (separate repos, post-`v0.1.0`):** language SDKs (Go · Python · Node · C#) that drive
 the engine's wire API, and a Wasmtime-based *software-isolation* sibling built to compare both
-boundaries. Each is its own repo built on this engine's frozen wire API — thin clients / a sibling,
+boundaries. Each is its own repo built on this engine's frozen wire API, thin clients / a sibling,
 never part of its trust boundary, and never traded against the hardware-isolation guarantee. See
 [`ROADMAP.md`](ROADMAP.md) Phases 20–21.
 
@@ -115,4 +115,4 @@ plan is [`ROADMAP.md`](ROADMAP.md); decisions are recorded in [docs/contributing
 
 ## License
 
-Apache-2.0 — see [`LICENSE`](LICENSE).
+Apache-2.0, see [`LICENSE`](LICENSE).

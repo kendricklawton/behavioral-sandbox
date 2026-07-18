@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use agent_probes_loader::{cgroup_id_of_self, check_support, object_path, Syscall, SyscallTracer};
 
-/// Why this host can't load the probe (a skip reason), or `None` when it can — so each test prints
+/// Why this host can't load the probe (a skip reason), or `None` when it can, so each test prints
 /// *why* it skipped. Same gate the counter tests use.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {
@@ -36,7 +36,7 @@ fn skip_reason() -> Option<String> {
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn tracer_captures_this_process_openat_with_its_path() {
     // The ring buffer carries per-event data, not just a count. Filter to our own pid, do an
-    // `openat` of a unique (nonexistent) path, and assert that exact event streams back — the path
+    // `openat` of a unique (nonexistent) path, and assert that exact event streams back, the path
     // proves the per-event payload, and every captured event being our pid proves the filter.
     if let Some(why) = skip_reason() {
         eprintln!("skipping tracer_captures_this_process_openat_with_its_path: {why}");
@@ -170,7 +170,7 @@ fn sockaddr_is_ipv4(bytes: &[u8], ip: [u8; 4], port: u16) -> bool {
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn attributes_events_to_this_process_cgroup() {
     // `cgroup_id_of_self` (the inode of our cgroup dir) must equal the `bpf_get_current_cgroup_id`
-    // the programs stamp on our events — the whole attribution bridge. Watch that cgroup and prove our
+    // the programs stamp on our events, the whole attribution bridge. Watch that cgroup and prove our
     // own openat comes back carrying it; an empty capture would mean the two ids disagree on this host.
     if let Some(why) = skip_reason() {
         eprintln!("skipping attributes_events_to_this_process_cgroup: {why}");
@@ -216,8 +216,8 @@ fn attributes_events_to_this_process_cgroup() {
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn a_workload_child_shows_up_attributed_to_its_cgroup() {
-    // The exit gate in miniature: launch a *workload* — a child process standing in for
-    // a sandbox's VMM — and assert its own `execve` and `openat` come back attributed to a cgroup id,
+    // The exit gate in miniature: launch a *workload*, a child process standing in for
+    // a sandbox's VMM, and assert its own `execve` and `openat` come back attributed to a cgroup id,
     // the sandbox-attribution axis. The child inherits our cgroup, so watching that id captures
     // the whole process tree (us + the workload) the way `watch_cgroup(vmm_cgroup)` captures a
     // sandbox's host footprint.
@@ -241,7 +241,7 @@ fn a_workload_child_shows_up_attributed_to_its_cgroup() {
     tracer.drain(|_| {}).expect("clear the baseline");
 
     // The workload: `cat <missing>` is one child that both `execve`s (itself) and `openat`s a known
-    // path (the file it tries to read). The path never exists, so the open just fails ENOENT — but
+    // path (the file it tries to read). The path never exists, so the open just fails ENOENT, but
     // `sys_enter_openat` fires regardless, carrying the path, and nothing is created or left behind.
     let marker = format!("/tmp/agent-p96-workload-{me}-missing");
     let status = Command::new("cat")

@@ -1,10 +1,10 @@
 //! Host readiness check: does this machine have what the engine needs to boot and confine a
-//! sandbox? The **single implementation** behind two entry points — the `agent doctor` subcommand an
-//! operator runs on a fresh host, and `cargo xtask setup` for a dev box — so the two can't drift on
+//! sandbox? The **single implementation** behind two entry points, the `agent doctor` subcommand an
+//! operator runs on a fresh host, and `cargo xtask setup` for a dev box, so the two can't drift on
 //! what "ready" means.
 //!
 //! Each [`Check`] is one prerequisite with a [`CheckStatus`]: [`Ok`](CheckStatus::Ok) present,
-//! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open —
+//! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open,
 //! decision 013), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
 //! it, or the host is off the supported platform). The split mirrors the engine's own error
 //! discipline: the isolation boundary is never a degradation, so `/dev/kvm`, the boot artifacts, and
@@ -14,7 +14,7 @@
 //!
 //! The eBPF-observability capability check (`CAP_BPF`/`CAP_PERFMON` + kernel BTF) lives in the probe
 //! loader, out of this crate (decisions 024/026); each entry point appends it. This module is
-//! `unsafe`-free std-only detection — nothing here boots a VM.
+//! `unsafe`-free std-only detection, nothing here boots a VM.
 
 use std::path::Path;
 
@@ -26,7 +26,7 @@ use crate::BootConfig;
 /// also guarantees `cgroup.kill` (5.14, decision 014); bump it here to tighten the floor.
 const MIN_KERNEL: (u64, u64) = (5, 15);
 
-/// The **supported CPU architectures** — Firecracker's two (decision 036). The engine builds for no
+/// The **supported CPU architectures**, Firecracker's two (decision 036). The engine builds for no
 /// others, so for a shipped binary this is decided at compile time; the check names an unsupported
 /// cross-compile rather than letting it fail obscurely at first boot.
 const SUPPORTED_ARCHES: [&str; 2] = ["x86_64", "aarch64"];
@@ -78,7 +78,7 @@ impl Check {
 pub fn checks(config: &BootConfig) -> Vec<Check> {
     let fc = config.firecracker.to_string_lossy();
     vec![
-        // The supported platform — hard: off it, the engine is not certified to isolate (decision 036).
+        // The supported platform, hard: off it, the engine is not certified to isolate (decision 036).
         Check::new(
             &format!(
                 "architecture is {} (x86_64 or aarch64)",
@@ -99,7 +99,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
              running untrusted code (decision 036); it also provides cgroup.kill for crash-safe \
              teardown (decision 014)",
         ),
-        // The hardware isolation boundary — never a degradation.
+        // The hardware isolation boundary, never a degradation.
         Check::new(
             "/dev/kvm present",
             Path::new("/dev/kvm").exists(),
@@ -112,7 +112,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             false,
             "every boot fails (NoKvm): add your user to the `kvm` group, or run as root",
         ),
-        // The boot artifacts — hard: nothing boots without a kernel + rootfs at the configured paths.
+        // The boot artifacts, hard: nothing boots without a kernel + rootfs at the configured paths.
         Check::new(
             "guest kernel present (AGENT_KERNEL)",
             config.kernel.is_file(),
@@ -131,7 +131,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             false,
             "no VMM to launch: install Firecracker v1.9, or set AGENT_FIRECRACKER",
         ),
-        // The jailer path — fails open: `--unjailed` still boots (behind the KVM boundary).
+        // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
             "firecracker is the pinned v1.9 (decision 001)",
             firecracker_version(&fc) == Some((1, 9)),
@@ -156,7 +156,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "jailed VMs run WITHOUT cpu/memory caps (decision 013) — a fail-open DoS mitigation",
         ),
-        // Networking + bulk-I/O tooling — fails open: only the runs that use them need them.
+        // Networking + bulk-I/O tooling, fails open: only the runs that use them need them.
         Check::new(
             "ip (iproute2 — the per-VM tap for --net)",
             command_on_path("ip"),
@@ -178,7 +178,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
     ]
 }
 
-/// The degradation matrix as lines — the same fails-open-vs-hard split the checks carry, stated once
+/// The degradation matrix as lines, the same fails-open-vs-hard split the checks carry, stated once
 /// for the report footer so both entry points render an identical summary.
 #[must_use]
 pub fn matrix() -> Vec<&'static str> {
@@ -197,7 +197,7 @@ pub fn matrix() -> Vec<&'static str> {
     ]
 }
 
-/// Whether every hard ([`Fail`](CheckStatus::Fail)) prerequisite in `checks` is satisfied — the
+/// Whether every hard ([`Fail`](CheckStatus::Fail)) prerequisite in `checks` is satisfied, the
 /// engine can boot *something* (jailed or not). A caller turns this into an exit code.
 #[must_use]
 pub fn can_boot(checks: &[Check]) -> bool {
@@ -224,7 +224,7 @@ fn command_on_path(bin: &str) -> bool {
 }
 
 /// The effective uid from `/proc/self/status` (`Uid:` line, fields real/effective/…), or `None` if
-/// it can't be read — std-only, no `libc`.
+/// it can't be read, std-only, no `libc`.
 fn geteuid() -> Option<u32> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let line = status.lines().find(|l| l.starts_with("Uid:"))?;
@@ -232,7 +232,7 @@ fn geteuid() -> Option<u32> {
 }
 
 /// `(major, minor)` of `<fc> --version` (first line `Firecracker v1.9.1`), or `None` if missing or
-/// unparseable — the same parse the driver runs to warn on an unpinned binary.
+/// unparseable, the same parse the driver runs to warn on an unpinned binary.
 fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     let out = std::process::Command::new(fc)
         .arg("--version")
@@ -322,7 +322,7 @@ mod tests {
             .find(|c| c.label.contains("jailer"))
             .expect("a jailer check");
         assert!(matches!(jailer.status, CheckStatus::Ok | CheckStatus::Warn));
-        // The supported-platform floor (decision 036) is present and **hard** — architecture and a
+        // The supported-platform floor (decision 036) is present and **hard**, architecture and a
         // kernel LTS are never degradations, so an off-platform host is refused, not warned.
         let arch = checks
             .iter()

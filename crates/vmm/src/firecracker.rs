@@ -2,7 +2,7 @@
 //!
 //! Firecracker exposes a REST API on a unix domain socket (`--api-sock`); we drive a boot with a
 //! handful of `PUT`s. Rather than pull in an async runtime or an HTTP crate, we hand-roll the
-//! sliver of HTTP/1.1 those calls need — it keeps the driver dependency-light and `unsafe`-free,
+//! sliver of HTTP/1.1 those calls need, it keeps the driver dependency-light and `unsafe`-free,
 //! and the raw request/response framing stays small.
 //!
 //! Framing rules that matter (a naive client hangs on each):
@@ -54,7 +54,7 @@ impl ApiClient {
     }
 
     /// `PATCH <path>` with a JSON body, expecting a `2xx`. Firecracker uses `PATCH` for in-place
-    /// changes to an already-configured VM — its run state (`/vm`) and a drive's backing path — so
+    /// changes to an already-configured VM, its run state (`/vm`) and a drive's backing path, so
     /// the snapshot/restore flow needs it alongside `put`. Framing is identical.
     pub(crate) fn patch<B: Serialize>(&self, path: &str, body: &B) -> Result<(), VmmError> {
         self.send("PATCH", path, body)
@@ -169,28 +169,28 @@ fn io_err(ctx: &str, e: &std::io::Error) -> VmmError {
 // Field names and shapes are pinned to Firecracker v1.9 (see docs/contributing-architecture.md, decision 001); the API
 // schema has drifted across versions, so a version bump means re-checking these.
 
-/// `PUT /boot-source` — the guest kernel and its command line.
+/// `PUT /boot-source`, the guest kernel and its command line.
 #[derive(Serialize)]
 pub(crate) struct BootSource<'a> {
     pub kernel_image_path: &'a str,
     pub boot_args: &'a str,
 }
 
-/// `PUT /drives/{drive_id}` — a virtio-block device. The root device becomes `/dev/vda`.
+/// `PUT /drives/{drive_id}`, a virtio-block device. The root device becomes `/dev/vda`.
 #[derive(Serialize)]
 pub(crate) struct Drive<'a> {
     pub drive_id: &'a str,
     pub path_on_host: &'a str,
     pub is_root_device: bool,
     pub is_read_only: bool,
-    /// The guest's IO bandwidth bound for this device (`None` omits it — an unthrottled drive). The
+    /// The guest's IO bandwidth bound for this device (`None` omits it, an unthrottled drive). The
     /// driver sets a derived default ([`RateLimiter::default_guest_io`]); it is not a `Limits` knob.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rate_limiter: Option<RateLimiter>,
 }
 
 /// A [Firecracker rate-limiter token bucket](https://github.com/firecracker-microvm/firecracker/blob/main/docs/design.md):
-/// `size` tokens available, refilled in full every `refill_time` **milliseconds** — so the sustained
+/// `size` tokens available, refilled in full every `refill_time` **milliseconds**, so the sustained
 /// rate is `size / refill_time`. `one_time_burst` is extra tokens spent *before* the steady-state
 /// bucket engages, so an initial burst runs unthrottled.
 #[derive(Serialize)]
@@ -213,7 +213,7 @@ pub(crate) struct RateLimiter {
 }
 
 /// The derived per-drive **bandwidth** cap (bytes/second): 256 MiB/s. Defense in depth against a
-/// disk-thrashing guest starving a co-resident run — it sits well under a typical NVMe's throughput
+/// disk-thrashing guest starving a co-resident run, it sits well under a typical NVMe's throughput
 /// (so a co-resident run keeps the bulk of it) yet is ample for one sandbox's normal IO.
 const GUEST_IO_BANDWIDTH_BYTES_PER_S: u64 = 256 * 1024 * 1024;
 /// The one-time burst (bytes) that runs unthrottled before the steady-state cap engages: 1 GiB, past
@@ -239,14 +239,14 @@ impl RateLimiter {
     }
 }
 
-/// `PUT /machine-config` — the vCPU and memory budget.
+/// `PUT /machine-config`, the vCPU and memory budget.
 #[derive(Serialize)]
 pub(crate) struct MachineConfig {
     pub vcpu_count: u32,
     pub mem_size_mib: u32,
 }
 
-/// `PUT /actions` — an instance action. The closed set of actions the driver issues, modelled as an
+/// `PUT /actions`, an instance action. The closed set of actions the driver issues, modelled as an
 /// enum so the wire discriminant can't be mistyped; serializes to `{"action_type": "<PascalCase>"}`,
 /// matching Firecracker's schema (mirrors how `channel` centralizes its `TAG_*` wire discriminants).
 #[derive(Serialize)]
@@ -256,7 +256,7 @@ pub(crate) enum Action {
     SendCtrlAltDel,
 }
 
-/// `PUT /vsock` — a virtio-vsock device. The host reaches a guest-listening port by connecting to
+/// `PUT /vsock`, a virtio-vsock device. The host reaches a guest-listening port by connecting to
 /// `uds_path` and sending `CONNECT <port>\n`; the guest sees it on context id `guest_cid`.
 #[derive(Serialize)]
 pub(crate) struct Vsock<'a> {
@@ -264,7 +264,7 @@ pub(crate) struct Vsock<'a> {
     pub uds_path: &'a str,
 }
 
-/// `PUT /network-interfaces/{iface_id}` — a virtio-net device backed by a host tap. Firecracker does
+/// `PUT /network-interfaces/{iface_id}`, a virtio-net device backed by a host tap. Firecracker does
 /// not create the tap; the host makes it first and names it here via `host_dev_name`. Rate limiters
 /// are optional and omitted (deny-by-default; no shaping in this engine).
 #[derive(Serialize)]
@@ -274,10 +274,10 @@ pub(crate) struct NetworkInterface<'a> {
     pub guest_mac: &'a str,
 }
 
-/// `PATCH /vm` — move a running VM between run states. `Paused` freezes the vCPUs (the prerequisite
+/// `PATCH /vm`, move a running VM between run states. `Paused` freezes the vCPUs (the prerequisite
 /// for a consistent snapshot); `Resumed` continues them. Serializes to `{"state": "Paused"}` /
 /// `{"state": "Resumed"}` (a serde unit variant serializes as its PascalCase name, matching the
-/// wire schema — the same closed-set-as-enum discipline as [`Action`]).
+/// wire schema, the same closed-set-as-enum discipline as [`Action`]).
 #[derive(Serialize)]
 pub(crate) struct VmState {
     pub state: VmStateKind,
@@ -289,7 +289,7 @@ pub(crate) enum VmStateKind {
     Resumed,
 }
 
-/// `PUT /snapshot/create` — write a snapshot of a **paused** VM: `snapshot_path` receives the vCPU
+/// `PUT /snapshot/create`, write a snapshot of a **paused** VM: `snapshot_path` receives the vCPU
 /// and device state, `mem_file_path` the full guest memory. Only a `Full` snapshot is taken today;
 /// diff snapshots ride the prewarmed pool later.
 #[derive(Serialize)]
@@ -304,7 +304,7 @@ pub(crate) enum SnapshotType {
     Full,
 }
 
-/// `PUT /snapshot/load` — rebuild a VM from a snapshot on a fresh VMM and (with `resume_vm`) resume
+/// `PUT /snapshot/load`, rebuild a VM from a snapshot on a fresh VMM and (with `resume_vm`) resume
 /// it. `mem_backend` names the memory file. Firecracker opens each block device's backing file **at
 /// load**, at the path baked into the snapshot, so the driver stages the bundle's disk copy there
 /// before calling this (see `Vm::restore`).
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn parses_204_without_content_length_header() {
-        // Some responses omit Content-Length entirely on an empty body — must not hang.
+        // Some responses omit Content-Length entirely on an empty body, must not hang.
         let raw = b"HTTP/1.1 204 No Content\r\n\r\n";
         let (status, body) = read_response(&raw[..], "test").unwrap();
         assert_eq!(status, 204);
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn newline_free_stream_is_bounded_not_unbounded_memory() {
-        // A peer that never sends `\n` must hit the response cap and fail typed — the status
+        // A peer that never sends `\n` must hit the response cap and fail typed, the status
         // line's String must not grow with the stream.
         let raw = vec![b'a'; MAX_RESPONSE as usize + 1024];
         assert!(read_response(&raw[..], "test").is_err());
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(json["drive_id"], "rootfs");
         assert_eq!(json["is_root_device"], true);
         assert_eq!(json["is_read_only"], false);
-        // A `None` rate limiter is omitted entirely — an unthrottled drive, not `"rate_limiter":null`.
+        // A `None` rate limiter is omitted entirely, an unthrottled drive, not `"rate_limiter":null`.
         assert!(
             json.get("rate_limiter").is_none(),
             "an absent rate limiter must not serialize a key: {json}"

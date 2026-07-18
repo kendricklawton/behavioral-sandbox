@@ -47,14 +47,14 @@ use serde::{Deserialize, Serialize};
 /// request/response shape changes in a non-additive way.
 pub const WIRE_SCHEMA: u32 = 1;
 
-/// Upper bound on one protocol line, before decoding — the guardrail-5 allocation cap so a peer that
+/// Upper bound on one protocol line, before decoding, the guardrail-5 allocation cap so a peer that
 /// never sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an
 /// unbounded read. Generous: a per-message `stdin`/`content` string plus its JSON envelope fits,
 /// while the exec channel still enforces the real `agent_vmm::MAX_PAYLOAD` on the bytes that reach
 /// the guest, so this is a DoS bound, not the input-size contract.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
-/// A schema-stamped message. Every line on the wire — request or response — is an `Envelope`: the
+/// A schema-stamped message. Every line on the wire, request or response, is an `Envelope`: the
 /// leading `schema` field plus the flattened [`Request`]/[`Response`] body, so a line reads
 /// `{"schema":1,"op":"exec",...}` and the version is legible before the body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,13 +67,13 @@ pub struct Envelope<T> {
 }
 
 /// A client → daemon message. Internally tagged by an `op` field, so a line reads
-/// `{"schema":1,"op":"exec","argv":["echo","hi"]}` — self-describing and hand-writable. The verb set
+/// `{"schema":1,"op":"exec","argv":["echo","hi"]}`, self-describing and hand-writable. The verb set
 /// is the versioned lifecycle:
 /// `open` → (`exec` | `put` | `get` | `snapshot` | `trace` | `trace_summary`)\* → `close`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Open the connection's sandbox — the first message of a session (the VM *is* the session,
+    /// Open the connection's sandbox, the first message of a session (the VM *is* the session,
     /// decision 019). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
     /// is the daemon's launch-time choice, never a client's, so a caller can't downgrade the jail.
     /// Any omitted field keeps the conservative `agent_vmm::Limits` default.
@@ -111,7 +111,7 @@ pub enum Request {
         /// The file's UTF-8 contents. Bulk/binary is the block-device path, not this verb.
         content: String,
     },
-    /// Read `path` back from the session's working directory. A missing file is not an error — the
+    /// Read `path` back from the session's working directory. A missing file is not an error, the
     /// [`Response::Got`] simply reports `present: false`.
     Get {
         /// Which file in the working directory to read back, relative.
@@ -119,20 +119,20 @@ pub enum Request {
     },
     /// Snapshot the session's live VM into a daemon-side bundle, answered with the bundle's host
     /// path ([`Response::Snapshotted`]). Snapshotting a **jailed** session is a typed refusal (its
-    /// disk lives in the chroot) — the prewarm-source flow is unjailed, mirroring the engine API.
+    /// disk lives in the chroot), the prewarm-source flow is unjailed, mirroring the engine API.
     Snapshot,
     /// Ask for the session's **host-observed audit record** so far ([`Response::Trace`]): the same
-    /// `RunRecord` shape the CLI's `--record` writes, as a JSON object, but sampled **live** — a
+    /// `RunRecord` shape the CLI's `--record` writes, as a JSON object, but sampled **live**, a
     /// non-destructive snapshot, repeatable mid-session. So its `coverage` reflects **attach time**,
     /// and an axis that is absent may be a *transient* read (a momentary tap/meter miss) rather than a
     /// finalized gap, unlike the CLI's `--record`, which finalizes the record at session end and
-    /// records read failures as gaps. Fail-open — a host that couldn't attach the probes answers a
+    /// records read failures as gaps. Fail-open, a host that couldn't attach the probes answers a
     /// coverage-gapped record, never an error.
     Trace,
     /// Ask for the session's **model-legible summary** so far ([`Response::TraceSummary`]): the same
     /// compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied,
     /// its resource envelope, any coverage gap), sampled **live** and non-destructively like
-    /// [`Trace`](Self::Trace) — the face an agent driving `agentd` reads between turns, so the wire
+    /// [`Trace`](Self::Trace), the face an agent driving `agentd` reads between turns, so the wire
     /// exposes the projection, not just the full record. Fail-open, same as `trace`.
     TraceSummary,
     /// End the session: tear the sandbox down and close the connection. Dropping the connection
@@ -187,7 +187,7 @@ pub enum Response {
         /// The host directory holding the snapshot bundle.
         dir: String,
     },
-    /// The session's audit record (answering [`Request::Trace`]), as the `RunRecord` JSON object —
+    /// The session's audit record (answering [`Request::Trace`]), as the `RunRecord` JSON object,
     /// carried opaquely here so this crate stays free of the probes-loader types.
     Trace {
         /// The `RunRecord` as a JSON object (its own `schema` field is the *record* schema, distinct
@@ -195,7 +195,7 @@ pub enum Response {
         record: serde_json::Value,
     },
     /// The session's model-legible summary (answering [`Request::TraceSummary`]), as the projection's
-    /// JSON object — carried opaquely, same as [`Trace`](Self::Trace).
+    /// JSON object, carried opaquely, same as [`Trace`](Self::Trace).
     TraceSummary {
         /// The record summary as a JSON object (its own leading `schema` is the *summary* schema,
         /// distinct from the record schema and this wire [`WIRE_SCHEMA`]).
@@ -204,10 +204,10 @@ pub enum Response {
     /// The session ended cleanly (acknowledging a [`Request::Close`]).
     Closed,
     /// The request could not be served: a malformed message, a boot/channel failure, or a guest
-    /// fault. `fatal` distinguishes a session-ending failure (the sandbox is gone — reconnect) from
+    /// fault. `fatal` distinguishes a session-ending failure (the sandbox is gone, reconnect) from
     /// a per-request one the session survives (e.g. a command that couldn't spawn).
     Error {
-        /// A human-readable reason (never carries injected secrets — an engine `VmmError` rendering
+        /// A human-readable reason (never carries injected secrets, an engine `VmmError` rendering
         /// may name a path or an env *key*, never a value).
         message: String,
         /// `true` if the session is over (the connection will close); `false` if the client may send
@@ -216,18 +216,18 @@ pub enum Response {
     },
 }
 
-/// Every way the line protocol can fail to decode a peer's message, as a typed value — so a hostile
+/// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile
 /// or buggy peer is a typed error the daemon answers or drops, never a panic (guardrail 5).
 #[derive(Debug)]
 pub enum ProtocolError {
     /// The underlying stream failed.
     Io(std::io::Error),
-    /// A line whose `schema` is not [`WIRE_SCHEMA`] — a version mismatch, reported before the body
+    /// A line whose `schema` is not [`WIRE_SCHEMA`], a version mismatch, reported before the body
     /// is trusted. Carries the number the peer sent.
     Schema(u64),
     /// A line that isn't valid UTF-8 JSON for the expected message.
     Malformed(String),
-    /// A line exceeded [`MAX_MESSAGE_BYTES`] before a newline arrived — rejected before it can grow
+    /// A line exceeded [`MAX_MESSAGE_BYTES`] before a newline arrived, rejected before it can grow
     /// host memory without bound.
     TooLarge,
 }
@@ -264,8 +264,8 @@ impl std::error::Error for ProtocolError {
 /// protocol fault. The order of checks is deliberate: over-cap (before decoding) → JSON well-formed
 /// → **schema match** (before the body is trusted) → body decode.
 ///
-/// This is the one decode both ends use — the daemon with `T = Request`, a client with
-/// `T = Response` — so the framing, the cap, and the schema gate can't drift between them.
+/// This is the one decode both ends use, the daemon with `T = Request`, a client with
+/// `T = Response`, so the framing, the cap, and the schema gate can't drift between them.
 ///
 /// # Errors
 /// [`ProtocolError`] on an I/O failure, an over-cap line, a wrong `schema`, or a body that isn't a
@@ -295,7 +295,7 @@ pub fn read_message<T: DeserializeOwned>(
 /// Decode one already-framed line into a `T`, enforcing the schema gate. Split out so the framing
 /// (bounded line read) and the decoding (schema + body) are each unit-testable in isolation.
 fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
-    // Parse once to a generic value so the `schema` can be checked *before* the body is trusted —
+    // Parse once to a generic value so the `schema` can be checked *before* the body is trusted,
     // a wrong-version peer is a clean `Schema` error even if its body is a shape we don't know yet.
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
@@ -363,7 +363,7 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
         body,
     };
     // These types always serialize (no maps with non-string keys, no failing custom impls), so a
-    // serialize error is a bug, not a runtime state — fold it into `Io` rather than a new variant.
+    // serialize error is a bug, not a runtime state, fold it into `Io` rather than a new variant.
     let mut line = serde_json::to_string(&envelope)
         .map_err(|e| ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     line.push('\n');

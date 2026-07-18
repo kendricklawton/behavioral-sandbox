@@ -1,4 +1,4 @@
-//! Snapshot and restore — the point-in-time-copy half of the VM lifecycle, split out of `vm.rs`.
+//! Snapshot and restore, the point-in-time-copy half of the VM lifecycle, split out of `vm.rs`.
 //! [`RunningVm::snapshot`] pauses a VM and writes a portable [`Snapshot`](crate::Snapshot) bundle
 //! (device + vCPU state, guest memory, root disk); [`Vm::restore`] rebuilds a VM from one on a fresh
 //! VMM. The [`Snapshot`] type itself stays in `vm.rs` with the other public surface; this module
@@ -16,7 +16,7 @@ impl Vm {
     /// Restore a microVM from a [`Snapshot`] on a fresh VMM and resume it, returning once it's
     /// running and (if the snapshot carried the exec channel) exec-ready. Reuses only the
     /// `firecracker` binary, `boot_timeout`, the per-exec budgets
-    /// ([`exec_wall`](BootConfig::exec_wall)/[`output_cap`](BootConfig::output_cap) — they are the
+    /// ([`exec_wall`](BootConfig::exec_wall)/[`output_cap`](BootConfig::output_cap), they are the
     /// restoring host's bounds, not the source's), and [`jail`](BootConfig::jail) from `config`
     /// (the guest's kernel, memory, and devices all come from the snapshot).
     ///
@@ -35,23 +35,23 @@ impl Vm {
     ///
     /// A **networked** snapshot restores into a fresh **per-VM network namespace** (decision 017):
     /// the snapshot's recorded tap name is recreated inside it, where the baked-in guest
-    /// address/MAC/routes are already correct and collision-free — so no re-addressing, and any
+    /// address/MAC/routes are already correct and collision-free, so no re-addressing, and any
     /// number of networked clones coexist. Entropy is reseeded via VMGenID (Firecracker bumps the
-    /// generation on restore and the guest kernel reseeds its CRNG — proven by test, not assumed), so
+    /// generation on restore and the guest kernel reseeds its CRNG, proven by test, not assumed), so
     /// clones don't share RNG state. The guest's **wall clock is not fixed up**: it lags by the
     /// snapshot's age until the workload resyncs it.
     ///
     /// With [`jail`](BootConfig::jail) set, the clone restores **under the jailer**: the
-    /// bundle is staged into the chroot — the state file copied, the memory file and a shared base
+    /// bundle is staged into the chroot, the state file copied, the memory file and a shared base
     /// disk bind-mounted read-only (so clones keep sharing one page cache), a private disk copy
-    /// handed to the jailed uid — and a networked clone's netns is joined via `--netns`. Needs real
+    /// handed to the jailed uid, and a networked clone's netns is joined via `--netns`. Needs real
     /// root, like a jailed boot. The cgroup **resource caps** are re-applied to a jailed clone (P15.8),
-    /// so the restored VM (where the untrusted code runs) is confined, not just isolated — and both
+    /// so the restored VM (where the untrusted code runs) is confined, not just isolated, and both
     /// caps derive from the *snapshot's* true envelope, never `config`'s declaration (the guest's
     /// vCPUs and RAM come from the snapshot state; restore issues no `PUT /machine-config`):
     /// `memory.max` from the memory file's true size (so a `config` under-declaring the guest's RAM
     /// can't OOM a legitimate clone), `cpu.max` from the vCPU count recorded in the bundle
-    /// ([`Snapshot::vcpus`] — so a `config` defaulting to fewer vCPUs than the source can't silently
+    /// ([`Snapshot::vcpus`], so a `config` defaulting to fewer vCPUs than the source can't silently
     /// throttle a clone), and the constant `pids.max`.
     ///
     /// Restore latency (load + resume) is [`RunningVm::boot_latency`] on the returned VM, for the
@@ -81,17 +81,17 @@ impl Vm {
 
 impl RunningVm {
     /// Pause the VM, write a [`Snapshot`] bundle (device + vCPU state, guest memory, and the root
-    /// disk) into `dir`, then resume — the VM keeps running and can be shut down or snapshotted again.
+    /// disk) into `dir`, then resume, the VM keeps running and can be shut down or snapshotted again.
     ///
     /// A **read-write** boot's disk is copied into the bundle **inside the paused window**, so the copy
     /// agrees with the memory image; a **`read_only_root`** boot (a prewarmed snapshot) references the shared
-    /// base in place (no copy). The **vsock exec channel is supported** — restore re-binds its socket —
+    /// base in place (no copy). The **vsock exec channel is supported**, restore re-binds its socket,
     /// so a prewarmed snapshot restores exec-ready.
     ///
     /// Refused (a typed error, never an unrestorable bundle): a VM with an **output** or **input**
     /// block device (per-clone images a restore can't yet recreate), a **jailed** VM (its disk lives
-    /// inside the chroot at a chroot-relative path, so a bundle would record an unrestorable backing
-    /// — snapshot an *unjailed* prewarmed source, then restore **jailed** clones from it, which is where
+    /// inside the chroot at a chroot-relative path, so a bundle would record an unrestorable backing,
+    /// snapshot an *unjailed* prewarmed source, then restore **jailed** clones from it, which is where
     /// the untrusted code runs), and an **already-restored** VM (its `rootfs` is a placeholder; the
     /// live disk is an anonymous inode with no host path to bundle). A NIC is supported: the bundle
     /// records the tap name and restore recreates it in each clone's own netns (see [`Vm::restore`]).
@@ -113,7 +113,7 @@ impl RunningVm {
         // A jailed VM's root disk lives inside the chroot (torn down with the scratch dir) and its
         // path is chroot-relative, so a bundle would record an unrestorable backing. Deliberate, not
         // just deferred: the clone story is snapshot an *unjailed* prewarmed source (it runs only
-        // the embedder's warm-up), then restore **jailed** clones from it — the untrusted code runs
+        // the embedder's warm-up), then restore **jailed** clones from it, the untrusted code runs
         // confined; the source needs no jail to protect the host from itself.
         if self.chroot.is_some() {
             return Err(VmmError::Vmm(
@@ -126,7 +126,7 @@ impl RunningVm {
         // input image lives at the gone source scratch path), so those stay refused. The vsock exec
         // channel is supported (restore re-binds its baked-in relative socket), and a NIC is supported
         // too: under the netns model restore recreates the recorded tap in a fresh per-VM netns, where
-        // the snapshot's baked-in identity is already correct — no re-addressing, so a networked
+        // the snapshot's baked-in identity is already correct, no re-addressing, so a networked
         // snapshot no longer needs vsock (that requirement was decision 011's, now retired).
         if self.output.is_some() || self.has_input {
             return Err(VmmError::Vmm(
@@ -181,8 +181,8 @@ impl RunningVm {
             shared_base,
             has_vsock: self.vsock_uds.is_some(),
             tap_name: self.tap.as_ref().map(|t| t.name.clone()),
-            // The source's true envelope (this VM is boot-originated — a restored VM was refused
-            // above — so the boot-time config value is what `PUT /machine-config` really set): a
+            // The source's true envelope (this VM is boot-originated, a restored VM was refused
+            // above, so the boot-time config value is what `PUT /machine-config` really set): a
             // jailed restore derives its `cpu.max` from this, not from the restoring config.
             vcpus: self.vcpus,
         })

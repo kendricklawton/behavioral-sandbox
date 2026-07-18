@@ -1,5 +1,5 @@
 //! Integration tests for the guest agent, driving [`agent_guest::serve`] through the **public**
-//! channel API ([`ClientConnection`]) over a unix socketpair — the same protocol the host will speak
+//! channel API ([`ClientConnection`]) over a unix socketpair, the same protocol the host will speak
 //! over vsock, but with no VM.
 // This is a test binary; the `run` helper isn't a `#[test]` fn, so the workspace's
 // no-unwrap/expect lints don't auto-exempt it. Panicking on setup failure is correct in a test.
@@ -125,7 +125,7 @@ fn stdin_is_fed_to_the_command() {
 #[test]
 fn env_reaches_the_command_but_never_the_agents_own_process() {
     // The two halves of the env contract in one run: the injected variable is visible to the
-    // spawned command, and it is set via `Command::env` only — `serve` runs in *this* process here,
+    // spawned command, and it is set via `Command::env` only, `serve` runs in *this* process here,
     // so if the agent ever `set_var`'d it, the assertion on our own environment would catch it.
     let key = "AGENT_TEST_ENV_SCOPE";
     assert!(
@@ -212,7 +212,7 @@ fn injected_file_is_read_by_the_command_and_artifact_returned() {
 #[test]
 fn session_state_persists_across_connections() {
     // The stateful-session contract at the agent layer: two connections served with the same
-    // session dir see one working directory — a file injected before the first exec, and a file
+    // session dir see one working directory, a file injected before the first exec, and a file
     // that exec writes, are both still there for the second. (One-shot `serve` keeps its
     // fresh-and-removed semantics; this is the `serve_session` path the in-VM binary runs.)
     let dir = std::env::temp_dir().join(format!("agent-session-test-{}", std::process::id()));
@@ -397,7 +397,7 @@ fn stalled_host_does_not_wedge_the_guest() {
             timeout_ms: 30_000,
         })
         .expect("send request");
-    // Deliberately never read a response — the guest's send buffer fills and its forward blocks.
+    // Deliberately never read a response, the guest's send buffer fills and its forward blocks.
 
     match rx.recv_timeout(Duration::from_secs(10)) {
         Ok(()) => {

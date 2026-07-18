@@ -12,7 +12,7 @@ use std::process::Command;
 
 use agent_probes_loader::{check_support, object_path, ProbeError, TapMonitor};
 
-/// Why this host can't load the probe (a skip reason), or `None` when it can — so the test prints
+/// Why this host can't load the probe (a skip reason), or `None` when it can, so the test prints
 /// *why* it skipped. Same gate the tracer/counter tests use.
 fn skip_reason() -> Option<String> {
     if let Err(e) = check_support() {
@@ -31,7 +31,7 @@ fn skip_reason() -> Option<String> {
 #[ignore = "needs CAP_BPF+CAP_NET_ADMIN/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn attaches_to_a_tap_and_reads_the_flow_map() {
     // Attach the two clsact classifiers to a real ethernet device (a tap, exactly what a VM
-    // uses) and read the per-flow map back. Freshly attached on an idle tap it is empty — the point
+    // uses) and read the per-flow map back. Freshly attached on an idle tap it is empty, the point
     // here is that the qdisc-add + ingress/egress attach + map-open path works end to end.
     if let Some(why) = skip_reason() {
         eprintln!("skipping attaches_to_a_tap_and_reads_the_flow_map: {why}");
@@ -68,7 +68,7 @@ fn attaches_to_a_tap_and_reads_the_flow_map() {
     })();
 
     // Always delete the tap (cascading its clsact qdisc + the filters away), whether or not the attach
-    // assertions passed — no leaked host interface.
+    // assertions passed, no leaked host interface.
     let _ = Command::new("ip").args(["link", "del", &dev]).status();
     result.expect("attach the classifiers and read the flow map");
 }
