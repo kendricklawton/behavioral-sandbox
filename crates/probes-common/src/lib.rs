@@ -74,24 +74,32 @@ pub const EVENT_SIZE: usize = core::mem::size_of::<SyscallEvent>();
 
 impl SyscallEvent {
     /// Reconstruct an event from a ring-buffer record's raw bytes, or `None` if the slice is too
-    /// short. Reads each field at its fixed `#[repr(C)]` offset with `from_ne_bytes`, safe, no
-    /// transmute, and defined next to the field list so it can't drift from the kernel writer.
+    /// short. Reads each field at its `#[repr(C)]` offset with `from_ne_bytes`, safe, no
+    /// transmute. The offsets are **derived from the struct itself** (`core::mem::offset_of!`),
+    /// not hand-coded, so even a same-size field reorder cannot make the reader and the kernel
+    /// writer disagree (a resize is caught by the [`EVENT_SIZE`] check; the offsets close the
+    /// remaining drift hole).
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < EVENT_SIZE {
             return None;
         }
-        // Offsets follow the padding-free `#[repr(C)]` layout: cgroup_id@0, pid@8, tid@12,
-        // syscall@16, detail_len@20, comm@24, detail@40 (EVENT_SIZE == 168).
-        let cgroup_id = u64::from_ne_bytes(b.get(0..8)?.try_into().ok()?);
-        let pid = u32::from_ne_bytes(b.get(8..12)?.try_into().ok()?);
-        let tid = u32::from_ne_bytes(b.get(12..16)?.try_into().ok()?);
-        let syscall = u32::from_ne_bytes(b.get(16..20)?.try_into().ok()?);
-        let detail_len = u32::from_ne_bytes(b.get(20..24)?.try_into().ok()?);
+        const CGROUP_ID: usize = core::mem::offset_of!(SyscallEvent, cgroup_id);
+        const PID: usize = core::mem::offset_of!(SyscallEvent, pid);
+        const TID: usize = core::mem::offset_of!(SyscallEvent, tid);
+        const SYSCALL: usize = core::mem::offset_of!(SyscallEvent, syscall);
+        const DETAIL_LEN: usize = core::mem::offset_of!(SyscallEvent, detail_len);
+        const COMM: usize = core::mem::offset_of!(SyscallEvent, comm);
+        const DETAIL: usize = core::mem::offset_of!(SyscallEvent, detail);
+        let cgroup_id = u64::from_ne_bytes(b.get(CGROUP_ID..CGROUP_ID + 8)?.try_into().ok()?);
+        let pid = u32::from_ne_bytes(b.get(PID..PID + 4)?.try_into().ok()?);
+        let tid = u32::from_ne_bytes(b.get(TID..TID + 4)?.try_into().ok()?);
+        let syscall = u32::from_ne_bytes(b.get(SYSCALL..SYSCALL + 4)?.try_into().ok()?);
+        let detail_len = u32::from_ne_bytes(b.get(DETAIL_LEN..DETAIL_LEN + 4)?.try_into().ok()?);
         let mut comm = [0u8; COMM_CAP];
-        comm.copy_from_slice(b.get(24..24 + COMM_CAP)?);
+        comm.copy_from_slice(b.get(COMM..COMM + COMM_CAP)?);
         let mut detail = [0u8; DETAIL_CAP];
-        detail.copy_from_slice(b.get(40..40 + DETAIL_CAP)?);
+        detail.copy_from_slice(b.get(DETAIL..DETAIL + DETAIL_CAP)?);
         Some(Self {
             cgroup_id,
             pid,
@@ -145,14 +153,28 @@ impl SyscallEvent {
     /// The event's detail blob decoded for display: the path (`execve`/`openat`, lossy UTF-8) or the
     /// `connect` address (`AF_INET` as `a.b.c.d:port`, other families by number). Centralized here so
     /// every consumer decodes the same way (`std`-only).
+    ///
+    /// Returns a [`Cow`](std::borrow::Cow): **borrowed** for the common case (a valid-UTF-8 path,
+    /// no allocation), owned only when rendering must build a string (a `connect` sockaddr, or
+    /// lossy replacement characters). A per-event fold probes its dedup map with this without
+    /// paying an allocation per repeat; take [`detail_display`](Self::detail_display) when an owned
+    /// `String` is wanted anyway.
+    #[cfg(any(feature = "std", test))]
+    #[must_use]
+    pub fn detail_display_cow(&self) -> std::borrow::Cow<'_, str> {
+        let d = self.detail();
+        match self.kind() {
+            Some(Syscall::Connect) => std::borrow::Cow::Owned(describe_sockaddr(d)),
+            _ => String::from_utf8_lossy(d),
+        }
+    }
+
+    /// [`detail_display_cow`](Self::detail_display_cow), owned. The two stay one decoder: this is
+    /// just `.into_owned()`.
     #[cfg(any(feature = "std", test))]
     #[must_use]
     pub fn detail_display(&self) -> String {
-        let d = self.detail();
-        match self.kind() {
-            Some(Syscall::Connect) => describe_sockaddr(d),
-            _ => String::from_utf8_lossy(d).into_owned(),
-        }
+        self.detail_display_cow().into_owned()
     }
 
     /// One decoded trace line: `pid=<pid> comm=<comm> <syscall> <detail>` (`std`-only). The streaming
@@ -685,9 +707,25 @@ mod tests {
 
     #[test]
     fn layout_is_padding_free_and_known_size() {
-        // The parser's fixed offsets assume this exact size; catch a field reorder/resize here.
+        // Catch a field resize here; the per-field offsets below catch a same-size reorder.
         assert_eq!(EVENT_SIZE, 168);
         assert_eq!(core::mem::align_of::<SyscallEvent>(), 8);
+    }
+
+    #[test]
+    fn layout_offsets_are_the_wire_contract() {
+        // The eBPF object is built separately from the loader (its own toolchain, its own time), so
+        // the struct layout *is* the wire format between two independently-built artifacts. Pin every
+        // field offset: `from_bytes` derives its reads from `offset_of!` (it cannot drift from this
+        // struct), but an accidental layout change would silently change the wire, and a stale probe
+        // object on disk would then read as garbage. This test makes that change loud instead.
+        assert_eq!(core::mem::offset_of!(SyscallEvent, cgroup_id), 0);
+        assert_eq!(core::mem::offset_of!(SyscallEvent, pid), 8);
+        assert_eq!(core::mem::offset_of!(SyscallEvent, tid), 12);
+        assert_eq!(core::mem::offset_of!(SyscallEvent, syscall), 16);
+        assert_eq!(core::mem::offset_of!(SyscallEvent, detail_len), 20);
+        assert_eq!(core::mem::offset_of!(SyscallEvent, comm), 24);
+        assert_eq!(core::mem::offset_of!(SyscallEvent, detail), 40);
     }
 
     #[test]

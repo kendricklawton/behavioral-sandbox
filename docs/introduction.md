@@ -42,7 +42,7 @@ change protects:
 
 And one scope rule: **engine, not platform.** This is a runtime plus a clean driver API you
 self-host. Multi-tenant auth, billing, fleet scheduling, and dashboards belong to whatever *hosts*
-the engine, the full non-goals list is in [Using the engine API](./embedding.md).
+the engine, the full non-goals list is in [Non-goals](./non-goals.md).
 
 ## Reading this book
 
@@ -57,16 +57,20 @@ the engine, the full non-goals list is in [Using the engine API](./embedding.md)
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
 - **[Using the agentd daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
-  wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`), the pre-warmed pool for fast
+  wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`), the pre-warmed pool for fast
   `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
 - **[Examples](./examples.md)**, worked, end-to-end walkthroughs: [running untrusted
-  code](./examples-untrusted-code.md) and [observing a run from the
-  host](./examples-observe-a-run.md).
+  code](./examples-untrusted-code.md), [observing a run from the
+  host](./examples-observe-a-run.md), [containing an agent](./examples-agent-containment.md),
+  [analyzing an untrusted binary](./examples-untrusted-binary.md), and [running a CI job from a
+  fork](./examples-ci-job.md).
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each with a live demo.
-- **[Security](./security.md)**, what is trusted, what counts as a security bug, and how to report
-  one.
+- **[Threat model](./threat-model.md)**, what is trusted, what the adversary is assumed to control,
+  and the assumptions the guarantees rest on.
+- **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
+  report one.
 - **[Contributing](./contributing.md)**, how the work is organized, [building](./contributing-building.md),
   [testing](./contributing-testing.md), and the invariants.
 

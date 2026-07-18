@@ -78,7 +78,12 @@ const TAG_TIMEDOUT: u8 = 8;
 /// A host→guest message. `#[non_exhaustive]`: new request types are added as new tags without
 /// breaking an older guest agent, an unknown tag becomes [`Unknown`](Request::Unknown), which the
 /// agent answers with a typed "unsupported" rather than a fatal protocol error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is **hand-written and redacting** (below), not derived: `Exec`'s `stdin`/`env` values and
+/// `PutFile`'s `data` are secrets by presumption, so the doc rule "neither peer may log one" is
+/// enforced by construction, a future `tracing::debug!(?req)` or `format!("{req:?}")` prints sizes
+/// and key names, never the bytes. A test pins it.
+#[derive(Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Request {
     /// Write a file into the run's working directory *before* the command runs. Sent zero or more
@@ -103,6 +108,46 @@ pub enum Request {
     /// A well-framed request whose tag this build doesn't know, a *newer* host speaking a request
     /// type we don't implement. Not a protocol error; the agent replies with a typed "unsupported".
     Unknown { tag: u8 },
+}
+
+impl std::fmt::Debug for Request {
+    /// The redacting `Debug` (see the type doc): secret-bearing payloads (`PutFile::data`,
+    /// `Exec::stdin`, `Exec::env` *values*) render as byte counts / key lists only, so no
+    /// formatting path, log line, or panic message can leak them. Everything non-secret (paths,
+    /// argv, artifact names, timeouts) renders normally, the variant stays legible for debugging.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PutFile { path, data } => f
+                .debug_struct("PutFile")
+                .field("path", path)
+                .field("data", &format_args!("<redacted; {} byte(s)>", data.len()))
+                .finish(),
+            Self::Exec {
+                argv,
+                stdin,
+                env,
+                artifacts,
+                timeout_ms,
+            } => {
+                // Keys are loggable by contract (an error may name a key); values never are.
+                let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+                f.debug_struct("Exec")
+                    .field("argv", argv)
+                    .field(
+                        "stdin",
+                        &format_args!("<redacted; {} byte(s)>", stdin.len()),
+                    )
+                    .field(
+                        "env",
+                        &format_args!("<{} var(s), values redacted; keys: {keys:?}>", env.len()),
+                    )
+                    .field("artifacts", artifacts)
+                    .field("timeout_ms", timeout_ms)
+                    .finish()
+            }
+            Self::Unknown { tag } => f.debug_struct("Unknown").field("tag", tag).finish(),
+        }
+    }
 }
 
 /// A guest→host message. The host reads these until a terminal [`Exit`](Response::Exit) or
@@ -673,6 +718,44 @@ mod tests {
         let mut buf = Vec::new();
         write_handshake(&mut buf).unwrap();
         read_handshake(&mut buf.as_slice()).unwrap();
+    }
+
+    #[test]
+    fn request_debug_redacts_secrets_by_construction() {
+        // The type-level guarantee behind "neither peer may log one": no `{:?}` of a `Request`
+        // can print an env value, stdin bytes, or injected file bytes, however the format call
+        // is reached (a debug log, an error interpolation, a panic message).
+        let exec = format!(
+            "{:?}",
+            Request::Exec {
+                argv: vec!["deploy".into()],
+                stdin: b"stdin-secret-material".to_vec(),
+                env: vec![("API_KEY".into(), "hunter2-value".into())],
+                artifacts: vec!["out.txt".into()],
+                timeout_ms: 1_000,
+            }
+        );
+        assert!(!exec.contains("hunter2-value"), "env value leaked: {exec}");
+        assert!(!exec.contains("stdin-secret"), "stdin leaked: {exec}");
+        // The non-secret shape stays legible: the key name (loggable by contract), argv, sizes.
+        assert!(exec.contains("API_KEY"), "key name should render: {exec}");
+        assert!(
+            exec.contains("deploy") && exec.contains("redacted"),
+            "{exec}"
+        );
+
+        let put = format!(
+            "{:?}",
+            Request::PutFile {
+                path: "cfg.toml".into(),
+                data: b"file-secret-material".to_vec(),
+            }
+        );
+        assert!(!put.contains("file-secret"), "file bytes leaked: {put}");
+        assert!(
+            put.contains("cfg.toml") && put.contains("20 byte(s)"),
+            "{put}"
+        );
     }
 
     #[test]

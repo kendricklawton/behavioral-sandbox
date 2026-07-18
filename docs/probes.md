@@ -160,7 +160,13 @@ packet is already policed). Rules go in as raw bytes (`PolicyRule::to_bytes`, so
 
 Every dropped packet is **recorded** before the drop: the classifier counts it against its destination
 in a `DENIALS` map, which `TapMonitor::denials()` reads back, the audit trail of which endpoints a
-sandbox was blocked from, folded into the per-run record (below). The whole mechanism (map,
+sandbox was blocked from, folded into the per-run record (below). Both the flow table and the denial
+map are fixed-size (4096 entries), and saturation is **counted, never silent**: a full map bumps a
+per-CPU drop counter (`TapMonitor::dropped_flows()`/`dropped_denials()`), the record's network
+section carries the counts and a `truncated` flag, and the run gets a coverage gap, so a guest that
+churns source ports to fill the table cannot quietly evict its real traffic from its own record
+(the `EVENT_DROPS` honest-loss discipline, applied to the network axis). Enforcement never depends
+on the maps: a denied packet is dropped at the tap whether or not its audit row fit. The whole mechanism (map,
 schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is decision 025; `net_enforce.rs`
 (ignored/privileged) proves a guest reaches an allow-listed endpoint and is blocked from everything
 else; and `cargo xtask enforce-sandbox` is the live demo. Folding attach-and-enforce into the launch

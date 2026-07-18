@@ -15,3 +15,10 @@ Report privately via GitHub's security advisories: the
 [Security tab](https://github.com/kendricklawton/agent/security), or
 [this direct link](https://github.com/kendricklawton/agent/security/advisories/new) to the
 reporting form. Please do not open a public issue for a suspected vulnerability.
+
+## What to expect
+
+This is an early, single-maintainer project, so the promise is honest rather than enterprise-grade:
+expect an acknowledgement within about a week, and a good-faith effort to confirm the issue, agree a
+disclosure timeline with you, and credit you (if you want it) when a fix lands. There is no bounty.
+Coordinated disclosure is preferred: please give the fix a chance to land before going public.

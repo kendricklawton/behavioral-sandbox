@@ -1,4 +1,4 @@
-# Standalone manifest — `crates/probes` is **excluded** from the workspace (root Cargo.toml), so it
+# Standalone manifest: `crates/probes` is **excluded** from the workspace (root Cargo.toml), so it
 # can't inherit workspace fields. It builds for `bpfel-unknown-none` (not the host triple) via
 # `bpf-linker`, under its own **nightly** toolchain (`rust-toolchain.toml`) with `build-std = ["core"]`
 # (`.cargo/config.toml`). The host workspace stays on stable and never compiles this crate; its object
@@ -7,9 +7,12 @@
 name = "agent-probes"
 version = "0.1.0"
 edition = "2021"
+# Excluded from the workspace (builds for `bpfel-unknown-none`, not the host triple), so its package
+# fields are spelled literally rather than inherited from `[workspace.package]`.
+rust-version = "1.94"
 license = "Apache-2.0"
 publish = false
-description = "The eBPF programs (no_std) — syscall tracepoints, tc/XDP on the tap, cgroup accounting."
+description = "The eBPF programs (no_std): syscall tracepoints, tc/XDP on the tap, cgroup accounting."
 
 [dependencies]
 # The in-kernel eBPF side of aya: `#[tracepoint]`/`#[classifier]`/… macros, program contexts, and
@@ -17,7 +20,7 @@ description = "The eBPF programs (no_std) — syscall tracepoints, tc/XDP on the
 aya-ebpf = "0.1"
 
 # The wire record written into the ring buffer (`SyscallEvent`), shared with the userspace reader so
-# the two sides can't drift. `no_std`, no default features — the BPF side never wants `std`.
+# the two sides can't drift. `no_std`, no default features: the BPF side never wants `std`.
 agent-probes-common = { path = "../probes-common", default-features = false }
 
 # One object per program set, linked by `bpf-linker` for `bpfel-unknown-none`: the syscall

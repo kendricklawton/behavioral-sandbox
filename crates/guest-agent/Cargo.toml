@@ -3,6 +3,8 @@ name = "agent-guest"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 authors.workspace = true
 publish = false
 description = "The in-guest agent: runs one command per connection and streams its output over the channel."
@@ -21,7 +23,7 @@ path = "src/main.rs"
 agent-channel = { path = "../channel" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# The in-VM transport: a static `AF_VSOCK` listener. Guest-agent-only — the host reaches Firecracker's
+# The in-VM transport: a static `AF_VSOCK` listener. Guest-agent-only: the host reaches Firecracker's
 # vsock over a plain `UnixStream`, not `AF_VSOCK`. The crate's internal `unsafe` is the dep's, not
 # ours (this crate stays `#![forbid(unsafe_code)]`). Pinned; all of its tree is MIT/Apache.
 vsock = "0.5.4"

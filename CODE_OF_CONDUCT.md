@@ -6,5 +6,6 @@ This project adopts the [Contributor Covenant, version
 In short: be respectful, be constructive, assume good faith, and keep the discussion about the
 work. Harassment or discrimination of any kind is not tolerated.
 
-Instances of unacceptable behavior may be reported to the maintainer via a GitHub issue or, where
-privacy matters, through the contact path in [`SECURITY.md`](SECURITY.md).
+Instances of unacceptable behavior may be reported privately to the maintainer at
+**khe4r6@gmail.com**. Reports are handled confidentially. For anything that is also a security
+matter, the private channel in [`SECURITY.md`](SECURITY.md) works too.

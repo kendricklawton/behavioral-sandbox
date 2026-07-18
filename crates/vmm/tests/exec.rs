@@ -224,9 +224,9 @@ fn python_script_writes_a_file_and_we_capture_it() {
     );
     // Exactly the one requested artifact comes back, holding what the script computed.
     assert_eq!(out.files.len(), 1, "one artifact requested and returned");
-    let (path, data) = &out.files[0];
-    assert_eq!(path, "result.json");
-    let text = String::from_utf8_lossy(data);
+    let artifact = &out.files[0];
+    assert_eq!(artifact.path, "result.json");
+    let text = String::from_utf8_lossy(&artifact.data);
     assert!(
         text.contains("\"answer\"") && text.contains("42"),
         "captured file should hold the JSON the script wrote; got {text:?}"
@@ -264,9 +264,9 @@ fn runs_node_a_second_interpreter() {
         vm.console()
     );
     assert_eq!(out.files.len(), 1, "one artifact requested and returned");
-    let (path, data) = &out.files[0];
-    assert_eq!(path, "result.json");
-    let text = String::from_utf8_lossy(data);
+    let artifact = &out.files[0];
+    assert_eq!(artifact.path, "result.json");
+    let text = String::from_utf8_lossy(&artifact.data);
     assert!(
         text.contains("\"answer\"") && text.contains("42"),
         "captured file should hold the JSON Node wrote; got {text:?}"

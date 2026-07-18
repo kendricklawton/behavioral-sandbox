@@ -339,11 +339,38 @@ pub struct RunResult {
     pub stdout: Vec<u8>,
     /// Bytes the guest wrote to stderr.
     pub stderr: Vec<u8>,
-    /// Requested artifact files the guest returned, as `(path, contents)`. A requested artifact
-    /// that didn't exist is simply absent.
-    pub files: Vec<(String, Vec<u8>)>,
+    /// Requested [`Artifact`] files the guest returned. A requested artifact that didn't exist is
+    /// simply absent.
+    pub files: Vec<Artifact>,
     /// What the run cost, host-measured (see [`ExecMetrics`]).
     pub metrics: ExecMetrics,
+}
+
+/// One returned artifact: a working-directory file the run asked for back, named + its bytes. A
+/// named struct (not a `(String, Vec<u8>)` pair) so the public seam documents itself and can grow
+/// (a mode, a truncation flag) without a tuple-shape break; `#[non_exhaustive]` for the same
+/// reason, with [`new`](Self::new) as the construction seam. The `path` is guaranteed relative and
+/// non-climbing by the exec layer, the containment every embedder that writes artifacts to disk
+/// inherits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Artifact {
+    /// The artifact's path, relative to the run's working directory (validated non-climbing).
+    pub path: String,
+    /// The file's bytes, exactly as the guest returned them.
+    pub data: Vec<u8>,
+}
+
+impl Artifact {
+    /// Construct an artifact (the struct is `#[non_exhaustive]`, so this is the seam callers and
+    /// tests build one through).
+    #[must_use]
+    pub fn new(path: impl Into<String>, data: Vec<u8>) -> Self {
+        Self {
+            path: path.into(),
+            data,
+        }
+    }
 }
 
 /// Host-measured metrics for one exec, the **metrics** leg of the structured run result. Measured

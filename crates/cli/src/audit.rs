@@ -133,10 +133,12 @@ impl Observability {
     }
 }
 
-/// The reason string carried by any [`AxisGap`] variant.
+/// The reason string carried by any [`AxisGap`] variant. `AxisGap` is `#[non_exhaustive]`, so a
+/// new axis (unknown to this build) reads as a generic marker rather than a compile break.
 fn gap_reason(gap: &AxisGap) -> &str {
     match gap {
         AxisGap::HostSyscalls(r) | AxisGap::Network(r) | AxisGap::Cpu(r) => r,
+        _ => "(new observation axis; update the CLI to render it)",
     }
 }
 

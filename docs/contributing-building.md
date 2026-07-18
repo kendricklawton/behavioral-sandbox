@@ -1,9 +1,12 @@
 # Building
 
-One Rust workspace, **stable** toolchain, Linux-only. The eBPF programs (`crates/probes`) are the
-exception: excluded from the workspace, built for `bpfel-unknown-none` under their own pinned
-nightly (`-Z build-std=core`, since rustup ships no prebuilt `core` for the BPF target) and linked
-by `bpf-linker`. Host prerequisites are covered in [Installation](./cli-install.md);
+One Rust workspace, **stable** toolchain, Linux-only. The minimum supported Rust version
+(`rust-version` in `[workspace.package]`) tracks current stable: the project carries no
+back-compatibility burden this early, so building expects a recent stable toolchain (`rustup update`
+if `cargo` complains the installed version is older than the manifest's `rust-version`). The eBPF
+programs (`crates/probes`) are the exception: excluded from the workspace, built for
+`bpfel-unknown-none` under their own pinned nightly (`-Z build-std=core`, since rustup ships no
+prebuilt `core` for the BPF target) and linked by `bpf-linker`. Host prerequisites are covered in [Installation](./cli-install.md);
 `cargo xtask setup` reports what's missing.
 
 ```console

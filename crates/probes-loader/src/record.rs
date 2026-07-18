@@ -14,7 +14,7 @@
 //! output will rely on. Kept here, out of `agent-vmm`, so the driver stays independent of the eBPF
 //! loader (decisions 024/026); the two tracks bridge only by plain values.
 
-use std::collections::btree_map::{BTreeMap, Entry};
+use std::collections::btree_map::BTreeMap;
 use std::time::Duration;
 
 use agent_probes_common::{FlowCounts, FlowKey, Syscall, SyscallEvent};
@@ -30,6 +30,7 @@ pub const MAX_NOTABLE: usize = 64;
 
 /// One run's fused audit record: what the host observed the sandbox do, from outside the guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RunRecord {
     /// The guest's own network traffic on its tap, plus the blocked-egress trail. `None` when the
     /// sandbox had no NIC (nothing to observe), distinct from "observed, and it was empty".
@@ -71,6 +72,7 @@ impl RunRecord {
 /// The network axis: per-VM totals, the per-flow breakdown, and the denied-egress trail, all read
 /// from the one per-VM tap monitor, so they belong together.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NetSection {
     /// One sandbox's traffic summed across flows (the rollup a caller exports).
     pub totals: NetStats,
@@ -80,6 +82,15 @@ pub struct NetSection {
     /// decision 025 folds in here. **Aggregated by destination** (one row per blocked endpoint,
     /// summed across guest source ports) and sorted by that destination triple.
     pub denials: Vec<DenialRecord>,
+    /// New flows the kernel could not admit because the flow table was full: their traffic is
+    /// **absent** from [`flows`](Self::flows) and undercounted in [`totals`](Self::totals). Nonzero
+    /// means the section is [`truncated`](Self::truncated), a guest churning source ports must not
+    /// be able to evict its real traffic from its own record *silently*.
+    pub dropped_flows: u64,
+    /// The [`dropped_flows`](Self::dropped_flows) twin for the denial trail: denied packets whose
+    /// destination row a full map could not record (the packets were still dropped at the tap;
+    /// only the audit row is missing).
+    pub dropped_denials: u64,
 }
 
 impl NetSection {
@@ -89,11 +100,17 @@ impl NetSection {
     /// separate entries, and summing them per `(dst, port, proto)` is what makes the trail both
     /// meaningful (one row per blocked endpoint) and totally ordered. Total orders on both
     /// collections are what make the record byte-stable across map-iteration order.
+    ///
+    /// `dropped_flows`/`dropped_denials` are the kernel's full-map drop counters: how many new
+    /// flows / denial rows could **not** be recorded. They ride the section (and mark it
+    /// [`truncated`](Self::truncated)) so a saturated table reads as truncated, never as complete.
     #[must_use]
     pub fn from_tap(
         flows: Vec<(FlowKey, FlowCounts)>,
         totals: NetStats,
         denials: Vec<(FlowKey, u64)>,
+        dropped_flows: u64,
+        dropped_denials: u64,
     ) -> Self {
         let mut flows: Vec<FlowRecord> = flows
             .into_iter()
@@ -121,12 +138,25 @@ impl NetSection {
             totals,
             flows,
             denials,
+            dropped_flows,
+            dropped_denials,
         }
+    }
+
+    /// Whether the section is **incomplete**: the kernel dropped at least one flow or denial row
+    /// because its table was full, so [`flows`](Self::flows)/[`totals`](Self::totals)/
+    /// [`denials`](Self::denials) undercount what actually crossed the tap. A truncated section
+    /// also carries a coverage gap on the record, this is the per-section flag a consumer checks
+    /// before trusting the flow list as exhaustive.
+    #[must_use]
+    pub fn truncated(&self) -> bool {
+        self.dropped_flows > 0 || self.dropped_denials > 0
     }
 }
 
 /// One flow's identity and its per-direction counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FlowRecord {
     pub key: FlowKey,
     pub counts: FlowCounts,
@@ -135,6 +165,7 @@ pub struct FlowRecord {
 /// One blocked **destination** and how many packets to it were dropped, summed across guest source
 /// ports (the source of a dropped probe is noise; the endpoint is the audit signal).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DenialRecord {
     /// Destination IPv4 address, host byte order (as [`FlowKey::dst_addr`]).
     pub dst_addr: u32,
@@ -156,6 +187,7 @@ fn flow_order(k: &FlowKey) -> (u32, u16, u8, u32, u16) {
 /// events. Both dimensions of unboundedness are closed, repetition collapses into a hit count, and
 /// the distinct set is capped at [`MAX_NOTABLE`].
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct SyscallFootprint {
     /// Every attributed event, an exact `u64` counter, always O(1) memory.
     pub total: u64,
@@ -194,6 +226,7 @@ impl SyscallFootprint {
 /// Counts of the host syscalls the probes trace, by kind. Fixed fields, so it's deterministic by
 /// construction (no ordering to stabilize).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct SyscallCounts {
     pub execve: u64,
     pub openat: u64,
@@ -205,6 +238,7 @@ pub struct SyscallCounts {
 /// A notable host syscall: its kind, the decoded detail (an opened/exec'd path, or a connect target),
 /// the `comm` that made it, and how many times this exact `(kind, detail)` occurred.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NotableSyscall {
     pub kind: Syscall,
     pub detail: String,
@@ -220,8 +254,15 @@ pub struct SyscallFold {
     cgroup_id: u64,
     total: u64,
     by_kind: SyscallCounts,
-    /// Keyed by `(kind discriminant, detail)`; the value carries the typed kind + comm + hits.
-    notable: BTreeMap<(u32, String), NotableAccum>,
+    /// Keyed `kind discriminant → detail → accumulator` (the same `(kind, detail)` dedup as a flat
+    /// pair key, nested so [`record`](Self::record) can probe the inner map with a **borrowed**
+    /// `&str`: the common repeat path allocates nothing, the owned `String` is built only on a
+    /// vacant under-cap insert). Both `BTreeMap` levels keep the total `(kind, detail)` order, so
+    /// [`finish`](Self::finish) flattens already-sorted.
+    notable: BTreeMap<u32, BTreeMap<String, NotableAccum>>,
+    /// Total distinct `(kind, detail)` entries held across the nested map, the [`MAX_NOTABLE`] cap
+    /// check (the outer map's `len()` counts kinds, not entries).
+    distinct: usize,
     overflow_events: u64,
 }
 
@@ -241,6 +282,7 @@ impl SyscallFold {
             total: 0,
             by_kind: SyscallCounts::default(),
             notable: BTreeMap::new(),
+            distinct: 0,
             overflow_events: 0,
         }
     }
@@ -264,45 +306,46 @@ impl SyscallFold {
             Syscall::Openat => self.by_kind.openat += 1,
             Syscall::Connect => self.by_kind.connect += 1,
         }
-        let key = (kind as u32, ev.detail_display());
-        // Read the length before the mutable `entry` borrow so the cap check doesn't alias it.
-        let at_cap = self.notable.len() >= MAX_NOTABLE;
-        match self.notable.entry(key) {
-            Entry::Occupied(mut e) => e.get_mut().hits += 1,
-            Entry::Vacant(v) => {
-                if at_cap {
-                    self.overflow_events += 1;
-                } else {
-                    v.insert(NotableAccum {
-                        kind,
-                        comm: ev.comm_lossy().into_owned(),
-                        hits: 1,
-                    });
-                }
-            }
+        // Probe with the borrowed render (`Cow`): the common repeat path (`get_mut` by `&str`)
+        // allocates nothing per event; the owned `String` key (and the comm) are built only on a
+        // vacant, under-cap insert. This fold runs once per streamed ring-buffer event, so the
+        // per-repeat allocation was the record path's one avoidable hot-loop cost.
+        let detail = ev.detail_display_cow();
+        let inner = self.notable.entry(kind as u32).or_default();
+        if let Some(acc) = inner.get_mut(detail.as_ref()) {
+            acc.hits += 1;
+        } else if self.distinct >= MAX_NOTABLE {
+            self.overflow_events += 1;
+        } else {
+            inner.insert(
+                detail.into_owned(),
+                NotableAccum {
+                    kind,
+                    comm: ev.comm_lossy().into_owned(),
+                    hits: 1,
+                },
+            );
+            self.distinct += 1;
         }
     }
 
-    /// Finalize into a sorted, capped [`SyscallFootprint`].
+    /// Finalize into a sorted, capped [`SyscallFootprint`]. Flattening the nested `BTreeMap`s
+    /// yields `(kind, detail)` in total order already (both levels are ordered, and an entry per
+    /// `(kind, detail)` is unique, so no further sort key is needed), the same deterministic order
+    /// the flat pair key produced.
     #[must_use]
     pub fn finish(self) -> SyscallFootprint {
-        let mut notable: Vec<NotableSyscall> = self
+        let notable: Vec<NotableSyscall> = self
             .notable
             .into_iter()
-            .map(|((_, detail), acc)| NotableSyscall {
+            .flat_map(|(_, by_detail)| by_detail)
+            .map(|(detail, acc)| NotableSyscall {
                 kind: acc.kind,
                 detail,
                 comm: acc.comm,
                 hits: acc.hits,
             })
             .collect();
-        notable.sort_by(|a, b| {
-            (a.kind as u32, a.detail.as_str(), a.comm.as_str()).cmp(&(
-                b.kind as u32,
-                b.detail.as_str(),
-                b.comm.as_str(),
-            ))
-        });
         SyscallFootprint {
             total: self.total,
             by_kind: self.by_kind,
@@ -324,6 +367,7 @@ pub struct Timing {
 /// One observation axis that was unavailable, and why, carried in [`RunRecord::coverage`] so a
 /// fail-open partial record explains its own gaps instead of looking complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AxisGap {
     /// The host-syscall trace couldn't be loaded, scoped, or attributed.
     HostSyscalls(String),
@@ -476,8 +520,8 @@ mod tests {
             )
         };
         let totals = NetStats::default();
-        let a = NetSection::from_tap(vec![], totals, vec![d(40000, 3), d(40001, 4)]);
-        let b = NetSection::from_tap(vec![], totals, vec![d(40001, 4), d(40000, 3)]);
+        let a = NetSection::from_tap(vec![], totals, vec![d(40000, 3), d(40001, 4)], 0, 0);
+        let b = NetSection::from_tap(vec![], totals, vec![d(40001, 4), d(40000, 3)], 0, 0);
         assert_eq!(a, b); // same observations, shuffled input → identical section
         assert_eq!(a.denials.len(), 1, "one row per blocked endpoint");
         assert_eq!(a.denials[0].dst_addr, dst);
@@ -560,14 +604,24 @@ mod tests {
             vec![flow([8, 8, 8, 8], 443), flow([1, 1, 1, 1], 53)],
             totals,
             vec![],
+            0,
+            0,
         );
         let b = NetSection::from_tap(
             vec![flow([1, 1, 1, 1], 53), flow([8, 8, 8, 8], 443)],
             totals,
             vec![],
+            0,
+            0,
         );
         assert_eq!(a, b); // same flows, different input order → identical section
         assert_eq!(a.flows[0].key.dst_addr, u32::from_be_bytes([1, 1, 1, 1]));
+        // A full kernel table marks the section truncated: either counter alone is enough, and the
+        // healthy shape (0/0) reads complete. This is the honest-loss contract of decision 025's
+        // trail: a guest churning source ports can fill the table but not silence the loss.
+        assert!(!a.truncated());
+        assert!(NetSection::from_tap(vec![], totals, vec![], 1, 0).truncated());
+        assert!(NetSection::from_tap(vec![], totals, vec![], 0, 1).truncated());
         assert_eq!(a.totals, totals); // totals passed through unchanged
     }
 
@@ -585,7 +639,7 @@ mod tests {
         let totals = NetStats::default();
         let build = |flows: Vec<(FlowKey, FlowCounts)>| {
             RunRecord::from_parts(
-                Some(NetSection::from_tap(flows, totals, vec![])),
+                Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
                 ResourceSummary::default(),
                 SyscallFootprint::from_events(CG, &cg_events),
                 Timing {

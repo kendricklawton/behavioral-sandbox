@@ -28,10 +28,18 @@
 //! goes for the metrics endpoint: it serves plain HTTP with no auth, so bind it to loopback (or a
 //! private scrape network), never a public interface.
 //!
-//! **Teardown is crash-only.** A live session's VM drops when its connection ends, tearing the microVM
-//! down; and losing the whole daemon process (SIGKILL, OOM, a supervisor's SIGTERM) can't leak a VM
-//! either, the lifetime sentinel (decision 014) reaps it, and the next start clears a stale socket
-//! file. A graceful drain of in-flight sessions on shutdown is a later ops concern.
+//! **Bounded concurrency.** Every session is a full microVM (guest RAM, a tap, a cgroup), so the
+//! daemon bounds its own core resource: at the `--max-sessions` ceiling a new connection gets a
+//! typed "at capacity" refusal *before* any VM is booted, instead of walking the host into
+//! OOM/KVM/fd exhaustion. The ceiling is the hoster's knob (`0` = unlimited); admission control is
+//! engine self-protection, not tenancy (still no auth, no scheduling, no queueing).
+//!
+//! **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
+//! ends, tearing the microVM down; and losing the whole daemon process (SIGKILL, OOM) can't leak a
+//! VM either, the lifetime sentinel (decision 014) reaps it, and the next start clears a stale
+//! socket file. A supervisor's SIGTERM/SIGINT is handled: the daemon logs, unlinks its socket, and
+//! exits cleanly (in-flight sessions end crash-consistently, their VMs reaped by the sentinel); a
+//! graceful *drain* of in-flight sessions remains a later ops concern.
 #![forbid(unsafe_code)]
 
 mod metrics;
@@ -41,7 +49,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_cli::audit::Observability;
@@ -87,6 +95,12 @@ struct Cli {
     /// Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`.
     #[arg(long, value_name = "FILTER")]
     log: Option<String>,
+    /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
+    /// cgroup), so the daemon bounds its own core resource: at the ceiling a new connection is
+    /// refused with a typed "at capacity" error *before* any VM boots, rather than exhausting the
+    /// host. Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
+    #[arg(long, value_name = "N", default_value_t = 16)]
+    max_sessions: usize,
 }
 
 /// The daemon's shared context, handed by `Arc` to every session thread: the env-layered base config
@@ -112,6 +126,11 @@ struct Server {
     /// The metric registry the session threads bump; `Arc` so the metrics endpoint thread renders it
     /// independently of the `Server` borrow.
     metrics: Arc<Metrics>,
+    /// The `--max-sessions` ceiling (`0` = unlimited), enforced by [`SessionTicket::acquire`].
+    max_sessions: usize,
+    /// Live sessions right now, the counter the admission check compares against the ceiling.
+    /// Incremented by a successful [`SessionTicket::acquire`], decremented by the ticket's `Drop`.
+    active_sessions: AtomicUsize,
 }
 
 impl Server {
@@ -136,6 +155,10 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
+    // A supervisor's stop signal gets a prompt, clean exit: log, unlink the socket (so a restart
+    // never depends on the stale-path heuristic), and exit 0. In-flight sessions end
+    // crash-consistently; their VMs are reaped by the lifetime sentinel (decision 014).
+    install_signal_handler(cli.socket.clone());
     // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
     // explicitly either works or the daemon refuses to start, an operational surface the hoster
     // requested must not silently be absent (the same posture as `--allow`'s enforcement refusal).
@@ -146,21 +169,41 @@ fn main() -> ExitCode {
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
+    // The endpoint is plain HTTP with no auth (the doc says bind loopback or a private scrape
+    // network); a public bind may be a deliberate private-network choice, so warn, don't refuse,
+    // a fat-fingered `0.0.0.0` must at least be visible in the startup log.
+    if let Some(addr) = cli.metrics {
+        if !addr.ip().is_loopback() {
+            tracing::warn!(
+                %addr,
+                "metrics endpoint bound to a non-loopback address; it serves plain HTTP with no \
+                 auth, make sure this is a private scrape network"
+            );
+        }
+    }
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
     // on top). The daemon has no `.agent.toml` cwd discovery, that's a CLI-in-a-project convenience;
     // a daemon's config is its own flags + environment.
     let base = BootConfig::from_env();
     let jailed = !cli.unjailed;
+    // Snapshot bundles are guest-memory-sized, so they live under the engine's own scratch knob
+    // (`AGENT_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
+    // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
+    // large artifact (boot scratch, prewarm, snapshots) follows.
+    let snapshot_base = base
+        .scratch_dir
+        .join(format!("agentd-snapshots-{}", std::process::id()));
     let pool = build_optional_pool(cli.prewarm, &base, jailed);
     let server = Arc::new(Server {
         base,
         jailed,
         observ: Observability::load(),
         pool,
-        snapshot_base: std::env::temp_dir()
-            .join(format!("agentd-snapshots-{}", std::process::id())),
+        snapshot_base,
         snapshot_seq: AtomicU64::new(0),
         metrics: Arc::new(Metrics::default()),
+        max_sessions: cli.max_sessions,
+        active_sessions: AtomicUsize::new(0),
     });
     if let Some(metrics_listener) = metrics_listener {
         spawn_metrics(metrics_listener, &server);
@@ -214,14 +257,115 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
     }
 }
 
-/// Serve one accepted connection on its own thread. A thread-spawn failure (EAGAIN under load) drops
-/// just that connection, never the daemon.
+/// Serve one accepted connection on its own thread, behind the `--max-sessions` admission check:
+/// at the ceiling the client gets a typed "at capacity" refusal *before* any VM resource is
+/// committed (the whole point of the cap; thread-spawn EAGAIN would fire only after the boot was
+/// already under way). A thread-spawn failure (EAGAIN under load) drops just that connection,
+/// never the daemon.
 fn spawn_session(stream: UnixStream, server: Arc<Server>) {
+    let Some(ticket) = SessionTicket::acquire(&server) else {
+        refuse_at_capacity(stream, &server);
+        return;
+    };
     let spawned = std::thread::Builder::new()
         .name("agentd-session".into())
-        .spawn(move || session::serve(stream, &server));
+        .spawn(move || {
+            // The ticket lives exactly as long as the session: its `Drop` releases the slot
+            // however `serve` ends (clean close, client hang-up, or a panic unwinding).
+            let _ticket = ticket;
+            session::serve(stream, &server);
+        });
     if let Err(e) = spawned {
+        // The ticket was moved into the failed closure and dropped with it: the slot is free.
         tracing::warn!(error = %e, "cannot spawn a session thread; dropping the connection");
+    }
+}
+
+/// One admitted session's slot in the `--max-sessions` budget, released on `Drop` (RAII, so a
+/// session can't leak its slot on any exit path).
+struct SessionTicket(Arc<Server>);
+
+impl SessionTicket {
+    /// Take a slot if the daemon is under its ceiling (`None` at capacity). Lock-free CAS loop so
+    /// two racing accepts can never over-admit past the ceiling; `max_sessions == 0` is unlimited.
+    fn acquire(server: &Arc<Server>) -> Option<Self> {
+        if server.max_sessions == 0 {
+            server.active_sessions.fetch_add(1, Ordering::Relaxed);
+            return Some(Self(Arc::clone(server)));
+        }
+        let mut current = server.active_sessions.load(Ordering::Relaxed);
+        loop {
+            if current >= server.max_sessions {
+                return None;
+            }
+            match server.active_sessions.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return Some(Self(Arc::clone(server))),
+                Err(now) => current = now,
+            }
+        }
+    }
+}
+
+impl Drop for SessionTicket {
+    fn drop(&mut self) {
+        self.0.active_sessions.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed fatal
+/// [`agentd_protocol::Response::Error`] (the client's `open` reads it as the reply), then the
+/// connection drops. The write is timeout-bounded so a stalled client can't park the accept loop,
+/// and best-effort, the refusal itself must never take the daemon down.
+fn refuse_at_capacity(stream: UnixStream, server: &Server) {
+    tracing::warn!(
+        max_sessions = server.max_sessions,
+        "refusing a connection: at the session ceiling"
+    );
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
+    let mut stream = stream;
+    let refusal = agentd_protocol::Response::Error {
+        message: format!(
+            "at capacity: {} session(s) live, the daemon's --max-sessions ceiling; retry later \
+             or raise the ceiling",
+            server.max_sessions
+        ),
+        fatal: true,
+    };
+    let _ = agentd_protocol::write_message(&mut stream, &refusal);
+}
+
+/// Install the SIGTERM/SIGINT handler: log, unlink the socket, exit 0 (a clean stop for a
+/// supervisor). Best-effort, a host where the handler can't be installed keeps the crash-only
+/// behavior (the sentinel still reaps VMs; the next start still clears the stale socket).
+fn install_signal_handler(socket: PathBuf) {
+    let spawned = std::thread::Builder::new()
+        .name("agentd-signals".into())
+        .spawn(move || {
+            let mut signals = match signal_hook::iterator::Signals::new([
+                signal_hook::consts::SIGTERM,
+                signal_hook::consts::SIGINT,
+            ]) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot install the signal handler; shutdown stays crash-only");
+                    return;
+                }
+            };
+            if let Some(signal) = signals.forever().next() {
+                tracing::info!(signal, "shutting down: removing the socket and exiting");
+                // In-flight sessions end crash-consistently (their VMs reaped by the sentinel);
+                // the unlink is what a plain process kill would leave behind.
+                let _ = std::fs::remove_file(&socket);
+                std::process::exit(0);
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::warn!(error = %e, "cannot spawn the signal thread; shutdown stays crash-only");
     }
 }
 
@@ -263,8 +407,12 @@ fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, Vm
     let source_config = base.clone().with_limits(Limits::default());
     let source = Sandbox::open_unjailed(source_config)?;
 
-    // 2. Snapshot it into a per-daemon scratch dir.
-    let snap_dir = std::env::temp_dir().join(format!("agentd-prewarm-{}", std::process::id()));
+    // 2. Snapshot it into a per-daemon dir under the engine's scratch knob (`AGENT_SCRATCH_DIR`),
+    //    the same routing as the session snapshot bundles: guest-memory-sized files belong where
+    //    the operator pointed scratch, never a hardcoded `$TMPDIR`.
+    let snap_dir = base
+        .scratch_dir
+        .join(format!("agentd-prewarm-{}", std::process::id()));
     std::fs::create_dir_all(&snap_dir)
         .map_err(|e| VmmError::Vmm(format!("create prewarm dir {}: {e}", snap_dir.display())))?;
     let snapshot = source.snapshot(&snap_dir)?;
@@ -308,12 +456,23 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
             .map_err(|e| format!("remove stale socket {}: {e}", socket.display()))?;
         tracing::warn!(socket = %socket.display(), "removed a stale socket from a dead daemon");
     }
-    UnixListener::bind(socket).map_err(|e| {
+    let listener = UnixListener::bind(socket).map_err(|e| {
         format!(
             "bind {}: {e} (does its parent directory exist and is it writable?)",
             socket.display()
         )
-    })
+    })?;
+    // Defense-in-depth on the socket's own mode: the parent directory's permissions are the
+    // designed access control (the module doc), but the file itself would otherwise inherit the
+    // ambient umask, so pin it to owner+group. A hoster who wants wider access grants it on the
+    // directory (or re-chmods), a deliberate choice instead of an inherited accident.
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(e) = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660)) {
+            tracing::warn!(error = %e, socket = %socket.display(), "cannot chmod the socket to 0660");
+        }
+    }
+    Ok(listener)
 }
 
 /// stderr logging, filter from `--log` else `AGENT_LOG` else `info`. `info` (not the CLI's `warn`):

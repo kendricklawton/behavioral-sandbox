@@ -18,6 +18,7 @@ dependencies = [
  "ratatui",
  "serde",
  "serde_json",
+ "signal-hook",
  "toml",
  "tracing",
  "tracing-subscriber",

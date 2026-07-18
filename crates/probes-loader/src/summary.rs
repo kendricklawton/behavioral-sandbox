@@ -153,6 +153,10 @@ fn net_summary(out: &mut String, net: &NetSection) {
     // Guest-view bytes: the record's tap-view `ingress` is what the guest sent, `egress` what it received.
     field(out, "sent_bytes", net.totals.ingress_bytes, false);
     field(out, "recv_bytes", net.totals.egress_bytes, false);
+    // An agent reading `reached`/`denied` between turns must know when the lists are not
+    // exhaustive (the kernel's flow/denial tables saturated); the counts ride the full record.
+    out.push_str(",\"truncated\":");
+    out.push_str(if net.truncated() { "true" } else { "false" });
     out.push('}');
 }
 
@@ -286,7 +290,7 @@ mod tests {
             ],
         );
         RunRecord::from_parts(
-            Some(NetSection::from_tap(flows, totals, denials)),
+            Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
             resources,
             host_syscalls,
             Timing {
@@ -307,7 +311,8 @@ mod tests {
         let expected = concat!(
             "{\"schema\":1,\"timing\":{\"boot_ns\":120000000,\"exec_ns\":42000000}",
             ",\"network\":{\"reached\":[\"1.1.1.1:53/udp\",\"8.8.8.8:443/tcp\"],",
-            "\"denied\":[\"9.9.9.9:443/tcp\"],\"sent_bytes\":120,\"recv_bytes\":200}",
+            "\"denied\":[\"9.9.9.9:443/tcp\"],\"sent_bytes\":120,\"recv_bytes\":200,",
+            "\"truncated\":false}",
             ",\"host_syscalls\":{\"execve\":1,\"openat\":2,\"connect\":0,",
             "\"notable\":[\"execve /bin/sh\",\"openat /etc/hosts\"],\"truncated\":false}",
             ",\"resources\":{\"cpu_ns\":5000,\"mem_peak_bytes\":4096,\"io_read_bytes\":null,",
@@ -396,7 +401,7 @@ mod tests {
             egress_bytes: 999,
         };
         let record = RunRecord::from_parts(
-            Some(NetSection::from_tap(flows, totals, vec![])),
+            Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
             ResourceSummary::default(),
             SyscallFootprint::from_events(0x42, &events),
             Timing {

@@ -105,8 +105,18 @@ impl Pool {
             // probe, `probe_agent` would return the *permanent* `require_vsock` error, a structural
             // condition, not a dead-clone signal, so hand the popped clone out directly rather than
             // reading that error as "unhealthy" and tearing down the whole pool on the first take.
+            // The one cheap liveness signal left is the VMM process itself: a clone whose VMM died
+            // while pooled is discarded like a failed probe, not handed out to fail on first use.
             if !self.snapshot.has_vsock {
-                return Ok(vm);
+                if std::path::Path::new(&format!("/proc/{}", vm.vmm_pid())).exists() {
+                    return Ok(vm);
+                }
+                tracing::warn!(
+                    vmm_pid = vm.vmm_pid(),
+                    "discarding pooled clone whose VMM process died"
+                );
+                drop(vm);
+                continue;
             }
             match vm.probe_agent() {
                 Ok(()) => return Ok(vm),

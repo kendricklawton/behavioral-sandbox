@@ -3,13 +3,15 @@ name = "agent-probes-loader"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 authors.workspace = true
 publish = false
-description = "Userspace loader — attach the eBPF probes to a sandbox, read their maps, stream events."
+description = "Userspace loader: attach the eBPF probes to a sandbox, read their maps, stream events."
 
 [dependencies]
 # The userspace side of aya: load the object built from `crates/probes` (`cargo xtask build-probes`),
-# attach its programs, and read their maps — synchronously, no async runtime (see
+# attach its programs, and read their maps, synchronously, no async runtime (see
 # `docs/probes.md`). The tc/XDP and cgroup-bpf load/attach paths build on this.
 aya = "0.13"
 

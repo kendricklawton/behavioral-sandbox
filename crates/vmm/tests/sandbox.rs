@@ -89,7 +89,10 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
     assert_eq!(result.stdout, b"from stdin\n");
     assert_eq!(
         result.files,
-        vec![("art.txt".to_string(), b"api-test=from a file".to_vec())],
+        vec![agent_vmm::Artifact::new(
+            "art.txt",
+            b"api-test=from a file".to_vec()
+        )],
         "the artifact must hold the env value and the injected file, combined in-guest"
     );
 

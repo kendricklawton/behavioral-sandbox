@@ -133,7 +133,11 @@ const TP_NAME: &str = "sys_enter_execve";
 /// A typed failure from loading/attaching/reading the probes, the loader's analogue of the driver's
 /// `VmmError`: a missing prerequisite, a missing object, a kernel load/verify/permission failure, an
 /// attach failure, or a map read failure is a typed `Err`, never a panic (the host path never panics).
+///
+/// `#[non_exhaustive]` like `VmmError`: a new probe or attach mode adds a new failure class as a new
+/// variant without breaking a downstream `match` (the crate is pinned by git rev downstream).
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ProbeError {
     /// The host can't load eBPF at all: a missing prerequisite named up front (no kernel BTF, or the
     /// `CAP_BPF`/`CAP_PERFMON` capabilities), caught by [`check_support`] *before* a load so it reads
@@ -174,8 +178,10 @@ impl From<PolicyError> for ProbeError {
 
 /// A rejected egress-policy input, caught by construction (`parse, don't validate`) so an illegal policy
 /// can't reach the kernel map: an out-of-range CIDR prefix, or more rules than the map holds. Distinct
-/// from [`ProbeError`]'s eBPF-runtime failures.
+/// from [`ProbeError`]'s eBPF-runtime failures. `#[non_exhaustive]`: a richer policy vocabulary adds
+/// new rejection classes as new variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PolicyError {
     /// An IPv4 CIDR prefix length over 32 (the given value), rejected by [`Ipv4Cidr::new`].
     PrefixTooLong(u8),
@@ -203,7 +209,17 @@ impl std::fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
-impl std::error::Error for ProbeError {}
+impl std::error::Error for ProbeError {
+    /// Preserve the chain: [`ProbeError::Policy`] wraps a real error, so a caller walking
+    /// `.source()` (or downcasting) reaches the [`PolicyError`] instead of a dead end, the same
+    /// contract `VmmError` keeps for its wrapped causes.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Policy(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 /// A loaded, attached `sys_enter_execve` counter. Holds the aya [`Ebpf`] that owns the
 /// program, its map, and the live attachment; dropping this detaches and frees them, pinning nothing
@@ -262,16 +278,7 @@ impl ExecveCounter {
     /// # Errors
     /// [`ProbeError::Map`] if the counter map is missing or unreadable.
     pub fn count(&self) -> Result<u64, ProbeError> {
-        let map = self
-            .ebpf
-            .map(MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{MAP}` not found")))?;
-        let counter: PerCpuArray<_, u64> = PerCpuArray::try_from(map)
-            .map_err(|e| ProbeError::Map(format!("open `{MAP}` as a per-cpu array: {e}")))?;
-        let per_cpu = counter
-            .get(&0, 0)
-            .map_err(|e| ProbeError::Map(format!("read `{MAP}`[0]: {e}")))?;
-        Ok(per_cpu.iter().copied().sum())
+        per_cpu_sum(&self.ebpf, MAP)
     }
 
     /// The per-PID `execve` counts as `(pid, count)` pairs, read from the `EXECVE_BY_PID` hash map
@@ -295,6 +302,22 @@ impl ExecveCounter {
         }
         Ok(out)
     }
+}
+
+/// Read a kernel-side single-slot **per-CPU** `u64` counter (the `EVENT_DROPS` shape) and sum its
+/// slots into one total. The one read every drop/count surface shares ([`ExecveCounter::count`],
+/// [`SyscallTracer::dropped_events`], [`TapMonitor::dropped_flows`]/[`dropped_denials`](TapMonitor::dropped_denials)),
+/// so the map-open/read error story can't drift between them.
+fn per_cpu_sum(ebpf: &Ebpf, name: &str) -> Result<u64, ProbeError> {
+    let map = ebpf
+        .map(name)
+        .ok_or_else(|| ProbeError::Map(format!("map `{name}` not found")))?;
+    let counter: PerCpuArray<_, u64> = PerCpuArray::try_from(map)
+        .map_err(|e| ProbeError::Map(format!("open `{name}` as a per-cpu array: {e}")))?;
+    let per_cpu = counter
+        .get(&0, 0)
+        .map_err(|e| ProbeError::Map(format!("read `{name}`[0]: {e}")))?;
+    Ok(per_cpu.iter().copied().sum())
 }
 
 /// The tracepoint programs the syscall tracer attaches, paired with the `syscalls` event each hooks.
@@ -448,17 +471,7 @@ impl SyscallTracer {
     /// # Errors
     /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
     pub fn dropped_events(&self) -> Result<u64, ProbeError> {
-        let map = self
-            .ebpf
-            .map(EVENT_DROPS_MAP)
-            .ok_or_else(|| ProbeError::Map(format!("map `{EVENT_DROPS_MAP}` not found")))?;
-        let drops: PerCpuArray<_, u64> = PerCpuArray::try_from(map).map_err(|e| {
-            ProbeError::Map(format!("open `{EVENT_DROPS_MAP}` as a per-cpu array: {e}"))
-        })?;
-        let per_cpu = drops
-            .get(&0, 0)
-            .map_err(|e| ProbeError::Map(format!("read `{EVENT_DROPS_MAP}`[0]: {e}")))?;
-        Ok(per_cpu.iter().copied().sum())
+        per_cpu_sum(&self.ebpf, EVENT_DROPS_MAP)
     }
 
     /// Register `cgroup_id` in the trace target *set* and switch to set mode if not already, so from
@@ -601,6 +614,13 @@ const ENFORCE_MAP: &str = "ENFORCE";
 /// The per-destination denied-packet counters the enforcement drop path records (`#[map] static
 /// DENIALS`), read back by [`TapMonitor::denials`], the audit trail of blocked endpoints.
 const DENIALS_MAP: &str = "DENIALS";
+/// The per-CPU counter of new flows a full `FLOWS` map dropped (`#[map] static FLOW_DROPS`), read by
+/// [`TapMonitor::dropped_flows`] so a saturated flow table is reported, never a silently thinner
+/// record (the `EVENT_DROPS` discipline, applied to the network axis).
+const FLOW_DROPS_MAP: &str = "FLOW_DROPS";
+/// The [`FLOW_DROPS_MAP`] twin for denial rows (`#[map] static DENIAL_DROPS`), read by
+/// [`TapMonitor::dropped_denials`].
+const DENIAL_DROPS_MAP: &str = "DENIAL_DROPS";
 /// `EEXIST`: a clsact qdisc already on the interface is not an error (the attach is idempotent).
 const EEXIST: i32 = 17;
 /// Where `ip netns` bind-mounts a named network namespace's handle (matches the driver's own
@@ -611,6 +631,7 @@ const NETNS_DIR: &str = "/run/netns";
 /// perspective, **ingress** is what the guest sent, **egress** what it received. The sandbox-level
 /// rollup a caller exports, above the per-flow detail [`TapMonitor::flows`] gives.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct NetStats {
     /// Packets the guest sent (tap ingress), summed over flows.
     pub ingress_packets: u64,
@@ -734,6 +755,30 @@ impl TapMonitor {
             stats.egress_bytes = stats.egress_bytes.saturating_add(c.egress_bytes);
         })?;
         Ok(stats)
+    }
+
+    /// New flows the kernel **dropped** because the `FLOWS` map was full, summed across CPUs: each
+    /// count is a packet whose 5-tuple could not be admitted to the flow table, so its traffic is
+    /// absent from [`flows`](Self::flows) *and* undercounted by [`totals`](Self::totals). Without
+    /// this counter a guest could fill the table with benign flows and evict its real traffic from
+    /// its own record silently; a nonzero value marks the network section truncated and becomes a
+    /// coverage gap on the run's record. Monotonic since attach (each monitor owns fresh maps).
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
+    pub fn dropped_flows(&self) -> Result<u64, ProbeError> {
+        per_cpu_sum(&self.ebpf, FLOW_DROPS_MAP)
+    }
+
+    /// The [`dropped_flows`](Self::dropped_flows) twin for the denial trail: denied packets whose
+    /// destination row a full `DENIALS` map could not record. The packets were still dropped at the
+    /// tap (enforcement never depends on the map); only the audit row is missing, and this makes
+    /// that loss visible instead of silent.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
+    pub fn dropped_denials(&self) -> Result<u64, ProbeError> {
+        per_cpu_sum(&self.ebpf, DENIAL_DROPS_MAP)
     }
 
     /// The **denied** guest-sent packets: `(FlowKey, count)` pairs from the `DENIALS` map, one per
@@ -1408,6 +1453,7 @@ impl ResourceMeter {
 /// and the syscall trace) is the audit record's convergence, kept here, out of `agent-vmm`, so the driver stays
 /// independent of the eBPF loader (they bridge only by plain values).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ResourceSummary {
     /// On-CPU time the VMM's cgroup accumulated while metered, the host CPU the sandbox burned running
     /// its guest, from the scheduler tracepoint (`ResourceMeter`). [`Duration::ZERO`] if the cgroup was
@@ -1428,6 +1474,7 @@ pub struct ResourceSummary {
 /// Read one with [`read`](Self::read), pointed at the cgroup dir the Firecracker track placed the VMM in
 /// (`<cgroup mount>/<path>`; the driver knows it and supplies it).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CgroupStats {
     /// Total CPU time the kernel charged this cgroup, microseconds (`cpu.stat`'s `usage_usec`). An
     /// independent cross-check on [`ResourceMeter::cpu_time`], from the scheduler's own accounting.

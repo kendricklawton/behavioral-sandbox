@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use agent_channel::{ClientConnection, Response};
 
-use crate::{ExecMetrics, RunResult, VmmError};
+use crate::{Artifact, ExecMetrics, RunResult, VmmError};
 
 /// Deadline for the vsock connect + `CONNECT` handshake, and the read/write timeout the exec
 /// connection carries, so a dead-or-stalled guest is a typed timeout, never a host hang
@@ -134,10 +134,22 @@ pub(crate) fn run_exec<S: Read + Write>(
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut files: Vec<Artifact> = Vec::new();
     // Bound stdout + stderr + artifact *names and bytes* together. `FRAME_FLOOR` is charged per
     // frame so a flood of empty frames (or `File` frames whose budget is spent on `path`, not
     // `data`) can't spin the loop or grow `files` without advancing the cap.
+    //
+    // The charge is checked **before** buffering: a frame that would push past the cap is rejected
+    // without being copied in, so `max_output` is a hard bound on what the host buffers, not a
+    // soft one that a final `MAX_PAYLOAD`-sized frame could overshoot by ~1 MiB.
+    fn charge(captured: &mut usize, add: usize, max: usize) -> Result<(), VmmError> {
+        let next = captured.saturating_add(add);
+        if next > max {
+            return Err(VmmError::OutputCap { limit: max });
+        }
+        *captured = next;
+        Ok(())
+    }
     let mut captured = 0usize;
     loop {
         // The host's own wall-clock deadline, checked *before* each blocking read. The socket's
@@ -152,11 +164,11 @@ pub(crate) fn run_exec<S: Read + Write>(
         }
         match conn.recv_response()? {
             Response::Stdout(b) => {
-                captured += b.len() + FRAME_FLOOR;
+                charge(&mut captured, b.len() + FRAME_FLOOR, bounds.max_output)?;
                 stdout.extend_from_slice(&b);
             }
             Response::Stderr(b) => {
-                captured += b.len() + FRAME_FLOOR;
+                charge(&mut captured, b.len() + FRAME_FLOOR, bounds.max_output)?;
                 stderr.extend_from_slice(&b);
             }
             Response::File { path, data } => {
@@ -171,8 +183,12 @@ pub(crate) fn run_exec<S: Read + Write>(
                          working tree"
                     )));
                 }
-                captured += path.len() + data.len() + FRAME_FLOOR;
-                files.push((path, data));
+                charge(
+                    &mut captured,
+                    path.len() + data.len() + FRAME_FLOOR,
+                    bounds.max_output,
+                )?;
+                files.push(Artifact::new(path, data));
             }
             Response::Exit { code } => {
                 tracing::info!(
@@ -217,11 +233,6 @@ pub(crate) fn run_exec<S: Read + Write>(
                     "unexpected response frame from guest agent".into(),
                 ))
             }
-        }
-        if captured > bounds.max_output {
-            return Err(VmmError::OutputCap {
-                limit: bounds.max_output,
-            });
         }
     }
 }
@@ -433,7 +444,7 @@ mod tests {
         // The one artifact that exists comes back; the missing one is simply omitted.
         assert_eq!(
             result.files,
-            vec![("out/up.txt".to_string(), b"HELLO\n".to_vec())]
+            vec![Artifact::new("out/up.txt", b"HELLO\n".to_vec())]
         );
         server.join().expect("server thread");
     }

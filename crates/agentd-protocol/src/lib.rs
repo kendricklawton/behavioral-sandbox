@@ -219,6 +219,7 @@ pub enum Response {
 /// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile
 /// or buggy peer is a typed error the daemon answers or drops, never a panic (guardrail 5).
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ProtocolError {
     /// The underlying stream failed.
     Io(std::io::Error),
@@ -356,7 +357,9 @@ fn read_line_capped(
 /// daemon writes a [`Response`]; a client writes a [`Request`].
 ///
 /// # Errors
-/// [`ProtocolError::Io`] on a write failure (serialization of these fixed types is infallible).
+/// [`ProtocolError::Io`] on a write failure (serialization of these fixed types is infallible);
+/// [`ProtocolError::TooLarge`] if the serialized line exceeds [`MAX_MESSAGE_BYTES`], the same
+/// envelope the read side enforces, refused before a byte is written.
 pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), ProtocolError> {
     let envelope = Envelope {
         schema: WIRE_SCHEMA,
@@ -367,6 +370,13 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
     let mut line = serde_json::to_string(&envelope)
         .map_err(|e| ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
     line.push('\n');
+    // The encode side honors the same size envelope as the decode side: a line the peer's own
+    // `read_message` would reject as `TooLarge` is refused *here*, typed, before any byte moves.
+    // Latent today (every producer is bounded well under the cap: flows ≤ 4096, notable ≤ 64), but
+    // the size contract must not live as an implicit invariant of a different crate's caps.
+    if line.len() > MAX_MESSAGE_BYTES {
+        return Err(ProtocolError::TooLarge);
+    }
     w.write_all(line.as_bytes()).map_err(ProtocolError::Io)?;
     w.flush().map_err(ProtocolError::Io)
 }

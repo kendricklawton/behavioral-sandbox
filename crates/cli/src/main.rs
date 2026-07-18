@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use agent_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
-use agent_vmm::{BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
+use agent_vmm::{Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 use clap::{Parser, Subcommand};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
@@ -40,6 +40,34 @@ const EXIT_OPERATIONAL: u8 = 2;
 /// surfaces, two independent versions. Same policy, additive within a version, a rename/removal
 /// bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
+
+/// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error
+/// (and its `kind()` buckets, pinned by embedders) is never minted for faults that are the CLI's
+/// own: a bad flag combination, a refused artifact path, a local file write. `Engine` passes the
+/// driver's error through untouched (`?` converts via `From`); both print as `agent: <reason>` and
+/// exit 2, the taxonomy is for honesty, not for different handling.
+#[derive(Debug)]
+enum CliError {
+    /// A CLI-layer fault (usage or local I/O), phrased for the operator.
+    Cli(String),
+    /// The engine's typed error, passed through.
+    Engine(VmmError),
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cli(m) => f.write_str(m),
+            Self::Engine(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl From<VmmError> for CliError {
+    fn from(e: VmmError) -> Self {
+        Self::Engine(e)
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -183,7 +211,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
+fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
     match cmd {
         Cmd::Run(args) => run_command(*args, file),
         Cmd::Shell(args) => shell(args, file),
@@ -206,7 +234,12 @@ fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
 /// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
 /// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
 /// / `--record` full JSON / `--record-summary` model-legible projection, the three faces of one record).
-fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
+fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
+    // The run's root span: boot, exec, and the audit-record events all nest under it, so one run's
+    // telemetry is greppable as a unit. `vmm_pid` is recorded once the sandbox is up, the id that
+    // ties these log lines to the audit record and the host's own process table.
+    let span = tracing::info_span!("run", vmm_pid = tracing::field::Empty);
+    let _span = span.enter();
     let mut limits = limits_with(args.vcpus, args.mem);
     if let Some(secs) = args.wall {
         limits.wall = Duration::from_secs(secs); // clap enforced >= 1 at parse
@@ -216,7 +249,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     }
     // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
     if args.watch && !std::io::stderr().is_terminal() {
-        return Err(VmmError::Vmm(
+        return Err(CliError::Cli(
             "--watch draws on stderr and needs it to be a terminal; use --trace or --record when \
              piping"
                 .to_string(),
@@ -231,7 +264,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     } else {
         let policy = build_egress(&args.allow)?;
         if let Err(e) = agent_probes_loader::check_support() {
-            return Err(VmmError::Vmm(format!(
+            return Err(CliError::Cli(format!(
                 "--allow requested egress enforcement, but this host can't load the eBPF probes: {e}"
             )));
         }
@@ -243,6 +276,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     let mut config = base_config(file).with_limits(limits);
     config.enable_network = args.net;
     let sandbox = open(config, args.unjailed)?;
+    span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
         // it panics on a closed pipe (`agent run … | head -0`), and a no-panic host path
@@ -252,7 +286,10 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             "booted microVM to userspace in {} ms",
             sandbox.boot_latency().as_millis()
         );
-        return sandbox.shutdown().map(|()| ExitCode::SUCCESS);
+        return sandbox
+            .shutdown()
+            .map(|()| ExitCode::SUCCESS)
+            .map_err(CliError::from);
     }
 
     // The audit surface, when a flag asked for it (a plain `agent run` pays nothing): load the shared
@@ -342,7 +379,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             "artifacts": result
                 .files
                 .iter()
-                .map(|(path, data)| serde_json::json!({ "path": path, "bytes": data.len() }))
+                .map(|a| serde_json::json!({ "path": a.path, "bytes": a.data.len() }))
                 .collect::<Vec<_>>(),
             "metrics": {
                 "boot_ms": boot_latency.as_millis() as u64,
@@ -392,7 +429,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
-fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, VmmError> {
+fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
     let sandbox = open(
         base_config(file).with_limits(limits_with(args.vcpus, args.mem)),
         args.unjailed,
@@ -442,11 +479,14 @@ fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, 
             Err(e) => {
                 let _ = writeln!(err_out, "agent: session lost: {e}");
                 let _ = sandbox.shutdown();
-                return Err(e);
+                return Err(e.into());
             }
         }
     }
-    sandbox.shutdown().map(|()| ExitCode::SUCCESS)
+    sandbox
+        .shutdown()
+        .map(|()| ExitCode::SUCCESS)
+        .map_err(CliError::from)
 }
 
 /// Open the sandbox jailed by default, unjailed on the explicit flag, the CLI face of the
@@ -513,9 +553,9 @@ fn parse_allow(s: &str) -> Result<AllowRule, String> {
 /// Fold the `--allow` rules into a deny-by-default [`EgressPolicy`]. Refuses more than the kernel
 /// policy map holds ([`MAX_POLICY_RULES`]) with a typed error naming the cap, rather than letting the
 /// overflow surface as a cryptic attach-time failure.
-fn build_egress(allows: &[AllowRule]) -> Result<EgressPolicy, VmmError> {
+fn build_egress(allows: &[AllowRule]) -> Result<EgressPolicy, CliError> {
     if allows.len() > MAX_POLICY_RULES {
-        return Err(VmmError::Vmm(format!(
+        return Err(CliError::Cli(format!(
             "too many --allow rules: {} given, but the kernel egress policy holds at most \
              {MAX_POLICY_RULES}",
             allows.len()
@@ -604,9 +644,9 @@ fn read_put_files(puts: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, VmmError> 
 /// non-climbing (`run_exec`); here we additionally resolve every component without following a
 /// symlink, so a pre-existing symlinked directory in the cwd (`out -> /etc`) can't turn a
 /// `Normal`-component path into an escape the string check alone is blind to.
-fn write_artifacts(files: &[(String, Vec<u8>)], requested: &[String]) -> Result<(), VmmError> {
+fn write_artifacts(files: &[Artifact], requested: &[String]) -> Result<(), CliError> {
     let cwd = std::env::current_dir()
-        .map_err(|e| VmmError::Vmm(format!("resolve current directory: {e}")))?;
+        .map_err(|e| CliError::Cli(format!("resolve current directory: {e}")))?;
     write_artifacts_in(&cwd, files, requested)
 }
 
@@ -614,15 +654,15 @@ fn write_artifacts(files: &[(String, Vec<u8>)], requested: &[String]) -> Result<
 /// testable without mutating the process-global cwd.
 fn write_artifacts_in(
     base: &Path,
-    files: &[(String, Vec<u8>)],
+    files: &[Artifact],
     requested: &[String],
-) -> Result<(), VmmError> {
-    for (path, data) in files {
+) -> Result<(), CliError> {
+    for Artifact { path, data, .. } in files {
         // Deny-by-default: the guest doesn't get to choose what lands on the host, only a name the
         // operator requested with `--get` is eligible. An honest guest only ever returns requested
         // paths (it echoes the request's artifact list), so a mismatch is a misbehaving guest.
         if !requested.iter().any(|r| r == path) {
-            return Err(VmmError::Vmm(format!(
+            return Err(CliError::Cli(format!(
                 "refusing artifact {path:?}: not requested with --get"
             )));
         }
@@ -633,13 +673,13 @@ fn write_artifacts_in(
                 .components()
                 .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
         if !named {
-            return Err(VmmError::Vmm(format!(
+            return Err(CliError::Cli(format!(
                 "refusing to write artifact {path:?} outside the current directory"
             )));
         }
         let dest = confined_dest(base, rel)?;
         std::fs::write(&dest, data)
-            .map_err(|e| VmmError::Vmm(format!("write artifact {path:?}: {e}")))?;
+            .map_err(|e| CliError::Cli(format!("write artifact {path:?}: {e}")))?;
         tracing::info!(path = %path, bytes = data.len(), "wrote artifact");
     }
     Ok(())
@@ -650,7 +690,7 @@ fn write_artifacts_in(
 /// component. `symlink_metadata` is `lstat` (no traversal), so a pre-existing symlinked directory,
 /// or a symlinked final name, is rejected rather than written through, closing the
 /// `out -> /etc` escape that a string-only check misses.
-fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, VmmError> {
+fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
     let names: Vec<_> = rel
         .components()
         .filter_map(|c| match c {
@@ -664,19 +704,19 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, VmmError> {
         let last = i + 1 == names.len();
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.file_type().is_symlink() => {
-                return Err(VmmError::Vmm(format!(
+                return Err(CliError::Cli(format!(
                     "refusing to write artifact through the symlink {cur:?}"
                 )));
             }
             // The final component may already be a regular file (a legitimate overwrite), but not a
             // directory we'd clobber; an intermediate component must be a real directory to descend.
             Ok(m) if last && m.is_dir() => {
-                return Err(VmmError::Vmm(format!(
+                return Err(CliError::Cli(format!(
                     "refusing to write artifact over the directory {cur:?}"
                 )));
             }
             Ok(m) if !last && !m.is_dir() => {
-                return Err(VmmError::Vmm(format!(
+                return Err(CliError::Cli(format!(
                     "artifact path component {cur:?} is not a directory"
                 )));
             }
@@ -685,10 +725,10 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, VmmError> {
                 // Create missing intermediate dirs; the final missing component the write creates.
                 if !last {
                     std::fs::create_dir(&cur)
-                        .map_err(|e| VmmError::Vmm(format!("create artifact dir {cur:?}: {e}")))?;
+                        .map_err(|e| CliError::Cli(format!("create artifact dir {cur:?}: {e}")))?;
                 }
             }
-            Err(e) => return Err(VmmError::Vmm(format!("stat artifact path {cur:?}: {e}"))),
+            Err(e) => return Err(CliError::Cli(format!("stat artifact path {cur:?}: {e}"))),
         }
     }
     Ok(cur)
@@ -733,7 +773,7 @@ fn init_tracing(flag: Option<&str>) {
 mod tests {
     use super::{
         build_egress, limits_with, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus,
-        write_artifacts_in, AllowRule, MAX_VCPUS,
+        write_artifacts_in, AllowRule, Artifact, MAX_VCPUS,
     };
     use agent_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
     use std::net::Ipv4Addr;
@@ -766,8 +806,8 @@ mod tests {
         }
     }
 
-    fn artifact(path: &str, data: &[u8]) -> Vec<(String, Vec<u8>)> {
-        vec![(path.to_string(), data.to_vec())]
+    fn artifact(path: &str, data: &[u8]) -> Vec<Artifact> {
+        vec![Artifact::new(path, data.to_vec())]
     }
 
     #[test]

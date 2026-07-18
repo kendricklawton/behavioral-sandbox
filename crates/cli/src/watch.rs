@@ -423,7 +423,7 @@ mod tests {
     };
 
     fn net(flows: Vec<(FlowKey, FlowCounts)>, denials: Vec<(FlowKey, u64)>) -> NetSection {
-        NetSection::from_tap(flows, NetStats::default(), denials)
+        NetSection::from_tap(flows, NetStats::default(), denials, 0, 0)
     }
 
     fn key(dst: [u8; 4], dport: u16) -> FlowKey {
@@ -439,31 +439,27 @@ mod tests {
     #[test]
     fn timeline_emits_once_per_new_flow_and_tracks_denial_deltas() {
         let mut tl = Timeline::new();
-        let snap1 = LiveSnapshot {
-            network: Some(net(
-                vec![(key([1, 1, 1, 1], 53), FlowCounts::default())],
-                vec![(key([9, 9, 9, 9], 443), 2)],
-            )),
-            resources: None,
-            host_syscalls: None,
-        };
+        // `LiveSnapshot` is `#[non_exhaustive]` (it grows an axis at a time), so fixtures build
+        // default-then-assign rather than by struct literal.
+        let mut snap1 = LiveSnapshot::default();
+        snap1.network = Some(net(
+            vec![(key([1, 1, 1, 1], 53), FlowCounts::default())],
+            vec![(key([9, 9, 9, 9], 443), 2)],
+        ));
         tl.observe(Duration::from_millis(100), &snap1);
         assert_eq!(tl.events.len(), 2, "one flow + one denial entry");
         // The same snapshot again: nothing new, nothing emitted.
         tl.observe(Duration::from_millis(200), &snap1);
         assert_eq!(tl.events.len(), 2, "unchanged state emits nothing");
         // The denial count grows and a second flow appears: one entry each.
-        let snap2 = LiveSnapshot {
-            network: Some(net(
-                vec![
-                    (key([1, 1, 1, 1], 53), FlowCounts::default()),
-                    (key([8, 8, 8, 8], 443), FlowCounts::default()),
-                ],
-                vec![(key([9, 9, 9, 9], 443), 5)],
-            )),
-            resources: None,
-            host_syscalls: None,
-        };
+        let mut snap2 = LiveSnapshot::default();
+        snap2.network = Some(net(
+            vec![
+                (key([1, 1, 1, 1], 53), FlowCounts::default()),
+                (key([8, 8, 8, 8], 443), FlowCounts::default()),
+            ],
+            vec![(key([9, 9, 9, 9], 443), 5)],
+        ));
         tl.observe(Duration::from_millis(300), &snap2);
         assert_eq!(tl.events.len(), 4);
         let texts: Vec<&str> = tl.events.iter().map(|(_, t)| t.as_str()).collect();
@@ -490,11 +486,8 @@ mod tests {
             }
         };
         let mut tl = Timeline::new();
-        let snap = LiveSnapshot {
-            network: None,
-            resources: None,
-            host_syscalls: Some(SyscallFootprint::from_events(1, &[mk(b"/etc/hosts")])),
-        };
+        let mut snap = LiveSnapshot::default();
+        snap.host_syscalls = Some(SyscallFootprint::from_events(1, &[mk(b"/etc/hosts")]));
         tl.observe(Duration::ZERO, &snap);
         tl.observe(Duration::from_millis(50), &snap);
         assert_eq!(tl.events.len(), 1, "a distinct syscall lands once");

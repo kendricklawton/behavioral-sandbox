@@ -4,7 +4,7 @@ From a fresh clone to a first sandboxed run you can trust, observed from the hos
 path; each step links to its full chapter.
 
 > **Linux + KVM only.** The engine needs `/dev/kvm` and a supported host (x86_64/aarch64, kernel
-> ≥ 5.15). Run [`cargo xtask doctor`](./cli-install.md#supported-platforms), or `agent doctor` once
+> ≥ 5.15). Run [`cargo xtask setup`](./cli-install.md#supported-platforms), or `agent doctor` once
 > built, to see exactly where your host sits before the first sandbox.
 
 ## 1. Stand it up
@@ -45,9 +45,10 @@ it, and every allowance is recorded:
 
 ```console
 # Allow exactly one egress endpoint; everything else is dropped at the tap and logged.
+# --trace prints the human-readable audit trail; --record-summary writes the compact,
+# model-legible projection (for an agent's observe-act loop).
 agent run --unjailed --net --allow 1.1.1.1:53/udp \
-  --trace \                       # human-readable audit trail on stdout
-  --record-summary run.json \     # compact, model-legible projection (for an agent's loop)
+  --trace --record-summary run.json \
   -- python3 fetch_something.py
 ```
 

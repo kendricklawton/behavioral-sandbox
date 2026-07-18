@@ -1,4 +1,4 @@
-# cargo-deny config — the supply-chain gate (`cargo deny check`, run by CI and `cargo xtask ci`).
+# cargo-deny config: the supply-chain gate (`cargo deny check`, run by CI and `cargo xtask ci`).
 # Keep the dependency tree light, license-clean, and advisory-free. See https://embarkstudios.github.io/cargo-deny/
 
 [advisories]
@@ -6,7 +6,7 @@
 version = 2
 yanked = "deny"
 ignore = [
-    # `paste` (a compile-time proc-macro, pulled in by ratatui — the CLI's `--watch` live view) is
+    # `paste` (a compile-time proc-macro, pulled in by ratatui, the CLI's `--watch` live view) is
     # archived by its author: an *unmaintained* notice, not a vulnerability, and the crate does no
     # runtime work. Drop this exception when ratatui moves off it upstream.
     "RUSTSEC-2024-0436",
@@ -14,7 +14,7 @@ ignore = [
 
 [licenses]
 version = 2
-# Minimal permissive set — only the licenses actually present in the tree today, so `cargo deny`
+# Minimal permissive set: only the licenses actually present in the tree today, so `cargo deny`
 # runs warning-clean. Add to this list deliberately (with a reason) when a new dependency needs
 # it: a missing license fails the CI gate and names the offending crate.
 allow = [
@@ -22,7 +22,7 @@ allow = [
     "Apache-2.0",
     "Unicode-3.0",
     # `foldhash` (the default hasher for aya's `hashbrown`, via `aya`/`aya-obj` in the eBPF
-    # loader) is Zlib-licensed — OSI-approved and FSF-free/permissive. Added when aya entered the tree.
+    # loader) is Zlib-licensed: OSI-approved and FSF-free/permissive. Added when aya entered the tree.
     "Zlib",
 ]
 confidence-threshold = 0.9
@@ -36,6 +36,6 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 [sources]
-# Only the official crates.io registry — no unknown git or alternate registries.
+# Only the official crates.io registry: no unknown git or alternate registries.
 unknown-registry = "deny"
 unknown-git = "deny"

@@ -24,8 +24,13 @@ exclude = ["crates/probes", "fuzz"]
 
 [workspace.package]
 edition = "2021"
+# The minimum supported Rust version. The project tracks current stable (no back-support burden this
+# early); CI and the everyday `cargo xtask ci` gate build with it. Raising this is a deliberate,
+# noted change, not incidental.
+rust-version = "1.94"
 license = "Apache-2.0"
 authors = ["k-henry <khe4r6@gmail.com>"]
+repository = "https://github.com/kendricklawton/agent"
 
 # Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON
 # over a unix socket (serde), the CLI parses with clap, logs with tracing.

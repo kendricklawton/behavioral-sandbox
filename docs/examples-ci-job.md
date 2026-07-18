@@ -77,10 +77,10 @@ mirror on a fixed address):
 $ cargo run -q -p agent-cli -- run --unjailed --net \
     --allow 151.101.0.223:443/tcp \
     --put project.tar --put docs/examples/ci-job.sh --get report.txt \
-    --record ci.json -- /bin/sh ci-job.sh
+    --record-summary ci.json -- /bin/sh ci-job.sh
 ```
 
-Now the record's `reached` lists exactly the registry and nothing else, and any fetch to anywhere
-else lands in `denied`. Either way you get a signed-off account of what the fork's CI actually
+Now the summary's `reached` lists exactly the registry and nothing else, and any fetch to anywhere
+else lands in `denied` (the full `--record` keeps the same facts as `flows`/`denials`). Either way you get a signed-off account of what the fork's CI actually
 touched, see [Observing a run from the host](./examples-observe-a-run.md) and [Containing an
 agent](./examples-agent-containment.md).

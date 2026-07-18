@@ -31,6 +31,22 @@ the record can't be forged by the code it is recording.
 - **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
   benchmarked with percentiles, never hand-waved.
 
+## Try it
+
+**Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` or `aarch64` host, and kernel
+**≥ 5.15**. `cargo xtask setup` (or `agent doctor` once built) reports exactly what your host is
+missing before the first sandbox.
+
+```console
+git clone https://github.com/kendricklawton/agent && cd agent
+cargo xtask self-host                                   # build + install agent/agentd, boot a proof sandbox
+agent run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
+```
+
+`--unjailed` is the explicit opt-out from the default jailer for a dev box without real root; the
+guest still sits behind the KVM boundary. The [Quickstart](docs/quickstart.md) walks the same path
+and then asks for the host-observed record of what the code actually did.
+
 ## Documentation
 
 The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook, `mdbook serve docs`, or read the
@@ -64,8 +80,8 @@ cgroup limits, seccomp); and is wrapped in the embedder-facing `Sandbox` lifecyc
 ([docs/embedding.md](docs/embedding.md)). The host-side eBPF track observes a running sandbox's
 host syscall footprint and its per-VM network flows, enforces deny-by-default egress in the
 kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)), each with a
-measured overhead and a live demo. The audit log that fuses these into one per-run record is the
-track that follows.
+measured overhead and a live demo. The audit log that fuses these into one host-observed per-run
+record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `agentd` daemon.
 
 ## How it fits together
 
@@ -89,7 +105,7 @@ isolation *plus* out-of-guest observability and enforcement, is the whole idea.
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
-| `crates/cli` | The `agent` binary (`run`, `shell`, `--log`) and later the `agentd` daemon. |
+| `crates/cli` | Two binaries: the `agent` CLI (`run`, `shell`, `doctor`) and the `agentd` driver daemon. |
 | `docs` | This documentation, as an mdBook. |
 | `xtask` | Dev orchestration, `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 

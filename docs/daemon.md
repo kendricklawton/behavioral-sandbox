@@ -28,7 +28,19 @@ jail posture is fixed when the daemon launches, so a caller can never weaken it.
 
 **Access control is the hoster's.** The daemon does no authentication. Who may connect is governed by
 the filesystem permissions on the socket and its directory, place the socket where only trusted
-local clients can reach it.
+local clients can reach it. (The socket file itself is pinned to `0660` at bind, defense-in-depth
+against a permissive ambient umask; the directory remains the designed gate.)
+
+**Bounded sessions with `--max-sessions N` (default 16).** Every session is a full microVM (guest
+RAM, a tap, a cgroup), so the daemon bounds its own core resource: at the ceiling a new connection
+gets a typed, fatal `"at capacity"` error as its `open` reply, *before* any VM boots, instead of a
+connect-loop walking the host into memory/KVM/fd exhaustion. Size it to the host (sessions × guest
+memory must fit in RAM); `0` means unlimited. This is engine self-protection, not tenancy: no
+queueing, no auth, no scheduling.
+
+**Shutdown.** SIGTERM/SIGINT gets a prompt, clean exit: the daemon logs, unlinks its socket, and
+exits `0`. In-flight sessions end crash-consistently, their VMs reaped by the lifetime sentinel,
+the same guarantee as a hard kill; the unlink just spares the next start the stale-socket check.
 
 **Fast `open` with `--prewarm N`.** The daemon boots one unjailed pre-warmed source, snapshots it,
 and keeps a [pre-warmed pool](./embedding.md) of `N` restored clones. A **bare** `open` (no resource
@@ -156,7 +168,7 @@ scrape_configs:
 ## The reference client
 
 `agentd-client` is the **reference Rust client**: a `Client` type that drives the whole session
-(`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over the socket. It depends on
+(`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
 `agentd-protocol` and a JSON value **only, never `agent-vmm`**, which is the point: it proves a
 caller drives the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
 The polyglot SDKs (Go/Python/Node/C#, planned) are this client's method set hardened per language.

@@ -283,7 +283,8 @@ pub fn trace_connect(ctx: TracePointContext) -> u32 {
 }
 
 /// Per-flow byte/packet counters, keyed by the directional IPv4 [`FlowKey`]. Bounded at
-/// [`MAX_FLOWS`] (maps are sized at load); a full map drops new flows, the counts already recorded stay
+/// [`MAX_FLOWS`] (maps are sized at load); a full map drops new flows (counted in [`FLOW_DROPS`], so
+/// the loss is visible on the record), the counts already recorded stay
 /// live. Best-effort like [`EXECVE_BY_PID`]: a flow's read-modify-write is not atomic across CPUs, so a
 /// burst racing two CPUs on one flow can lose an update (a slight undercount). Fine for observability; a
 /// per-CPU map is the accuracy upgrade if exactness is ever needed.
@@ -300,6 +301,33 @@ const MAX_FLOWS: u32 = 4096;
 /// (a non-atomic lookup-or-init can undercount a burst by one). Empty until enforcement drops something.
 #[map]
 static DENIALS: HashMap<FlowKey, u64> = HashMap::with_max_entries(MAX_FLOWS, 0);
+
+/// A single-slot **per-CPU** counter of new flows a full [`FLOWS`] map **dropped** (the insert
+/// rejected, so that 5-tuple's traffic is absent from the map and undercounted in the totals). The
+/// loader sums the slots and surfaces a nonzero value as a truncated network section plus a coverage
+/// gap on the run's record, the same honest-loss discipline as [`EVENT_DROPS`]: without it, a guest
+/// could *fill* the map with 4096 benign flows (one per ephemeral source port) and evict its real
+/// traffic from its own audit record silently. Per-CPU like [`EVENT_DROPS`] (no cross-CPU atomics).
+#[map]
+static FLOW_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// The [`FLOW_DROPS`] twin for [`DENIALS`]: denied-endpoint rows a full map could not record. The
+/// packets were still **dropped** (enforcement never depends on the map; this is the audit trail
+/// only), but the destination is missing from the denial rows, so the loss must be visible.
+#[map]
+static DENIAL_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
+/// Bump one of the per-CPU drop counters ([`FLOW_DROPS`]/[`DENIAL_DROPS`]) after a failed map
+/// insert. `#[inline(always)]` like every helper here, so each classifier stays one self-contained
+/// program.
+#[inline(always)]
+fn count_map_drop(counter: &PerCpuArray<u64>) {
+    if let Some(drops) = counter.get_ptr_mut(0) {
+        // SAFETY: this CPU's own slot of the one-element per-CPU array; the pointer is only used
+        // inside the null-check and this program is its sole writer on this CPU.
+        unsafe { *drops += 1 };
+    }
+}
 
 /// The Linux `tc` action a classifier returns to the kernel: `TC_ACT_OK` (`0`) lets the packet
 /// continue, `TC_ACT_SHOT` (`2`) drops it. Named after the kernel ABI constants so the values are
@@ -400,7 +428,7 @@ fn egress_verdict(ctx: &TcContext) -> Verdict {
 /// Record one denied guest-sent packet against its destination flow in [`DENIALS`]. Best-effort
 /// like [`FLOWS`]: a lookup-or-init counter (the verifier's mandatory null-check on the map pointer), not
 /// atomic across CPUs, so a burst can undercount by one, fine for an audit signal. A full map drops new
-/// denied flows; the ones already recorded stay.
+/// denied flows (counted in [`DENIAL_DROPS`], so the loss is visible); the ones already recorded stay.
 #[inline(always)]
 fn record_denial(key: &FlowKey) {
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
@@ -408,8 +436,10 @@ fn record_denial(key: &FlowKey) {
     unsafe {
         if let Some(count) = DENIALS.get_ptr_mut(key) {
             *count += 1;
-        } else {
-            let _ = DENIALS.insert(key, &1, 0);
+        } else if DENIALS.insert(key, &1, 0).is_err() {
+            // Map full: the packet was still dropped (enforcement is not map-dependent), but its
+            // destination is missing from the audit rows, count the loss so the record can say so.
+            count_map_drop(&DENIAL_DROPS);
         }
     }
 }
@@ -469,7 +499,11 @@ fn count(ctx: &TcContext, dir: Direction) {
                     init.egress_bytes = bytes;
                 }
             }
-            let _ = FLOWS.insert(&key, &init, 0);
+            if FLOWS.insert(&key, &init, 0).is_err() {
+                // Map full: this 5-tuple's traffic is now invisible to the flow table *and* the
+                // totals folded from it, count the loss so the record reads truncated, not complete.
+                count_map_drop(&FLOW_DROPS);
+            }
         }
     }
 }

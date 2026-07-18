@@ -357,7 +357,39 @@ impl SandboxProbes {
                             .push(AxisGap::Network(format!("read tap denials: {e}")));
                         Vec::new()
                     });
-                    Some(NetSection::from_tap(flows, totals, denials))
+                    // The kernel's full-map drop counters: nonzero means the flow table / denial
+                    // rows saturated and this section undercounts, the loss must ride the record
+                    // (a truncated section + a coverage gap), never read as a complete account.
+                    // A failed *read* of a counter is its own gap, unknown loss is still loss.
+                    let dropped_flows = monitor.dropped_flows().unwrap_or_else(|e| {
+                        self.gaps
+                            .push(AxisGap::Network(format!("read tap flow drops: {e}")));
+                        0
+                    });
+                    let dropped_denials = monitor.dropped_denials().unwrap_or_else(|e| {
+                        self.gaps
+                            .push(AxisGap::Network(format!("read tap denial drops: {e}")));
+                        0
+                    });
+                    if dropped_flows > 0 {
+                        self.gaps.push(AxisGap::Network(format!(
+                            "flow table full: {dropped_flows} new flow(s) dropped; flows and \
+                             totals undercount"
+                        )));
+                    }
+                    if dropped_denials > 0 {
+                        self.gaps.push(AxisGap::Network(format!(
+                            "denial table full: {dropped_denials} denied packet(s) missing a \
+                             destination row (the packets were still dropped at the tap)"
+                        )));
+                    }
+                    Some(NetSection::from_tap(
+                        flows,
+                        totals,
+                        denials,
+                        dropped_flows,
+                        dropped_denials,
+                    ))
                 }
             },
             None => None,
@@ -412,7 +444,17 @@ impl SandboxProbes {
             let totals = monitor.totals().ok()?;
             let flows = monitor.flows().ok()?;
             let denials = monitor.denials().ok()?;
-            Some(NetSection::from_tap(flows, totals, denials))
+            // Live view: a transiently unreadable drop counter reads as 0 (the authoritative,
+            // gap-recording read is `collect`); a real nonzero still marks the view truncated.
+            let dropped_flows = monitor.dropped_flows().unwrap_or(0);
+            let dropped_denials = monitor.dropped_denials().unwrap_or(0);
+            Some(NetSection::from_tap(
+                flows,
+                totals,
+                denials,
+                dropped_flows,
+                dropped_denials,
+            ))
         });
         let resources = self
             .meter
@@ -439,6 +481,7 @@ impl SandboxProbes {
 /// testable. An axis that couldn't be read *right now* is `None`; honesty about *why* an axis is
 /// missing belongs to the final [`RunRecord`](crate::RunRecord)'s coverage, not here.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct LiveSnapshot {
     /// The tap's flows/totals/denials at this instant, already deterministically sorted
     /// ([`NetSection::from_tap`]). `None` without a NIC or on a transient read failure.

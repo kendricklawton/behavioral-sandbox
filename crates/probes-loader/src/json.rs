@@ -117,7 +117,14 @@ fn net_to_json(out: &mut String, net: &NetSection) {
         field(out, "packets", denial.count, false);
         out.push('}');
     }
-    out.push_str("]}");
+    out.push(']');
+    // The kernel's full-map drop counters + the one flag a consumer checks before trusting the
+    // flow list as exhaustive. Additive keys (schema stays 1); 0/false is the healthy shape.
+    field(out, "dropped_flows", net.dropped_flows, false);
+    field(out, "dropped_denials", net.dropped_denials, false);
+    out.push_str(",\"truncated\":");
+    out.push_str(if net.truncated() { "true" } else { "false" });
+    out.push('}');
 }
 
 fn net_stats_to_json(out: &mut String, s: &NetStats) {
@@ -361,7 +368,7 @@ mod tests {
             ],
         );
         RunRecord::from_parts(
-            Some(NetSection::from_tap(flows, totals, denials)),
+            Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
             resources,
             host_syscalls,
             Timing {
@@ -389,7 +396,8 @@ mod tests {
             "{\"src\":\"10.200.0.2\",\"src_port\":40001,\"dst\":\"8.8.8.8\",\"dst_port\":443,",
             "\"proto\":\"tcp\",\"ingress_packets\":2,\"ingress_bytes\":120,\"egress_packets\":3,",
             "\"egress_bytes\":200}],",
-            "\"denials\":[{\"dst\":\"9.9.9.9\",\"dst_port\":443,\"proto\":\"tcp\",\"packets\":4}]}",
+            "\"denials\":[{\"dst\":\"9.9.9.9\",\"dst_port\":443,\"proto\":\"tcp\",\"packets\":4}],",
+            "\"dropped_flows\":0,\"dropped_denials\":0,\"truncated\":false}",
             ",\"resources\":{\"cpu_time_ns\":5000,\"cgroup\":{\"cpu_usage_usec\":6,",
             "\"memory_current\":1024,\"memory_peak\":4096,\"io_rbytes\":null,\"io_wbytes\":512}}",
             ",\"host_syscalls\":{\"total\":3,\"by_kind\":{\"execve\":1,\"openat\":2,\"connect\":0,",

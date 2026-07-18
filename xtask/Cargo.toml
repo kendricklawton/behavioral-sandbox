@@ -3,6 +3,7 @@ name = "xtask"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish = false
 
 # Dev orchestration (the cargo-xtask pattern). `cargo xtask ci` is the host-safe gate; never shipped.
@@ -12,10 +13,10 @@ clap.workspace = true
 # The host↔guest contract constants (`AGENT_VSOCK_PORT`, `GUEST_READY_MARKER`): the rootfs build
 # writes the guest's init line from the same definition the driver dials, so they cannot drift.
 agent-channel = { path = "../crates/channel" }
-# The driver, for `bench-boot` — it boots real microVMs and reads `boot_latency`. A dev-only
+# The driver, for `bench-boot`: it boots real microVMs and reads `boot_latency`. A dev-only
 # dep on a never-shipped crate; the everyday `ci` gate doesn't invoke it (booting needs KVM).
 agent-vmm = { path = "../crates/vmm" }
-# The probe loader, for `bench-trace` — it attaches the syscall tracepoints and measures their
+# The probe loader, for `bench-trace`: it attaches the syscall tracepoints and measures their
 # per-syscall overhead. Dev-only; the everyday `ci` gate doesn't invoke it (loading eBPF
 # needs CAP_BPF/CAP_PERFMON).
 agent-probes-loader = { path = "../crates/probes-loader" }

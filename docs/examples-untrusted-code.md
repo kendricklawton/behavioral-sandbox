@@ -31,7 +31,7 @@ means the engine failed to stand the run up.
 
 ```console
 $ cargo run -q -p agent-cli -- run --json -- python3 -c 'print(2 + 2)' 2>/dev/null
-{"exit_code":0,"stdout":"4\n","stderr":"","artifacts":[],"metrics":{"boot_ms":128,"exec_wall_ms":41}}
+{"schema":1,"exit_code":0,"stdout":"4\n","stderr":"","artifacts":[],"metrics":{"boot_ms":128,"exec_wall_ms":41},"limits":{"vcpus":1,"mem_mib":256,"wall_ms":30000,"output_cap_bytes":16777216}}
 ```
 
 Pipe it straight into `jq`:

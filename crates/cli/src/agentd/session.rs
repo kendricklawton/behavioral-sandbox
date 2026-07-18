@@ -184,10 +184,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     result,
                     &mut total_exec_wall,
                     |r| {
-                        let found = r.files.iter().find(|(p, _)| *p == path);
+                        let found = r.files.iter().find(|a| a.path == path);
                         Response::Got {
                             path: path.clone(),
-                            content: found.map(|(_, b)| lossy(b)).unwrap_or_default(),
+                            content: found.map(|a| lossy(&a.data)).unwrap_or_default(),
                             present: found.is_some(),
                         }
                     },

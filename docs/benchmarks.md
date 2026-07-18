@@ -2,7 +2,7 @@
 
 *Measured, not marketed.* Every performance claim this engine makes is backed by a benchmark you can
 re-run, reported with percentiles, against an honest baseline. This page is the results report; the
-numbers below come from the benchmark suite in [`xtask`](./contributing-testing.md#benchmarks).
+numbers below come from the benchmark suite in [`xtask`](https://github.com/kendricklawton/agent/tree/main/xtask), re-run with `cargo xtask bench-all`.
 
 ## Methodology
 
@@ -126,7 +126,7 @@ wildly different whole-host cost).
 132 MiB image, plus its touched guest RAM) to ~47 MiB (the base shared once for the fleet, writes in a
 guest tmpfs overlay) to ~0 MiB (a restore shares even the memory file copy-on-write, paying only for the
 pages the guest dirties). Guest RAM dominates the rest; shrink the base and you mainly buy sharing, not
-boot time (see [`bench-boot`](./contributing-testing.md#benchmarks)).
+boot time (see `cargo xtask bench-boot`).
 
 One caveat, which the harness itself demonstrates: the whole-host number attributes the *first touch*
 of shared files, so a page-cache-warm base shrinks the shared-base row. The numbers above are from a

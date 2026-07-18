@@ -103,7 +103,7 @@ unknown key is a typed error, never a silent no-op.
 | `AGENT_MARKER` | `marker` | the console line that means "userspace is up" (`AGENT-GUEST-READY` for the agent rootfs) | the boot image's login prompt |
 | `AGENT_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
 | `AGENT_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
-| `AGENT_PROBES_OBJECT` |, | the built eBPF object (for the probe demos) | the `cargo xtask build-probes` output path |
+| `AGENT_PROBES_OBJECT` | — | the built eBPF object (for the probe demos; env only, no `.agent.toml` key) | the `cargo xtask build-probes` output path |
 
 ```toml
 # .agent.toml — pinned beside a project's code
@@ -120,7 +120,7 @@ the host-side eBPF probes to the sandbox at launch and fuse what they saw into o
 record, observed from *outside* the guest, where the code can't forge or disable it.
 
 ```console
-# Watch it live, read the trail after, keep the machine record + the agent-legible summary:
+# Watch it live, read the trail after, keep the machine record + the model-legible summary:
 agent run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
 ```
 

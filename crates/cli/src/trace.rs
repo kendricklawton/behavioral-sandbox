@@ -112,12 +112,15 @@ pub fn render(record: &RunRecord) -> String {
     }
 
     for gap in &record.coverage {
-        let (axis, reason) = match gap {
-            AxisGap::HostSyscalls(r) => ("syscalls", r),
-            AxisGap::Network(r) => ("network", r),
-            AxisGap::Cpu(r) => ("cpu", r),
+        // `AxisGap` is `#[non_exhaustive]`: a new observation axis renders as a generic gap line
+        // here until this renderer learns its short label, never a compile break on a pin bump.
+        let line = match gap {
+            AxisGap::HostSyscalls(r) => format!("syscalls: {r}"),
+            AxisGap::Network(r) => format!("network: {r}"),
+            AxisGap::Cpu(r) => format!("cpu: {r}"),
+            other => format!("{other:?}"),
         };
-        let _ = writeln!(out, "  gap        {axis}: {reason}");
+        let _ = writeln!(out, "  gap        {line}");
     }
     out
 }
@@ -177,8 +180,8 @@ pub(crate) fn syscall_name(kind: Syscall) -> &'static str {
 mod tests {
     use super::*;
     use agent_probes_loader::{
-        CgroupStats, FlowCounts, FlowKey, NetSection, NetStats, ResourceSummary, RunRecord,
-        SyscallEvent, SyscallFootprint, Timing,
+        FlowCounts, FlowKey, NetSection, NetStats, ResourceSummary, SyscallEvent, SyscallFootprint,
+        Timing,
     };
 
     /// A synthetic event from public fields, as the loader's own unit tests build them.
@@ -201,12 +204,11 @@ mod tests {
     }
 
     fn sample() -> RunRecord {
-        let totals = NetStats {
-            ingress_packets: 5,
-            ingress_bytes: 470,
-            egress_packets: 0,
-            egress_bytes: 0,
-        };
+        // The record types are `#[non_exhaustive]` (they grow), so fixtures build
+        // default-then-assign rather than by struct literal.
+        let mut totals = NetStats::default();
+        totals.ingress_packets = 5;
+        totals.ingress_bytes = 470;
         let flows = vec![(
             FlowKey::new(
                 u32::from_be_bytes([10, 200, 0, 2]),
@@ -226,18 +228,15 @@ mod tests {
             FlowKey::new(0, u32::from_be_bytes([9, 9, 9, 9]), 0, 443, 6),
             4,
         )];
+        let mut resources = ResourceSummary::default();
+        resources.cpu_time = Duration::from_micros(5200);
+        resources.cgroup.cpu_usage_usec = Some(6);
+        resources.cgroup.memory_current = Some(12 * 1024 * 1024);
+        resources.cgroup.memory_peak = Some(14 * 1024 * 1024);
+        resources.cgroup.io_wbytes = Some(512);
         RunRecord::from_parts(
-            Some(NetSection::from_tap(flows, totals, denials)),
-            ResourceSummary {
-                cpu_time: Duration::from_micros(5200),
-                cgroup: CgroupStats {
-                    cpu_usage_usec: Some(6),
-                    memory_current: Some(12 * 1024 * 1024),
-                    memory_peak: Some(14 * 1024 * 1024),
-                    io_rbytes: None,
-                    io_wbytes: Some(512),
-                },
-            },
+            Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
+            resources,
             SyscallFootprint::from_events(
                 0x42,
                 &[
