@@ -163,9 +163,11 @@ impl RawClient {
         }
     }
 
-    /// Send one request `body` (the JSON without its schema), stamped with `"schema":1`.
+    /// Send one request `body` (the JSON without its schema), stamped with `"schema":1`. The body
+    /// keeps its own closing brace (only its leading `{` is dropped to splice `schema` in first), so
+    /// the template must not add one.
     fn send(&mut self, body: &str) {
-        let line = format!("{{\"schema\":1,{}}}\n", body.trim_start_matches('{'));
+        let line = format!("{{\"schema\":1,{}\n", body.trim_start_matches('{'));
         if let Err(e) = self.writer.write_all(line.as_bytes()) {
             panic!("send a request line: {e}");
         }

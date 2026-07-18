@@ -26,6 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use agent_cli::MAX_VCPUS;
 use agent_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
 use agent_vmm::{Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 use clap::{Parser, Subcommand};
@@ -578,10 +579,6 @@ fn build_egress(allows: &[AllowRule]) -> Result<EgressPolicy, CliError> {
     Ok(policy)
 }
 
-/// Firecracker v1.9 caps a microVM at 32 vCPUs (decision 001), so refuse anything above it at the
-/// CLI edge rather than surfacing a late Firecracker API error mid-boot.
-const MAX_VCPUS: u8 = 32;
-
 /// Fold the `--vcpus`/`--mem` overrides onto the default [`Limits`], the two resource knobs both
 /// `run` and `shell` project. An unset flag keeps the (deliberately conservative) default; a set one
 /// carries the already-validated [`NonZeroU8`]/[`NonZeroU32`] the parsers produced. `run` layers its
@@ -763,14 +760,13 @@ fn piped_stdin() -> Vec<u8> {
     buf
 }
 
-/// Initialize stderr logging, resolving the filter from the flag, then `AGENT_LOG`, then `warn`.
+/// Initialize stderr logging from the filter [`config::resolve_log`] already resolved
+/// (`flag > AGENT_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
+/// environment: the precedence is single-sourced in `resolve_log`, this only applies the result.
 /// An invalid filter falls back to `warn` rather than failing the run.
-fn init_tracing(flag: Option<&str>) {
-    let filter = flag
-        .map(str::to_string)
-        .or_else(|| std::env::var("AGENT_LOG").ok())
-        .unwrap_or_else(|| "warn".to_string());
-    let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
+fn init_tracing(filter: Option<&str>) {
+    let filter = filter.unwrap_or("warn");
+    let env_filter = tracing_subscriber::EnvFilter::try_new(filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
@@ -786,35 +782,9 @@ mod tests {
         write_artifacts_in, AllowRule, Artifact, MAX_VCPUS,
     };
     use agent_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
+    use agent_test_support::ScratchDir;
     use std::net::Ipv4Addr;
     use std::num::{NonZeroU32, NonZeroU8};
-    use std::path::{Path, PathBuf};
-
-    /// A scratch dir removed on drop, so a panicking assertion can't leak it. Unique per (pid, tag,
-    /// counter) so parallel tests don't collide, the artifact tests write real files.
-    struct TestDir(PathBuf);
-    impl TestDir {
-        fn new(tag: &str) -> Self {
-            use std::sync::atomic::{AtomicU32, Ordering};
-            static SEQ: AtomicU32 = AtomicU32::new(0);
-            let dir = std::env::temp_dir().join(format!(
-                "agent-cli-{tag}-{}-{}",
-                std::process::id(),
-                SEQ.fetch_add(1, Ordering::Relaxed)
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("create test dir");
-            Self(dir)
-        }
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for TestDir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 
     fn artifact(path: &str, data: &[u8]) -> Vec<Artifact> {
         vec![Artifact::new(path, data.to_vec())]
@@ -964,7 +934,7 @@ mod tests {
         // Absolute and climbing paths are refused (backstopping the public API); the error names the path
         // (allowed) and carries none of the data. Requested here so the escape check, not the
         // deny-by-default check, is what fires.
-        let base = TestDir::new("escape");
+        let base = ScratchDir::created("escape");
         for bad in ["/etc/owned", "../escape.txt", "a/../../b"] {
             let err = write_artifacts_in(base.path(), &artifact(bad, b"data"), &[bad.to_string()])
                 .expect_err("escaping artifact path must be refused");
@@ -981,7 +951,7 @@ mod tests {
     fn unrequested_artifacts_are_refused() {
         // Deny-by-default: a guest returning a file the operator never asked for is refused, even
         // though the name itself is a harmless relative path.
-        let base = TestDir::new("unrequested");
+        let base = ScratchDir::created("unrequested");
         let err = write_artifacts_in(base.path(), &artifact("Makefile", b"pwn"), &[])
             .expect_err("an unrequested artifact must be refused");
         assert!(format!("{err}").contains("Makefile"));
@@ -993,8 +963,8 @@ mod tests {
     fn symlinked_component_cannot_escape_the_base() {
         // A pre-existing symlinked directory in the cwd must not let a `Normal`-component path be
         // written through it, the string check can't see the on-disk symlink, `confined_dest` can.
-        let base = TestDir::new("symlink");
-        let outside = TestDir::new("symlink-outside");
+        let base = ScratchDir::created("symlink");
+        let outside = ScratchDir::created("symlink-outside");
         // `out -> <outside>`, then a requested `out/x.txt` would land in `outside` if followed.
         std::os::unix::fs::symlink(outside.path(), base.path().join("out")).expect("symlink");
         let err = write_artifacts_in(
@@ -1012,7 +982,7 @@ mod tests {
     fn requested_nested_artifact_is_written() {
         // The happy path: a requested nested name is written under the base, with the intermediate
         // directory created.
-        let base = TestDir::new("write");
+        let base = ScratchDir::created("write");
         write_artifacts_in(
             base.path(),
             &artifact("sub/out.txt", b"HELLO\n"),

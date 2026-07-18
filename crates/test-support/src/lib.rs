@@ -10,7 +10,63 @@
 // the same file-level opt-out the integration-test binaries carry.
 #![allow(clippy::panic)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+/// A host scratch dir reclaimed on drop, so a panicking assertion or an early `?` return can't leak
+/// it. Unique per (pid, tag, sequence) so parallel tests in one process never collide (the
+/// collision the CLI copy had to fix). [`new`](Self::new) only *reserves* the path (clearing any
+/// stale copy) without creating the dir, for callers that hand it to code that creates it (a
+/// snapshot bundle, a sandbox output dir); [`created`](Self::created) also `mkdir`s it for callers
+/// that write into it directly.
+///
+/// The single scratch-dir guard for every test context: the driver and loader integration suites,
+/// the unit tests in either crate, and the CLI's own. (`xtask`'s bench keeps its own trivial guard:
+/// it is normal, non-test code, and this crate stays a test-only dev-dependency.)
+pub struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    /// Reserve a unique scratch path (clearing any stale copy) without creating the dir.
+    #[must_use]
+    pub fn new(tag: &str) -> Self {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "agent-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        Self(dir)
+    }
+
+    /// Like [`new`](Self::new) but also creates the directory, for callers that write into it
+    /// directly. Panics if the dir can't be created (the idiomatic test assertion).
+    #[must_use]
+    pub fn created(tag: &str) -> Self {
+        let this = Self::new(tag);
+        if let Err(e) = std::fs::create_dir_all(&this.0) {
+            panic!("create scratch dir {}: {e}", this.0.display());
+        }
+        this
+    }
+
+    /// Adopt an existing dir (e.g. one the code under test produced) so it is reclaimed on drop.
+    #[must_use]
+    pub fn adopt(dir: PathBuf) -> Self {
+        Self(dir)
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// Host-side memory headroom above the guest's RAM for the VMM's own footprint, in MiB. Mirrors the
 /// engine's own derivation (`jail`'s `MEMORY_OVERHEAD_MIB`, decision 013), so a test cgroup caps the

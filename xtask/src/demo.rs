@@ -10,7 +10,6 @@
 //! Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
 //! privileged, user-run demo like `bench-boot`, never part of the host-safe gate.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 use agent_probes_loader::{
@@ -36,9 +35,7 @@ fn effective_uid() -> Option<u32> {
 /// Boot a sandbox and stream its cgroup-attributed host syscall footprint, the syscall-trace exit-gate
 /// demo. `seconds` is the length of the live tail after the boot+exec window is printed.
 pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("trace-sandbox needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("trace-sandbox")?;
     if let Err(e) = agent_probes_loader::check_support() {
         bail!("trace-sandbox needs eBPF support: {e}");
     }
@@ -165,9 +162,7 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
 /// privileged, user-run demo like `trace-sandbox`. `rounds` is how many guest-traffic bursts to send
 /// (watching the counters climb each one).
 pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("watch-sandbox needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("watch-sandbox")?;
     if let Err(e) = agent_probes_loader::check_support() {
         bail!("watch-sandbox needs eBPF support: {e}");
     }
@@ -282,9 +277,7 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
 /// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
 /// privileged, user-run demo like `watch-sandbox`.
 pub(crate) fn enforce_sandbox() -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("enforce-sandbox needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("enforce-sandbox")?;
     if let Err(e) = agent_probes_loader::check_support() {
         bail!("enforce-sandbox needs eBPF support: {e}");
     }
@@ -417,9 +410,7 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
 /// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
 /// privileged, user-run demo like `trace-sandbox`.
 pub(crate) fn meter_sandbox() -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("meter-sandbox needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("meter-sandbox")?;
     if let Err(e) = agent_probes_loader::check_support() {
         bail!("meter-sandbox needs eBPF support: {e}");
     }

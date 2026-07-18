@@ -38,6 +38,12 @@ connect-loop walking the host into memory/KVM/fd exhaustion. Size it to the host
 memory must fit in RAM); `0` means unlimited. This is engine self-protection, not tenancy: no
 queueing, no auth, no scheduling.
 
+**Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
+guarantee: a session with no request from its client for this long is dropped, freeing its microVM
+and its `--max-sessions` slot, so a wedged or forgotten connection can't pin capacity forever. It
+covers the wait for the first `open` too; a client that keeps sending requests keeps resetting it.
+`0` disables it.
+
 **Shutdown.** SIGTERM/SIGINT gets a prompt, clean exit: the daemon logs, unlinks its socket, and
 exits `0`. In-flight sessions end crash-consistently, their VMs reaped by the lifetime sentinel,
 the same guarantee as a hard kill; the unlink just spares the next start the stale-socket check.

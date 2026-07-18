@@ -2,8 +2,8 @@
 //! compiles or tests, and three kinds are mechanically checkable, so this pass checks them:
 //!
 //! 1. **Decision citations.** `decision NNN` in any tracked `.rs`/`.md`/`.rules` prose must name
-//!    an entry that exists in `docs/contributing-architecture.md` (`### NNN, ...`). A renumbered or
-//!    deleted entry otherwise turns every citation into a pointer at the wrong rationale.
+//!    an ADR that exists under `docs/adr/` (a `NNN-*.md` file). A renumbered or deleted ADR
+//!    otherwise turns every citation into a pointer at the wrong rationale.
 //! 2. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
 //!    something in the tree; a rename otherwise leaves the comment lying about where things live.
 //! 3. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
@@ -19,8 +19,9 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-/// The decision log: the single place `### NNN` entries are defined.
-const DECISION_LOG: &str = "docs/contributing-architecture.md";
+/// The decision log: the ADR folder, one `NNN-*.md` file per decision. The set of numbers those
+/// filenames carry is the single source of "which decisions exist".
+const ADR_DIR: &str = "docs/adr";
 
 /// One broken reference, kept as a rendered line so the report stays a plain sorted list.
 type Violation = String;
@@ -54,7 +55,7 @@ pub fn check(root: &Path) -> Result<()> {
             citations += 1;
             if !defined.contains(&n) {
                 violations.push(format!(
-                    "{rel}:{line_no}: cites decision {n:03}, not defined in {DECISION_LOG}"
+                    "{rel}:{line_no}: cites decision {n:03}, no `{n:03}-*.md` ADR in {ADR_DIR}"
                 ));
             }
         }
@@ -113,22 +114,26 @@ fn tracked_files(root: &Path) -> Result<BTreeSet<String>> {
         .collect())
 }
 
-/// The set of `### NNN` entries the decision log defines.
+/// The set of decision numbers the ADR folder defines: one number per `NNN-*.md` filename (the
+/// index `README.md` and any non-`NNN` file are ignored).
 fn defined_decisions(root: &Path) -> Result<BTreeSet<u32>> {
-    let text = std::fs::read_to_string(root.join(DECISION_LOG))
-        .with_context(|| format!("reading {DECISION_LOG}"))?;
+    let dir = root.join(ADR_DIR);
     let mut defined = BTreeSet::new();
-    for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("### ") {
-            if let Some(n) = leading_number(rest) {
-                if !defined.insert(n) {
-                    bail!("{DECISION_LOG} defines decision {n:03} twice");
-                }
+    let entries = std::fs::read_dir(&dir).with_context(|| format!("reading {ADR_DIR}"))?;
+    for entry in entries {
+        let name = entry?.file_name();
+        let name = name.to_string_lossy();
+        if !name.ends_with(".md") {
+            continue;
+        }
+        if let Some(n) = leading_number(&name) {
+            if !defined.insert(n) {
+                bail!("{ADR_DIR} defines decision {n:03} twice");
             }
         }
     }
     if defined.is_empty() {
-        bail!("{DECISION_LOG} defines no `### NNN` entries; the lint would pass vacuously");
+        bail!("{ADR_DIR} holds no `NNN-*.md` ADRs; the lint would pass vacuously");
     }
     Ok(defined)
 }
@@ -282,6 +287,23 @@ fn path_exists(tracked: &BTreeSet<String>, cand: &str) -> bool {
 /// Relative link targets in Markdown (`[text](target)`), with their 1-based line. External
 /// (`http`, `mailto:`), in-page (`#anchor`), and fenced-code-block content are skipped; a
 /// `path#anchor` target is checked as `path`.
+/// Blank out inline code spans (backtick-delimited) in one line, so link syntax shown *as code*
+/// isn't scanned as a live link. Backticks toggle in/out of a span; an unbalanced backtick drops the
+/// rest of the line (conservative: a lint skips rather than false-positives). Only the surviving
+/// text matters to the caller (it reports line numbers, not columns), so spans are dropped outright.
+fn strip_inline_code(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut in_code = false;
+    for c in line.chars() {
+        if c == '`' {
+            in_code = !in_code;
+        } else if !in_code {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn markdown_links(text: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     let mut in_fence = false;
@@ -293,7 +315,10 @@ fn markdown_links(text: &str) -> Vec<(usize, String)> {
         if in_fence {
             continue;
         }
-        let mut rest = line;
+        // Blank out inline code spans first: a `[text](x.md)` *shown as code* (the link syntax
+        // itself, e.g. in a doc about Markdown) is not a live link and its target needn't exist.
+        let stripped = strip_inline_code(line);
+        let mut rest = stripped.as_str();
         while let Some(pos) = rest.find("](") {
             rest = &rest[pos + 2..];
             let Some(end) = rest.find(')') else { break };
@@ -412,5 +437,14 @@ mod tests {
             vec![(1, "./quickstart.md".into()), (5, "embedding.md".into())],
             "{got:?}"
         );
+    }
+
+    #[test]
+    fn markdown_links_skip_inline_code_spans() {
+        // Link syntax shown as code (documenting Markdown itself) is not a live link; a real link
+        // on the same line still resolves.
+        let text = "the form `[text](x.md)` is a link; see [real](embedding.md) for one";
+        let got = markdown_links(text);
+        assert_eq!(got, vec![(1, "embedding.md".into())], "{got:?}");
     }
 }

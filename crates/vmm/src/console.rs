@@ -12,6 +12,12 @@ use crate::VmmError;
 /// port must not grow host memory without bound, a hostile guest never causes a leak. Boot output
 /// is tens of KiB, so the userspace marker is never dropped while it still matters.
 const CONSOLE_CAP: usize = 1 << 20; // 1 MiB
+/// Slack the buffer may overshoot [`CONSOLE_CAP`] before it compacts. Draining on every 4 KiB chunk
+/// once at the cap memmoves the whole buffer per chunk (O(n) per chunk, ~256x write amplification
+/// under a flooding guest, the exact hostile case); overshooting by a cap's worth and compacting in
+/// one bulk drop amortizes that to O(1) per byte. Memory stays strictly bounded at `CONSOLE_CAP +
+/// CONSOLE_SLACK`.
+const CONSOLE_SLACK: usize = CONSOLE_CAP;
 /// The captured serial console: a background thread appends the child's stdout into a shared
 /// buffer that the boot loop scans for the userspace marker.
 #[derive(Debug, Default)]
@@ -95,10 +101,12 @@ pub(crate) fn last_lines(text: &str, n: usize) -> Option<String> {
     Some(tail.into_iter().rev().collect::<Vec<_>>().join(" | "))
 }
 
-/// Append a console chunk, dropping the oldest bytes once the buffer exceeds [`CONSOLE_CAP`].
+/// Append a console chunk, dropping the oldest bytes in one bulk compaction once the buffer
+/// overshoots [`CONSOLE_CAP`] by [`CONSOLE_SLACK`] (so the front-drain memmove is amortized, not
+/// paid per chunk).
 fn append_capped(buf: &mut Vec<u8>, chunk: &[u8]) {
     buf.extend_from_slice(chunk);
-    if buf.len() > CONSOLE_CAP {
+    if buf.len() > CONSOLE_CAP + CONSOLE_SLACK {
         let excess = buf.len() - CONSOLE_CAP;
         buf.drain(..excess);
     }
@@ -134,13 +142,34 @@ mod tests {
 
     #[test]
     fn console_buffer_is_capped_keeping_the_tail() {
-        let mut buf = vec![b'a'; CONSOLE_CAP];
+        // Push past the compaction trigger (cap + slack) so one bulk drop fires.
+        let mut buf = vec![b'a'; CONSOLE_CAP + CONSOLE_SLACK];
         append_capped(&mut buf, b"login:");
-        assert_eq!(buf.len(), CONSOLE_CAP, "buffer must not grow past the cap");
+        assert!(
+            buf.len() <= CONSOLE_CAP + CONSOLE_SLACK,
+            "buffer stays within the cap plus its compaction slack"
+        );
         assert!(
             find(&buf, b"login:"),
             "the newest bytes (where the marker lands) must be kept"
         );
+        assert_eq!(
+            &buf[buf.len() - 6..],
+            b"login:",
+            "the freshest tail is preserved after compaction"
+        );
         assert_eq!(&buf[..1], b"a", "only the oldest bytes are dropped");
+    }
+
+    #[test]
+    fn console_buffer_overshoots_by_at_most_the_slack_before_compacting() {
+        // Below the trigger the buffer is left intact (no per-chunk memmove).
+        let mut buf = vec![b'a'; CONSOLE_CAP];
+        append_capped(&mut buf, b"x");
+        assert_eq!(
+            buf.len(),
+            CONSOLE_CAP + 1,
+            "no compaction until cap + slack"
+        );
     }
 }

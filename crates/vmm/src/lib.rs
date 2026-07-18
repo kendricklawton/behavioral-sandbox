@@ -24,8 +24,6 @@ mod pool;
 mod snapshot;
 mod spawn;
 mod sweep;
-#[cfg(test)]
-mod test_util;
 mod vm;
 
 use std::num::{NonZeroU32, NonZeroU8};

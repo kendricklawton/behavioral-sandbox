@@ -11,6 +11,7 @@ name = "agent-cli"
 version = "0.1.0"
 dependencies = [
  "agent-probes-loader",
+ "agent-test-support",
  "agent-vmm",
  "agentd-client",
  "agentd-protocol",

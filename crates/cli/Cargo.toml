@@ -48,6 +48,8 @@ tracing-subscriber.workspace = true
 # over the wire API alone. A dev-dep so the daemon crate can spawn `agentd` (it owns the artifacts)
 # while the client itself stays free of `agent-vmm`.
 agentd-client = { path = "../agentd-client" }
+# The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).
+agent-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

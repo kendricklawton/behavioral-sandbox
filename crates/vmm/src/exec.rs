@@ -363,17 +363,17 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TestDir;
     use crate::vm::VSOCK_UDS;
     use agent_channel::AGENT_VSOCK_PORT;
+    use agent_test_support::ScratchDir;
     use std::path::PathBuf;
 
     /// Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake, then
     /// hand the same stream to the *real* guest agent. Lets us exercise the entire host exec path
     /// (vsock connect + `CONNECT` ack + channel handshake + exec round trip) with no VM.
-    fn fake_vsock_agent(tag: &str) -> (TestDir, PathBuf, std::thread::JoinHandle<()>) {
+    fn fake_vsock_agent(tag: &str) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>) {
         use std::os::unix::net::UnixListener;
-        let dir = TestDir::new(tag);
+        let dir = ScratchDir::created(tag);
         let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
@@ -629,7 +629,7 @@ mod tests {
         };
 
         let sink = LogSink::default();
-        let dir = TestDir::new("agent-vsock-leak");
+        let dir = ScratchDir::created("agent-vsock-leak");
         let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let agent_sink = sink.clone();
@@ -771,12 +771,12 @@ mod tests {
     fn fake_vsock_server<F>(
         tag: &str,
         handler: F,
-    ) -> (TestDir, PathBuf, std::thread::JoinHandle<()>)
+    ) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>)
     where
         F: FnOnce(agent_channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
     {
         use std::os::unix::net::UnixListener;
-        let dir = TestDir::new(tag);
+        let dir = ScratchDir::created(tag);
         let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let handle = std::thread::spawn(move || {
@@ -1008,12 +1008,12 @@ mod tests {
     fn fake_connect_target<F>(
         tag: &str,
         handler: F,
-    ) -> (TestDir, PathBuf, std::thread::JoinHandle<()>)
+    ) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>)
     where
         F: FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
     {
         use std::os::unix::net::UnixListener;
-        let dir = TestDir::new(tag);
+        let dir = ScratchDir::created(tag);
         let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind");
         let handle = std::thread::spawn(move || {

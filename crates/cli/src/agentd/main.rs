@@ -101,6 +101,12 @@ struct Cli {
     /// host. Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
     #[arg(long, value_name = "N", default_value_t = 16)]
     max_sessions: usize,
+    /// Drop a session after this many seconds with **no request** from the client, so a wedged or
+    /// forgotten connection can't pin a microVM and a `--max-sessions` slot forever (the idle half of
+    /// the same capacity guarantee the ceiling gives). Applies to the wait for the first `open` too.
+    /// A client streaming requests keeps resetting it; `0` disables the timeout. Default 300 (5 min).
+    #[arg(long, value_name = "SECONDS", default_value_t = 300)]
+    idle_timeout: u64,
 }
 
 /// The daemon's shared context, handed by `Arc` to every session thread: the env-layered base config
@@ -128,6 +134,9 @@ struct Server {
     metrics: Arc<Metrics>,
     /// The `--max-sessions` ceiling (`0` = unlimited), enforced by [`SessionTicket::acquire`].
     max_sessions: usize,
+    /// The per-session idle timeout (`None` = disabled), from `--idle-timeout`: a read that waits this
+    /// long with no client bytes ends the session, freeing its VM and `--max-sessions` slot.
+    idle_timeout: Option<std::time::Duration>,
     /// Live sessions right now, the counter the admission check compares against the ceiling.
     /// Incremented by a successful [`SessionTicket::acquire`], decremented by the ticket's `Drop`.
     active_sessions: AtomicUsize,
@@ -213,6 +222,8 @@ fn main() -> ExitCode {
         snapshot_seq: AtomicU64::new(0),
         metrics: Arc::new(Metrics::default()),
         max_sessions: cli.max_sessions,
+        idle_timeout: (cli.idle_timeout > 0)
+            .then(|| std::time::Duration::from_secs(cli.idle_timeout)),
         active_sessions: AtomicUsize::new(0),
     });
     if let Some(metrics_listener) = metrics_listener {

@@ -27,16 +27,13 @@ use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
 use agent_cli::audit::RunProbes;
+use agent_cli::MAX_VCPUS;
 use agent_probes_loader::Timing;
 use agent_vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
 use agentd_protocol::{read_message, write_message, ProtocolError, Request, Response};
 
 use crate::metrics::{Metrics, Verb};
 use crate::Server;
-
-/// Firecracker v1.9 caps a microVM at 32 vCPUs (decision 001); reject an over-cap `open` up front as
-/// a typed error rather than surfacing a late boot failure, the daemon mirror of the CLI's guard.
-const MAX_VCPUS: u8 = 32;
 
 /// The no-op command `put`/`get` run: the engine injects files and returns artifacts only *around an
 /// exec*, so a bare file write/read rides a command that does nothing but carry them. `true` exits 0
@@ -56,6 +53,14 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     };
     let mut reader = BufReader::new(stream);
+
+    // Arm the idle timeout (if configured): a read that blocks this long with no client bytes fails
+    // (`WouldBlock`/`TimedOut`), which the read loop treats as a broken connection and ends the
+    // session, so a wedged client can't pin a VM + a `--max-sessions` slot indefinitely. Covers the
+    // wait for `open` too. Best-effort: a platform that refuses the sockopt just runs without it.
+    if let Some(idle) = server.idle_timeout {
+        let _ = reader.get_ref().set_read_timeout(Some(idle));
+    }
 
     // The first message must be `open` (carrying the session's resource envelope). Anything else,
     // EOF, a stray verb, a malformed/wrong-schema line, ends the connection before any VM is booted.
@@ -142,6 +147,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     result,
                     t0.elapsed(),
                     &mut total_exec_wall,
+                    true, // a real guest command
                     |r| Response::Result {
                         exit_code: r.exit_code,
                         stdout: lossy(&r.stdout),
@@ -168,6 +174,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     result,
                     t0.elapsed(),
                     &mut total_exec_wall,
+                    false, // put rides a no-op `true`, not a guest command
                     |_| Response::Put { path: path.clone() },
                 ) {
                     break;
@@ -189,6 +196,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     result,
                     t0.elapsed(),
                     &mut total_exec_wall,
+                    false, // get rides a no-op `true`, not a guest command
                     |r| {
                         let found = r.files.iter().find(|a| a.path == path);
                         Response::Got {
@@ -260,7 +268,17 @@ pub fn serve(stream: UnixStream, server: &Server) {
             // A wrong wire schema means the peer speaks another protocol, end the session. A
             // transport I/O error means the connection itself is broken, stop.
             Err(ProtocolError::Io(e)) => {
-                tracing::warn!(error = %e, "connection read failed; ending session");
+                // An idle-timeout read surfaces here as `WouldBlock`/`TimedOut` (the armed
+                // `SO_RCVTIMEO`); name it so an operator can tell an idle drop from a real transport
+                // break. Either way the connection is done, tear the session down.
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) {
+                    tracing::info!("session idle past --idle-timeout; ending session");
+                } else {
+                    tracing::warn!(error = %e, "connection read failed; ending session");
+                }
                 break;
             }
             Err(e @ ProtocolError::Schema(_)) => {
@@ -290,15 +308,23 @@ fn serve_run(
     result: Result<agent_vmm::RunResult, VmmError>,
     wall: Duration,
     total_exec_wall: &mut Duration,
+    is_command: bool,
     to_response: impl FnOnce(&agent_vmm::RunResult) -> Response,
 ) -> bool {
-    // Accumulate the **host-measured** wall on both success and failure: a timed-out or capped exec
-    // still consumed time (up to the whole budget), so the session's trace `exec_wall` must count it,
-    // not silently drop it by only summing successful runs' guest-reported wall.
-    *total_exec_wall += wall;
+    // Only a real `exec` counts as a guest command. `put`/`get` ride a no-op `true` purely to carry a
+    // file, so folding their wall into the `guest_command` histogram or the trace `exec_wall` would
+    // dilute the user-command latency signal with file-transfer overhead (16-G); `requests_total{verb}`
+    // already counts put/get separately. For a real command, accumulate the **host-measured** wall on
+    // both success and failure: a timed-out or capped exec still consumed time (up to the whole
+    // budget), so `exec_wall` must count it, not silently drop it by only summing successful runs.
+    if is_command {
+        *total_exec_wall += wall;
+    }
     match result {
         Ok(run) => {
-            metrics.guest_command(run.metrics.wall);
+            if is_command {
+                metrics.guest_command(run.metrics.wall);
+            }
             send(w, &to_response(&run))
         }
         Err(e) => {
@@ -375,8 +401,10 @@ fn cold_boot(mut config: BootConfig, jailed: bool) -> Result<RunningVm, VmmError
 /// jailed session is a typed refusal inside `snapshot` (its disk is in the chroot).
 fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
     let dir = server.next_snapshot_dir();
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| VmmError::Vmm(format!("create snapshot dir {}: {e}", dir.display())))?;
+    // Don't pre-create the bundle dir: `Vm::snapshot` refuses a restored/jailed/device-bearing VM
+    // *before* writing anything, and creates the dir itself only on its success path. Pre-creating it
+    // would orphan an empty `snap-N` on every refusal, and the default daemon posture is jailed (where
+    // snapshot is always a refusal), so a client looping `snapshot` would leak dirs unbounded.
     // The returned `Snapshot` is just metadata pointing at the on-disk bundle; the client gets the
     // directory (the bundle stays on the daemon host, decision 034 keeps bulk bytes off this line).
     let _snapshot = vm.snapshot(&dir)?;

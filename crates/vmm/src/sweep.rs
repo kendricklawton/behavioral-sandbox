@@ -303,7 +303,7 @@ fn protected_identities(dir: &Path) -> BTreeSet<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TestDir;
+    use agent_test_support::ScratchDir;
 
     /// A pid guaranteed dead: spawn a short-lived child and reap it. Immediate recycling of a
     /// just-freed pid is effectively impossible (the kernel allocates pids cyclically).
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn sweep_reclaims_dead_dirs_and_spares_live_and_foreign_ones() {
-        let base = TestDir::new("agent-sweep-base");
+        let base = ScratchDir::created("agent-sweep-base");
         let dead = base.path().join(format!("agent-{}-0", dead_pid()));
         let live = base.path().join(format!("agent-{}-0", std::process::id()));
         let foreign = base.path().join("agent-bundle-1234"); // the test suite's TmpDir shape
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn fresh_staged_disk_is_detected_and_missing_or_stale_is_not() {
-        let dir = TestDir::new("agent-stage-fresh");
+        let dir = ScratchDir::created("agent-stage-fresh");
         // No disk staged yet.
         assert!(!has_fresh_staged_disk(dir.path(), Duration::from_secs(120)));
         std::fs::write(dir.path().join("rootfs.ext4"), b"disk").expect("write staged disk");
@@ -380,7 +380,7 @@ mod tests {
     fn sweep_defers_a_dead_dir_that_holds_a_fresh_restore_stage() {
         // A cross-process restore stages the source's disk into the source's now-dead-pid dir; the
         // sweep must not `remove_dir_all` it mid-copy.
-        let base = TestDir::new("agent-sweep-stage");
+        let base = ScratchDir::created("agent-sweep-stage");
         let staging = base.path().join(format!("agent-{}-0", dead_pid()));
         std::fs::create_dir(&staging).expect("create staging dir");
         std::fs::write(staging.join("rootfs.ext4"), b"disk").expect("stage a disk");
@@ -399,7 +399,7 @@ mod tests {
         // a dir this process creates (like every real workdir) must pass the filter. (The
         // rejection side, a foreign-uid decoy, needs a second uid, so it can't be unit-tested
         // unprivileged; the filter's equality is the whole mechanism.)
-        let dir = TestDir::new("agent-sweep-uid");
+        let dir = ScratchDir::created("agent-sweep-uid");
         let dir_uid = std::fs::metadata(dir.path()).expect("stat test dir").uid();
         assert_eq!(own_euid(), Some(dir_uid));
     }

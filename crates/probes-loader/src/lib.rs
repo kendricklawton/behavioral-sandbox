@@ -241,17 +241,7 @@ impl ExecveCounter {
         // Name the missing prerequisite up front: no kernel BTF, or no CAP_BPF/CAP_PERFMON, is
         // a legible `Unsupported` error here rather than a cryptic verifier reject / `EPERM` below.
         check_support()?;
-        let path = object_path();
-        let bytes = std::fs::read(&path).map_err(|e| {
-            ProbeError::Object(format!(
-                "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
-                path.display()
-            ))
-        })?;
-        // `Ebpf::load` parses the ELF and creates the maps in the kernel (needs CAP_BPF); the program
-        // is loaded (verified) and attached below. All of it is owned by `ebpf` and torn down on drop.
-        let mut ebpf =
-            Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+        let mut ebpf = load_object()?;
 
         let program: &mut TracePoint = ebpf
             .program_mut(PROGRAM)
@@ -376,15 +366,7 @@ impl SyscallTracer {
     /// tracepoint attach fails.
     pub fn load() -> Result<Self, ProbeError> {
         check_support()?;
-        let path = object_path();
-        let bytes = std::fs::read(&path).map_err(|e| {
-            ProbeError::Object(format!(
-                "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
-                path.display()
-            ))
-        })?;
-        let mut ebpf =
-            Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+        let mut ebpf = load_object()?;
 
         for (program, event) in TRACERS {
             let tp: &mut TracePoint = ebpf
@@ -576,10 +558,12 @@ impl SyscallTracer {
     /// while events are flowing, so latency is bounded by `idle`. Decode + print with
     /// [`SyscallEvent::describe`].
     ///
-    /// Kept a poll-with-sleep loop deliberately: the ring buffer's fd is available via `AsRawFd` for a
-    /// zero-idle-latency `epoll` wait, but that needs an event loop or an extra dependency; this stays
-    /// sync, `unsafe`-free, and dependency-light, matching the driver. `keep_going` is where a caller
-    /// wires a deadline or a Ctrl-C flag.
+    /// Kept a poll-with-sleep loop deliberately. A zero-idle-latency `poll`/`epoll` wait on the ring
+    /// buffer's fd is possible in principle, but aya's `RingBuf` exposes only `AsRawFd`, not `AsFd`, so
+    /// handing its fd to a poller needs `BorrowedFd::borrow_raw`, which is `unsafe` and this crate is
+    /// `#![forbid(unsafe_code)]` (the loader stays unsafe-free by policy). The only caller that matters
+    /// is a live-trace viewer, never the audit record (that uses [`drain`](Self::drain)/`collect`), so
+    /// the idle sleep is immaterial. `keep_going` is where a caller wires a deadline or a Ctrl-C flag.
     ///
     /// # Errors
     /// Propagates a [`drain`](Self::drain) error (currently none in practice).
@@ -1028,14 +1012,7 @@ fn set_enforce(ebpf: &mut Ebpf, on: bool) -> Result<(), ProbeError> {
 /// interface). Namespace-independent: creating the maps and loading the programs is global, so this
 /// runs in whatever netns the caller is in.
 fn load_classifiers() -> Result<Ebpf, ProbeError> {
-    let path = object_path();
-    let bytes = std::fs::read(&path).map_err(|e| {
-        ProbeError::Object(format!(
-            "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
-            path.display()
-        ))
-    })?;
-    let mut ebpf = Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+    let mut ebpf = load_object()?;
     for program in [CLS_INGRESS, CLS_EGRESS] {
         let cls: &mut SchedClassifier = ebpf
             .program_mut(program)
@@ -1139,6 +1116,21 @@ pub fn object_path() -> PathBuf {
         return PathBuf::from(p);
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../probes/target/bpfel-unknown-none/release/probes")
+}
+
+/// Read the compiled BPF object (from [`object_path`]) and load it into the kernel: `Ebpf::load`
+/// parses the ELF and creates the maps (needs `CAP_BPF`). Each probe pulls its typed program handle
+/// out of the returned `Ebpf` and loads/attaches it; the `Ebpf` owns everything and tears it down on
+/// drop. Shared by every probe's `load`, so the object-read and load errors read the same everywhere.
+fn load_object() -> Result<Ebpf, ProbeError> {
+    let path = object_path();
+    let bytes = std::fs::read(&path).map_err(|e| {
+        ProbeError::Object(format!(
+            "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
+            path.display()
+        ))
+    })?;
+    Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))
 }
 
 /// The cgroup v2 id of process `pid`, the same `u64` `bpf_get_current_cgroup_id` reports for tasks in
@@ -1257,15 +1249,7 @@ impl ResourceMeter {
     /// tracepoint attach fails.
     pub fn load() -> Result<Self, ProbeError> {
         check_support()?;
-        let path = object_path();
-        let bytes = std::fs::read(&path).map_err(|e| {
-            ProbeError::Object(format!(
-                "read BPF object {}: {e} (build it with `cargo xtask build-probes`)",
-                path.display()
-            ))
-        })?;
-        let mut ebpf =
-            Ebpf::load(&bytes).map_err(|e| ProbeError::Load(format!("load object: {e}")))?;
+        let mut ebpf = load_object()?;
 
         let program: &mut TracePoint = ebpf
             .program_mut(PROG_SCHED_SWITCH)

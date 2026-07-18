@@ -239,11 +239,7 @@ fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let rest = text.split("Firecracker v").nth(1)?;
-    let mut parts = rest
-        .split(|c: char| !c.is_ascii_digit())
-        .filter(|t| !t.is_empty());
-    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+    crate::spawn::fc_version_of(&text)
 }
 
 /// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.

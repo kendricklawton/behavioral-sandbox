@@ -98,6 +98,22 @@ pub(crate) fn verify(dir: &Path) -> Result<()> {
             bail!("vendored {rel} sha256 mismatch: manifest {sha}, got {got}");
         }
     }
+    // Drift the other direction: a file present in the mirror but absent from the manifest (a stray
+    // `.apk`, a hand-dropped file) is unaudited, and an unwitting re-`vendor` would legitimize it by
+    // hashing it into the next manifest. Flag it now so the mirror stays exactly the pinned set.
+    let recorded_rels: std::collections::BTreeSet<&str> =
+        recorded.iter().map(|(_, rel)| rel.as_str()).collect();
+    let mut actual = Vec::new();
+    walk_files(dir, &mut actual)?;
+    for path in &actual {
+        let rel = path.strip_prefix(dir).unwrap_or(path).to_string_lossy();
+        if rel != MANIFEST_NAME && !recorded_rels.contains(rel.as_ref()) {
+            bail!(
+                "vendored file {rel} is present in the mirror but absent from the manifest; \
+                 re-run `cargo xtask vendor` to rebuild it, or remove the stray file"
+            );
+        }
+    }
     println!(
         "✓ vendor mirror {} verified ({} files match the manifest)",
         dir.display(),

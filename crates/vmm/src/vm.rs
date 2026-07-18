@@ -781,7 +781,7 @@ pub(crate) fn reclaim_scratch(workdir: &Path, tap: Option<&Tap>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TestDir;
+    use agent_test_support::ScratchDir;
 
     #[test]
     fn reclaim_scratch_removes_the_dir_when_there_is_no_netns() {
@@ -789,7 +789,7 @@ mod tests {
         // `abort` now route through this one helper, so a failed boot reclaims exactly as a drop does.
         // (The netns-lingers branch needs CAP_NET_ADMIN to make `netns_exists` meaningful; the
         // privileged suite covers the sweep reclaiming a stranded netns+dir pair.)
-        let base = TestDir::new("agent-reclaim");
+        let base = ScratchDir::created("agent-reclaim");
         let workdir = base.path().join("agent-1-0");
         std::fs::create_dir(&workdir).expect("create workdir");
         reclaim_scratch(&workdir, None);

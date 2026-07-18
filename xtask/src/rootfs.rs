@@ -185,7 +185,11 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     fetch_one(&base)?;
 
     let dir = artifacts_dir();
-    let staging = dir.join("rootfs-staging");
+    // Per-pid staging so two concurrent `xtask` invocations (or a build racing a `--verify`
+    // rebuild) don't extract into and clean the same scratch tree. Removed at the end of a
+    // successful build; a crashed run leaves at most one stale `rootfs-staging.<pid>` under the
+    // gitignored `artifacts/`.
+    let staging = dir.join(format!("rootfs-staging.{}", std::process::id()));
     if staging.exists() {
         std::fs::remove_dir_all(&staging)
             .with_context(|| format!("clean staging {}", staging.display()))?;

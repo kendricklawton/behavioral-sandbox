@@ -440,12 +440,12 @@ fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TestDir;
+    use agent_test_support::ScratchDir;
 
     #[test]
     fn sanitize_symlinks_drops_escapes_including_chained_intermediate_links() {
         use std::os::unix::fs::symlink;
-        let dir = TestDir::new("agent-sanitize");
+        let dir = ScratchDir::created("agent-sanitize");
         let dest = dir.path();
 
         // A real file + a legitimate in-tree symlink to it: must survive.

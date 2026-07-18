@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use agent_probes_loader::{ResourceMeter, SyscallTracer};
-use agent_vmm::{BootConfig, Pool, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use agent_vmm::{
+    BootConfig, Pool, RunningVm, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID, GUEST_READY_MARKER,
+};
 use anyhow::{bail, Context, Result};
 
 use crate::{agent_rootfs_path, kernel_path};
@@ -27,9 +29,7 @@ pub(crate) fn image_used_bytes(path: &Path) -> Result<u64> {
 /// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
 /// duplicates the whole image per boot, the shared path doesn't. "Measured, not marketed."
 pub(crate) fn bench_boot(runs: usize) -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("bench-boot needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("bench-boot")?;
     if runs == 0 {
         bail!("--runs must be >= 1");
     }
@@ -106,6 +106,33 @@ fn warm_bench_config(kernel: &Path, rootfs: &Path, read_only_root: bool) -> Boot
     cfg
 }
 
+/// Build one prewarmed Python snapshot: boot the shared read-only base, load Python once (its
+/// interpreter and imports left resident in guest memory), pause, snapshot into a fresh scratch
+/// bundle, drop the source. Returns the snapshot and its bundle guard, which the caller must keep
+/// alive (the snapshot maps files under the bundle). `tag` names the scratch dir. The three memory
+/// benches share this identical preamble.
+fn prewarm_python_snapshot(
+    kernel: &Path,
+    rootfs: &Path,
+    tag: &str,
+) -> Result<(Snapshot, ScratchDir)> {
+    let bundle =
+        ScratchDir(std::env::temp_dir().join(format!("agent-bench-{tag}-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&bundle.0);
+    let source =
+        Vm::boot(warm_bench_config(kernel, rootfs, true)).context("boot the prewarmed source")?;
+    let warm_up = ["python3", "-c", "import json, os, sys"].map(String::from);
+    let out = source.exec(&warm_up, &[]).context("warm-up exec")?;
+    if out.exit_code != 0 {
+        bail!("warm-up python exited {}", out.exit_code);
+    }
+    let snapshot = source
+        .snapshot(&bundle.0)
+        .context("take the prewarmed snapshot")?;
+    source.shutdown().ok();
+    Ok((snapshot, bundle))
+}
+
 /// Exec the timed Python one-liner on `vm` and verify the answer actually came back: a sample
 /// counts only if it produced the result (a bench that times failures would be lying).
 fn timed_python(vm: &RunningVm) -> Result<()> {
@@ -132,9 +159,7 @@ fn timed_python(vm: &RunningVm) -> Result<()> {
 /// prewarmed image per runtime. Teardown and pool refill happen off the clock: they're the cost a
 /// caller pays between requests, not on the request path.
 pub(crate) fn bench_warm(runs: usize) -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("bench-warm needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("bench-warm")?;
     if runs == 0 {
         bail!("--runs must be >= 1");
     }
@@ -152,23 +177,8 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
     println!("bench-warm: agent rootfs {used_mib} MiB, {runs} runs per path\n");
 
-    // One prewarmed snapshot feeds the restore and pool paths: boot the shared read-only base, load
-    // Python once (interpreter + imports resident in guest memory), pause + snapshot, drop the
-    // source.
-    let bundle =
-        ScratchDir(std::env::temp_dir().join(format!("agent-bench-warm-{}", std::process::id())));
-    let _ = std::fs::remove_dir_all(&bundle.0);
-    let source =
-        Vm::boot(warm_bench_config(&kernel, &rootfs, true)).context("boot the prewarmed source")?;
-    let warm_up = ["python3", "-c", "import json, os, sys"].map(String::from);
-    let out = source.exec(&warm_up, &[]).context("warm-up exec")?;
-    if out.exit_code != 0 {
-        bail!("warm-up python exited {}", out.exit_code);
-    }
-    let snapshot = source
-        .snapshot(&bundle.0)
-        .context("take the prewarmed snapshot")?;
-    source.shutdown().ok();
+    // One prewarmed snapshot feeds the restore and pool paths.
+    let (snapshot, _bundle) = prewarm_python_snapshot(&kernel, &rootfs, "warm")?;
     let mem_mib = image_used_bytes(snapshot.mem_path())? / (1024 * 1024);
 
     // Each path splits into two per-run samples: the **start** (begin a sandbox → an exec-ready VM)
@@ -305,9 +315,7 @@ impl std::fmt::Display for StopReason {
 /// into swap), and reports **which**, so "how many concurrent microVMs before it degrades" is a
 /// measured number, not a guess. Needs KVM + the built agent rootfs.
 pub(crate) fn bench_density(count: usize) -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("bench-density needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("bench-density")?;
     if count == 0 {
         bail!("--count must be >= 1");
     }
@@ -322,23 +330,9 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
         }
     }
 
-    // One prewarmed snapshot feeds every clone (Python resident, then paused): the same read-only
-    // shared base `bench-warm` uses, so a clone's marginal memory is only its copy-on-write pages.
-    let bundle = ScratchDir(
-        std::env::temp_dir().join(format!("agent-bench-density-{}", std::process::id())),
-    );
-    let _ = std::fs::remove_dir_all(&bundle.0);
-    let source =
-        Vm::boot(warm_bench_config(&kernel, &rootfs, true)).context("boot the prewarmed source")?;
-    let warm_up = ["python3", "-c", "import json, os, sys"].map(String::from);
-    let out = source.exec(&warm_up, &[]).context("warm-up exec")?;
-    if out.exit_code != 0 {
-        bail!("warm-up python exited {}", out.exit_code);
-    }
-    let snapshot = source
-        .snapshot(&bundle.0)
-        .context("take the prewarmed snapshot")?;
-    source.shutdown().ok();
+    // One prewarmed snapshot feeds every clone (the same read-only shared base `bench-warm` uses, so
+    // a clone's marginal memory is only its copy-on-write pages).
+    let (snapshot, _bundle) = prewarm_python_snapshot(&kernel, &rootfs, "density")?;
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
     let mem_mib = image_used_bytes(snapshot.mem_path())? / (1024 * 1024);
 
@@ -453,9 +447,7 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
 /// before the next strategy. The RW-copy-minus-shared-base gap is the rootfs choice made a number.
 /// Needs KVM + the built agent rootfs.
 pub(crate) fn bench_footprint(count: usize) -> Result<()> {
-    if !Path::new("/dev/kvm").exists() {
-        bail!("bench-footprint needs /dev/kvm (run on a KVM-capable host)");
-    }
+    crate::require_kvm("bench-footprint")?;
     if count == 0 {
         bail!("--count must be >= 1");
     }
@@ -470,23 +462,9 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
         }
     }
 
-    // One prewarmed snapshot feeds the restore strategy (Python resident, then paused), the same
-    // shared read-only base the cold-shared and restore paths use.
-    let bundle = ScratchDir(
-        std::env::temp_dir().join(format!("agent-bench-footprint-{}", std::process::id())),
-    );
-    let _ = std::fs::remove_dir_all(&bundle.0);
-    let source =
-        Vm::boot(warm_bench_config(&kernel, &rootfs, true)).context("boot the prewarmed source")?;
-    let warm_up = ["python3", "-c", "import json, os, sys"].map(String::from);
-    let out = source.exec(&warm_up, &[]).context("warm-up exec")?;
-    if out.exit_code != 0 {
-        bail!("warm-up python exited {}", out.exit_code);
-    }
-    let snapshot = source
-        .snapshot(&bundle.0)
-        .context("take the prewarmed snapshot")?;
-    source.shutdown().ok();
+    // One prewarmed snapshot feeds the restore strategy, the same shared read-only base the
+    // cold-shared and restore paths use.
+    let (snapshot, _bundle) = prewarm_python_snapshot(&kernel, &rootfs, "footprint")?;
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
     let mem_mib = image_used_bytes(snapshot.mem_path())? / (1024 * 1024);
     let cfg = warm_bench_config(&kernel, &rootfs, true);

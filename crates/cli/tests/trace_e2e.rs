@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use agent_probes_loader::{check_support, object_path};
+use agent_test_support::ScratchDir;
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -45,22 +46,6 @@ fn skip_reason() -> Option<String> {
     None
 }
 
-/// A scratch dir removed on drop, so a failing assertion can't leak it.
-struct TestDir(PathBuf);
-impl TestDir {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("agent-trace-e2e-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create test dir");
-        Self(dir)
-    }
-}
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn run_with_trace_and_record_yields_trail_and_json() {
@@ -69,9 +54,9 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         return;
     }
     let root = workspace_root();
-    let scratch = TestDir::new();
-    let record_path = scratch.0.join("record.json");
-    let summary_path = scratch.0.join("summary.json");
+    let scratch = ScratchDir::created("trace-e2e");
+    let record_path = scratch.path().join("record.json");
+    let summary_path = scratch.path().join("summary.json");
 
     // A workload that touches a file in-guest and prints, interesting enough to leave a footprint
     // on every axis the CLI surfaces. Unjailed on purpose: the proof here is the audit face, and
@@ -169,8 +154,8 @@ fn allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial() 
         return;
     }
     let root = workspace_root();
-    let scratch = TestDir::new();
-    let record_path = scratch.0.join("record.json");
+    let scratch = ScratchDir::created("trace-e2e");
+    let record_path = scratch.path().join("record.json");
 
     // The host end of every VM's fixed point-to-point /30 is `10.200.0.1` (the guest is `.2`), so the
     // gateway address is known from outside, no per-run allocation to discover. Allow it on **one**
@@ -264,7 +249,7 @@ fn doctor_passes_then_one_run_drives_every_projection_at_once() {
         eprintln!("skipping doctor_passes_then_one_run_drives_every_projection_at_once: {why}");
         return;
     }
-    let scratch = TestDir::new();
+    let scratch = ScratchDir::created("trace-e2e");
     let env = artifact_env();
 
     // 1) `agent doctor` on a capable host reports ready (exit 0): the gate an operator runs first.
@@ -284,7 +269,7 @@ fn doctor_passes_then_one_run_drives_every_projection_at_once() {
     //    + egress policy (--net/--allow), file injection + retrieval (--put/--get), piped stdin, and
     //    the structured result (--json). The workload folds stdin + the injected file into a returned
     //    artifact and sends UDP to the allowed endpoint.
-    let injected = scratch.0.join("injected.txt");
+    let injected = scratch.path().join("injected.txt");
     std::fs::write(&injected, b"INJECTED").expect("write the --put file");
     let workload = "\
 import sys, socket
@@ -295,7 +280,7 @@ socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('10.200.0.1', 999
 print('p14-9f-complete')
 ";
     let mut child = Command::new(env!("CARGO_BIN_EXE_agent"))
-        .current_dir(&scratch.0) // --get writes result.txt here
+        .current_dir(scratch.path()) // --get writes result.txt here
         .envs(env.iter().cloned())
         .args([
             "run",
@@ -352,7 +337,7 @@ print('p14-9f-complete')
     // The retrieved artifact (--get) landed under the cwd and folds stdin + the injected file, so
     // --put, --get, and stdin all round-tripped through the one run.
     let got =
-        std::fs::read_to_string(scratch.0.join("result.txt")).expect("--get wrote result.txt");
+        std::fs::read_to_string(scratch.path().join("result.txt")).expect("--get wrote result.txt");
     assert_eq!(
         got, "STDIN|INJECTED",
         "stdin + --put round-tripped via --get"
@@ -374,9 +359,9 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
         return;
     }
     let root = workspace_root();
-    let scratch = TestDir::new();
-    let record_path = scratch.0.join("record.json");
-    let summary_path = scratch.0.join("summary.json");
+    let scratch = ScratchDir::created("trace-e2e");
+    let record_path = scratch.path().join("record.json");
+    let summary_path = scratch.path().join("summary.json");
 
     // The very script the docs example ships, one source of truth for "the agent," exercised here.
     let agent = std::fs::read_to_string(root.join("docs/examples/agent-tool-loop.py"))

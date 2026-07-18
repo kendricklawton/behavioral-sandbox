@@ -12,24 +12,9 @@ use std::time::Duration;
 
 use agent_vmm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID};
 
-/// A host scratch dir removed on drop, so a panicking assertion can't leak it. (The unit tests have
-/// their own copy; the integration crate is separate, so it needs one too.)
-pub struct TmpDir(PathBuf);
-impl TmpDir {
-    pub fn new(tag: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("agent-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        Self(dir)
-    }
-    pub fn path(&self) -> &std::path::Path {
-        &self.0
-    }
-}
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+/// The shared scratch-dir guard (removed on drop). `new` reserves the path without creating it, the
+/// semantics these integration tests rely on (a snapshot bundle / output dir the driver creates).
+pub use agent_test_support::ScratchDir as TmpDir;
 
 /// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep, mirrors the input test's
 /// host-side hash of the injected payload). A free helper (not a `#[test]` fn), so it uses explicit
@@ -177,23 +162,10 @@ pub fn have_net_admin() -> bool {
 /// the jailer test needs real root (or a privileged container). Skips otherwise, like
 /// [`have_net_admin`].
 pub fn have_jailer_privileges() -> bool {
-    let euid0 = std::fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find_map(|l| l.strip_prefix("Uid:").map(|v| v.trim().to_string()))
-        })
-        // `Uid:` is real/effective/saved/fs; the effective uid is the second field.
-        .and_then(|v| {
-            v.split_whitespace()
-                .nth(1)
-                .and_then(|e| e.parse::<u32>().ok())
-        })
-        .is_some_and(|euid| euid == 0);
     // The initial user namespace maps the full uid range (`0 0 4294967295`); a `--map-root-user`
     // userns maps a single id, so its map differs and this reads false.
     let init_userns = std::fs::read_to_string("/proc/self/uid_map")
         .ok()
         .is_some_and(|m| m.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"]);
-    euid0 && init_userns
+    agent_test_support::have_real_root() && init_userns
 }

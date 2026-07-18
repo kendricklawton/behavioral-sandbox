@@ -35,7 +35,31 @@ use agent_channel::{ChannelError, Request, Response, ServerConnection};
 const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(3600); // 1 hour
 
 /// How often the reaper polls for the child's exit while waiting toward the deadline.
-const WAIT_POLL: Duration = Duration::from_millis(20);
+/// Exponential backoff for the child-exit poll: start tight so a fast command returns almost at
+/// once, widen toward a cap so a long one polls cheaply. Mirrors `vmm`'s `PollBackoff` (the boot
+/// path's proven fix for the same fixed-tick quantization); kept local because this crate is the
+/// static musl guest binary and takes no `vmm` dependency.
+struct WaitBackoff {
+    next: Duration,
+}
+
+impl WaitBackoff {
+    const INITIAL: Duration = Duration::from_millis(1);
+    const CAP: Duration = Duration::from_millis(5);
+
+    fn new() -> Self {
+        Self {
+            next: Self::INITIAL,
+        }
+    }
+
+    /// Sleep the current interval, then double it toward the cap.
+    fn sleep(&mut self) {
+        let current = self.next;
+        self.next = (self.next * 2).min(Self::CAP);
+        std::thread::sleep(current);
+    }
+}
 
 /// `serve`'s return value for a timed-out (SIGKILL'd) command, the shell convention for SIGKILL.
 const TIMED_OUT_CODE: i32 = 137;
@@ -367,6 +391,7 @@ fn budget_from(timeout_ms: u32) -> Duration {
 /// the per-exec [`ExecCgroup`] after this returns, on both the exit and timeout paths. So a
 /// hung or double-forking command can no longer wedge the agent's connection.
 fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited> {
+    let mut backoff = WaitBackoff::new();
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Waited::Exited(status));
@@ -376,7 +401,7 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited>
             child.wait()?; // reap the SIGKILL'd child
             return Ok(Waited::TimedOut);
         }
-        std::thread::sleep(WAIT_POLL);
+        backoff.sleep();
     }
 }
 

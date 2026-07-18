@@ -330,14 +330,14 @@ pub(crate) fn arm_sentinel(dirs: &[PathBuf]) -> Option<Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TestDir;
+    use agent_test_support::ScratchDir;
 
     /// The core crash-safety mechanism, without a VM or privileges: the sentinel acts on pipe EOF.
     /// A plain directory stands in for the cgroup, `echo 1 > cgroup.kill` creates the file there
     /// (a real cgroup already has it), so "the kill was written" is observable as file content.
     #[test]
     fn sentinel_kills_watched_cgroups_on_driver_death() {
-        let dir = TestDir::new("agent-sentinel");
+        let dir = ScratchDir::created("agent-sentinel");
         let cg = dir.path().join("cg");
         std::fs::create_dir(&cg).expect("create fake cgroup");
 
@@ -361,7 +361,7 @@ mod tests {
     /// when EOF arrives, so nothing is written anywhere and the sentinel exits promptly.
     #[test]
     fn teardown_disarms_the_sentinel_without_a_kill() {
-        let dir = TestDir::new("agent-sentinel-disarm");
+        let dir = ScratchDir::created("agent-sentinel-disarm");
         let cg = dir.path().join("cg");
         std::fs::create_dir(&cg).expect("create fake cgroup");
 
@@ -382,7 +382,7 @@ mod tests {
     /// drop the lifetime, and assert the process is gone, not lingering as our zombie child.
     #[test]
     fn drop_reaps_the_sentinel_without_an_explicit_teardown() {
-        let dir = TestDir::new("agent-sentinel-drop");
+        let dir = ScratchDir::created("agent-sentinel-drop");
         let cg = dir.path().join("cg");
         std::fs::create_dir(&cg).expect("create fake cgroup");
 
@@ -418,7 +418,7 @@ mod tests {
     /// After teardown it must no-op (never signal a possibly-recycled pid).
     #[test]
     fn kill_handle_writes_cgroup_kill_then_noops_after_teardown() {
-        let dir = TestDir::new("agent-killhandle");
+        let dir = ScratchDir::created("agent-killhandle");
         let cg = dir.path().join("cg");
         std::fs::create_dir(&cg).expect("create fake cgroup");
 

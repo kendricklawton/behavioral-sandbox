@@ -675,6 +675,16 @@ fn artifacts_dir() -> PathBuf {
     workspace_root().join("artifacts")
 }
 
+/// Bail unless `/dev/kvm` is present: the shared guard every VM-booting subcommand runs first, so the
+/// "needs a KVM host" refusal reads identically across the bench and demo sections. `what` names the
+/// caller (e.g. `"bench-boot"`) for the message.
+fn require_kvm(what: &str) -> Result<()> {
+    if !Path::new("/dev/kvm").exists() {
+        bail!("{what} needs /dev/kvm (run on a KVM-capable host)");
+    }
+    Ok(())
+}
+
 /// The local vendor mirror, if the operator set `AGENT_VENDOR_DIR`: the offline source for every
 /// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Firecracker S3
 /// bucket or the Alpine CDN. `None` means fetch from pinned upstream (the default).

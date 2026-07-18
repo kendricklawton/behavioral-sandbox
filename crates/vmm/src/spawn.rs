@@ -636,23 +636,9 @@ impl Spawned {
                 give_to_jail(&disk_target, uid, gid, 0o600)?;
                 disk_unstage = Some(disk_target);
             }
-            // Mounts were recorded eagerly above; here just learn the jailer's cgroup (mirroring
-            // `run_boot`) so teardown can remove it too.
-            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
-                let actual = read_cgroup_dir(pid);
-                if let Some(dir) = actual.as_deref() {
-                    if !self.lifetime.watches(dir) {
-                        tracing::warn!(
-                            cgroup = %dir.display(),
-                            "jailer placed the VMM outside the precomputed cgroup; the lifetime \
-                             sentinel is not guarding it (driver death would leak this VMM)"
-                        );
-                    }
-                }
-                if let Some(chroot) = self.chroot.as_mut() {
-                    chroot.cgroup_dir = actual;
-                }
-            }
+            // Mounts were recorded eagerly above; here just learn the jailer's cgroup so teardown
+            // can remove it too.
+            self.learn_jailer_cgroup();
         } else {
             state_arg = path_str(&snapshot.state)?.to_string();
             mem_arg = path_str(&snapshot.mem)?.to_string();
@@ -776,6 +762,29 @@ impl Spawned {
         )
     }
 
+    /// Learn the cgroup the jailer actually placed the VMM in (from `/proc/<pid>/cgroup`, now that
+    /// Firecracker runs in its final cgroup) so teardown can remove it. The lifetime sentinel watches
+    /// the *precomputed* jailer path from spawn; if the jailer put the VMM somewhere else, the
+    /// sentinel is not guarding it, warn (driver death would leak this VMM), never hide it. Shared by
+    /// the cold boot and the snapshot restore, which learn it at the same point.
+    fn learn_jailer_cgroup(&mut self) {
+        if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
+            let actual = read_cgroup_dir(pid);
+            if let Some(dir) = actual.as_deref() {
+                if !self.lifetime.watches(dir) {
+                    tracing::warn!(
+                        cgroup = %dir.display(),
+                        "jailer placed the VMM outside the precomputed cgroup; the lifetime \
+                         sentinel is not guarding it (driver death would leak this VMM)"
+                    );
+                }
+            }
+            if let Some(chroot) = self.chroot.as_mut() {
+                chroot.cgroup_dir = actual;
+            }
+        }
+    }
+
     /// Drive the API through the boot sequence and wait for the userspace marker; returns the
     /// boot-to-userspace latency.
     pub(crate) fn run_boot(
@@ -847,25 +856,7 @@ impl Spawned {
                     dest: dest.clone(),
                 });
             }
-            // Learn the cgroup the jailer placed the VMM in (from `/proc/<pid>/cgroup`, now that
-            // Firecracker is running in its final cgroup), so teardown can remove it. The lifetime
-            // sentinel watches the *precomputed* jailer cgroup path from spawn; if the
-            // jailer put the VMM somewhere else, the sentinel isn't guarding it, warn, don't hide.
-            if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
-                let actual = read_cgroup_dir(pid);
-                if let Some(dir) = actual.as_deref() {
-                    if !self.lifetime.watches(dir) {
-                        tracing::warn!(
-                            cgroup = %dir.display(),
-                            "jailer placed the VMM outside the precomputed cgroup; the lifetime \
-                             sentinel is not guarding it (driver death would leak this VMM)"
-                        );
-                    }
-                }
-                if let Some(chroot) = self.chroot.as_mut() {
-                    chroot.cgroup_dir = actual;
-                }
-            }
+            self.learn_jailer_cgroup();
         } else {
             let kernel = absolute(&config.kernel)?;
             kernel_arg = path_str(&kernel)?.to_string();
@@ -1311,7 +1302,9 @@ fn warn_on_unpinned_firecracker(firecracker: &Path) {
 }
 
 /// The `(major, minor)` out of `firecracker --version` output (first line `Firecracker v1.9.1`).
-fn fc_version_of(text: &str) -> Option<(u64, u64)> {
+/// Single-sourced here (the driver's own boot-time pin check) so `doctor`'s readiness probe reports
+/// the exact same version the driver validates against, the two surfaces can't drift.
+pub(crate) fn fc_version_of(text: &str) -> Option<(u64, u64)> {
     let rest = text.split("Firecracker v").nth(1)?;
     let mut parts = rest
         .split(|c: char| !c.is_ascii_digit())
@@ -1556,7 +1549,7 @@ mod version_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_util::TestDir;
+    use agent_test_support::ScratchDir;
 
     #[test]
     fn poll_backoff_starts_tight_and_caps() {
@@ -1578,7 +1571,7 @@ mod tests {
         // A "firecracker" that exits immediately, complaining on stderr: `sh --api-sock <path>`
         // rejects the flag. Boot must fail fast with the exit surfaced, not wait out the whole
         // deadline, and carry the stderr tail. Needs no KVM, so it runs in the host gate.
-        let dir = TestDir::new("agent-fake-fc");
+        let dir = ScratchDir::created("agent-fake-fc");
         let kernel = dir.path().join("vmlinux");
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
@@ -1610,8 +1603,8 @@ mod tests {
     #[test]
     fn workdirs_are_fresh_private_and_distinct() {
         let base = Path::new("/tmp");
-        let a = TestDir::adopt(create_workdir(base).expect("first workdir"));
-        let b = TestDir::adopt(create_workdir(base).expect("second workdir"));
+        let a = ScratchDir::adopt(create_workdir(base).expect("first workdir"));
+        let b = ScratchDir::adopt(create_workdir(base).expect("second workdir"));
         assert_ne!(a.path(), b.path(), "each VM gets its own scratch dir");
         let mode = std::fs::metadata(a.path())
             .expect("stat workdir")
@@ -1623,7 +1616,7 @@ mod tests {
     #[test]
     fn staging_dir_is_created_private_and_adopts_only_its_own() {
         use std::os::unix::fs::PermissionsExt;
-        let base = TestDir::new("agent-stage-priv");
+        let base = ScratchDir::created("agent-stage-priv");
         let dir = base.path().join("agent-99999-0");
         // Fresh create: private 0700, regardless of umask.
         ensure_private_staging_dir(&dir).expect("create the staging dir");
@@ -1645,7 +1638,7 @@ mod tests {
     #[test]
     fn a_staged_restore_disk_is_private_and_never_clobbers() {
         use std::os::unix::fs::PermissionsExt;
-        let base = TestDir::new("agent-stage-disk");
+        let base = ScratchDir::created("agent-stage-disk");
         let src = base.path().join("bundle-disk");
         std::fs::write(&src, b"snapshot disk bytes").expect("write source disk");
         let backing = base.path().join("agent-77777-0/rootfs.ext4");
