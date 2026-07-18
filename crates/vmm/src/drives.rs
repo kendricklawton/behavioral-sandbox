@@ -168,13 +168,23 @@ fn require_dir(path: &Path, what: &str) -> Result<(), VmmError> {
 /// [`VmmError::Artifact`], the driver's only other external process is `firecracker`, so these are
 /// real new runtime dependencies, surfaced clearly rather than as a cryptic spawn failure.
 fn run_host_tool(program: &str, args: &[&OsStr]) -> Result<(), VmmError> {
-    let status = Command::new(program)
+    // `.output()` (not `.status()` with inherited stdio): capture stderr so a real failure (e.g.
+    // `mke2fs` on a full scratch fs) names the cause instead of an undiagnosable one-liner, and null
+    // stdin so a tool line can never land on the pipe-clean structured-result stdout.
+    let output = Command::new(program)
         .args(args)
-        .status()
+        .stdin(std::process::Stdio::null())
+        .output()
         .map_err(|e| tool_spawn_error(program, e))?;
-    if !status.success() {
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail = stderr.trim();
         return Err(VmmError::Vmm(format!(
-            "{program} failed building a block device image"
+            "{program} failed building a block device image (exit {}): {tail}",
+            output
+                .status
+                .code()
+                .map_or_else(|| "signal".to_string(), |c| c.to_string())
         )));
     }
     Ok(())
@@ -410,7 +420,16 @@ fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
             if ft.is_dir() {
                 stack.push(path);
             } else if let Ok(rel) = path.strip_prefix(dest) {
-                out.push(rel.to_string_lossy().into_owned());
+                // A non-UTF-8 name has no lossless `String`, and a `to_string_lossy` U+FFFD form
+                // names no file on disk (an embedder resolving it gets ENOENT), so drop it with a
+                // warning rather than hand back a broken manifest entry (the sanitizer's posture).
+                match rel.to_str() {
+                    Some(s) => out.push(s.to_owned()),
+                    None => tracing::warn!(
+                        path = %rel.display(),
+                        "output artifact has a non-UTF-8 name; omitted from the manifest"
+                    ),
+                }
             }
         }
     }

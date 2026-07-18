@@ -165,6 +165,14 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     }
 }
 
+/// The `<image>.part` sibling a build writes to before atomically renaming it into place, so a
+/// crash mid-build never leaves a plausible-but-broken image at the canonical path.
+fn part_path(image: &Path) -> PathBuf {
+    let mut p = image.as_os_str().to_owned();
+    p.push(".part");
+    PathBuf::from(p)
+}
+
 /// One full rootfs assembly into `out_image`: extract the pinned Alpine base, install the guest
 /// packages, bake the static agent + init in, and build the ext4 from the staging dir with
 /// `mke2fs -d` (rootless, no loopback, no `sudo`). A distinct output path from the pinned Ubuntu
@@ -235,13 +243,18 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     // create/write/check times and clamps the copied file mtimes down to the epoch, make two builds
     // byte-identical. `lazy_itable_init=0` writes the inode table eagerly, so its bytes are fixed here
     // rather than finished non-deterministically by the guest kernel on first mount.
-    let _ = std::fs::remove_file(out_image);
+    // Build to a `<out>.part` sibling and atomically rename into place only after mke2fs succeeds.
+    // A Ctrl-C or mke2fs failure then leaves an obvious partial at `<out>.part`, never a plausible
+    // 256 MiB non-filesystem at the canonical path that every consumer's `is_file()` would accept
+    // and then boot into a cryptic timeout (mirrors `artifacts.rs`'s download `.part` discipline).
+    let part = part_path(out_image);
+    let _ = std::fs::remove_file(&part);
     run_tool(
         "truncate",
         &[
             OsStr::new("-s"),
             OsStr::new(&format!("{ROOTFS_SIZE_MIB}M")),
-            out_image.as_os_str(),
+            part.as_os_str(),
         ],
     )?;
     let ext_opts = format!("hash_seed={ROOTFS_UUID},lazy_itable_init=0");
@@ -262,7 +275,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
             OsStr::new(&ext_opts),
             OsStr::new("-d"),
             staging.as_os_str(),
-            out_image.as_os_str(),
+            part.as_os_str(),
         ],
         &[("SOURCE_DATE_EPOCH", ROOTFS_SOURCE_DATE_EPOCH)],
     )?;
@@ -272,6 +285,15 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     // The image is the product, don't leave the extracted staging tree behind.
     std::fs::remove_dir_all(&staging)
         .with_context(|| format!("clean up staging {}", staging.display()))?;
+
+    // Rename last, so the canonical path only ever appears as a fully-built image.
+    std::fs::rename(&part, out_image).with_context(|| {
+        format!(
+            "move built rootfs into place: {} -> {}",
+            part.display(),
+            out_image.display()
+        )
+    })?;
 
     Ok(RootfsBuild {
         image_sha256: sha256_of(out_image)?,
@@ -320,10 +342,14 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
 
     if verify {
         // Prove determinism: a second full build must be byte-for-byte identical. Built to a temp
-        // path so the canonical image (which the boot test uses) stays in place; removed after.
+        // path so the canonical image (which the boot test uses) stays in place. Clean up the temp
+        // (and its `.part`, present if the build failed mid-way) on *every* path, before propagating
+        // a build error, so a failed second build leaks neither.
         let tmp = artifacts_dir().join("rootfs-agent.verify.ext4");
-        let again = assemble_rootfs(&tmp)?;
+        let result = assemble_rootfs(&tmp);
         let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(part_path(&tmp));
+        let again = result?;
         if again.image_sha256 != build.image_sha256 {
             bail!(
                 "rootfs build is NOT reproducible — two builds differ:\n  {}\n  {}",

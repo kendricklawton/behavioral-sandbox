@@ -30,6 +30,7 @@
 use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::jail::unmount_base;
 use crate::net::{netns_del, netns_exists};
@@ -46,7 +47,17 @@ pub struct SweepReport {
     /// Scratch dirs skipped because their owner pid is alive (a live driver, or a recycled pid,
     /// indistinguishable, so both are kept).
     pub live_skipped: usize,
+    /// Dead-pid dirs whose removal was deferred because a restore is staging a disk into them right
+    /// now (a cross-process restore stages the source's disk into the source's old, now-dead dir).
+    /// A later sweep past the grace reclaims a genuinely-leaked stage.
+    pub restore_staging_skipped: usize,
 }
+
+/// How recently a staged restore disk must have been touched for the sweep to treat the dir as an
+/// in-flight restore and defer its removal. Generous: it need only exceed the copy→`PUT
+/// /snapshot/load` window (a large disk on slow storage), since the only cost of over-waiting is
+/// keeping a genuinely-leaked stage one extra sweep.
+const RESTORE_STAGING_GRACE: Duration = Duration::from_secs(120);
 
 /// Reclaim the residue of **dead** drivers under `scratch_dir` (the [`BootConfig::scratch_dir`]
 /// base, `/tmp` by default): their per-VM scratch dirs, and the per-VM network namespaces named after
@@ -132,6 +143,19 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
                 }
             }
         }
+        // Defer removing a dir that holds a freshly-staged restore disk: a cross-process restore
+        // stages the source's disk into this dead-source-pid dir (the baked-in
+        // `agent-<srcpid>-<n>/rootfs.ext4`), and `remove_dir_all` mid-copy would flake it. The netns
+        // above is still reclaimed; only the dir removal waits, a later sweep past the grace reclaims
+        // a genuinely-leaked stage.
+        if has_fresh_staged_disk(&dir, RESTORE_STAGING_GRACE) {
+            tracing::debug!(
+                dir = %dir.display(),
+                "sweep: a restore is staging into this dir; deferring its removal"
+            );
+            report.restore_staging_skipped += 1;
+            continue;
+        }
         // A crashed driver's jailed read-only boot leaves the shared base **bind-mounted** into its
         // chroot; `remove_dir_all` would `EBUSY` on that mount point and leak the whole dir. Detach any
         // mount under this dir first (lazy, best-effort), so reclamation is never blocked by a mount
@@ -176,6 +200,24 @@ fn detach_mounts_under(dir: &Path) {
     }
 }
 
+/// Whether `dir` holds a restore disk (`rootfs.ext4`) touched within `grace`, the signal that a
+/// cross-process restore is staging into this (dead-source-pid) dir right now. Wall-clock, because a
+/// file mtime is only comparable to wall time, not a monotonic `Instant`. A mtime in the future
+/// (clock skew) reads as fresh (`elapsed()` errs), erring toward *keeping* an active restore; a
+/// missing/unreadable disk reads as not-fresh, so an ordinary orphan dir is reclaimed as before.
+fn has_fresh_staged_disk(dir: &Path, grace: Duration) -> bool {
+    let Ok(md) = std::fs::metadata(dir.join("rootfs.ext4")) else {
+        return false;
+    };
+    match md.modified() {
+        Ok(mtime) => match mtime.elapsed() {
+            Ok(age) => age < grace,
+            Err(_) => true, // mtime in the future: treat as fresh, don't reclaim mid-restore
+        },
+        Err(_) => false,
+    }
+}
+
 /// The owner pid embedded in a per-VM scratch-dir name, iff `name` matches the exact
 /// `agent-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else,
 /// including the test suite's `agent-<tag>-<pid>` temp dirs, is not a sweep candidate.
@@ -198,8 +240,9 @@ fn pid_alive(pid: u32) -> bool {
 /// This process's **effective** uid, from `/proc/self/status` (`Uid:` is real/effective/saved/fs;
 /// effective is the second field), no `unsafe`, no libc, the same read the test helpers use.
 /// The euid is what names the files this process creates, so it's the identity `create_workdir`'s
-/// dirs carry and the one the candidate filter must match.
-fn own_euid() -> Option<u32> {
+/// dirs carry and the one the candidate filter must match. Also the ownership the restore-disk
+/// staging verifies before adopting a pre-existing dir (`stage_restore_disk`).
+pub(crate) fn own_euid() -> Option<u32> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
     uid.split_whitespace().nth(1)?.parse().ok()
@@ -318,6 +361,36 @@ mod tests {
         let err = sweep_orphans(Path::new("/nonexistent-sweep-base"))
             .expect_err("missing base is a typed error");
         assert!(matches!(err, VmmError::Vmm(_)));
+    }
+
+    #[test]
+    fn fresh_staged_disk_is_detected_and_missing_or_stale_is_not() {
+        let dir = TestDir::new("agent-stage-fresh");
+        // No disk staged yet.
+        assert!(!has_fresh_staged_disk(dir.path(), Duration::from_secs(120)));
+        std::fs::write(dir.path().join("rootfs.ext4"), b"disk").expect("write staged disk");
+        // Just written, so within any positive grace: an in-flight restore.
+        assert!(has_fresh_staged_disk(dir.path(), Duration::from_secs(120)));
+        // With a zero grace even a just-written file counts as stale (age >= 0), the tail case
+        // where a later sweep finally reclaims a genuinely-leaked stage.
+        assert!(!has_fresh_staged_disk(dir.path(), Duration::ZERO));
+    }
+
+    #[test]
+    fn sweep_defers_a_dead_dir_that_holds_a_fresh_restore_stage() {
+        // A cross-process restore stages the source's disk into the source's now-dead-pid dir; the
+        // sweep must not `remove_dir_all` it mid-copy.
+        let base = TestDir::new("agent-sweep-stage");
+        let staging = base.path().join(format!("agent-{}-0", dead_pid()));
+        std::fs::create_dir(&staging).expect("create staging dir");
+        std::fs::write(staging.join("rootfs.ext4"), b"disk").expect("stage a disk");
+        let report = sweep_orphans(base.path()).expect("sweep");
+        assert!(
+            staging.exists(),
+            "a dead dir with a fresh restore stage must be spared"
+        );
+        assert_eq!(report.restore_staging_skipped, 1);
+        assert_eq!(report.dirs_reclaimed, 0);
     }
 
     #[test]

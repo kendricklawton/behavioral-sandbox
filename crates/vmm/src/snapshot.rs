@@ -6,7 +6,9 @@
 
 use std::path::Path;
 
-use crate::firecracker::{SnapshotCreate, SnapshotType, VmState, VmStateKind};
+use crate::firecracker::{
+    snapshot_api_timeout, SnapshotCreate, SnapshotType, VmState, VmStateKind,
+};
 use crate::paths::{absolute, path_str, require_file};
 use crate::spawn::Spawned;
 use crate::vm::{BootConfig, RunningVm, Snapshot, Vm};
@@ -66,12 +68,16 @@ impl Vm {
         if !Path::new("/dev/kvm").exists() {
             return Err(VmmError::NoKvm);
         }
-        require_file(&snapshot.state, "snapshot state file")?;
-        require_file(&snapshot.mem, "snapshot memory file")?;
-        require_file(&snapshot.root_drive, "snapshot root disk")?;
+        // No `fetch-artifacts` hint: a snapshot bundle is the embedder's own, no xtask produces it.
+        require_file(&snapshot.state, "snapshot state file", None)?;
+        require_file(&snapshot.mem, "snapshot memory file", None)?;
+        require_file(&snapshot.root_drive, "snapshot root disk", None)?;
 
+        // One deadline for the whole restore, computed before the pre-spawn staging so both share it
+        // (decision 013); `run_restore` enforces it around the disk stage and every API step.
+        let deadline = crate::spawn::boot_deadline(config.boot_timeout);
         let mut spawned = Spawned::launch_for_restore(config, snapshot)?;
-        let latency = match spawned.run_restore(snapshot, config.boot_timeout) {
+        let latency = match spawned.run_restore(snapshot, deadline) {
             Ok(latency) => latency,
             Err(e) => return Err(spawned.abort(e)),
         };
@@ -199,13 +205,17 @@ impl RunningVm {
         root_drive: &Path,
         shared_base: bool,
     ) -> Result<(), VmmError> {
-        self.api.put(
+        // `/snapshot/create` replies only after Firecracker writes the whole `mem_mib`-sized memory
+        // file, so its socket timeout scales with guest RAM, not the instant-reply default (a
+        // multi-GiB guest on a slow disk would otherwise spuriously time out a valid snapshot).
+        self.api.put_with_timeout(
             "/snapshot/create",
             &SnapshotCreate {
                 snapshot_type: SnapshotType::Full,
                 snapshot_path: path_str(state)?,
                 mem_file_path: path_str(mem)?,
             },
+            snapshot_api_timeout(self.mem_mib.get()),
         )?;
         if !shared_base {
             std::fs::copy(&self.rootfs, root_drive)

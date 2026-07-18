@@ -621,6 +621,10 @@ const FLOW_DROPS_MAP: &str = "FLOW_DROPS";
 /// The [`FLOW_DROPS_MAP`] twin for denial rows (`#[map] static DENIAL_DROPS`), read by
 /// [`TapMonitor::dropped_denials`].
 const DENIAL_DROPS_MAP: &str = "DENIAL_DROPS";
+/// The per-CPU counter of non-IPv4 (IPv6/VLAN) frames the tap saw but the flow parser can't
+/// represent (`#[map] static UNPARSED_L3`), read by [`TapMonitor::unparsed_l3`] so the network
+/// section is gapped as IPv4-only rather than silently omitting them.
+const UNPARSED_L3_MAP: &str = "UNPARSED_L3";
 /// `EEXIST`: a clsact qdisc already on the interface is not an error (the attach is idempotent).
 const EEXIST: i32 = 17;
 /// Where `ip netns` bind-mounts a named network namespace's handle (matches the driver's own
@@ -674,7 +678,8 @@ impl TapMonitor {
     pub fn attach(interface: &str) -> Result<Self, ProbeError> {
         check_support()?;
         let mut ebpf = load_classifiers()?;
-        attach_classifiers(&mut ebpf, interface)?;
+        // Current netns (persists): keep the links so aya's drop detaches them here, the correct netns.
+        attach_classifiers(&mut ebpf, interface, false)?;
         Ok(Self { ebpf })
     }
 
@@ -694,7 +699,9 @@ impl TapMonitor {
         // namespace-scoped); only the `tc` attach must run inside the sandbox's netns.
         let mut ebpf = load_classifiers()?;
         let handle = Path::new(NETNS_DIR).join(netns);
-        with_netns(&handle, || attach_classifiers(&mut ebpf, interface))?;
+        // Netns-attached: forget the links so aya's drop can't fire a wrong-netns filter-delete; the
+        // sandbox's netns teardown reclaims the in-kernel filter.
+        with_netns(&handle, || attach_classifiers(&mut ebpf, interface, true))?;
         Ok(Self { ebpf })
     }
 
@@ -779,6 +786,18 @@ impl TapMonitor {
     /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
     pub fn dropped_denials(&self) -> Result<u64, ProbeError> {
         per_cpu_sum(&self.ebpf, DENIAL_DROPS_MAP)
+    }
+
+    /// Non-IPv4 (IPv6 or 802.1Q VLAN) frames the tap saw that the flow parser can't represent, so
+    /// they aren't in [`flows`](Self::flows) or [`totals`](Self::totals). Nonzero means the flow view
+    /// is IPv4-only and the guest emitted frames it can't otherwise show (ARP is not counted, it is
+    /// expected on-link, not a flow). The consumer records a coverage gap rather than an exact-looking
+    /// record. Neither IPv6 nor VLAN is configured on a sandbox's tap (decision 017).
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the counter map is missing or unreadable.
+    pub fn unparsed_l3(&self) -> Result<u64, ProbeError> {
+        per_cpu_sum(&self.ebpf, UNPARSED_L3_MAP)
     }
 
     /// The **denied** guest-sent packets: `(FlowKey, count)` pairs from the `DENIALS` map, one per
@@ -949,7 +968,8 @@ impl TapMonitor {
         let mut ebpf = load_classifiers()?;
         apply_policy(&mut ebpf, policy)?;
         let handle = Path::new(NETNS_DIR).join(netns);
-        with_netns(&handle, || attach_classifiers(&mut ebpf, interface))?;
+        // Netns-attached: forget the links (see `attach_in_netns`) so the drop can't misfire.
+        with_netns(&handle, || attach_classifiers(&mut ebpf, interface, true))?;
         Ok(Self { ebpf })
     }
 }
@@ -1034,7 +1054,11 @@ fn load_classifiers() -> Result<Ebpf, ProbeError> {
 /// clsact qdisc first. **Namespace-scoped**: the caller must already be in the netns that owns
 /// `interface` (the current netns for [`TapMonitor::attach`], the sandbox's for
 /// [`TapMonitor::attach_in_netns`]).
-fn attach_classifiers(ebpf: &mut Ebpf, interface: &str) -> Result<(), ProbeError> {
+fn attach_classifiers(
+    ebpf: &mut Ebpf,
+    interface: &str,
+    forget_links: bool,
+) -> Result<(), ProbeError> {
     // clsact gives a device both a `tc` ingress and egress hook. Idempotent: an already-present clsact
     // (EEXIST) is fine; any other failure (no CAP_NET_ADMIN, or the interface is gone) is a typed error.
     if let Err(e) = tc::qdisc_add_clsact(interface) {
@@ -1055,66 +1079,54 @@ fn attach_classifiers(ebpf: &mut Ebpf, interface: &str) -> Result<(), ProbeError
             .map_err(|e| {
                 ProbeError::Load(format!("program `{program}` is not a classifier: {e}"))
             })?;
-        cls.attach(interface, attach_type).map_err(|e| {
+        let link_id = cls.attach(interface, attach_type).map_err(|e| {
             ProbeError::Attach(format!(
                 "attach `{program}` to {interface} ({attach_type:?}): {e}"
             ))
         })?;
+        if forget_links {
+            // Netns-attached: the in-kernel `tc` filter is reclaimed by the sandbox's **netns
+            // teardown** (the documented model), so take the link out of the program and forget it.
+            // Otherwise aya's `Ebpf` drop would issue the netlink filter-delete in the *dropping
+            // thread's* netns (the pre-6.6 path), where this ifindex may name an unrelated device,
+            // detaching someone else's filter. Forgetting leaks no fd: the classic clsact filter is
+            // in-kernel bookkeeping the qdisc/netns teardown clears, not a held descriptor.
+            let link = cls.take_link(link_id).map_err(|e| {
+                ProbeError::Attach(format!("take `{program}` link on {interface}: {e}"))
+            })?;
+            std::mem::forget(link);
+        }
     }
     Ok(())
 }
 
-/// Run `f` with the calling thread moved into the network namespace at `netns_handle`, then move it
-/// back, so a `tc` attach lands in a sandbox's netns without moving the whole process (only this
-/// thread is affected, briefly). Uses nix's *safe* `setns` wrapper, so the loader stays
-/// `#![forbid(unsafe_code)]`. The origin netns is captured first and **always** restored: on the normal
-/// path explicitly (so a restore failure is surfaced as an error), and on an unwinding panic in `f` by
-/// the [`NetnsGuard`], so no code path can strand the thread in the sandbox's netns.
-fn with_netns<T>(
+/// Run `f` inside the network namespace at `netns_handle`, on a **short-lived scoped thread** that
+/// enters the netns and then dies with it, so a `tc` attach lands in a sandbox's netns without moving
+/// the calling thread (or the process) at all. The worker's `setns` affects only *that* thread, and
+/// because it simply exits afterward there is **no restore step to fail**: the earlier design moved
+/// the caller's own thread and `?`-propagated the restore `setns`, so a failed restore stranded the
+/// caller permanently in the sandbox's (about-to-be-torn-down) netns. Here a failure just ends the
+/// worker, the caller's thread was never in the sandbox netns. `f`'s result (and any panic) crosses
+/// the join. Uses nix's *safe* `setns`, so the loader stays `#![forbid(unsafe_code)]`.
+fn with_netns<T: Send>(
     netns_handle: &Path,
-    f: impl FnOnce() -> Result<T, ProbeError>,
+    f: impl FnOnce() -> Result<T, ProbeError> + Send,
 ) -> Result<T, ProbeError> {
     use nix::sched::{setns, CloneFlags};
-    // The *calling thread's* netns, not `/proc/self/ns/net` (which is the thread-group leader's): a
-    // caller may drive the loader off a worker thread, and we must return exactly where we started.
-    let origin = File::open("/proc/thread-self/ns/net")
-        .map_err(|e| ProbeError::Attach(format!("open the calling thread's netns handle: {e}")))?;
-    let target = File::open(netns_handle)
-        .map_err(|e| ProbeError::Attach(format!("open netns {}: {e}", netns_handle.display())))?;
-    setns(&target, CloneFlags::CLONE_NEWNET)
-        .map_err(|e| ProbeError::Attach(format!("enter netns {}: {e}", netns_handle.display())))?;
-
-    // Arm a guard so an unwinding panic in `f` still restores the origin netns (the sandbox's netns is
-    // about to be torn down; a thread stranded there would corrupt every later operation on it). The
-    // normal path disarms the guard and restores explicitly below, so a restore *failure* surfaces as
-    // an error rather than being swallowed on drop.
-    let mut guard = NetnsGuard {
-        origin: Some(origin),
-    };
-    let result = f();
-    // Disarm the guard (so its `Drop` won't restore a second time) and restore explicitly, so a restore
-    // *failure* is surfaced as an error rather than swallowed. `origin` is `Some` until exactly here.
-    if let Some(origin) = guard.origin.take() {
-        setns(&origin, CloneFlags::CLONE_NEWNET)
-            .map_err(|e| ProbeError::Attach(format!("restore the calling thread's netns: {e}")))?;
-    }
-    result
-}
-
-/// Restores a thread's origin netns if [`with_netns`] unwinds through it. Armed for the duration of
-/// `f`; the normal path takes `origin` (disarming it) and restores explicitly, so this fires **only**
-/// on a panic. `Drop` can't propagate, and the thread is already unwinding, so a failed restore here is
-/// best-effort, attempting it is still strictly better than leaving the thread in a doomed netns.
-struct NetnsGuard {
-    origin: Option<File>,
-}
-
-impl Drop for NetnsGuard {
-    fn drop(&mut self) {
-        if let Some(origin) = self.origin.take() {
-            let _ = nix::sched::setns(&origin, nix::sched::CloneFlags::CLONE_NEWNET);
-        }
-    }
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let target = File::open(netns_handle).map_err(|e| {
+                    ProbeError::Attach(format!("open netns {}: {e}", netns_handle.display()))
+                })?;
+                setns(&target, CloneFlags::CLONE_NEWNET).map_err(|e| {
+                    ProbeError::Attach(format!("enter netns {}: {e}", netns_handle.display()))
+                })?;
+                f()
+            })
+            .join()
+            .map_err(|_| ProbeError::Attach("netns worker thread panicked".into()))?
+    })
 }
 
 /// Where the compiled BPF object lives: the `AGENT_PROBES_OBJECT` override if set, else the
@@ -1334,6 +1346,39 @@ impl ResourceMeter {
             .map_err(|e| ProbeError::Map(format!("reset cgroup {cgroup_id} CPU total: {e}")))
     }
 
+    /// Delete `cgroup_id`'s `CPU_NS` row entirely (not just zero it like [`reset`](Self::reset)),
+    /// freeing its slot in the fixed-capacity map. Called after a finished sandbox's final read so
+    /// dead cgroups don't accumulate against `MAX_CGROUPS`: without it a long-lived meter fills the
+    /// map, and once full the kernel's `CPU_NS.insert` for a *new* sandbox silently fails, so its
+    /// `cpu_ns` reads back an indistinguishable `0` (a used-no-CPU lie) with no coverage gap.
+    /// Removing a cgroup with no row is a no-op, not an error, mirroring
+    /// [`remove_target`](Self::remove_target).
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the CPU map is missing, or the removal fails for a reason other than
+    /// the key being absent.
+    pub fn clear(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
+        let map = self
+            .ebpf
+            .map_mut(CPU_NS_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{CPU_NS_MAP}` not found")))?;
+        let mut cpu: AyaHashMap<_, u64, u64> = AyaHashMap::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{CPU_NS_MAP}` as a hash map: {e}")))?;
+        match cpu.remove(&cgroup_id) {
+            Ok(()) => Ok(()),
+            // Absent key (ENOENT): the row was never created (the cgroup never ran), so a no-op is
+            // the intended outcome, exactly as `remove_target` treats an already-gone target.
+            Err(aya::maps::MapError::SyscallError(e))
+                if e.io_error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(ProbeError::Map(format!(
+                "clear cgroup {cgroup_id} CPU total: {e}"
+            ))),
+        }
+    }
+
     /// Turn the **meter-everything** toggle on or off. Off (the default) meters only the registered
     /// [`add_target`](Self::add_target) set, the multi-sandbox path. On meters every cgroup on the host
     /// (so `CPU_NS` grows toward one entry per live cgroup); the whole-host escape hatch for a snapshot or
@@ -1380,20 +1425,27 @@ impl ResourceMeter {
         Ok(Duration::from_nanos(self.cpu_ns(cgroup_id)?))
     }
 
-    /// The raw accumulated on-CPU **nanoseconds** for `cgroup_id` (0 if absent). Reads the map by
-    /// iteration rather than a keyed lookup so a missing key is an unambiguous `0`, not a lookup error to
-    /// disentangle from a real one, the map holds one entry under a targeted meter, so the scan is trivial.
+    /// The raw accumulated on-CPU **nanoseconds** for `cgroup_id` (0 if absent). A **keyed lookup**:
+    /// aya 0.13 returns a typed `MapError::KeyNotFound`, so a missing key is an unambiguous `0` (never
+    /// scheduled, or not the metered target) with no scan, distinct from a real read error. (Under
+    /// `meter_all` the map can hold up to `MAX_CGROUPS` rows, which the old full scan walked every read.)
     ///
     /// # Errors
-    /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
+    /// [`ProbeError::Map`] if the map is missing or the read fails for a reason other than a missing key.
     pub fn cpu_ns(&self, cgroup_id: u64) -> Result<u64, ProbeError> {
-        let mut found = 0u64;
-        self.for_each_cpu(|id, ns| {
-            if id == cgroup_id {
-                found = ns;
-            }
-        })?;
-        Ok(found)
+        let map = self
+            .ebpf
+            .map(CPU_NS_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{CPU_NS_MAP}` not found")))?;
+        let cpu: AyaHashMap<_, u64, u64> = AyaHashMap::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{CPU_NS_MAP}` as a hash map: {e}")))?;
+        match cpu.get(&cgroup_id, 0) {
+            Ok(ns) => Ok(ns),
+            Err(aya::maps::MapError::KeyNotFound) => Ok(0),
+            Err(e) => Err(ProbeError::Map(format!(
+                "read `{CPU_NS_MAP}` for cgroup {cgroup_id}: {e}"
+            ))),
+        }
     }
 
     /// Every metered cgroup's on-CPU nanoseconds as `(cgroup_id, ns)` pairs (order unspecified), the

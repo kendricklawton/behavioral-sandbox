@@ -4,12 +4,8 @@ Run a script or a binary you don't trust inside a microVM, feed it input, and re
 result back. Every command here is `agent run`, jailed by default; add `--unjailed` on a dev box
 without real root and the `jailer` binary (the guest still sits behind the KVM boundary).
 
-Point the CLI at the agent rootfs once:
-
-```console
-export AGENT_ROOTFS=artifacts/rootfs-agent.ext4
-export AGENT_MARKER=AGENT-GUEST-READY
-```
+The defaults point at the agent rootfs the build leaves in `artifacts/`, so no environment setup
+is needed; a rootfs elsewhere is one `AGENT_ROOTFS=/path/to/rootfs-agent.ext4` away.
 
 ## A script, with stdin
 

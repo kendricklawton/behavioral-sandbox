@@ -1,8 +1,6 @@
 # Summary
 
 - [Introduction](./introduction.md)
-- [Quickstart](./quickstart.md)
-- [Non-goals](./non-goals.md)
 - [Using the agent CLI](./cli.md)
   - [Installation](./cli-install.md)
 - [Using the agentd daemon](./daemon.md)

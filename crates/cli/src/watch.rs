@@ -136,9 +136,22 @@ impl Term {
             let _ = disable_raw_mode();
             return Err(VmmError::Vmm(format!("enter alternate screen: {e}")));
         }
+        // Chain a terminal-restoring step ahead of the existing panic hook. Without it, a panic while
+        // the view is up (ratatui/crossterm internals, or the exec worker thread) prints its message
+        // into the alternate screen, which this guard's `Drop` then tears down on unwind, so the
+        // process dies with the terminal correctly restored but the failure *invisible*. Restoring
+        // first means the message lands on the normal screen. `Drop` resets to the default hook (the
+        // CLI installs none before here, so default is the original).
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = disable_raw_mode();
+            let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
+            prev(info);
+        }));
         match Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stderr())) {
             Ok(terminal) => Ok(Self { terminal }),
             Err(e) => {
+                let _ = std::panic::take_hook(); // drop our hook (Terminal init failed, no view)
                 let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
                 let _ = disable_raw_mode();
                 Err(VmmError::Vmm(format!("initialize terminal: {e}")))
@@ -149,6 +162,9 @@ impl Term {
 
 impl Drop for Term {
     fn drop(&mut self) {
+        // Reset the panic hook to the default (drops ours), then restore the terminal. Idempotent
+        // with the hook itself if a panic already ran it.
+        let _ = std::panic::take_hook();
         let _ = disable_raw_mode();
         let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
         let _ = self.terminal.show_cursor();
@@ -177,6 +193,7 @@ pub fn live(probes: &RunProbes, meta: &WatchMeta, done: &AtomicBool) -> Result<(
     // keeps the previous view rather than blanking a panel.
     let mut last = LiveSnapshot::default();
     let mut finished_noted = false;
+    let mut poll_failures = 0u32;
     loop {
         let finished = done.load(Ordering::Acquire);
         let snap = probes.snapshot();
@@ -200,18 +217,32 @@ pub fn live(probes: &RunProbes, meta: &WatchMeta, done: &AtomicBool) -> Result<(
         term.terminal
             .draw(|f| ui(f, meta, start.elapsed(), finished, &last, &timeline))
             .map_err(|e| VmmError::Vmm(format!("draw live view: {e}")))?;
-        // Keyboard: q/Esc/Ctrl-C closes the view (never the run). Poll errors are treated as
-        // "no input", input trouble must not kill a healthy run.
-        if event::poll(TICK).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                let quit = key.kind == KeyEventKind::Press
-                    && (key.code == KeyCode::Char('q')
-                        || key.code == KeyCode::Esc
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)));
-                if quit {
+        // Keyboard: q/Esc/Ctrl-C closes the view (never the run). Poll trouble must not kill a
+        // healthy run, but a *persistent* poll failure (a revoked tty) can't just be read as "no
+        // input": `event::poll` then returns instantly, so the loop would busy-spin at 100% CPU and
+        // `q` could never fire. After a few consecutive failures, give up the view (the run finishes
+        // headless), sleeping meanwhile so the interim isn't a spin.
+        match event::poll(TICK) {
+            Ok(true) => {
+                poll_failures = 0;
+                if let Ok(Event::Key(key)) = event::read() {
+                    let quit = key.kind == KeyEventKind::Press
+                        && (key.code == KeyCode::Char('q')
+                            || key.code == KeyCode::Esc
+                            || (key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL)));
+                    if quit {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(false) => poll_failures = 0,
+            Err(_) => {
+                poll_failures += 1;
+                if poll_failures >= 5 {
                     return Ok(());
                 }
+                std::thread::sleep(TICK);
             }
         }
     }

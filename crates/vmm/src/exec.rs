@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
-use agent_channel::{ClientConnection, Response};
+use agent_channel::{ChannelError, ClientConnection, Response};
 
 use crate::{Artifact, ExecMetrics, RunResult, VmmError};
 
@@ -99,6 +99,24 @@ fn wire_timeout_ms(timeout: Duration) -> u32 {
         .max(1)
 }
 
+/// Whether a send failure is the guest *disconnecting* mid-write (EPIPE / ECONNRESET / EOF), the only
+/// case where a typed refusal it queued before closing is still readable past the close, so worth a
+/// recovery `recv_response`. A `PayloadTooLarge`/`Protocol` error wrote nothing to the socket, and a
+/// local write timeout leaves the guest healthy and awaiting a request: for those, reading back would
+/// just park for the full socket read timeout, so the caller surfaces the send error directly.
+fn send_was_disconnect(err: &VmmError) -> bool {
+    matches!(
+        err,
+        VmmError::Channel(ChannelError::Io(e))
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+    )
+}
+
 pub(crate) fn run_exec<S: Read + Write>(
     conn: &mut ClientConnection<S>,
     argv: &[String],
@@ -125,12 +143,28 @@ pub(crate) fn run_exec<S: Read + Write>(
     // presumption (the secret-hygiene contract on `RunningVm::exec_with_files`): the borrowed-send
     // path serializes straight from the caller's slices into a single exact-sized wire buffer that
     // the channel wipes after each send (decision 018), so the engine keeps no extra copy of a file
-    // body or env value to strand, and nothing on this path logs one. `?` yields
-    // `VmmError::Channel(..)`, preserving the source.
-    for (path, data) in files_in {
-        conn.send_put_file(path, data)?;
+    // body or env value to strand, and nothing on this path logs one.
+    let sent = (|| -> Result<(), VmmError> {
+        for (path, data) in files_in {
+            conn.send_put_file(path, data)?;
+        }
+        conn.send_exec(argv, stdin, env, artifacts, wire_timeout_ms(bounds.timeout))?;
+        Ok(())
+    })();
+    if let Err(send_err) = sent {
+        // The guest may have rejected an earlier request and closed *while the host was still
+        // writing* (a peer disconnect: EPIPE / ECONNRESET / EOF): its typed refusal is already in
+        // the socket buffer, readable past the close, so prefer that reason over the transport
+        // symptom. Only a disconnect leaves a refusal to read: a `PayloadTooLarge`/`Protocol` send
+        // error wrote nothing, and a local write timeout leaves the guest healthy and awaiting a
+        // request, so draining either would just park `recv_response` for the full read timeout.
+        if send_was_disconnect(&send_err) {
+            if let Ok(Response::Error(msg)) = conn.recv_response() {
+                return Err(VmmError::GuestExec(msg));
+            }
+        }
+        return Err(send_err);
     }
-    conn.send_exec(argv, stdin, env, artifacts, wire_timeout_ms(bounds.timeout))?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -457,6 +491,31 @@ mod tests {
         assert_eq!(wire_timeout_ms(Duration::from_secs(3600)), 3_600_000);
         // An absurd budget saturates rather than wrapping back toward (or to) zero.
         assert_eq!(wire_timeout_ms(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn only_a_peer_disconnect_triggers_the_send_failure_drain() {
+        use std::io::{Error, ErrorKind};
+        // A disconnect mid-write: the guest closed after queuing a refusal, so read it back.
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::UnexpectedEof,
+        ] {
+            let err = VmmError::Channel(ChannelError::Io(Error::from(kind)));
+            assert!(send_was_disconnect(&err), "{kind:?} should drain");
+        }
+        // Wrote-nothing / guest-still-healthy failures must NOT drain (they would block on a read
+        // for the full socket timeout): an oversized frame, a protocol misuse, and a write timeout.
+        let too_large = VmmError::Channel(ChannelError::PayloadTooLarge {
+            tag: 0,
+            len: 1 << 21,
+        });
+        let protocol = VmmError::Channel(ChannelError::Protocol("bad".into()));
+        let write_timeout = VmmError::Channel(ChannelError::Io(Error::from(ErrorKind::WouldBlock)));
+        assert!(!send_was_disconnect(&too_large));
+        assert!(!send_was_disconnect(&protocol));
+        assert!(!send_was_disconnect(&write_timeout));
     }
 
     #[test]

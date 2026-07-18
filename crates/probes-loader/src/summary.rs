@@ -124,16 +124,27 @@ impl RunRecord {
     }
 }
 
-/// The network summary: `reached` (distinct destinations the guest actually talked to, flows collapsed
-/// to their destination triple and sorted), `denied` (blocked destinations, already dst-aggregated and
-/// sorted by the builder), and the guest-view byte rollup.
+/// The network summary: `reached` (distinct destinations the guest actually got bytes to, flows
+/// collapsed to their destination triple, minus any that were denied, sorted), `denied` (blocked
+/// destinations, already dst-aggregated and sorted by the builder), and the guest-view byte rollup.
 fn net_summary(out: &mut String, net: &NetSection) {
+    // The tap counts a flow *before* the egress verdict runs (`tap_ingress`: `count()` then
+    // `egress_verdict()`), so a fully-denied endpoint still appears among the flow destinations even
+    // though every packet was dropped. Subtract the denied triples: `reached` must mean the guest
+    // actually got bytes out, not merely attempted, or a supervising agent (decision 035) reads a
+    // blocked exfil endpoint as reached. Those endpoints still appear in `denied` below.
+    let denied: BTreeSet<(u32, u16, u8)> = net
+        .denials
+        .iter()
+        .map(|d| (d.dst_addr, d.dst_port, d.proto))
+        .collect();
     // Collapse flows to distinct destinations, an agent cares *which endpoint* it reached, not the
     // ephemeral source port. A BTreeSet dedups and yields them in total (dst, port, proto) order.
     let dests: BTreeSet<(u32, u16, u8)> = net
         .flows
         .iter()
         .map(|f| (f.key.dst_addr, f.key.dst_port, f.key.proto))
+        .filter(|triple| !denied.contains(triple))
         .collect();
     out.push_str("{\"reached\":[");
     for (i, &(addr, port, proto)) in dests.iter().enumerate() {
@@ -347,6 +358,28 @@ mod tests {
         assert!(
             json.contains("\"reached\":[\"8.8.8.8:443/tcp\"]"),
             "one distinct destination, not two: {json}"
+        );
+    }
+
+    #[test]
+    fn a_denied_endpoint_is_never_listed_as_reached() {
+        // The tap counts a flow *before* the egress verdict, so a blocked endpoint has a flow row
+        // *and* a denial row (`sample` always denies 9.9.9.9:443/tcp). `reached` must exclude it
+        // (zero bytes left the host); it belongs only in `denied`. Otherwise a supervising agent
+        // reads a blocked exfil target as reached (decision 035).
+        let record = sample(vec![
+            flow([10, 200, 0, 2], 40000, [8, 8, 8, 8], 443, IPPROTO_TCP), // allowed
+            flow([10, 200, 0, 2], 40001, [9, 9, 9, 9], 443, IPPROTO_TCP), // denied at the tap
+        ]);
+        let json = record.to_summary_json();
+        // The trailing `]` pins 8.8.8.8 as the *sole* reached entry, so 9.9.9.9 is provably absent.
+        assert!(
+            json.contains("\"reached\":[\"8.8.8.8:443/tcp\"]"),
+            "reached must list only the allowed endpoint, not the denied one: {json}"
+        );
+        assert!(
+            json.contains("\"denied\":[\"9.9.9.9:443/tcp\"]"),
+            "the blocked endpoint still appears in denied: {json}"
         );
     }
 

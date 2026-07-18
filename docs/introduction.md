@@ -42,17 +42,14 @@ change protects:
 
 And one scope rule: **engine, not platform.** This is a runtime plus a clean driver API you
 self-host. Multi-tenant auth, billing, fleet scheduling, and dashboards belong to whatever *hosts*
-the engine, the full non-goals list is in [Non-goals](./non-goals.md).
+the engine, and the model driving an agent is always the *caller*, never an engine component; the
+full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Reading this book
 
-- **[Quickstart](./quickstart.md)**, from a fresh clone to a first sandboxed run you can trust,
-  observed from the host, in a handful of commands. Start here.
-- **[Non-goals](./non-goals.md)**, what this engine deliberately is *not* (no tenancy, billing,
-  scheduling, dashboard, or embedded model), and why the boundary is load-bearing.
 - **[Using the agent CLI](./cli.md)**, how to run the engine: [install the
-  prerequisites](./cli-install.md), build the guest artifacts, then run untrusted code with
-  `agent run` and hold interactive sessions with `agent shell`.
+  prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
+  untrusted code with `agent run` and hold interactive sessions with `agent shell`. Start here.
 - **[Using the engine API](./embedding.md)**, the embedder's contract: the `Sandbox` lifecycle,
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.

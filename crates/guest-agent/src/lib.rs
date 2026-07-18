@@ -548,6 +548,23 @@ impl RunDir {
         if !real.starts_with(&root) {
             return Ok(None);
         }
+        // Skip an over-cap artifact *before* reading it. `fs::read` would otherwise slurp a
+        // multi-GiB (even sparse) file whole and OOM-kill the agent, taking the whole session down,
+        // instead of the intended graceful skip. This is only the coarse pre-check: the send side's
+        // `PayloadTooLarge` catch is the precise-boundary/TOCTOU backstop (a file that grows between
+        // this stat and the read still can't overflow a frame).
+        match std::fs::metadata(&real) {
+            Ok(md) if md.len() > agent_channel::MAX_PAYLOAD as u64 => {
+                tracing::warn!(
+                    "artifact {rel:?} exceeds the frame cap ({} bytes); skipped",
+                    md.len()
+                );
+                return Ok(None);
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(AgentError::WorkDir(e)),
+        }
         match std::fs::read(&real) {
             Ok(data) => Ok(Some(data)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

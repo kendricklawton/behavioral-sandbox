@@ -394,7 +394,17 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
                 "output_cap_bytes": limits.output_cap,
             },
         });
-        let _ = writeln!(std::io::stdout(), "{structured}");
+        // The structured result is the machine surface a `--json` caller consumes, so a failed write
+        // (a full disk) is a real failure, not to be swallowed like the guest-output relay below (the
+        // `--record` file writes are treated the same). A downstream-closed pipe is still not our
+        // fault, so BrokenPipe is the one exception.
+        if let Err(e) = writeln!(std::io::stdout(), "{structured}") {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(
+                    VmmError::Artifact(format!("write --json result to stdout: {e}")).into(),
+                );
+            }
+        }
     } else {
         // Relay the guest's output on our own stdout/stderr, the whole point of `exec`. Ignore
         // write errors (a closed pipe is not our failure); the guest exit code is what we return.

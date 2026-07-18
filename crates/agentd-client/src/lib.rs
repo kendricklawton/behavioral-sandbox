@@ -151,6 +151,17 @@ impl Client {
         self.reader.get_ref().set_read_timeout(timeout)
     }
 
+    /// Bound how long a call blocks *writing* a request, so a daemon that stops reading can't hang
+    /// the caller forever: without it a large `put`/`exec` fills the socket buffer and blocks in
+    /// `write_message` with no opt-out. `None` blocks indefinitely (the default). Set it generously
+    /// (a big `put` is real bytes over the socket), like the read timeout.
+    ///
+    /// # Errors
+    /// The underlying `setsockopt` error.
+    pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
+        self.writer.set_write_timeout(timeout)
+    }
+
     /// Open the session's sandbox. Must be the first call; the daemon boots a microVM and reports
     /// its latency (and whether it came from the warm pool).
     ///

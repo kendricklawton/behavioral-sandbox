@@ -2025,17 +2025,18 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       are packaged by default and can be dropped, while inline `src/` unit tests cannot be split out
       without moving them.)*
 - [x] **P19.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
-      *(**Done.** The docs are already an mdBook (`book.toml`, `SUMMARY.md`); this adds the two
-      first-class destinations the box names that were missing as dedicated pages. `quickstart.md`:
-      fresh clone → `self-host` → run untrusted code → observe it (reached/denied/`--record-summary`),
-      copy-pasteable, cross-linked. `non-goals.md`: the recorded non-goals consolidated into one page
-      (engine-not-platform: no tenancy/auth/billing/scheduling/dashboard; the model is the caller;
-      isolation is hardware; deny-by-default + the platform floor; SDKs/Wasmtime sibling live
-      elsewhere), each linked to its decision (016/033/034/035/036). The engine API
-      (`embedding.md`) and threat model (`threat-model.md`) already existed; both are now surfaced
-      alongside the two new pages in `SUMMARY.md` + the introduction's map. `mdbook build` is clean
-      and every cross-page anchor resolves. Publishing (GitHub Pages deploy) is left to launch
-      (P19.2/P19.4). Docs only, non-`api:`.)*
+      *(**Done.** The docs are already an mdBook (`book.toml`, `SUMMARY.md`); all four destinations
+      the box names exist, mapped onto wasmtime's book layout (the structural model, which carries
+      no standalone quickstart or non-goals pages): the quickstart path is `cli-install.md` (fresh
+      clone → `self-host` → run untrusted code, copy-pasteable) plus the README's "Try it"; the
+      non-goals live as the introduction's scope rule and `embedding.md`'s consolidated list
+      (engine-not-platform, the model is the caller, isolation is hardware, deny-by-default; each
+      linked to its decision, 016/033/034/035/036). The engine API (`embedding.md`) and threat
+      model (`threat-model.md`) are first-class chapters in `SUMMARY.md` + the introduction's map.
+      Dedicated `quickstart.md`/`non-goals.md` pages were tried and then folded back to match the
+      wasmtime shape, no extra pages the model doesn't carry. `mdbook build` is clean and every
+      cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
+      (GitHub Pages deploy) is left to launch (P19.2/P19.4). Docs only, non-`api:`.)*
 - [ ] **P19.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
 - [ ] **P19.5** A **reference integration**: a small host application embedding the engine end to end.
 - [x] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
@@ -2050,7 +2051,16 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       `examples.md` + `SUMMARY.md`; the "land later" note is retired. `mdbook build` clean, all
       cross-links resolve. Docs only, non-`api:`. The commands run on a KVM host; the example output
       shown is representative.)*
-- [ ] **P19.7** Security policy + responsible-disclosure notes.
+- [x] **P19.7** Security policy + responsible-disclosure notes.
+      *(**Done**, across the two existing security surfaces, no new pages (the wasmtime-shape rule):
+      root `SECURITY.md` carries the reporting mechanics (private GitHub advisory, ~1-week
+      acknowledgement, no bounty, coordinated disclosure) and `docs/security.md` the model, now
+      completed with its two missing halves: **"What is not a security bug"** (compromised-host
+      premises, below-floor hosts, the `--unjailed` opt-out, caller-harms-caller, an assumed-hostile
+      guest agent, in-budget resource burn, dependency advisories with no guest-reachable path) so
+      reports stay signal, and **"After a report: how a fix ships"** (confirm in the private
+      advisory, fix on `main` with a gate regression test, no pre-`v0.1.0` backports, publish the
+      advisory + a `RELEASES.md` note + credit once the fix lands). Docs only, non-`api:`.)*
 - [x] **P19.8** `(decision)` **Supported-platform policy**: the hard floor (architectures, a
       security-maintained host-kernel LTS) vs the documented degradations, and the pinned upstream
       versions (Firecracker + the guest kernel that tracks its support list).

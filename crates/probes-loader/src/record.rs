@@ -121,9 +121,13 @@ impl NetSection {
         // per-source entries and yields them already in the total (dst, port, proto) order.
         let mut by_dst: BTreeMap<(u32, u16, u8), u64> = BTreeMap::new();
         for (key, count) in denials {
-            *by_dst
+            let slot = by_dst
                 .entry((key.dst_addr, key.dst_port, key.proto))
-                .or_insert(0) += count;
+                .or_insert(0);
+            // Saturate like the sibling totals/IO rollups: kernel-supplied counters are adversarial
+            // by the crate's bar, so a wraparound (debug panic / release wrap) must not corrupt the
+            // audit record.
+            *slot = slot.saturating_add(count);
         }
         let denials = by_dst
             .into_iter()

@@ -162,6 +162,22 @@ fn a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox()
         "the sandbox cgroup {cgroup} must carry the charged CPU, got {all:?}"
     );
 
+    // The map-capacity fix: `clear` frees the cgroup's `CPU_NS` row entirely (not just zeroes it
+    // like `reset`), so a long-lived shared meter doesn't accumulate dead cgroups against the
+    // fixed `MAX_CGROUPS`. After clearing the one live row, the map holds nothing.
+    meter
+        .clear(cgroup)
+        .expect("clear the sandbox cgroup's CPU row");
+    let after_clear = meter.cpu_ns_all().expect("read the CPU map after clear");
+    assert!(
+        after_clear.is_empty(),
+        "clear must free the cgroup's CPU_NS row, leaving the map empty, got {after_clear:?}"
+    );
+    // Clearing an absent row is a no-op, not an error (mirrors `remove_target`).
+    meter
+        .clear(cgroup)
+        .expect("clearing an already-cleared cgroup is a no-op");
+
     drop(meter);
     vm.shutdown().expect("shut the sandbox down");
 }

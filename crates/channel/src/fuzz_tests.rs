@@ -187,7 +187,14 @@ fn request_and_response_encode_decode_round_trip() {
         let resp = rand_response(&mut rng);
         let mut buf = Vec::new();
         write_response(&mut buf, &resp).unwrap();
-        assert_eq!(read_response(&mut buf.as_slice()).unwrap(), resp);
+        let decoded = read_response(&mut buf.as_slice()).unwrap();
+        match resp {
+            // `Response::Error` decodes through `sanitize_error_msg` (control chars escaped, length
+            // capped) since it reaches the operator's terminal unquoted, so the round-trip identity
+            // is the *sanitized* message, not the raw one.
+            Response::Error(s) => assert_eq!(decoded, Response::Error(sanitize_error_msg(&s))),
+            other => assert_eq!(decoded, other),
+        }
     }
 }
 

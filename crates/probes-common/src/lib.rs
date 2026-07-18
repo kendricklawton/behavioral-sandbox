@@ -225,6 +225,13 @@ pub const ETH_P_IP: u16 = 0x0800;
 /// EtherType for ARP. Egress enforcement lets ARP through even under deny-by-default: the guest must
 /// resolve its on-link gateway (`10.200.0.1`, decision 017) before it can reach *any* allowed endpoint.
 pub const ETH_P_ARP: u16 = 0x0806;
+/// EtherType for IPv6, and for an 802.1Q VLAN tag. The tap parser handles only IPv4, so a frame with
+/// either of these is *unrepresentable* as a flow: the kernel counts it (as an honest coverage
+/// signal) rather than dropping it from the record silently. Neither is expected on a sandbox's
+/// IPv4-only tap (decision 017), unlike ARP, which is why ARP is not counted here.
+pub const ETH_P_IPV6: u16 = 0x86dd;
+/// See [`ETH_P_IPV6`].
+pub const ETH_P_8021Q: u16 = 0x8100;
 /// An L4 protocol an egress rule (or a flow) is matched on, the typed face of the raw IP protocol
 /// number the wire carries. A caller writes `Protocol::Udp`, never `17`. Only the two protocols the
 /// parser reads ports for; "any protocol" is [`None`], not a variant (see [`PolicyRule`]). `#[repr(u8)]`
@@ -397,8 +404,12 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     let proto = *ip.get(9)?;
     let src = u32::from_be_bytes(ip.get(12..16)?.try_into().ok()?);
     let dst = u32::from_be_bytes(ip.get(16..20)?.try_into().ok()?);
+    // The low 13 bits of the flags/fragment-offset field (bytes 6..8) are the fragment offset. A
+    // non-first fragment (offset != 0) carries no L4 header, so reading "ports" there would just
+    // interpret payload bytes, letting a guest mint bogus 5-tuples. Leave the ports zero for it.
+    let frag_off = u16::from_be_bytes([*ip.get(6)?, *ip.get(7)?]) & 0x1fff;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
-    if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+    if frag_off == 0 && (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
         let l4 = ip.get(ihl..)?;
         src_port = u16::from_be_bytes([*l4.first()?, *l4.get(1)?]);
         dst_port = u16::from_be_bytes([*l4.get(2)?, *l4.get(3)?]);
@@ -573,6 +584,31 @@ mod flow_tests {
         // Truncated below a full IPv4 header (and the empty slice) are skipped, never a panic.
         assert!(parse_ipv4_5tuple(&u[..ETH_HLEN + 10]).is_none());
         assert!(parse_ipv4_5tuple(&[]).is_none());
+    }
+
+    #[test]
+    fn non_first_fragment_has_no_ports() {
+        // A non-first IP fragment (fragment-offset != 0) carries no L4 header, so what sits at the
+        // port offsets is payload; the parser must zero the ports, else a guest mints bogus 5-tuples.
+        // The flags/fragment-offset field is IP-header bytes 6..8 (absolute `ETH_HLEN + 6`).
+        let mut frag = frame(IPPROTO_TCP, [10, 200, 0, 2], [9, 9, 9, 9], 51000, 443);
+        frag[ETH_HLEN + 6] = 0x00;
+        frag[ETH_HLEN + 7] = 0xb9; // fragment offset 185 (nonzero)
+        let key = parse_ipv4_5tuple(&frag).expect("a fragment still parses its addresses");
+        assert_eq!(key.dst_addr.to_be_bytes(), [9, 9, 9, 9]);
+        assert_eq!(key.proto, IPPROTO_TCP);
+        assert_eq!(key.src_port, 0, "non-first fragment ports must be zero");
+        assert_eq!(key.dst_port, 0, "non-first fragment ports must be zero");
+        // A *first* fragment (offset 0, More-Fragments bit set) still has its L4 header, keep ports.
+        let mut first = frame(IPPROTO_TCP, [10, 200, 0, 2], [9, 9, 9, 9], 51000, 443);
+        first[ETH_HLEN + 6] = 0x20; // MF flag, offset 0
+        first[ETH_HLEN + 7] = 0x00;
+        assert_eq!(
+            parse_ipv4_5tuple(&first)
+                .expect("first fragment parses")
+                .dst_port,
+            443
+        );
     }
 
     #[test]

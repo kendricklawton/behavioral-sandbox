@@ -10,10 +10,8 @@ host and built the guest artifacts yet, do [Installation](./cli-install.md) firs
 # Prove the boundary: boot a microVM to userspace and read its console.
 cargo run -p agent-cli -- run --demo-boot
 
-# Run code inside one. The agent rootfs (built by `cargo xtask build-rootfs`) carries
-# python3 and the in-guest exec agent:
-export AGENT_ROOTFS=artifacts/rootfs-agent.ext4
-export AGENT_MARKER=AGENT-GUEST-READY
+# Run code inside one. The defaults point at the agent rootfs (built by
+# `cargo xtask build-rootfs` or `self-host`), which carries python3 and the in-guest exec agent:
 cargo run -p agent-cli -- run -- python3 -c 'print(2 + 2)'
 ```
 
@@ -99,8 +97,8 @@ unknown key is a typed error, never a silent no-op.
 |----------|-------------------|-------------------|---------|
 | `AGENT_FIRECRACKER` | `firecracker` | the `firecracker` binary | `firecracker` (PATH) |
 | `AGENT_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
-| `AGENT_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs.ext4` |
-| `AGENT_MARKER` | `marker` | the console line that means "userspace is up" (`AGENT-GUEST-READY` for the agent rootfs) | the boot image's login prompt |
+| `AGENT_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-agent.ext4` (the agent image) |
+| `AGENT_MARKER` | `marker` | the console line that means "userspace is up" | `AGENT-GUEST-READY` (the agent image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
 | `AGENT_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
 | `AGENT_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
 | `AGENT_PROBES_OBJECT` | — | the built eBPF object (for the probe demos; env only, no `.agent.toml` key) | the `cargo xtask build-probes` output path |

@@ -21,8 +21,8 @@ use crate::console::{last_lines, Console};
 use crate::drives::{build_input_image, build_output_image, OutputDevice};
 use crate::exec::connect_agent_at;
 use crate::firecracker::{
-    Action, ApiClient, BootSource, Drive, MachineConfig, MemBackend, MemBackendType,
-    NetworkInterface, RateLimiter, SnapshotLoad, Vsock,
+    snapshot_api_timeout, Action, ApiClient, BootSource, Drive, MachineConfig, MemBackend,
+    MemBackendType, NetworkInterface, RateLimiter, SnapshotLoad, Vsock,
 };
 use crate::jail::{
     cgroup_limit_args, give_to_jail, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup,
@@ -122,14 +122,15 @@ impl Drop for Spawned {
 
 impl Spawned {
     /// Validate the inputs, lay out the scratch dir, and spawn `firecracker --api-sock`.
-    pub(crate) fn launch(config: &BootConfig) -> Result<Self, VmmError> {
-        require_file(&config.kernel, "kernel image")?;
-        require_file(&config.rootfs, "rootfs image")?;
+    pub(crate) fn launch(config: &BootConfig, deadline: Instant) -> Result<Self, VmmError> {
+        let fetch = Some("run `cargo xtask fetch-artifacts`");
+        require_file(&config.kernel, "kernel image", fetch)?;
+        require_file(&config.rootfs, "rootfs image", fetch)?;
         warn_on_unpinned_firecracker(&config.firecracker);
 
         // Jailed boot spawns the jailer (not firecracker directly) and stages resources into the
-        // chroot later; the unjailed setup below is untouched. Every boot feature composes with the
-        // jail, so there is no combination to refuse first.
+        // chroot later, under `run_boot`'s deadline checks; the unjailed setup below is untouched.
+        // Every boot feature composes with the jail, so there is no combination to refuse first.
         if let Some(jail) = config.jail.as_ref() {
             return Self::launch_jailed(config, jail);
         }
@@ -152,6 +153,14 @@ impl Spawned {
                 }
             }
         } else {
+            // The whole-rootfs copy is the heaviest host-side step and unbounded on its own (a
+            // multi-GiB image on slow storage), so it runs under the shared boot deadline: check
+            // before it, and each later staging step re-checks, so a copy that blows the budget
+            // surfaces as a typed `Timeout` instead of an unbounded host hang.
+            if let Err(e) = still_before(deadline, "rootfs copy") {
+                let _ = std::fs::remove_dir_all(&workdir);
+                return Err(e);
+            }
             let copy = workdir.join("rootfs.ext4");
             if let Err(e) = std::fs::copy(&config.rootfs, &copy) {
                 let _ = std::fs::remove_dir_all(&workdir);
@@ -174,29 +183,41 @@ impl Spawned {
         // second block device (`/dev/vdb`). Lives in the scratch dir, so teardown reclaims it too.
         let input_image = match &config.input_dir {
             None => None,
-            Some(dir) => match build_input_image(dir, &workdir) {
-                Ok(img) => Some(img),
-                Err(e) => {
+            Some(dir) => {
+                if let Err(e) = still_before(deadline, "input image build") {
                     let _ = std::fs::remove_dir_all(&workdir);
                     return Err(e);
                 }
-            },
+                match build_input_image(dir, &workdir) {
+                    Ok(img) => Some(img),
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&workdir);
+                        return Err(e);
+                    }
+                }
+            }
         };
 
         // Bulk writable output: build a blank ext4 the guest mounts read-write at `/output`,
         // attached as another block device. Its host destination rides along for `collect_outputs`.
         let output = match &config.output_dir {
             None => None,
-            Some(dest) => match build_output_image(&workdir) {
-                Ok(image) => Some(OutputDevice {
-                    image,
-                    dest: dest.clone(),
-                }),
-                Err(e) => {
+            Some(dest) => {
+                if let Err(e) = still_before(deadline, "output image build") {
                     let _ = std::fs::remove_dir_all(&workdir);
                     return Err(e);
                 }
-            },
+                match build_output_image(&workdir) {
+                    Ok(image) => Some(OutputDevice {
+                        image,
+                        dest: dest.clone(),
+                    }),
+                    Err(e) => {
+                        let _ = std::fs::remove_dir_all(&workdir);
+                        return Err(e);
+                    }
+                }
+            }
         };
 
         // Per-VM network namespace + tap for the guest's virtio-net (netns model), when enabled.
@@ -227,10 +248,10 @@ impl Spawned {
         ) {
             Ok(pair) => pair,
             Err(e) => {
-                if let Some(tap) = tap.as_ref() {
-                    tap.delete();
-                }
-                let _ = std::fs::remove_dir_all(&workdir);
+                // Route through `reclaim_scratch` (not a bare `tap.delete()` + `remove_dir_all`) so
+                // the dir is kept if the netns delete fails: a failed boot must not strand a
+                // dir-less netns any more than teardown may (the invariant `reclaim_scratch` owns).
+                reclaim_scratch(&workdir, tap.as_ref());
                 return Err(e);
             }
         };
@@ -340,10 +361,10 @@ impl Spawned {
         ) {
             Ok(t) => t,
             Err(e) => {
-                if let Some(tap) = tap.as_ref() {
-                    tap.delete();
-                }
-                let _ = std::fs::remove_dir_all(&workdir);
+                // Route through `reclaim_scratch` (not a bare `tap.delete()` + `remove_dir_all`) so
+                // the dir is kept if the netns delete fails: a failed boot must not strand a
+                // dir-less netns any more than teardown may (the invariant `reclaim_scratch` owns).
+                reclaim_scratch(&workdir, tap.as_ref());
                 return Err(e);
             }
         };
@@ -413,10 +434,10 @@ impl Spawned {
         ) {
             Ok(pair) => pair,
             Err(e) => {
-                if let Some(tap) = tap.as_ref() {
-                    tap.delete();
-                }
-                let _ = std::fs::remove_dir_all(&workdir);
+                // Route through `reclaim_scratch` (not a bare `tap.delete()` + `remove_dir_all`) so
+                // the dir is kept if the netns delete fails: a failed boot must not strand a
+                // dir-less netns any more than teardown may (the invariant `reclaim_scratch` owns).
+                reclaim_scratch(&workdir, tap.as_ref());
                 return Err(e);
             }
         };
@@ -519,17 +540,13 @@ impl Spawned {
     pub(crate) fn run_restore(
         &mut self,
         snapshot: &Snapshot,
-        timeout: Duration,
+        deadline: Instant,
     ) -> Result<Duration, VmmError> {
         let span = tracing::info_span!("restore", vm = %self.vm_name());
         let _span = span.enter();
 
-        // `Instant + Duration` panics on overflow; a caller's `Duration::MAX` must stay a bounded
-        // wait, not a panic, clamp to a day (as `run_boot` does).
-        let now = Instant::now();
-        let deadline = now
-            .checked_add(timeout)
-            .unwrap_or_else(|| now + Duration::from_secs(86_400));
+        // The deadline is computed once by the caller (`boot_deadline`) so it spans the pre-spawn
+        // staging (`launch_for_restore`) and this restore together, one wall (decision 013).
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 
@@ -644,8 +661,14 @@ impl Spawned {
                 disk_unstage = Some(snapshot.root_backing.clone());
             }
         }
+        // `/snapshot/load` blocks until Firecracker reads the whole memory file back, so scale its
+        // socket timeout by that file's true size (the bundle's, never the restoring `config`'s,
+        // which may under-declare) rather than the instant-reply default.
+        let mem_mib = std::fs::metadata(&snapshot.mem)
+            .map(|m| u32::try_from(m.len() >> 20).unwrap_or(u32::MAX))
+            .unwrap_or(0);
         let started = Instant::now();
-        let loaded = self.api.put(
+        let loaded = self.api.put_with_timeout(
             "/snapshot/load",
             &SnapshotLoad {
                 snapshot_path: &state_arg,
@@ -655,6 +678,7 @@ impl Spawned {
                 },
                 resume_vm: true,
             },
+            snapshot_api_timeout(mem_mib),
         );
         // The restore latency is the load + resume call itself, measured before host-side cleanup.
         let latency = started.elapsed();
@@ -708,7 +732,12 @@ impl Spawned {
                         )));
                     }
                     if Instant::now() >= deadline {
-                        return Err(e);
+                        // Deadline expired: a **timeout** (the documented `Vm::restore` contract,
+                        // whose `kind()` is `Infra`), not the retryable `GuestUnavailable` that `e`
+                        // typically is; keep `e` as detail so the last failure stays legible.
+                        return Err(VmmError::Timeout(format!(
+                            "guest agent not ready before the restore deadline: {e}"
+                        )));
                     }
                     backoff.sleep();
                 }
@@ -749,18 +778,18 @@ impl Spawned {
 
     /// Drive the API through the boot sequence and wait for the userspace marker; returns the
     /// boot-to-userspace latency.
-    pub(crate) fn run_boot(&mut self, config: &BootConfig) -> Result<Duration, VmmError> {
+    pub(crate) fn run_boot(
+        &mut self,
+        config: &BootConfig,
+        deadline: Instant,
+    ) -> Result<Duration, VmmError> {
         // One span per boot, keyed by the scratch-dir name, so interleaved logs from concurrent
         // VMs (the prewarmed pool) stay attributable to their sandbox.
         let span = tracing::info_span!("boot", vm = %self.vm_name());
         let _span = span.enter();
 
-        // `Instant + Duration` panics on overflow, and `boot_timeout` is caller-set (a
-        // `Duration::MAX` "no limit" must stay a *bounded* wait, not a panic), clamp to a day.
-        let now = Instant::now();
-        let deadline = now
-            .checked_add(config.boot_timeout)
-            .unwrap_or_else(|| now + Duration::from_secs(86_400));
+        // The deadline spans host-side staging (`launch`) *and* this API boot: it's computed once by
+        // the caller (`boot_deadline`) and threaded in, so both share one wall (decision 013).
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 
@@ -1115,6 +1144,7 @@ impl Spawned {
             // restore it merely mirrors `config` and is never read (a restored VM refuses
             // snapshotting, the field's one consumer).
             vcpus: config.vcpus,
+            mem_mib: config.mem_mib,
             child,
             workdir: std::mem::take(&mut self.workdir),
             console: std::mem::take(&mut self.console),
@@ -1142,17 +1172,20 @@ impl Spawned {
 /// which would target the identical baked-in path) is never clobbered. This is why an unjailed
 /// read-write restore is single-flight; a jailed restore re-roots the path per chroot, so it isn't.
 fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
+    use std::os::unix::fs::OpenOptionsExt;
     if let Some(parent) = backing.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            VmmError::Vmm(format!("stage restore disk dir {}: {e}", parent.display()))
-        })?;
+        ensure_private_staging_dir(parent)?;
     }
     // `create_new` reserves the path **atomically**: if it already exists (a still-live source's
     // disk) the open fails rather than clobbering it, the "never overwrite" guarantee, race-free,
-    // not a check-then-copy TOCTOU. A missing parent or any other error is surfaced as-is.
+    // not a check-then-copy TOCTOU. `mode(0o600)` keeps the staged disk unreadable to other local
+    // users during the copy→`PUT /snapshot/load` window (the private-0700 parent already blocks a
+    // rename-swap; this is defense in depth on the file itself). A missing parent or any other
+    // error is surfaced as-is.
     let mut dst = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
+        .mode(0o600)
         .open(backing)
     {
         Ok(f) => f,
@@ -1186,6 +1219,45 @@ fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
         )));
     }
     Ok(())
+}
+
+/// Create the restore-disk staging dir private (mode `0700`, owned by us), or, if it already exists,
+/// adopt it only after verifying it is ours and `0700`. The baked-in path is predictable
+/// (`/tmp/agent-<srcpid>-<seq>`, from the snapshot's source) and `/tmp` is world-writable, so a
+/// blind `create_dir_all` would silently adopt an attacker-planted world-writable dir, letting a
+/// local user rename-swap the staged disk before `PUT /snapshot/load` opens it (guest boots an
+/// attacker's rootfs). This mirrors `create_workdir`'s posture; the only pre-existing dir it may
+/// legitimately meet is a lingering-empty one from a prior restore of the same snapshot (still ours,
+/// still `0700`), and the disk's own `create_new` keeps that case single-flight.
+fn ensure_private_staging_dir(dir: &Path) -> Result<(), VmmError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {
+            // mkdir's mode is umask-masked; make 0700 unconditional now that the dir is exclusively
+            // ours (race-free, we just created it fail-if-exists).
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| VmmError::Vmm(format!("chmod staging dir {}: {e}", dir.display())))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let md = std::fs::metadata(dir)
+                .map_err(|e| VmmError::Vmm(format!("stat staging dir {}: {e}", dir.display())))?;
+            let me = crate::sweep::own_euid().ok_or_else(|| {
+                VmmError::Vmm("cannot read own euid to verify the staging dir owner".into())
+            })?;
+            if md.uid() != me || md.permissions().mode() & 0o777 != 0o700 {
+                return Err(VmmError::Vmm(format!(
+                    "restore staging dir {} exists but is not a private (mode 0700, owner {me}) \
+                     directory; refusing to stage the root disk into a possibly-squatted path",
+                    dir.display()
+                )));
+            }
+            Ok(())
+        }
+        Err(e) => Err(VmmError::Vmm(format!(
+            "create staging dir {}: {e}",
+            dir.display()
+        ))),
+    }
 }
 
 /// Remove the staged restore disk (and its parent dir if now empty), once Firecracker holds the fd.
@@ -1452,6 +1524,17 @@ fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
     Ok(())
 }
 
+/// The wall-clock deadline for one whole boot/restore, `now + timeout`, computed **once** by
+/// `Vm::boot`/`Vm::restore` and threaded through host-side staging (`launch`) *and* the API boot
+/// (`run_boot`) so the two share one budget (decision 013: one wall for the run, not one per phase).
+/// `Instant + Duration` panics on overflow, and `timeout` is caller-set, so a `Duration::MAX`
+/// "no limit" clamps to a day rather than panicking.
+pub(crate) fn boot_deadline(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout)
+        .unwrap_or_else(|| now + Duration::from_secs(86_400))
+}
+
 #[cfg(test)]
 mod version_tests {
     use super::fc_version_of;
@@ -1509,8 +1592,11 @@ mod tests {
             ..BootConfig::default()
         };
         let started = Instant::now();
-        let mut spawned = Spawned::launch(&cfg).expect("launch the fake vmm");
-        let err = spawned.run_boot(&cfg).expect_err("a dead vmm cannot boot");
+        let deadline = boot_deadline(cfg.boot_timeout);
+        let mut spawned = Spawned::launch(&cfg, deadline).expect("launch the fake vmm");
+        let err = spawned
+            .run_boot(&cfg, deadline)
+            .expect_err("a dead vmm cannot boot");
         let msg = spawned.abort(err).to_string();
 
         assert!(msg.contains("exited before boot"), "fail fast, got: {msg}");
@@ -1532,6 +1618,52 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o700, "scratch dir must be private to us");
+    }
+
+    #[test]
+    fn staging_dir_is_created_private_and_adopts_only_its_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = TestDir::new("agent-stage-priv");
+        let dir = base.path().join("agent-99999-0");
+        // Fresh create: private 0700, regardless of umask.
+        ensure_private_staging_dir(&dir).expect("create the staging dir");
+        let mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "staging dir must be private to us");
+        // A second call adopts our own 0700 dir (the lingering-empty-from-a-prior-restore case).
+        ensure_private_staging_dir(&dir).expect("adopt our own private dir");
+        // A world-writable pre-existing dir (an attacker's plant) is refused.
+        let squatted = base.path().join("agent-88888-0");
+        std::fs::create_dir(&squatted).expect("create squatted dir");
+        std::fs::set_permissions(&squatted, std::fs::Permissions::from_mode(0o777))
+            .expect("widen mode");
+        assert!(
+            ensure_private_staging_dir(&squatted).is_err(),
+            "a non-0700 pre-existing dir must be refused, not adopted"
+        );
+    }
+
+    #[test]
+    fn a_staged_restore_disk_is_private_and_never_clobbers() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = TestDir::new("agent-stage-disk");
+        let src = base.path().join("bundle-disk");
+        std::fs::write(&src, b"snapshot disk bytes").expect("write source disk");
+        let backing = base.path().join("agent-77777-0/rootfs.ext4");
+        stage_restore_disk(&src, &backing).expect("stage the disk");
+        assert_eq!(
+            std::fs::read(&backing).expect("read staged disk"),
+            b"snapshot disk bytes"
+        );
+        let mode = std::fs::metadata(&backing)
+            .expect("stat staged disk")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "staged disk must be owner-only");
+        // A second stage to the same baked-in path must not clobber (the single-flight guarantee).
+        assert!(
+            stage_restore_disk(&src, &backing).is_err(),
+            "re-staging over an existing disk must fail, not overwrite"
+        );
     }
 
     #[test]

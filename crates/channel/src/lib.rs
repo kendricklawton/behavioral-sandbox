@@ -42,6 +42,32 @@ pub const PROTOCOL_VERSION: u16 = 2;
 /// exists so a broken `len` header is a typed error, not a huge allocation.
 pub const MAX_PAYLOAD: usize = 1 << 20; // 1 MiB
 
+/// Cap on a decoded guest error message ([`Response::Error`]). The message is *guest-chosen* and
+/// reaches the operator's terminal and audit log unquoted (via the host's error `Display`), so it is
+/// truncated here so a 1 MiB blob can't flood those surfaces. Well under the frame cap; a real error
+/// is a short line.
+const ERROR_MSG_CAP: usize = 4 << 10; // 4 KiB
+
+/// Sanitize a guest-sent error message before it becomes a [`Response::Error`]: escape control
+/// characters and truncate to [`ERROR_MSG_CAP`]. The guest is untrusted and this string is the one
+/// host surface guest-chosen bytes hit unquoted, so raw ANSI escapes / control codes (terminal
+/// injection, log-line splitting) must never pass through.
+fn sanitize_error_msg(msg: &str) -> String {
+    let mut out = String::with_capacity(msg.len().min(ERROR_MSG_CAP));
+    for c in msg.chars() {
+        if out.len() >= ERROR_MSG_CAP {
+            out.push('…');
+            break;
+        }
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The boot-readiness sentinel: the in-guest agent prints this to its stdout (the serial console)
 /// **after** it has bound its vsock listener, and the host scans the console for it to know the
 /// agent is accepting connections. It's the pre-connection half of the host↔guest contract,
@@ -432,6 +458,7 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
             for _ in 0..envc {
                 env.push((body.string()?, body.string()?));
             }
+            body.finish()?;
             Ok(Request::Exec {
                 argv,
                 stdin,
@@ -443,6 +470,7 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
         TAG_PUTFILE => {
             let path = body.string()?;
             let data = body.blob()?.to_vec();
+            body.finish()?;
             Ok(Request::PutFile { path, data })
         }
         other => Ok(Request::Unknown { tag: other }),
@@ -486,6 +514,7 @@ pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError>
             let mut body = Body::new(&payload);
             let path = body.string()?;
             let data = body.blob()?.to_vec();
+            body.finish()?;
             Ok(Response::File { path, data })
         }
         TAG_EXIT => {
@@ -509,7 +538,7 @@ pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError>
         TAG_ERROR => {
             let msg = String::from_utf8(payload)
                 .map_err(|_| ChannelError::Protocol("error frame is not valid UTF-8".into()))?;
-            Ok(Response::Error(msg))
+            Ok(Response::Error(sanitize_error_msg(&msg)))
         }
         other => Err(ChannelError::Protocol(format!(
             "unknown response tag {other}"
@@ -671,6 +700,22 @@ impl<'a> Body<'a> {
         self.pos = end;
         Ok(slice)
     }
+
+    /// Assert the body is fully consumed after the last parsed field. Trailing bytes mean the peer
+    /// encoded a field this version doesn't parse, an additive change whose `PROTOCOL_VERSION` bump
+    /// was forgotten (the handshake should have rejected the skew, this is the loud backstop for when
+    /// it wasn't). Failing here beats silently dropping the field, the exact degradation the v1→v2
+    /// `env` addition would have been (see `PROTOCOL_VERSION`).
+    fn finish(&self) -> Result<(), ChannelError> {
+        if self.pos == self.buf.len() {
+            Ok(())
+        } else {
+            Err(ChannelError::Protocol(format!(
+                "frame body has {} unparsed trailing byte(s)",
+                self.buf.len() - self.pos
+            )))
+        }
+    }
 }
 
 /// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
@@ -816,6 +861,49 @@ mod tests {
     }
 
     #[test]
+    fn a_frame_body_with_trailing_bytes_is_rejected() {
+        // Trailing bytes after the last parsed field mean an additive field a forgotten
+        // `PROTOCOL_VERSION` bump would have introduced: it must fail loudly, not be silently
+        // dropped (the v1→v2 `env` degradation). Encode a valid message, bump the frame length, and
+        // append a stray byte.
+        let append_trailing = |buf: &mut Vec<u8>| {
+            let len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);
+            buf[1..5].copy_from_slice(&(len + 1).to_le_bytes());
+            buf.push(0xEE);
+        };
+
+        let mut req = Vec::new();
+        write_request(
+            &mut req,
+            &Request::PutFile {
+                path: "a".into(),
+                data: b"x".to_vec(),
+            },
+        )
+        .unwrap();
+        append_trailing(&mut req);
+        assert!(matches!(
+            read_request(&mut req.as_slice()),
+            Err(ChannelError::Protocol(_))
+        ));
+
+        let mut resp = Vec::new();
+        write_response(
+            &mut resp,
+            &Response::File {
+                path: "r".into(),
+                data: b"y".to_vec(),
+            },
+        )
+        .unwrap();
+        append_trailing(&mut resp);
+        assert!(matches!(
+            read_response(&mut resp.as_slice()),
+            Err(ChannelError::Protocol(_))
+        ));
+    }
+
+    #[test]
     fn unknown_request_tag_is_graceful_not_fatal() {
         // A well-framed frame with an unknown tag → Request::Unknown, so the agent can reply
         // "unsupported" instead of the connection dying. (Forward-compat for newer request types.)
@@ -851,6 +939,39 @@ mod tests {
             write_response(&mut buf, &resp).unwrap();
             assert_eq!(read_response(&mut buf.as_slice()).unwrap(), resp);
         }
+    }
+
+    #[test]
+    fn guest_error_control_chars_are_escaped_and_length_capped() {
+        // A hostile guest's error with an ANSI escape + newline must never render raw (terminal
+        // injection / log-line splitting); the sanitizer escapes both and keeps the surrounding text.
+        let sanitized = sanitize_error_msg("boom\x1b[2J\nsplit");
+        assert!(!sanitized.contains('\x1b'), "ESC escaped: {sanitized:?}");
+        assert!(!sanitized.contains('\n'), "newline escaped: {sanitized:?}");
+        assert!(
+            sanitized.contains("boom") && sanitized.contains("split"),
+            "text kept: {sanitized:?}"
+        );
+        // A blob far past the cap is truncated so it can't flood the terminal/log.
+        let capped = sanitize_error_msg(&"x".repeat(MAX_PAYLOAD));
+        assert!(
+            capped.len() <= ERROR_MSG_CAP + 8,
+            "capped near {ERROR_MSG_CAP}, got {}",
+            capped.len()
+        );
+    }
+
+    #[test]
+    fn decoded_guest_error_is_sanitized() {
+        // The decode path applies the sanitizer, so a control-char message never reaches a caller raw.
+        let evil = "x\x1by";
+        let mut framed = vec![TAG_ERROR];
+        framed.extend_from_slice(&(evil.len() as u32).to_le_bytes());
+        framed.extend_from_slice(evil.as_bytes());
+        assert_eq!(
+            read_response(&mut framed.as_slice()).unwrap(),
+            Response::Error(sanitize_error_msg(evil))
+        );
     }
 
     #[test]

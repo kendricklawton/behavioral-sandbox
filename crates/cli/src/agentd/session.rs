@@ -24,7 +24,7 @@ use std::io::BufReader;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_cli::audit::RunProbes;
 use agent_probes_loader::Timing;
@@ -134,11 +134,13 @@ pub fn serve(stream: UnixStream, server: &Server) {
             }
             Ok(Some(Request::Exec { argv, stdin })) => {
                 server.metrics.request(Verb::Exec);
+                let t0 = Instant::now();
                 let result = vm.exec(&argv, stdin.as_deref().unwrap_or("").as_bytes());
                 if !serve_run(
                     &mut writer,
                     &server.metrics,
                     result,
+                    t0.elapsed(),
                     &mut total_exec_wall,
                     |r| Response::Result {
                         exit_code: r.exit_code,
@@ -152,6 +154,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
             }
             Ok(Some(Request::Put { path, content })) => {
                 server.metrics.request(Verb::Put);
+                let t0 = Instant::now();
                 let result = vm.exec_with_files(
                     &[NOOP_ARGV.to_string()],
                     b"",
@@ -163,6 +166,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     &mut writer,
                     &server.metrics,
                     result,
+                    t0.elapsed(),
                     &mut total_exec_wall,
                     |_| Response::Put { path: path.clone() },
                 ) {
@@ -171,6 +175,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
             }
             Ok(Some(Request::Get { path })) => {
                 server.metrics.request(Verb::Get);
+                let t0 = Instant::now();
                 let result = vm.exec_with_files(
                     &[NOOP_ARGV.to_string()],
                     b"",
@@ -182,6 +187,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     &mut writer,
                     &server.metrics,
                     result,
+                    t0.elapsed(),
                     &mut total_exec_wall,
                     |r| {
                         let found = r.files.iter().find(|a| a.path == path);
@@ -282,12 +288,16 @@ fn serve_run(
     w: &mut UnixStream,
     metrics: &Metrics,
     result: Result<agent_vmm::RunResult, VmmError>,
+    wall: Duration,
     total_exec_wall: &mut Duration,
     to_response: impl FnOnce(&agent_vmm::RunResult) -> Response,
 ) -> bool {
+    // Accumulate the **host-measured** wall on both success and failure: a timed-out or capped exec
+    // still consumed time (up to the whole budget), so the session's trace `exec_wall` must count it,
+    // not silently drop it by only summing successful runs' guest-reported wall.
+    *total_exec_wall += wall;
     match result {
         Ok(run) => {
-            *total_exec_wall += run.metrics.wall;
             metrics.guest_command(run.metrics.wall);
             send(w, &to_response(&run))
         }
@@ -304,11 +314,12 @@ fn serve_run(
 /// when the daemon has one, the fast path, since the pool's clones carry the default profile. Any
 /// custom resource knob (or no pool) is a cold boot with the requested envelope.
 ///
-/// The lock is held only to pop **ready stock** (an O(1) pop), never across a `Vm::restore` (16-A):
-/// an empty (or poisoned) pool cold-boots rather than restoring a clone under the lock, so one dry
-/// `open` can't serialize every other bare `open` behind its restore. A dry cold boot pays its own
-/// latency and the pool refills between sessions; the trade is a `pooled: false` on the transient
-/// dry window instead of a lock-held inline restore.
+/// The lock is taken **non-blocking** (`try_lock`) and held only to pop **ready stock** (an O(1)
+/// pop), never across a `Vm::restore` (16-A). Two ways it declines and cold-boots instead of blocking:
+/// an empty (or poisoned) pool, and a *contended* one, `end_session` holds this same lock across its
+/// `refill`'s inline restores, so a blocking `lock()` here would serialize every bare `open` behind
+/// that whole refill window. Falling through to a lock-free cold boot keeps opens independent of
+/// refills; the trade is a `pooled: false` on the transient dry/busy window instead of a stall.
 fn boot_session_vm(
     server: &Server,
     limits: Limits,
@@ -316,7 +327,7 @@ fn boot_session_vm(
 ) -> Result<(RunningVm, bool), VmmError> {
     if bare {
         if let Some(pool) = &server.pool {
-            match pool.lock() {
+            match pool.try_lock() {
                 Ok(mut p) => {
                     // Pop only when there is ready stock, `Pool::take` would otherwise restore
                     // inline under this lock (the 16-A serialization). No stock ⇒ fall through to a
@@ -331,7 +342,13 @@ fn boot_session_vm(
                         }
                     }
                 }
-                Err(_) => tracing::warn!("pool lock poisoned; cold-booting this session"),
+                // Contended (a refill holds the lock): don't wait it out, cold-boot instead.
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    tracing::debug!("pool busy (refilling?); cold-booting this session")
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    tracing::warn!("pool lock poisoned; cold-booting this session")
+                }
             }
         }
     }

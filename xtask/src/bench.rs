@@ -47,6 +47,7 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
     println!("bench-boot: agent rootfs {used_mib} MiB, {runs} boots per path\n");
 
+    let mut p50s = Vec::with_capacity(2);
     for (label, read_only_root) in [
         ("read-only shared base", true),
         ("read-write per-VM copy", false),
@@ -59,16 +60,26 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
             cfg.userspace_marker = GUEST_READY_MARKER.to_string();
             cfg.guest_cid = Some(DEFAULT_GUEST_CID);
             cfg.read_only_root = read_only_root;
+            // Time the whole `Vm::boot`, not `vm.boot_latency()`: that clock starts *after*
+            // `Spawned::launch` does the per-VM rootfs copy, which is exactly the cost the two paths
+            // differ on, so measuring it is the point. (bench-warm times its cold boot the same way.)
+            let t0 = Instant::now();
             let vm = Vm::boot(cfg).with_context(|| format!("{label}: boot {i} failed"))?;
-            latencies.push(vm.boot_latency().as_millis() as u64);
+            latencies.push(t0.elapsed().as_millis() as u64);
             vm.shutdown().ok();
         }
         report_percentiles(label, &mut latencies, "ms");
+        p50s.push(nearest_p50(&mut latencies));
     }
+    // Derive the takeaway from the two p50s instead of asserting it: the read-write path's excess
+    // over the shared base *is* the per-VM copy's contribution to boot latency.
+    let (shared_p50, copy_p50) = (p50s[0], p50s[1]);
+    let copy_delta = copy_p50.saturating_sub(shared_p50);
     println!(
-        "\nBoth paths boot in well under a second. The {used_mib} MiB base is cheap to duplicate (the\n\
-         host page cache serves the copy), so its size barely moves boot latency here — keeping the\n\
-         base small mainly buys memory-sharing (page-cache dedup across VMs + disk), not boot time."
+        "\nShared-base p50 {shared_p50} ms vs per-VM-copy p50 {copy_p50} ms: duplicating the \
+         {used_mib} MiB\nbase adds ~{copy_delta} ms to boot here (the host page cache serves the \
+         copy). Keeping the base\nsmall buys that boot delta plus memory-sharing (page-cache dedup \
+         across VMs + disk)."
     );
     Ok(())
 }
@@ -905,6 +916,7 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
         .context("clear the pre-measurement baseline")?;
     println!("syscall tracer — ns per watched openat:");
     println!("  targets   ns/openat(p50)");
+    let mut tracer_p50s: Vec<u64> = Vec::new();
     let (mut dummy, mut current) = (0u64, 1usize); // our cgroup is already in the set
     for &size in &SIZES {
         while current < size {
@@ -919,7 +931,9 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
             samples.push(ns_per_openat(&missing, BATCH));
             tracer.drain(|_| {}).context("drain the burst")?; // keep the ring from overflowing
         }
-        println!("  {size:<8}  {:>6}", nearest_p50(&mut samples));
+        let p50 = nearest_p50(&mut samples);
+        println!("  {size:<8}  {p50:>6}");
+        tracer_p50s.push(p50);
     }
     drop(tracer); // detach before the meter (nothing pinned; explicit for legibility)
 
@@ -929,6 +943,7 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     meter.reset(me).context("zero our CPU baseline")?;
     println!("\nresource meter — ns per context switch:");
     println!("  targets   ns/switch(p50)");
+    let mut meter_p50s: Vec<u64> = Vec::new();
     let (mut dummy, mut current) = (0u64, 1usize);
     for &size in &SIZES {
         while current < size {
@@ -942,16 +957,38 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
         for _ in 0..runs {
             samples.push(ns_per_switch(ROUNDS)?);
         }
-        println!("  {size:<8}  {:>6}", nearest_p50(&mut samples));
+        let p50 = nearest_p50(&mut samples);
+        println!("  {size:<8}  {p50:>6}");
+        meter_p50s.push(p50);
     }
     drop(meter);
 
-    println!(
-        "\nBoth per-event costs stay flat as the watched set grows from 1 to {} — each event is a single\n\
-         O(1) hash lookup no matter how many sandboxes are watched, so total probe overhead scales with\n\
-         the event rate, not with the number of concurrent sandboxes (one shared program, not one per VM).",
-        SIZES[SIZES.len() - 1],
-    );
+    // Derive the O(1)-per-event takeaway from the data instead of asserting it: the cost is flat iff
+    // the p50 doesn't grow with the watched set, so compare first vs last and warn on >1.5x drift (a
+    // regression would otherwise print a rising table right under a "stays flat" claim).
+    let last = SIZES[SIZES.len() - 1];
+    let ends = |p50s: &[u64]| {
+        (
+            p50s.first().copied().unwrap_or(0),
+            p50s.last().copied().unwrap_or(0),
+        )
+    };
+    let drifted = |(first, last): (u64, u64)| first > 0 && last > first.saturating_mul(3) / 2;
+    let (tf, tl) = ends(&tracer_p50s);
+    let (mf, ml) = ends(&meter_p50s);
+    println!("\nWatched set 1 → {last}: tracer p50 {tf}→{tl} ns, meter p50 {mf}→{ml} ns.");
+    if drifted((tf, tl)) || drifted((mf, ml)) {
+        println!(
+            "  WARNING: a per-event p50 grew >1.5x as the set grew — the O(1)-per-event property does\n\
+             not hold on this run (expected flat: one shared program, a single hash lookup per event)."
+        );
+    } else {
+        println!(
+            "  Both stay ~flat: each event is one O(1) hash lookup regardless of set size, so probe\n\
+             overhead scales with the event rate, not the concurrent-sandbox count (one shared\n\
+             program, not one per VM)."
+        );
+    }
     Ok(())
 }
 
@@ -970,8 +1007,22 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
     }
     // A section's skip reason: `None` = its host prerequisite is met, `Some(why)` = skip with that
     // reason. One value per prerequisite, so availability and its explanation can't drift apart.
-    let kvm_skip: Option<String> =
-        (!Path::new("/dev/kvm").exists()).then(|| "needs /dev/kvm".into());
+    let kvm_skip: Option<String> = if !Path::new("/dev/kvm").exists() {
+        Some("needs /dev/kvm".into())
+    } else {
+        // The KVM sections boot a real microVM, so they also need the pinned kernel + agent rootfs.
+        // A missing build input is a *stated skip* (the suite's promise: skip what it can't run),
+        // not four FAILED sections that exit the suite non-zero.
+        [("kernel", kernel_path()), ("agent rootfs", agent_rootfs_path())]
+            .into_iter()
+            .find(|(_, p)| !p.is_file())
+            .map(|(what, p)| {
+                format!(
+                    "missing {what} at {} (run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`)",
+                    p.display()
+                )
+            })
+    };
     let object = agent_probes_loader::object_path();
     let ebpf_skip: Option<String> = match agent_probes_loader::check_support() {
         Err(e) => Some(e.to_string()),

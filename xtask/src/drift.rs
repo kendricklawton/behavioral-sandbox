@@ -58,14 +58,14 @@ pub fn check(root: &Path) -> Result<()> {
                 ));
             }
         }
-        if is_rs {
-            for (line_no, cand) in path_candidates(&text, &anchors) {
-                path_refs += 1;
-                if !path_exists(&tracked, &cand) {
-                    violations.push(format!(
-                        "{rel}:{line_no}: references `{cand}`, which matches nothing in the tree"
-                    ));
-                }
+        // Backticked repo-path claims are checked in every prose file, `.rs`, `.md`, and `.rules`
+        // (a rename rots a `docs/*.md` or `.rules` path just as it does a comment's).
+        for (line_no, cand) in path_candidates(&text, &anchors) {
+            path_refs += 1;
+            if !path_exists(&tracked, &cand) {
+                violations.push(format!(
+                    "{rel}:{line_no}: references `{cand}`, which matches nothing in the tree"
+                ));
             }
         }
         if is_md {
@@ -135,41 +135,59 @@ fn defined_decisions(root: &Path) -> Result<BTreeSet<u32>> {
 
 /// Every decision number the text cites, with its 1-based line: `decision 013`, `Decision 013`,
 /// and the joined forms `decision 013/014`, `decisions 024, 026`, `decisions 024 and 026`.
+///
+/// Scans a **line-joined** view (each source line separated by a single space) so a citation
+/// wrapped across a line break (`decision\n029`, as several live docs do) still parses as one token;
+/// a per-offset line map keeps best-effort attribution (the line the word "decision" sits on).
 fn cited_decisions(text: &str) -> Vec<(usize, u32)> {
-    let mut found = Vec::new();
-    for (idx, line) in text.lines().enumerate() {
-        let lower = line.to_ascii_lowercase();
-        let mut from = 0;
-        while let Some(pos) = lower[from..].find("decision") {
-            let at = from + pos;
-            // A word start: "predecision" is not a citation.
-            let word_start = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
-            let mut rest = &lower[at + "decision".len()..];
-            rest = rest.strip_prefix('s').unwrap_or(rest);
-            if word_start {
-                while let Some(n) = {
-                    let trimmed = rest.trim_start();
-                    let n = leading_number(trimmed);
-                    if n.is_some() {
-                        rest = &trimmed[3..];
-                    }
-                    n
-                } {
-                    found.push((idx + 1, n));
-                    // A joined continuation ("/014", ", 026", " and 026") cites more numbers.
-                    let after = rest.trim_start();
-                    rest = match after
-                        .strip_prefix('/')
-                        .or_else(|| after.strip_prefix(','))
-                        .or_else(|| after.strip_prefix("and "))
-                    {
-                        Some(next) => next,
-                        None => break,
-                    };
-                }
-            }
-            from = at + "decision".len();
+    // Join lines with one space; record where each source line begins so an offset maps back to a
+    // line. `to_ascii_lowercase` preserves byte length, so offsets in `lower` == offsets in `joined`.
+    let mut joined = String::with_capacity(text.len());
+    let mut line_starts = Vec::new();
+    for line in text.lines() {
+        line_starts.push(joined.len());
+        joined.push_str(line);
+        joined.push(' ');
+    }
+    let line_of = |offset: usize| -> usize {
+        match line_starts.binary_search(&offset) {
+            Ok(i) => i + 1, // offset is the first byte of line i (0-based)
+            Err(i) => i,    // line_starts[i-1] <= offset < line_starts[i] ⇒ line i-1 (0-based)
         }
+    };
+    let lower = joined.to_ascii_lowercase();
+
+    let mut found = Vec::new();
+    let mut from = 0;
+    while let Some(pos) = lower[from..].find("decision") {
+        let at = from + pos;
+        // A word start: "predecision" is not a citation.
+        let word_start = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
+        let mut rest = &lower[at + "decision".len()..];
+        rest = rest.strip_prefix('s').unwrap_or(rest);
+        if word_start {
+            while let Some(n) = {
+                let trimmed = rest.trim_start();
+                let n = leading_number(trimmed);
+                if n.is_some() {
+                    rest = &trimmed[3..];
+                }
+                n
+            } {
+                found.push((line_of(at), n));
+                // A joined continuation ("/014", ", 026", " and 026") cites more numbers.
+                let after = rest.trim_start();
+                rest = match after
+                    .strip_prefix('/')
+                    .or_else(|| after.strip_prefix(','))
+                    .or_else(|| after.strip_prefix("and "))
+                {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+        }
+        from = at + "decision".len();
     }
     found
 }
@@ -196,7 +214,18 @@ fn leading_number(s: &str) -> Option<u32> {
 /// so they are not checkable and never anchor.
 fn path_candidates(text: &str, anchors: &BTreeSet<String>) -> Vec<(usize, String)> {
     let mut found = Vec::new();
+    // Skip fenced code blocks: a `.md`/`.rules` example (or a shown command) may name a path that
+    // needn't exist. A ```` ``` ```` fence toggles at a line's start; in `.rs` the doc-comment
+    // fences are prefixed (`//! ```), so this never triggers there, leaving `.rs` behavior unchanged.
+    let mut in_fence = false;
     for (idx, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
         let mut parts = line.split('`');
         let _outside = parts.next();
         while let (Some(inside), Some(_)) = (parts.next(), parts.next()) {
@@ -296,6 +325,30 @@ mod tests {
         assert_eq!(
             got,
             vec![(1, 13), (2, 24), (2, 26), (2, 13), (2, 14)],
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn citations_wrapped_across_a_line_break_are_caught() {
+        // The word "decision" ending a line with its number on the next is still one citation
+        // (attributed to the line the word sits on), the live-doc drift the line-joined scan closes.
+        let text = "see decision\n029 for why, and decisions 024,\n026 too.";
+        let got = cited_decisions(text);
+        assert_eq!(got, vec![(1, 29), (2, 24), (2, 26)], "{got:?}");
+    }
+
+    #[test]
+    fn path_candidates_skip_fenced_code_blocks() {
+        let anchors = path_anchors(&BTreeSet::new());
+        // A backticked path outside a fence is a candidate; the same inside a ``` fence is skipped
+        // (an illustrative example that needn't exist).
+        let text = "real `crates/vmm/src/lib.rs` here.\n\
+                    ```\n`docs/made-up-example.md`\n```\n";
+        let got = path_candidates(text, &anchors);
+        assert_eq!(
+            got,
+            vec![(1, "crates/vmm/src/lib.rs".to_string())],
             "{got:?}"
         );
     }

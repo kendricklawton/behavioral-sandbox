@@ -125,6 +125,10 @@ impl SharedTracer {
     fn finalize(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
             drain_route(inner);
+            // Best-effort unregister: this footprint is already drained, so a failure here can't
+            // undercount *this* run. Its only downstream effect, the departed cgroup keeping the
+            // host-global ring buffer under pressure, is not silent: those extra drops surface as
+            // `AxisGap::HostSyscalls` ring-drop gaps in the *later* sandboxes' records (see `collect`).
             let _ = inner.tracer.remove_target(cgroup_id);
             inner.folds.remove(&cgroup_id).map(SyscallFold::finish)
         })
@@ -309,6 +313,7 @@ impl SandboxProbes {
         // Host syscalls: drain + finish this cgroup's fold on the shared tracer (also unregisters it).
         // A lost fold or poisoned lock is a *recorded gap*, never an empty footprint passed off as a
         // quiet run.
+        let had_tracer = matches!((self.traced, self.cgroup_id), (true, Some(_)));
         let host_syscalls = match (self.traced, self.cgroup_id) {
             (true, Some(cgid)) => match self.tracer.finalize(cgid) {
                 Some(footprint) => footprint,
@@ -325,14 +330,23 @@ impl SandboxProbes {
         self.traced = false;
 
         // The shared ring buffer is host-global; if the kernel counted drops during this run's window,
-        // the footprint may undercount, say so instead of looking exact.
-        if let (Some(before), Some(after)) = (self.drops_at_attach, self.tracer.drops()) {
-            if after > before {
-                self.gaps.push(AxisGap::HostSyscalls(format!(
-                    "ring buffer dropped {} event(s) during this run's window; the footprint may \
-                     undercount",
-                    after - before
-                )));
+        // the footprint may undercount, say so instead of looking exact. And if the tracer was attached
+        // but either endpoint of the delta is *unreadable*, the loss is unknown, still a gap (unknown
+        // loss is loss), never silence.
+        if had_tracer {
+            match (self.drops_at_attach, self.tracer.drops()) {
+                (Some(before), Some(after)) if after > before => {
+                    self.gaps.push(AxisGap::HostSyscalls(format!(
+                        "ring buffer dropped {} event(s) during this run's window; the footprint \
+                         may undercount",
+                        after - before
+                    )));
+                }
+                (Some(_), Some(_)) => {} // both read, no increase: exact
+                _ => self.gaps.push(AxisGap::HostSyscalls(
+                    "ring-buffer event-loss counter unreadable at finalize; possible undercount"
+                        .to_string(),
+                )),
             }
         }
 
@@ -383,6 +397,19 @@ impl SandboxProbes {
                              destination row (the packets were still dropped at the tap)"
                         )));
                     }
+                    // Non-IPv4 (IPv6/VLAN) frames the flow view can't represent: not a flow, but their
+                    // presence means the section is IPv4-only, not the whole picture, so gap it. A
+                    // failed read of the counter is itself a gap (unknown coverage is a gap).
+                    match monitor.unparsed_l3() {
+                        Ok(n) if n > 0 => self.gaps.push(AxisGap::Network(format!(
+                            "{n} non-IPv4 (IPv6/VLAN) frame(s) crossed the tap; the flow view covers \
+                             IPv4 only, so this section is not the complete tap traffic"
+                        ))),
+                        Ok(_) => {}
+                        Err(e) => self
+                            .gaps
+                            .push(AxisGap::Network(format!("read tap unparsed-L3 counter: {e}"))),
+                    }
                     Some(NetSection::from_tap(
                         flows,
                         totals,
@@ -413,7 +440,13 @@ impl SandboxProbes {
         };
         if self.metered {
             if let Some(cgid) = self.cgroup_id {
-                let _ = self.meter.with(|m| m.remove_target(cgid));
+                // Unregister *and* free the cgroup's `CPU_NS` row (the summary above already read
+                // it), so a long-lived shared meter doesn't accumulate dead cgroups against the
+                // map's fixed `MAX_CGROUPS` capacity. Both are best-effort teardown.
+                let _ = self.meter.with(|m| {
+                    let _ = m.remove_target(cgid);
+                    m.clear(cgid)
+                });
             }
             self.metered = false;
         }
@@ -508,7 +541,12 @@ impl Drop for SandboxProbes {
         }
         if self.metered {
             if let Some(cgid) = self.cgroup_id {
-                let _ = self.meter.with(|m| m.remove_target(cgid));
+                // Drop-path teardown with no final read: unregister and free the `CPU_NS` row so the
+                // shared map doesn't accumulate this dead cgroup (mirrors `collect`).
+                let _ = self.meter.with(|m| {
+                    let _ = m.remove_target(cgid);
+                    m.clear(cgid)
+                });
             }
         }
     }

@@ -40,10 +40,13 @@ use crate::{Limits, RunResult, VmmError};
 /// Firecracker adds `root=/dev/vda` itself from the root drive, so it is not listed here.
 const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
 
-/// Substring that marks the guest reached userspace. The pinned Ubuntu rootfs prints its getty
-/// prompt (`ubuntu-fc-uvm login:`) once init is up; no earlier boot line contains `login:`. This
-/// is tied to the pinned rootfs, a new rootfs pin may need a new marker (overridable via env).
-const DEFAULT_USERSPACE_MARKER: &str = "login:";
+/// Substring that marks the guest reached userspace. The default is the **agent rootfs's** ready
+/// sentinel, printed by `agent-guest` once its vsock listener accepts: that image is what the
+/// engine builds, what `Sandbox` needs (exec requires the in-guest agent), and what every product
+/// path boots, so the default must match it, a caller pointing at it must not need to also know a
+/// marker. The exception is the pinned Ubuntu CI rootfs (raw boot tests only), whose readiness is
+/// its getty prompt: those callers set `login:` explicitly (or via `AGENT_MARKER`).
+const DEFAULT_USERSPACE_MARKER: &str = agent_channel::GUEST_READY_MARKER;
 
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
 pub(crate) static VM_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -224,7 +227,10 @@ impl Default for BootConfig {
         Self {
             firecracker: PathBuf::from("firecracker"),
             kernel: PathBuf::from("artifacts/vmlinux"),
-            rootfs: PathBuf::from("artifacts/rootfs.ext4"),
+            // The agent image (`cargo xtask build-rootfs` / `self-host`): the one every product
+            // path boots, and the one the default marker matches. The Ubuntu CI image
+            // (`artifacts/rootfs.ext4`) is a raw-boot-test fixture, named explicitly there.
+            rootfs: PathBuf::from("artifacts/rootfs-agent.ext4"),
             vcpus: limits.vcpus,
             mem_mib: limits.mem_mib,
             boot_args: DEFAULT_BOOT_ARGS.to_string(),
@@ -292,6 +298,10 @@ pub struct RunningVm {
     /// derive its `cpu.max` from the clone's *true* parallelism. On a restore this mirrors the
     /// restoring `config` and is never read, a restored VM refuses snapshotting.
     pub(crate) vcpus: NonZeroU8,
+    /// The guest's RAM as configured at boot ([`BootConfig::mem_mib`]). Used to scale the
+    /// `/snapshot/create` socket timeout: that call blocks until Firecracker writes the whole
+    /// memory file, so a multi-GiB guest must not be bounded by the instant-reply default.
+    pub(crate) mem_mib: NonZeroU32,
 }
 
 /// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
@@ -399,8 +409,12 @@ impl Vm {
         if !Path::new("/dev/kvm").exists() {
             return Err(VmmError::NoKvm);
         }
-        let mut spawned = Spawned::launch(&config)?;
-        let boot_latency = match spawned.run_boot(&config) {
+        // One deadline for the whole boot: host-side staging (`launch`) and the API boot (`run_boot`)
+        // share it, so a slow rootfs copy can't run unbounded before the boot's own timeout starts
+        // (decision 013).
+        let deadline = crate::spawn::boot_deadline(config.boot_timeout);
+        let mut spawned = Spawned::launch(&config, deadline)?;
+        let boot_latency = match spawned.run_boot(&config, deadline) {
             Ok(latency) => latency,
             Err(e) => return Err(spawned.abort(e)),
         };
@@ -428,6 +442,16 @@ impl RunningVm {
     #[must_use]
     pub fn vmm_pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Whether this VM's VMM process is still running, reaping it if it has exited. Unlike a
+    /// `/proc/<pid>` existence probe, this can't be fooled by an **unreaped zombie**: a pooled clone's
+    /// VMM is nobody's `wait()` until it's taken, and a zombie keeps its `/proc/<pid>` entry, so the
+    /// probe would read a dead clone as alive. `try_wait` sees the real exit (and reaps it). An
+    /// unexpected `try_wait` error is treated as not-alive: a clone we can't even query is not worth
+    /// handing out.
+    pub(crate) fn vmm_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// A cheap, cloneable, `Send + Sync` [`KillHandle`] that force-kills this VM from any thread,
@@ -636,7 +660,12 @@ impl RunningVm {
         // window and a fired handle could `kill -9` an unrelated process. Idempotent with the later
         // `teardown`/`abort` calls.
         self.lifetime.mark_down();
-        let _ = self.api.put("/actions", &Action::SendCtrlAltDel);
+        // `SendCtrlAltDel` is an x86 i8042 action; Firecracker rejects it on aarch64, and any API
+        // error means the guest was never asked to power off. Polling for a clean exit would then
+        // just burn the whole grace before the caller's hard kill, so skip straight to that.
+        if self.api.put("/actions", &Action::SendCtrlAltDel).is_err() {
+            return false;
+        }
         loop {
             match self.child.try_wait() {
                 Ok(Some(_)) => return true, // clean power-off (guest ran its umount on shutdown)

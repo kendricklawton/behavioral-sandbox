@@ -77,9 +77,19 @@ use aya_ebpf::{
 };
 use agent_probes_common::{
     rule_matches, FlowCounts, FlowKey, PolicyRule, Syscall, SyscallEvent, DETAIL_CAP,
-    ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_ARP, ETH_P_IP, IPPROTO_TCP, IPPROTO_UDP, MAX_POLICY_RULES,
-    SOCKADDR_SNAP,
+    ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPPROTO_TCP,
+    IPPROTO_UDP, MAX_POLICY_RULES, SOCKADDR_SNAP,
 };
+
+/// The object's kernel `license` section. Without it every program loads as **non-GPL-compatible**,
+/// which works only while the helper set stays non-`gpl_only`: the first GPL-only helper added
+/// (`bpf_perf_event_output`, `bpf_get_stackid`, some probe-read variants) would fail to load with a
+/// cryptic "cannot call GPL-restricted function", undercutting the documented cross-kernel
+/// portability. Declaring `GPL` makes the programs GPL-compatible (dual-licensable: this crate is
+/// Apache-2.0). `#[no_mangle]` + the exact `license` section name are what the kernel loader reads.
+#[no_mangle]
+#[link_section = "license"]
+static _LICENSE: [u8; 4] = *b"GPL\0";
 
 /// A single-slot **per-CPU** counter of `sys_enter_execve` events. Per-CPU means each CPU increments
 /// its own copy of slot 0 with no cross-CPU atomic; the loader sums the per-CPU values when it reads.
@@ -317,6 +327,14 @@ static FLOW_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 static DENIAL_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
+/// A single-slot **per-CPU** counter of **non-IPv4** frames (IPv6 or 802.1Q VLAN) that crossed the tap
+/// but can't be represented as an IPv4 [`FlowKey`], so they'd vanish from the flow view silently. The
+/// loader reads it and gaps the network section as IPv4-only when nonzero. ARP is deliberately *not*
+/// counted (it is expected on-link, not a flow); neither IPv6 nor VLAN is configured on a sandbox's
+/// tap (decision 017), so a nonzero count is a guest emitting frames the audit can't otherwise show.
+#[map]
+static UNPARSED_L3: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
+
 /// Bump one of the per-CPU drop counters ([`FLOW_DROPS`]/[`DENIAL_DROPS`]) after a failed map
 /// insert. `#[inline(always)]` like every helper here, so each classifier stays one self-contained
 /// program.
@@ -431,12 +449,19 @@ fn egress_verdict(ctx: &TcContext) -> Verdict {
 /// denied flows (counted in [`DENIAL_DROPS`], so the loss is visible); the ones already recorded stay.
 #[inline(always)]
 fn record_denial(key: &FlowKey) {
+    // Key by **destination only** (src addr/port zeroed): the map's stated semantics are
+    // per-destination, and keying on the guest's ephemeral source port would spread one blocked
+    // endpoint across a row per port, filling the 4096-entry map far faster (hitting `DENIAL_DROPS`)
+    // and diluting the "which endpoint was blocked" trail. A guest hammering one denied dst from many
+    // source ports now stays a single, incrementing row. (The loader already aggregates by dst, so
+    // this only changes what the kernel *stores*, not the record's shape.)
+    let dst = FlowKey::new(0, key.dst_addr, 0, key.dst_port, key.proto);
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
-        if let Some(count) = DENIALS.get_ptr_mut(key) {
+        if let Some(count) = DENIALS.get_ptr_mut(&dst) {
             *count += 1;
-        } else if DENIALS.insert(key, &1, 0).is_err() {
+        } else if DENIALS.insert(&dst, &1, 0).is_err() {
             // Map full: the packet was still dropped (enforcement is not map-dependent), but its
             // destination is missing from the audit rows, count the loss so the record can say so.
             count_map_drop(&DENIAL_DROPS);
@@ -468,6 +493,14 @@ fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
 #[inline(always)]
 fn count(ctx: &TcContext, dir: Direction) {
     let Some(key) = parse(ctx) else {
+        // Not our IPv4. Count an IPv6 or VLAN-tagged frame (which a flow can't represent) so its
+        // presence isn't silently absent from the record; skip ARP (expected on-link, not a flow)
+        // and anything else. A second small `load` only on this uncommon path.
+        if let Ok(ethertype) = ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be) {
+            if ethertype == ETH_P_IPV6 || ethertype == ETH_P_8021Q {
+                count_map_drop(&UNPARSED_L3);
+            }
+        }
         return;
     };
     // `skb->len` is the full frame length, counts a GSO super-frame's real bytes, which `data_end -
@@ -526,8 +559,13 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
     let proto: u8 = ctx.load(ETH_HLEN + 9).ok()?;
     let src = u32::from_be(ctx.load::<u32>(ETH_HLEN + 12).ok()?);
     let dst = u32::from_be(ctx.load::<u32>(ETH_HLEN + 16).ok()?);
+    // The low 13 bits of the flags/fragment-offset field (IP header bytes 6..8) are the fragment
+    // offset. A non-first fragment (offset != 0) has no L4 header, so reading "ports" there would
+    // interpret payload bytes; leave them zero so a guest can't mint bogus 5-tuples with fragments
+    // (mirrors `agent_probes_common::parse_ipv4_5tuple`).
+    let frag_off = u16::from_be(ctx.load::<u16>(ETH_HLEN + 6).ok()?) & 0x1fff;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
-    if proto == IPPROTO_TCP || proto == IPPROTO_UDP {
+    if frag_off == 0 && (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
         let l4 = ETH_HLEN + ihl;
         src_port = u16::from_be(ctx.load::<u16>(l4).ok()?);
         dst_port = u16::from_be(ctx.load::<u16>(l4 + 2).ok()?);

@@ -148,6 +148,13 @@ fn main() -> ExitCode {
         || std::env::var("AGENT_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     init_tracing(cli.log.as_deref(), log_json);
 
+    // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
+    // on top). The daemon has no `.agent.toml` cwd discovery, that's a CLI-in-a-project convenience;
+    // a daemon's config is its own flags + environment. Computed up front so the signal handler and
+    // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
+    let base = BootConfig::from_env();
+    let jailed = !cli.unjailed;
+
     let listener = match bind(&cli.socket) {
         Ok(listener) => listener,
         Err(e) => {
@@ -156,9 +163,19 @@ fn main() -> ExitCode {
         }
     };
     // A supervisor's stop signal gets a prompt, clean exit: log, unlink the socket (so a restart
-    // never depends on the stale-path heuristic), and exit 0. In-flight sessions end
-    // crash-consistently; their VMs are reaped by the lifetime sentinel (decision 014).
-    install_signal_handler(cli.socket.clone());
+    // never depends on the stale-path heuristic), remove this daemon's bundle dirs (else a
+    // `--prewarm` restart leaks a guest-RAM-sized bundle each time), and exit 0. In-flight sessions
+    // end crash-consistently; their VMs are reaped by the lifetime sentinel (decision 014).
+    install_signal_handler(
+        cli.socket.clone(),
+        vec![
+            prewarm_dir(&base.scratch_dir),
+            snapshots_dir(&base.scratch_dir),
+        ],
+    );
+    // Reclaim bundle dirs a *crashed* prior daemon (SIGKILL/OOM, no handler) leaked, before this one
+    // adds its own. Best-effort, this-user, dead-pid only.
+    sweep_stale_agentd_bundles(&base.scratch_dir);
     // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
     // explicitly either works or the daemon refuses to start, an operational surface the hoster
     // requested must not silently be absent (the same posture as `--allow`'s enforcement refusal).
@@ -181,18 +198,11 @@ fn main() -> ExitCode {
             );
         }
     }
-    // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
-    // on top). The daemon has no `.agent.toml` cwd discovery, that's a CLI-in-a-project convenience;
-    // a daemon's config is its own flags + environment.
-    let base = BootConfig::from_env();
-    let jailed = !cli.unjailed;
     // Snapshot bundles are guest-memory-sized, so they live under the engine's own scratch knob
     // (`AGENT_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
     // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
     // large artifact (boot scratch, prewarm, snapshots) follows.
-    let snapshot_base = base
-        .scratch_dir
-        .join(format!("agentd-snapshots-{}", std::process::id()));
+    let snapshot_base = snapshots_dir(&base.scratch_dir);
     let pool = build_optional_pool(cli.prewarm, &base, jailed);
     let server = Arc::new(Server {
         base,
@@ -339,10 +349,78 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     let _ = agentd_protocol::write_message(&mut stream, &refusal);
 }
 
-/// Install the SIGTERM/SIGINT handler: log, unlink the socket, exit 0 (a clean stop for a
-/// supervisor). Best-effort, a host where the handler can't be installed keeps the crash-only
-/// behavior (the sentinel still reaps VMs; the next start still clears the stale socket).
-fn install_signal_handler(socket: PathBuf) {
+/// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
+fn prewarm_dir(scratch: &Path) -> PathBuf {
+    scratch.join(format!("agentd-prewarm-{}", std::process::id()))
+}
+
+/// This daemon's session-snapshot bundle dir (holds each session's `snap-N`), under the scratch knob.
+fn snapshots_dir(scratch: &Path) -> PathBuf {
+    scratch.join(format!("agentd-snapshots-{}", std::process::id()))
+}
+
+/// The effective uid this process runs as, so the startup sweep only reclaims bundle dirs *it* owns
+/// (from a prior crashed daemon of the same user), never another user's on a shared scratch base.
+fn own_euid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let uid = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
+    uid.split_whitespace().nth(1)?.parse().ok()
+}
+
+/// Reclaim this-user `agentd-prewarm-<pid>` / `agentd-snapshots-<pid>` bundle dirs left by **dead**
+/// prior daemons: their guest-memory-sized files are pure leak once the daemon that owned them is
+/// gone (SIGKILL/OOM skips the signal-handler cleanup). Best-effort, per-entry: a dir we can't stat
+/// or remove is logged and skipped. Skips our own pid and any live pid (a concurrently-running
+/// daemon of the same user). A dead daemon's pid is genuinely absent from `/proc` (it's not our
+/// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
+fn sweep_stale_agentd_bundles(scratch: &Path) {
+    use std::os::unix::fs::MetadataExt as _;
+    let Some(me) = own_euid() else {
+        return; // without our euid we can't prove ownership; skip rather than risk a wrong delete
+    };
+    let Ok(entries) = std::fs::read_dir(scratch) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(pid) = name
+            .strip_prefix("agentd-prewarm-")
+            .or_else(|| name.strip_prefix("agentd-snapshots-"))
+        else {
+            continue; // not a bundle dir this daemon mints
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        if pid == std::process::id() {
+            continue; // never our own live dirs
+        }
+        if entry.metadata().map(|m| m.uid()).ok() != Some(me) {
+            continue; // another user's residue (their daemon's sweep, not ours)
+        }
+        if Path::new(&format!("/proc/{pid}")).exists() {
+            continue; // a live daemon still owns it
+        }
+        match std::fs::remove_dir_all(entry.path()) {
+            Ok(()) => tracing::info!(
+                dir = %entry.path().display(),
+                "swept a stale agentd bundle dir from a dead daemon"
+            ),
+            Err(e) => tracing::warn!(
+                dir = %entry.path().display(),
+                error = %e,
+                "could not sweep a stale agentd bundle dir"
+            ),
+        }
+    }
+}
+
+/// Install the SIGTERM/SIGINT handler: log, unlink the socket, remove this daemon's own bundle dirs
+/// (`cleanup_dirs`, guest-memory-sized), then exit 0 (a clean stop for a supervisor). Best-effort, a
+/// host where the handler can't be installed keeps the crash-only behavior (the sentinel still reaps
+/// VMs; the next start clears the stale socket and the startup sweep reclaims the leaked bundle dirs).
+fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
     let spawned = std::thread::Builder::new()
         .name("agentd-signals".into())
         .spawn(move || {
@@ -357,10 +435,14 @@ fn install_signal_handler(socket: PathBuf) {
                 }
             };
             if let Some(signal) = signals.forever().next() {
-                tracing::info!(signal, "shutting down: removing the socket and exiting");
+                tracing::info!(signal, "shutting down: removing the socket and bundle dirs, exiting");
                 // In-flight sessions end crash-consistently (their VMs reaped by the sentinel);
-                // the unlink is what a plain process kill would leave behind.
+                // the unlink is what a plain process kill would leave behind, and the bundle dirs
+                // are guest-memory-sized files a plain kill would leak.
                 let _ = std::fs::remove_file(&socket);
+                for dir in &cleanup_dirs {
+                    let _ = std::fs::remove_dir_all(dir);
+                }
                 std::process::exit(0);
             }
         });
@@ -402,20 +484,36 @@ fn build_optional_pool(
 /// daemon's confinement posture. The clones carry the default profile, which is why only a
 /// bare-default `open` is pool-eligible (`session::boot_session_vm`).
 fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, VmmError> {
+    // Snapshot into a per-daemon dir under the engine's scratch knob (`AGENT_SCRATCH_DIR`), the same
+    // routing as the session bundles: guest-memory-sized files belong where the operator pointed
+    // scratch, never a hardcoded `$TMPDIR`. On a **successful** build the pool's clones reference this
+    // bundle, so it must live until shutdown (the signal handler / startup sweep reclaim it); on any
+    // **failure** below, nothing references it, so remove it rather than leak a guest-RAM-sized bundle.
+    let snap_dir = prewarm_dir(&base.scratch_dir);
+    std::fs::create_dir_all(&snap_dir)
+        .map_err(|e| VmmError::Vmm(format!("create prewarm dir {}: {e}", snap_dir.display())))?;
+    let built = build_pool_from(base, jailed, target, &snap_dir);
+    if built.is_err() {
+        let _ = std::fs::remove_dir_all(&snap_dir);
+    }
+    built
+}
+
+/// The snapshot + restore steps of [`build_pool`], split out so the caller can reclaim `snap_dir` on
+/// any error without a cleanup branch per `?`.
+fn build_pool_from(
+    base: &BootConfig,
+    jailed: bool,
+    target: usize,
+    snap_dir: &Path,
+) -> Result<Pool, VmmError> {
     // 1. An unjailed prewarm source running only the default profile (no untrusted code, the source
     //    is the daemon's own, its clones are where sessions run).
     let source_config = base.clone().with_limits(Limits::default());
     let source = Sandbox::open_unjailed(source_config)?;
 
-    // 2. Snapshot it into a per-daemon dir under the engine's scratch knob (`AGENT_SCRATCH_DIR`),
-    //    the same routing as the session snapshot bundles: guest-memory-sized files belong where
-    //    the operator pointed scratch, never a hardcoded `$TMPDIR`.
-    let snap_dir = base
-        .scratch_dir
-        .join(format!("agentd-prewarm-{}", std::process::id()));
-    std::fs::create_dir_all(&snap_dir)
-        .map_err(|e| VmmError::Vmm(format!("create prewarm dir {}: {e}", snap_dir.display())))?;
-    let snapshot = source.snapshot(&snap_dir)?;
+    // 2. Snapshot it into the per-daemon bundle dir the caller prepared.
+    let snapshot = source.snapshot(snap_dir)?;
     // The source has served its purpose (its state is captured); tear it down before the pool fills.
     // Best-effort (16-D): the snapshot is the artifact that matters and it is already on disk, so a
     // teardown error must not discard a working pool. `Drop` reclaims the source either way.
@@ -456,22 +554,43 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
             .map_err(|e| format!("remove stale socket {}: {e}", socket.display()))?;
         tracing::warn!(socket = %socket.display(), "removed a stale socket from a dead daemon");
     }
-    let listener = UnixListener::bind(socket).map_err(|e| {
-        format!(
-            "bind {}: {e} (does its parent directory exist and is it writable?)",
-            socket.display()
-        )
-    })?;
-    // Defense-in-depth on the socket's own mode: the parent directory's permissions are the
-    // designed access control (the module doc), but the file itself would otherwise inherit the
-    // ambient umask, so pin it to owner+group. A hoster who wants wider access grants it on the
-    // directory (or re-chmods), a deliberate choice instead of an inherited accident.
-    {
+    // Bind at a temp path in the **same directory**, narrow its mode, then atomically rename it into
+    // place, so the socket never exists at its canonical (client-known) path with the ambient umask's
+    // mode. Binding directly and chmod-ing after leaves a window where a permissive umask lets another
+    // local user connect before the 0660 narrowing lands; the temp path is not the path clients dial,
+    // so no such window exists. Defense-in-depth on the file's own mode: the parent directory's
+    // permissions are the designed access control (the module doc), and a hoster wanting wider access
+    // grants it on the directory (or re-chmods) as a deliberate choice, not an inherited umask accident.
+    let listener = {
         use std::os::unix::fs::PermissionsExt as _;
-        if let Err(e) = std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o660)) {
-            tracing::warn!(error = %e, socket = %socket.display(), "cannot chmod the socket to 0660");
+        let mut tmp = socket.to_path_buf().into_os_string();
+        tmp.push(format!(".{}.tmp", std::process::id()));
+        let tmp = std::path::PathBuf::from(tmp);
+        let _ = std::fs::remove_file(&tmp); // clear a leftover temp from a prior crashed start
+        let listener = UnixListener::bind(&tmp).map_err(|e| {
+            format!(
+                "bind {}: {e} (does its parent directory exist and is it writable?)",
+                tmp.display()
+            )
+        })?;
+        // Fatal on failure: refuse to serve on a wide-open socket rather than warn and continue.
+        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o660)) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "chmod the socket {} to 0660 failed: {e}; refusing to serve wide-open",
+                tmp.display()
+            ));
         }
-    }
+        std::fs::rename(&tmp, socket).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!(
+                "move socket into place ({} -> {}): {e}",
+                tmp.display(),
+                socket.display()
+            )
+        })?;
+        listener
+    };
     Ok(listener)
 }
 

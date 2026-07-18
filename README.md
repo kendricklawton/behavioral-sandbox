@@ -33,9 +33,10 @@ the record can't be forged by the code it is recording.
 
 ## Try it
 
-**Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` or `aarch64` host, and kernel
-**≥ 5.15**. `cargo xtask setup` (or `agent doctor` once built) reports exactly what your host is
-missing before the first sandbox.
+**Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` or `aarch64` host, kernel
+**≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.9 on
+`PATH` (the engine drives it, it doesn't bundle it). `cargo xtask setup` (or `agent doctor` once
+built) reports exactly what your host is missing before the first sandbox.
 
 ```console
 git clone https://github.com/kendricklawton/agent && cd agent
@@ -44,8 +45,9 @@ agent run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in 
 ```
 
 `--unjailed` is the explicit opt-out from the default jailer for a dev box without real root; the
-guest still sits behind the KVM boundary. The [Quickstart](docs/quickstart.md) walks the same path
-and then asks for the host-observed record of what the code actually did.
+guest still sits behind the KVM boundary. [Installation](docs/cli-install.md) walks the same path
+in full, and [the CLI chapter](docs/cli.md) shows how to ask for the host-observed record of what
+the code actually did.
 
 ## Documentation
 

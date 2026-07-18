@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_vmm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use agent_vmm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID};
 
 /// A host scratch dir removed on drop, so a panicking assertion can't leak it. (The unit tests have
 /// their own copy; the integration crate is separate, so it needs one too.)
@@ -72,6 +72,9 @@ pub fn config() -> BootConfig {
     if std::env::var_os("AGENT_ROOTFS").is_none() {
         cfg.rootfs = root.join("artifacts/rootfs.ext4");
     }
+    // The Ubuntu CI rootfs is the exception to the agent-marker default: its readiness line is
+    // the getty prompt.
+    cfg.userspace_marker = "login:".to_string();
     cfg.boot_timeout = Duration::from_secs(30);
     cfg
 }
@@ -86,7 +89,6 @@ pub fn agent_rootfs_config() -> BootConfig {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
     cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
-    cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     // Read-only shared base + a per-run tmpfs overlay: `/` is writable in-guest but the base
     // file is never mutated. This is what makes the agent's `/tmp` working dir usable, so the exec

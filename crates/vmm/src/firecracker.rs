@@ -21,8 +21,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::VmmError;
 
-/// Per-call socket timeout. The API itself answers instantly; this only bounds a wedged VMM.
+/// Per-call socket timeout for the ordinary API calls, which answer instantly; this only bounds a
+/// wedged VMM. The exception is `/snapshot/create` and `/snapshot/load`, whose reply is withheld
+/// until Firecracker synchronously writes or reads the whole guest memory file: those use
+/// [`snapshot_api_timeout`] instead, scaled by guest RAM.
 const API_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Assumed floor throughput (MiB/s) for the guest memory file during `/snapshot/create` (write) and
+/// `/snapshot/load` (read). Real storage is far faster (NVMe in GB/s, network-backed volumes
+/// ~100+ MB/s), so this deliberately-low floor is pure headroom: it keeps a slow disk and a
+/// multi-GiB guest from making a *valid* snapshot spuriously time out, while still bounding a
+/// genuinely wedged VMM.
+const SNAPSHOT_FLOOR_MIB_PER_S: u32 = 32;
+
+/// The socket timeout for a snapshot create/load call. Unlike the instant-reply calls, this one
+/// blocks until Firecracker moves the entire `mem_mib`-sized memory file, so the bound is
+/// [`API_TIMEOUT`] (the base reply latency) plus the time that file takes at
+/// [`SNAPSHOT_FLOOR_MIB_PER_S`]. Integer division floors the per-MiB term; the base covers the
+/// remainder.
+pub(crate) fn snapshot_api_timeout(mem_mib: u32) -> Duration {
+    API_TIMEOUT + Duration::from_secs(u64::from(mem_mib / SNAPSHOT_FLOOR_MIB_PER_S))
+}
 
 /// Cap on a response body. Firecracker's replies are at most a small JSON object; a huge
 /// `Content-Length` is a broken peer and must be a typed error, not a huge upfront allocation.
@@ -50,21 +69,39 @@ impl ApiClient {
 
     /// `PUT <path>` with a JSON body, expecting a `2xx`. A `4xx` fault becomes a typed error.
     pub(crate) fn put<B: Serialize>(&self, path: &str, body: &B) -> Result<(), VmmError> {
-        self.send("PUT", path, body)
+        self.send("PUT", path, body, API_TIMEOUT)
+    }
+
+    /// `PUT <path>` with an explicit socket timeout instead of the instant-reply [`API_TIMEOUT`],
+    /// for `/snapshot/create` and `/snapshot/load`, whose reply is withheld until Firecracker moves
+    /// the whole guest memory file (see [`snapshot_api_timeout`]). Framing is otherwise identical.
+    pub(crate) fn put_with_timeout<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        timeout: Duration,
+    ) -> Result<(), VmmError> {
+        self.send("PUT", path, body, timeout)
     }
 
     /// `PATCH <path>` with a JSON body, expecting a `2xx`. Firecracker uses `PATCH` for in-place
     /// changes to an already-configured VM, its run state (`/vm`) and a drive's backing path, so
     /// the snapshot/restore flow needs it alongside `put`. Framing is identical.
     pub(crate) fn patch<B: Serialize>(&self, path: &str, body: &B) -> Result<(), VmmError> {
-        self.send("PATCH", path, body)
+        self.send("PATCH", path, body, API_TIMEOUT)
     }
 
     /// Serialize `body`, send `method path`, and expect a `2xx`; a `4xx` fault becomes a typed error.
-    fn send<B: Serialize>(&self, method: &str, path: &str, body: &B) -> Result<(), VmmError> {
+    fn send<B: Serialize>(
+        &self,
+        method: &str,
+        path: &str,
+        body: &B,
+        timeout: Duration,
+    ) -> Result<(), VmmError> {
         let json = serde_json::to_vec(body)
             .map_err(|e| VmmError::Vmm(format!("serialize {path}: {e}")))?;
-        let (status, resp) = self.request(method, path, &json)?;
+        let (status, resp) = self.request(method, path, &json, timeout)?;
         if (200..300).contains(&status) {
             return Ok(());
         }
@@ -73,12 +110,23 @@ impl ApiClient {
     }
 
     /// Write the request and read the framed response: `(status_code, body_bytes)`.
-    fn request(&self, method: &str, path: &str, body: &[u8]) -> Result<(u16, Vec<u8>), VmmError> {
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        timeout: Duration,
+    ) -> Result<(u16, Vec<u8>), VmmError> {
         let ctx = || format!("api {method} {path}");
+        // `connect` itself has no deadline (std offers none for a unix socket): the one unbounded
+        // step. In practice the VMM's listen backlog absorbs a connect while it's briefly busy, so a
+        // hang here needs the backlog *full* (a VMM whose API thread is wedged, e.g. a snapshot write
+        // to dead storage) plus enough queued requests to fill it, the same accepted gap the vsock
+        // dial documents (`exec.rs`). The read/write timeouts below bound every step after connect.
         let stream = UnixStream::connect(&self.socket).map_err(|e| io_err(&ctx(), &e))?;
         stream
-            .set_read_timeout(Some(API_TIMEOUT))
-            .and_then(|()| stream.set_write_timeout(Some(API_TIMEOUT)))
+            .set_read_timeout(Some(timeout))
+            .and_then(|()| stream.set_write_timeout(Some(timeout)))
             .map_err(|e| io_err(&ctx(), &e))?;
 
         // One `write_all`: request line, headers, blank line, then the body.
@@ -329,6 +377,26 @@ pub(crate) enum MemBackendType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_timeout_scales_with_guest_ram_and_floors_at_the_base() {
+        // A tiny guest still gets at least the base reply latency.
+        assert_eq!(snapshot_api_timeout(1), API_TIMEOUT);
+        // 256 MiB at the 32 MiB/s floor: base + 8s.
+        assert_eq!(
+            snapshot_api_timeout(256),
+            API_TIMEOUT + Duration::from_secs(8)
+        );
+        // A multi-GiB guest gets a bound far past the old fixed 5s (the bug: a valid snapshot that
+        // takes ~tens of seconds to write must not spuriously time out).
+        assert_eq!(
+            snapshot_api_timeout(4096),
+            API_TIMEOUT + Duration::from_secs(128)
+        );
+        assert!(snapshot_api_timeout(4096) > Duration::from_secs(60));
+        // The largest plausible guest still yields a finite, non-panicking bound.
+        assert!(snapshot_api_timeout(u32::MAX) > API_TIMEOUT);
+    }
 
     #[test]
     fn parses_204_no_content() {

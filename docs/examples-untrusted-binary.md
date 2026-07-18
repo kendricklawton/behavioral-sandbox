@@ -5,12 +5,8 @@ build artifact from a fork. Run it in a microVM and let the **host** tell you wh
 `execve`, `openat`, and `connect` it made, observed from outside the guest where the binary can't
 hide them. This is the malware-sandbox use case, minus the trust.
 
-Point the CLI at the agent rootfs (once), and add `--unjailed` on a dev box without real root:
-
-```console
-export AGENT_ROOTFS=artifacts/rootfs-agent.ext4
-export AGENT_MARKER=AGENT-GUEST-READY
-```
+The defaults point at the agent rootfs in `artifacts/`; add `--unjailed` on a dev box without
+real root.
 
 ## A stand-in for the unknown binary
 

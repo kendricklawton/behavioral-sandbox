@@ -318,6 +318,11 @@ fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
 /// peer can't grow host memory without bound. Returns `Ok(true)` if it stopped at EOF (the line may
 /// be unterminated), `Ok(false)` if it stopped on a newline. Reads through the `BufRead`'s own buffer
 /// (`fill_buf`/`consume`), so it is byte-precise without being a syscall per byte.
+///
+/// On the over-cap path it first drains the rest of the offending line (through its `\n`, or to EOF)
+/// before returning `TooLarge`, so the stream is left at a clean line boundary. Without that, a
+/// caller that treats `TooLarge` as per-request and keeps reading (the daemon does) would resume
+/// mid-line and emit a cascade of spurious errors for one oversize message.
 fn read_line_capped(
     reader: &mut impl BufRead,
     cap: usize,
@@ -335,6 +340,9 @@ fn read_line_capped(
         match available.iter().position(|&b| b == b'\n') {
             Some(i) => {
                 if out.len() + i > cap {
+                    // The newline is already in view: consume through it so the next read starts
+                    // at the following line, then report the oversize one.
+                    reader.consume(i + 1);
                     return Err(ProtocolError::TooLarge);
                 }
                 out.extend_from_slice(&available[..i]);
@@ -344,9 +352,40 @@ fn read_line_capped(
             None => {
                 let used = available.len();
                 if out.len() + used > cap {
+                    // Over cap with no newline yet: discard this chunk and keep draining until the
+                    // line's `\n` (or EOF) so the stream resyncs, then report the oversize line.
+                    reader.consume(used);
+                    discard_to_newline(reader)?;
                     return Err(ProtocolError::TooLarge);
                 }
                 out.extend_from_slice(available);
+                reader.consume(used);
+            }
+        }
+    }
+}
+
+/// Consume and discard bytes through the next `\n` (or to EOF), leaving `reader` at a fresh line
+/// boundary. Used to resynchronize after an over-cap line so the surviving session parses the
+/// following message cleanly. Bounded in memory (nothing is buffered); it reads only what the peer
+/// already sent, the same liveness envelope as any in-progress line.
+fn discard_to_newline(reader: &mut impl BufRead) -> Result<(), ProtocolError> {
+    loop {
+        let available = match reader.fill_buf() {
+            Ok(b) => b,
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(ProtocolError::Io(e)),
+        };
+        if available.is_empty() {
+            return Ok(()); // EOF: nothing left to resync to
+        }
+        match available.iter().position(|&b| b == b'\n') {
+            Some(i) => {
+                reader.consume(i + 1); // through the newline
+                return Ok(());
+            }
+            None => {
+                let used = available.len();
                 reader.consume(used);
             }
         }
@@ -567,5 +606,30 @@ mod tests {
             read_message::<Request>(&mut flood.as_slice()),
             Err(ProtocolError::TooLarge)
         ));
+    }
+
+    #[test]
+    fn an_overlong_line_resyncs_so_the_next_message_parses() {
+        // The desync bug: an over-cap line left its tail (and newline) in the stream, so a session
+        // that treats `TooLarge` as per-request resumed mid-line and emitted a cascade of spurious
+        // errors. The fix drains to the newline, so exactly one `TooLarge` is reported and the very
+        // next line decodes normally.
+        let mut wire = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+        wire.push(b'\n'); // the oversize line *is* newline-terminated
+        wire.extend_from_slice(b"{\"schema\":1,\"op\":\"close\"}\n"); // a valid message right after
+        let mut cursor = wire.as_slice();
+
+        // First read: the oversize line, one clean `TooLarge`.
+        assert!(matches!(
+            read_message::<Request>(&mut cursor),
+            Err(ProtocolError::TooLarge)
+        ));
+        // Second read: the stream resynced, so the following message parses (no mid-line garbage).
+        assert!(matches!(
+            read_message::<Request>(&mut cursor),
+            Ok(Some(Request::Close))
+        ));
+        // Third read: clean EOF, nothing stranded.
+        assert!(matches!(read_message::<Request>(&mut cursor), Ok(None)));
     }
 }

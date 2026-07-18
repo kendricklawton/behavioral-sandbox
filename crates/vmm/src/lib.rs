@@ -77,7 +77,7 @@ mod tests {
                 VmmError::ExecUnresponsive {
                     limit: Duration::from_secs(1),
                 },
-                ErrorKind::Guest,
+                ErrorKind::Transport,
             ),
         ];
         for (err, want) in cases {
@@ -215,11 +215,13 @@ pub enum ErrorKind {
     /// vsock **establishment** (connect + `CONNECT` ack + handshake, where "the agent isn't up yet"
     /// shows up). Not the guest's fault; a retry or a fixed host is the response.
     Infra,
-    /// Channel / transport: a steady-state framing/IO fault on an already-established exec connection.
-    /// The channel is unreliable, so a caller should retire the VM rather than blame the command.
+    /// Channel / transport: a steady-state framing/IO fault on an already-established exec connection,
+    /// or the host giving up on an exec whose guest went silent past its deadline
+    /// ([`ExecUnresponsive`](VmmError::ExecUnresponsive)). The channel/guest is unreliable, so a
+    /// caller should retire the VM rather than blame the command.
     Transport,
-    /// Guest fault: the agent couldn't run the command, it outran its budget, flooded output, or went
-    /// unresponsive. The run is at fault, not the engine.
+    /// Guest fault: the agent couldn't run the command, it outran its budget, or it flooded output.
+    /// The run is at fault, not the engine.
     Guest,
 }
 
@@ -243,12 +245,14 @@ impl VmmError {
             | VmmError::Timeout(_)
             | VmmError::GuestUnavailable(_)
             | VmmError::Vmm(_) => ErrorKind::Infra,
-            VmmError::Channel(_) => ErrorKind::Transport,
+            // `ExecUnresponsive` is a *liveness* fault (the guest went silent/hostile mid-exec), so
+            // it buckets with `Channel` as Transport: its own contract is "retire the VM, not blame
+            // the command", which is Transport's, not Guest's.
+            VmmError::Channel(_) | VmmError::ExecUnresponsive { .. } => ErrorKind::Transport,
             VmmError::GuestExec(_)
             | VmmError::GuestProtocol(_)
             | VmmError::OutputCap { .. }
-            | VmmError::ExecTimeout { .. }
-            | VmmError::ExecUnresponsive { .. } => ErrorKind::Guest,
+            | VmmError::ExecTimeout { .. } => ErrorKind::Guest,
         }
     }
 }
@@ -303,9 +307,12 @@ pub struct Limits {
     /// never cut off by the transport. Should be a realistic duration: it is also the boot deadline,
     /// and on the exec side a zero or sub-millisecond wall is floored to a **1 ms** command budget on
     /// the wire (the guest reads a truncated-to-zero `timeout_ms` as its 1 h ceiling, so the floor
-    /// keeps a tiny wall meaning "very short", never "unlimited"). (A caller that genuinely needs
-    /// different boot and exec ceilings sets [`BootConfig::boot_timeout`] / [`BootConfig::exec_wall`]
-    /// under the public API.)
+    /// keeps a tiny wall meaning "very short", never "unlimited"). At the top end the guest agent
+    /// clamps any exec budget to a **1 h** ceiling (`MAX_EXEC_TIMEOUT`), so a `wall` above an hour
+    /// kills the command at one hour, the effective exec budget is `min(wall, 1 h)` even though the
+    /// reported [`ExecTimeout`](VmmError::ExecTimeout) names the configured `wall`. (A caller that
+    /// genuinely needs different boot and exec ceilings sets [`BootConfig::boot_timeout`] /
+    /// [`BootConfig::exec_wall`] under the public API.)
     pub wall: Duration,
     /// Aggregate cap, in bytes, on what the host buffers for one exec, stdout + stderr + returned
     /// artifacts (plus a small per-frame accounting floor), so a flooding guest can't grow host

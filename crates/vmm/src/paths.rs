@@ -30,13 +30,17 @@ pub(crate) fn absolute(p: &Path) -> Result<PathBuf, VmmError> {
 }
 
 /// Require a file to exist, mapping absence to a clear [`VmmError::Artifact`]. Callers pass it their
-/// inputs (kernel, rootfs, a snapshot bundle's files) to fail early with an actionable message.
-pub(crate) fn require_file(path: &Path, what: &str) -> Result<(), VmmError> {
+/// inputs (kernel, rootfs, a snapshot bundle's files) to fail early with an actionable message. The
+/// `hint` is **caller-supplied**: the fetchable pinned artifacts point at `cargo xtask
+/// fetch-artifacts`, but an embedder's own snapshot bundle can't (that command doesn't produce it),
+/// so those callers pass `None` rather than a remediation that doesn't apply.
+pub(crate) fn require_file(path: &Path, what: &str, hint: Option<&str>) -> Result<(), VmmError> {
     if path.is_file() {
         Ok(())
     } else {
+        let hint = hint.map(|h| format!(" ({h})")).unwrap_or_default();
         Err(VmmError::Artifact(format!(
-            "{what} not found at {} (run `cargo xtask fetch-artifacts`)",
+            "{what} not found at {}{hint}",
             path.display()
         )))
     }
@@ -48,7 +52,7 @@ mod tests {
 
     #[test]
     fn missing_artifact_is_typed_error() {
-        let err = require_file(Path::new("/no/such/vmlinux"), "kernel image").unwrap_err();
+        let err = require_file(Path::new("/no/such/vmlinux"), "kernel image", None).unwrap_err();
         assert!(matches!(err, VmmError::Artifact(_)));
     }
 }

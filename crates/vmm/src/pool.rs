@@ -100,19 +100,23 @@ impl Pool {
     /// Only what a fresh [`Vm::restore`] can return; pooled-clone health failures are consumed by
     /// the discard-and-retry loop, not surfaced.
     pub fn take(&mut self) -> Result<RunningVm, VmmError> {
-        while let Some(vm) = self.ready.pop() {
+        while let Some(mut vm) = self.ready.pop() {
             // The probe is a vsock health check. A snapshot without the exec channel has nothing to
             // probe, `probe_agent` would return the *permanent* `require_vsock` error, a structural
             // condition, not a dead-clone signal, so hand the popped clone out directly rather than
             // reading that error as "unhealthy" and tearing down the whole pool on the first take.
             // The one cheap liveness signal left is the VMM process itself: a clone whose VMM died
             // while pooled is discarded like a failed probe, not handed out to fail on first use.
+            // `try_wait` (not a `/proc/<pid>` probe): the pooled VMM is nobody's `wait()`, so a dead
+            // one is an unreaped zombie that keeps its `/proc` entry, which the old probe read as
+            // alive; `try_wait` sees the real exit and reaps it.
             if !self.snapshot.has_vsock {
-                if std::path::Path::new(&format!("/proc/{}", vm.vmm_pid())).exists() {
+                let pid = vm.vmm_pid();
+                if vm.vmm_alive() {
                     return Ok(vm);
                 }
                 tracing::warn!(
-                    vmm_pid = vm.vmm_pid(),
+                    vmm_pid = pid,
                     "discarding pooled clone whose VMM process died"
                 );
                 drop(vm);
