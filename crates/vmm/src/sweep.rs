@@ -38,7 +38,6 @@ use crate::VmmError;
 
 /// What a [`sweep_orphans`] pass reclaimed and what it deliberately left alone.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub struct SweepReport {
     /// Dead drivers' scratch dirs removed.
     pub dirs_reclaimed: usize,

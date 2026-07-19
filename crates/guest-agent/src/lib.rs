@@ -66,7 +66,6 @@ const TIMED_OUT_CODE: i32 = 137;
 
 /// Everything running one command over the channel can fail with, as a typed value.
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum AgentError {
     /// The channel handshake, request read, or response write failed.
     Channel(ChannelError),

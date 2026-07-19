@@ -45,7 +45,6 @@ impl RunRecord {
         // schema version, first, so a consumer reads it before anything else.
         field(&mut out, "schema", AUDIT_SCHEMA_VERSION, true);
 
-        // timing
         out.push_str(",\"timing\":{");
         field(&mut out, "boot_ns", clamped_ns(self.timing.boot), true);
         field(
@@ -63,15 +62,12 @@ impl RunRecord {
             None => out.push_str("null"),
         }
 
-        // resources
         out.push_str(",\"resources\":");
         resources_to_json(&mut out, &self.resources);
 
-        // host_syscalls
         out.push_str(",\"host_syscalls\":");
         syscalls_to_json(&mut out, &self.host_syscalls);
 
-        // coverage
         out.push_str(",\"coverage\":[");
         for (i, gap) in self.coverage.iter().enumerate() {
             if i > 0 {

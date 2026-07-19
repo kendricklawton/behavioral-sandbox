@@ -79,7 +79,6 @@ jobs:
     if: always()
     needs: [gate]
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
       - name: Verify every job passed
         run: jq --exit-status 'all(.result == "success" or .result == "skipped")' <<< '${{ toJson(needs) }}'

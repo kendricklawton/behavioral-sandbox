@@ -35,9 +35,3 @@ boundaries:
 - `xtask`, dev orchestration; `cargo xtask ci` runs the host-safe gate and builds the eBPF
   object, `ci-privileged` runs the VM-boot + probe-attach integration tests, `setup` verifies the
   host, and the rootfs/kernel build lives here. Never shipped.
-
----
-
-## Recorded decisions
-
-The decisions are recorded as **ADRs**, one file per decision, under [`docs/adr/`](./adr/README.md): each hard-to-reverse choice is a numbered `NNN-*.md` entry (the decision, the alternatives, the why). See [the ADR index](./adr/README.md) for the full list; a new decision is a new ADR, and the roadmap's `(decision)` tags point at these numbers.
