@@ -3,7 +3,7 @@
 //! leading [`schema`](Envelope::schema) field, so the two sides agree on the shape before either
 //! trusts the other's bytes.
 //!
-//! **This is the SDK contract seed (decision 034).** It is the one artifact the daemon
+//! **This is the SDK contract seed (ADR 034).** It is the one artifact the daemon
 //! ([`agentd`](../agent_cli/index.html)), the reference client (`agentd-client`), and the eventual
 //! polyglot SDKs all share, so it lives in its own **`agent-vmm`-free** crate: the wire is the
 //! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
@@ -12,7 +12,7 @@
 //! which is exactly why [`WIRE_SCHEMA`] is stamped on every message and mismatches are rejected up
 //! front rather than silently mis-decoded.
 //!
-//! **Why JSON, not gRPC (decision 034).** The daemon is synchronous, thread-per-connection, with no
+//! **Why JSON, not gRPC (ADR 034).** The daemon is synchronous, thread-per-connection, with no
 //! async runtime on the host path; gRPC would drag `tonic`/`prost` and a `tokio` stack into that
 //! posture. The peer is a **local, trusted-ish client** the hoster runs, so hand-debuggability
 //! (`socat`, `nc`) matters more than a compact wire, and any language can drive a line of JSON over a
@@ -75,7 +75,7 @@ pub struct Envelope<T> {
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
     /// Open the connection's sandbox, the first message of a session (the VM *is* the session,
-    /// decision 019). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
+    /// ADR 019). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
     /// is the daemon's launch-time choice, never a client's, so a caller can't downgrade the jail.
     /// Any omitted field keeps the conservative `agent_vmm::Limits` default.
     Open {
@@ -94,7 +94,7 @@ pub enum Request {
         output_cap: Option<usize>,
     },
     /// Run one command in the open sandbox, feeding `stdin` (UTF-8 text) to it. Repeated `exec`s
-    /// share the session's working directory (decision 019).
+    /// share the session's working directory (ADR 019).
     Exec {
         /// The command and its arguments (`argv[0]` is the program). Empty is a guest fault.
         argv: Vec<String>,

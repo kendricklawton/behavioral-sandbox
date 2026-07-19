@@ -5,10 +5,10 @@
 //! code, then read back **both** what the code produced and the host-observed audit record, and
 //! close. This is the launch sequence the driver (`agent-vmm`) and the loader (`agent-probes-loader`)
 //! document, composed **by the caller**. The model/agent, if any, is always the caller here, never
-//! in the host path (decision 035).
+//! in the host path (ADR 035).
 //!
 //! The two halves bridge only by the plain values `Sandbox` exposes (`vmm_pid`, `netns`, `tap_name`,
-//! `boot_latency`), so the driver never gains a dependency on the eBPF loader (decisions 024/026);
+//! `boot_latency`), so the driver never gains a dependency on the eBPF loader (ADRs 024/026);
 //! that is why this reference lives in the loader crate, which dev-depends on the driver, not the
 //! other way round.
 //!
@@ -42,14 +42,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let meter = SharedMeter::load()?;
 
     // 2. Configure the run. `from_env` layers flags/env/`.agent.toml`/defaults for the artifact
-    //    paths; `Limits` is the per-run resource budget (decision 013). Conservative defaults, with
+    //    paths; `Limits` is the per-run resource budget (ADR 013). Conservative defaults, with
     //    the whole-run wall-clock budget raised for this demo; `vcpus`/`mem_mib` are `NonZero` knobs
     //    on the same struct.
     let mut limits = Limits::default();
     limits.wall = Duration::from_secs(20);
     let config = BootConfig::from_env().with_limits(limits);
 
-    // 3. Boot: hardware isolation (KVM) under the jailer, the confined default (decision 015).
+    // 3. Boot: hardware isolation (KVM) under the jailer, the confined default (ADR 015).
     //    `open_unjailed` is the greppable dev opt-out for a host without root.
     let sandbox = Sandbox::open(config)?;
     println!(
@@ -60,7 +60,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // 4. Attach the observers to THIS sandbox by the plain values it exposes. `None` egress =
     //    deny-by-default networking, observe-only; `Some(&policy)` would enforce a per-VM allow-list
-    //    at the tap (decision 025). Each axis that can't attach degrades to a recorded coverage gap.
+    //    at the tap (ADR 025). Each axis that can't attach degrades to a recorded coverage gap.
     let probes = SandboxProbes::attach(
         sandbox.vmm_pid(),
         sandbox.netns(),

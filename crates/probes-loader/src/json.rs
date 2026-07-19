@@ -2,7 +2,7 @@
 //! *outside* the guest.
 //!
 //! Hand-rolled, dependency-free, and **compact** (no incidental whitespace), for the same reasons the
-//! host↔guest wire is hand-framed (decision 002): the audit-log format is a contract downstream SDKs
+//! host↔guest wire is hand-framed (ADR 002): the audit-log format is a contract downstream SDKs
 //! parse, so pinning the exact bytes here, rather than trusting a derive's field order, is the
 //! point. The output is **byte-stable**: object keys are written in a fixed order and every array the
 //! record carries is already sorted by its builder ([`NetSection::from_tap`](crate::NetSection),

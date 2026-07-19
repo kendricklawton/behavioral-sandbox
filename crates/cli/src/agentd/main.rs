@@ -5,9 +5,9 @@
 //! use, **still engine, not platform**, no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
-//! **Shape.** One connection is one sandbox **session** (the VM *is* the session, decision 019),
+//! **Shape.** One connection is one sandbox **session** (the VM *is* the session, ADR 019),
 //! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`agentd_protocol`] crate (decision 034);
+//! is the versioned newline-JSON contract in the shared [`agentd_protocol`] crate (ADR 034);
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
@@ -36,7 +36,7 @@
 //!
 //! **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
 //! ends, tearing the microVM down; and losing the whole daemon process (SIGKILL, OOM) can't leak a
-//! VM either, the lifetime sentinel (decision 014) reaps it, and the next start clears a stale
+//! VM either, the lifetime sentinel (ADR 014) reaps it, and the next start clears a stale
 //! socket file. A supervisor's SIGTERM/SIGINT is handled: the daemon logs, unlinks its socket, and
 //! exits cleanly (in-flight sessions end crash-consistently, their VMs reaped by the sentinel); a
 //! graceful *drain* of in-flight sessions remains a later ops concern.
@@ -78,7 +78,7 @@ struct Cli {
     /// built (no KVM, no root for jailed clones), every session cold-boots. Omit (or `0`) to disable.
     #[arg(long, value_name = "N")]
     prewarm: Option<usize>,
-    /// Run every session's VMM without the jailer. The default is confined (jailed, decision 015,
+    /// Run every session's VMM without the jailer. The default is confined (jailed, ADR 015,
     /// needs real root + the `jailer` binary); this is the daemon-wide opt-out for hosts that can't
     /// jail. A **client never chooses this**, the confinement posture is the hoster's, set here.
     #[arg(long)]
@@ -174,7 +174,7 @@ fn main() -> ExitCode {
     // A supervisor's stop signal gets a prompt, clean exit: log, unlink the socket (so a restart
     // never depends on the stale-path heuristic), remove this daemon's bundle dirs (else a
     // `--prewarm` restart leaks a guest-RAM-sized bundle each time), and exit 0. In-flight sessions
-    // end crash-consistently; their VMs are reaped by the lifetime sentinel (decision 014).
+    // end crash-consistently; their VMs are reaped by the lifetime sentinel (ADR 014).
     install_signal_handler(
         cli.socket.clone(),
         vec![

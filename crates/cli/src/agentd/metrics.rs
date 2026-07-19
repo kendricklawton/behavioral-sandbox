@@ -4,7 +4,7 @@
 //! are the hoster's, above the engine).
 //!
 //! **Hand-rolled on purpose.** The exposition format is a few lines of stable text, and the daemon is
-//! synchronous with no async runtime (decision 034's posture), so the endpoint is a plain
+//! synchronous with no async runtime (ADR 034's posture), so the endpoint is a plain
 //! `TcpListener` + a bounded HTTP/1.1 responder on one thread, the same discipline as the driver's
 //! hand-rolled Firecracker HTTP client, not a `tokio`/framework import for one GET route. Scrapes are
 //! served sequentially (a scraper polls every few seconds; there is no fan-in to manage), each under

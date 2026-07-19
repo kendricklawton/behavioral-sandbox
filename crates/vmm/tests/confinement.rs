@@ -439,7 +439,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
         peak <= max,
         "memory.peak {peak} must never pass memory.max {max}"
     );
-    // The host never had to OOM-kill the VMM: the 128 MiB overhead budget (decision 012 addendum)
+    // The host never had to OOM-kill the VMM: the 128 MiB overhead budget (ADR 012 addendum)
     // absorbed the VMM's worst case while the guest's own OOM killer handled the hog.
     assert_eq!(
         cg.stat("memory.events", "oom_kill"),
@@ -533,7 +533,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
-    // The explicitly multi-tenant assertion (decision 022): a hostile run storming the host's CPU alongside
+    // The explicitly multi-tenant assertion (ADR 022): a hostile run storming the host's CPU alongside
     // a well-behaved run on the *same host* can neither **starve** it (the victim's work still
     // completes, correctly and within a bound) nor **observe** it (distinct VMMs; network isolation is
     // the per-VM netns's job, net.rs). Each run is capped at its own cgroup, so the attacker cannot

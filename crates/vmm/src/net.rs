@@ -1,5 +1,5 @@
 //! Per-VM guest networking, host side: a **per-VM network namespace** holding the tap that backs
-//! virtio-net (decisions 008, 009, 011, and the netns decision that supersedes 011's clone limit).
+//! virtio-net (ADRs 008, 009, 011, and the netns ADR that supersedes 011's clone limit).
 //!
 //! Each networked VM gets its own netns (`ip netns add <name>`); the tap lives *inside* it, and the
 //! VMM runs there too (the jailer's `--netns`, or `ip netns exec` for a direct boot). Because the tap
@@ -27,7 +27,7 @@ pub(crate) const TAP_NAME: &str = "fc0";
 const GUEST_MAC: &str = "02:00:00:00:00:02";
 
 /// The host end of the point-to-point link, assigned to the tap inside the netns. The guest reaches
-/// this (and nothing else, deny-by-default, decision 008); it is unreachable from the host's own
+/// this (and nothing else, deny-by-default, ADR 008); it is unreachable from the host's own
 /// netns, which is by design (the driver talks to the guest over vsock, never IP).
 const HOST_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
 

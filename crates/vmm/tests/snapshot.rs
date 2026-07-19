@@ -243,7 +243,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_networked_clones_coexist_each_in_its_own_netns() {
-    // Retires decision 011's one-live-networked-clone limit. On v1.9 (no `network_overrides`)
+    // Retires ADR 011's one-live-networked-clone limit. On v1.9 (no `network_overrides`)
     // every clone must present the snapshot's baked-in tap name, which in a shared host netns could
     // exist only once, so only one networked clone could be live. Under the netns model each clone
     // recreates that tap in its **own** network namespace, where the baked-in identity is already
@@ -486,12 +486,12 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
-    // Decision 011, entropy + clocks. Every clone wakes from the same memory image, so if the
+    // ADR 011, entropy + clocks. Every clone wakes from the same memory image, so if the
     // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical, the
     // classic clone-entropy vulnerability (shared session keys/nonces/UUIDs). The pinned stack has
     // both halves of the fix (Firecracker v1.9 ships VMGenID; kernel 6.1 has the vmgenid driver,
     // which reseeds the CRNG on a generation bump): this proves it end to end. Clock skew is
-    // measured and reported, not asserted (decision 011 records the posture).
+    // measured and reported, not asserted (ADR 011 records the posture).
     let bundle = TmpDir::new("snap-entropy");
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 

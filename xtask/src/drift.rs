@@ -1,9 +1,10 @@
 //! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else
 //! compiles or tests, and three kinds are mechanically checkable, so this pass checks them:
 //!
-//! 1. **Decision citations.** `decision NNN` in any tracked `.rs`/`.md`/`.rules` prose must name
-//!    an ADR that exists under `docs/adr/` (a `NNN-*.md` file). A renumbered or deleted ADR
-//!    otherwise turns every citation into a pointer at the wrong rationale.
+//! 1. **ADR citations.** `ADR NNN` or `decision NNN` (both spellings cite the same log) in any
+//!    tracked `.rs`/`.md`/`.rules` prose must name an ADR that exists under `docs/adr/` (a
+//!    `NNN-*.md` file). A renumbered or deleted ADR otherwise turns every citation into a pointer
+//!    at the wrong rationale.
 //! 2. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
 //!    something in the tree; a rename otherwise leaves the comment lying about where things live.
 //! 3. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
@@ -88,7 +89,7 @@ pub fn check(root: &Path) -> Result<()> {
         bail!("prose drift: {} broken reference(s)", violations.len());
     }
     println!(
-        "· prose drift: {citations} decision citation(s), {path_refs} path reference(s), \
+        "· prose drift: {citations} ADR citation(s), {path_refs} path reference(s), \
          {links} markdown link(s) all resolve"
     );
     Ok(())
@@ -138,12 +139,14 @@ fn defined_decisions(root: &Path) -> Result<BTreeSet<u32>> {
     Ok(defined)
 }
 
-/// Every decision number the text cites, with its 1-based line: `decision 013`, `Decision 013`,
-/// and the joined forms `decision 013/014`, `decisions 024, 026`, `decisions 024 and 026`.
+/// Every ADR number the text cites, with its 1-based line. Two interchangeable spellings are
+/// scanned, `ADR 013` (crate comments) and `decision 013` (docs/ROADMAP/.rules), each in singular,
+/// plural, and joined forms: `Decision 013`, `decision 013/014`, `decisions 024, 026`,
+/// `ADRs 024 and 026`.
 ///
 /// Scans a **line-joined** view (each source line separated by a single space) so a citation
 /// wrapped across a line break (`decision\n029`, as several live docs do) still parses as one token;
-/// a per-offset line map keeps best-effort attribution (the line the word "decision" sits on).
+/// a per-offset line map keeps best-effort attribution (the line the keyword sits on).
 fn cited_decisions(text: &str) -> Vec<(usize, u32)> {
     // Join lines with one space; record where each source line begins so an offset maps back to a
     // line. `to_ascii_lowercase` preserves byte length, so offsets in `lower` == offsets in `joined`.
@@ -162,37 +165,41 @@ fn cited_decisions(text: &str) -> Vec<(usize, u32)> {
     };
     let lower = joined.to_ascii_lowercase();
 
+    // Both keywords cite the same ADR log, so both are scanned; neither is a substring of the
+    // other, so the two passes never double-count one citation.
     let mut found = Vec::new();
-    let mut from = 0;
-    while let Some(pos) = lower[from..].find("decision") {
-        let at = from + pos;
-        // A word start: "predecision" is not a citation.
-        let word_start = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
-        let mut rest = &lower[at + "decision".len()..];
-        rest = rest.strip_prefix('s').unwrap_or(rest);
-        if word_start {
-            while let Some(n) = {
-                let trimmed = rest.trim_start();
-                let n = leading_number(trimmed);
-                if n.is_some() {
-                    rest = &trimmed[3..];
+    for keyword in ["decision", "adr"] {
+        let mut from = 0;
+        while let Some(pos) = lower[from..].find(keyword) {
+            let at = from + pos;
+            // A word start: "predecision"/"quadratic" is not a citation.
+            let word_start = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
+            let mut rest = &lower[at + keyword.len()..];
+            rest = rest.strip_prefix('s').unwrap_or(rest);
+            if word_start {
+                while let Some(n) = {
+                    let trimmed = rest.trim_start();
+                    let n = leading_number(trimmed);
+                    if n.is_some() {
+                        rest = &trimmed[3..];
+                    }
+                    n
+                } {
+                    found.push((line_of(at), n));
+                    // A joined continuation ("/014", ", 026", " and 026") cites more numbers.
+                    let after = rest.trim_start();
+                    rest = match after
+                        .strip_prefix('/')
+                        .or_else(|| after.strip_prefix(','))
+                        .or_else(|| after.strip_prefix("and "))
+                    {
+                        Some(next) => next,
+                        None => break,
+                    };
                 }
-                n
-            } {
-                found.push((line_of(at), n));
-                // A joined continuation ("/014", ", 026", " and 026") cites more numbers.
-                let after = rest.trim_start();
-                rest = match after
-                    .strip_prefix('/')
-                    .or_else(|| after.strip_prefix(','))
-                    .or_else(|| after.strip_prefix("and "))
-                {
-                    Some(next) => next,
-                    None => break,
-                };
             }
+            from = at + keyword.len();
         }
-        from = at + "decision".len();
     }
     found
 }
@@ -352,6 +359,15 @@ mod tests {
             vec![(1, 13), (2, 24), (2, 26), (2, 13), (2, 14)],
             "{got:?}"
         );
+    }
+
+    #[test]
+    fn adr_spelling_is_cited_like_decision() {
+        // `ADR NNN` cites the same log as `decision NNN`; both spellings and their plural/joined
+        // forms parse, and a word that merely contains "adr" (quadratic) is not a citation.
+        let text = "see ADR 013 and ADRs 024/026.\nquadratic 999 is not one; ADR013 is.";
+        let got = cited_decisions(text);
+        assert_eq!(got, vec![(1, 13), (1, 24), (1, 26), (2, 13)], "{got:?}");
     }
 
     #[test]

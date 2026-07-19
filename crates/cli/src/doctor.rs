@@ -17,7 +17,7 @@ use agent_vmm::BootConfig;
 #[must_use]
 pub fn report(config: &BootConfig) -> ExitCode {
     let mut out = std::io::stdout();
-    let _ = writeln!(out, "agent doctor — host readiness\n");
+    let _ = writeln!(out, "agent doctor: host readiness\n");
 
     let mut checks = doctor::checks(config);
     checks.push(ebpf_check());
@@ -47,7 +47,7 @@ pub fn report(config: &BootConfig) -> ExitCode {
         // and exit non-zero so a script can gate on it.
         let _ = writeln!(
             std::io::stderr(),
-            "agent: not ready — a hard prerequisite above is missing (see the FAIL rows)"
+            "agent: not ready, a hard prerequisite above is missing (see the FAIL rows)"
         );
         ExitCode::from(2)
     }

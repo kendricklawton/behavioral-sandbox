@@ -6,7 +6,7 @@
 //! or the `--json` structured result / audit log), so `agent run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
 //! flags > env (`AGENT_LOG`) > default. Both subcommands run
-//! **jailed by default** (decision 015) with `--unjailed` as the explicit opt-out, and both point
+//! **jailed by default** (ADR 015) with `--unjailed` as the explicit opt-out, and both point
 //! at the env-layered artifacts (`AGENT_ROOTFS`/`AGENT_KERNEL`/`AGENT_MARKER`, exec needs the
 //! agent rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
@@ -104,7 +104,7 @@ struct RunArgs {
     #[arg(long)]
     demo_boot: bool,
     /// Run the VMM without the jailer. The default is confined (jailed, which needs real root and
-    /// the `jailer` binary, decision 015); this is the explicit opt-out for hosts that can't jail.
+    /// the `jailer` binary, ADR 015); this is the explicit opt-out for hosts that can't jail.
     #[arg(long)]
     unjailed: bool,
     /// Set an environment variable on the guest command (repeatable). Values are treated as
@@ -127,7 +127,7 @@ struct RunArgs {
     #[arg(long, value_name = "BYTES")]
     output_cap: Option<usize>,
     /// Guest vCPUs (default 1). A whole number in 1..=32; zero or over-cap is a typed CLI error,
-    /// never a silent clamp (Firecracker v1.9 caps a microVM at 32, decision 001).
+    /// never a silent clamp (Firecracker v1.9 caps a microVM at 32, ADR 001).
     #[arg(long, value_name = "N", value_parser = parse_vcpus)]
     vcpus: Option<NonZeroU8>,
     /// Guest memory in MiB (default 256). A whole number of at least 1; zero is a typed CLI error.

@@ -19,7 +19,7 @@ aya = "0.13"
 # `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
 agent-probes-common = { path = "../probes-common", features = ["std"] }
 
-# Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (decision 024).
+# Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (ADR 024).
 # `setns` has no `std` wrapper; nix's is a *safe* function, so the loader stays
 # `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
 # Pinned to the same 0.31 the workspace already carries (via `vsock` under `agent-vmm`) so the build

@@ -73,6 +73,12 @@ kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md
 measured overhead and a live demo. The audit log that fuses these into one host-observed per-run
 record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `agentd` daemon.
 
+**Verified on:** the host-safe gate (build, tests, lints) runs in CI on **Ubuntu 24.04** (`x86_64`
+and `aarch64`) on every change; the privileged path (microVM boot, the jailer, the eBPF probes, the
+integration suite) is currently hand-verified on **Arch Linux** with **Firecracker v1.9**, with
+Ubuntu LTS validation in progress. `agent doctor` reports your own host's readiness. See
+[Supported platforms](docs/cli-install.md#supported-platforms).
+
 ## How it fits together
 
 ```

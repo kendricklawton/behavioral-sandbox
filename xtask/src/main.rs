@@ -447,9 +447,9 @@ fn ci_privileged() -> Result<()> {
 
 /// Print a checklist of the host prerequisites; read-only, never fails the build.
 fn setup() -> Result<()> {
-    println!("agent — host capability check\n");
+    println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `agent doctor` renders (P14.9d): one
+    // The runtime host checks are the *same* implementation `agent doctor` renders (decision 032): one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
@@ -468,19 +468,22 @@ fn setup() -> Result<()> {
     // verifying static links); an operator running the shipped engine does not, so they are not in
     // the shared `agent doctor` set.
     println!("\ndev toolchain (for building, not running):");
-    check("bpf-linker installed", in_path("bpf-linker"));
+    check(
+        "bpf-linker installed",
+        dev_tool_path("bpf-linker").is_some(),
+    );
     check(
         "nightly toolchain + rust-src (eBPF object build: `cargo xtask build-probes`)",
         nightly_ebpf_ready(),
     );
     check(
-        "readelf (binutils — static-link verification)",
-        in_path("readelf"),
+        "readelf (binutils: static-link verification)",
+        dev_tool_path("readelf").is_some(),
     );
 
     // The degradation matrix, the same fails-open-vs-hard split `agent doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.
-    println!("\nDegradation matrix — what a missing item above means at runtime:");
+    println!("\nDegradation matrix: what a missing item above means at runtime:");
     for line in agent_vmm::doctor::matrix() {
         println!("  {line}");
     }
@@ -489,14 +492,14 @@ fn setup() -> Result<()> {
     // be weaponized; *deploying* them, as whom, when, over what directory, is the hoster's, and
     // these are the four calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
-    println!("\nHardening — the hoster's responsibility (the engine can't decide these for you):");
+    println!("\nHardening: the hoster's responsibility (the engine can't decide these for you):");
     println!(
         "    scratch base: point AGENT_SCRATCH_DIR at a dir only the engine user owns (not the"
     );
     println!(
         "                  world-writable /tmp default), so no other local user can plant residue"
     );
-    println!("    run the sweep: schedule agent_vmm::sweep_orphans() (boot-time + periodic) — the");
+    println!("    run the sweep: schedule agent_vmm::sweep_orphans() (boot-time + periodic), the");
     println!("                  engine exposes it; when/how often it runs is your ops call");
     println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
     println!("                  run drivers as several users, each user must run its own sweep");
@@ -506,13 +509,15 @@ fn setup() -> Result<()> {
     );
 
     println!("\neBPF probes: loading + attaching needs CAP_BPF + CAP_PERFMON, not full");
-    println!("             root — grant a loader binary just those with `setcap cap_bpf,cap_perfmon+ep`.");
+    println!(
+        "             root: grant a loader binary just those with `setcap cap_bpf,cap_perfmon+ep`."
+    );
     println!(
         "             A host without kernel BTF or those caps is named by a typed error, not a"
     );
     println!("             cryptic verifier reject (agent_probes_loader::check_support).");
 
-    println!("\nMissing items are covered in docs/cli-install.md → Prerequisites.");
+    println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
     Ok(())
 }
 
@@ -651,9 +656,24 @@ fn elf_has_section(bytes: &[u8], name: &str) -> bool {
 /// Whether the nightly toolchain with the `rust-src` component (needed to build `crates/probes` with
 /// `-Z build-std`) is installed, via `rustup component list --installed`. Informational, for `setup`.
 fn nightly_ebpf_ready() -> bool {
-    Command::new("rustup")
-        .args(["component", "list", "--toolchain", "nightly", "--installed"])
-        .output()
+    // Resolve `rustup` the sudo-aware way too (it is also a per-user `~/.cargo/bin` tool), so a
+    // `sudo cargo xtask setup` doesn't misreport the toolchain as absent, see `dev_tool_path`.
+    let Some(rustup) = dev_tool_path("rustup") else {
+        return false;
+    };
+    let mut cmd = Command::new(rustup);
+    cmd.args(["component", "list", "--toolchain", "nightly", "--installed"]);
+    // Under a sudo that reset `$HOME` to root's, `rustup` would read root's empty `~/.rustup` and
+    // report no nightly. Point it at the *invoking* user's toolchain home so the row is honest
+    // whichever way setup is run (only when `RUSTUP_HOME` isn't already pinned by the environment).
+    if std::env::var_os("RUSTUP_HOME").is_none() {
+        if let Some(user) = std::env::var_os("SUDO_USER") {
+            if let Some(home) = user_home(&user) {
+                cmd.env("RUSTUP_HOME", home.join(".rustup"));
+            }
+        }
+    }
+    cmd.output()
         .map(|o| {
             o.status.success()
                 && String::from_utf8_lossy(&o.stdout)
@@ -741,6 +761,62 @@ fn in_path(bin: &str) -> bool {
         return false;
     };
     std::env::split_paths(&path).any(|dir| dir.join(bin).is_file())
+}
+
+/// Resolve a per-user dev-toolchain binary: `$PATH` first, then the cargo bin dirs. `cargo install`
+/// places these build-only tools (`bpf-linker`, `rustup`) in `~/.cargo/bin`, which `sudo` drops from
+/// root's PATH, so the natural `sudo cargo xtask setup` (run to green the *runtime* rows) would
+/// otherwise report an installed tool as missing. Checking the cargo bin dirs, including the
+/// *invoking* user's under sudo, keeps the dev-toolchain rows honest whichever way setup is invoked.
+fn dev_tool_path(bin: &str) -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("PATH") {
+        if let Some(hit) = std::env::split_paths(&path)
+            .map(|dir| dir.join(bin))
+            .find(|p| p.is_file())
+        {
+            return Some(hit);
+        }
+    }
+    cargo_bin_dirs()
+        .into_iter()
+        .map(|dir| dir.join(bin))
+        .find(|p| p.is_file())
+}
+
+/// The cargo bin dirs to search beyond `$PATH`: `$CARGO_HOME/bin`, `$HOME/.cargo/bin`, and, when
+/// running under `sudo`, the *invoking* user's `~/.cargo/bin` (their `$HOME` is often root's here).
+fn cargo_bin_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
+        dirs.push(PathBuf::from(cargo_home).join("bin"));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        dirs.push(PathBuf::from(home).join(".cargo").join("bin"));
+    }
+    if let Some(user) = std::env::var_os("SUDO_USER") {
+        if let Some(home) = user_home(&user) {
+            dirs.push(home.join(".cargo").join("bin"));
+        }
+    }
+    dirs
+}
+
+/// The home directory of `user`, from `getent passwd` (field 6), falling back to `/home/<user>` if
+/// `getent` is unavailable, so the sudo path in [`cargo_bin_dirs`] never hardcodes the home layout.
+fn user_home(user: &OsStr) -> Option<PathBuf> {
+    if let Ok(out) = Command::new("getent").arg("passwd").arg(user).output() {
+        if out.status.success() {
+            if let Some(home) = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .and_then(|l| l.split(':').nth(5))
+                .filter(|h| !h.is_empty())
+            {
+                return Some(PathBuf::from(home));
+            }
+        }
+    }
+    Some(PathBuf::from("/home").join(user.to_str()?))
 }
 
 fn cargo(args: &[&str]) -> Result<()> {

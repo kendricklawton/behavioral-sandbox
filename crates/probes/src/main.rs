@@ -170,7 +170,7 @@ const FILTER_CGROUP: u32 = 1;
 ///. **One shared tracer, a target *set*** is what keeps host-syscall observation bounded under
 /// many concurrent sandboxes: the three `sys_enter_*` tracepoints are global, so a tracer-per-sandbox
 /// would attach (and run) *N* copies of each program on *every* matching syscall (O(sandboxes) per
-/// syscall, the shape decision 026 rejects for `sched_switch`). Instead one shared tracer is attached
+/// syscall, the shape ADR 026 rejects for `sched_switch`). Instead one shared tracer is attached
 /// once and every sandbox registers its cgroup here; the hot path is a single hash lookup, and
 /// [`EVENTS`] only ever carries the registered cgroups' events (not the whole host's). Consulted only
 /// when [`TRACE_SET`] is on; empty + off is the load-time single-[`FILTER`] behaviour.
@@ -331,7 +331,7 @@ static DENIAL_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// but can't be represented as an IPv4 [`FlowKey`], so they'd vanish from the flow view silently. The
 /// loader reads it and gaps the network section as IPv4-only when nonzero. ARP is deliberately *not*
 /// counted (it is expected on-link, not a flow); neither IPv6 nor VLAN is configured on a sandbox's
-/// tap (decision 017), so a nonzero count is a guest emitting frames the audit can't otherwise show.
+/// tap (ADR 017), so a nonzero count is a guest emitting frames the audit can't otherwise show.
 #[map]
 static UNPARSED_L3: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 

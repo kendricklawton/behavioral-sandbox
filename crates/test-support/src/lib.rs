@@ -69,14 +69,14 @@ impl Drop for ScratchDir {
 }
 
 /// Host-side memory headroom above the guest's RAM for the VMM's own footprint, in MiB. Mirrors the
-/// engine's own derivation (`jail`'s `MEMORY_OVERHEAD_MIB`, decision 013), so a test cgroup caps the
+/// engine's own derivation (`jail`'s `MEMORY_OVERHEAD_MIB`, ADR 013), so a test cgroup caps the
 /// VMM exactly where the jailer would.
 const MEMORY_OVERHEAD_MIB: u64 = 128;
 /// The cgroup v2 `cpu.max` accounting period, in microseconds (the kernel default). A quota of
 /// `n * this` per period is `n` cores' worth of CPU. Mirrors `jail`'s `CPU_PERIOD_US`.
 const CPU_PERIOD_US: u64 = 100_000;
 
-/// A cgroup carrying the engine's own limit derivation (decision 013): `cpu.max` = `vcpus` cores,
+/// A cgroup carrying the engine's own limit derivation (ADR 013): `cpu.max` = `vcpus` cores,
 /// `memory.max` = guest RAM + the fixed VMM overhead. Built by the test because those limits normally
 /// arrive via the jailer, and exec-under-jail is a later migration, so this pins the *same-derived*
 /// caps onto an exec-capable boot path and proves they bind under load. `None` (skip) where cgroup v2

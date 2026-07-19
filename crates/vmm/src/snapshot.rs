@@ -35,7 +35,7 @@ impl Vm {
     /// snapshot carried vsock, restore waits until the guest agent is reachable before returning, so
     /// the VM can [`exec`](RunningVm::exec) immediately.
     ///
-    /// A **networked** snapshot restores into a fresh **per-VM network namespace** (decision 017):
+    /// A **networked** snapshot restores into a fresh **per-VM network namespace** (ADR 017):
     /// the snapshot's recorded tap name is recreated inside it, where the baked-in guest
     /// address/MAC/routes are already correct and collision-free, so no re-addressing, and any
     /// number of networked clones coexist. Entropy is reseeded via VMGenID (Firecracker bumps the
@@ -47,7 +47,7 @@ impl Vm {
     /// bundle is staged into the chroot, the state file copied, the memory file and a shared base
     /// disk bind-mounted read-only (so clones keep sharing one page cache), a private disk copy
     /// handed to the jailed uid, and a networked clone's netns is joined via `--netns`. Needs real
-    /// root, like a jailed boot. The cgroup **resource caps** are re-applied to a jailed clone (decision 013),
+    /// root, like a jailed boot. The cgroup **resource caps** are re-applied to a jailed clone (ADR 013),
     /// so the restored VM (where the untrusted code runs) is confined, not just isolated, and both
     /// caps derive from the *snapshot's* true envelope, never `config`'s declaration (the guest's
     /// vCPUs and RAM come from the snapshot state; restore issues no `PUT /machine-config`):
@@ -74,7 +74,7 @@ impl Vm {
         require_file(&snapshot.root_drive, "snapshot root disk", None)?;
 
         // One deadline for the whole restore, computed before the pre-spawn staging so both share it
-        // (decision 013); `run_restore` enforces it around the disk stage and every API step.
+        // (ADR 013); `run_restore` enforces it around the disk stage and every API step.
         let deadline = crate::spawn::boot_deadline(config.boot_timeout);
         let mut spawned = Spawned::launch_for_restore(config, snapshot)?;
         let latency = match spawned.run_restore(snapshot, deadline) {
@@ -133,7 +133,7 @@ impl RunningVm {
         // channel is supported (restore re-binds its baked-in relative socket), and a NIC is supported
         // too: under the netns model restore recreates the recorded tap in a fresh per-VM netns, where
         // the snapshot's baked-in identity is already correct, no re-addressing, so a networked
-        // snapshot no longer needs vsock (that requirement was decision 011's, now retired).
+        // snapshot no longer needs vsock (that requirement was ADR 011's, now retired).
         if self.output.is_some() || self.has_input {
             return Err(VmmError::Vmm(
                 "snapshot of a VM with an input/output device is not yet supported".into(),

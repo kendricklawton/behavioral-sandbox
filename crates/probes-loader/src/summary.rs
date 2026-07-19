@@ -3,7 +3,7 @@
 //!
 //! This is the *third face* of the one record, alongside the human trail (`--trace`) and the full
 //! machine JSON (`--record`, [`RunRecord::to_json`](crate::RunRecord::to_json)). It is a **pure view**
-//! of the existing record, no new observation, no new machinery (decision 035: the AI-native surface
+//! of the existing record, no new observation, no new machinery (ADR 035: the AI-native surface
 //! adds a *reader* of the host-observed record, never a new *authority*). It answers the questions a
 //! supervising agent asks between turns: *what did my sandboxed code reach, what was blocked, what did
 //! it cost, and what couldn't the host see?*
@@ -19,7 +19,7 @@
 //! guest sent); the summary relabels to the *guest's* view (`sent`/`recv`) because that is how an agent
 //! reasons about its own code. The host-syscall counts stay labelled `host_syscalls`, they are the
 //! **VMM's** host-boundary footprint, not the guest's in-guest file I/O (which a microVM services
-//! itself, out of host view; decision 033), and the projection does not pretend otherwise.
+//! itself, out of host view; ADR 033), and the projection does not pretend otherwise.
 //!
 //! Byte-stable and deterministic for the same reasons as [`RunRecord::to_json`]: a fixed key order,
 //! integer nanoseconds/bytes (no float wobble), and every array derived from a builder-sorted
@@ -47,7 +47,7 @@ impl RunRecord {
     /// Render this record as the compact, model-legible **summary**, one line of deterministic JSON,
     /// a pure projection of the record for an agent's observe→act loop (what it reached, what egress
     /// was denied, its resource envelope, any coverage gap; the forensic detail dropped). A *view* of
-    /// the record, not new machinery (decision 035). The leading `schema` field is
+    /// the record, not new machinery (ADR 035). The leading `schema` field is
     /// [`SUMMARY_SCHEMA_VERSION`].
     #[must_use]
     pub fn to_summary_json(&self) -> String {
@@ -131,7 +131,7 @@ fn net_summary(out: &mut String, net: &NetSection) {
     // The tap counts a flow *before* the egress verdict runs (`tap_ingress`: `count()` then
     // `egress_verdict()`), so a fully-denied endpoint still appears among the flow destinations even
     // though every packet was dropped. Subtract the denied triples: `reached` must mean the guest
-    // actually got bytes out, not merely attempted, or a supervising agent (decision 035) reads a
+    // actually got bytes out, not merely attempted, or a supervising agent (ADR 035) reads a
     // blocked exfil endpoint as reached. Those endpoints still appear in `denied` below.
     let denied: BTreeSet<(u32, u16, u8)> = net
         .denials
@@ -366,7 +366,7 @@ mod tests {
         // The tap counts a flow *before* the egress verdict, so a blocked endpoint has a flow row
         // *and* a denial row (`sample` always denies 9.9.9.9:443/tcp). `reached` must exclude it
         // (zero bytes left the host); it belongs only in `denied`. Otherwise a supervising agent
-        // reads a blocked exfil target as reached (decision 035).
+        // reads a blocked exfil target as reached (ADR 035).
         let record = sample(vec![
             flow([10, 200, 0, 2], 40000, [8, 8, 8, 8], 443, IPPROTO_TCP), // allowed
             flow([10, 200, 0, 2], 40001, [9, 9, 9, 9], 443, IPPROTO_TCP), // denied at the tap

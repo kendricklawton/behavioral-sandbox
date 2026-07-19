@@ -129,7 +129,7 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
     );
 
     // Close cleanly. Dropping the monitor frees its userspace handles; the VM shutdown tears the
-    // netns down, which reclaims the tc filter (decision 023), leaving no dangling host state.
+    // netns down, which reclaims the tc filter (ADR 023), leaving no dangling host state.
     drop(monitor);
     vm.shutdown().expect("shut the sandbox down");
 }

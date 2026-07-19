@@ -47,6 +47,18 @@ API bodies may not match). The **guest kernel** baked into the rootfs is pinned 
 Firecracker-supported version, Firecracker periodically retires old guest kernels, so a fresh build
 tracks their supported set.
 
+**Verified on** (measured, not marketed, this is the honest test surface as of pre-1.0):
+
+- **Host-safe gate** (build, unit tests, lints, docs, the eBPF object build) runs in CI on **Ubuntu
+  24.04**, both `x86_64` and `aarch64`, on every change.
+- **The privileged path** (microVM boot, the jailer, the eBPF probes, the end-to-end integration
+  suite) is currently exercised **by hand on Arch Linux** (rolling) with **Firecracker v1.9**; it
+  needs a real KVM host, which stock CI runners can't nest. **Ubuntu LTS validation is in progress.**
+- One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
+  systemd default on Arch, and some Ubuntu setups), the jailed default fails because the jailer's
+  chroot `/dev/kvm` there is inert, point `AGENT_SCRATCH_DIR` at a non-`nodev` path. `agent doctor`
+  flags this, and reports your own host's arch, kernel, and Firecracker version.
+
 **Degradations** (the run still works, minus the named capability):
 
 - No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
@@ -54,6 +66,9 @@ tracks their supported set.
 - **cgroup v2** controllers not delegated → jailed VMs run without CPU/memory caps (a fail-open DoS
   mitigation, not the isolation boundary, [decision 013](./adr/013-per-run-resource-policy-one-limits-struct-of.md)).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
+- **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
+  `/dev/kvm` is inert, so the jailed default fails to open KVM; set `AGENT_SCRATCH_DIR` to a
+  non-`nodev` path (e.g. under `$HOME`), or use `--unjailed`. `agent doctor` flags this.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
 ## Prerequisites
@@ -91,7 +106,7 @@ Two parts touch the kernel and need more than a plain user:
 
 ```console
 git clone https://github.com/kendricklawton/agent && cd agent
-cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps — reports what's missing
+cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
 cargo build
 ```
 

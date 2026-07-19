@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The host↔guest wire protocol for the sandbox exec channel (docs/contributing-architecture.md decision 002)."
+description = "The host↔guest wire protocol for the sandbox exec channel (docs/contributing-architecture.md ADR 002)."
 
 # Dependency-free by design: the protocol is hand-rolled over `std::io::{Read, Write}` so it stays
 # tiny and transport-agnostic (vsock in the guest, a unix socket in tests), and both the host driver

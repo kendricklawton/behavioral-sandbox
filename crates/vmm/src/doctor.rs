@@ -5,28 +5,30 @@
 //!
 //! Each [`Check`] is one prerequisite with a [`CheckStatus`]: [`Ok`](CheckStatus::Ok) present,
 //! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open,
-//! decision 013), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
+//! ADR 013), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
 //! it, or the host is off the supported platform). The split mirrors the engine's own error
 //! discipline: the isolation boundary is never a degradation, so `/dev/kvm`, the boot artifacts, and
-//! the **supported-platform floor** (architecture + a security-maintained host-kernel LTS, decision
+//! the **supported-platform floor** (architecture + a security-maintained host-kernel LTS, ADR
 //! 036) are hard, while the jailer, resource caps, and networking tools fail open with a named
 //! consequence.
 //!
 //! The eBPF-observability capability check (`CAP_BPF`/`CAP_PERFMON` + kernel BTF) lives in the probe
-//! loader, out of this crate (decisions 024/026); each entry point appends it. This module is
+//! loader, out of this crate (ADRs 024/026); each entry point appends it. This module is
 //! `unsafe`-free std-only detection, nothing here boots a VM.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::os::unix::ffi::OsStringExt as _;
+use std::path::{Path, PathBuf};
 
 use crate::BootConfig;
 
 /// The **supported host-kernel floor** (`major.minor`), a hard requirement: the engine refuses to
 /// certify a host below a security-maintained LTS, because running untrusted code on an unpatched
-/// kernel is a threat-model hole, not a convenience gap (decision 036). 5.15 is a maintained LTS that
-/// also guarantees `cgroup.kill` (5.14, decision 014); bump it here to tighten the floor.
+/// kernel is a threat-model hole, not a convenience gap (ADR 036). 5.15 is a maintained LTS that
+/// also guarantees `cgroup.kill` (5.14, ADR 014); bump it here to tighten the floor.
 const MIN_KERNEL: (u64, u64) = (5, 15);
 
-/// The **supported CPU architectures**, Firecracker's two (decision 036). The engine builds for no
+/// The **supported CPU architectures**, Firecracker's two (ADR 036). The engine builds for no
 /// others, so for a shipped binary this is decided at compile time; the check names an unsupported
 /// cross-compile rather than letting it fail obscurely at first boot.
 const SUPPORTED_ARCHES: [&str; 2] = ["x86_64", "aarch64"];
@@ -37,7 +39,7 @@ pub enum CheckStatus {
     /// The prerequisite is present.
     Ok,
     /// Absent, but the engine **degrades** rather than refusing: the run still works, minus the
-    /// capability the `note` names (a fail-open item, decision 013).
+    /// capability the `note` names (a fail-open item, ADR 013).
     Warn,
     /// Absent and **hard**: a boot cannot happen without it (the isolation boundary, the artifacts).
     Fail,
@@ -78,7 +80,7 @@ impl Check {
 pub fn checks(config: &BootConfig) -> Vec<Check> {
     let fc = config.firecracker.to_string_lossy();
     vec![
-        // The supported platform, hard: off it, the engine is not certified to isolate (decision 036).
+        // The supported platform, hard: off it, the engine is not certified to isolate (ADR 036).
         Check::new(
             &format!(
                 "architecture is {} (x86_64 or aarch64)",
@@ -86,7 +88,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             ),
             SUPPORTED_ARCHES.contains(&std::env::consts::ARCH),
             false,
-            "unsupported architecture: the engine builds and is tested only for x86_64 and aarch64 (decision 036)",
+            "unsupported architecture: the engine builds and is tested only for x86_64 and aarch64 (ADR 036)",
         ),
         Check::new(
             &format!(
@@ -96,8 +98,8 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             kernel_at_least(MIN_KERNEL.0, MIN_KERNEL.1),
             false,
             "unsupported kernel: below the security-maintained LTS floor the engine requires for \
-             running untrusted code (decision 036); it also provides cgroup.kill for crash-safe \
-             teardown (decision 014)",
+             running untrusted code (ADR 036); it also provides cgroup.kill for crash-safe \
+             teardown (ADR 014)",
         ),
         // The hardware isolation boundary, never a degradation.
         Check::new(
@@ -133,13 +135,13 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         ),
         // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
-            "firecracker is the pinned v1.9 (decision 001)",
+            "firecracker is the pinned v1.9 (ADR 001)",
             firecracker_version(&fc) == Some((1, 9)),
             true,
             "boots continue with a warning; API request bodies may not match another version",
         ),
         Check::new(
-            "real root (euid 0 — the jailer mknod's device nodes)",
+            "real root (euid 0: the jailer mknod's device nodes)",
             geteuid() == Some(0),
             true,
             "jailed boot (the default) fails; `--unjailed` still runs behind the KVM boundary",
@@ -154,23 +156,35 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "cgroup v2 cpu+memory delegated (jailer resource caps)",
             cgroup_controllers_delegated(),
             true,
-            "jailed VMs run WITHOUT cpu/memory caps (decision 013) — a fail-open DoS mitigation",
+            "jailed VMs run WITHOUT cpu/memory caps (ADR 013): a fail-open DoS mitigation",
+        ),
+        // The jailer mknods /dev/kvm inside its chroot (under the scratch dir), and a `nodev` mount
+        // makes that node inert, so an owned-and-readable /dev/kvm still fails to open. The default
+        // scratch base is /tmp, which modern systemd hosts mount `nodev`, so this catches a jailed
+        // boot that would otherwise fail at InstanceStart with a misleading "/dev/kvm ACL" error.
+        Check::new(
+            "scratch dir is not nodev (the jailer's /dev/kvm lives there)",
+            !scratch_is_nodev(&config.scratch_dir).unwrap_or(false),
+            true,
+            "jailed boot (the default) fails: the scratch filesystem is mounted `nodev`, so the \
+             jailer's chroot /dev/kvm cannot be opened; point AGENT_SCRATCH_DIR at a non-nodev path \
+             (e.g. under $HOME), or use `--unjailed`",
         ),
         // Networking + bulk-I/O tooling, fails open: only the runs that use them need them.
         Check::new(
-            "ip (iproute2 — the per-VM tap for --net)",
+            "ip (iproute2: the per-VM tap for --net)",
             command_on_path("ip"),
             true,
             "a `--net` run fails to build its tap; runs without networking are unaffected",
         ),
         Check::new(
-            "mke2fs (e2fsprogs — bulk input device / rootfs build)",
+            "mke2fs (e2fsprogs: bulk input device / rootfs build)",
             command_on_path("mke2fs"),
             true,
             "bulk `input_dir` and `cargo xtask build-rootfs` fail; per-frame files are unaffected",
         ),
         Check::new(
-            "e2fsck + debugfs (e2fsprogs — bulk output readback)",
+            "e2fsck + debugfs (e2fsprogs: bulk output readback)",
             command_on_path("e2fsck") && command_on_path("debugfs"),
             true,
             "bulk `output_dir` readback fails; per-frame `--get` artifacts are unaffected",
@@ -184,13 +198,14 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
 pub fn matrix() -> Vec<&'static str> {
     vec![
         "fails open (a warning, still runs):",
-        "  firecracker not v1.9         -> boots continue; API bodies may not match (decision 001)",
+        "  firecracker not v1.9         -> boots continue; API bodies may not match (ADR 001)",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
-        "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (decision 013)",
+        "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (ADR 013)",
+        "  scratch dir is nodev         -> jailed /dev/kvm can't open; point AGENT_SCRATCH_DIR off nodev",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
         "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
-        "  unsupported arch / kernel    -> off the supported platform: refused (decision 036)",
+        "  unsupported arch / kernel    -> off the supported platform: refused (ADR 036)",
         "  /dev/kvm missing/unwritable  -> every boot fails: NoKvm (isolation is hardware)",
         "  kernel or rootfs missing     -> nothing to boot: fetch/build the artifacts first",
         "  firecracker missing          -> no VMM to launch: a typed Vmm error",
@@ -269,6 +284,79 @@ fn cgroup_controllers_delegated() -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the filesystem holding `dir` is mounted `nodev` (so device nodes there are inert and the
+/// jailer's chroot `/dev/kvm` cannot be opened). `None` when it can't be determined (no readable
+/// `/proc/self/mountinfo`, or the path doesn't resolve), so the check reads "unknown" as "assume
+/// fine" rather than raising a false alarm.
+fn scratch_is_nodev(dir: &Path) -> Option<bool> {
+    // The scratch dir may not exist yet; its nearest existing ancestor is on the same filesystem the
+    // jailer's chroot will be created on (mkdir does not cross a mount), so that is what to classify.
+    let target = nearest_existing(dir)?.canonicalize().ok()?;
+    let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    mount_nodev_in(&mountinfo, &target)
+}
+
+/// The `nodev` flag of the longest mount point in `mountinfo` that is an ancestor of `target` (the
+/// filesystem that actually holds it). Pure, so the `/proc/self/mountinfo` parse is unit-tested
+/// without a real `/proc`. `None` if no line covers `target` (an absolute path is always covered by
+/// `/`, so this only happens on malformed input).
+fn mount_nodev_in(mountinfo: &str, target: &Path) -> Option<bool> {
+    let mut best: Option<(usize, bool)> = None;
+    for line in mountinfo.lines() {
+        // mountinfo fields: id parent major:minor root MOUNT_POINT OPTIONS <optional...> - fstype ...
+        // Mount point (index 4) and the per-mount VFS options (index 5) sit before the variable
+        // optional fields, so their positions are fixed.
+        let mut fields = line.split(' ');
+        let Some(mount_point) = fields.nth(4).map(unescape_octal) else {
+            continue;
+        };
+        let Some(options) = fields.next() else {
+            continue;
+        };
+        if target.starts_with(&mount_point) {
+            let len = mount_point.as_os_str().len();
+            if best.is_none_or(|(best_len, _)| len > best_len) {
+                best = Some((len, options.split(',').any(|opt| opt == "nodev")));
+            }
+        }
+    }
+    best.map(|(_, nodev)| nodev)
+}
+
+/// The nearest existing ancestor of `dir` (possibly `dir` itself), walking up until one exists.
+fn nearest_existing(dir: &Path) -> Option<PathBuf> {
+    let mut cur = dir;
+    loop {
+        if cur.exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+}
+
+/// Decode a mountinfo path's octal escapes (`\040` space, `\011` tab, `\012` newline, `\134`
+/// backslash) so a mount point with a space still prefix-matches correctly.
+fn unescape_octal(s: &str) -> PathBuf {
+    if !s.contains('\\') {
+        return PathBuf::from(s);
+    }
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 3 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 4], 8) {
+                out.push(byte);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    PathBuf::from(OsString::from_vec(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +392,41 @@ mod tests {
     }
 
     #[test]
+    fn nodev_scratch_is_detected_from_mountinfo() {
+        // A minimal mountinfo: `/` is a normal fs, `/tmp` is tmpfs mounted `nodev` (the modern
+        // systemd default that breaks a jailed boot), and `/home` allows device nodes.
+        let mi = "\
+21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
+30 21 0:21 / /tmp rw,nosuid,nodev shared:2 - tmpfs tmpfs rw
+40 21 0:22 / /home rw,relatime shared:3 - btrfs /dev/sda2 rw";
+        // The jailer's chroot /dev/kvm under /tmp is on the nodev fs, the exact failure case.
+        assert_eq!(
+            mount_nodev_in(mi, Path::new("/tmp/agent-1/root/dev/kvm")),
+            Some(true)
+        );
+        // A scratch dir under $HOME is not nodev, the recommended fix.
+        assert_eq!(
+            mount_nodev_in(mi, Path::new("/home/k/.agent-scratch")),
+            Some(false)
+        );
+        // Longest-prefix wins: `/tmp` (nodev), not the `/` root it also sits under.
+        assert_eq!(mount_nodev_in(mi, Path::new("/tmp")), Some(true));
+        // An `nodev`-free path falls through to the non-nodev root.
+        assert_eq!(mount_nodev_in(mi, Path::new("/var/lib/agent")), Some(false));
+    }
+
+    #[test]
+    fn mountinfo_octal_escapes_decode() {
+        // A mount point with a space is octal-escaped in mountinfo; it must still prefix-match.
+        let mi = "50 21 0:23 / /mnt/my\\040scratch rw,nodev shared:4 - ext4 /dev/sdb rw\n\
+                  21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw";
+        assert_eq!(
+            mount_nodev_in(mi, Path::new("/mnt/my scratch/agent-1")),
+            Some(true)
+        );
+    }
+
+    #[test]
     fn checks_cover_the_engine_prerequisites() {
         let cfg = BootConfig::default();
         let checks = checks(&cfg);
@@ -318,7 +441,7 @@ mod tests {
             .find(|c| c.label.contains("jailer"))
             .expect("a jailer check");
         assert!(matches!(jailer.status, CheckStatus::Ok | CheckStatus::Warn));
-        // The supported-platform floor (decision 036) is present and **hard**, architecture and a
+        // The supported-platform floor (ADR 036) is present and **hard**, architecture and a
         // kernel LTS are never degradations, so an off-platform host is refused, not warned.
         let arch = checks
             .iter()

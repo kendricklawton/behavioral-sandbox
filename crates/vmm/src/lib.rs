@@ -8,7 +8,7 @@
 //! - [`Vm`] / [`RunningVm`], the raw microVM: boot/restore, exec over vsock, console, networking,
 //!   snapshots, teardown.
 //! - [`Sandbox`], the embedder-facing lifecycle wrapper (`open → exec → outputs → snapshot →
-//!   close`), **jailed by default** (decision 015) with per-exec files + env at the public API.
+//!   close`), **jailed by default** (ADR 015) with per-exec files + env at the public API.
 #![forbid(unsafe_code)]
 
 mod console;
@@ -276,7 +276,7 @@ impl From<ChannelError> for VmmError {
 pub const FDS_PER_VM: usize = 8;
 
 /// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy. This is
-/// the per-run resource-policy surface whose shape is fixed by decision 013 (an ADR under docs/adr/): one
+/// the per-run resource-policy surface whose shape is fixed by ADR 013: one
 /// options struct of **quantities** (vCPUs, memory, deadlines, an output cap), not capabilities,
 /// enforced host-side (the VMM cgroup for cpu/memory; the exec channel's bounds for the rest).
 ///
@@ -297,7 +297,7 @@ pub struct Limits {
     /// zero is not a budget, so it can't be constructed.
     pub mem_mib: NonZeroU32,
     /// The wall-clock budget: the boot-to-userspace deadline **and** each command's exec budget,
-    /// one `wall` for the whole run, not just boot (decision 013). On the exec side it is sent to
+    /// one `wall` for the whole run, not just boot (ADR 013). On the exec side it is sent to
     /// the guest agent, which kills the command past it (the cooperative
     /// [`ExecTimeout`](VmmError::ExecTimeout)); the host's own give-up deadline, the
     /// [`ExecUnresponsive`](VmmError::ExecUnresponsive) liveness backstop, is derived from it
@@ -393,11 +393,11 @@ pub struct ExecMetrics {
 
 /// A microVM sandbox: the embedder-facing lifecycle type, backed by a [`RunningVm`]. The lifecycle
 /// is `open → exec (with files + env) → collect outputs → snapshot → close`, every step synchronous
-/// and every failure a typed [`VmmError`]. Repeated `exec`s form a **stateful session** (decision
+/// and every failure a typed [`VmmError`]. Repeated `exec`s form a **stateful session** (ADR
 /// 019): the VM is the session, every exec shares its persistent working directory and overlay, and
 /// closing the sandbox discards the state.
 ///
-/// **Confined by default (decision 015).** [`open`](Sandbox::open) and [`boot`](Sandbox::boot) run
+/// **Confined by default (ADR 015).** [`open`](Sandbox::open) and [`boot`](Sandbox::boot) run
 /// the VMM **under the jailer**, chroot, uid/gid drop, seccomp, its own mount and network
 /// namespaces, on top of the KVM hardware boundary, so the headline "run untrusted code" path is
 /// the double-walled one. That needs real root and the `jailer` binary; the opt-out is
@@ -434,7 +434,7 @@ impl Sandbox {
         Self::open_inner(config)
     }
 
-    /// [`open`](Sandbox::open) **without the jailer**, the explicit opt-out (decision 015) for
+    /// [`open`](Sandbox::open) **without the jailer**, the explicit opt-out (ADR 015) for
     /// hosts that can't run it (no root, no `jailer`): the guest still sits behind the KVM hardware
     /// boundary, but the VMM process itself runs unconfined. The opt-out is this constructor's
     /// *name* rather than a flag so it is greppable and can't be reached by accident; any `jail`

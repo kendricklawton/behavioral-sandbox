@@ -344,7 +344,7 @@ print('p14-9f-complete')
     );
 }
 
-/// The reference **agent-containment** example (decision 035, docs/embedding.md), as a CI-reproducible proof.
+/// The reference **agent-containment** example (ADR 035, docs/embedding.md), as a CI-reproducible proof.
 /// The scripted agent (`docs/examples/agent-tool-loop.py`, no model, no secrets) runs in a sandbox
 /// egress-policed to **one** endpoint, calls one allowed "tool" and one forbidden one, and the
 /// host-observed record + its model-legible summary prove **exactly what it reached and what was

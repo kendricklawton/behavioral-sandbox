@@ -1,4 +1,4 @@
-//! The `agentd` daemon end to end, as tests (the wire API, decision 034, docs/daemon.md): drive the
+//! The `agentd` daemon end to end, as tests (the wire API, ADR 034, docs/daemon.md): drive the
 //! real daemon over its unix socket through the full
 //! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.

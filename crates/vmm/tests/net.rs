@@ -235,7 +235,7 @@ fn two_networked_vms_run_in_isolated_netns() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
-    // Prove the allow/deny posture at the transport layer, not just ICMP. Per decision 008,
+    // Prove the allow/deny posture at the transport layer, not just ICMP. Per ADR 008,
     // "allowed" here is host-local (world-egress allow-listing is eBPF-enforced at the tap). Under
     // the netns model the tap's host end lives *inside* the VM's netns, so the host endpoint the guest
     // reaches is bound there too: a real TCP listener on the host `/30` end, entered via

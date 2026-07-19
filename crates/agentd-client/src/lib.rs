@@ -1,4 +1,4 @@
-//! The reference **Rust client** for the `agentd` wire API (decision 034): drive a sandbox **session**
+//! The reference **Rust client** for the `agentd` wire API (ADR 034): drive a sandbox **session**
 //! over a unix socket, `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`, using
 //! nothing but the shared wire contract ([`agentd_protocol`]) and a JSON value for the opaque trace
 //! record.

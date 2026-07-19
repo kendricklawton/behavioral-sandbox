@@ -107,7 +107,7 @@ pub struct BootConfig {
     pub boot_timeout: Duration,
     /// Wall-clock budget for each command run through this VM's `exec`: the guest agent kills the
     /// command past it, and the host's own give-up deadline is derived from it. At the public API this is
-    /// [`Limits::wall`], one wall for the whole run (decision 013), which
+    /// [`Limits::wall`], one wall for the whole run (ADR 013), which
     /// [`with_limits`](BootConfig::with_limits) folds into both `boot_timeout` and this; the split
     /// exists at this layer so a driver-level caller can give boot and exec different ceilings.
     /// See [`Limits::wall`] for the semantics (including the nonzero requirement).
@@ -145,7 +145,7 @@ pub struct BootConfig {
     /// driver creates the tap (`ip tuntap`, needs `CAP_NET_ADMIN`), attaches it via
     /// `PUT /network-interfaces`, and deletes it on teardown. `false` (the default) boots with **no
     /// NIC**, deny-by-default. Even when `true`, the guest gets an *unconfigured* `eth0`: this box
-    /// adds no address, route, or masquerade (decision 008), so the guest reaches nothing until
+    /// adds no address, route, or masquerade (ADR 008), so the guest reaches nothing until
     /// addressing lands. Needs `ip` (iproute2) on the host.
     pub enable_network: bool,
     /// Run Firecracker under its **jailer**: a chroot, a uid/gid drop, and the jailer's mount
@@ -205,7 +205,7 @@ impl BootConfig {
     }
 
     /// Fold a per-sandbox [`Limits`] budget onto the config: vCPUs, memory, the wall (one wall for
-    /// the whole run, decision 013, it becomes both the boot deadline *and* the per-exec budget),
+    /// the whole run, ADR 013, it becomes both the boot deadline *and* the per-exec budget),
     /// and the output cap.
     #[must_use]
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -335,10 +335,10 @@ pub struct Snapshot {
     /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
     /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
     /// restore must recreate a tap with **exactly this name**, trivially satisfied by the netns
-    /// model (decision 017): each clone recreates the fixed-name tap inside its **own per-VM network
+    /// model (ADR 017): each clone recreates the fixed-name tap inside its **own per-VM network
     /// namespace**, so any number of networked clones coexist (no name collision across namespaces)
     /// and the snapshot's baked-in guest address/MAC/routes are already correct in each, with no
-    /// re-addressing needed. (This retired decision 011's one-live-networked-clone limit.)
+    /// re-addressing needed. (This retired ADR 011's one-live-networked-clone limit.)
     pub(crate) tap_name: Option<String>,
     /// The source's vCPU count, the restored clone's **true** parallelism, since the vCPUs come
     /// from the snapshot state (restore issues no `PUT /machine-config`) and nothing forces the
@@ -400,7 +400,7 @@ impl Vm {
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
-        // (images built in place inside the chroot). The decision-013 deny-by-default refusal that
+        // (images built in place inside the chroot). The ADR-013 deny-by-default refusal that
         // stood here while combinations were unjailed retired with its last member; a new
         // not-yet-jailed feature must reinstate it rather than boot half-confined.
         //
@@ -411,7 +411,7 @@ impl Vm {
         }
         // One deadline for the whole boot: host-side staging (`launch`) and the API boot (`run_boot`)
         // share it, so a slow rootfs copy can't run unbounded before the boot's own timeout starts
-        // (decision 013).
+        // (ADR 013).
         let deadline = crate::spawn::boot_deadline(config.boot_timeout);
         let mut spawned = Spawned::launch(&config, deadline)?;
         let boot_latency = match spawned.run_boot(&config, deadline) {
@@ -539,7 +539,7 @@ impl RunningVm {
     /// the exec protocol. The captured output is bounded ([`BootConfig::output_cap`]); a command
     /// that exits non-zero is a normal [`RunResult`], not an error. Each call opens a fresh
     /// connection (the guest agent serves one command per connection and loops), and repeated
-    /// `exec`s **compose into a stateful session** (decision 019): the agent serves every one from
+    /// `exec`s **compose into a stateful session** (ADR 019): the agent serves every one from
     /// the same persistent working directory, so files injected or written by one command are
     /// visible to the next, until the VM (and its overlay) is torn down.
     ///
@@ -809,7 +809,7 @@ mod tests {
         });
         assert_eq!(cfg.vcpus.get(), 4);
         assert_eq!(cfg.mem_mib.get(), 1024);
-        // One wall for the whole run (decision 013): the fold sets the boot deadline *and* the
+        // One wall for the whole run (ADR 013): the fold sets the boot deadline *and* the
         // per-exec budget from it; the output cap rides alongside.
         assert_eq!(cfg.boot_timeout, Duration::from_secs(60));
         assert_eq!(cfg.exec_wall, Duration::from_secs(60));

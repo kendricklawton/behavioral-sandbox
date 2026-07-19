@@ -14,7 +14,7 @@ use crate::{Artifact, ExecMetrics, RunResult, VmmError};
 
 /// Deadline for the vsock connect + `CONNECT` handshake, and the read/write timeout the exec
 /// connection carries, so a dead-or-stalled guest is a typed timeout, never a host hang
-/// (decision 002: liveness is the transport's job).
+/// (ADR 002: liveness is the transport's job).
 pub(crate) const VSOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Deadline for a [`RunningVm::probe_agent`] health check. Much shorter than [`VSOCK_TIMEOUT`]: an
@@ -47,7 +47,7 @@ pub(crate) const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// back. The host's total patience is `budget + EXEC_KILL_SLACK`, used both as the exec socket's
 /// per-read idle timeout (so a legitimately long-but-quiet command isn't cut off by the transport)
 /// and as the wall-clock deadline on the collect loop (so a silent-or-hostile guest that never
-/// self-reports can't park `exec` forever, decision 002: liveness is the transport's job, not the
+/// self-reports can't park `exec` forever, ADR 002: liveness is the transport's job, not the
 /// guest's). Ordered so the guest's cooperative `TimedOut` (fired at `budget`) always beats the host
 /// deadline for a legitimate timeout; the host fires only when the guest fails to report.
 pub(crate) const EXEC_KILL_SLACK: Duration = Duration::from_secs(5);
@@ -142,7 +142,7 @@ pub(crate) fn run_exec<S: Read + Write>(
     // Inject input files first, then the terminal exec request. The injected bytes are secrets by
     // presumption (the secret-hygiene contract on `RunningVm::exec_with_files`): the borrowed-send
     // path serializes straight from the caller's slices into a single exact-sized wire buffer that
-    // the channel wipes after each send (decision 018), so the engine keeps no extra copy of a file
+    // the channel wipes after each send (ADR 018), so the engine keeps no extra copy of a file
     // body or env value to strand, and nothing on this path logs one.
     let sent = (|| -> Result<(), VmmError> {
         for (path, data) in files_in {
