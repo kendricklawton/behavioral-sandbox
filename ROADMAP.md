@@ -2028,7 +2028,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       *(**Done.** The docs are already an mdBook (`book.toml`, `SUMMARY.md`); all four destinations
       the box names exist, mapped onto wasmtime's book layout (the structural model, which carries
       no standalone quickstart or non-goals pages): the quickstart path is `cli-install.md` (fresh
-      clone → `self-host` → run untrusted code, copy-pasteable) plus the README's "Try it"; the
+      clone → `self-host` → run untrusted code, copy-pasteable) plus the README's "Getting started"; the
       non-goals live as the introduction's scope rule and `embedding.md`'s consolidated list
       (engine-not-platform, the model is the caller, isolation is hardware, deny-by-default; each
       linked to its decision, 016/033/034/035/036). The engine API (`embedding.md`) and threat
@@ -2038,7 +2038,15 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
       (GitHub Pages deploy) is left to launch (P19.2/P19.4). Docs only, non-`api:`.)*
 - [ ] **P19.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
-- [ ] **P19.5** A **reference integration**: a small host application embedding the engine end to end.
+- [x] **P19.5** A **reference integration**: a small host application embedding the engine end to end.
+      *(**Done.** `crates/probes-loader/examples/reference_integration.rs`: the smallest complete host
+      app that composes both halves, load the shared observers, `Sandbox::open` (jailed, KVM), attach
+      the probes by the plain values the sandbox exposes, `exec` untrusted code, `collect` the record
+      while it's still alive, then `shutdown`, and prints both the `RunResult` and the JSON audit
+      record. It lives in the loader crate (which dev-deps the driver) because the driver must gain no
+      dep on the loader (024/026); the composition is the caller's, the launch sequence 027/028
+      document. Compiles in the host-safe gate (clippy `--all-targets`); running it needs KVM + root +
+      `CAP_BPF`. `docs/embedding.md` points at it. non-`api:` (an example + docs).)*
 - [x] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
       *(**Done.** Untrusted Python was already the [Running untrusted code](docs/examples-untrusted-code.md)
       demo; this adds the two the examples index promised. `examples-untrusted-binary.md`: build a

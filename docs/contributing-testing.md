@@ -33,3 +33,30 @@ host↔guest channel decoders): a dependency-free property test runs in the `ci`
 
 The per-phase exit-gate demos (a real sandbox, one probe end to end) are listed under *Try it* in
 [Host-side observability & enforcement](./probes.md#try-it).
+
+## On a real KVM box: the full manual pass
+
+A bare-metal or nested-virt host with `/dev/kvm`, real root, and the eBPF caps runs every layer. This
+is the order to exercise the whole engine end to end; each step links to its detail.
+
+1. **Check the host.** `cargo xtask setup` (build-time) and `agent doctor` (runtime) report exactly
+   what is missing; `doctor` exits non-zero on a missing hard requirement.
+   ([Supported platforms](./cli-install.md#supported-platforms).)
+2. **Stand it up.** `cargo xtask self-host` does the whole build: the guest kernel + rootfs + eBPF
+   object, installs `agent`/`agentd`, and boots one proof sandbox.
+   ([Self-host in one command](./cli-install.md#self-host-in-one-command).)
+3. **Run one sandbox, confined.** With real root you exercise the jailed default (not `--unjailed`):
+   `agent run -- python3 -c 'print(2 ** 100)'`. Add `--net` / `--trace` / `--record` / `--watch` to
+   see the host-observed record. ([Using the agent CLI](./cli.md).)
+4. **The privileged integration suite.** `cargo xtask ci-privileged` boots real microVMs, execs, runs
+   tap networking, attaches probes, and asserts the observed record: the half the host-safe gate
+   cannot reach. It self-checks its prerequisites and prints the fix if an artifact is missing.
+5. **The live demos.** One probe end to end each: `trace-sandbox`, `watch-sandbox`, `enforce-sandbox`,
+   `meter-sandbox`. ([Host-side observability, *Try it*](./probes.md#try-it).)
+6. **The daemon.** `agentd --socket ./agentd.sock`, then drive it with the reference client or `socat`.
+   ([Using the `agentd` daemon](./daemon.md).)
+7. **The embedding API.** The reference integration
+   [`crates/probes-loader/examples/reference_integration.rs`](../crates/probes-loader/examples/reference_integration.rs)
+   composes the whole lifecycle (open, attach, exec, collect, close) in one small program.
+   ([Using the engine API](./embedding.md).)
+8. **The numbers.** `cargo xtask bench-all` for the measured percentiles. ([Benchmarks](./benchmarks.md).)

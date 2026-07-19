@@ -119,6 +119,14 @@ budget, a warning, not a refusal, per the fail-open posture above. The measured 
 fds per VM on every start path, pinned by test; the constant is deliberately above it so growth is
 a visible bump, never drift.
 
+### A minimal reference integration
+
+For the whole lifecycle in one small file, embedding the engine end to end (load the host-side
+observers, `open` a jailed sandbox, attach the probes, `exec`, `collect` the audit record, `close`,
+then print both the `RunResult` and the JSON record), see the runnable example
+[`crates/probes-loader/examples/reference_integration.rs`](../crates/probes-loader/examples/reference_integration.rs).
+It composes the driver and the loader the way a downstream host application would.
+
 ### The CLI is the reference embedder
 
 `agent run` is the lifecycle in one command: piped stdin, `--env`, `--put`/`--get`, `--wall`,

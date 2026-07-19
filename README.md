@@ -1,37 +1,25 @@
 # agent *(working name)*
 
-**A self-hostable engine for running untrusted code in hardware isolation, with a tamper-evident
-record of exactly what it did that you can trust without trusting the code.** The code runs inside
-a **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) watches and
-enforces what it does (syscalls, its network, its cgroup) from *outside* the guest, where the code
-can't see or subvert it. Every run yields a host-observed **audit log** of exactly what
-happened.
+**A self-hostable engine for running untrusted code in a hardware-isolated microVM, with a
+host-observed record of exactly what it did.**
 
-Built in the open, milestone by milestone: each one ships as a working demo, from the
-hardware-isolation boundary up to the syscall/network boundary.
+## What is agent?
 
-## Why
+agent runs untrusted code inside a **Firecracker** microVM, so the trust boundary is the CPU (KVM),
+not guest-side software. Around that microVM, **host-side eBPF** (via **aya**) watches and enforces
+what the code does, its syscalls, its network, its cgroup, from *outside* the guest, where the code
+can't see or subvert it. Every run yields a tamper-evident **audit record**, host-observed, of
+exactly what happened: the network flows, the notable syscalls, the resources it used, and any
+egress that was denied.
 
-Any time you run code you don't fully trust (a third-party binary, a CI job from a fork, a
-dependency's install script, an AI-generated snippet, a sample under analysis) you want two things
-at once: strong isolation, and a trustworthy account of what the code actually did. This is the
-**self-hostable engine** for exactly that: the code stays on your own infrastructure (air-gapped or
-regulated is fine), and the watching and the policy live in the host kernel, outside the guest, so
-the record can't be forged by the code it is recording.
+It is an **engine, not a platform**: a runtime plus a clean driver API you self-host, with no
+multi-tenant auth, billing, fleet scheduling, or dashboard. A sandbox with no explicit policy
+reaches no network and holds minimal capability; every allowance is explicit and recorded. Boot,
+snapshot-restore, memory-sharing, and eBPF overhead are benchmarked with percentiles.
 
-- **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. The trust
-  boundary is the CPU, not guest-side software.
-- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF, the guest
-  cannot disable what it cannot reach. In-guest agents exist for convenience (exec/IO), never
-  for security.
-- **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
-  capability; every allowance is explicit and recorded.
-- **Engine, not platform.** A runtime + a clean driver API you self-host. *It's an engine, not a
-  PaaS.*
-- **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
-  benchmarked with percentiles, never hand-waved.
+Built in the open, milestone by milestone, each one shipping as a working demo.
 
-## Try it
+## Getting started
 
 **Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` or `aarch64` host, kernel
 **≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.9 on

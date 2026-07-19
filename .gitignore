@@ -13,6 +13,8 @@
 /vendor/
 # Local .md files
 MASTER.md
+LOCAL.md
+LAUNCH.md
 
 # mdBook output (`mdbook build docs`) — the book renders from the committed docs/*.md
 /docs/book/
