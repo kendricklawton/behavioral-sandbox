@@ -103,6 +103,10 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
         String::from_utf8_lossy(&out.stdout).trim(),
         out.exit_code
     );
+    if out.exit_code != 0 {
+        // Match the other demos: a non-zero exec is a regression, not a run to narrate over.
+        bail!("trace demo: guest `echo traced` exited {}", out.exit_code);
+    }
 
     // Drain the boot+exec window, keeping only this sandbox's host footprint.
     let mut events = Vec::new();

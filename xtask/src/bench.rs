@@ -393,7 +393,9 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
                 "  {n:<6}   {:>7}    {:>7}    {:>7}    {:>7}",
                 rss / 1024,
                 pss / 1024,
-                start_avail.saturating_sub(avail) / 1024,
+                // Signed: MemAvailable can rise (cache reclaim, other processes freeing) as the
+                // cohort grows, so clamping the drop to 0 would fabricate a "free" row.
+                (start_avail as i64 - avail as i64) / 1024,
                 avail / 1024,
             );
             rows.push((n, rss, pss));
@@ -408,12 +410,13 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
     println!("\n{stop_reason}.");
     if let (Some(&(n0, _, p0)), Some(&(n1, r1, p1))) = (rows.first(), rows.last()) {
         if n1 > n0 {
-            let marginal = (p1.saturating_sub(p0)) / (n1 - n0) as u64;
+            // Report in KiB: the per-clone copy-on-write cost is the small number this bench exists
+            // to surface, and flooring it to MiB would print the interesting regime as "~0 MiB".
+            let marginal = p1.saturating_sub(p0) / (n1 - n0) as u64;
             println!(
-                "Marginal cost per added clone: ~{} MiB Pss — its private copy-on-write pages; the\n\
-                 read-only base disk and the {mem_mib} MiB snapshot memory file stay shared across all\n\
-                 {n1} clones (page-cache-deduped), not copied per VM.",
-                marginal / 1024,
+                "Marginal cost per added clone: ~{marginal} KiB Pss — its private copy-on-write pages;\n\
+                 the read-only base disk and the {mem_mib} MiB snapshot memory file stay shared across\n\
+                 all {n1} clones (page-cache-deduped), not copied per VM.",
             );
         }
         let saved = r1.saturating_sub(p1);
@@ -545,17 +548,21 @@ fn footprint_cohort(
         rss_sum += r;
         pss_mib.push(p / 1024);
     }
-    let n = vms.len() as u64;
-    let host_drop_mib = before.saturating_sub(mem_available_kib()?) / 1024;
+    let n = vms.len() as i64;
+    // Signed host-wide delta: MemAvailable can *rise* (cache reclaim, another process freeing) while
+    // the cohort is up, so a saturating_sub would clamp real noise to a fabricated "0 MiB/sandbox".
+    // Report per-sandbox in KiB so a sub-MiB per-VM cost doesn't floor to "0 MiB" either.
+    let host_drop_kib = before as i64 - mem_available_kib()? as i64;
     for vm in vms.drain(..) {
         vm.shutdown().ok();
     }
     report_percentiles(label, &mut pss_mib, "MiB Pss/VM");
     println!(
-        "  {:<26} whole-host {host_drop_mib} MiB for {n} sandboxes = {} MiB/sandbox (naive Rss {} MiB/VM)",
+        "  {:<26} whole-host {} MiB for {n} sandboxes = {} KiB/sandbox (naive Rss {} KiB/VM)",
         "→",
-        host_drop_mib / n,
-        rss_sum / 1024 / n,
+        host_drop_kib / 1024,
+        host_drop_kib / n,
+        rss_sum as i64 / n,
     );
     Ok(())
 }
@@ -567,6 +574,12 @@ fn footprint_cohort(
 fn report_percentiles(label: &str, samples: &mut [u64], unit: &str) {
     samples.sort_unstable();
     let n = samples.len();
+    if n == 0 {
+        // Safe on its own: `clamp(1, 0)` and `samples[0]` would panic. Callers guard n >= 1 today,
+        // but the primitive shouldn't depend on that.
+        println!("  {label:<26} (no samples; {unit})");
+        return;
+    }
     let pct = |p: usize| -> String {
         let rank = (p * n).div_ceil(100).clamp(1, n); // 1-based nearest rank
         if rank >= n {
@@ -642,6 +655,14 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
         std::env::temp_dir().join(format!("agent-bench-trace-{}-missing", std::process::id()));
     println!("bench-trace: {runs} bursts x {BATCH} openat/burst per condition\n");
 
+    // Warm the CPU (frequency governor, i-cache, branch predictor) before the first timed
+    // condition. The baseline is measured first, so timing it cold would inflate its p50 above the
+    // later, already-warmed conditions and print a real overhead as a fabricated +0 (or negative).
+    const WARMUP: usize = 3;
+    for _ in 0..WARMUP {
+        ns_per_openat(&missing, BATCH);
+    }
+
     // 1. Baseline: nothing attached.
     let mut baseline = Vec::with_capacity(runs);
     for _ in 0..runs {
@@ -683,12 +704,14 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
 
     // Deltas from the p50s, the same [`nearest_p50`] rule the columns above used, one shared
     // definition (the vecs are already sorted, so its re-sort is a no-op).
-    let base = nearest_p50(&mut baseline);
-    let unwatched_cost = nearest_p50(&mut unwatched).saturating_sub(base);
-    let watched_cost = nearest_p50(&mut watched).saturating_sub(base);
+    // Signed: a value at or below zero means the condition's p50 landed within baseline noise, not
+    // that the probe made openat *faster*. Report it honestly rather than clamping to a fake +0.
+    let base = nearest_p50(&mut baseline) as i64;
+    let unwatched_cost = nearest_p50(&mut unwatched) as i64 - base;
+    let watched_cost = nearest_p50(&mut watched) as i64 - base;
     println!(
-        "\nAdded cost per openat (p50 vs baseline): unwatched +{unwatched_cost} ns, watched \
-         +{watched_cost} ns. Captured {captured} of {} watched openats.",
+        "\nAdded cost per openat (p50 vs baseline): unwatched {unwatched_cost:+} ns, watched \
+         {watched_cost:+} ns. Captured {captured} of {} watched openats.",
         runs * BATCH
     );
     println!(
@@ -775,6 +798,13 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
         "bench-meter: {runs} bursts x {ROUNDS} ping-pong round-trips (~2 ctx switches each) per condition\n"
     );
 
+    // Warm the CPU before the first timed condition (see the note in `bench_trace`): the baseline
+    // runs cold-first, so an un-warmed p50 would inflate it and hide the real per-switch cost.
+    const WARMUP: usize = 3;
+    for _ in 0..WARMUP {
+        ns_per_switch(ROUNDS)?;
+    }
+
     // 1. Baseline: nothing attached.
     let mut baseline = Vec::with_capacity(runs);
     for _ in 0..runs {
@@ -815,12 +845,13 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
 
     // Deltas from the p50s, the same [`nearest_p50`] rule the columns above used, one shared
     // definition (the vecs are already sorted, so its re-sort is a no-op).
-    let base = nearest_p50(&mut baseline);
-    let untargeted_cost = nearest_p50(&mut untargeted).saturating_sub(base);
-    let targeted_cost = nearest_p50(&mut targeted).saturating_sub(base);
+    // Signed (see `bench_trace`): a value at or below zero means within baseline noise, not a real speedup.
+    let base = nearest_p50(&mut baseline) as i64;
+    let untargeted_cost = nearest_p50(&mut untargeted) as i64 - base;
+    let targeted_cost = nearest_p50(&mut targeted) as i64 - base;
     println!(
-        "\nAdded cost per context switch (p50 vs baseline): not-metering-us +{untargeted_cost} ns, \
-         metering-us +{targeted_cost} ns. The meter charged {charged:?} of CPU to our cgroup while \
+        "\nAdded cost per context switch (p50 vs baseline): not-metering-us {untargeted_cost:+} ns, \
+         metering-us {targeted_cost:+} ns. The meter charged {charged:?} of CPU to our cgroup while \
          targeted."
     );
     println!(
@@ -831,12 +862,17 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     Ok(())
 }
 
-/// The nearest-rank p50 of `samples`, sorting in place, the same rank rule
-/// [`report_percentiles`] uses, extracted so the delta lines in `bench-trace`/`bench-meter` and the
-/// scaling sweep's per-size columns all share one definition instead of re-deriving the formula.
+/// The nearest-rank p50 of `samples`, sorting in place, sharing the rank *formula*
+/// [`report_percentiles`] uses so the delta lines in `bench-trace`/`bench-meter` and the scaling
+/// sweep's per-size columns don't re-derive it. Unlike the column, this always returns a concrete
+/// value (a delta needs a number): it does not apply the "rank lands on the last sample → `—`"
+/// display cutoff, so at `n == 1` this yields the single sample while the p50 column prints `—`.
 fn nearest_p50(samples: &mut [u64]) -> u64 {
     samples.sort_unstable();
     let n = samples.len();
+    if n == 0 {
+        return 0; // no samples: `clamp(1, 0)` would panic; a delta against 0 is the honest default.
+    }
     samples[(50 * n).div_ceil(100).clamp(1, n) - 1]
 }
 

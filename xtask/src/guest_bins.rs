@@ -78,6 +78,15 @@ fn ensure_guest_target() -> Result<()> {
         .args(["target", "list", "--installed"])
         .output()
         .context("running rustup (is it installed?)")?;
+    if !installed.status.success() {
+        // Without this, a non-zero rustup (no default toolchain, corrupt state) yields empty stdout
+        // and the check below misreports it as "target not installed" — the wrong fix to suggest.
+        bail!(
+            "`rustup target list --installed` failed (exit {:?}): {}",
+            installed.status.code(),
+            String::from_utf8_lossy(&installed.stderr).trim()
+        );
+    }
     if !String::from_utf8_lossy(&installed.stdout)
         .lines()
         .any(|t| t == GUEST_TARGET)
@@ -95,8 +104,9 @@ fn ensure_guest_target() -> Result<()> {
 /// a static-PIE (no `NEEDED` but with an interpreter) is also rejected.
 fn verify_static(bin: &Path, what: &str) -> Result<()> {
     // `readelf -d` (dynamic section): a static binary lists no `(NEEDED)` shared objects.
-    let Some(dynamic) = readelf(bin, "-d") else {
-        // No `readelf` (binutils) on this host: don't fake a guarantee we couldn't check.
+    let Some(dynamic) = readelf(bin, "-d")? else {
+        // No `readelf` (binutils) on this host: don't fake a guarantee we couldn't check. (A
+        // `readelf` that is present but fails is an error, not this soft skip.)
         println!("  ! could not run `readelf` to verify staticness — install binutils to check");
         return Ok(());
     };
@@ -109,7 +119,7 @@ fn verify_static(bin: &Path, what: &str) -> Result<()> {
         );
     }
     // `readelf -l` (program headers): a fully static binary carries no `INTERP` segment (loader).
-    let Some(segments) = readelf(bin, "-l") else {
+    let Some(segments) = readelf(bin, "-l")? else {
         println!("  ! could not run `readelf -l` to verify no interpreter — install binutils");
         return Ok(());
     };
@@ -119,11 +129,22 @@ fn verify_static(bin: &Path, what: &str) -> Result<()> {
     Ok(())
 }
 
-/// Run `readelf <flag> <bin>` and return its stdout, or `None` if `readelf` is absent/failed, the
-/// caller decides whether a missing tool is a soft skip (we don't fake a guarantee we can't check).
-fn readelf(bin: &Path, flag: &str) -> Option<String> {
-    match Command::new("readelf").arg(flag).arg(bin).output() {
-        Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).into_owned()),
-        _ => None,
+/// Run `readelf <flag> <bin>` and return its stdout. `Ok(None)` means `readelf` (binutils) isn't
+/// installed, the only outcome the caller may treat as a soft skip. A `readelf` that *is* present
+/// but exits non-zero is an `Err`, never a silent `None`: otherwise a tool failure would quietly
+/// disarm the static-link check and let a dynamically-linked guest agent pass as "verified static".
+fn readelf(bin: &Path, flag: &str) -> Result<Option<String>> {
+    let out = match Command::new("readelf").arg(flag).arg(bin).output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("running readelf {flag}")),
+    };
+    if !out.status.success() {
+        bail!(
+            "readelf {flag} {} exited {:?} — cannot verify static linking",
+            bin.display(),
+            out.status.code()
+        );
     }
+    Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
 }

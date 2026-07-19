@@ -65,11 +65,11 @@ Markdown in place):
   per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
 - **[Security](docs/security.md)**, the security model: what's trusted, what counts as a bug,
   how to report one.
-- **[Contributing](docs/contributing.md)**, orientation,
-  [architecture & the decision log](docs/contributing-architecture.md) (every hard-to-reverse
-  choice, its rationale, and the alternatives that lost),
-  [building](docs/contributing-building.md), [testing](docs/contributing-testing.md),
-  [fuzzing](docs/contributing-fuzzing.md).
+- **[Contributing](docs/contributing.md)**, orientation, the
+  [architecture overview](docs/contributing-architecture.md) and the
+  [decision records](docs/adr/README.md) (each hard-to-reverse choice as one ADR: its rationale
+  and the alternatives that lost), [building](docs/contributing-building.md),
+  [testing](docs/contributing-testing.md), [fuzzing](docs/contributing-fuzzing.md).
 
 ## Status
 
@@ -128,7 +128,7 @@ never part of its trust boundary, and never traded against the hardware-isolatio
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
-[documentation](docs/contributing.md). The operating manual for agents is [`.rules`](.rules); decisions are recorded in [docs/adr/contributing-architecture.md](docs/contributing-architecture.md).
+[documentation](docs/contributing.md). The operating manual for agents is [`.rules`](.rules); each hard-to-reverse choice is recorded as one ADR under [`docs/adr/`](docs/adr/README.md).
 
 ## License
 

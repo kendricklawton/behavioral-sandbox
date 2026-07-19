@@ -261,6 +261,9 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
             part.as_os_str(),
         ],
     )?;
+    // `mke2fs -d` populates the image from the staging tree. e2fsprogs enumerates that tree with
+    // `scandir(., alphasort)`, so inode allocation follows sorted names, not host readdir order: the
+    // on-disk layout (hence the image sha256) is reproducible across hosts, not just on a rebuild here.
     let ext_opts = format!("hash_seed={ROOTFS_UUID},lazy_itable_init=0");
     run_tool_env(
         "mke2fs",
@@ -510,12 +513,14 @@ fn install_guest_packages(staging: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Extract the pinned static `apk` from its (already-fetched) tarball into `<scratch_base>/apk-tools`,
-/// returning `(tooldir, apk_static_path)`. The caller removes `tooldir` when done, the tool is
-/// ephemeral, the packages it installs are the product. `scratch_base` is caller-chosen so the
-/// `vendor` command keeps its scratch inside the mirror dir, not the workspace `artifacts/`.
+/// Extract the pinned static `apk` from its (already-fetched) tarball into
+/// `<scratch_base>/apk-tools.<pid>`, returning `(tooldir, apk_static_path)`. The caller removes
+/// `tooldir` when done, the tool is ephemeral, the packages it installs are the product.
+/// `scratch_base` is caller-chosen so the `vendor` command keeps its scratch inside the mirror dir,
+/// not the workspace `artifacts/`. The dir is per-pid (like the `rootfs-staging.<pid>` tree) so two
+/// concurrent builds can't `remove_dir_all` each other's tool mid-`apk`.
 fn extract_apk_static(tools_tar: &Path, scratch_base: &Path) -> Result<(PathBuf, PathBuf)> {
-    let tooldir = scratch_base.join("apk-tools");
+    let tooldir = scratch_base.join(format!("apk-tools.{}", std::process::id()));
     if tooldir.exists() {
         std::fs::remove_dir_all(&tooldir)?;
     }
@@ -557,13 +562,13 @@ fn run_apk_add(apk: &Path, staging: &Path, source: &ApkSource) -> Result<()> {
         // `--no-network`: install purely from the vendored cache (the sha-pinned closure + index).
         ApkSource::VendorCache(dir) => {
             args.push(OsString::from("--cache-dir"));
-            args.push(absolute(dir).into_os_string());
+            args.push(absolute(dir)?.into_os_string());
             args.push(OsString::from("--no-network"));
         }
         // Online, but keep every fetched `.apk` + the index in the cache dir, the vendor snapshot.
         ApkSource::PopulateCache(dir) => {
             args.push(OsString::from("--cache-dir"));
-            args.push(absolute(dir).into_os_string());
+            args.push(absolute(dir)?.into_os_string());
         }
     }
     args.push(OsString::from("add"));
@@ -587,7 +592,7 @@ fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path) -> Result<()> {
         OsString::from("--repository"),
         OsString::from(&repo),
         OsString::from("--cache-dir"),
-        absolute(cache_dir).into_os_string(),
+        absolute(cache_dir)?.into_os_string(),
         OsString::from("update"),
     ];
     let apk_str = apk.to_string_lossy().into_owned();
@@ -599,13 +604,15 @@ fn run_apk_update(apk: &Path, staging: &Path, cache_dir: &Path) -> Result<()> {
 /// resolves a *relative* `--cache-dir` against its `--root`, which would put the cache inside the
 /// staging tree instead of where the packages actually live, so every cache path handed to apk goes
 /// through here first.
-fn absolute(path: &Path) -> PathBuf {
+fn absolute(path: &Path) -> Result<PathBuf> {
     if path.is_absolute() {
-        return path.to_path_buf();
+        return Ok(path.to_path_buf());
     }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(path))
-        .unwrap_or_else(|_| path.to_path_buf())
+    // Propagate a `current_dir` failure: silently returning the relative path would reintroduce the
+    // exact apk-resolves-cache-inside-staging bug this function exists to prevent.
+    let cwd = std::env::current_dir()
+        .context("resolving the current dir to make an apk cache path absolute")?;
+    Ok(cwd.join(path))
 }
 
 /// Populate a vendored apk cache with the resolved guest-package closure (the `.apk` files **and**

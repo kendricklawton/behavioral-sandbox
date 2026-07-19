@@ -122,12 +122,24 @@ pub(crate) fn download_one(a: &Artifact) -> Result<()> {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     println!("↓ {} <- {}", name.display(), a.url);
-    let part = a.dest.with_extension("part");
+    // Per-pid temp name so two concurrent `xtask` fetches into the same dir can't interleave writes
+    // to one `.part` (each verifies its own, then renames onto the shared final path atomically).
+    let part = a
+        .dest
+        .with_extension(format!("part.{}", std::process::id()));
     if let Err(e) = curl_download(&a.url, &part) {
         let _ = std::fs::remove_file(&part);
         return Err(e);
     }
-    let got = sha256_of(&part)?;
+    // Clean up the `.part` on *any* verify failure, including a `sha256sum` that can't run, so a
+    // failed check never leaves a temp file behind.
+    let got = match sha256_of(&part) {
+        Ok(got) => got,
+        Err(e) => {
+            let _ = std::fs::remove_file(&part);
+            return Err(e);
+        }
+    };
     if got != a.sha256 {
         let _ = std::fs::remove_file(&part);
         bail!(
