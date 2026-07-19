@@ -7,7 +7,7 @@
 //! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
-//! **The verbs** (the versioned wire API, P16.2): `open` boots; `exec` runs a command; `put`/`get`
+//! **The verbs** (the versioned wire API, decision 034): `open` boots; `exec` runs a command; `put`/`get`
 //! write/read a working-directory file (a no-op exec that only injects/returns it, since injection is
 //! the engine's only file seam); `snapshot` writes a bundle (a typed refusal for a jailed session);
 //! `trace` returns the host-observed audit record (`RunRecord`) so far; `close` ends it.

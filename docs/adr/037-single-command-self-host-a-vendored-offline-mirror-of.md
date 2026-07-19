@@ -1,5 +1,13 @@
 # 037. Single-command self-host + a vendored offline mirror of every pinned input *(2026-07-17)*
 
+**Context.** "Self-hostable" is a core property, not a slogan, and two forces shape what it has to
+mean here. First, standing the engine up must be one command a self-hoster can actually run, not a
+sequence of build steps to assemble by hand. Second, that command must not silently depend on two
+third-party CDNs (the Firecracker CI S3 bucket and the Alpine CDN) staying up: the build pulls
+sha-pinned upstream inputs, but decision 007 left the resolved `.apk` package closure
+fetched-not-pinned, the last input a self-hoster could not reproduce from a mirror they control. A
+reproducible, offline-verifiable build closes that gap.
+
 **Decision.** Standing the engine up is one command, `cargo xtask self-host`: it obtains the pinned
 guest kernel + rootfs, builds the guest image and the eBPF probe object, installs the `agent` and
 `agentd` binaries into a prefix (`~/.local/bin` by default), and, on a KVM host, boots one sandbox
@@ -40,11 +48,12 @@ Mechanics that matter:
   `--cache-dir` + `--no-network` is the supported offline-install path and needs no signing rework;
   re-deriving apk's index/signature format in `xtask` would be fragile and redundant.
 - **A `curl | sh` installer as the single command instead of an `xtask` subcommand.** Deferred to
-  P19.2 (release packaging). `self-host` builds from source, which is what a from-a-clone self-hoster
+  release packaging. `self-host` builds from source, which is what a from-a-clone self-hoster
   has today; the shell installer ships the *built* binaries, a packaging concern layered on top.
 
-**Why.** "Self-hostable" is a core property, not a slogan: it has to be one command a self-hoster can
-actually run, and it must not silently depend on two third-party CDNs staying up. Vendoring turns the
-last fetched-not-pinned input into a sha-pinned, offline-verifiable one, so the whole build is
-reproducible from a mirror the self-hoster controls. The reader-facing statement is the *Self-host*
-and *Vendoring* sections of `docs/cli-install.md`; the two are kept in sync.
+**Consequences.** Vendoring turns the last fetched-not-pinned input into a sha-pinned,
+offline-verifiable one, so the whole build is reproducible from a mirror the self-hoster controls,
+with both CDNs dark. The cost: the mirror is produced once and lives outside source, so its manifest
+(not the tree) is the audit trail, and a self-hoster who never vendors still depends on the two CDNs
+at build time. The reader-facing statement is the *Self-host* and *Vendoring* sections of
+`docs/cli-install.md`; the two are kept in sync.

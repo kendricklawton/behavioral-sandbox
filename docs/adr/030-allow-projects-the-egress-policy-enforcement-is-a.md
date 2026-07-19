@@ -1,5 +1,14 @@
 # 030. `--allow` projects the egress policy: enforcement is a typed refusal, never a degradation *(2026-07-17)*
 
+**Context.** The engine's egress control is a security property, so the CLI has to project the
+`EgressPolicy` onto the command line and arm it on the guest's tap. Two forces shape how. First, an
+earlier decision pulled the network half forward observe-only (decision 029): a `--trace` run watches
+egress even where the host lacks the caps to enforce, so observation is allowed to degrade to a recorded
+coverage gap. Second, a *policy* is a control, not a report: a run that asked to enforce an allow-list but
+silently could not arm the tap would leave the operator believing egress was constrained when it was open.
+Those two must not share a failure mode, and the projection must respect the no-unpoliced-window property
+(decision 025), the policy is live before the guest's traffic path is.
+
 **Decision.** `agent run --allow IP[/CIDR][:PORT][/PROTO]` (repeatable, `requires` `--net`) projects
 the `EgressPolicy` onto the CLI, completing the network half decision 029 pulled forward observe-only.
 Each value parses into one validated allow-rule (`parse_allow`, right-to-left so the numeric CIDR
@@ -20,6 +29,6 @@ case the pre-flight can't see). `--allow` without `--net` is refused by clap. Th
 the enforcement check keys on the network axis alone, so a poisoned syscall/CPU probe still degrades
 observation to a gap without blocking a policed run.
 
-**Scope.** This closes the network projection of the CLI-completeness interphase; the config-file layer,
+**Scope.** This closes the network projection of the CLI-completeness work; the config-file layer,
 `agent doctor`, and the JSON schema version remain. `--allow` is `run`-only, where `--net` lives (the
 interactive `shell` has no network face).

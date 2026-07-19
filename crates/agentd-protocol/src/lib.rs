@@ -7,7 +7,8 @@
 //! ([`agentd`](../agent_cli/index.html)), the reference client (`agentd-client`), and the eventual
 //! polyglot SDKs all share, so it lives in its own **`agent-vmm`-free** crate: the wire is the
 //! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
-//! linking the engine. Phase 20 freezes and formally specs it; until then the shape may still change,
+//! linking the engine. Freezing and formally speccing it comes with the polyglot SDKs (separate
+//! repos); until then the shape may still change,
 //! which is exactly why [`WIRE_SCHEMA`] is stamped on every message and mismatches are rejected up
 //! front rather than silently mis-decoded.
 //!

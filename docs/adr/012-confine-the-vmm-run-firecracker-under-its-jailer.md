@@ -1,14 +1,17 @@
 # 012. Confine the VMM: run Firecracker under its jailer *(2026-07-14)*
 
-**Problem.** Hardware isolation (KVM) contains the *guest*, but the *VMM process* still runs on the
-host with the driver's privileges. A Firecracker bug, or a guest that breaks out into the VMM, would
-land in that context. The jailer is the host-side confinement: a chroot, a uid/gid drop, and a mount
-namespace around Firecracker.
+**Context.** Hardware isolation (KVM) contains the *guest*, but the *VMM process* itself runs on the
+host with the driver's privileges. That leaves a second surface: a Firecracker bug, or a guest that
+breaks out of hardware isolation into the VMM, would land in the driver's context. The guest boundary
+alone is therefore not the whole story; the VMM process wants its own host-side confinement. Firecracker
+ships exactly that, its `jailer`: a chroot, a uid/gid drop, a mount namespace, and a cgroup around
+Firecracker. The force this decision answers is how to adopt that confinement without forcing every
+existing boot path chroot-relative at once.
 
 **Decision.** An **opt-in** [`BootConfig::jail`] runs Firecracker under Firecracker's `jailer` for a
 plain read-write cold boot. Opt-in, not the new default, because the whole FC track was built
 unjailed and every existing path (memory-sharing's shared read-only base, snapshot bundles, the pre-warmed pool,
-the tap, bulk I/O) needs chroot-relative staging or a netns that later Phase-6 boxes add. This box
+the tap, bulk I/O) needs chroot-relative staging or a netns that later steps add. This decision
 lands the mechanism on the simplest boot; the rest migrates behind it.
 - **Chroot inside the scratch dir.** `--chroot-base-dir` is the VM's own `/tmp/agent-<pid>-<n>`
   scratch dir, so the jail is `<scratch>/firecracker/<id>/root/` and teardown's `remove_dir_all`
@@ -30,7 +33,7 @@ lands the mechanism on the simplest boot; the rest migrates behind it.
   opt-out); on this cgroup-v2-only host it is passed `--cgroup-version 2` (the v1 default would fail
   to find the hierarchy). The exact cgroup dir is learned from `/proc/<pid>/cgroup` once the VMM is up
   (version-independent, no guess about the jailer's parent-cgroup layout) and removed (best-effort) on
-  teardown, since it lives outside the scratch dir, like the tap. cgroup *limits* are P6.2.
+  teardown, since it lives outside the scratch dir, like the tap. cgroup *limits* land in the addendum below.
 - **Needs real root; refuses half-confinement.** The jailer's `mknod` of device nodes is `EPERM` in a
   non-initial user namespace even with `CAP_MKNOD`, so a jailed boot needs real root, the
   `unshare -Urn --map-root-user` trick that carries the other privileged tests is not enough (the
@@ -39,34 +42,34 @@ lands the mechanism on the simplest boot; the rest migrates behind it.
   and snapshotting a jailed VM is refused (its disk lives in the chroot).
 
 **Alternatives considered.**
-- **Jail by default.** Rejected for this box: it would force every existing path chroot-relative at
-  once (P6.1–P6.7 in one change) and break the 23 unjailed privileged tests / the `unshare` dev flow.
-  The additive `#[non_exhaustive]` knob is the same discipline every prior phase used
+- **Jail by default.** Rejected for this step: it would force every existing path chroot-relative at
+  once (every FC path in one change) and break the 23 unjailed privileged tests / the `unshare` dev flow.
+  The additive `#[non_exhaustive]` knob is the same discipline every prior step used
   (`read_only_root`, `enable_network`, …).
 - **Hardlink / bind-mount resources instead of copying.** Hardlink `EXDEV`s across the `/tmp` (tmpfs)
   boundary; bind-mounting into the chroot wants the jailer's mount namespace we don't drive. Copying is
-  the honest P6.1 cost; zero-copy staging of a shared read-only base rides with the overlay-under-jailer
+  the honest cost of this first step; zero-copy staging of a shared read-only base rides with the overlay-under-jailer
   step, alongside snapshot memory-sharing.
 - **`--daemonize`.** Rejected: it redirects stdio to `/dev/null`, which would sever the serial console
   the boot-readiness wait depends on.
 
-**Consequences and notes.**
+**Consequences.**
 - **A jailed cold boot copies the kernel and rootfs into the chroot per VM** (measured ~4 s for a
   jailed plain-rootfs boot in a privileged container). Sharing-preserving staging (shared RO base) and
-  jailed **snapshot/restore/pool**, **vsock/exec**, **networking**, and **bulk I/O** are later Phase-6
-  steps behind this knob.
+  jailed **snapshot/restore/pool**, **vsock/exec**, **networking**, and **bulk I/O** are later steps
+  behind this knob.
 - **cgroup lifecycle is best-effort here.** Teardown reaps the VMM's (now-empty) cgroup; leak-proof,
-  cgroup-**owned** lifetime (host-process death can't leak a VM) is **P6.7**, resource *limits* are
-  **P6.2**, and Firecracker's seccomp filters are **P6.3**.
+  cgroup-**owned** lifetime (host-process death can't leak a VM) comes in a later step, resource
+  *limits* and Firecracker's seccomp filters land in the addendum below.
 - **The jailer's netns is the sanctioned path to concurrent networked clones** (decisions 009/011's
   note): once networking is jailed, each VM's tap in its own netns removes the one-live-networked-
-  clone limit. Kept on the Phase-6 radar.
+  clone limit. Kept on the radar.
 - **`BootConfig` gained a public field**, but it is not one of the API-pinned types (`Sandbox`,
   `Limits`, `RunResult`, `VmmError`, the channel wire), and the jailer path is opt-in, so no downstream
   pin bump is forced.
 
-**cgroup limits + seccomp (P6.2/P6.3 addendum, 2026-07-14).** The jailer already gives each VMM its
-own cgroup; these two boxes fill it in.
+**cgroup limits + seccomp (addendum, 2026-07-14).** The jailer already gives each VMM its
+own cgroup; these two additions fill it in.
 - **CPU/memory limits via the jailer's `--cgroup`.** The driver derives the cap from the guest's own
   envelope: `cpu.max = <vcpus × 100000> 100000` (exactly `vcpus` cores) and `memory.max =
   (mem_mib + 128 MiB)` bytes. The 128 MiB overhead is the VMM's host-side footprint above guest RAM;
@@ -79,13 +82,13 @@ own cgroup; these two boxes fill it in.
   `cgroup.subtree_control` first: if the controllers aren't delegated it logs a warning and passes no
   `--cgroup` (the jailed boot still runs, unlimited) rather than letting the jailer fail. `xtask setup`
   reports whether they're delegated. Enforcement *under load* (a mem-hog/fork-bomb actually bounded)
-  is P6.4; the configurable policy shape is P6.5.
+  and the configurable policy shape are later steps.
 - **Seccomp is on by default; we just don't disable it.** Firecracker installs its built-in per-thread
   filters (advanced level: an allowlist per API/VMM/vCPU thread, `SIGSYS` on violation) at
   `InstanceStart`. We never pass `--no-seccomp`, so every boot is filtered. Verified by probing
   `/proc/<pid>/task/*/status`: pre-boot the process shows `Seccomp: 0`, but a running VM shows
   `Seccomp: 2` on every thread. This is why the jailer test asserts `Seccomp: 2` on the running VMM.
-- **Guest-side process-tree reaping (P6.4, the P2.6 fix).** Separate from the host jailer cgroup: the
+- **Guest-side process-tree reaping (fixing the earlier exec-connection hang).** Separate from the host jailer cgroup: the
   *guest agent* now runs each command in its own **guest** cgroup (a `cgroup2` mount added to the
   rootfs init) and reaps the whole tree with `cgroup.kill` after the command exits or times out.
   cgroup membership is inherited by every fork and can't be escaped by `setsid`, so a double-forked
@@ -94,11 +97,11 @@ own cgroup; these two boxes fill it in.
   precisely because a `setsid` daemon escapes the process group but not the cgroup; and it needs no
   controller delegation (no limits, just `cgroup.kill`), so it works even though the guest root cgroup
   holds processes. Best-effort: a guest without cgroup v2 falls back to the old direct-child kill.
-  **Enrollment is child-side, via a trampoline (P6.8 hardening).** The first cut wrote the child's pid
+  **Enrollment is child-side, via a trampoline (later hardening).** The first cut wrote the child's pid
   to `cgroup.procs` from the *agent* right after `spawn`, which **races the child's own forks**: on a
   1-vCPU guest the child usually runs first, so anything it forked before the write landed (a daemon,
   a fork storm's spinners) escaped the cgroup, survived `cgroup.kill`, and wedged the connection
-  anyway. P6.8's fork-storm test caught this (the P6.4 daemon test had been winning the race). The fix
+  anyway. A later fork-storm test caught this (the earlier daemon test had been winning the race). The fix
   is a tiny `sh` trampoline: the agent spawns `sh -c 'echo $$ > "$1/cgroup.procs"; shift; exec "$@"'`,
   so the child **enrolls itself and only then `exec`s the real command** (same pid, wait/kill are
   untouched; argv is passed as real argv, never interpolated). Enrollment now strictly precedes the
@@ -111,7 +114,7 @@ own cgroup; these two boxes fill it in.
   built-in advanced filters are the maintained, audited default; a bespoke filter is only worth it to
   *tighten* beyond them, which nothing here needs.
 
-**Isolation verified, not assumed (P6.6 addendum, 2026-07-14).** The jail is only worth what's actually
+**Isolation verified, not assumed (addendum, 2026-07-14).** The jail is only worth what's actually
 in force on the running VMM, so `boots_under_the_jailer` reads the live `/proc/<pid>` and asserts each
 wall independently: the VMM is **chrooted** (its root's `(st_dev, st_ino)` via `/proc/<pid>/root/`
 differs from the host root's, the link *text* renders as `/` after the jailer's pivot_root, so
@@ -124,5 +127,5 @@ that box, able to name no host path, hold no capability, and make no syscall out
 not-yet-jailed feature (a NIC, the overlay, bulk I/O) with a typed error before it probes for
 KVM, so there is no half-confined escape hatch (a `jail_refuses_half_confined_boots` unit test in the
 everyday gate; decision 013's "the isolation boundary never half-degrades"). Running a *hostile workload
-inside* a jailed guest waited on exec-under-jail, since landed (P7.0a composed the jail with the vsock
-exec channel), so P6.6's bar was the VMM-side confinement layers plus the refusal, not an in-guest exploit.
+inside* a jailed guest waited on exec-under-jail, since landed (a later step composed the jail with the vsock
+exec channel), so this addendum's bar was the VMM-side confinement layers plus the refusal, not an in-guest exploit.

@@ -44,8 +44,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-# The reference client (P16.4), used by the daemon's e2e demo to prove a caller drives `agentd`
-# over the wire API alone. A dev-dep so the daemon crate can spawn `agentd` (it owns the artifacts)
+# The reference client for the versioned wire API (decision 034, docs/daemon.md), used by the
+# daemon's e2e demo to prove a caller drives `agentd` over the wire alone. A dev-dep so the daemon
+# crate can spawn `agentd` (it owns the artifacts)
 # while the client itself stays free of `agent-vmm`.
 agentd-client = { path = "../agentd-client" }
 # The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).

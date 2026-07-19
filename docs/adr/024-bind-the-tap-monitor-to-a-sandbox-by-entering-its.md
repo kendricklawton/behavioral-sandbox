@@ -1,12 +1,13 @@
 # 024. Bind the tap monitor to a sandbox by entering its network namespace *(2026-07-16)*
 
-**Problem.** P10.1/P10.2's `TapMonitor` attaches to an interface *in the current netns*, but a
-sandbox's tap (`fc0`) lives inside that sandbox's **own** network namespace (decision 017). To bind the
-monitor to one specific sandbox's traffic (P10.4), the loader must attach the `tc` programs to `fc0`
-*inside* that netns, and aya resolves the interface and opens its netlink socket in the **calling
-thread's** netns, so the attach has to run there. The driver's netns tooling (`ip netns exec`, the
-jailer's `--netns`) all shells out or spawns a child, which can't hold a live, in-process eBPF
-attachment the loader then reads a map from.
+**Context.** A sandbox's tap (`fc0`) lives inside that sandbox's **own** network namespace
+(decision 017), so binding the tap monitor to one specific sandbox's traffic means attaching the `tc`
+programs to `fc0` *inside* that netns. Two forces make that awkward. First, aya resolves the interface
+and opens its netlink socket in the **calling thread's** netns, so the attach must physically run there.
+Second, the driver's existing netns tooling (`ip netns exec`, the jailer's `--netns`) all shells out or
+spawns a child, and a child process can't hold a live, in-process eBPF attachment that the loader then
+reads a map from. The monitor therefore needs a way to run one namespace-scoped step, the attach, inside
+the sandbox's netns while the rest of the loader stays in the host netns.
 
 **Decision.** The loader **enters the sandbox's netns in-process for the attach only**, via `setns`.
 - **Load in the host netns, attach in the sandbox's netns.** Creating the maps and loading/verifying
@@ -48,10 +49,10 @@ attachment the loader then reads a map from.
   `ProbeError::Attach` naming it.
 - **The two tracks stay decoupled by plain values.** The loader takes a **netns name** and an
   **interface name** (`String`s), which the driver hands over via `Sandbox::netns`/`Sandbox::tap_name`
-  (added here, additive `api:`); `probes-loader` gains no dependency on `vmm`. The P10.6 end-to-end
-  test uses `agent-vmm` as a **dev-dependency** only.
+  (added here, additive `api:`); `probes-loader` gains no dependency on `vmm`. The end-to-end test uses
+  `agent-vmm` as a **dev-dependency** only.
 - **`nix` is MIT** (already in the license allow-list) and pulled with default features off, `sched`
   only. First `nix`/`setns` use in the tree.
-- P10.3 is the userspace export surface (`flows` per 5-tuple, `totals` as the per-VM `NetStats`
-  rollup); P10.5 is this attach-on-open / teardown-on-close lifecycle; P10.6 proves guest traffic lands
-  in the counters, and `cargo xtask watch-sandbox` is the live exit-gate demo.
+- The userspace export surface (`flows` per 5-tuple, `totals` as the per-VM `NetStats` rollup) feeds
+  this attach-on-open / teardown-on-close lifecycle; the end-to-end test proves guest traffic lands in
+  the counters, and `cargo xtask watch-sandbox` is the live exit-gate demo.

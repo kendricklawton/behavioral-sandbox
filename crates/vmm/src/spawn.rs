@@ -489,7 +489,7 @@ impl Spawned {
     ) -> Result<Self, VmmError> {
         // Re-apply the resource caps a cold jailed boot gets, so a restored clone (where the
         // untrusted code runs) is confined too, not just isolated, the co-resident-safety property
-        // (P15.8). Both caps derive from the snapshot's true envelope, never `config`'s declaration:
+        // (decision 022). Both caps derive from the snapshot's true envelope, never `config`'s declaration:
         // `memory.max` from the memory file's true size (`restore_mem_mib`, never below what the
         // clone actually uses, the OOM hazard that once kept restore uncapped), `cpu.max` from the
         // vCPU count recorded in the bundle (the clone's real parallelism; a `config` defaulting to

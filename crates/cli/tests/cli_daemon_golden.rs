@@ -1,4 +1,5 @@
-//! Phase 16 golden: the **CLI** (`agent run --json`) and the **daemon wire API** (`agentd`, driven
+//! CLI/daemon parity golden (the wire API, decision 034): the **CLI** (`agent run --json`) and the
+//! **daemon wire API** (`agentd`, driven
 //! through the reference [`agentd_client::Client`]) render the *same* command **identically**, same
 //! exit code, same stdout, same stderr. The two faces are thin hosts of one `agent-vmm` lifecycle, so
 //! a run must never depend on which door it came through; this pins that invariant against drift (a

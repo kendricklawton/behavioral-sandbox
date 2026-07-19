@@ -47,7 +47,7 @@ impl Vm {
     /// bundle is staged into the chroot, the state file copied, the memory file and a shared base
     /// disk bind-mounted read-only (so clones keep sharing one page cache), a private disk copy
     /// handed to the jailed uid, and a networked clone's netns is joined via `--netns`. Needs real
-    /// root, like a jailed boot. The cgroup **resource caps** are re-applied to a jailed clone (P15.8),
+    /// root, like a jailed boot. The cgroup **resource caps** are re-applied to a jailed clone (decision 013),
     /// so the restored VM (where the untrusted code runs) is confined, not just isolated, and both
     /// caps derive from the *snapshot's* true envelope, never `config`'s declaration (the guest's
     /// vCPUs and RAM come from the snapshot state; restore issues no `PUT /machine-config`):

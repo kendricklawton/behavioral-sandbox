@@ -279,6 +279,62 @@ fn session_state_persists_across_connections() {
 }
 
 #[test]
+fn a_relative_program_built_in_the_session_runs_by_its_path() {
+    // Regression: the pre-flight program check must resolve a `/`-bearing relative program against
+    // the run's working dir (where the command runs), not the agent's own cwd. Exec 1 builds an
+    // executable `./tool` in the session dir; exec 2 runs it by that relative path and must not be
+    // falsely rejected as "no such binary".
+    let dir = std::env::temp_dir().join(format!("agent-relprog-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // One exec per connection against the shared session dir: build the executable, then run it.
+    let run_argv = |argv: Vec<String>| -> (Vec<u8>, Result<i32, String>) {
+        let (host, guest) = UnixStream::pair().expect("socketpair");
+        let session = dir.clone();
+        let agent = std::thread::spawn(move || agent_guest::serve_session(guest, &session));
+        let mut client = ClientConnection::connect(host).expect("client handshake");
+        client
+            .send_request(&Request::Exec {
+                argv,
+                stdin: Vec::new(),
+                env: Vec::new(),
+                artifacts: Vec::new(),
+                timeout_ms: 30_000,
+            })
+            .expect("exec");
+        let mut out = Vec::new();
+        let res = loop {
+            match client.recv_response().expect("recv") {
+                Response::Stdout(b) => out.extend_from_slice(&b),
+                Response::Stderr(_) => {}
+                Response::Exit { code } => break Ok(code),
+                Response::Error(m) => break Err(m),
+                other => panic!("unexpected frame: {other:?}"),
+            }
+        };
+        let _ = agent.join();
+        (out, res)
+    };
+
+    // Build the executable via a shell line (argv[0] = "sh" is PATH-resolved), then invoke it by path.
+    let (_, built) = run_argv(vec![
+        "sh".into(),
+        "-c".into(),
+        "printf '#!/bin/sh\\necho ran-in-workdir\\n' > tool && chmod +x tool".into(),
+    ]);
+    assert_eq!(built, Ok(0), "building ./tool");
+
+    let (out, result) = run_argv(vec!["./tool".into()]);
+    assert_eq!(
+        result,
+        Ok(0),
+        "a session-built ./tool must run, not be rejected"
+    );
+    assert_eq!(out, b"ran-in-workdir\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn hung_command_is_killed_at_its_deadline() {
     // A command that would run far longer than its timeout must be killed and reported as TimedOut,
     // not hang the agent. A short timeout keeps the test fast.

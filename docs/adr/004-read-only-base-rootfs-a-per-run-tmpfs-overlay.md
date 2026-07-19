@@ -1,5 +1,13 @@
 # 004. Read-only base rootfs + a per-run tmpfs overlay *(2026-07-12)*
 
+**Context.** Runs are disposable: a sandbox boots, executes untrusted code, and is thrown away, so
+nothing a run writes to `/` should persist or leak into the next boot. That pulls two ways at once.
+The guest still needs a writable root (the agent's `/tmp` working dir among other things), yet the
+base image is identical across every VM and copying a full ~50 MB rootfs per boot wastes both time
+and RAM. A read-only base shared across VMs is page-cache-deduped and is the memory-sharing win the
+benchmarks are later measured against; the writable layer it lacks has to come from somewhere cheap
+and ephemeral.
+
 **Decision.** When `BootConfig.read_only_root` is set, the driver attaches the base rootfs
 **read-only and shared** (no per-VM copy, Firecracker opens it `O_RDONLY`, so the guest can't mutate
 it), and the guest stacks a **per-run tmpfs overlay** over it so `/` is writable but ephemeral. A
@@ -10,11 +18,12 @@ two knobs**: a RO `/` without the overlay would break the agent's `/tmp` working
 the single flag implies both.
 
 **Alternatives considered.**
-- **A second writable block device as the overlay upper.** Rejected for P3.3: heavier (a per-VM image
-  to create/format on the host) and it consumes the exact mechanism P3.4/P3.5 own (injecting a per-run
-  working dir via a second block device). tmpfs keeps P3.3 to the overlay approach and is sharing-optimal,
-  the base is shared read-only (page-cache-deduped across VMs) and the overlay costs only the RAM a
-  run actually writes, vs. today's full ~50 MB copy per boot.
+- **A second writable block device as the overlay upper.** Rejected here: heavier (a per-VM image
+  to create/format on the host) and it consumes the exact mechanism a later per-run-working-dir
+  feature owns (injecting a per-run working dir via a second block device). tmpfs keeps this
+  decision to the overlay approach and is sharing-optimal, the base is shared read-only
+  (page-cache-deduped across VMs) and the overlay costs only the RAM a run actually writes, vs.
+  today's full ~50 MB copy per boot.
 - **An initramfs that sets up the overlay before pivoting** ("initramfs vs rootfs"). Rejected:
   `BootSource` has no `initrd_path`, so it means a second CPIO artifact to build, pin, and hash-guard
   for zero benefit when a baked `/sbin/overlay-init` reuses the single ext4 we already assemble.
@@ -23,8 +32,8 @@ the single flag implies both.
   but ours is the RO base still in use as the overlay lowerdir. `pivot_root` keeps it mounted, shadowed
   at `/rom`.
 
-**Why.** Runs are disposable, so an ephemeral RAM overlay is the natural writable layer, and sharing
-one read-only base is the memory-sharing win Phase 5 is measured against. The tmpfs cap is **half of guest
+**Why.** With runs disposable, an ephemeral RAM overlay is the natural writable layer, and sharing
+one read-only base is the memory-sharing win the benchmarks target. The tmpfs cap is **half of guest
 RAM** (`mem_mib / 2`), passed on the kernel command line as `overlay_size=<N>M`, the kernel routes
 `key=value` cmdline tokens into PID 1's environment, so `overlay-init` reads `$overlay_size` without
 mounting `/proc` first. A guest has **no swap**, so a tmpfs sized near RAM would drive the OOM-killer
@@ -36,7 +45,7 @@ when `overlay-init` runs, you can't `mkdir` a mountpoint on a read-only `/`.
   set in code where the agent image is chosen as a bundle (the test's `agent_rootfs_config`), so the
   multi-env footprint doesn't grow. The stock (Ubuntu) config still copies + boots read-write. Making
   the agent rootfs the read-only default is still the separate flip this file's decision 003 reserved.
-- **Snapshot/restore (Phase 5):** the tmpfs upper lives in guest RAM, so it is captured by a memory
+- **Snapshot/restore:** the tmpfs upper lives in guest RAM, so it is captured by a memory
   snapshot, and a restore requires the same read-only base present at the same host path.
 - **A read-only rootfs must ship `/sbin/overlay-init` + a `/overlay` mountpoint** (both baked by
   `build-rootfs`); pointing `read_only_root` at an image without them is a bounded boot failure (typed

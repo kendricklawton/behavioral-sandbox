@@ -220,8 +220,10 @@ where
 
     // Resolve the program up front so "no such binary" stays the typed spawn error the host knows
     // (`Response::Error` → `VmmError::GuestExec`): with the trampoline, the real `execvp` happens
-    // inside the child, where a failure can only surface as a shell-style 127 on stderr.
-    if let Err(e) = resolve_program(program) {
+    // inside the child, where a failure can only surface as a shell-style 127 on stderr. Resolved
+    // against the run's working dir (the child's cwd), so an injected/`built-in-session` `./tool`
+    // is judged where it will actually run, not against the agent's own cwd.
+    if let Err(e) = resolve_program(program, workdir.path()) {
         let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
         return Err(AgentError::Spawn(e));
     }
@@ -420,7 +422,12 @@ const TRAMPOLINE_SCRIPT: &str = r#"{ echo $$ > "$1/cgroup.procs"; } 2>/dev/null;
 /// missing or non-executable program as the typed spawn error before the trampoline runs.
 /// TOCTOU-tolerant: a program that vanishes between this check and the child's `exec` surfaces as
 /// the trampoline's shell-style 127 instead.
-fn resolve_program(program: &str) -> Result<(), std::io::Error> {
+///
+/// A `/`-bearing relative program is resolved against `workdir` (the child's cwd), so it is judged
+/// exactly where the trampoline's `exec` will resolve it, an absolute path is used as-is, and a bare
+/// name is `PATH`-searched. Resolving a relative `./tool` against the agent's own cwd instead would
+/// falsely reject a program injected via `--put` or built by an earlier exec in the session.
+fn resolve_program(program: &str, workdir: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt as _;
     let executable = |p: &Path| {
         std::fs::metadata(p)
@@ -428,7 +435,8 @@ fn resolve_program(program: &str) -> Result<(), std::io::Error> {
             .unwrap_or(false)
     };
     let found = if program.contains('/') {
-        executable(Path::new(program))
+        let p = Path::new(program);
+        executable(&workdir.join(p)) // `join` keeps an absolute `p` as-is, else roots it at workdir
     } else {
         std::env::var_os("PATH")
             .map(|paths| std::env::split_paths(&paths).any(|dir| executable(&dir.join(program))))

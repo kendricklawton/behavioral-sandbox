@@ -1,11 +1,11 @@
-//! The reference **Rust client** for the `agentd` wire API (Phase 16): drive a sandbox **session**
+//! The reference **Rust client** for the `agentd` wire API (decision 034): drive a sandbox **session**
 //! over a unix socket, `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`, using
 //! nothing but the shared wire contract ([`agentd_protocol`]) and a JSON value for the opaque trace
 //! record.
 //!
 //! **This is the proof, and the seed.** The proof: it links **no `agent-vmm`**, so it demonstrates
 //! that a caller drives the daemon with only a JSON library and a unix socket, the exact surface a
-//! non-Rust SDK has. The seed: the polyglot SDKs (Go/Python/Node/C#, Phase 20) are this client's
+//! non-Rust SDK has. The seed: the polyglot SDKs (Go/Python/Node/C#, separate repos) are this client's
 //! shape hardened per language, so its method set *is* the SDK's method set.
 //!
 //! **Synchronous and blocking**, matching the daemon: one [`Client`] owns one connection (one

@@ -1,12 +1,15 @@
 # 011. Restore identity: the agent re-addresses the clone; VMGenID reseeds it *(2026-07-12)*
 
-**Problem.** Restore hands every clone a byte-identical copy of one guest memory image, so anything
-that must be unique per VM but was frozen into that image is now shared: the guest's **network
-identity** (IP/MAC/routes), its **RNG state**, and its **clocks**. Network identity is the
-load-bearing one here because Phase 4 addresses the guest via the kernel `ip=` parameter (decision
-009), which runs exactly once, before userspace, at the *source's* boot; it cannot re-fire on
-restore, so a clone wakes still holding the snapshot's baked-in address on a link it no longer
-matches.
+**Context.** The pre-warmed pool restores every clone from one guest memory image, so each clone
+wakes byte-identical to the snapshot. Anything that must be unique per VM but was frozen into that
+image is therefore shared: the guest's **network identity** (IP/MAC/routes), its **RNG state**, and
+its **clocks**. Restoring per-VM identity is a correctness and isolation requirement, not a
+convenience. Network identity is the load-bearing case: the engine addresses the guest via the
+kernel `ip=` parameter (decision 009), which runs exactly once, before userspace, at the *source's*
+boot. It cannot re-fire on restore, so absent a runtime path a clone wakes still holding the
+snapshot's baked-in address on a link it no longer matches. Each of the three (network, entropy,
+clocks) pulls toward a different answer, and the tension is between adding engine mechanism and
+leaning on what the pinned stack already provides.
 
 **Decision (network): keep `ip=` for cold boot; the guest agent applies a fresh identity on restore.**
 - **Cold boot is unchanged.** `ip=` stays the cold-boot fast path: zero overhead, no rootfs change,
@@ -21,8 +24,8 @@ matches.
   `restored_networked_clone_gets_a_fresh_identity`).
 - **Core-property check:** this puts network *configuration* in the guest agent, acceptable because the agent
   is exec/IO convenience (core property 2) and enforcement never moves in-guest: policy stays host-side (the
-  route shape today, eBPF at the tap from Phase 11). A guest that tampers with its own address gains
-  nothing: the host end of the /30 and the tap it enforces on are outside its reach.
+  route shape today, eBPF at the tap once network enforcement lands). A guest that tampers with its own address
+  gains nothing: the host end of the /30 and the tap it enforces on are outside its reach.
 - **MAC is deliberately not changed.** The clone keeps the snapshot's MAC; each clone sits on its own
   point-to-point tap (a separate L2 segment), so MAC uniqueness across taps is irrelevant, and on
   v1.9 only one networked clone can be live at a time anyway.
@@ -32,12 +35,12 @@ matches.
 **The v1.9 constraint (probed, not assumed).** `PUT /snapshot/load` on the pinned Firecracker v1.9
 rejects `network_overrides` ("unknown field", probed against the real binary), so the snapshot's
 recorded `host_dev_name` is fixed: restore must present a tap with **exactly that name**. Consequence at
-the time: **only one networked clone can be live at a time** on v1.9. ***(Resolved: decision 017 (P7.0c)
+the time: **only one networked clone can be live at a time** on v1.9. ***(Resolved: decision 017
 gives each clone its own network namespace, so all recreate the same baked-in tap name without colliding,
 concurrent networked clones now run, and `Tap::create_named` + the in-guest re-addressing below are
 deleted.)*** Concurrent networked clones needed either a Firecracker with `network_overrides` (a
-deliberate version bump) or per-VM network namespaces (the Phase-6 jailer), deferred to whichever lands
-first, the netns route landed. Non-networked pre-warmed clones keep their unbounded concurrency (P5.4).
+deliberate version bump) or per-VM network namespaces (the jailer), deferred to whichever lands
+first, the netns route landed. Non-networked pre-warmed clones keep their unbounded concurrency.
 
 **Decision (entropy): rely on VMGenID, and prove it.** Both halves are already in the pinned stack:
 Firecracker v1.9 ships the VMGenID device and bumps the generation on snapshot restore, and the
@@ -51,7 +54,7 @@ that test fails and the gap is visible, not silent.
 **Decision (clocks): document the staleness; don't fix it up.** kvm-clock keeps the monotonic clock
 sane across restore, but the guest's **wall clock lags by the snapshot's age** (measured: a clone
 restored ~9 s after its snapshot reports a wall clock ~9 s behind the host). The engine does not
-reach into the guest to set the time: a fix-up belongs to the workload or a later phase's explicit
+reach into the guest to set the time: a fix-up belongs to the workload or a later explicit
 mechanism (and the audit log timestamps host-side, so the audit trail never depends on guest
 clocks). Recorded as a documented limitation the pre-warmed-pool docs must carry: code that trusts guest
 wall-clock time (TLS validity windows, token expiry) can misbehave in a clone until it resyncs.

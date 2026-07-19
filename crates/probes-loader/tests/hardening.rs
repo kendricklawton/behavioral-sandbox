@@ -1,6 +1,6 @@
-//! The consolidated **trust-story** suite: one hostile guest run, contained on every axis, and the
-//! containment **shown in the host-observed audit record**, plus the proof that the guest can
-//! neither see nor disable the probes doing the observing.
+//! The consolidated **trust-story** suite (the security boundary, decision 033): one hostile guest
+//! run, contained on every axis, and the containment **shown in the host-observed audit record**,
+//! plus the proof that the guest can neither see nor disable the probes doing the observing.
 //!
 //! `#[ignore]`d: each boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches all
 //! three host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
@@ -87,7 +87,7 @@ fn networked_agent_config() -> BootConfig {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_hostile_guest_is_contained_and_the_record_shows_it() {
-    // P15.1, the consolidated adversarial suite as one hostile guest: it tries to **exfiltrate**
+    // The consolidated adversarial suite as one hostile guest: it tries to **exfiltrate**
     // (reach a blocked endpoint) and to **DoS** the host (a fork storm), and every attempt is both
     // *contained* and *recorded*. Exfiltration is denied at the tap and the drop lands in the audit
     // record; the storm creates zero host threads (hardware isolation) and the VM stays responsive;
@@ -245,7 +245,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_guest_cannot_see_or_disable_the_host_side_probes() {
-    // P15.2, the guest can neither see nor disable the host-side observation. It runs its **own**
+    // The guest can neither see nor disable the host-side observation. It runs its **own**
     // kernel inside the microVM; the eBPF probes live in the **host** kernel, and the tap monitor
     // sits on the **host** end of the VM's tap, outside the guest. There is no in-guest syscall,
     // file, or device that reaches any of it. The proof is behavioural: a guest that spends its run
@@ -345,7 +345,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged` as root)"]
 fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
-    // P15.3, one hostile guest attacks on every exhaustion axis at once, and the engine's two
+    // One hostile guest attacks on every exhaustion axis at once, and the engine's two
     // enforcement mechanisms bound all of them: the **cgroup** caps compute + memory (a memory hog
     // stays under `memory.max` without the host OOM-killing the VMM; a fork storm burns no more than
     // its CPU quota and creates zero host threads), and the **egress policy** caps the network (a

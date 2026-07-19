@@ -403,15 +403,19 @@ enum Direction {
 /// Attached by the userspace loader's `TapMonitor` after it adds the clsact qdisc.
 #[classifier]
 pub fn tap_ingress(ctx: TcContext) -> i32 {
-    count(&ctx, Direction::Ingress);
-    egress_verdict(&ctx).as_tc()
+    // Parse the 5-tuple **once** and hand it to both the counter and the verdict: on the enforcement
+    // hot path this halves the per-packet `bpf_skb_load_bytes` calls (the old shape parsed in `count`
+    // and again in `egress_verdict`). `FlowKey` is `Copy`, so sharing it adds no stack pressure.
+    let key = parse(&ctx);
+    count(&ctx, Direction::Ingress, key);
+    egress_verdict(&ctx, key).as_tc()
 }
 
 /// `tc`/clsact **egress** on a VM's tap, a frame delivered to the guest. Always accepted: egress policy
 /// governs what the guest *sends* (the ingress hook), and replies to allowed traffic must come back in.
 #[classifier]
 pub fn tap_egress(ctx: TcContext) -> i32 {
-    count(&ctx, Direction::Egress);
+    count(&ctx, Direction::Egress, parse(&ctx));
     Verdict::Pass.as_tc()
 }
 
@@ -422,18 +426,19 @@ pub fn tap_egress(ctx: TcContext) -> i32 {
 /// A denied IPv4 frame is recorded in [`DENIALS`] before the drop, so the host can report which
 /// endpoint a guest was blocked from, the audit trail folded into the per-run record.
 #[inline(always)]
-fn egress_verdict(ctx: &TcContext) -> Verdict {
+fn egress_verdict(ctx: &TcContext, key: Option<FlowKey>) -> Verdict {
     if ENFORCE.get(0).copied().unwrap_or(0) == 0 {
         return Verdict::Pass;
     }
-    // ARP must survive deny-by-default: without resolving 10.200.0.1 the guest can't send IP at all.
-    match ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be) {
-        Ok(ETH_P_ARP) => return Verdict::Pass,
-        Ok(ETH_P_IP) => {}
-        _ => return Verdict::Drop, // non-IPv4 (or an unreadable ethertype): deny by default, no 5-tuple to log
-    }
-    let Some(key) = parse(ctx) else {
-        return Verdict::Drop; // truncated IPv4: can't prove it's allowed (or key it), so drop
+    // `key` is the caller's single parse of this frame. A parsed IPv4 5-tuple goes straight to the
+    // policy; anything `parse` couldn't key (ARP, IPv6/VLAN, a non-IPv4 or truncated frame) needs the
+    // ethertype only to spare ARP, without it the guest can't resolve 10.200.0.1 and so can't send IP
+    // at all. Everything else is deny-by-default (no 5-tuple to prove allowed or to log).
+    let Some(key) = key else {
+        return match ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be) {
+            Ok(ETH_P_ARP) => Verdict::Pass,
+            _ => Verdict::Drop,
+        };
     };
     if policy_allows(key.dst_addr, key.dst_port, key.proto) {
         Verdict::Pass
@@ -487,12 +492,13 @@ fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     false
 }
 
-/// Add one packet to its flow's per-direction counters. A non-IPv4 or truncated frame is skipped (the
+/// Add one packet to its flow's per-direction counters. `key` is the caller's single parse of the
+/// frame (`None` for a non-IPv4 or truncated one, which a flow can't represent and this skips, the
 /// caller still accepts it). `#[inline(always)]` so each classifier stays one self-contained program
 /// (no BPF-to-BPF call), the verifier profile the earlier programs established.
 #[inline(always)]
-fn count(ctx: &TcContext, dir: Direction) {
-    let Some(key) = parse(ctx) else {
+fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
+    let Some(key) = key else {
         // Not our IPv4. Count an IPv6 or VLAN-tagged frame (which a flow can't represent) so its
         // presence isn't silently absent from the record; skip ARP (expected on-link, not a flow)
         // and anything else. A second small `load` only on this uncommon path.

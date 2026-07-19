@@ -1,5 +1,17 @@
 # 002. Host↔guest channel: vsock + a tiny guest agent *(2026-07-10)*
 
+**Context.** `exec` has to drive one command inside a running microVM and stream its
+`stdout`/`stderr`/exit back to the host, and the transport that carries it is itself a new fault
+domain a misbehaving guest sits on. Three standing forces shape the pick. First, the channel must not
+weaken isolation: it moves the output of untrusted code, so any IO path is convenience and never
+containment (core property 2), with the CPU/KVM boundary still doing the containing. Second,
+deny-by-default has to hold (invariant 6): driving a command must not require handing the guest a
+network before there is egress control to govern it. Third, a hostile or buggy guest (one that never
+connects, dies mid-command, half-writes a frame, or floods the reader) must surface as a
+deadline-bounded, typed failure, never a host hang or an unbounded buffer (invariant 5). And the host
+side should compose with the `unsafe`-free, unix-domain-socket-over-`std` client already established in
+decision 001, not open a second, differently-shaped surface.
+
 **Decision.** `exec` talks to the guest over **virtio-vsock**: a minimal, statically-linked
 **guest agent** (started by the guest's init) listens on a vsock port, runs the requested command,
 and streams `stdout`/`stderr`/exit back; the host reaches it through the **unix-domain socket
@@ -19,10 +31,11 @@ agent).
   already carries the boot console, all the work of a real protocol with none of the socket
   semantics. Kept only as a fallback if a guest kernel lacks `vhost-vsock`.
 - **Network + SSH / a TCP agent.** Reuse an existing, battle-tested protocol. Rejected: it drags
-  Phase 4 (tap/virtio-net) forward before we have egress control, so it would violate
+  guest networking (tap/virtio-net) forward before we have egress control, so it would violate
   *deny-by-default* (invariant 6), the guest would need a network purely to be driven, and it
   is a large attack surface and dependency for "run one command." vsock needs **no guest
-  networking at all**, which keeps the deny-by-default posture intact through Phase 2.
+  networking at all**, which keeps the deny-by-default posture intact while there is still no
+  guest network.
 - **Firecracker's own logger/metrics or the API socket.** Those are host-side control/observability
   surfaces; none carries guest stdin/stdout. Not a channel.
 
@@ -45,7 +58,7 @@ the transport pick:
 - **Error taxonomy & API (Rust for Rustaceans / ZtP).** This implies extending the `#[non_exhaustive]`
   `VmmError` with additive channel/guest-failure variants (e.g. a channel/transport failure vs. a
   guest-agent crash vs. an exec timeout) so callers can distinguish "the VM broke" from "your
-  command exited non-zero," and an `exec(cmd, stdin) -> Result<Output, VmmError>` surface (P2.4)
+  command exited non-zero," and an `exec(cmd, stdin) -> Result<Output, VmmError>` surface
   whose `Output` mirrors the existing `RunResult`.
 - **Telemetry & testability (ZtP).** The frame **codec is pure and unit-testable without KVM**
   (encode/decode round-trips, truncated-frame and oversized-length rejection, mirroring the
@@ -55,13 +68,13 @@ the transport pick:
 
 **Consequences and notes.**
 - **Adds a guest-side component to build and trust-scope.** The agent must be **statically linked**
-  (musl, no libc surprises) and **baked into the rootfs**, so P2.2 (the agent) and P3.1 (the
-  reproducible rootfs build) are coupled, and the agent's protocol version is pinned alongside the
+  (musl, no libc surprises) and **baked into the rootfs**, so building the agent and building the
+  reproducible rootfs are coupled, and the agent's protocol version is pinned alongside the
   image. It runs in-guest, so it is inside the isolation boundary and outside the trust boundary.
 - **Requires `vhost-vsock` in the guest kernel** and a vsock device in the machine config; a guest
   kernel built without it falls back to the serial protocol above. The guest **CID** must be unique
   per VM (a uniqueness concern that returns, with entropy and network identity, when snapshots
-  clone VMs in Phase 5, see P5.5).
+  clone VMs later).
 - **The host connects to a Firecracker-managed UDS with a `CONNECT <port>` handshake**, a
   Firecracker convention, pinned the way the API schema is in decision 001; a version bump means
   re-checking it.
@@ -71,10 +84,10 @@ the transport pick:
   `ServerConnection` perform the handshake on construction and expose only their role's operations,
   so a message-before-handshake or a client/server role mix-up is a *compile* error; the raw codec
   is `pub(crate)`. Chosen while the only callers were the guest agent and tests, cheap to commit to
-  before the host side (P2.3) adopts it.
+  before the host side adopts it.
 - **Liveness is the transport's responsibility, not the channel's.** The framing is transport-
-  agnostic and sets no timeouts itself; every connection (the unix harness now, the vsock device +
-  the host response read in P2.3) must set read/write deadlines on the concrete socket before
+  agnostic and sets no timeouts itself; every connection (the unix harness now, the vsock device and
+  the host response read later) must set read/write deadlines on the concrete socket before
   wrapping it, so a dead-or-stalled peer is a typed timeout, never a hang. The guest agent's
   unconditional pipe-drain only bounds the guest *given* that write deadline. A silent hung *command*
-  is a separate axis, bounded by the exec wall-timeout (P2.6).
+  is a separate axis, bounded by the exec wall-timeout.

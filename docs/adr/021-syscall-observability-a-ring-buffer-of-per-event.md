@@ -1,10 +1,18 @@
 # 021. Syscall observability: a ring buffer of per-event records, a shared POD type, and an in-kernel filter *(2026-07-15)*
 
-**Problem.** Phase 8's counter answers "how many `execve`s"; Phase 9 needs "which syscall, by whom,
-on what", a **stream of per-event records** (pid, cgroup, `comm`, the opened path / connected
-address), scoped to *one* sandbox's host workers, not the whole machine's. Three shapes have to be
-chosen together: how events cross the kernel→userspace boundary, how the record type stays consistent
-across that boundary, and where the "watch one sandbox" filter lives.
+**Context.** The engine observes a sandbox's host footprint from outside the guest, and a bare
+syscall counter answers only "how many `execve`s". Real observability needs a **stream of per-event
+records** (pid, cgroup, `comm`, the opened path / connected address), scoped to *one* sandbox's host
+workers rather than the whole machine's. That requirement forces three shapes to be chosen together:
+how events cross the kernel→userspace boundary, how the record type stays consistent across that
+boundary, and where the "watch one sandbox" filter lives. Each has a force pulling on it: the
+boundary crossing must be ordered and non-blocking (best-effort observability must never stall a
+syscall); the record type must not drift silently across an FFI boundary, where a misread is data
+corruption, not a compile error; and the scoping filter must make "watch one sandbox" honest rather
+than a userspace afterthought. The `execve`/`openat`/`connect` set is the smallest that exercises all
+three record shapes (a program path, a file path, a socket address), and a ring buffer paired with a
+shared POD type is what keeps the eBPF side isomorphic to the driver side: typed, ordered, no silent
+corruption, no leak.
 
 **Decision.** Three coupled choices, extending decision 020's loader:
 - **A ring buffer (`BPF_MAP_TYPE_RINGBUF`), not a perf event array.** The three `sys_enter_*`
@@ -12,7 +20,8 @@ across that boundary, and where the "watch one sandbox" filter lives.
   drains it with a single in-order consumer ([`SyscallTracer::drain`]). The ring buffer is the modern
   (5.8+) replacement for per-CPU perf buffers: one shared queue, ordered, no per-CPU reassembly. A
   full buffer drops new events (best-effort observability, never blocking a syscall). Draining is
-  **non-blocking** (returns 0 when empty); an `epoll`-backed blocking wait is the P9.3 consumer's job.
+  **non-blocking** (returns 0 when empty); an `epoll`-backed blocking wait is the streaming consumer's
+  job.
 - **The wire record is one shared, dependency-free POD crate.** `crates/probes-common` holds the
   `#[repr(C)]`, padding-free `SyscallEvent` (and its safe `from_bytes` reader), depended on by both
   the kernel writer (`crates/probes`) and the userspace reader (`crates/probes-loader`). Single-
@@ -41,14 +50,9 @@ across that boundary, and where the "watch one sandbox" filter lives.
   stable tracepoint offset read with `read_at` + `bpf_probe_read_user_*`; genuine `vmlinux`-struct
   field reads (and their relocations) arrive when a later phase reads kernel structs.
 
-**Why.** The ring buffer + shared-POD pair keeps the eBPF side isomorphic to the driver side
-(typed, ordered, no silent corruption, no leak), and the in-kernel filter is what makes "watch one
-sandbox" honest rather than a userspace afterthought. The `execve`/`openat`/`connect` set is the
-smallest that shows all three record shapes (a program path, a file path, a socket address).
-
 **Consequences and notes.**
 - This is still the **host's** footprint, not the guest's (decision 020's honest limit stands): a
-  microVM services its syscalls in-guest. The filter's cgroup axis is how P9.4 attributes events to a
+  microVM services its syscalls in-guest. The filter's cgroup axis is how events are attributed to a
   specific sandbox: `cgroup_id_of_pid` resolves a VMM pid to its cgroup id (the inode of the cgroup
   dir, which equals `bpf_get_current_cgroup_id`), and `watch_cgroup` scopes the trace to it. The bridge
   to the Firecracker track is plain `u32`/`u64` values, so `probes-loader` stays independent of `vmm`.
@@ -56,8 +60,8 @@ smallest that shows all three record shapes (a program path, a file path, a sock
   `channel` protocol + audit-log format); it can change without an `api:` marker.
 - The `detail` blob is bounded (128 bytes): long paths truncate, and a `connect` captures only the
   leading sockaddr bytes (a full IPv4 address; IPv6 partially) to avoid over-reading a short user
-  buffer. Phase 9 is now complete: the streaming consumer (P9.3, a poll-with-sleep [`SyscallTracer::stream`]
-  rather than the `epoll` wait sketched above, keeping the crate sync + `unsafe`-free), cgroup
-  attribution (P9.4, `cgroup_id_of_pid`), the measured per-syscall overhead (`cargo xtask bench-trace`,
-  P9.5), and the attributed-workload test (P9.6) all landed, with `cargo xtask trace-sandbox` (boot a
-  real sandbox, stream its cgroup-attributed host footprint) as the exit-gate demo.
+  buffer. The streaming consumer is a poll-with-sleep [`SyscallTracer::stream`] rather than the
+  `epoll` wait sketched above, keeping the crate sync + `unsafe`-free; cgroup attribution rests on
+  `cgroup_id_of_pid`; the per-syscall overhead is measured (`cargo xtask bench-trace`); and an
+  attributed-workload test plus `cargo xtask trace-sandbox` (boot a real sandbox, stream its
+  cgroup-attributed host footprint) exercise the whole path end to end.

@@ -1,11 +1,14 @@
 # 018. Per-exec inputs (files + env) ride the exec channel under a pinned secret-hygiene contract *(2026-07-14)*
 
-**Problem.** A real workload needs configuration and credentials in the guest: input files (landed
-P2.5) and environment variables (new at P7.1). Env could ride several paths, baked into the rootfs,
-written as a file the command sources, exported into the guest agent's own process, or carried
-per-exec on the wire. And whatever carries secrets must *state* what the engine does with them:
-logs, error renderings, and the serial console are host-observable surfaces an embedder will ship
-into its own telemetry, so "we probably don't log it" is not a contract an SDK can be built on.
+**Context.** A real workload needs configuration and credentials inside the guest: input files and
+environment variables. Env could ride several paths, baked into the rootfs, written as a file the
+command sources, exported into the guest agent's own process, or carried per-exec on the wire, and
+each path pulls differently. Process-level or image-baked env turns a run's secrets into state that
+outlives the run (or into build-time state), which collides directly with a long-lived
+(pre-warmed/pooled) VM where a later run must never inherit an earlier one's credentials. And
+whatever carries secrets must *state* what the engine does with them: logs, error renderings, and the
+serial console are host-observable surfaces an embedder will ship into its own telemetry, so "we
+probably don't log it" is not a contract an SDK can be built on.
 
 **Decision.**
 - **Env is a per-exec field on `Request::Exec`** (wire protocol **v2**), applied by the guest agent
@@ -26,8 +29,8 @@ into its own telemetry, so "we probably don't log it" is not a contract an SDK c
   the channel's serialized payload buffer and the driver's request clones, best-effort by
   declaration: the caller's own buffers and the kernel's socket buffers are out of the engine's
   reach. The run's own `RunResult` is the one surface allowed to carry input bytes (it is the
-  caller's data). The audit log (P13) inherits the contract: it records *that* inputs were
-  injected (paths/keys/sizes or hashes), never contents.
+  caller's data). The audit log inherits the contract: it records *that* inputs were injected
+  (paths/keys/sizes or hashes), never contents.
 
 **Alternatives considered.**
 - **Agent-process or rootfs-baked env.** Rejected: process-level env outlives the exec (a pooled
@@ -42,7 +45,7 @@ into its own telemetry, so "we probably don't log it" is not a contract an SDK c
   the promise as stated; a compiler-elision-proof `zeroize` can be revisited if the public API ever
   carries higher-assurance requirements.
 
-**Why.** The public API is embedder-driven: every SDK-shaped caller passes files + env, and the engine's
+The public API is embedder-driven: every SDK-shaped caller passes files + env, and the engine's
 observable surfaces are precisely where a hoster's log pipeline would exfiltrate a leaked value.
 Making non-leakage a *tested contract*, a sentinel grepped out of every surface, with a positive
 control proving the console capture is real, is what lets a downstream pin this crate and pass

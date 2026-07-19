@@ -141,7 +141,13 @@ impl Histogram {
             cumulative += self.buckets[i].load(Ordering::Relaxed);
             sample(out, name, &format!("_bucket{{le=\"{label}\"}}"), cumulative);
         }
-        let count = self.count.load(Ordering::Relaxed);
+        // `+Inf`/`_count` must be >= every finite bucket cumulative (the exposition spec's
+        // monotonicity). `observe` bumps `count` before the slot so x86's store order keeps that
+        // true, but on a weaker-ordered arch (aarch64 is supported) a `Relaxed` scrape can see a
+        // slot increment without the matching `count` one. Clamp up to `cumulative` so a mid-observe
+        // scrape never emits a non-monotonic histogram. Steady state (count >= cumulative) is a
+        // no-op; the raised value keeps `+Inf` and `_count` equal, as the spec also requires.
+        let count = self.count.load(Ordering::Relaxed).max(cumulative);
         sample(out, name, "_bucket{le=\"+Inf\"}", count);
         let sum_secs = self.sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
         sample(out, name, "_sum", format!("{sum_secs:.6}"));
@@ -618,6 +624,25 @@ mod tests {
         let m = Metrics::default();
         m.session_closed();
         assert!(m.render(None).contains("agentd_sessions_active 0"));
+    }
+
+    #[test]
+    fn a_bucket_visible_before_its_count_still_renders_monotonic() {
+        // The weak-ordering transient the render-side clamp guards: a scrape sees a per-bucket
+        // increment but not yet the matching `count` one (on aarch64 the two `Relaxed` writes in
+        // `observe` can be reordered). Model it directly, a bucket at 1 with `count` still 0, and
+        // assert the exposition stays monotonic: `+Inf` (and `_count`) clamp up to the bucket
+        // cumulative rather than emitting a finite bucket that exceeds `+Inf`.
+        let h = Histogram::default();
+        h.buckets[0].store(1, Ordering::Relaxed);
+        let mut out = String::new();
+        h.render(&mut out, "x");
+        assert!(out.contains("x_bucket{le=\"0.005\"} 1"), "{out}");
+        assert!(
+            out.contains("x_bucket{le=\"+Inf\"} 1"),
+            "+Inf clamps up: {out}"
+        );
+        assert!(out.contains("x_count 1"), "count matches +Inf: {out}");
     }
 
     #[test]

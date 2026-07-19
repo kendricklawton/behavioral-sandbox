@@ -1,10 +1,13 @@
 # 014. Cgroup-owned VM lifetime: a sentinel that outlives the driver, and a file-based kill handle *(2026-07-14)*
 
-**Problem.** Teardown was `Drop`-based: correct on every path the driver survives, but a `SIGKILL`ed,
-OOM-killed, or Ctrl-C'd driver never runs `Drop`, and its Firecracker children lived on as orphans
-holding KVM memory. No in-process fix exists (a signal handler can't catch `SIGKILL`, and would only
-paper over `SIGINT`). Separately, an embedder blocked in `exec` (`&self`) had no way to force a wedged
-run down: `shutdown` consumes `self`, which the blocked call still borrows.
+**Context.** A VMM outlives nothing it does not force to die. The obvious teardown path, `Drop`, is
+correct on every path the driver survives, but the driver does not always survive: a `SIGKILL`, an OOM
+kill, or a Ctrl-C leaves `Drop` unrun, and the Firecracker children live on as orphans holding KVM
+memory. No in-process mechanism closes this: a signal handler cannot catch `SIGKILL`, and would only
+paper over `SIGINT`. So VM lifetime cannot be owned by anything inside the driver process; it has to be
+owned by something the kernel keeps after the driver is gone. A second force pulls the same way: an
+embedder blocked in `exec` (`&self`) needs a way to force a wedged run down, yet `shutdown` consumes
+`self`, which the blocked call still borrows, so the kill switch cannot be the shutdown path either.
 
 **Decision.** Crash-only design: the VM's lifetime is owned by things that survive the driver's death,
 all built from the cgroup the VM already has.
@@ -30,7 +33,7 @@ all built from the cgroup the VM already has.
   VM down; the blocked `exec` returns a typed error when the vsock peer closes. Where no cgroup exists
   it falls back to signalling the pid (safe while the VM is unreaped; a `torn_down` flag set *before*
   the reap makes late kills no-ops, so a recycled pid is never signalled). Surfaced on `RunningVm` now,
-  on `Sandbox` in P7.
+  on `Sandbox` once the sandbox lifecycle API lands.
 
 **Alternatives considered.**
 - **`PR_SET_PDEATHSIG` on the child.** The classic answer, rejected: it needs a `pre_exec` hook
@@ -39,7 +42,7 @@ all built from the cgroup the VM already has.
 - **A janitor daemon / pid files.** Rejected: a daemon is platform territory (guardrail 4), and pid
   files race pid recycling. The sentinel is per-VM, ephemeral, and dies right after cleanup.
 - **A signal handler.** Rejected as the mechanism (only papers over `SIGINT`; `SIGKILL`/OOM remain),
-  which is exactly why the roadmap deferred this box until the cgroup existed.
+  which is exactly why this work waited until the cgroup existed to build on.
 - **`kill(2)` from the handle.** Needs `unsafe` (or a libc shim); the cgroup file is the safe,
   aliasable kill switch the cgroup already gave us, the handle holds a path, not a process.
 

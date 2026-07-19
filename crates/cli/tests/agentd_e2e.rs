@@ -1,4 +1,5 @@
-//! Phase 16 demo, as tests: drive the real `agentd` daemon over its unix socket through the full
+//! The `agentd` daemon end to end, as tests (the wire API, decision 034, docs/daemon.md): drive the
+//! real daemon over its unix socket through the full
 //! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.
 //! Three angles:
@@ -7,10 +8,10 @@
 //!    (parsed with `serde_json::Value`, no access to the daemon's Rust types), the proof the wire is
 //!    hand-debuggable and every message carries its `schema`.
 //! 2. [`the_reference_client_drives_a_full_session`] drives the same daemon through the **reference
-//!    client** ([`agentd_client::Client`]), the P16.4 proof a caller needs only the wire contract
+//!    client** ([`agentd_client::Client`]), the proof a caller needs only the wire contract
 //!    (the client links no `agent-vmm`).
 //! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agentd --prewarm 1` and asserts a bare
-//!    `open` comes back `pooled: true`, the P16.3 fast path.
+//!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the agent
 //! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p agent-cli -- --ignored`. Unjailed

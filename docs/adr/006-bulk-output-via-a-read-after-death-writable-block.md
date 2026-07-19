@@ -1,11 +1,21 @@
 # 006. Bulk output via a read-after-death writable block device *(2026-07-12)*
 
+**Context.** A run produces output in two shapes: a few small files the vsock channel already carries
+per frame as `Response::File`, and the whole working directory or a single large artifact, for which
+the channel's framing and round-trips are the wrong tool. The engine needs a bulk-output surface for
+the second shape, and it must match the input side's discipline: move data at near-disk speed with **no
+guest-agent change**, and let the host read the result back **rootless**, with no `mount`, no loopback,
+no `sudo`. Two forces shape the mechanism. First, Firecracker holds the writable image open and the
+guest may still be writing while the VM lives, so any host read that replays the ext4 journal races the
+VMM and could corrupt the image. Second, the guest controls the image's contents, names, and link
+targets, so extraction has to treat an output symlink as hostile.
+
 **Decision.** When `BootConfig.output_dir` is set, the driver attaches a **blank, writable** ext4 as
 a third block device (labelled `agent-output`, `is_read_only: false`); the guest mounts it read-write
 at `/output`, so a command's files under `/output/...` are the bulk-output surface. `RunningVm::`
 `collect_outputs` (consumes the VM) then reads that image back into the host directory. It is the
 whole-working-dir / large-file counterpart to the vsock channel's per-frame `Response::File`
-artifacts (P2.5), which carry only small files. Readback is **rootless** and happens **after the VMM
+artifacts, which carry only small files. Readback is **rootless** and happens **after the VMM
 has exited**: stop the VM (cooperative `SendCtrlAltDel`, then a hard kill), `e2fsck -fy` the image to
 recover the journal, then `debugfs rdump` the tree out, no loopback, no `mount`, no `sudo`.
 
@@ -19,8 +29,8 @@ recover the journal, then `debugfs rdump` the tree out, no loopback, no `mount`,
   device carries what the channel can't at near-disk speed, with **no guest-agent change** (the
   command writes to `/output`; a wedged grandchild can't wedge the agent).
 - **Loop-mount the image host-side** and copy. Rejected: `mount` needs root/`CAP_SYS_ADMIN`, breaking
-  the rootless discipline P3.4 set. `debugfs rdump` reads an ext4 without mounting, mirroring how
-  `mke2fs -d` *writes* one without mounting.
+  the rootless discipline the driver holds to. `debugfs rdump` reads an ext4 without mounting, mirroring
+  how `mke2fs -d` *writes* one without mounting.
 - **`fuse2fs` + `cp --sparse=always`.** Not available on the reference host (no `fuse2fs` binary), and
   it adds a `/dev/fuse` dependency and a real mount to unwind; `debugfs` keeps deps to e2fsprogs.
 

@@ -1,5 +1,15 @@
 # 007. A byte-for-byte reproducible rootfs build *(2026-07-12)*
 
+**Context.** The rootfs is a build-time input to an isolation boundary, so its reproducibility is a
+first-class "measured, not marketed" property: a build you can't reproduce byte-for-byte is a claim you
+can't check. `cargo xtask build-rootfs` assembles `rootfs-agent.ext4` from an Alpine minirootfs plus an
+`apk add` closure and the guest agent binary, and two forces pull against each other. Determinism wants
+every input pinned and every timestamp fixed; the everyday build wants to keep working when upstream
+Alpine moves. `SOURCE_DATE_EPOCH`/`hash_seed`/`lazy_itable_init=0` are the standard ext4 determinism
+levers, and the non-obvious last mile is that a floating package install can stay both reproducible and
+checkable without becoming brittle: a recorded closure makes package drift *visible* without making the
+build *fail* the day upstream bumps.
+
 **Decision.** `cargo xtask build-rootfs` is **deterministic**: two builds from the same inputs produce
 a byte-identical `rootfs-agent.ext4`. Three non-determinism sources are pinned:
 - **`mke2fs` timestamps + directory-hash seed.** `SOURCE_DATE_EPOCH` (a fixed constant, scoped to the
@@ -35,11 +45,6 @@ upstream bump. The default `build-rootfs` stays one command (deterministic image
   Rejected: those are already source-of-truth constants in `xtask`; a second copy just drifts. The
   only thing not already captured is the resolved closure, which *is* the lockfile.
 
-**Why.** Reproducibility is a first-class "measured, not marketed" property: a build you can't
-reproduce is a claim you can't check. `SOURCE_DATE_EPOCH`/`hash_seed`/`lazy_itable_init=0` are the
-standard ext4 determinism levers; the apk-log removal was the non-obvious last mile. The lockfile
-makes package drift *visible* without making the build *brittle*.
-
 **Consequences and notes.**
 - **Reproducibility is a `ci-privileged`-guarded property**, not the everyday `ci` gate's, it needs
   the musl target + network + `mke2fs`, so `--verify` runs where the boot tests already do.
@@ -47,13 +52,13 @@ makes package drift *visible* without making the build *brittle*.
   closure is independent of the agent binary), so it isn't a per-commit chore.
 - **Durable over-time reproducibility still rests on Alpine's CDN** until the `.apk` closure is
   vendored (the deferred hardening); today a bump makes `--verify` fail loudly with a re-pin hint.
-- **The same availability class covers `fetch-artifacts`' inputs** (P6.9d): the pinned guest kernel
+- **The same availability class covers `fetch-artifacts`' inputs**: the pinned guest kernel
   and Ubuntu boot rootfs come from the Firecracker CI S3 bucket, sha256-pinned, so tamper-*safe*
   but availability-*fragile*. A deleted bucket (or a retired Alpine branch) bricks **fresh-host
   setup** while existing `artifacts/` dirs keep working, and nothing upstream owes these URLs
   permanence. The failure is loud (a hash-checked fetch fails, it never silently substitutes), and
   the durable fix, vendoring the kernel, base images, and `.apk` closure as release artifacts of
-  this repo, rides the P19.1 packaging work, where a self-host bundle needs them offline anyway.
+  this repo, rides the self-host packaging work, where a self-host bundle needs them offline anyway.
 - **A fixed htree hash seed is safe here**, the seed only matters against adversarial directory-hash
   flooding, which a trusted, pinned, build-time image doesn't face.
 - **The guarantee is same-host determinism, not cross-machine bit-reproducibility.** The rootless

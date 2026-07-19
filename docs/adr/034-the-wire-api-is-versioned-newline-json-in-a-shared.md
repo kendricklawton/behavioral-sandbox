@@ -1,22 +1,25 @@
 # 034. The wire API is versioned newline-JSON in a shared `agentd-protocol` crate, not gRPC *(2026-07-17)*
 
-**Decision.** `agentd`'s wire API, the SDK contract Phase 20 freezes, is **newline-delimited JSON
+**Context.** `agentd` exposes the engine over a wire API, and that wire is a contract downstream
+depends on: the language SDKs (separate repos) freeze against it, so its shape is a long-lived
+commitment, not an implementation detail. Two forces set that shape. First, the peer is a **local,
+trusted-ish client** the hoster runs, not the untrusted guest, so hand-debuggability (`socat`/`nc` by
+hand) and "any language with a JSON library and a unix socket can drive it" outweigh a compact wire.
+Second, the daemon is synchronous, thread-per-connection, with **no async runtime** on the host path
+(the same posture the `Pool` doc restates as an invariant); a gRPC stack would drag `tonic` / `prost`
+and a `tokio` stack into that posture for no gain here. The one adversarial concern that still applies
+is guardrail 5: even a trusted-ish peer's input is bounded, so every decode has a message-size cap and
+returns a typed error, never a panic/hang/unbounded allocation.
+
+**Decision.** `agentd`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
 over a unix socket**, and every message (request *and* response) carries a leading `schema` field.
 The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\*
 → `close`. It is **not gRPC**.
 
-**Why JSON, not gRPC.** The daemon is synchronous, thread-per-connection, with **no async runtime** on
-the host path (the same posture the `Pool` doc restates as an invariant); gRPC would drag `tonic` /
-`prost` and a `tokio` stack into that posture for no gain here. The peer is a **local, trusted-ish
-client** the hoster runs, not the untrusted guest, so hand-debuggability (`socat`/`nc` by hand) and
-"any language with a JSON library and a unix socket can drive it" outweigh a compact wire. The one
-adversarial concern that still applies is guardrail 5: every decode is bounded by a message-size cap
-and returns a typed error, never a panic/hang/unbounded allocation.
-
 **Why a `schema` field now, when the shape isn't frozen.** Precisely *because* it isn't frozen yet:
 stamping `schema: 1` on every message and rejecting a mismatch **up front, before the body is
 trusted**, means a client built against a future revision fails loudly instead of being
-half-understood. The stamp is the seam Phase 20 freezes against. (It is distinct from the audit
+half-understood. The stamp is the seam the SDKs freeze against. (It is distinct from the audit
 record's own `schema` and the CLI's `--json` run-result `schema`: three surfaces, three independent
 versions.)
 
