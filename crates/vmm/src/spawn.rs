@@ -1219,6 +1219,22 @@ fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
             )));
         }
     };
+    // With the path reserved (`create_new` above, so a concurrent restore's marker is never
+    // clobbered), drop the stager's pid marker the orphan sweep checks before reclaiming a
+    // dead-source-pid dir (`sweep::RESTORE_STAGING_MARKER`): while this pid is alive the sweep
+    // defers the dir, so the copy→`PUT /snapshot/load` window is never `remove_dir_all`'d out from
+    // under us. A failed marker write aborts the stage: an unmarked copy would be sweep-raceable.
+    if let Some(parent) = backing.parent() {
+        let marker = parent.join(crate::sweep::RESTORE_STAGING_MARKER);
+        if let Err(e) = std::fs::write(&marker, std::process::id().to_string()) {
+            drop(dst);
+            unstage_restore_disk(backing);
+            return Err(VmmError::Vmm(format!(
+                "write restore-staging marker {}: {e}",
+                marker.display()
+            )));
+        }
+    }
     let copy_bytes =
         std::fs::File::open(copy).and_then(|mut src| std::io::copy(&mut src, &mut dst).map(|_| ()));
     if let Err(e) = copy_bytes {
@@ -1273,13 +1289,15 @@ fn ensure_private_staging_dir(dir: &Path) -> Result<(), VmmError> {
     }
 }
 
-/// Remove the staged restore disk (and its parent dir if now empty), once Firecracker holds the fd.
-/// Best-effort: the open fd keeps the inode alive for the VM's lifetime, so a failure here leaks at
-/// most an empty file/dir under `/tmp`, never the VM's disk. `remove_dir` only succeeds on an empty
-/// dir, so it never touches a directory that still holds a live VM's files.
+/// Remove the staged restore disk, its staging marker, and the parent dir if now empty, once
+/// Firecracker holds the fd. Best-effort: the open fd keeps the inode alive for the VM's lifetime,
+/// so a failure here leaks at most an empty file/dir under `/tmp`, never the VM's disk.
+/// `remove_dir` only succeeds on an empty dir, so it never touches a directory that still holds a
+/// live VM's files.
 fn unstage_restore_disk(backing: &Path) {
     let _ = std::fs::remove_file(backing);
     if let Some(parent) = backing.parent() {
+        let _ = std::fs::remove_file(parent.join(crate::sweep::RESTORE_STAGING_MARKER));
         let _ = std::fs::remove_dir(parent);
     }
 }
