@@ -31,6 +31,38 @@ const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
 /// with the fixed UUID + hash seed, this makes two builds byte-identical. 2024-01-01T00:00:00Z.
 const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
 
+/// The reproducibility floor: `mke2fs` honours `SOURCE_DATE_EPOCH` from e2fsprogs 1.47.1; older
+/// versions silently ignore it and stamp wall-clock times, so two builds of the identical tree
+/// differ (Ubuntu 24.04 ships 1.47.0 and hit exactly this). [`build_rootfs`] probes it: a hard
+/// error under `--verify` (which claims reproducibility), a warning on a plain build (the image
+/// still boots fine). `cargo xtask setup` surfaces the same probe as a dev-toolchain row.
+pub(crate) const MKE2FS_SOURCE_DATE_EPOCH_MIN: (u32, u32, u32) = (1, 47, 1);
+
+/// The installed `mke2fs` version, or `None` if the tool is missing or its banner unparseable
+/// (a missing tool fails later at the build step with its own spawn error).
+pub(crate) fn mke2fs_version() -> Option<(u32, u32, u32)> {
+    let out = std::process::Command::new("mke2fs")
+        .arg("-V")
+        .output()
+        .ok()?;
+    // `-V` prints the banner on stderr: `mke2fs 1.47.4 (6-Mar-2025)`.
+    parse_mke2fs_version(&String::from_utf8_lossy(&out.stderr))
+}
+
+/// Parse `mke2fs 1.47.4 (6-Mar-2025)` to `(1, 47, 4)`. Non-digit suffixes in a component
+/// (`-rc1`, `~pre`) are dropped; missing components are zero.
+fn parse_mke2fs_version(banner: &str) -> Option<(u32, u32, u32)> {
+    let token = banner.lines().next()?.split_whitespace().nth(1)?;
+    let mut parts = token.split('.').map(|part| {
+        let digits: String = part.chars().take_while(char::is_ascii_digit).collect();
+        digits.parse::<u32>().ok()
+    });
+    let major = parts.next().flatten()?;
+    let minor = parts.next().flatten().unwrap_or(0);
+    let patch = parts.next().flatten().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
 /// Image size. Headroom over the payload so `apk.static --root` has room without a re-size. Bumped
 /// 128→256 when Node (its `icu-libs`/`simdjson`/`ada-libs` closure, ~64 MiB) joined python3.
 const ROOTFS_SIZE_MIB: u32 = 256;
@@ -243,9 +275,9 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     std::fs::create_dir_all(staging.join("output")).context("create /output mountpoint")?;
 
     // Build the ext4 from the staging dir, rootless, via `mke2fs -d`, and **deterministic**:
-    // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH`, which stamps the superblock
-    // create/write/check times and clamps the copied file mtimes down to the epoch, make two builds
-    // byte-identical. `lazy_itable_init=0` writes the inode table eagerly, so its bytes are fixed here
+    // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` (honoured from e2fsprogs
+    // 1.47.1, probed in `build_rootfs`), which stamps the superblock create/write/check times and
+    // clamps the copied file mtimes down to the epoch, make two builds byte-identical. `lazy_itable_init=0` writes the inode table eagerly, so its bytes are fixed here
     // rather than finished non-deterministically by the guest kernel on first mount.
     // Build to a `<out>.part` sibling and atomically rename into place only after mke2fs succeeds.
     // A Ctrl-C or mke2fs failure then leaves an obvious partial at `<out>.part`, never a plausible
@@ -321,6 +353,20 @@ struct RootfsBuild {
 /// upstream bump); `--verify` proves reproducibility, a second build must be byte-identical, and
 /// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the CI gate.
 pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
+    // Name the mke2fs floor up front (see `MKE2FS_SOURCE_DATE_EPOCH_MIN`), instead of letting
+    // `--verify` die later on a bare two-hash mismatch a reader can't diagnose.
+    if let Some((major, minor, patch)) = mke2fs_version() {
+        if (major, minor, patch) < MKE2FS_SOURCE_DATE_EPOCH_MIN {
+            let msg = format!(
+                "mke2fs {major}.{minor}.{patch} ignores SOURCE_DATE_EPOCH (honoured from e2fsprogs \
+                 1.47.1), so the image will not be byte-reproducible; install e2fsprogs >= 1.47.1"
+            );
+            if verify {
+                bail!("{msg}");
+            }
+            println!("! {msg} (building anyway; the image itself is fine)");
+        }
+    }
     let out = agent_rootfs_path();
     let build = assemble_rootfs(&out)?;
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
@@ -672,4 +718,39 @@ fn set_mode_0755(path: &Path) -> Result<()> {
         .permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(path, perms).with_context(|| format!("chmod +x {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_mke2fs_version, MKE2FS_SOURCE_DATE_EPOCH_MIN};
+
+    #[test]
+    fn parses_the_stock_banner() {
+        assert_eq!(
+            parse_mke2fs_version("mke2fs 1.47.4 (6-Mar-2025)\n\tUsing EXT2FS Library 1.47.4\n"),
+            Some((1, 47, 4))
+        );
+    }
+
+    #[test]
+    fn the_ubuntu_noble_version_is_below_the_floor() {
+        let noble = parse_mke2fs_version("mke2fs 1.47.0 (5-Feb-2023)").unwrap();
+        assert!(noble < MKE2FS_SOURCE_DATE_EPOCH_MIN);
+    }
+
+    #[test]
+    fn suffixed_and_short_versions_parse() {
+        assert_eq!(
+            parse_mke2fs_version("mke2fs 1.47.1-rc2 (x)"),
+            Some((1, 47, 1))
+        );
+        assert_eq!(parse_mke2fs_version("mke2fs 1.47 (x)"), Some((1, 47, 0)));
+    }
+
+    #[test]
+    fn garbage_banners_parse_to_none() {
+        assert_eq!(parse_mke2fs_version(""), None);
+        assert_eq!(parse_mke2fs_version("mke2fs"), None);
+        assert_eq!(parse_mke2fs_version("mke2fs weird-version (x)"), None);
+    }
 }

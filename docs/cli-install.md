@@ -81,7 +81,10 @@ tracks their supported set.
   `PATH` or named via `AGENT_FIRECRACKER`.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
   rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
-  loopback, no `sudo`). A missing tool is a clear typed error.
+  loopback, no `sudo`). A missing tool is a clear typed error. The **reproducible** rootfs build
+  (`cargo xtask build-rootfs --verify`) additionally needs e2fsprogs **>= 1.47.1**, where `mke2fs`
+  starts honouring `SOURCE_DATE_EPOCH` (older versions stamp wall-clock times; Ubuntu 24.04's
+  1.47.0 is below the floor, `cargo xtask setup` probes it).
 - **`iproute2`** (`ip`): the driver creates and deletes the per-VM **tap** device backing the
   guest's virtio-net. Creating a tap needs `CAP_NET_ADMIN`.
 - **`curl`**: `cargo xtask fetch-artifacts` and `cargo xtask build-rootfs` download the pinned

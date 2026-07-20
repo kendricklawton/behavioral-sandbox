@@ -480,6 +480,10 @@ fn setup() -> Result<()> {
         "readelf (binutils: static-link verification)",
         dev_tool_path("readelf").is_some(),
     );
+    check(
+        "mke2fs >= 1.47.1 (reproducible rootfs: SOURCE_DATE_EPOCH honoured)",
+        matches!(rootfs::mke2fs_version(), Some(v) if v >= rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN),
+    );
 
     // The degradation matrix, the same fails-open-vs-hard split `agent doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.

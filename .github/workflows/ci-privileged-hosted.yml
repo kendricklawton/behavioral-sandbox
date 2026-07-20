@@ -70,6 +70,21 @@ jobs:
           sudo install -m0755 "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer
           firecracker --version
 
+      - name: mke2fs >= 1.47.1 (noble ships 1.47.0, which ignores SOURCE_DATE_EPOCH)
+        run: |
+          # The reproducible-rootfs verify needs mke2fs to honor SOURCE_DATE_EPOCH (added in
+          # e2fsprogs 1.47.1); Ubuntu 24.04's 1.47.0 silently ignores it and the two verify builds
+          # differ. Build the one binary from a pinned release; it links the e2fs libs statically
+          # by default, and /usr/local/sbin precedes /usr/sbin in PATH.
+          ver="1.47.2"
+          curl -fsSL "https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${ver}/e2fsprogs-${ver}.tar.xz" -o /tmp/e2fsprogs.tar.xz
+          tar -C /tmp -xJf /tmp/e2fsprogs.tar.xz
+          cd "/tmp/e2fsprogs-${ver}"
+          ./configure >/dev/null
+          make -j"$(nproc)" >/dev/null
+          sudo install -m0755 misc/mke2fs /usr/local/sbin/mke2fs
+          mke2fs -V
+
       - name: Toolchains (nightly + rust-src + bpf-linker for the eBPF object; musl for the guest agent)
         run: |
           rustup toolchain install nightly --profile minimal --component rust-src
