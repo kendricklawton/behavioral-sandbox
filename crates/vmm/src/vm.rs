@@ -37,8 +37,14 @@ use crate::{Limits, RunResult, VmmError};
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
 /// Firecracker hands to our stdout); `reboot=k panic=1` make a guest panic/reboot exit the VMM
 /// promptly; `pci=off` trims an unused bus; `random.trust_cpu=on` avoids an entropy stall at boot.
-/// Firecracker adds `root=/dev/vda` itself from the root drive, so it is not listed here.
-const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
+/// `ipv6.disable=1` because the sandbox's network world is IPv4-only (ADR 008): a boot-time
+/// disable means the guest never emits IPv6 link-up chatter (MLD, duplicate-address detection)
+/// that the tap monitor would honestly flag as a non-IPv4 coverage gap, and a hostile guest
+/// cannot re-enable what its kernel never started. The host side of the same stance is
+/// `net::disable_ipv6_in_ns`. Firecracker adds `root=/dev/vda` itself from the root drive, so it
+/// is not listed here.
+const DEFAULT_BOOT_ARGS: &str =
+    "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on ipv6.disable=1";
 
 /// Substring that marks the guest reached userspace. The default is the **agent rootfs's** ready
 /// sentinel, printed by `agent-guest` once its vsock listener accepts: that image is what the

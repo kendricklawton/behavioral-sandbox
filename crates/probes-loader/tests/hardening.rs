@@ -409,9 +409,15 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     let hog_out = vm
         .exec(&hog, b"")
         .expect("the mem-hog exec must complete (guest OOM, not VMM death)");
-    assert_eq!(
-        hog_out.exit_code, 0,
-        "the mem-hog run stays contained, exit 0"
+    // Two contained endings, per the comment above: Python's MemoryError (exit 0, when the
+    // allocation fails cleanly) or the guest's own OOM killer (exit 137 = 128+SIGKILL, when the
+    // kernel reaps the hog first). Which one fires depends on guest memory pressure timing; both
+    // stay inside the hardware boundary, and the containment proof is the memory.peak bound below.
+    assert!(
+        hog_out.exit_code == 0 || hog_out.exit_code == 137,
+        "the mem-hog must end inside the guest (MemoryError exit 0, or its OOM killer's 137), \
+         got {}",
+        hog_out.exit_code
     );
     let peak: u64 = cg
         .read("memory.peak")

@@ -19,6 +19,18 @@ of a running sandbox is auditable from the host. This settles the queued network
 (deny-by-default over NAT-to-world) in favor of denying, and orders it ahead of the addressing/tap work,
 so the tap lands already denying, not opened-then-restricted.
 
+The same posture fixes the protocol surface: **the sandbox's network world is IPv4-only.** The flow
+view, the egress policy, and the denial records all speak IPv4; a protocol the observers cannot parse
+is an unobserved channel, which deny-by-default forbids ("every allowance is explicit and recorded",
+and no policy can express an IPv6 allowance). So IPv6 is disabled at both ends of the tap rather than
+left to kernel defaults: the guest kernel boots with `ipv6.disable=1` (a hostile guest cannot restart
+a stack its kernel never started) and the per-VM netns sets the `disable_ipv6` sysctls before any
+interface comes up (silencing the host stack's own link-up chatter, MLD reports and duplicate-address
+detection, which surfaced as honest non-IPv4 coverage gaps on hosted CI runners). The record's
+non-IPv4 gap machinery stays armed as the failsafe: if a frame crosses anyway, the record says so
+rather than claiming completeness. Re-enabling IPv6 is a deliberate future capability with a forced
+order: the flow view, policy shape, and record learn IPv6 *first*, then the two disables lift.
+
 **Alternatives considered.**
 - **Default `MASQUERADE` to give the guest general egress (the "it just works" NAT).** Rejected: it is
   the fastest way to make a "guest reaches an allowed endpoint" test pass, but it opens *general* egress

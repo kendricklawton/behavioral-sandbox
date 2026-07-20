@@ -87,6 +87,7 @@ impl Tap {
 
     /// Bring up `lo`, create + up the tap, and assign the host /30 end, all *inside* the netns.
     fn build_tap(netns: &str, owner: Option<(u32, u32)>) -> Result<(), VmmError> {
+        disable_ipv6_in_ns(netns)?;
         ip_in_ns(netns, &["link", "set", "dev", "lo", "up"])?;
         let (uid, gid);
         let mut add = vec!["tuntap", "add", "dev", TAP_NAME, "mode", "tap"];
@@ -209,6 +210,26 @@ fn ip_in_ns(netns: &str, args: &[&str]) -> Result<(), VmmError> {
     let mut full = vec!["netns", "exec", netns, "ip"];
     full.extend_from_slice(args);
     run_ip(&full)
+}
+
+/// Disable IPv6 for the whole netns (`all` + `default`), before any interface comes up. The
+/// sandbox's network world is IPv4-only (ADR 008), so the only IPv6 the netns would ever carry is
+/// the host stack's own link-up chatter (MLD reports, duplicate-address detection), which crosses
+/// the tap and surfaces as an honest non-IPv4 coverage gap in the audit record (hosted CI runners
+/// emit it; hosts with IPv6 off don't). The guest half of the same stance is `ipv6.disable=1` on
+/// the kernel command line (`DEFAULT_BOOT_ARGS` in `vm.rs`). A kernel without IPv6 has nothing to
+/// disable, so the missing sysctl dir is a no-op.
+fn disable_ipv6_in_ns(netns: &str) -> Result<(), VmmError> {
+    run_ip(&[
+        "netns",
+        "exec",
+        netns,
+        "sh",
+        "-c",
+        "test -d /proc/sys/net/ipv6 || exit 0; \
+         echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 && \
+         echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6",
+    ])
 }
 
 /// Run `ip <args>`, mapping a missing binary or a nonzero exit to a typed error.
