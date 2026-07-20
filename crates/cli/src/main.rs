@@ -350,8 +350,17 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         let worker_done = Arc::clone(&done);
         let (argv, env, get) = (args.argv.clone(), args.env.clone(), args.get.clone());
         let worker = std::thread::spawn(move || {
+            // Drop-based, not a plain store after the call: a panicking exec must still flag
+            // completion on unwind, or the view shows "running" forever and only `q` closes it
+            // (the panic itself still surfaces through `worker.join()` below).
+            struct DoneOnExit(Arc<AtomicBool>);
+            impl Drop for DoneOnExit {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                }
+            }
+            let _done = DoneOnExit(worker_done);
             let result = sandbox.exec_with_files(&argv, &stdin, &files_in, &env, &get);
-            worker_done.store(true, Ordering::Release);
             (sandbox, result)
         });
         if let Some(p) = probes.as_ref() {

@@ -127,6 +127,49 @@ impl Timeline {
 /// no-panic path.
 struct Term {
     terminal: Terminal<ratatui::backend::CrosstermBackend<std::io::Stderr>>,
+    /// A listener that restores the terminal if a signal (SIGTERM/SIGINT/SIGHUP) is delivered while
+    /// the view is up, the one exit path `Drop` can't cover (a signal terminates without unwinding).
+    /// `None` on a host that refused the registration (the view still runs; only the signal case is
+    /// unguarded). Closed and joined on `Drop` so a normal exit leaves signal disposition untouched.
+    signal_guard: Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)>,
+}
+
+/// Spawn the view's signal-restore listener: on SIGTERM/SIGINT/SIGHUP, restore the terminal (from
+/// normal thread context, so crossterm is safe to call, the `Signals` iterator does not deliver in
+/// async-signal context) and exit with the signal's conventional status. `Drop` won't run (the
+/// process exits), but the terminal is left sane; the sandbox VM is reaped by the lifetime sentinel
+/// and its residue reclaimed by the next run's startup sweep. External SIGINT is caught here; a
+/// keyboard Ctrl-C stays a key event under raw mode and is handled as quit in the poll loop.
+/// Best-effort: a failed registration returns `None`, keeping the pre-existing behavior.
+fn install_view_signal_restore(
+) -> Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)> {
+    let mut signals = match signal_hook::iterator::Signals::new([
+        signal_hook::consts::SIGTERM,
+        signal_hook::consts::SIGINT,
+        signal_hook::consts::SIGHUP,
+    ]) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "no signal restore for the live view; a signal mid-view could leave the terminal raw"
+            );
+            return None;
+        }
+    };
+    let handle = signals.handle();
+    let thread = std::thread::Builder::new()
+        .name("agent-watch-signals".into())
+        .spawn(move || {
+            if let Some(sig) = signals.forever().next() {
+                let _ = disable_raw_mode();
+                let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
+                std::process::exit(128 + sig);
+            }
+            // Reached only when `handle.close()` ends the iterator on a normal view exit: nothing to do.
+        })
+        .ok()?;
+    Some((handle, thread))
 }
 
 impl Term {
@@ -149,7 +192,10 @@ impl Term {
             prev(info);
         }));
         match Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stderr())) {
-            Ok(terminal) => Ok(Self { terminal }),
+            Ok(terminal) => Ok(Self {
+                terminal,
+                signal_guard: install_view_signal_restore(),
+            }),
             Err(e) => {
                 let _ = std::panic::take_hook(); // drop our hook (Terminal init failed, no view)
                 let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
@@ -162,6 +208,13 @@ impl Term {
 
 impl Drop for Term {
     fn drop(&mut self) {
+        // Stop the signal listener first: closing its handle ends `forever()`, the thread exits, and
+        // dropping its `Signals` deregisters the handlers, so a signal after a normal view exit gets
+        // its default disposition again (never a stale restore of an already-restored terminal).
+        if let Some((handle, thread)) = self.signal_guard.take() {
+            handle.close();
+            let _ = thread.join();
+        }
         // Reset the panic hook to the default (drops ours), then restore the terminal. Idempotent
         // with the hook itself if a panic already ran it.
         let _ = std::panic::take_hook();

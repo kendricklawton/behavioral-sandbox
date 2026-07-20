@@ -177,14 +177,22 @@ fn ip_netns_add(name: &str) -> Result<(), VmmError> {
 /// it. A failure is logged, never propagated or panicked (the no-panic host path), so an orphaned netns
 /// is at least visible.
 pub(crate) fn netns_del(name: &str) {
-    match Command::new("ip").args(["netns", "del", name]).output() {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => tracing::warn!(
+    // Bounded, because this runs inside teardown/`Drop`: `ip netns del` can wedge in the kernel (rtnl
+    // lock, a device that won't release its refcount), and a plain `.output()` would hang `Drop`. On
+    // timeout `run_bounded` detaches; the netns then lingers, which `reclaim_scratch` already handles
+    // by keeping the scratch dir so the orphan sweep reclaims the pair (a failed delete's existing path).
+    let mut cmd = Command::new("ip");
+    cmd.args(["netns", "del", name]);
+    match crate::proc::run_bounded(cmd, crate::proc::TEARDOWN_HELPER_TIMEOUT, "ip netns del") {
+        crate::proc::Bounded::Exited { success: true, .. } => {}
+        crate::proc::Bounded::Exited { stderr, .. } => tracing::warn!(
             netns = %name,
-            error = %String::from_utf8_lossy(&out.stderr).trim(),
+            error = %stderr.trim(),
             "failed to delete network namespace"
         ),
-        Err(e) => tracing::warn!(netns = %name, error = %e, "failed to spawn `ip netns del`"),
+        // Detached (wedged past the wall, or spawn/poll failed): logged inside `run_bounded`; the
+        // namespace is left behind for the sweep, exactly as a failed delete would leave it.
+        crate::proc::Bounded::Detached => {}
     }
 }
 

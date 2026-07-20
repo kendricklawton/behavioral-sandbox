@@ -168,12 +168,24 @@ impl Pool {
         self.ready.iter().map(RunningVm::vmm_pid).collect()
     }
 
-    /// Gracefully shut down every pooled clone (ask each guest to power off, then the guaranteed
-    /// teardown). Dropping the pool gives the same no-leak guarantee without the polite ask.
-    pub fn shutdown(self) {
-        for vm in self.ready {
-            let _ = vm.shutdown();
+    /// Gracefully shut down every pooled clone. Ask **every** guest to power off first, then poll them
+    /// all against **one** shared grace window, so a pool of N clones pays one power-off grace
+    /// (`POWER_OFF_TIMEOUT`), not N (the old per-clone `vm.shutdown()` serialized the grace, a 50-clone
+    /// pool of guests ignoring `SendCtrlAltDel` took ~N×3 s). A guest
+    /// still alive at the deadline is hard-killed by its `Drop` when `self.ready` drops below, the same
+    /// no-leak guarantee `drop(pool)` gives, just without the polite ask.
+    pub fn shutdown(mut self) {
+        use std::time::Instant;
+        for vm in &mut self.ready {
+            vm.request_power_off();
         }
+        let deadline = Instant::now() + crate::vm::POWER_OFF_TIMEOUT;
+        // Poll the whole set on one clock; `vmm_alive` reaps a clone the instant it exits, so a
+        // cooperative guest is gone within a tick and only the stubborn ones ride to the deadline.
+        while Instant::now() < deadline && self.ready.iter_mut().any(RunningVm::vmm_alive) {
+            std::thread::sleep(crate::vm::POWER_OFF_POLL);
+        }
+        // `self.ready` drops here: each `RunningVm::Drop` kills+reaps whatever is still alive.
     }
 }
 

@@ -21,6 +21,7 @@ mod lifetime;
 mod net;
 mod paths;
 mod pool;
+mod proc;
 mod snapshot;
 mod spawn;
 mod sweep;

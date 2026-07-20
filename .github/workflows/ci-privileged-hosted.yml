@@ -1,0 +1,98 @@
+# Try the privileged suite on a GitHub-HOSTED runner, before standing up a self-hosted box.
+# Since 2023 the hosted ubuntu x86_64 runners expose /dev/kvm, so this self-provisions everything the
+# privileged path needs, KVM access, firecracker/jailer, net/fs tools, the eBPF toolchain, the guest
+# artifacts, and runs `cargo xtask ci-privileged` as root. If this stays green you may not need a
+# self-hosted runner at all; if the preflight fails on /dev/kvm or BTF, that is the signal to fall
+# back to the self-hosted `ci-privileged.yml`.
+#
+# SECURITY: dispatch-only. NEVER add a fork `pull_request` trigger, this runs untrusted-capable code
+# as root with KVM. Manual dispatch (and later a schedule / push-to-main) only, on code already yours.
+name: CI (privileged, hosted probe)
+
+on:
+  workflow_dispatch:
+  # Uncomment once it is proven green on a real run:
+  # push:
+  #   branches: [main]
+  # schedule:
+  #   - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-privileged-hosted
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Any v1.9.x, the driver pins on major.minor (doctor probes it). Bump the patch as upstream moves.
+  FC_VERSION: v1.9.1
+
+jobs:
+  hosted:
+    name: VM boot + probe attach (ubuntu-24.04 hosted)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Grant access to /dev/kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          ls -l /dev/kvm
+
+      - name: Preflight, does this runner have KVM + BTF?
+        run: |
+          echo "kernel: $(uname -r)"
+          test -e /dev/kvm \
+            || { echo "::error::no /dev/kvm on this runner; use the self-hosted ci-privileged.yml"; exit 1; }
+          test -e /sys/kernel/btf/vmlinux \
+            || { echo "::error::no BTF (/sys/kernel/btf/vmlinux); CO-RE eBPF cannot load here"; exit 1; }
+
+      - name: Scratch dir off any nodev mount (the jailer's chroot /dev/kvm lives under it)
+        run: |
+          sudo mkdir -p /agent-scratch && sudo chmod 1777 /agent-scratch
+          echo "AGENT_SCRATCH_DIR=/agent-scratch" >> "$GITHUB_ENV"
+
+      - name: Install host tools (firecracker + jailer + net/fs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 e2fsprogs binutils curl
+          url="https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          curl -fsSL "$url" -o /tmp/fc.tgz && tar -C /tmp -xzf /tmp/fc.tgz
+          sudo install -m0755 "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker
+          sudo install -m0755 "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer
+          firecracker --version
+
+      - name: Toolchains (nightly + rust-src + bpf-linker for the eBPF object)
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          cargo install bpf-linker --locked
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            crates/probes
+
+      - name: Build the guest artifacts + eBPF object
+        run: |
+          cargo xtask fetch-artifacts
+          cargo xtask build-rootfs
+          cargo xtask build-probes
+
+      - name: Host check (report; non-blocking)
+        run: |
+          sudo -E env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
+            "AGENT_SCRATCH_DIR=$AGENT_SCRATCH_DIR" cargo xtask setup || true
+
+      - name: Run the privileged gate (root, for the jailer + eBPF caps)
+        run: |
+          sudo -E env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
+            "AGENT_SCRATCH_DIR=$AGENT_SCRATCH_DIR" cargo xtask ci-privileged

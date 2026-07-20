@@ -75,8 +75,8 @@ pub(crate) const IFACE_ID: &str = "eth0";
 
 /// How long a graceful `SendCtrlAltDel` power-off is given to land before teardown stops waiting
 /// (the guaranteed kill in `Drop`/`stop_and_reap` takes over), and how often that wait polls.
-const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(3);
-const POWER_OFF_POLL: Duration = Duration::from_millis(50);
+pub(crate) const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
 /// baseline, [`from_env`](BootConfig::from_env) layers the `AGENT_*` overrides on top, and
@@ -646,6 +646,17 @@ impl RunningVm {
         // read it. `self` drops at the end of this method → `Drop` reclaims the scratch dir.
         self.stop_and_reap();
         collect_output_image(&output.image, &output.dest)
+    }
+
+    /// Issue the cooperative power-off ask (`SendCtrlAltDel`) **without waiting** for the guest to
+    /// act, so a batch caller ([`Pool::shutdown`](crate::Pool::shutdown)) can ask every clone first
+    /// and then poll them all against one shared grace, paying one [`POWER_OFF_TIMEOUT`], not one per
+    /// VM. Marks teardown begun (so a `KillHandle` no-ops on the soon-to-be-reaped pid), like
+    /// [`power_off_and_wait`](Self::power_off_and_wait). A guest still alive at the caller's deadline
+    /// is hard-killed by `Drop`, the same guaranteed teardown, just without the wait.
+    pub(crate) fn request_power_off(&mut self) {
+        self.lifetime.mark_down();
+        let _ = self.api.put("/actions", &Action::SendCtrlAltDel);
     }
 
     /// Ask the guest to power off (best-effort `SendCtrlAltDel`, an x86 ACPI-ish nicety over i8042),

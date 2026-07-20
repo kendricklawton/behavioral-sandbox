@@ -178,7 +178,13 @@ impl RunningVm {
                 state: VmStateKind::Resumed,
             },
         );
-        created?;
+        if let Err(e) = created {
+            // A failed create leaves partial, guest-RAM-sized bundle files that a later
+            // `Vm::restore` would pass its file-existence checks on and fail only deep in the
+            // load; sweep them (best-effort) so the caller's dir holds a bundle or nothing.
+            remove_partial_bundle(&state, &mem, (!shared_base).then_some(&root_drive));
+            return Err(e);
+        }
         // Resume failing after a successful create is the one path that can leave the guest paused
         // (the VMM is unresponsive, since the resume PATCH is otherwise instant). There is no public
         // un-pause, and a later `exec` would just burn its whole wall against a frozen guest, so say
@@ -235,5 +241,18 @@ impl RunningVm {
                 .map_err(|e| VmmError::Vmm(format!("copy root disk into snapshot bundle: {e}")))?;
         }
         Ok(())
+    }
+}
+
+/// Best-effort removal of the files a failed [`snapshot`](RunningVm::snapshot) may have partly
+/// written: the state file, the guest-RAM-sized memory file, and (for a private-copy disk) the
+/// bundled root disk. A shared read-only base is referenced in place, never copied, so it is passed
+/// as `None` and left untouched. Leaves the caller's dir holding a complete bundle or nothing, so a
+/// later `Vm::restore` can't half-open a torn one.
+fn remove_partial_bundle(state: &Path, mem: &Path, private_disk: Option<&Path>) {
+    let _ = std::fs::remove_file(state);
+    let _ = std::fs::remove_file(mem);
+    if let Some(disk) = private_disk {
+        let _ = std::fs::remove_file(disk);
     }
 }

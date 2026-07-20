@@ -15,11 +15,11 @@
 > hoster's job.
 >
 > **Scope of this repo:** the **core engine**, the Firecracker + eBPF sandbox of **Phases 0–19**,
-> defined by the four core properties (§0). The **vNext tracks** (Phases 20–21: the polyglot SDKs
+> defined by the four core properties (§0). The **vNext tracks** (Phases 21–22: the polyglot SDKs
 > and the software-isolation Wasmtime sibling) are **adjacent repos**, they build on this engine's
 > frozen wire API + audit-log format, but their code lives **outside** this repo and is
 > tracked here only as a forward map. This repo never trades its core properties to accommodate them: the
-> Wasmtime variant is a *sibling, not a backend* (Phase 21), so *isolation is hardware* holds here
+> Wasmtime variant is a *sibling, not a backend* (Phase 22), so *isolation is hardware* holds here
 > without exception.
 >
 > This file is the **single source of truth for progress**, of the core engine, and a map to its
@@ -54,12 +54,12 @@ Four properties every phase must protect:
 
 - **`v0.1.0` is the finish line**, the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; this is
-  P19.8).
-- **The vNext tracks (Phases 20–21) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
+  P20.8).
+- **The vNext tracks (Phases 21–22) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
   neither pulls tenancy/billing/scheduling into scope, and the Wasmtime sibling never dilutes this
-  engine's core properties (it's a separate artifact, see Phase 21).
+  engine's core properties (it's a separate artifact, see Phase 22).
 - **Everything until then is a pre-release `v0.0.x`.** Tag the foundation baseline (the engine
   boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
   patch as they land. These are checkpoints, not releases, no stability promise.
@@ -810,10 +810,10 @@ surface freezes.
       sha256-pinned (tamper-safe) but **availability-fragile**, a deleted bucket bricks new-host
       setup while existing artifact dirs keep working. Record the failure mode + the vendoring plan
       (decision 007 already notes the `.apk` closure half; this adds the kernel/base-image
-      half), pointing at P19.1 where vendored artifacts ride the packaging work. Docs only.
+      half), pointing at P20.1 where vendored artifacts ride the packaging work. Docs only.
       *(Recorded as a decision-007 consequence bullet: the kernel/base-image half joins the `.apk`
       half in the same availability class, loud failure (hash-checked fetches never silently
-      substitute), fresh-host-only blast radius, vendored as release artifacts at P19.1 where the
+      substitute), fresh-host-only blast radius, vendored as release artifacts at P20.1 where the
       self-host bundle needs them offline anyway.)*
 - **Exit gate:** a crash-looped host stays serviceable (sweep demo) and a mismatched host
   explains itself (`setup` demo).
@@ -1596,7 +1596,7 @@ interacting flags on `run`.
 - [x] **P14.9e** Version the JSON surface: a `schema` field (integer, starting at `1`) on the
       `--json` run result **and** the audit-record JSON, plus a written compatibility policy
       (additive within a version; field rename/removal bumps it). This is the seed the wire API
-      (P16.2) and the SDK freeze (Phase 20) harden, versioning lands *before* anything external
+      (P16.2) and the SDK freeze (Phase 21) harden, versioning lands *before* anything external
       parses these bytes, not after. (The audit record's open field questions are already settled:
       `overflow_events` semantics and the u64-nanosecond ceiling, decision 028's hardening pass.)
       *(Landed: a leading `schema` field on both surfaces, `RUN_RESULT_SCHEMA` on the `--json` run
@@ -1758,11 +1758,11 @@ A local daemon others drive over a socket: still engine, not PaaS.
       `docs/daemon.md`. `#[ignore]`d/privileged. Access control (socket-dir perms) and the wire-API
       freeze stay the hoster's / later boxes.)*
 - [x] **P16.2** A **versioned** wire API (JSON/gRPC, `(decision)`): open/exec/put/get/snapshot/
-      close/trace. This is the **SDK contract**, Phase 20 freezes and spec's it.
+      close/trace. This is the **SDK contract**, Phase 21 freezes and spec's it.
       *(Decision 034: newline-JSON, **not gRPC**, the daemon is synchronous with no async runtime,
       and the peer is a local trusted-ish client, so hand-debuggability (`socat`) and "any language +
       a JSON lib + a socket" beat a compact wire. Every message carries a leading `schema` field,
-      rejected on mismatch **before the body is trusted**, the seam Phase 20 freezes against (distinct
+      rejected on mismatch **before the body is trusted**, the seam Phase 21 freezes against (distinct
       from the audit-record and `--json` schemas). Lives in a new **`agentd-protocol`** crate
       (serde-only, **no `agent-vmm`**): the shared `Request`/`Response`/`Envelope` shapes + a bounded,
       typed line codec (guardrail 5, host-safe unit-tested, round-trips, schema-gate, blank-line/EOF,
@@ -1782,7 +1782,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       Fail-open: a host that can't build the pool (no KVM, no root) logs one warning and every session
       cold-boots. Non-`api:`.)*
 - [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agentd` over the
-      wire API, the seed the **polyglot SDKs (Phase 20)** harden into Go/Python/Node/C#. (The full
+      wire API, the seed the **polyglot SDKs (Phase 21)** harden into Go/Python/Node/C#. (The full
       SDK set is post-`v0.1.0`.)
       *(New **`agentd-client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
       `snapshot`/`trace`/`close`) with typed errors, no panics. Depends on `agentd-protocol` + a JSON
@@ -1958,7 +1958,7 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       fourth face. `Cmd::Run` boxed to keep the added flag under `clippy::large_enum_variant`.
       non-`api:` (probes-loader + CLI, not the pinned `vmm` surface).)*
 - [x] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
-      **Phase 20 SDKs** expose it as part of the SDK contract, an agent driving `agentd` from any
+      **Phase 21 SDKs** expose it as part of the SDK contract, an agent driving `agentd` from any
       language reads the same model-legible observation the CLI writes, not a CLI-only convenience.
       *(New `trace_summary` verb in `agentd-protocol`, parallel to `trace`: `Request::TraceSummary` →
       `Response::TraceSummary { summary }` (the projection JSON carried opaquely, so the protocol crate
@@ -1994,11 +1994,57 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
   scripted-agent example + its privileged e2e (P18.4) prove containment with the record showing
   reached-vs-blocked, no model in the host path.
 
-## Phase 19, Packaging & docs
+## Phase 19, Record integrity (make "tamper-evident" literal)
+
+The engine's headline is a **tamper-evident** audit record, and today that holds in exactly one sense:
+the record is **host-observed**, so the *guest* can't forge or alter it (decision 033, the trust
+boundary). But the finalized record is a plain JSON artifact, and the party that *consumes* it, a
+supervising agent loop or a hoster deciding whether to trust a run (Phase 18), reads it **after** it
+leaves the producing host. Nothing today lets that consumer **detect** post-hoc alteration by a
+compromised host process, an operator, or a transport. This phase makes the adjective mean what it
+says: the engine **signs** each finalized `RunRecord` with a host key the guest never sees, and ships
+a **verify** path, so *any* alteration is detectable, not only the guest's. It rides the deterministic
+JSON surface (P13.4) and the trust boundary already written down (decision 033); it lands **before**
+`v0.1.0` so the launch claim is honest, not aspirational.
+
+- [ ] **P19.1** `(decision)` The **integrity model + its boundary** → `docs/adr/`: what a signature
+      protects (post-hoc alteration of the stored/transmitted record) and what it explicitly does
+      **not** (a fully-compromised *producing* host can sign a lie: the trust root is the host signing
+      key, consistent with decision 033's "trust the host, not the guest" line, not a new trust
+      anchor). Fixes the primitive (an `ed25519` detached signature over the canonical record bytes)
+      and states that key custody is the **hoster's**, not a tenancy feature the engine grows
+      (guardrail 4).
+- [ ] **P19.2** **Sign the finalized record.** The loader signs the canonical (deterministic-JSON,
+      P13.4) `RunRecord` bytes with a host key loaded at startup (generated on first run; path via the
+      layered config, `AGENT_*` > file > default). The guest never sees the key (it's host-side, like
+      the eBPF). `--record` / the `agentd` `trace` verb carry a `signature` + `key_id` envelope
+      alongside the record; the JSON surface gains that envelope (a `schema` bump, versioned per P14.9e).
+- [ ] **P19.3** **`agent verify <record>`** (plus an `agentd` verb and a library entry point):
+      re-canonicalize the record, check the signature against the trusted public key(s), exit non-zero
+      on mismatch. **Demo:** flip one byte of a `--record` file and `agent verify` rejects it, while an
+      untouched record verifies clean.
+- [ ] **P19.4** **Session hash-chain (append-only evidence).** Each record carries the prior record's
+      hash, so a *sequence* (a `shell`/`agentd` session's runs) is tamper-evident as a whole: a deleted,
+      reordered, or inserted run is detectable, not just a single-record edit. Off by default for a
+      one-shot `agent run`; on for a session.
+- [ ] **P19.5** **Key rotation + `key_id`.** Records name the key that signed them; `verify` accepts a
+      *set* of trusted keys, so rotating the host key doesn't invalidate already-signed records.
+- [ ] **P19.6** **Docs + claim reconciliation.** An integrity chapter (what the signature does and
+      does not prove, how a supervisor verifies, where the trust root sits), folded into
+      `docs/security.md` + `docs/threat-model.md`; and every "tamper-evident"/"tamper-resistant"
+      claim in the prose is pointed at it (so the word is now backed by a task, not just asserted).
+- [ ] **P19.7** **Measured, not marketed.** Bench the signing overhead per record (one `ed25519` sign
+      over already-canonical bytes, expected sub-millisecond, off the boot path) with the rest of the
+      Phase 17 numbers, so the new step is measured like everything else.
+- **Exit gate:** a supervisor can `agent verify` a record and trust it **without trusting the host
+  that relayed it** to them, one flipped byte (or a dropped run in a session chain) is rejected and an
+  intact record verifies; the headline "tamper-evident" is now literal, not guest-only.
+
+## Phase 20, Packaging & docs
 
 Ship it as a thing others can run: packaged, documented, and self-hostable.
 
-- [x] **P19.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
+- [x] **P20.1** Single-command self-host: build the rootfs/kernel, install the daemon, run a sandbox.
       *(Includes vendoring the sha-pinned upstream inputs, the Firecracker CI kernel/rootfs and the
       `.apk` closure (decision 007's note, P6.9d's recording), so a fresh host's setup no longer
       depends on the FC S3 bucket or the Alpine CDN staying alive.)*
@@ -2014,7 +2060,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Alpine CDN dark. Vendor-aware via `fetch_one` (zero call-site churn); manifest parse/round-trip
       unit-tested; `docs/cli-install.md` gains Self-host + Vendoring sections. non-`api:` (xtask + docs
       only). The network/KVM steps run on the self-hoster's box, not the host-safe gate.)*
-- [ ] **P19.2** `curl | sh` / container / release binaries with checksums.
+- [ ] **P20.2** `curl | sh` / container / release binaries with checksums.
       *(What actually ships: the release binaries plus the xtask-built rootfs, guest kernel, and
       eBPF objects, gitignored, never carried in the source tree, assembled and checksummed at
       package time. Tests are **not** a shipped-artifact cost: `#[cfg(test)]` modules and `tests/`
@@ -2024,7 +2070,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       changes, trim the package tarball via `Cargo.toml` `include`/`exclude`: integration `tests/`
       are packaged by default and can be dropped, while inline `src/` unit tests cannot be split out
       without moving them.)*
-- [x] **P19.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
+- [x] **P20.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
       *(**Done.** The docs are already an mdBook (`book.toml`, `SUMMARY.md`); all four destinations
       the box names exist, mapped onto wasmtime's book layout (the structural model, which carries
       no standalone quickstart or non-goals pages): the quickstart path is `cli-install.md` (fresh
@@ -2036,9 +2082,9 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Dedicated `quickstart.md`/`non-goals.md` pages were tried and then folded back to match the
       wasmtime shape, no extra pages the model doesn't carry. `mdbook build` is clean and every
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
-      (GitHub Pages deploy) is left to launch (P19.2/P19.4). Docs only, non-`api:`.)*
-- [ ] **P19.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
-- [x] **P19.5** A **reference integration**: a small host application embedding the engine end to end.
+      (GitHub Pages deploy) is left to launch (P20.2/P20.4). Docs only, non-`api:`.)*
+- [ ] **P20.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
+- [x] **P20.5** A **reference integration**: a small host application embedding the engine end to end.
       *(**Done.** `crates/probes-loader/examples/reference_integration.rs`: the smallest complete host
       app that composes both halves, load the shared observers, `Sandbox::open` (jailed, KVM), attach
       the probes by the plain values the sandbox exposes, `exec` untrusted code, `collect` the record
@@ -2047,7 +2093,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       dep on the loader (024/026); the composition is the caller's, the launch sequence 027/028
       document. Compiles in the host-safe gate (clippy `--all-targets`); running it needs KVM + root +
       `CAP_BPF`. `docs/embedding.md` points at it. non-`api:` (an example + docs).)*
-- [x] **P19.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
+- [x] **P20.6** Example workloads (run untrusted Python, an untrusted binary, a CI job) as demos.
       *(**Done.** Untrusted Python was already the [Running untrusted code](docs/examples-untrusted-code.md)
       demo; this adds the two the examples index promised. `examples-untrusted-binary.md`: build a
       static ELF stand-in (inline source, nothing binary committed), run it under `--net --trace`, and
@@ -2059,7 +2105,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       `examples.md` + `SUMMARY.md`; the "land later" note is retired. `mdbook build` clean, all
       cross-links resolve. Docs only, non-`api:`. The commands run on a KVM host; the example output
       shown is representative.)*
-- [x] **P19.7** Security policy + responsible-disclosure notes.
+- [x] **P20.7** Security policy + responsible-disclosure notes.
       *(**Done**, across the two existing security surfaces, no new pages (the wasmtime-shape rule):
       root `SECURITY.md` carries the reporting mechanics (private GitHub advisory, ~1-week
       acknowledgement, no bounty, coordinated disclosure) and `docs/security.md` the model, now
@@ -2069,7 +2115,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       reports stay signal, and **"After a report: how a fix ships"** (confirm in the private
       advisory, fix on `main` with a gate regression test, no pre-`v0.1.0` backports, publish the
       advisory + a `RELEASES.md` note + credit once the fix lands). Docs only, non-`api:`.)*
-- [x] **P19.8** `(decision)` **Supported-platform policy**: the hard floor (architectures, a
+- [x] **P20.8** `(decision)` **Supported-platform policy**: the hard floor (architectures, a
       security-maintained host-kernel LTS) vs the documented degradations, and the pinned upstream
       versions (Firecracker + the guest kernel that tracks its support list).
       *(Pulled forward from packaging: a self-hostable security engine has to state what it runs on
@@ -2082,7 +2128,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
       matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
       internal doctor row + docs).)*
-- [ ] **P19.9** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
+- [ ] **P20.9** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
   and read the eBPF-observed audit trail.
 
@@ -2091,7 +2137,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 ## Post-v0.1.0, vNext tracks
 
-> These land **after** the `v0.1.0` finish line (P19.8) and **do not gate that tag** (§0.6). They
+> These land **after** the `v0.1.0` finish line (P20.8) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
 >, without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.
@@ -2102,47 +2148,47 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 > contract (and its certification) landing here*, the SDK/engine **code lives in its sibling
 > repo**, gated by the conformance suite this repo publishes.
 
-## Phase 20, Polyglot SDKs (Go · Python · C# · Node.js)
+## Phase 21, Polyglot SDKs (Go · Python · C# · Node.js)
 
 Thin, idiomatic clients so non-Rust callers can drive `agentd`, a client-SDK surface, still
 **engine, not platform**.
 
-- [ ] **P20.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
+- [ ] **P21.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
       SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/adr/`.
-- [ ] **P20.2** A **cross-language conformance suite** (golden request/response + audit-log
+- [ ] **P21.2** A **cross-language conformance suite** (golden request/response + audit-log
       round-trips) every SDK must pass, the single source of SDK correctness, run in CI.
-- [ ] **P20.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
-- [ ] **P20.4** **Python** SDK (own repo; sync + async).
-- [ ] **P20.5** **Node.js / TypeScript** SDK (own repo).
-- [ ] **P20.6** **C# / .NET** SDK (own repo).
-- [ ] **P20.7** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
-      to a wire-API version, certified by the P20.2 conformance suite, and published to its language
+- [ ] **P21.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
+- [ ] **P21.4** **Python** SDK (own repo; sync + async).
+- [ ] **P21.5** **Node.js / TypeScript** SDK (own repo).
+- [ ] **P21.6** **C# / .NET** SDK (own repo).
+- [ ] **P21.7** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
+      to a wire-API version, certified by the P21.2 conformance suite, and published to its language
       registry with checksums.
-- [ ] **P20.8** Each SDK is a **thin protocol client**, no tenancy/auth/billing/scheduling; deny-by-
+- [ ] **P21.8** Each SDK is a **thin protocol client**, no tenancy/auth/billing/scheduling; deny-by-
       default and the non-goals hold at the SDK layer too (note).
 - **Exit gate:** four languages run the same golden `exec` and read the same host-observed
   audit log through `agentd`, against one stable polyglot wire API with a shared conformance suite.
 
-## Phase 21, The Wasmtime sibling (a second isolation boundary)
+## Phase 22, The Wasmtime sibling (a second isolation boundary)
 
 A **separate** engine that reuses this one's driver API + audit-log format but swaps the
 isolation boundary from **hardware (KVM)** to **software (Wasmtime SFI)**, a second isolation
 option, not a replacement for this repo.
 
-- [ ] **P21.1** `(decision)` **Sibling repo, not a backend here.** Core property 1 (*isolation is
+- [ ] **P22.1** `(decision)` **Sibling repo, not a backend here.** Core property 1 (*isolation is
       hardware*) is never traded in this engine; the wasm variant carries a **different, weaker**
       guarantee, so it's a distinct artifact that *shares the API*, not a plug-in backend →
       `docs/adr/`.
-- [ ] **P21.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
+- [ ] **P22.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
       a `ResourceLimiter` (memory) → typed limits, mirroring the FC engine's no-hang/no-leak contract.
-- [ ] **P21.3** The **host-function (WASI) shim layer** = capabilities + policy + audit log:
+- [ ] **P22.3** The **host-function (WASI) shim layer** = capabilities + policy + audit log:
       enforcement moves from host-side eBPF to the **import boundary** (the module has zero ambient
       authority; deny-by-default becomes "link no imports").
-- [ ] **P21.4** Reuse the `Sandbox` lifecycle shape + the audit-log **JSON schema**, so a caller
-      (and the Phase 20 SDKs) can drive either engine.
-- [ ] **P21.5** Comparative benchmarks: **instantiate latency + fuel overhead + memory-sharing** vs the
+- [ ] **P22.4** Reuse the `Sandbox` lifecycle shape + the audit-log **JSON schema**, so a caller
+      (and the Phase 21 SDKs) can drive either engine.
+- [ ] **P22.5** Comparative benchmarks: **instantiate latency + fuel overhead + memory-sharing** vs the
       microVM's boot/restore/memory-sharing, same harness, honest numbers.
-- [ ] **P21.6** Test: the same untrusted program on both engines yields comparable audit-log
+- [ ] **P22.6** Test: the same untrusted program on both engines yields comparable audit-log
       records; where they *can't* be comparable, document why.
 - **Exit gate:** two engines, one API, two isolation boundaries, with a documented **hardware vs
   software** comparison: TCB size, startup, memory-sharing, scope, and threat model.

@@ -386,7 +386,12 @@ fn bind_ro(src: &Path, dst: &Path) -> Result<(), VmmError> {
 /// driver can always be cleared, so the scratch dir's `remove_dir_all` never `EBUSY`s. Failures are
 /// ignored: a path that isn't a mount (the copy fallback, or one already gone) is a harmless no-op.
 pub(crate) fn unmount_base(path: &Path) {
-    let _ = Command::new("umount").arg("-l").arg(path).status();
+    // Bounded like `netns_del`: this runs in teardown/`Drop`, and `umount` (even lazy) can wedge in
+    // the kernel behind a busy mount, which a plain `.status()` would let hang `Drop`. On timeout
+    // `run_bounded` detaches; a mount left behind is retried by the orphan sweep's `detach_mounts_under`.
+    let mut cmd = Command::new("umount");
+    cmd.arg("-l").arg(path);
+    let _ = crate::proc::run_bounded(cmd, crate::proc::TEARDOWN_HELPER_TIMEOUT, "umount -l");
 }
 
 /// Whether the filesystem mount backing `path` is a **shared** mount (carries a `shared:N` peer-group
