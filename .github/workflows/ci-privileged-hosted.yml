@@ -70,9 +70,10 @@ jobs:
           sudo install -m0755 "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer
           firecracker --version
 
-      - name: Toolchains (nightly + rust-src + bpf-linker for the eBPF object)
+      - name: Toolchains (nightly + rust-src + bpf-linker for the eBPF object; musl for the guest agent)
         run: |
           rustup toolchain install nightly --profile minimal --component rust-src
+          rustup target add x86_64-unknown-linux-musl
           cargo install bpf-linker --locked
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
