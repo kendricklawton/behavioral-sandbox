@@ -28,7 +28,9 @@ use std::time::Duration;
 
 use agent_cli::MAX_VCPUS;
 use agent_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
-use agent_vmm::{Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
+use agent_vmm::{
+    sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD,
+};
 use clap::{Parser, Subcommand};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
@@ -214,9 +216,33 @@ fn main() -> ExitCode {
 
 fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
     match cmd {
-        Cmd::Run(args) => run_command(*args, file),
-        Cmd::Shell(args) => shell(args, file),
+        Cmd::Run(args) => {
+            sweep_vm_residue(file);
+            run_command(*args, file)
+        }
+        Cmd::Shell(args) => {
+            sweep_vm_residue(file);
+            shell(args, file)
+        }
         Cmd::Doctor => Ok(doctor::report(&base_config(file))),
+    }
+}
+
+/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `agent`
+/// run left: a `Ctrl-C`/SIGKILL of a boot subcommand skips `Drop`, so the lifetime sentinel reaps
+/// the VM process but the scratch dir and netns are out of its scope (ADR 014). Run once before a
+/// boot subcommand as the boot-time GC the engine owes its host (ADR 016). Best-effort and
+/// conservative: [`sweep_orphans`] only reclaims this euid's dead-pid dirs, so it never touches a
+/// concurrent run's live sandbox.
+fn sweep_vm_residue(file: Option<&config::AgentToml>) {
+    match sweep_orphans(&base_config(file).scratch_dir) {
+        Ok(r) if r.dirs_reclaimed + r.netns_reclaimed > 0 => tracing::info!(
+            dirs = r.dirs_reclaimed,
+            netns = r.netns_reclaimed,
+            "reclaimed crashed-run VM residue at startup"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::debug!(error = %e, "startup orphan sweep skipped"),
     }
 }
 
@@ -355,16 +381,21 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             sandbox.exec_with_files(&args.argv, &stdin, &files_in, &args.env, &args.get)?;
         (sandbox, result)
     };
-    write_artifacts(&result.files, &args.get)?;
     // Finalize the audit record **while the sandbox is still alive** (the attached bundle reads the
-    // live cgroup + maps), then close.
+    // live cgroup + maps) and **before** the fallible artifact write below: an artifact-write error
+    // must not lose the record for exactly the misbehaving-guest run whose audit you want.
     let record = probes.map(|p| {
         p.collect(Timing {
             boot: boot_latency,
             exec_wall: result.metrics.wall,
         })
     });
-    sandbox.shutdown()?;
+    write_artifacts(&result.files, &args.get)?;
+    // Teardown is best-effort: a shutdown error must not mask the run's real result (its exit code,
+    // streams, and the record just collected). Log and continue, as `shell`'s teardown already does.
+    if let Err(e) = sandbox.shutdown() {
+        tracing::warn!(error = %e, "sandbox shutdown reported an error after the run");
+    }
 
     if args.json {
         // The structured run result, one JSON object on stdout, the machine-readable form of the

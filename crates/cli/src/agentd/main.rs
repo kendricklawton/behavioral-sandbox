@@ -53,7 +53,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use agent_cli::audit::Observability;
-use agent_vmm::{BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
+use agent_vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
 use clap::Parser;
 
 use crate::metrics::Metrics;
@@ -101,10 +101,13 @@ struct Cli {
     /// host. Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
     #[arg(long, value_name = "N", default_value_t = 16)]
     max_sessions: usize,
-    /// Drop a session after this many seconds with **no request** from the client, so a wedged or
-    /// forgotten connection can't pin a microVM and a `--max-sessions` slot forever (the idle half of
-    /// the same capacity guarantee the ceiling gives). Applies to the wait for the first `open` too.
-    /// A client streaming requests keeps resetting it; `0` disables the timeout. Default 300 (5 min).
+    /// Drop a session after this many seconds with **no progress** on the connection, whether the
+    /// client stopped sending requests or stopped reading replies, so a wedged or forgotten
+    /// connection can't pin a microVM and a `--max-sessions` slot forever (the idle half of the same
+    /// capacity guarantee the ceiling gives). Arms both the read and the write deadline (a client
+    /// that never drains a large reply is dropped just like one that goes silent). Applies to the
+    /// wait for the first `open` too. A client streaming requests keeps resetting it; `0` disables
+    /// the timeout. Default 300 (5 min).
     #[arg(long, value_name = "SECONDS", default_value_t = 300)]
     idle_timeout: u64,
 }
@@ -185,6 +188,11 @@ fn main() -> ExitCode {
     // Reclaim bundle dirs a *crashed* prior daemon (SIGKILL/OOM, no handler) leaked, before this one
     // adds its own. Best-effort, this-user, dead-pid only.
     sweep_stale_agentd_bundles(&base.scratch_dir);
+    // Also reclaim the per-VM residue (scratch dirs + their network namespaces) a crashed *driver*
+    // leaves: the lifetime sentinel reaps the VM processes, but dirs and netns are out of its scope
+    // (ADR 014), so without this they accumulate across restarts. This is the boot-time GC the engine
+    // owes its host (ADR 016); safe alongside live sessions (per-dir liveness + euid ownership).
+    sweep_orphaned_vms(&base.scratch_dir);
     // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
     // explicitly either works or the daemon refuses to start, an operational surface the hoster
     // requested must not silently be absent (the same posture as `--allow`'s enforcement refusal).
@@ -384,6 +392,22 @@ fn own_euid() -> Option<u32> {
 /// or remove is logged and skipped. Skips our own pid and any live pid (a concurrently-running
 /// daemon of the same user). A dead daemon's pid is genuinely absent from `/proc` (it's not our
 /// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
+/// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
+/// ([`agent_vmm::sweep_orphans`]), logging what it reclaimed. The complement of
+/// [`sweep_stale_agentd_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
+/// read failure on the scratch base is logged, never fatal.
+fn sweep_orphaned_vms(scratch: &Path) {
+    match sweep_orphans(scratch) {
+        Ok(r) if r.dirs_reclaimed + r.netns_reclaimed > 0 => tracing::info!(
+            dirs = r.dirs_reclaimed,
+            netns = r.netns_reclaimed,
+            "swept crashed-driver VM residue at startup"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "orphan sweep failed at startup"),
+    }
+}
+
 fn sweep_stale_agentd_bundles(scratch: &Path) {
     use std::os::unix::fs::MetadataExt as _;
     let Some(me) = own_euid() else {

@@ -54,12 +54,17 @@ pub fn serve(stream: UnixStream, server: &Server) {
     };
     let mut reader = BufReader::new(stream);
 
-    // Arm the idle timeout (if configured): a read that blocks this long with no client bytes fails
-    // (`WouldBlock`/`TimedOut`), which the read loop treats as a broken connection and ends the
-    // session, so a wedged client can't pin a VM + a `--max-sessions` slot indefinitely. Covers the
-    // wait for `open` too. Best-effort: a platform that refuses the sockopt just runs without it.
+    // Arm the idle timeout (if configured) on **both** directions: a read that blocks this long with
+    // no client bytes, or a write that blocks this long because the client stopped draining, fails
+    // (`WouldBlock`/`TimedOut`), which the loop treats as a broken connection and ends the session,
+    // so a wedged client can't pin a VM + a `--max-sessions` slot indefinitely. The write half is not
+    // optional: an `exec` reply can be up to a per-message cap (megabytes) against a ~200 KiB socket
+    // buffer, so a client that opens a session and then never reads would otherwise park the session
+    // thread in `write_all` forever, past the read timeout it never reaches. Covers the wait for
+    // `open` too. Best-effort: a platform that refuses the sockopt just runs without it.
     if let Some(idle) = server.idle_timeout {
         let _ = reader.get_ref().set_read_timeout(Some(idle));
+        let _ = writer.set_write_timeout(Some(idle));
     }
 
     // The first message must be `open` (carrying the session's resource envelope). Anything else,
@@ -631,5 +636,43 @@ mod tests {
         assert_eq!(record_to_value("{\"schema\":1}")["schema"], 1);
         // A malformed string can't happen from `to_json`, but the fallback must still be an object.
         assert!(record_to_value("not json").get("error").is_some());
+    }
+
+    #[test]
+    fn an_armed_write_timeout_unblocks_a_stalled_reply_instead_of_hanging() {
+        // The property `serve` relies on: with the write timeout armed, a reply to a client that has
+        // stopped reading fails in bounded time (`send` returns false → the session ends → the VM
+        // drops → the slot frees) rather than parking the session thread in `write_all` forever. Prove
+        // it at the socket level, no VM: fill the buffers of a peer that never reads and assert the
+        // write gives up at its timeout.
+        use std::io::Write;
+        let (writer, _reader) = UnixStream::pair().expect("socketpair");
+        writer
+            .set_write_timeout(Some(Duration::from_millis(100)))
+            .expect("arm write timeout");
+        // `_reader` is held (never read) so the kernel send+recv buffers fill and the write stalls.
+        let chunk = vec![0u8; 1024 * 1024];
+        let started = Instant::now();
+        let mut err = None;
+        for _ in 0..64 {
+            // Up to 64 MiB, far past any default unix-socket buffer, so a non-draining peer forces
+            // the stall regardless of the host's autotuned buffer size.
+            if let Err(e) = (&writer).write_all(&chunk) {
+                err = Some(e);
+                break;
+            }
+        }
+        let err = err.expect("a non-draining peer must make the write time out, not block forever");
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "expected a timeout-family error, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the write must give up at its timeout, not hang"
+        );
     }
 }

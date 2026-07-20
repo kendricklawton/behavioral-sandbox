@@ -4,7 +4,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// The filesystem labels the driver stamps on the data devices so the guest mounts them by label,
@@ -210,8 +210,11 @@ pub(crate) fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
 pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<String>, VmmError> {
     std::fs::create_dir_all(dest)
         .map_err(|e| VmmError::Vmm(format!("create output dir {}: {e}", dest.display())))?;
-    fsck_output_image(image)?;
-    rdump_capped(image, dest, OUTPUT_EXTRACT_CAP, OUTPUT_READBACK_TIMEOUT)?;
+    // One deadline for the whole readback: fsck and rdump share the bound the constant promises,
+    // rather than each stage getting its own fresh wall.
+    let deadline = Instant::now() + OUTPUT_READBACK_TIMEOUT;
+    fsck_output_image(image, deadline)?;
+    rdump_capped(image, dest, OUTPUT_EXTRACT_CAP, deadline)?;
     // Guest-controlled tree: drop the ext4 housekeeping dir and any symlink that would redirect a
     // later host read onto the host filesystem, before the caller (or its tooling) touches the files.
     let _ = std::fs::remove_dir_all(dest.join("lost+found"));
@@ -221,17 +224,21 @@ pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<Stri
 
 /// `e2fsck -fy` the image: force a full check and auto-answer, recovering the journal and clearing the
 /// "not cleanly unmounted" state a hard-killed guest leaves, so `debugfs` sees a consistent tree. The
-/// exit status is a bitmask, 0 clean, 1 errors corrected, 2 corrected + reboot advised (moot for an
-/// image file); `>= 4` means errors left uncorrected or an operational failure, which is a real error.
-fn fsck_output_image(image: &Path) -> Result<(), VmmError> {
-    let status = Command::new("e2fsck")
+/// image's contents are wholly guest-chosen, and a crafted filesystem can send e2fsck into a
+/// pathological repair, so it runs under the readback deadline ([`wait_bounded`]), never an
+/// open-ended `.status()`. The exit status is a bitmask, 0 clean, 1 errors corrected, 2 corrected +
+/// reboot advised (moot for an image file); `>= 4` means errors left uncorrected or an operational
+/// failure, which is a real error.
+fn fsck_output_image(image: &Path, deadline: Instant) -> Result<(), VmmError> {
+    let mut child = Command::new("e2fsck")
         .arg("-fy")
         .arg(image)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .spawn()
         .map_err(|e| tool_spawn_error("e2fsck", e))?;
+    let status = wait_bounded(&mut child, deadline, "e2fsck", || None)?;
     match status.code() {
         Some(0) => Ok(()),
         // Errors were found and corrected (1) or corrected + reboot-advised (2): the tree is now
@@ -261,7 +268,7 @@ fn rdump_capped(
     image: &Path,
     dest: &Path,
     byte_cap: u64,
-    timeout: Duration,
+    deadline: Instant,
 ) -> Result<(), VmmError> {
     // debugfs parses its `-R` request by whitespace, with no quoting, reject a whitespace dest
     // rather than silently truncate the path (the dest is operator-set, so this is a clear config
@@ -282,41 +289,56 @@ fn rdump_capped(
         .spawn()
         .map_err(|e| tool_spawn_error("debugfs", e))?;
 
-    let deadline = Instant::now() + timeout;
+    // The extra bound rdump carries over a plain wait: abort the moment the extracted tree's
+    // allocated blocks pass `byte_cap` (a sparse-file blow-up materialising as real host zeros),
+    // not only when it outruns the deadline.
+    let status = wait_bounded(&mut child, deadline, "debugfs rdump", || {
+        (dir_alloc_bytes(dest) > byte_cap).then_some(VmmError::OutputCap {
+            limit: byte_cap.min(usize::MAX as u64) as usize,
+        })
+    })?;
+    match status.code() {
+        Some(0) => Ok(()),
+        Some(code) => Err(VmmError::Vmm(format!("debugfs rdump failed (exit {code})"))),
+        None => Err(VmmError::Vmm("debugfs rdump terminated by a signal".into())),
+    }
+}
+
+/// Poll `child` to exit under `deadline`, killing and reaping it on any exit path so a readback
+/// helper (`e2fsck`, `debugfs`) run on a wholly guest-controlled image can never park the host
+/// thread. `over_budget` is checked each tick for an extra abort condition (rdump's byte cap);
+/// returning `Some(err)` kills the child and surfaces that error. A `try_wait` failure, the
+/// deadline, or an over-budget signal all kill+reap before returning a typed error; the `what`
+/// label names the tool in the timeout/wait messages.
+fn wait_bounded(
+    child: &mut Child,
+    deadline: Instant,
+    what: &str,
+    mut over_budget: impl FnMut() -> Option<VmmError>,
+) -> Result<ExitStatus, VmmError> {
     loop {
-        let waited = match child.try_wait() {
-            Ok(w) => w,
-            Err(e) => {
-                // Don't leak a live debugfs on a `wait` error: kill and reap before surfacing it.
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(VmmError::Vmm(format!("wait on debugfs: {e}")));
-            }
-        };
-        match waited {
-            Some(status) => {
-                return match status.code() {
-                    Some(0) => Ok(()),
-                    Some(code) => Err(VmmError::Vmm(format!("debugfs rdump failed (exit {code})"))),
-                    None => Err(VmmError::Vmm("debugfs rdump terminated by a signal".into())),
-                };
-            }
-            None => {
-                if dir_alloc_bytes(dest) > byte_cap {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) => {
+                if let Some(err) = over_budget() {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(VmmError::OutputCap {
-                        limit: byte_cap.min(usize::MAX as u64) as usize,
-                    });
+                    return Err(err);
                 }
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(VmmError::Timeout(
-                        "output readback exceeded its deadline".into(),
-                    ));
+                    return Err(VmmError::Timeout(format!(
+                        "{what} exceeded the output-readback deadline"
+                    )));
                 }
                 std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                // Don't leak a live helper on a `wait` error: kill and reap before surfacing it.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(VmmError::Vmm(format!("wait on {what}: {e}")));
             }
         }
     }
@@ -479,6 +501,63 @@ mod tests {
     }
 
     #[test]
+    fn wait_bounded_kills_a_child_that_outruns_the_deadline() {
+        // Stands in for e2fsck/debugfs wedged on a pathological guest image: a long sleeper must be
+        // killed and reaped at the deadline, returning a typed Timeout, never parking the thread.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        let started = Instant::now();
+        let err = wait_bounded(
+            &mut child,
+            started + Duration::from_millis(100),
+            "sleep",
+            || None,
+        )
+        .expect_err("a 30s sleep must not finish before a 100ms deadline");
+        assert!(matches!(err, VmmError::Timeout(_)), "got {err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "must return promptly at the deadline, not wait out the child"
+        );
+        // The child was killed and reaped inside `wait_bounded`, so its pid is gone (no zombie: we
+        // already `wait`ed it). A second reap here would be the only other claimant.
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists()
+                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|s| s
+                        .split(") ")
+                        .nth(1)
+                        .and_then(|r| r.split(' ').next())
+                        .map(str::to_owned))
+                    != Some("Z".to_string()),
+            "the killed child must be reaped, not left a zombie"
+        );
+    }
+
+    #[test]
+    fn wait_bounded_returns_a_quick_child_status() {
+        let mut child = Command::new("true")
+            .stdin(Stdio::null())
+            .spawn()
+            .expect("spawn true");
+        let status = wait_bounded(
+            &mut child,
+            Instant::now() + Duration::from_secs(5),
+            "true",
+            || None,
+        )
+        .expect("a fast child returns its status");
+        assert!(status.success(), "`true` exits 0");
+    }
+
+    #[test]
     fn output_dir_with_whitespace_is_rejected_before_debugfs() {
         // A whitespace dest would be split by debugfs's `-R` parser; catch it as a typed error rather
         // than silently truncating the extraction path. (No debugfs is spawned, the guard fires first.)
@@ -486,7 +565,7 @@ mod tests {
             Path::new("/nonexistent/img.ext4"),
             Path::new("/tmp/has a space"),
             OUTPUT_EXTRACT_CAP,
-            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(1),
         )
         .unwrap_err();
         assert!(

@@ -104,8 +104,10 @@ impl RunningVm {
     ///
     /// # Errors
     /// [`VmmError::Vmm`] if the VM is unsupported for snapshotting, or on any API or file-copy failure.
-    /// A create failure still falls through to the resume, so a failed snapshot never leaves the guest
-    /// frozen.
+    /// A **create** failure still falls through to the resume, so it never leaves the guest frozen. A
+    /// **resume** failure (the VMM went unresponsive after a good create) is the exception: it may
+    /// leave the guest paused and returns the error, drop the VM in that case (its teardown reaps it)
+    /// rather than reusing the handle.
     pub fn snapshot(&self, dir: &Path) -> Result<Snapshot, VmmError> {
         // A restored VM's `rootfs` is a placeholder (its live disk is an anonymous inode), so the
         // shared-base classifier below would misread it and bundle a stale, shared-writable disk.
@@ -177,7 +179,18 @@ impl RunningVm {
             },
         );
         created?;
-        resumed?;
+        // Resume failing after a successful create is the one path that can leave the guest paused
+        // (the VMM is unresponsive, since the resume PATCH is otherwise instant). There is no public
+        // un-pause, and a later `exec` would just burn its whole wall against a frozen guest, so say
+        // so: the VM is unusable and should be dropped (its teardown reaps it), not reused.
+        if let Err(e) = resumed {
+            tracing::warn!(
+                error = %e,
+                "snapshot created but resume failed; the VM is likely left paused and unusable, \
+                 drop it (teardown reaps it) rather than reusing this handle"
+            );
+            return Err(e);
+        }
         tracing::info!(dir = %dir.display(), shared_base, "wrote microVM snapshot bundle");
         Ok(Snapshot {
             state,

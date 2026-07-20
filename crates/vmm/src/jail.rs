@@ -236,6 +236,14 @@ pub(crate) fn spawn_jailer(
         Err(e) => {
             let _ = child.kill();
             let _ = child.wait();
+            // The jailer creates the VM's cgroup early (before it execs Firecracker), but on this
+            // failure the lifetime sentinel isn't armed yet and no `Chroot` exists to carry the dir
+            // into teardown, so remove it here (best-effort) rather than leak an empty cgroup. This
+            // branch fires on `Console::spawn` EAGAIN, i.e. under exactly the many-sandbox load where
+            // leaked cgroups would accrue.
+            if let Some(cgroup) = jailer_cgroup_dir(firecracker, id) {
+                remove_cgroup(&cgroup);
+            }
             Err(e)
         }
     }

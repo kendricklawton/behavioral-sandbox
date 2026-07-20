@@ -53,10 +53,14 @@ pub struct SweepReport {
 }
 
 /// How recently a staged restore disk must have been touched for the sweep to treat the dir as an
-/// in-flight restore and defer its removal. Generous: it need only exceed the copy→`PUT
-/// /snapshot/load` window (a large disk on slow storage), since the only cost of over-waiting is
-/// keeping a genuinely-leaked stage one extra sweep.
-const RESTORE_STAGING_GRACE: Duration = Duration::from_secs(120);
+/// in-flight restore and defer its removal. It must exceed the copy→`PUT /snapshot/load` window,
+/// whose worst case is the whole load: a multi-GiB memory file read on slow storage, now itself
+/// bounded by the restore's wall (`run_restore` clamps the load timeout to the remaining deadline).
+/// So this generously exceeds any realistic restore wall; a `/snapshot/load` that legitimately runs
+/// longer than this (a wall set past ten minutes) could still race a sweep, the residual the finding
+/// notes, but it is a reclaimed-a-live-stage *flake*, never a leak. Over-waiting only keeps a
+/// genuinely-leaked stage one extra sweep, so err long.
+const RESTORE_STAGING_GRACE: Duration = Duration::from_secs(600);
 
 /// Reclaim the residue of **dead** drivers under `scratch_dir` (the [`BootConfig::scratch_dir`]
 /// base, `/tmp` by default): their per-VM scratch dirs, and the per-VM network namespaces named after

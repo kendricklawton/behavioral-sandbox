@@ -778,6 +778,25 @@ pub(crate) fn reclaim_scratch(workdir: &Path, tap: Option<&Tap>) {
     }
 }
 
+/// Reclaim the scratch dir after a **tap-creation** failure, where the half-built netns was already
+/// best-effort deleted by [`Tap::create`](crate::net::Tap::create) but that delete may itself have
+/// failed. The netns is named after the scratch dir (its basename), so if one lingers we keep the dir
+/// (like [`reclaim_scratch`]) so the dir-keyed orphan sweep can reclaim the pair, never stranding a
+/// dir-less netns. Shared by the three `Tap::create` call sites in [`spawn`](crate::spawn), which have
+/// no [`Tap`] to hand [`reclaim_scratch`].
+pub(crate) fn reclaim_scratch_after_tap_failure(workdir: &Path) {
+    let netns = workdir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    if !netns.is_empty() && crate::net::netns_exists(netns) {
+        tracing::warn!(
+            workdir = %workdir.display(),
+            %netns,
+            "netns survived a failed tap create; keeping the scratch dir so the orphan sweep can reclaim both"
+        );
+    } else {
+        let _ = std::fs::remove_dir_all(workdir);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

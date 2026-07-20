@@ -33,8 +33,8 @@ use crate::lifetime::VmLifetime;
 use crate::net::Tap;
 use crate::paths::{absolute, path_str, require_file};
 use crate::vm::{
-    reclaim_scratch, teardown, BootConfig, RunningVm, Snapshot, FC_STDERR, IFACE_ID, VM_SEQ,
-    VSOCK_UDS,
+    reclaim_scratch, reclaim_scratch_after_tap_failure, teardown, BootConfig, RunningVm, Snapshot,
+    FC_STDERR, IFACE_ID, VM_SEQ, VSOCK_UDS,
 };
 use crate::VmmError;
 
@@ -229,7 +229,9 @@ impl Spawned {
             match Tap::create(&workdir_name(&workdir), None) {
                 Ok(tap) => Some(tap),
                 Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
+                    // A failed create best-effort-deletes its own netns, but if that delete failed
+                    // the netns lingers, so gate the dir removal on it (never strand a dir-less netns).
+                    reclaim_scratch_after_tap_failure(&workdir);
                     return Err(e);
                 }
             }
@@ -343,7 +345,9 @@ impl Spawned {
             match Tap::create(&id, Some((jail.uid, jail.gid))) {
                 Ok(tap) => Some(tap),
                 Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
+                    // Gate the dir removal on the netns actually being gone (a failed create's own
+                    // best-effort delete may have failed), so a dir-less netns is never stranded.
+                    reclaim_scratch_after_tap_failure(&workdir);
                     return Err(e);
                 }
             }
@@ -418,7 +422,9 @@ impl Spawned {
             match Tap::create(&workdir_name(&workdir), None) {
                 Ok(tap) => Some(tap),
                 Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
+                    // Gate the dir removal on the netns actually being gone (a failed create's own
+                    // best-effort delete may have failed), so a dir-less netns is never stranded.
+                    reclaim_scratch_after_tap_failure(&workdir);
                     return Err(e);
                 }
             }
@@ -555,7 +561,7 @@ impl Spawned {
         // matching unstage that could leak the staged file *outside our reach*, the unjailed baked
         // path lives outside this VM's workdir. (Jailed staging is all inside the chroot, which the
         // workdir's `remove_dir_all` reclaims on any abort, so the discipline holds structurally.)
-        still_before(deadline, "PUT /snapshot/load")?;
+        still_before(deadline, "restore staging")?;
 
         // The vsock socket path was baked in relative, so Firecracker re-binds it in this VMM's cwd,
         // its scratch dir unjailed, the chroot root jailed (`launch_jailed_for_restore` set
@@ -573,7 +579,9 @@ impl Spawned {
         // uid. `disk_unstage` is the staged private copy to remove once Firecracker holds its fd.
         let state_arg: String;
         let mem_arg: String;
-        let mut disk_unstage: Option<PathBuf> = None;
+        // Guards the staged private disk copy: unstaged explicitly after the load, but also on any
+        // unwind in between (the unjailed copy lives outside the workdir, so no `Drop` else covers it).
+        let mut disk_unstage = StagedDisk::none();
         if let Some(chroot) = self.chroot.as_ref() {
             let (root, uid, gid) = (chroot.root.clone(), chroot.uid, chroot.gid);
             let workdir = self.workdir.clone();
@@ -582,8 +590,13 @@ impl Spawned {
             // relying on the jailer's own layout choices.
             std::os::unix::fs::chown(&root, Some(uid), Some(gid))
                 .map_err(|e| VmmError::Vmm(format!("chown chroot root to {uid}:{gid}: {e}")))?;
+            // Re-check the shared wall before each staging copy, as `run_boot` does before each PUT:
+            // the memory stage can fall back to copying the whole guest-RAM-sized file, so a copy that
+            // blows the budget must surface as a typed Timeout, not silently run the deadline out.
+            still_before(deadline, "stage snapshot state")?;
             state_arg =
                 stage_into_chroot(&root, "snapshot.state", &snapshot.state, uid, gid, 0o444)?;
+            still_before(deadline, "stage snapshot memory")?;
             let (mem_rel, mem_mount) = stage_ro_base_into_chroot(
                 &root,
                 "snapshot.mem",
@@ -616,6 +629,7 @@ impl Spawned {
                     VmmError::Vmm(format!("create chroot disk dirs {}: {e}", parent.display()))
                 })?;
             }
+            still_before(deadline, "stage restore disk")?;
             if snapshot.shared_base {
                 let rel = baked_rel.to_string_lossy();
                 let (_, disk_mount) = stage_ro_base_into_chroot(
@@ -634,7 +648,7 @@ impl Spawned {
             } else {
                 stage_restore_disk(&snapshot.root_drive, &disk_target)?;
                 give_to_jail(&disk_target, uid, gid, 0o600)?;
-                disk_unstage = Some(disk_target);
+                disk_unstage = StagedDisk::armed(disk_target);
             }
             // Mounts were recorded eagerly above; here just learn the jailer's cgroup so teardown
             // can remove it too.
@@ -643,8 +657,9 @@ impl Spawned {
             state_arg = path_str(&snapshot.state)?.to_string();
             mem_arg = path_str(&snapshot.mem)?.to_string();
             if !snapshot.shared_base {
+                still_before(deadline, "stage restore disk")?;
                 stage_restore_disk(&snapshot.root_drive, &snapshot.root_backing)?;
-                disk_unstage = Some(snapshot.root_backing.clone());
+                disk_unstage = StagedDisk::armed(snapshot.root_backing.clone());
             }
         }
         // `/snapshot/load` blocks until Firecracker reads the whole memory file back, so scale its
@@ -653,6 +668,13 @@ impl Spawned {
         let mem_mib = std::fs::metadata(&snapshot.mem)
             .map(|m| u32::try_from(m.len() >> 20).unwrap_or(u32::MAX))
             .unwrap_or(0);
+        // Clamp that mem-scaled ceiling to the wall's remaining budget: the ceiling is slow-disk
+        // headroom, but the run's one wall (ADR 013) is the hard bound, a load that would outrun it is
+        // a Timeout, never an overrun that returns minutes past the wall. `still_before` keeps the
+        // remainder positive (a zero socket timeout means "block forever").
+        still_before(deadline, "PUT /snapshot/load")?;
+        let load_timeout =
+            snapshot_api_timeout(mem_mib).min(deadline.saturating_duration_since(Instant::now()));
         let started = Instant::now();
         let loaded = self.api.put_with_timeout(
             "/snapshot/load",
@@ -664,14 +686,14 @@ impl Spawned {
                 },
                 resume_vm: true,
             },
-            snapshot_api_timeout(mem_mib),
+            load_timeout,
         );
         // The restore latency is the load + resume call itself, measured before host-side cleanup.
         let latency = started.elapsed();
         // Firecracker now holds the disk's fd (or the load failed); either way remove a staged private
         // copy so it never outlives this restore. The open fd keeps the inode alive for the VM's
         // lifetime.
-        if let Some(target) = disk_unstage {
+        if let Some(target) = disk_unstage.take() {
             unstage_restore_disk(&target);
         }
         loaded?;
@@ -1259,6 +1281,40 @@ fn unstage_restore_disk(backing: &Path) {
     let _ = std::fs::remove_file(backing);
     if let Some(parent) = backing.parent() {
         let _ = std::fs::remove_dir(parent);
+    }
+}
+
+/// RAII guard for the unjailed restore's staged root-disk copy. That copy lives at the snapshot's
+/// baked-in path **outside** this VM's workdir, so no `Spawned::Drop` reclaims it: `run_restore`
+/// unstages it explicitly once Firecracker holds the fd ([`take`](Self::take)), but a **panic-unwind**
+/// between the stage and that point would otherwise leak a rootfs-sized file. This guard unstages on
+/// drop unless disarmed, the structural cover the one out-of-workdir stage/unstage pair lacked. (A
+/// jailed restore's staged disk is inside the chroot, already reclaimed by `Spawned::Drop`; guarding
+/// it too is a harmless extra `remove_file`.)
+struct StagedDisk(Option<PathBuf>);
+
+impl StagedDisk {
+    /// Disarmed: nothing staged yet.
+    fn none() -> Self {
+        Self(None)
+    }
+
+    /// Armed on `path`: unstage on drop unless [`take`](Self::take)n first.
+    fn armed(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    /// Disarm and hand back the path, for the deliberate post-load unstage.
+    fn take(&mut self) -> Option<PathBuf> {
+        self.0.take()
+    }
+}
+
+impl Drop for StagedDisk {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            unstage_restore_disk(&path);
+        }
     }
 }
 

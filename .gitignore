@@ -11,10 +11,10 @@
 # The local vendor mirror of all sha-pinned upstream inputs (`cargo xtask vendor`) — a self-hoster
 # produces it to build offline; like /artifacts/ it holds downloaded images, never committed.
 /vendor/
-# Local .md files
-MASTER.md
-LOCAL.md
-LAUNCH.md
+
+# ── Scratch / planning ────────────────────────────────────────────────────────
+scratch/
+
 
 # mdBook output (`mdbook build docs`) — the book renders from the committed docs/*.md
 /docs/book/

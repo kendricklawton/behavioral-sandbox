@@ -15,7 +15,7 @@
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -122,11 +122,16 @@ impl ApiClient {
         // step. In practice the VMM's listen backlog absorbs a connect while it's briefly busy, so a
         // hang here needs the backlog *full* (a VMM whose API thread is wedged, e.g. a snapshot write
         // to dead storage) plus enough queued requests to fill it, the same accepted gap the vsock
-        // dial documents (`exec.rs`). The read/write timeouts below bound every step after connect.
+        // dial documents (`exec.rs`). The deadline below bounds every step after connect.
         let stream = UnixStream::connect(&self.socket).map_err(|e| io_err(&ctx(), &e))?;
+        // `timeout` bounds the **whole** response, not each read. A per-read `SO_RCVTIMEO` is reset by
+        // every byte that arrives, so a compromised VMM (the jail's stated threat) dripping one byte
+        // just inside the timeout would hold this call open indefinitely. The write is one small
+        // `write_all` Firecracker drains promptly, so a per-write timeout suffices there; the read
+        // side is re-armed to the *remaining* budget before every read by [`DeadlineReader`].
+        let deadline = Instant::now() + timeout;
         stream
-            .set_read_timeout(Some(timeout))
-            .and_then(|()| stream.set_write_timeout(Some(timeout)))
+            .set_write_timeout(Some(timeout))
             .map_err(|e| io_err(&ctx(), &e))?;
 
         // One `write_all`: request line, headers, blank line, then the body.
@@ -144,7 +149,43 @@ impl ApiClient {
         (&stream).write_all(&req).map_err(|e| io_err(&ctx(), &e))?;
         (&stream).flush().map_err(|e| io_err(&ctx(), &e))?;
 
-        read_response(BufReader::new(&stream), &ctx())
+        read_response(
+            BufReader::new(DeadlineReader::new(&stream, deadline)),
+            &ctx(),
+        )
+    }
+}
+
+/// A `Read` adapter that bounds the **whole** response by one `deadline`, not each syscall. The
+/// socket's own `SO_RCVTIMEO` is reset by every byte that arrives, so a peer dripping bytes slower
+/// than the timeout but never pausing a full timeout's worth would never trip it. Re-arming the read
+/// timeout to the *remaining* budget before each underlying read (including those `BufReader` makes
+/// inside `read_line`/`read_exact`) makes the sum of all reads honor one deadline.
+struct DeadlineReader<'a> {
+    stream: &'a UnixStream,
+    deadline: Instant,
+}
+
+impl<'a> DeadlineReader<'a> {
+    fn new(stream: &'a UnixStream, deadline: Instant) -> Self {
+        Self { stream, deadline }
+    }
+}
+
+impl Read for DeadlineReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // A blown deadline: fail now rather than arm a zero timeout, which `set_read_timeout` treats
+        // as "block forever", the very hang this guards against.
+        let remaining = self.deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                ErrorKind::TimedOut,
+                "firecracker API response exceeded its deadline",
+            ));
+        }
+        self.stream.set_read_timeout(Some(remaining))?;
+        let mut s = self.stream;
+        s.read(buf)
     }
 }
 
@@ -167,8 +208,17 @@ fn read_response<R: BufRead>(reader: R, ctx: &str) -> Result<(u16, Vec<u8>), Vmm
     loop {
         let mut line = String::new();
         let n = reader.read_line(&mut line).map_err(|e| io_err(ctx, &e))?;
-        if n == 0 || line.trim_end().is_empty() {
-            break; // end of headers (or EOF)
+        if n == 0 {
+            // EOF *before* the blank line that terminates HTTP headers: the VMM closed mid-response
+            // (e.g. killed after writing the status line). A truncated reply must be a typed error,
+            // never the `Ok` we'd otherwise return, wrongly reporting a PUT the VMM may never have
+            // applied as having succeeded.
+            return Err(VmmError::Vmm(format!(
+                "{ctx}: connection closed mid-headers (truncated response)"
+            )));
+        }
+        if line.trim_end().is_empty() {
+            break; // the blank line: end of headers
         }
         let lower = line.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("content-length:") {
@@ -399,6 +449,47 @@ mod tests {
     }
 
     #[test]
+    fn a_drip_feeding_peer_trips_the_whole_response_deadline() {
+        // The finding: a per-read `SO_RCVTIMEO` is reset by every byte, so a peer dripping bytes
+        // faster than the timeout but never completing the response would never trip it and would
+        // hold `request` open indefinitely. `DeadlineReader` bounds the *sum* of reads by one
+        // deadline, so a drip that never finishes still fails, at the deadline, regardless of the
+        // per-byte interval. Prove it: a peer sends a byte every 20 ms forever (never a full
+        // response), against a 200 ms deadline. A per-read scheme would never fire (each byte lands
+        // well inside any per-read window); the deadline scheme must.
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+        let (client, mut server) = UnixStream::pair().expect("socketpair");
+        let feeder = std::thread::spawn(move || {
+            // Non-newline bytes so `read_line` never completes a status line; drip past the deadline.
+            for _ in 0..100 {
+                if server.write_all(b"a").is_err() {
+                    break; // reader hung up at its deadline
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(200);
+        let err = read_response(
+            BufReader::new(DeadlineReader::new(&client, deadline)),
+            "drip test",
+        )
+        .expect_err("a never-completing drip must trip the deadline");
+        assert!(
+            matches!(err, VmmError::Timeout(_)),
+            "expected a typed Timeout, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "must fail at the ~200ms deadline, not keep reading the drip: {:?}",
+            started.elapsed()
+        );
+        drop(client); // unblock the feeder's next write
+        let _ = feeder.join();
+    }
+
+    #[test]
     fn parses_204_no_content() {
         let raw =
             b"HTTP/1.1 204 No Content\r\nServer: Firecracker API\r\nContent-Length: 0\r\n\r\n";
@@ -414,6 +505,19 @@ mod tests {
         let (status, body) = read_response(&raw[..], "test").unwrap();
         assert_eq!(status, 204);
         assert!(body.is_empty());
+    }
+
+    #[test]
+    fn truncated_headers_before_the_blank_line_is_an_error() {
+        // A VMM killed after the status line (no terminating blank line, connection closes) must be
+        // a typed error, not the `Ok((204, empty))` an EOF-as-end-of-headers reading would return,
+        // wrongly reporting an unapplied PUT as success.
+        let raw = b"HTTP/1.1 204 No Content\r\n";
+        let err = read_response(&raw[..], "test").expect_err("a truncated response must error");
+        assert!(
+            matches!(err, VmmError::Vmm(ref m) if m.contains("mid-headers")),
+            "got {err:?}"
+        );
     }
 
     #[test]
