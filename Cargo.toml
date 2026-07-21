@@ -24,10 +24,11 @@ exclude = ["crates/probes", "fuzz"]
 
 [workspace.package]
 edition = "2021"
-# The minimum supported Rust version. The project tracks current stable (no back-support burden this
-# early); CI and the everyday `cargo xtask ci` gate build with it. Raising this is a deliberate,
-# noted change, not incidental.
-rust-version = "1.94"
+# The minimum supported Rust version: the downstream MSRV floor. Kept in step with the exact
+# toolchain pinned in `rust-toolchain.toml`, so local, CI, and this floor are one Rust version and a
+# lint can't pass locally yet fail CI. The project tracks current stable with deliberate bumps (no
+# back-support burden this early), never incidental drift.
+rust-version = "1.97"
 license = "Apache-2.0"
 authors = ["Kendrick Lawton <khe4r6@gmail.com>", "Kendrick Lawton <khlawton@asu.edu>"]
 repository = "https://github.com/kendricklawton/agent"

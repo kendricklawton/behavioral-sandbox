@@ -186,7 +186,7 @@ impl NetSection {
                 FlowRecord6 { key, counts }
             })
             .collect();
-        recs.sort_by(|a, b| flow_order6(&a.key).cmp(&flow_order6(&b.key)));
+        recs.sort_by_key(|r| flow_order6(&r.key));
         self.flows6 = recs;
         // Aggregate v6 denials by destination triple, like the v4 path.
         let mut by_dst: BTreeMap<([u8; 16], u16, u8), u64> = BTreeMap::new();

@@ -1,6 +1,11 @@
-# Pin the whole workspace to stable Rust (no nightly, see .rules) with fmt/clippy installed.
-# The eBPF crate (`crates/probes`) targets `bpfel-unknown-none`, which rustup has no std for;
-# it builds via `bpf-linker` (see docs/contributing-building.md), so no `targets` entry is needed here.
+# Pin the whole workspace to an exact stable Rust so a local build and CI run the identical compiler
+# and clippy: a lint that passes locally can then never surprise CI. Floating `channel = "stable"`
+# only holds that if every dev's installed stable is current, which is exactly the drift that bit us
+# (a stale local stable passing a lint a newer CI stable rejects). Bump this deliberately when moving
+# to a newer Rust, and keep `rust-version` in Cargo.toml in step (that is the downstream MSRV floor).
+# No nightly here (see .rules); the eBPF crate (`crates/probes`) targets `bpfel-unknown-none`, which
+# rustup has no std for, and builds via `bpf-linker` (see docs/contributing-building.md), so no
+# `targets` entry is needed.
 [toolchain]
-channel = "stable"
+channel = "1.97.0"
 components = ["rustfmt", "clippy"]
