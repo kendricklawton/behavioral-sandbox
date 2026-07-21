@@ -291,6 +291,17 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
         "the blocked v6 endpoint [{host_ip6}]:8888 should be in denials6: {:?}",
         network.denials6
     );
+    // And the allow-listed port must never be denied: the flow assert above counts pre-verdict and
+    // UDP gives the sender no failure signal, so without this a deny-all v6 matcher passes too
+    // (the v4 twin of this pin lives in net_enforce.rs).
+    assert!(
+        !network
+            .denials6
+            .iter()
+            .any(|d| d.dst_addr == octets && d.dst_port == 9999),
+        "the allowed v6 endpoint [{host_ip6}]:9999 must not appear in denials6: {:?}",
+        network.denials6
+    );
 
     // The deterministic JSON surface shows the v6 flow.
     let json = record.to_json();

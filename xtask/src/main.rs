@@ -362,6 +362,25 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
     Ok(())
 }
 
+/// This process's effective uid, read from `/proc/self/status` (`Uid:` line, second value), so the
+/// check needs no libc call.
+fn effective_uid() -> Result<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
+    parse_effective_uid(&status).context("parse the effective uid from /proc/self/status")
+}
+
+/// The euid (second value of the `Uid:` line) from a `/proc/<pid>/status` body, or `None` if the
+/// format isn't what we expect. Split out pure so the parse is unit-testable: a wrongly-`None`
+/// result turns into a loud gate refusal, never a silent skip, but it should still be correct.
+fn parse_effective_uid(status: &str) -> Option<u32> {
+    status
+        .lines()
+        .find(|l| l.starts_with("Uid:"))?
+        .split_whitespace()
+        .nth(2)
+        .and_then(|f| f.parse().ok())
+}
+
 /// Is `cargo fuzz` installed? (Probed once, cheaply, so a missing tool is a clear message.)
 fn cargo_fuzz_available() -> bool {
     Command::new("cargo")
@@ -415,6 +434,23 @@ fn ci_privileged() -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
     }
+    // Every privileged test skip-guards itself, and a skipped body is a *pass* to cargo, so a gate
+    // run without the capabilities would print green while the jailer, cgroup, and eBPF halves
+    // silently test nothing. Refuse loudly instead: real root covers CAP_NET_ADMIN/CAP_BPF/
+    // CAP_PERFMON and is what the jailer tests need outright.
+    if effective_uid()? != 0 {
+        bail!(
+            "cargo xtask ci-privileged needs real root (run it under sudo): without it the \
+             jailer, cgroup, and network tests skip themselves, and a skipped test looks like \
+             a pass"
+        );
+    }
+    if !Path::new("/sys/kernel/btf/vmlinux").exists() {
+        bail!(
+            "/sys/kernel/btf/vmlinux not present — the eBPF probe tests skip themselves without \
+             BTF, and a skipped test looks like a pass (need a CONFIG_DEBUG_INFO_BTF=y kernel)"
+        );
+    }
     // This gate builds and verifies the static guest agent (below), and that verification is the
     // *only* thing standing between a silently-reintroduced dynamic dependency and a confusing
     // in-guest loader failure. `verify_static` soft-skips when `readelf` is absent (so ad-hoc
@@ -459,9 +495,20 @@ fn ci_privileged() -> Result<()> {
     // not part of the image, so it's built separately, not baked into the rootfs.
     guest_bins::build_guest_example()?;
     // The eBPF probe tests load the object built from `crates/probes`; build it here (the
-    // same "don't shell a nightly `cargo build` from a `#[test]`" rule). Guarded, so a privileged host
-    // without `bpf-linker` skips the build and the probe tests then self-skip on the missing object.
+    // same "don't shell a nightly `cargo build` from a `#[test]`" rule). `build_probes` soft-skips
+    // without the eBPF toolchain (the everyday gate must stay host-safe), but *this* gate exists to
+    // prove the observe-and-enforce half, so a missing object must fail loudly here, exactly like
+    // the `readelf` check above: the probe tests would otherwise self-skip and look like passes.
     build_probes()?;
+    let object = workspace_root().join("crates/probes/target/bpfel-unknown-none/release/probes");
+    if !object.is_file() {
+        bail!(
+            "eBPF object not built ({}) — the probe tests skip themselves without it, and a \
+             skipped test looks like a pass; install bpf-linker + the nightly toolchain (see \
+             docs/contributing-building.md)",
+            object.display()
+        );
+    }
     // Serial (`--test-threads=1`): these tests each boot a real microVM and some assert on
     // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent prewarmed clones). Run
     // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
@@ -875,6 +922,30 @@ fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_uid_parses_the_second_uid_field_and_rejects_drift() {
+        // The privileged gate's root check keys off this parse; the failure direction is a loud
+        // refusal either way, but the euid must come from the right field.
+        let status = "Name:\tcargo\nUid:\t1000\t0\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n";
+        assert_eq!(
+            parse_effective_uid(status),
+            Some(0),
+            "second field is the euid"
+        );
+        assert_eq!(
+            parse_effective_uid("Name:\tcargo\nUid:\t1000\t1000\t1000\t1000\n"),
+            Some(1000)
+        );
+        assert_eq!(parse_effective_uid("Name:\tcargo\n"), None, "no Uid line");
+        assert_eq!(
+            parse_effective_uid("Uid:\t1000\n"),
+            None,
+            "a truncated Uid line is a parse failure, not a guess"
+        );
+        // And the live read on this host parses (format drift would surface here).
+        assert!(effective_uid().is_ok());
+    }
 
     /// A minimal valid ELF64-LE object with three sections: the null section, one named `sec1`, and
     /// `.shstrtab`. Enough to exercise the section-name walk without pulling in an ELF crate.

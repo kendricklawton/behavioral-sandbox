@@ -167,6 +167,18 @@ fn addresses_the_guest_and_routes_host_to_guest() {
         off.exit_code, 0,
         "deny-by-default: the guest must not reach an off-subnet address"
     );
+    // Pin the *reason*: no route (ENETUNREACH), not a timeout. TEST-NET is bogon-filtered on the
+    // public internet too, so a plain non-zero exit would also pass with a full default route +
+    // masquerade, the exact regression this probe exists to catch.
+    let off_err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&off.stdout),
+        String::from_utf8_lossy(&off.stderr)
+    );
+    assert!(
+        off_err.contains("nreachable"),
+        "the block must be no-route, not a timeout; output: {off_err}"
+    );
 
     vm.shutdown().expect("shutdown should succeed");
 }
@@ -253,6 +265,26 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
         off.exit_code, 0,
         "deny-by-default: the guest must not reach an off-link v6 address"
     );
+    // Pin the reason (no route, not a timeout), and the mechanism (no v6 default route), the same
+    // two binds the v4 twin carries: `2001:db8::/32` is bogon-filtered on the public internet, so
+    // the bare non-zero exit would also pass with full v6 egress.
+    let off_err = format!(
+        "{}{}",
+        String::from_utf8_lossy(&off.stdout),
+        String::from_utf8_lossy(&off.stderr)
+    );
+    assert!(
+        off_err.contains("nreachable"),
+        "the v6 block must be no-route, not a timeout; output: {off_err}"
+    );
+    let route = vm
+        .exec(&["ip".into(), "-6".into(), "route".into()], b"")
+        .expect("show guest v6 routes");
+    let route_out = String::from_utf8_lossy(&route.stdout);
+    assert!(
+        !route_out.contains("default"),
+        "no v6 default route may exist (deny-by-default): {route_out}"
+    );
 
     vm.shutdown().expect("shutdown should succeed");
 }
@@ -311,6 +343,15 @@ fn two_networked_vms_run_in_isolated_netns() {
         assert_ne!(
             off.exit_code, 0,
             "each guest must be deny-by-default, so it can't reach the other in netns {other}"
+        );
+        let off_err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&off.stdout),
+            String::from_utf8_lossy(&off.stderr)
+        );
+        assert!(
+            off_err.contains("nreachable"),
+            "the block must be no-route, not a timeout; output: {off_err}"
         );
     }
 
@@ -405,6 +446,13 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
     assert_ne!(
         blocked.exit_code, 0,
         "deny-by-default: the guest must not reach an off-subnet endpoint"
+    );
+    // Pin the reason: ENETUNREACH (no route), not the 3 s socket timeout, which is what an
+    // internet-open guest probing bogon-filtered TEST-NET would report.
+    let blocked_err = String::from_utf8_lossy(&blocked.stderr);
+    assert!(
+        blocked_err.contains("nreachable"),
+        "the block must be no-route, not a timeout; stderr: {blocked_err}"
     );
 
     vm.shutdown().expect("shutdown should succeed");

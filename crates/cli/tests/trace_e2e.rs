@@ -168,9 +168,19 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         .arg(&tampered_path)
         .output()
         .expect("run agent verify on tampered");
+    // Pin the rejection to the *right reason*: exit 1 is the typed verification failure (exit 2
+    // would be an operational error like an unreadable file, which must not pass as "rejected"),
+    // and the message names the signature.
+    assert_eq!(
+        verify_bad.status.code(),
+        Some(1),
+        "a flipped signature byte is the typed rejection: {}",
+        String::from_utf8_lossy(&verify_bad.stderr)
+    );
     assert!(
-        !verify_bad.status.success(),
-        "a flipped signature byte is rejected"
+        String::from_utf8_lossy(&verify_bad.stderr).contains("signature does not verify"),
+        "the rejection names the bad signature: {}",
+        String::from_utf8_lossy(&verify_bad.stderr)
     );
 
     // The model-legible summary is a parseable one-line projection of the *same* run, materially

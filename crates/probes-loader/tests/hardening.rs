@@ -152,6 +152,12 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     // problem, while the host-facing claim is what this asserts). Hardware isolation means those 50
     // guest processes never become host threads.
     let threads_before = process_threads(vm.vmm_pid());
+    // `process_threads` degrades to 0 on a failed read, and 0 == 0 would pass the flat-count
+    // assert below while measuring nothing; a live VMM always has several threads.
+    assert!(
+        threads_before >= 2,
+        "thread probe read failed ({threads_before}); the isolation assert would be vacuous"
+    );
     let storm = [
         "sh",
         "-c",
@@ -446,6 +452,12 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     // Vector 2, a fork storm. Hardware isolation means the guest's processes never become host
     // threads, and cpu.max means the whole VM can't burn more than its quota.
     let threads_before = process_threads(vm.vmm_pid());
+    // `process_threads` degrades to 0 on a failed read, and 0 == 0 would pass the flat-count
+    // assert below while measuring nothing; a live VMM always has several threads.
+    assert!(
+        threads_before >= 2,
+        "thread probe read failed ({threads_before}); the isolation assert would be vacuous"
+    );
     let usage_before = cg.stat("cpu.stat", "usage_usec");
     let storm_started = std::time::Instant::now();
     let storm = [

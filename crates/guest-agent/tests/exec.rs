@@ -411,6 +411,13 @@ fn put_file_rejects_path_traversal() {
     }
     let result = agent.join().expect("agent thread");
     assert!(result.is_err(), "a traversing path must fail the request");
+    // Rejected must mean *not written*: a reject-after-write bug would pass the error asserts
+    // alone. The agent resolves relative paths against its cwd, so the escape would land one
+    // level up from the test's cwd.
+    assert!(
+        !std::path::Path::new("../escape.txt").exists(),
+        "the traversing path must be rejected before any write"
+    );
 }
 
 #[test]

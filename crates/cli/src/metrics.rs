@@ -24,7 +24,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Upper bound on one scrape request's head (request line + headers). A scrape is a bare `GET`; far
 /// past this is not a scraper.
@@ -424,9 +424,12 @@ fn answer_scrape(
     metrics: &Metrics,
     pool_ready: &impl Fn() -> Option<u64>,
 ) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(SCRAPE_TIMEOUT))?;
     stream.set_write_timeout(Some(SCRAPE_TIMEOUT))?;
-    let head = read_request_head(&mut stream)?;
+    // Bound the *whole* request head by one absolute deadline, not each read: `SO_RCVTIMEO` is
+    // re-armed by the OS on every byte, so a per-read timeout alone lets a slow-drip peer (one byte
+    // just inside the timeout) hold this single-threaded endpoint until the byte cap, the same
+    // slowloris the VMM's `DeadlineReader` closes on the Firecracker socket.
+    let head = read_request_head(&mut stream, Instant::now() + SCRAPE_TIMEOUT)?;
     let (status, content_type, body) = if is_get_metrics(&head) {
         (
             "200 OK",
@@ -448,12 +451,23 @@ fn answer_scrape(
 }
 
 /// Read the request head, through the end of the headers (`\r\n\r\n`), capped at
-/// [`MAX_REQUEST_BYTES`]. A peer that never finishes its head inside the cap (or the socket
-/// timeout) is an error, so it can't grow memory or hold the endpoint (guardrail 5).
-fn read_request_head(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+/// [`MAX_REQUEST_BYTES`] and by one absolute `deadline` across all reads. A peer that never finishes
+/// its head inside the cap or the deadline is an error, so it can't grow memory or hold the endpoint
+/// (guardrail 5).
+fn read_request_head(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<Vec<u8>> {
     let mut head = Vec::with_capacity(256);
     let mut chunk = [0u8; 512];
     loop {
+        // Shrink the socket timeout to the time left before the deadline, so the sum of all reads
+        // honors one wall clock. A zero/elapsed remainder is the timeout itself.
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "scrape request head exceeded the deadline",
+            ));
+        }
+        stream.set_read_timeout(Some(remaining))?;
         let n = stream.read(&mut chunk)?;
         if n == 0 {
             return Ok(head); // peer closed after (or mid-) request; judge what we have
@@ -692,5 +706,39 @@ mod tests {
             missing.starts_with("HTTP/1.1 404 Not Found\r\n"),
             "{missing}"
         );
+    }
+
+    #[test]
+    fn a_slow_drip_head_is_bounded_by_the_absolute_deadline() {
+        // A peer that dribbles bytes without ever finishing the head must not hold the endpoint:
+        // the read loop is bounded by one wall-clock deadline, not a per-read timeout the drip
+        // keeps resetting. The server-side end of a real connection, fed one byte then left idle,
+        // must return a TimedOut error well before any byte cap, within ~the deadline.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut client = TcpStream::connect(addr).expect("connect");
+        let (mut server, _) = listener.accept().expect("accept");
+        client.write_all(b"G").expect("drip one byte"); // a partial head, never completed
+        let start = std::time::Instant::now();
+        let deadline = start + Duration::from_millis(200);
+        let err = read_request_head(&mut server, deadline).expect_err("must time out, not hang");
+        // Bounded either way: the shrunk socket timeout fires (`WouldBlock`) or the deadline guard
+        // trips (`TimedOut`); both mean the endpoint was released, not held.
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "a drip must end in a timeout, got {:?}",
+            err.kind()
+        );
+        // The real proof: it returned near the 200ms deadline, far under the 5s per-read
+        // `SCRAPE_TIMEOUT` the old code let a one-byte-per-4.9s drip reset indefinitely.
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "returned near the deadline, not after a full per-read timeout: {:?}",
+            start.elapsed()
+        );
+        drop(client);
     }
 }

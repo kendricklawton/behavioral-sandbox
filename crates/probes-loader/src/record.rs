@@ -517,8 +517,14 @@ mod tests {
         assert_eq!(f.by_kind.openat, 2);
         assert_eq!(f.by_kind.connect, 1);
         assert_eq!(f.by_kind.unknown, 1);
-        // The unknown event produces no notable entry (its detail is unreliable).
-        assert!(f.notable.iter().all(|n| n.hits > 0));
+        // The unknown event produces no notable entry (its detail is unreliable): exactly the four
+        // known-kind events survive as notables.
+        assert_eq!(
+            f.notable.len(),
+            4,
+            "one notable per known-kind event, none for the unknown discriminant: {:?}",
+            f.notable
+        );
     }
 
     #[test]

@@ -50,7 +50,10 @@ is the order to exercise the whole engine end to end; each step links to its det
    see the host-observed record. ([Using the agent CLI](./cli.md).)
 4. **The privileged integration suite.** `cargo xtask ci-privileged` boots real microVMs, execs, runs
    tap networking, attaches probes, and asserts the observed record: the half the host-safe gate
-   cannot reach. It self-checks its prerequisites and prints the fix if an artifact is missing.
+   cannot reach. It self-checks its prerequisites and prints the fix if an artifact is missing, and
+   it *refuses* to run without real root (run it under `sudo`), BTF, or the built eBPF object:
+   the capability-gated tests skip themselves on a short host, and a skipped test is a pass to
+   cargo, so running anyway would print a hollow green.
 5. **The live demos.** One probe end to end each: `trace-sandbox`, `watch-sandbox`, `enforce-sandbox`,
    `meter-sandbox`. ([Host-side observability, *Try it*](./probes.md#try-it).)
 6. **The daemon.** `agent serve --socket ./agent.sock`, then drive it with the reference client or `socat`.

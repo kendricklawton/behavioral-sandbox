@@ -93,6 +93,19 @@ impl LimitCgroup {
     /// test. Returns `None` where cgroup v2 isn't writable or delegated.
     #[must_use]
     pub fn create(vcpus: u32, mem_mib: u32, tag: &str) -> Option<Self> {
+        Self::create_with_quota(u64::from(vcpus) * CPU_PERIOD_US, mem_mib, tag)
+    }
+
+    /// Like [`create`](Self::create), but with the CPU quota given directly in `millicores`
+    /// (1000 = one core). A quota equal to the vCPU count is satisfied by the hardware alone (the
+    /// vCPUs physically can't burn more), which makes an enforcement assert built on it
+    /// unfalsifiable; pinning the quota *below* the vCPU bound is what makes "the cgroup capped
+    /// it" distinguishable from "the vCPU count capped it".
+    pub fn create_cpu_millicores(millicores: u64, mem_mib: u32, tag: &str) -> Option<Self> {
+        Self::create_with_quota(millicores * CPU_PERIOD_US / 1000, mem_mib, tag)
+    }
+
+    fn create_with_quota(cpu_quota_us: u64, mem_mib: u32, tag: &str) -> Option<Self> {
         let parent = PathBuf::from("/sys/fs/cgroup")
             .join(format!("agent-test-{}-{tag}", std::process::id()));
         std::fs::create_dir(&parent).ok()?;
@@ -105,11 +118,10 @@ impl LimitCgroup {
         std::fs::write(this.parent.join("cgroup.subtree_control"), "+cpu +memory").ok()?;
         std::fs::create_dir(&this.dir).ok()?;
         let memory_max = (u64::from(mem_mib) + MEMORY_OVERHEAD_MIB) * 1024 * 1024;
-        let cpu_quota = u64::from(vcpus) * CPU_PERIOD_US;
         std::fs::write(this.dir.join("memory.max"), memory_max.to_string()).ok()?;
         std::fs::write(
             this.dir.join("cpu.max"),
-            format!("{cpu_quota} {CPU_PERIOD_US}"),
+            format!("{cpu_quota_us} {CPU_PERIOD_US}"),
         )
         .ok()?;
         Some(this)

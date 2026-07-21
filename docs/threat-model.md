@@ -105,6 +105,13 @@ the boundary:
   scheduling layer it owns.
 - **Availability of a co-resident run under contention** is bounded (cgroup + egress caps), but the
   engine does not promise fair scheduling across runs, that is the hoster's scheduler.
+- **The e2fsprogs output-extraction tools.** Bulk outputs come back by running `e2fsck` and
+  `debugfs` over a guest-written ext4 image: complex C parsers fed attacker-controlled bytes, with
+  the driver's own privileges. The calls are bounded in wall time and output bytes, and the
+  extracted tree is symlink-sanitized, but a memory-corruption bug in those tools is not contained
+  today. Running them under dropped privileges is a planned hardening step; the clean fix conflicts
+  with the host path's no-`unsafe` rule (privilege-dropping via `pre_exec` is `unsafe`), so it
+  needs its own decision (an external `setpriv`-style dependency, or a dedicated helper).
 
 ## Out of scope (engine, not platform)
 

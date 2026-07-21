@@ -275,6 +275,13 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         snap["dir"].as_str().is_some_and(|d| !d.is_empty()),
         "snapshot returns a bundle dir: {snap}"
     );
+    // The daemon runs on this host, so the returned bundle dir must really exist (a fabricated
+    // path would satisfy the non-empty check alone).
+    let snap_dir = snap["dir"].as_str().expect("dir string");
+    assert!(
+        std::fs::metadata(snap_dir).is_ok_and(|m| m.is_dir()),
+        "the returned bundle dir exists: {snap_dir}"
+    );
     client.send("{\"op\":\"exec\",\"argv\":[\"echo\",\"post-snap\"]}");
     let post_snap = client.recv();
     assert_eq!(
@@ -297,6 +304,16 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
             .is_some_and(|s| s.len() == 128),
         "the record is signed: {traced}"
     );
+    // The signature must actually *verify*, not merely exist (128 hex chars of garbage would pass
+    // the shape check). Envelope-level field order doesn't matter to `verify`; the signed bytes are
+    // the embedded record string, which survives the reply's serde round-trip (decision 034).
+    let envelope = serde_json::to_string(&traced["record"]).expect("re-serialize envelope");
+    let signer = agent_probes_loader::TrustedKey::from_hex(
+        traced["record"]["key_id"].as_str().expect("key_id string"),
+    )
+    .expect("key_id parses as an ed25519 public key");
+    agent_probes_loader::verify(&envelope, &[signer])
+        .expect("the daemon's signed record verifies against the key it names");
     let inner: serde_json::Value =
         serde_json::from_str(traced["record"]["record"].as_str().expect("record string"))
             .expect("inner record parses");

@@ -147,6 +147,20 @@ fn driver_death_cannot_leak_a_vm() {
             .args(["-c", &format!("kill -9 {vmm_pid}")])
             .status();
         cleanup_victim_scratch();
+        // "Degraded" from the helper is ambiguous: no writable cgroup v2 on this host, or the
+        // lifetime-cgroup enrollment itself regressed (the VMM left in the driver's own cgroup),
+        // which is exactly this test's failure mode. Disambiguate by probing writability directly:
+        // if this host can create a cgroup, enrollment had no excuse, so fail, never skip.
+        let probe = Path::new("/sys/fs/cgroup")
+            .join(format!("agent-degraded-probe-{}", std::process::id()));
+        if std::fs::create_dir(&probe).is_ok() {
+            let _ = std::fs::remove_dir(&probe);
+            panic!(
+                "lifetime-cgroup enrollment produced no distinct cgroup on a host with writable \
+                 cgroup v2: the crash-only sentinel is inert, the exact regression this test \
+                 exists to catch"
+            );
+        }
         eprintln!("skipping driver_death_cannot_leak_a_vm: no writable cgroup v2 here");
         return;
     }
@@ -468,8 +482,10 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
         return;
     }
     let cfg = agent_rootfs_config();
-    let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
-    let Some(cg) = LimitCgroup::create(vcpus, mem_mib, "fork-bomb") else {
+    let mem_mib = cfg.mem_mib.get();
+    // Half a core, deliberately *below* the one-vCPU hardware bound: a quota equal to the vCPU
+    // count is satisfied by the silicon alone, which would make the CPU assert below unfalsifiable.
+    let Some(cg) = LimitCgroup::create_cpu_millicores(500, mem_mib, "fork-bomb") else {
         eprintln!(
             "skipping guest_fork_bomb_is_bounded_by_the_cgroup: cgroup v2 not writable/delegated"
         );
@@ -479,18 +495,25 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
     cg.enter(vm.vmm_pid());
 
     let threads_before = process_threads(vm.vmm_pid());
+    // `process_threads` degrades to 0 on a failed read, and 0 == 0 would pass the flat-count
+    // assert below while measuring nothing; a live VMM always has several threads.
+    assert!(
+        threads_before >= 2,
+        "thread probe read failed ({threads_before}); the isolation assert would be vacuous"
+    );
     let usage_before = cg.stat("cpu.stat", "usage_usec");
     let started = Instant::now();
 
-    // 100 spinning shells for 3 s: a bounded storm rather than the classic unbounded `:(){ :|:& };:`
+    // 100 spinning shells for 6 s: a bounded storm rather than the classic unbounded `:(){ :|:& };:`
     // so the guest agent stays schedulable and the run is measurable (the *unbounded* variant would
     // starve the agent inside the guest, a guest-availability problem, while this test is about
-    // what the host feels). The spinners outlive their parent command on purpose: the agent's tree
-    // reaping is what cleans them up.
+    // what the host feels). 6 s, not shorter, so the half-core quota's expected burn (~3 s) sits
+    // clearly under the cap while an unenforced full-core burn (~6 s) sits clearly over it. The
+    // spinners outlive their parent command on purpose: the agent's tree reaping cleans them up.
     let storm = [
         "sh",
         "-c",
-        "i=0; while [ \"$i\" -lt 100 ]; do i=$((i+1)); while :; do :; done & done; sleep 3; echo storm-live",
+        "i=0; while [ \"$i\" -lt 100 ]; do i=$((i+1)); while :; do :; done & done; sleep 6; echo storm-live",
     ]
     .map(String::from);
     let out = vm
@@ -510,10 +533,11 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
         "guest forks must not create host threads (hardware isolation)"
     );
 
-    // The cgroup CPU bound, observed: everything the VM burned during the storm is capped by
-    // quota × wall-clock (`vcpus` cores' worth), plus slack for the VMM's non-vCPU threads.
+    // The cgroup CPU bound, observed and falsifiable: the quota is half a core, so the cap is
+    // half the wall clock plus slack for the VMM's non-vCPU threads. An unenforced `cpu.max`
+    // (the vCPU spinning a full core for the window) overshoots this.
     let usage = cg.stat("cpu.stat", "usage_usec") - usage_before;
-    let cap = elapsed.as_micros() as u64 * u64::from(vcpus) + 2_000_000;
+    let cap = elapsed.as_micros() as u64 / 2 + 2_000_000;
     eprintln!(
         "fork storm: {elapsed:?} wall, {usage} usec of host CPU (cap {cap}), \
          threads {threads_before} -> {threads_after}"

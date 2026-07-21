@@ -215,15 +215,16 @@ fn boots_under_the_jailer() {
     vm.shutdown().expect("jailed shutdown should succeed");
 
     // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup, no
-    // `/tmp/agent-<pid>-*` survives.
+    // `agent-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
+    // via `from_env`, so `AGENT_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
+    // not zero leaks.
     let prefix = format!("agent-{}-", std::process::id());
-    let scratch_leaks = std::fs::read_dir("/tmp")
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
-                .count()
-        })
-        .unwrap_or(0);
+    let scratch_root = agent_vmm::BootConfig::from_env().scratch_dir;
+    let scratch_leaks = std::fs::read_dir(&scratch_root)
+        .expect("scan the scratch root for leaks")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .count();
     assert_eq!(
         scratch_leaks, 0,
         "jailed boot leaked a scratch dir / chroot"
@@ -446,15 +447,15 @@ fn repeated_boots_leave_no_leaks() {
             .unwrap_or_else(|e| panic!("shutdown {i} failed: {e}"));
     }
 
-    // This process's per-VM scratch dirs (`/tmp/agent-<pid>-<n>`) must all be gone.
+    // This process's per-VM scratch dirs (`agent-<pid>-<n>` under the configured scratch root)
+    // must all be gone; an unreadable root is a failure, not zero leaks.
     let prefix = format!("agent-{}-", std::process::id());
-    let leftovers = std::fs::read_dir("/tmp")
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
-                .count()
-        })
-        .unwrap_or(0);
+    let scratch_root = agent_vmm::BootConfig::from_env().scratch_dir;
+    let leftovers = std::fs::read_dir(&scratch_root)
+        .expect("scan the scratch root for leaks")
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+        .count();
     assert_eq!(leftovers, 0, "per-VM scratch dirs should be cleaned up");
 
     // Every firecracker VMM we booted must have been killed and reaped, no orphaned process.
