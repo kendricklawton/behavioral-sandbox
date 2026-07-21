@@ -1,7 +1,49 @@
 # Installation
 
-The engine is **Linux-only** (it needs KVM). There is no packaged release yet, you build from
-source, and `cargo xtask setup` tells you what your host is missing at every step.
+The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
+install a packaged release (tarball / `install.sh` / container, decision 035). Pre-rename releases
+are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setup` (or
+`agent doctor` once installed) tells you what your host is missing at every step.
+
+## Install from a release package
+
+Every release ships one tarball per platform plus `SHA256SUMS`, assembled by `cargo xtask dist`:
+the `agent` binary, the guest kernel, the agent rootfs, and the eBPF object, with a per-file
+`MANIFEST.sha256` inside. `install.sh` verifies both layers before touching anything, then installs
+the binary to `~/.local/bin`, the artifacts to `~/.local/share/agent`, and writes a starter
+`~/.agent.toml` (kernel/rootfs paths) if you don't have one:
+
+```console
+curl -fsSL https://raw.githubusercontent.com/kendricklawton/agent/main/install.sh | sh
+```
+
+Offline, or straight from a package you built or downloaded by hand:
+
+```console
+cargo xtask dist                                            # assemble dist/agent-<ver>-x86_64-linux.tar.gz
+AGENT_DIST_TARBALL=dist/agent-<ver>-x86_64-linux.tar.gz sh install.sh
+```
+
+Knobs (env): `AGENT_INSTALL_PREFIX` (binary dir), `AGENT_DATA_DIR` (artifact dir), `AGENT_VERSION`
+(a specific release), `AGENT_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
+prerequisite (the engine drives it, it doesn't bundle it); eBPF observability wants
+`AGENT_PROBES_OBJECT` pointed at the installed `probes` object, which the installer prints.
+
+## Run it as a container
+
+The image bundles the pinned Firecracker (the one bundling exception: an image is a closed,
+rebuilt filesystem) but never the KVM boundary, which is always the host's:
+
+```console
+cargo xtask dist
+docker build -f Containerfile --build-arg DIST=dist/agent-<ver>-x86_64-linux -t agent:<ver> .
+docker run --rm agent:<ver>                                          # doctor: what this host can do
+docker run --rm --device /dev/kvm agent:<ver> run --unjailed -- echo hi
+```
+
+The jailed default and eBPF observation need more of the host (real root, CAP_BPF/CAP_PERFMON,
+cgroup delegation); a hardened deployment runs those on the host or grants them explicitly, a
+hoster call the image documents rather than makes (see the `Containerfile` header).
 
 ## Self-host in one command
 

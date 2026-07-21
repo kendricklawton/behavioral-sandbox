@@ -2172,7 +2172,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Alpine CDN dark. Vendor-aware via `fetch_one` (zero call-site churn); manifest parse/round-trip
       unit-tested; `docs/cli-install.md` gains Self-host + Vendoring sections. non-`api:` (xtask + docs
       only). The network/KVM steps run on the self-hoster's box, not the host-safe gate.)*
-- [ ] **P20.2** `curl | sh` / container / release binaries with checksums.
+- [x] **P20.2** `curl | sh` / container / release binaries with checksums.
       *(What actually ships: the release binaries plus the xtask-built rootfs, guest kernel, and
       eBPF objects, gitignored, never carried in the source tree, assembled and checksummed at
       package time. Tests are **not** a shipped-artifact cost: `#[cfg(test)]` modules and `tests/`
@@ -2182,6 +2182,22 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       changes, trim the package tarball via `Cargo.toml` `include`/`exclude`: integration `tests/`
       are packaged by default and can be dropped, while inline `src/` unit tests cannot be split out
       without moving them.)*
+      *(**Done** as decision 035. `cargo xtask dist` assembles the package: release binary +
+      kernel/rootfs/eBPF object staged as `bin/` + `share/agent/`, a per-file `MANIFEST.sha256`
+      inside, a deterministic tarball + `SHA256SUMS` outside; the eBPF object is required (a
+      package without the audit half is not the product); vendor-aware, x86_64 only. `install.sh`
+      (repo root, also packed into the tarball) is the `curl | sh` face: verifies tarball +
+      manifest, installs to `~/.local/bin` + `~/.local/share/agent`, writes a starter
+      `~/.agent.toml` only if absent; `AGENT_DIST_TARBALL` runs it offline. The `Containerfile`
+      builds a runtime image from the dist stage bundling the sha-pinned Firecracker (the one
+      bundling exception; KVM always the host's, `--device /dev/kvm`). `release.yml` packages on a
+      pushed tag into a **draft** release, publishing stays human. Proven end to end on the dev
+      box: package → install into a fresh `$HOME` (both sha layers verified) → the installed
+      binary's `doctor` green and a sandbox booted; the container image ran `doctor` and booted a
+      sandbox with its bundled Firecracker. Pre-rename releases stay disposable `v0.0.x`
+      checkpoints: no package managers, no crates.io, no promotion (decision 035).
+      `docs/cli-install.md` gains the release-install + container sections. non-`api:` (xtask,
+      scripts, workflow, docs).)*
 - [x] **P20.3** Docs site: quickstart, the engine API, the threat model, the non-goals.
       *(**Done.** The docs are already an mdBook (`book.toml`, `SUMMARY.md`); all four destinations
       the box names exist, mapped onto wasmtime's book layout (the structural model, which carries

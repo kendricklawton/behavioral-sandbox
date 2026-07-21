@@ -52,6 +52,7 @@
     - [032. Supported platforms: two architectures, a security-maintained host-kernel floor, and pinned upstream versions](./adr/032-supported-platforms-two-architectures-a-security.md)
     - [033. Single-command self-host + a vendored offline mirror of every pinned input](./adr/033-single-command-self-host-a-vendored-offline-mirror-of.md)
     - [034. The integrity model: a host-signed record, and the boundary a signature does not cross](./adr/034-the-integrity-model-a-host-signed-record-and-the.md)
+    - [035. Distribution: a checksummed tarball, an installer script, and a container image; nothing that freezes the working name](./adr/035-distribution-is-a-checksummed-tarball-an-installer.md)
   - [Building](./contributing-building.md)
   - [Testing](./contributing-testing.md)
   - [Fuzzing](./contributing-fuzzing.md)

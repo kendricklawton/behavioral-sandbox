@@ -1,0 +1,64 @@
+# Release packaging: on a pushed v* tag (the user's act; tags are human-cut per RELEASES.md),
+# assemble `cargo xtask dist` and attach the tarball + SHA256SUMS to a DRAFT GitHub release, so
+# publishing stays a human step too. Manual dispatch builds the package without a release, a dry
+# run of the assembly. Pre-rename releases are disposable checkpoints (decision 035): no package
+# managers, no promotion.
+#
+# SECURITY: tag + dispatch only, never a fork `pull_request` trigger.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  dist:
+    name: package (x86_64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Toolchains (nightly + rust-src + bpf-linker for the eBPF object; musl for the guest agent)
+        run: |
+          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup target add x86_64-unknown-linux-musl
+          cargo install bpf-linker --locked
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          workspaces: |
+            .
+            crates/probes
+
+      - name: Assemble the package
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            cargo xtask dist --version "${GITHUB_REF_NAME#v}"
+          else
+            cargo xtask dist
+          fi
+          ls -l dist/
+
+      - name: Attach to a draft release (tags only; publishing stays human)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" --draft --title "${GITHUB_REF_NAME}" \
+            --notes "Pre-release checkpoint. Verify: sha256sum -c SHA256SUMS. Install: see install.sh." \
+            dist/agent-*-x86_64-linux.tar.gz dist/SHA256SUMS

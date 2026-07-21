@@ -13,6 +13,9 @@
 //! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
 //!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
 //!   bucket or the Alpine CDN; `--verify` re-checks the mirror offline.
+//! - **`dist`**, assemble the shippable release package: the release binary + the guest kernel,
+//!   rootfs, and eBPF object, staged, sha256-manifested, and tarred into `dist/` with a
+//!   `SHA256SUMS`; `install.sh` and the `Containerfile` consume it. Vendor-aware like `self-host`.
 //! - **`build-probes`**, build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via
 //!   `bpf-linker`, under the crate's own nightly toolchain. Host-safe (no KVM); skips with a note
 //!   when `bpf-linker`/`rustup` are absent.
@@ -67,6 +70,7 @@
 mod artifacts;
 mod bench;
 mod demo;
+mod dist;
 mod drift;
 mod guest_bins;
 mod rootfs;
@@ -127,6 +131,16 @@ enum Cmd {
     BuildProbes,
     /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
     FetchArtifacts,
+    /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
+    /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`
+    /// (decision 035). Vendor-aware via `AGENT_VENDOR_DIR`; the eBPF toolchain is required (a
+    /// package without the audit half is not the product).
+    Dist {
+        /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
+        /// against the `v0.0.x` checkpoint line, `v` stripped.
+        #[arg(long, value_name = "VERSION")]
+        version: Option<String>,
+    },
     /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
     BuildGuestAgent,
     /// Build the static native-ELF fixture (`examples/writefile`) for the guest target, the
@@ -292,6 +306,7 @@ fn main() -> Result<()> {
         }
         Cmd::BuildProbes => build_probes(),
         Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
+        Cmd::Dist { version } => dist::dist(version),
         Cmd::BuildGuestAgent => guest_bins::build_guest_agent().map(|_| ()),
         Cmd::BuildGuestExample => guest_bins::build_guest_example().map(|_| ()),
         Cmd::BuildRootfs {

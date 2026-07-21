@@ -40,3 +40,4 @@ phase), so each stands on its own as the roadmap evolves. The overview and repo 
 - [032. Supported platforms: two architectures, a security-maintained host-kernel floor, and pinned upstream versions](./032-supported-platforms-two-architectures-a-security.md) *(2026-07-17)*
 - [033. Single-command self-host + a vendored offline mirror of every pinned input](./033-single-command-self-host-a-vendored-offline-mirror-of.md) *(2026-07-17)*
 - [034. The integrity model: a host-signed record, and the boundary a signature does not cross](./034-the-integrity-model-a-host-signed-record-and-the.md) *(2026-07-21)*
+- [035. Distribution: a checksummed tarball, an installer script, and a container image; nothing that freezes the working name](./035-distribution-is-a-checksummed-tarball-an-installer.md) *(2026-07-21)*

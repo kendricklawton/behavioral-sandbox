@@ -13,11 +13,13 @@ green, so the tag means the whole story works end to end, not a subset.
   land *after* the tag. Both presuppose the frozen wire API; neither pulls tenancy/billing/
   scheduling into scope, and the Wasmtime sibling never dilutes the core properties (it ships as a
   separate artifact with a weaker, clearly-labelled guarantee).
-- **Everything until then is a pre-release `v0.0.x`.** The foundation baseline (the engine boots
-  and tears down microVMs) is tagged internally as `v0.0.1`; later milestones bump the `0.0.x`
-  patch as they land. These are checkpoints, not releases: no stability promise. (The Cargo
-  manifests carry `0.1.0` as their in-development working number, distinct from these git tags;
-  every crate is `publish = false`, so nothing reaches crates.io before the `v0.1.0` release.)
+- **Everything until then is a pre-release `v0.0.x`.** Checkpoint tags start at `v0.0.1`, the
+  first packaged checkpoint (`cargo xtask dist` + a draft GitHub release, decision 035); later
+  milestones bump the `0.0.x` patch as they land. These are checkpoints, not releases: no
+  stability promise, and they ship under the working name, so they are disposable by design
+  (no package managers, no promotion, decision 035). (The Cargo manifests carry `0.1.0` as their
+  in-development working number, distinct from these git tags; every crate is `publish = false`,
+  so nothing reaches crates.io before the `v0.1.0` release.)
 - **Tags are a human git step.** The coding agent's job ends at the working tree; the user cuts
   every tag (see [`.rules`](https://github.com/kendricklawton/agent/blob/main/.rules)).
 
