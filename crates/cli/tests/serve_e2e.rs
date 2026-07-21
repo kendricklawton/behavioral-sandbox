@@ -234,7 +234,8 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
 
     // Stdin rides the request and reaches the command.
     client.send("{\"op\":\"exec\",\"argv\":[\"cat\"],\"stdin\":\"piped\\n\"}");
-    assert_eq!(client.recv()["stdout"], "piped\n", "stdin fed the command");
+    let piped = client.recv();
+    assert_eq!(piped["stdout"], "piped\n", "stdin fed the command: {piped}");
 
     // put/get: a file written by `put` reads back by `get`, proving the working directory persists.
     client.send("{\"op\":\"put\",\"path\":\"note.txt\",\"content\":\"from put\\n\"}");
@@ -249,18 +250,18 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     );
     // A missing file is `present:false`, not an error.
     client.send("{\"op\":\"get\",\"path\":\"nope.txt\"}");
+    let missing = client.recv();
     assert_eq!(
-        client.recv()["present"],
-        false,
-        "a missing get is present:false"
+        missing["present"], false,
+        "a missing get is present:false: {missing}"
     );
 
     // put is visible to a following exec too (same working directory).
     client.send("{\"op\":\"exec\",\"argv\":[\"cat\",\"note.txt\"]}");
+    let noted = client.recv();
     assert_eq!(
-        client.recv()["stdout"],
-        "from put\n",
-        "put lands in the working dir"
+        noted["stdout"], "from put\n",
+        "put lands in the working dir: {noted}"
     );
 
     // snapshot (unjailed session): a bundle directory comes back, and the session survives it.
@@ -275,10 +276,10 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         "snapshot returns a bundle dir: {snap}"
     );
     client.send("{\"op\":\"exec\",\"argv\":[\"echo\",\"post-snap\"]}");
+    let post_snap = client.recv();
     assert_eq!(
-        client.recv()["stdout"],
-        "post-snap\n",
-        "the session survives a snapshot"
+        post_snap["stdout"], "post-snap\n",
+        "the session survives a snapshot: {post_snap}"
     );
 
     // trace: the host-observed audit record, now a signed envelope (decision 034). The wire `record`

@@ -351,6 +351,9 @@ fn serve_run(
         Err(e) => {
             let session_survives = e.kind() == ErrorKind::Guest;
             metrics.request_failed(session_survives);
+            // Logged host-side too: the error reply reaches only the one client, and an operator
+            // (or CI log) diagnosing a failed request needs the cause without owning that client.
+            tracing::warn!(error = %e, fatal = !session_survives, "request failed");
             let sent = send(w, &error(e.to_string(), !session_survives));
             sent && session_survives
         }
