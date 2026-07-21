@@ -5,11 +5,12 @@
 //! supervisor can verify a record **without trusting the host that relayed it**. Exit non-zero on any
 //! mismatch (a tampered record, an untrusted signer, or a malformed envelope), the demo P19.3 asks for.
 
+use std::io::Read as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agent_probes_loader::{verify, HostKey, TrustedKey};
+use agent_probes_loader::{verify, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
 
 use crate::config;
 use crate::CliError;
@@ -28,8 +29,7 @@ pub struct VerifyArgs {
 
 /// Verify the record file, printing the outcome and returning a non-zero exit on any failure.
 pub fn run(args: VerifyArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
-    let envelope = std::fs::read_to_string(&args.record)
-        .map_err(|e| CliError::Cli(format!("read {}: {e}", args.record.display())))?;
+    let envelope = read_bounded(&args.record)?;
 
     let trusted = trusted_keys(&args, file)?;
     match verify(envelope.trim(), &trusted) {
@@ -44,6 +44,31 @@ pub fn run(args: VerifyArgs, file: Option<&config::AgentToml>) -> Result<ExitCod
             Ok(ExitCode::from(1))
         }
     }
+}
+
+/// Read the record file, bounded: the envelope is untrusted input (relayed by a host the verifier
+/// deliberately doesn't trust), so the read stops at [`MAX_ENVELOPE_BYTES`] instead of swallowing an
+/// arbitrarily large file. Length is checked on bytes, before UTF-8 conversion, so an over-bound
+/// file reads as "too large" rather than a misleading encoding error.
+fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| CliError::Cli(format!("read {}: {e}", path.display())))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_ENVELOPE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| CliError::Cli(format!("read {}: {e}", path.display())))?;
+    if bytes.len() > MAX_ENVELOPE_BYTES {
+        return Err(CliError::Cli(format!(
+            "{}: larger than the {MAX_ENVELOPE_BYTES}-byte envelope bound; not a signed record",
+            path.display()
+        )));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        CliError::Cli(format!(
+            "{}: not UTF-8; not a signed record",
+            path.display()
+        ))
+    })
 }
 
 /// The trusted key **set**: the union of explicit `--key` values, the configured trusted keys

@@ -41,6 +41,7 @@ use ed25519_dalek::SigningKey;
 use ed25519_dalek::VerifyingKey;
 use sha2::Digest as _;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use crate::RunRecord;
 
@@ -49,6 +50,12 @@ use crate::RunRecord;
 /// know it is holding a signed envelope; the record inside carries its own
 /// [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION).
 pub const SIGNED_RECORD_SCHEMA_VERSION: u32 = 2;
+
+/// The most bytes [`verify`] accepts as an envelope. The verifier is where attacker-relayed bytes
+/// enter the host (a record arrives via an untrusted transport by design), so its decode is bounded
+/// like every other untrusted input. A real envelope is kilobytes (every record section is capped),
+/// so the bound is orders-of-magnitude headroom, not a budget.
+pub const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 
 /// A host signing key (an `ed25519` keypair). Held host-side; the guest never sees it. Sign a record
 /// to produce the envelope; hand [`verifying_key`](Self::verifying_key) to [`verify`] as a trusted key.
@@ -66,7 +73,9 @@ impl fmt::Debug for HostKey {
 }
 
 impl HostKey {
-    /// Build a key from a 32-byte `ed25519` seed (the secret scalar's seed).
+    /// Build a key from a 32-byte `ed25519` seed (the secret scalar's seed). The key's internal
+    /// copy is zeroized on drop (the `zeroize` feature); the caller's `seed` copy is the caller's
+    /// to scrub.
     #[must_use]
     pub fn from_seed(seed: [u8; 32]) -> Self {
         Self {
@@ -78,15 +87,24 @@ impl HostKey {
     /// `/dev/urandom`, written `0600`, parent dirs created). The generate-on-first-run path is why a
     /// hoster needs no key ceremony to get a signed record; custody of the file is theirs.
     ///
+    /// Concurrent first runs converge on **one** key: the publish is atomic, and a process that
+    /// loses the race discards its candidate and reloads the winner's file, so no signed record is
+    /// ever orphaned by an overwritten key.
+    ///
     /// # Errors
     /// [`KeyError`] if the file exists but is unreadable or malformed, or if generation/persist fails.
     pub fn load_or_generate(path: &Path) -> Result<Self, KeyError> {
         if path.exists() {
-            Self::load(path)
-        } else {
-            let key = Self::from_seed(random_seed()?);
-            key.persist(path)?;
+            return Self::load(path);
+        }
+        let seed = random_seed()?;
+        let key = Self {
+            signing: SigningKey::from_bytes(&seed),
+        };
+        if key.persist(path)? {
             Ok(key)
+        } else {
+            Self::load(path)
         }
     }
 
@@ -102,30 +120,47 @@ impl HostKey {
 
     /// Load a key from a hex-seed file.
     fn load(path: &Path) -> Result<Self, KeyError> {
-        let text = std::fs::read_to_string(path).map_err(KeyError::Io)?;
-        let mut seed = [0u8; 32];
-        hex_decode(text.trim(), &mut seed).map_err(|()| {
+        let text = Zeroizing::new(std::fs::read_to_string(path).map_err(KeyError::Io)?);
+        let mut seed = Zeroizing::new([0u8; 32]);
+        hex_decode(text.trim(), &mut *seed).map_err(|()| {
             KeyError::Malformed("signing-key file is not a 32-byte hex seed".into())
         })?;
-        Ok(Self::from_seed(seed))
+        Ok(Self {
+            signing: SigningKey::from_bytes(&seed),
+        })
     }
 
-    /// Persist the secret seed as hex, `0600`, creating parent dirs. Only called on first-run
-    /// generation, so it never widens an existing file's permissions.
-    fn persist(&self, path: &Path) -> Result<(), KeyError> {
+    /// Persist the secret seed as hex, `0600`, creating parent dirs. Publishes **atomically**
+    /// (write a sibling temp file, link it into place): a concurrent generator either wins the
+    /// link or sees the winner's file, and a reader can never observe a partial write. Returns
+    /// `false` when another process published first (the caller reloads that key). Only called on
+    /// first-run generation, so it never widens an existing file's permissions.
+    fn persist(&self, path: &Path) -> Result<bool, KeyError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(KeyError::Io)?;
         }
+        let tmp = temp_sibling(path);
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .mode(0o600)
-            .open(path)
+            .open(&tmp)
             .map_err(KeyError::Io)?;
-        let mut hex = hex_encode(&self.signing.to_bytes());
+        let mut hex = Zeroizing::new(hex_encode(&self.signing.to_bytes()));
         hex.push('\n');
-        f.write_all(hex.as_bytes()).map_err(KeyError::Io)
+        let written = f.write_all(hex.as_bytes());
+        drop(f);
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(KeyError::Io(e));
+        }
+        let linked = std::fs::hard_link(&tmp, path);
+        let _ = std::fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(KeyError::Io(e)),
+        }
     }
 
     /// The public verifying key: hand this to [`verify`] as a trusted key.
@@ -273,6 +308,11 @@ fn verify_entry(
     envelope: &str,
     trusted: &[TrustedKey],
 ) -> Result<(String, Option<String>), VerifyError> {
+    if envelope.len() > MAX_ENVELOPE_BYTES {
+        return Err(VerifyError::TooLarge {
+            len: envelope.len(),
+        });
+    }
     let v: serde_json::Value =
         serde_json::from_str(envelope).map_err(|e| VerifyError::Malformed(e.to_string()))?;
     let field = |name: &str| -> Result<String, VerifyError> {
@@ -336,12 +376,22 @@ pub fn verify_chain(envelopes: &[&str], trusted: &[TrustedKey]) -> Result<Vec<St
 }
 
 /// Read 32 random bytes from `/dev/urandom` (the OS CSPRNG on the Linux-only engine), so key
-/// generation needs no `rand` dependency.
-fn random_seed() -> Result<[u8; 32], KeyError> {
-    let mut seed = [0u8; 32];
+/// generation needs no `rand` dependency. Zeroized on drop: it is the secret.
+fn random_seed() -> Result<Zeroizing<[u8; 32]>, KeyError> {
+    let mut seed = Zeroizing::new([0u8; 32]);
     let mut f = std::fs::File::open("/dev/urandom").map_err(KeyError::Io)?;
-    f.read_exact(&mut seed).map_err(KeyError::Io)?;
+    f.read_exact(&mut *seed).map_err(KeyError::Io)?;
     Ok(seed)
+}
+
+/// A per-attempt-unique temp sibling of `path` for the atomic key publish (pid plus a process-wide
+/// counter, so concurrent threads of one process don't collide either).
+fn temp_sibling(path: &Path) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".tmp.{}.{n}", std::process::id()));
+    PathBuf::from(name)
 }
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -433,6 +483,12 @@ pub enum VerifyError {
     /// The signature did not verify against the trusted key: the record was altered, or signed by a
     /// different key than its `key_id` claims.
     BadSignature,
+    /// The envelope exceeds [`MAX_ENVELOPE_BYTES`], rejected before any parsing: no record this
+    /// engine produces comes close to the bound.
+    TooLarge {
+        /// The offered envelope's byte length.
+        len: usize,
+    },
 }
 
 impl fmt::Display for VerifyError {
@@ -446,6 +502,10 @@ impl fmt::Display for VerifyError {
                     "signature does not verify: the record was altered or mis-signed"
                 )
             }
+            Self::TooLarge { len } => write!(
+                f,
+                "envelope is {len} bytes, over the {MAX_ENVELOPE_BYTES}-byte bound; not a signed record"
+            ),
         }
     }
 }
@@ -676,6 +736,93 @@ mod tests {
             hex_decode("00", &mut [0u8; 2]).is_err(),
             "wrong length rejected"
         );
+    }
+
+    #[test]
+    fn an_oversized_envelope_is_rejected_before_parsing() {
+        let key = test_key();
+        let huge = "x".repeat(MAX_ENVELOPE_BYTES + 1);
+        assert!(matches!(
+            verify(&huge, &[key.verifying_key()]),
+            Err(VerifyError::TooLarge { len }) if len == MAX_ENVELOPE_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn arbitrary_mutations_of_an_envelope_never_panic_the_verifier() {
+        // The cheap in-gate tier of the envelope fuzzing (the deep tier is the `signing_envelope`
+        // libFuzzer target, docs/contributing-fuzzing.md): deterministic mutations of a valid
+        // chained envelope must always land in Ok/Err, never a panic.
+        let key = test_key();
+        let trusted = [key.verifying_key()];
+        let valid = key.sign_canonical_chained(r#"{"schema":1,"n":1}"#, Some(&record_hash("{}")));
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..2000 {
+            let mut bytes = valid.clone().into_bytes();
+            match next() % 3 {
+                0 => {
+                    let i = (next() as usize) % bytes.len();
+                    bytes[i] ^= (next() as u8) | 1;
+                }
+                1 => {
+                    bytes.truncate((next() as usize) % bytes.len());
+                }
+                _ => {
+                    let i = (next() as usize) % bytes.len();
+                    let n = (next() as usize) % 16;
+                    let noise: Vec<u8> = (0..n).map(|_| next() as u8).collect();
+                    bytes.splice(i..i, noise);
+                }
+            }
+            let s = String::from_utf8_lossy(&bytes);
+            let _ = verify(&s, &trusted);
+            let lines: Vec<&str> = s.lines().collect();
+            let _ = verify_chain(&lines, &trusted);
+            let _ = TrustedKey::from_hex(&s);
+        }
+    }
+
+    #[test]
+    fn concurrent_first_run_generation_converges_on_one_key() {
+        let dir = std::env::temp_dir().join(format!("agent-key-race-{}", std::process::id()));
+        let path = dir.join("record-signing.ed25519");
+        let _ = std::fs::remove_dir_all(&dir);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    HostKey::load_or_generate(&path)
+                        .expect("generates or reloads")
+                        .key_id()
+                })
+            })
+            .collect();
+        let ids: Vec<String> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect();
+        assert!(
+            ids.iter().all(|id| id == &ids[0]),
+            "every racer signs with the same key: {ids:?}"
+        );
+        let mode = std::os::unix::fs::MetadataExt::mode(&std::fs::metadata(&path).expect("stat"));
+        assert_eq!(mode & 0o777, 0o600);
+        let litter: Vec<_> = std::fs::read_dir(&dir)
+            .expect("dir")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(litter.is_empty(), "no temp litter: {litter:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

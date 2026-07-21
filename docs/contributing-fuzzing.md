@@ -15,6 +15,11 @@ must, for *any* input, return a value or a typed `ChannelError`, and never panic
 or allocate past `MAX_PAYLOAD`. The guest-side `Request` decoder is fuzzed too as defense in depth
 (the host is trusted, but the in-guest agent should be just as unpanicky).
 
+The **signed-record envelope** (`crates/probes-loader`, `verify`/`verify_chain`). A record is
+verified precisely when the host that delivered it is *not* trusted (decision 034), so the envelope
+bytes are attacker-relayed by design. The verifier must, for any input, return the canonical record
+or a typed `VerifyError`, bounded at `MAX_ENVELOPE_BYTES`, and never panic.
+
 Lower-value targets (the Firecracker HTTP response parser, the eBPF record parsers) read
 host/kernel-sourced input, not attacker-controlled input, so they are robustness hygiene, not a
 security boundary, and are not fuzzed today.
@@ -27,7 +32,8 @@ dependency, keeping the wire crate dependency-free and the supply-chain gate cle
 thousands of inputs at the decoders each run: arbitrary bytes, well-framed frames with random bodies
 (to reach the message-body parsers), encode/decode round-trips, and every truncation of a valid
 frame. Fixed seeds make any failure reproduce exactly, so it never flakes. This is the continuous
-guard.
+guard. The envelope verifier carries the same discipline: a deterministic mutation test in
+`crates/probes-loader` (byte flips, truncations, splices of a valid envelope) runs in the gate.
 
 **Deep, scheduled + on demand (`fuzz/`, nightly + libFuzzer).** A `cargo fuzz` harness for long,
 coverage-guided runs that explore far more of the input space than the in-gate pass. It lives in
@@ -44,7 +50,8 @@ uploads the reproducing input as a workflow artifact.
 The in-gate tier needs nothing extra:
 
 ```console
-cargo test -p agent-channel        # includes the fuzz_tests property suite
+cargo test -p agent-channel                # includes the fuzz_tests property suite
+cargo test -p agent-probes-loader --lib    # includes the envelope mutation test
 ```
 
 The deep tier needs the toolchain once, then run a target:
@@ -63,7 +70,8 @@ You only need nightly *installed*, not as your default: `cargo xtask fuzz` invok
 (`.github/workflows/fuzz.yml`) runs the exact same `cargo xtask fuzz` command, so a green local run
 and a green CI run mean the same thing.
 
-The targets are `channel_response` (host reads guest, the highest-value one), `channel_request`
+The targets are `channel_response` (host reads guest, the highest-value one), `signing_envelope`
+(the record verifier reading an envelope relayed by an untrusted host), `channel_request`
 (guest reads host), `channel_frame` (the shared framing), and `channel_handshake` (the magic +
 version exchanged before any message). A crash is written under `fuzz/artifacts/` and replays with
 `cargo +nightly fuzz run <target> fuzz/artifacts/<file>` (libFuzzer needs nightly, which is why

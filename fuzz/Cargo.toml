@@ -1,7 +1,8 @@
-# `cargo fuzz` harness for the host↔guest wire decoders. Kept OUT of the main workspace on purpose:
-# it needs a nightly toolchain and libFuzzer, so it must never be pulled into `cargo build` or
-# `cargo xtask ci`. Its own `[workspace]` table below detaches it; run it with `cargo xtask fuzz`
-# (or `cargo fuzz run <target>`). See `docs/contributing-fuzzing.md`.
+# `cargo fuzz` harness for the untrusted-input decoders: the host↔guest wire (channel) and the
+# signed-record envelope (attacker-relayed by design, decision 034). Kept OUT of the main workspace
+# on purpose: it needs a nightly toolchain and libFuzzer, so it must never be pulled into
+# `cargo build` or `cargo xtask ci`. Its own `[workspace]` table below detaches it; run it with
+# `cargo xtask fuzz` (or `cargo fuzz run <target>`). See `docs/contributing-fuzzing.md`.
 [package]
 name = "agent-fuzz"
 version = "0.0.0"
@@ -17,6 +18,11 @@ libfuzzer-sys = "0.4"
 [dependencies.agent-channel]
 path = "../crates/channel"
 features = ["fuzzing"]
+
+# The signed-record envelope surface (`verify`/`verify_chain`/`TrustedKey::from_hex`); the public
+# API is exactly the fuzz surface, so no feature flag is needed.
+[dependencies.agent-probes-loader]
+path = "../crates/probes-loader"
 
 # A separate one-crate workspace: detaches this crate from the repo's workspace so the everyday
 # stable gate never tries to build it.
@@ -50,6 +56,13 @@ bench = false
 [[bin]]
 name = "channel_handshake"
 path = "fuzz_targets/channel_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "signing_envelope"
+path = "fuzz_targets/signing_envelope.rs"
 test = false
 doc = false
 bench = false

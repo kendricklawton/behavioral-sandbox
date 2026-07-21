@@ -36,6 +36,9 @@ serde_json = { workspace = true }
 # The session hash-chain (decision 034): each record commits to the SHA-256 of the previous one, so a
 # sequence is tamper-evident as a whole. Already in the tree under `ed25519-dalek`; named directly here.
 sha2 = { workspace = true }
+# Scrub transient copies of the signing seed on drop; the key itself is scrubbed by dalek's own
+# `zeroize` feature (enabled at the workspace pin).
+zeroize = { workspace = true }
 
 [dev-dependencies]
 # The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach

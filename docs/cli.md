@@ -93,7 +93,8 @@ consumer can detect any alteration made *after* the producing host. The record f
 envelope, `{schema, key_id, signature, record}`, with the record carried inside as a string.
 
 `agent verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
-mismatch:
+mismatch. The input is treated as untrusted (that is the point of verifying) and is bounded: a file
+over 16 MiB is rejected as "not a signed record" without being read in, a real envelope is kilobytes.
 
 ```console
 agent verify run.json                      # trusts this host's own signing key

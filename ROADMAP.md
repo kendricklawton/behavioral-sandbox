@@ -2256,7 +2256,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
       matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
       internal doctor row + docs).)*
-- [ ] **P20.9** v0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
+- [ ] **P20.9** v0.0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
   and read the eBPF-observed audit trail.
 

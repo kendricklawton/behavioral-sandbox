@@ -53,9 +53,10 @@
 //! - **`meter-sandbox`**, the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
-//! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the host↔guest channel decoders (the
-//!   guest→host untrusted-input boundary). Nightly + `cargo install cargo-fuzz`; never part of `ci`
-//!   (the in-gate coverage is `crates/channel`'s dependency-free `fuzz_tests`).
+//! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the untrusted-input decoders: the
+//!   host↔guest channel (the guest→host boundary) and the signed-record envelope (attacker-relayed
+//!   by design). Nightly + `cargo install cargo-fuzz`; never part of `ci` (the in-gate coverage is
+//!   the crates' own dependency-free mutation tests).
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch), `vendor`
@@ -277,10 +278,11 @@ enum Cmd {
     /// most of a core, plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
     /// `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
     MeterSandbox,
-    /// Fuzz the host↔guest channel decoders with `cargo fuzz` (libFuzzer), the deep, nightly-only
-    /// counterpart to the channel crate's in-gate `fuzz_tests`. Needs `cargo install cargo-fuzz` + a
-    /// nightly toolchain; never part of `ci`. Targets: `channel_response` (default), `channel_request`,
-    /// `channel_frame`, `channel_handshake`.
+    /// Fuzz the untrusted-input decoders (the host↔guest channel, the signed-record envelope) with
+    /// `cargo fuzz` (libFuzzer), the deep, nightly-only counterpart to the in-gate mutation tests.
+    /// Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of `ci`. Targets:
+    /// `channel_response` (default), `channel_request`, `channel_frame`, `channel_handshake`,
+    /// `signing_envelope`.
     Fuzz {
         /// The libFuzzer target to run.
         #[arg(default_value = "channel_response")]
@@ -330,10 +332,10 @@ fn main() -> Result<()> {
     }
 }
 
-/// Run a `cargo fuzz` (libFuzzer) target against the channel decoders. cargo-fuzz drives libFuzzer
-/// under a nightly toolchain, both opt-in installs, so this bails with guidance rather than
-/// pretending, and it is never wired into `ci` (the in-gate coverage is the channel crate's
-/// dependency-free `fuzz_tests`). See `docs/contributing-fuzzing.md`.
+/// Run a `cargo fuzz` (libFuzzer) target against the untrusted-input decoders. cargo-fuzz drives
+/// libFuzzer under a nightly toolchain, both opt-in installs, so this bails with guidance rather
+/// than pretending, and it is never wired into `ci` (the in-gate coverage is the crates' own
+/// dependency-free mutation tests). See `docs/contributing-fuzzing.md`.
 fn fuzz(target: &str, seconds: u64) -> Result<()> {
     if !cargo_fuzz_available() {
         bail!(

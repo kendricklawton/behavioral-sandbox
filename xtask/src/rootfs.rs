@@ -141,6 +141,12 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 /// v6 exactly as for v4 (ADR 008): only the connected `/64` route is added, never a v6 default
 /// route, so the guest reaches the host end and nothing else. `ip` first, `ifconfig` as the fallback,
 /// so it works whether or not busybox's `ip` applet carries v6 address support.
+///
+/// DAD is disabled (`accept_dad=0`) before the address is added, mirroring the host tap end's
+/// `nodad` (`crates/vmm/src/net.rs`): the point-to-point `/64` has exactly one other endpoint,
+/// owned by the same driver, so detection can find nothing, and its tentative window (~1s) makes
+/// the address unusable as a source right after boot, a real failure for a guest command that
+/// talks v6 immediately.
 fn net_up_script() -> String {
     format!(
         "\
@@ -152,6 +158,7 @@ for tok in $(cat /proc/cmdline); do
 	esac
 done
 [ -n \"$addr\" ] || exit 0
+echo 0 > /proc/sys/net/ipv6/conf/eth0/accept_dad 2>/dev/null
 ip addr add \"$addr\" dev eth0 2>/dev/null || ifconfig eth0 add \"$addr\" 2>/dev/null
 exit 0
 ",

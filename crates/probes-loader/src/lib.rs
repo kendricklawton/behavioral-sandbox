@@ -120,7 +120,7 @@ pub use record::{
 };
 pub use signing::{
     default_key_path, record_hash, verify, verify_chain, ChainError, HostKey, KeyError, TrustedKey,
-    VerifyError, SIGNED_RECORD_SCHEMA_VERSION,
+    VerifyError, MAX_ENVELOPE_BYTES, SIGNED_RECORD_SCHEMA_VERSION,
 };
 pub use summary::SUMMARY_SCHEMA_VERSION;
 
