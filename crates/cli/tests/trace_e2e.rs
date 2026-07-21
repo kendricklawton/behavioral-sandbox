@@ -255,7 +255,11 @@ print('p14-9b-egress')
     );
 
     let json = std::fs::read_to_string(&record_path).expect("read the --record file");
-    let record: serde_json::Value = serde_json::from_str(&json).expect("record parses");
+    let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+    assert_eq!(envelope["schema"], 2, "the signed delivery surface: {json}");
+    let record: serde_json::Value =
+        serde_json::from_str(envelope["record"].as_str().expect("record string"))
+            .expect("embedded record parses");
     // Enforcement armed, no coverage gap (the --allow refusal path did not fire on a capable host).
     assert_eq!(
         record["coverage"].as_array().map(Vec::len),
@@ -468,7 +472,11 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     // The full record, the ground truth from outside the guest. Enforcement armed (no coverage gap),
     // the allowed tool is a flow, the forbidden one is a denial.
     let json = std::fs::read_to_string(&record_path).expect("read the --record file");
-    let record: serde_json::Value = serde_json::from_str(&json).expect("record parses");
+    let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+    assert_eq!(envelope["schema"], 2, "the signed delivery surface: {json}");
+    let record: serde_json::Value =
+        serde_json::from_str(envelope["record"].as_str().expect("record string"))
+            .expect("embedded record parses");
     assert_eq!(
         record["coverage"].as_array().map(Vec::len),
         Some(0),
