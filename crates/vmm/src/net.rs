@@ -3,14 +3,16 @@
 //!
 //! Each networked VM gets its own netns (`ip netns add <name>`); the tap lives *inside* it, and the
 //! VMM runs there too (the jailer's `--netns`, or `ip netns exec` for a direct boot). Because the tap
-//! is namespaced, every VM reuses the **same fixed** name/MAC/`/30` without any host-global allocator:
-//! two VMs holding an identically-named tap on `10.200.0.1/30` never collide, and a restored clone
-//! wakes with the snapshot's baked-in identity already correct in its own netns (no re-addressing).
+//! is namespaced, every VM reuses the **same fixed** name/MAC/`/30`/v6-link without any host-global
+//! allocator: two VMs holding an identically-named tap on `10.200.0.1/30` (and `fd00:200::1/64`)
+//! never collide, and a restored clone wakes with the snapshot's baked-in identity already correct in
+//! its own netns (no re-addressing). The link is **dual-stack** (ADR 008): v4 and v6 are both
+//! deny-by-default, each with a connected-prefix route only and no default route.
 //! That is what retires the one-live-networked-clone limit (v1.9 has no `network_overrides`, so restore
 //! must present the baked tap name, fine when each clone owns a private netns). Teardown is one op:
 //! `ip netns del <name>` reclaims the netns and the tap in it.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -39,6 +41,26 @@ const GUEST_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 2);
 /// that holds two usable hosts (the host end and the guest end) and nothing else.
 pub(crate) const HOST_PREFIX: u8 = 30;
 
+/// The host end of the per-VM link's **IPv6** ULA (`fc00::/7`, RFC 4193), the v6 analogue of
+/// [`HOST_IP`]. Fixed per netns, exactly like the v4 identity: the per-VM netns provides uniqueness,
+/// so every VM reuses the same address without a host-global allocator. The guest reaches this and
+/// nothing else (deny-by-default, ADR 008): the tap carries only the connected-prefix route, and no
+/// v6 default route is ever installed, so v6 egress is denied by construction just as v4 is.
+const HOST_IP6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, 1);
+
+/// The guest end of the per-VM v6 link, the v6 analogue of [`GUEST_IP`]. The kernel `ip=` boot param
+/// (`CONFIG_IP_PNP`) is IPv4-only, so unlike the v4 end this cannot ride `ip=`: the driver passes it
+/// as the `agent_guest_ip6=<addr>/<plen>` cmdline token (`spawn.rs`) and a guest sysinit step applies
+/// it (`rootfs.rs`). Sourced here so the host stays the single owner of the address (no guest-baked
+/// literal to drift from this one).
+pub(crate) const GUEST_IP6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, 2);
+
+/// The prefix length of the per-VM v6 link: a `/64`, the conventional IPv6 link size. Deny-by-default
+/// does not rest on the prefix length (a v6 link is a /64 by convention, not a /127): it rests on the
+/// **absent v6 default route**, exactly as the v4 `/30` link's does, so the guest can reach only the
+/// connected host end.
+pub(crate) const HOST_PREFIX6: u8 = 64;
+
 /// A per-VM **network namespace** holding the tap that backs the guest's virtio-net. The driver
 /// creates the netns and the tap inside it (`ip`, needs `CAP_NET_ADMIN`), the VMM joins the netns (the
 /// jailer's `--netns`, or `ip netns exec` for a direct boot), and every teardown path deletes the
@@ -57,10 +79,15 @@ pub(crate) struct Tap {
     pub(crate) host_ip: Ipv4Addr,
     /// The guest end of the /30 (on the guest's `eth0`).
     pub(crate) guest_ip: Ipv4Addr,
+    /// The host end of the per-VM v6 link (assigned to the tap, inside the netns).
+    pub(crate) host_ip6: Ipv6Addr,
+    /// The guest end of the v6 link (on the guest's `eth0`, applied from the `agent_guest_ip6=` token).
+    pub(crate) guest_ip6: Ipv6Addr,
 }
 
 impl Tap {
-    /// Create the per-VM netns `name`, then the tap inside it with the host end of the /30 assigned.
+    /// Create the per-VM netns `name`, then the tap inside it with the host ends of the v4 /30 and
+    /// the v6 link assigned (the v6 end best-effort, see [`add_host_v6`]).
     /// Shells out to `ip` (iproute2), consistent with the driver's other host-tool calls; needs
     /// `CAP_NET_ADMIN`, so this only succeeds under the privileged test/runtime tier.
     ///
@@ -82,12 +109,14 @@ impl Tap {
             mac: GUEST_MAC.to_string(),
             host_ip: HOST_IP,
             guest_ip: GUEST_IP,
+            host_ip6: HOST_IP6,
+            guest_ip6: GUEST_IP6,
         })
     }
 
-    /// Bring up `lo`, create + up the tap, and assign the host /30 end, all *inside* the netns.
+    /// Bring up `lo`, create + up the tap, and assign the host ends of both the v4 /30 and the v6
+    /// link, all *inside* the netns.
     fn build_tap(netns: &str, owner: Option<(u32, u32)>) -> Result<(), VmmError> {
-        disable_ipv6_in_ns(netns)?;
         ip_in_ns(netns, &["link", "set", "dev", "lo", "up"])?;
         let (uid, gid);
         let mut add = vec!["tuntap", "add", "dev", TAP_NAME, "mode", "tap"];
@@ -100,6 +129,7 @@ impl Tap {
         ip_in_ns(netns, &["link", "set", "dev", TAP_NAME, "up"])?;
         let cidr = format!("{HOST_IP}/{HOST_PREFIX}");
         ip_in_ns(netns, &["addr", "add", &cidr, "dev", TAP_NAME])?;
+        add_host_v6(netns);
         Ok(())
     }
 
@@ -212,24 +242,31 @@ fn ip_in_ns(netns: &str, args: &[&str]) -> Result<(), VmmError> {
     run_ip(&full)
 }
 
-/// Disable IPv6 for the whole netns (`all` + `default`), before any interface comes up. The
-/// sandbox's network world is IPv4-only (ADR 008), so the only IPv6 the netns would ever carry is
-/// the host stack's own link-up chatter (MLD reports, duplicate-address detection), which crosses
-/// the tap and surfaces as an honest non-IPv4 coverage gap in the audit record (hosted CI runners
-/// emit it; hosts with IPv6 off don't). The guest half of the same stance is `ipv6.disable=1` on
-/// the kernel command line (`DEFAULT_BOOT_ARGS` in `vm.rs`). A kernel without IPv6 has nothing to
-/// disable, so the missing sysctl dir is a no-op.
-fn disable_ipv6_in_ns(netns: &str) -> Result<(), VmmError> {
-    run_ip(&[
-        "netns",
-        "exec",
+/// Assign the host end of the v6 link to the tap, **best-effort**. Unlike the v4 `/30` (every Linux
+/// host has IPv4), IPv6 can be administratively off on the host: `ipv6.disable=1` on the host kernel,
+/// `net.ipv6.conf.all.disable_ipv6=1`, or a kernel without `CONFIG_IPV6`, any of which makes
+/// `ip -6 addr add` fail. That must **not** fail the whole networked boot, doing so would regress even
+/// v4-only sandboxes on an IPv6-off host. Isolation does not rest on this address: deny-by-default is
+/// the absent v6 default route plus the eBPF egress hook (ADR 008), neither of which needs the tap to
+/// hold a v6 address. So per ADR 036 (fail-open-for-observation) this warns and returns on failure,
+/// leaving the v6 link simply absent while v4 and isolation are unaffected.
+///
+/// `nodad` skips duplicate-address detection: the point-to-point link has exactly one other endpoint
+/// (the guest, on a different address), so DAD would only add link-up multicast chatter with nothing
+/// to detect. A DAD-less `nodad`-unaware `ip` just falls into the same best-effort warning.
+fn add_host_v6(netns: &str) {
+    let cidr6 = format!("{HOST_IP6}/{HOST_PREFIX6}");
+    if let Err(e) = ip_in_ns(
         netns,
-        "sh",
-        "-c",
-        "test -d /proc/sys/net/ipv6 || exit 0; \
-         echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6 && \
-         echo 1 > /proc/sys/net/ipv6/conf/default/disable_ipv6",
-    ])
+        &["-6", "addr", "add", &cidr6, "dev", TAP_NAME, "nodad"],
+    ) {
+        tracing::warn!(
+            netns = %netns,
+            error = %e,
+            "could not assign the host IPv6 address to the tap; the v6 link is absent on this host \
+             (IPv6 disabled in the host kernel?). The v4 link and isolation are unaffected."
+        );
+    }
 }
 
 /// Run `ip <args>`, mapping a missing binary or a nonzero exit to a typed error.
@@ -264,6 +301,13 @@ mod tests {
         assert_eq!(HOST_PREFIX, 30);
         assert_eq!(u32::from(GUEST_IP), u32::from(HOST_IP) + 1);
         assert_eq!(HOST_IP.octets()[0..2], [10, 200]);
+        // The v6 link mirrors the v4 one: a ULA (`fc00::/7`, so the top 7 bits are `1111110`), the
+        // guest one address above the host end, on a conventional /64. (`is_unique_local` is still
+        // unstable on `Ipv6Addr`, so this checks the prefix by octet.)
+        assert_eq!(HOST_PREFIX6, 64);
+        assert_eq!(HOST_IP6.octets()[0] & 0xfe, 0xfc);
+        assert_eq!(GUEST_IP6.octets()[0] & 0xfe, 0xfc);
+        assert_eq!(u128::from(GUEST_IP6), u128::from(HOST_IP6) + 1);
     }
 
     #[test]

@@ -1,5 +1,8 @@
 # agent *(working name)*
 
+[![CI](https://github.com/kendricklawton/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/kendricklawton/agent/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 **A self-hostable engine for running untrusted code in a hardware-isolated microVM, with a
 host-observed record of exactly what it did.**
 
@@ -28,7 +31,7 @@ built) reports exactly what your host is missing before the first sandbox.
 
 ```console
 git clone https://github.com/kendricklawton/agent && cd agent
-cargo xtask self-host                                   # build + install agent/agentd, boot a proof sandbox
+cargo xtask self-host                                   # build + install agent, boot a proof sandbox
 agent run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
 ```
 
@@ -71,7 +74,15 @@ cgroup limits, seccomp); and is wrapped in the embedder-facing `Sandbox` lifecyc
 host syscall footprint and its per-VM network flows, enforces deny-by-default egress in the
 kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)), each with a
 measured overhead and a live demo. The audit log that fuses these into one host-observed per-run
-record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `agentd` daemon.
+record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `agent serve` daemon.
+
+**Pre-1.0 and unstable, expect breaking changes.** Until the first stable release, nothing here
+carries a compatibility guarantee: the `Sandbox`/`vmm` API, the `agent serve` wire protocol (and its
+`agent-protocol` crate), the audit-log/record format, the crate names, and even the project's name
+(`agent` is a working title) can all change without notice. If you build on it, pin to a specific git
+rev. A first stable release is planned but **not yet scheduled**, and there is a long road of breaking
+work before it. The project is developed by a small group: **only project collaborators commit code**
+(the repo is not open to outside pull requests yet, see [CONTRIBUTING](CONTRIBUTING.md)).
 
 **Verified on:** the host-safe gate (build, tests, lints) runs in CI on **Ubuntu 24.04** (`x86_64`
 and `aarch64`) on every change; the privileged path (microVM boot, the jailer, the eBPF probes, the
@@ -101,7 +112,7 @@ isolation *plus* out-of-guest observability and enforcement, is the whole idea.
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
-| `crates/cli` | Two binaries: the `agent` CLI (`run`, `shell`, `doctor`) and the `agentd` driver daemon. |
+| `crates/cli` | One binary, `agent`: the CLI (`run`, `shell`, `doctor`) plus the `agent serve` driver daemon. |
 | `docs` | This documentation, as an mdBook. |
 | `xtask` | Dev orchestration, `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 

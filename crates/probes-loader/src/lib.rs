@@ -79,7 +79,7 @@
 #![forbid(unsafe_code)]
 
 use std::fs::File;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -89,10 +89,12 @@ use aya::programs::{tc, SchedClassifier, TcAttachType, TracePoint};
 use aya::Ebpf;
 
 pub use agent_probes_common::{
-    FlowCounts, FlowKey, PolicyRule, Protocol, Syscall, SyscallEvent, COMM_CAP, DETAIL_CAP,
-    MAX_POLICY_RULES,
+    FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol, Syscall, SyscallEvent,
+    COMM_CAP, DETAIL_CAP, MAX_POLICY_RULES,
 };
-use agent_probes_common::{FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, POLICY_RULE_SIZE};
+use agent_probes_common::{
+    FLOW_COUNTS_SIZE, FLOW_KEY6_SIZE, FLOW_KEY_SIZE, POLICY_RULE6_SIZE, POLICY_RULE_SIZE,
+};
 
 /// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
 /// dependency-free (`RunRecord::to_json`). Pure, unit-tested host-safe against a golden.
@@ -110,8 +112,8 @@ mod summary;
 pub use json::AUDIT_SCHEMA_VERSION;
 pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
 pub use record::{
-    AxisGap, DenialRecord, FlowRecord, NetSection, NotableSyscall, RunRecord, SyscallCounts,
-    SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
+    AxisGap, DenialRecord, DenialRecord6, FlowRecord, FlowRecord6, NetSection, NotableSyscall,
+    RunRecord, SyscallCounts, SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
 };
 pub use summary::SUMMARY_SCHEMA_VERSION;
 
@@ -183,7 +185,8 @@ impl From<PolicyError> for ProbeError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PolicyError {
-    /// An IPv4 CIDR prefix length over 32 (the given value), rejected by [`Ipv4Cidr::new`].
+    /// A CIDR prefix length over its family maximum (the given value): rejected by [`Ipv4Cidr::new`]
+    /// (max 32) or [`Ipv6Cidr::new`] (max 128).
     PrefixTooLong(u8),
     /// More allow-rules than the kernel `POLICY` map holds: the requested count and the cap.
     TooManyRules {
@@ -198,7 +201,10 @@ impl std::fmt::Display for PolicyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::PrefixTooLong(len) => {
-                write!(f, "IPv4 CIDR prefix length {len} is over the /32 maximum")
+                write!(
+                    f,
+                    "CIDR prefix length {len} is over its family maximum (/32 for IPv4, /128 for IPv6)"
+                )
             }
             Self::TooManyRules { got, max } => {
                 write!(f, "egress policy has {got} rules, over the {max}-rule cap")
@@ -589,15 +595,21 @@ impl SyscallTracer {
 /// `crates/probes`), one per clsact hook.
 const CLS_INGRESS: &str = "tap_ingress";
 const CLS_EGRESS: &str = "tap_egress";
-/// The per-flow counter map the classifiers write (`#[map] static FLOWS`).
+/// The per-flow counter map the classifiers write (`#[map] static FLOWS`), and its IPv6 twin
+/// (`#[map] static FLOWS6`), read by [`TapMonitor::flows`]/[`flows6`](TapMonitor::flows6).
 const FLOWS_MAP: &str = "FLOWS";
-/// The egress allow-list the ingress classifier consults (`#[map] static POLICY`), and the enforcement
-/// toggle (`#[map] static ENFORCE`) that arms it, the two maps [`TapMonitor::set_egress_policy`] writes.
+const FLOWS6_MAP: &str = "FLOWS6";
+/// The egress allow-list the ingress classifier consults (`#[map] static POLICY`), its IPv6 twin
+/// (`#[map] static POLICY6`), and the enforcement toggle (`#[map] static ENFORCE`) that arms them, the
+/// maps [`TapMonitor::set_egress_policy`] writes.
 const POLICY_MAP: &str = "POLICY";
+const POLICY6_MAP: &str = "POLICY6";
 const ENFORCE_MAP: &str = "ENFORCE";
 /// The per-destination denied-packet counters the enforcement drop path records (`#[map] static
-/// DENIALS`), read back by [`TapMonitor::denials`], the audit trail of blocked endpoints.
+/// DENIALS`), its IPv6 twin (`#[map] static DENIALS6`), read back by
+/// [`TapMonitor::denials`]/[`denials6`](TapMonitor::denials6), the audit trail of blocked endpoints.
 const DENIALS_MAP: &str = "DENIALS";
+const DENIALS6_MAP: &str = "DENIALS6";
 /// The per-CPU counter of new flows a full `FLOWS` map dropped (`#[map] static FLOW_DROPS`), read by
 /// [`TapMonitor::dropped_flows`] so a saturated flow table is reported, never a silently thinner
 /// record (the `EVENT_DROPS` discipline, applied to the network axis).
@@ -813,6 +825,64 @@ impl TapMonitor {
         Ok(out)
     }
 
+    /// The IPv6 per-flow counters as `(FlowKey6, FlowCounts)` pairs, read from the `FLOWS6` map, the v6
+    /// twin of [`flows`](Self::flows). Order is unspecified (hash-map iteration); the record builder
+    /// sorts them.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the map is missing or a read fails mid-iteration.
+    pub fn flows6(&self) -> Result<Vec<(FlowKey6, FlowCounts)>, ProbeError> {
+        let map = self
+            .ebpf
+            .map(FLOWS6_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{FLOWS6_MAP}` not found")))?;
+        let flows: AyaHashMap<_, [u8; FLOW_KEY6_SIZE], [u8; FLOW_COUNTS_SIZE]> =
+            AyaHashMap::try_from(map)
+                .map_err(|e| ProbeError::Map(format!("open `{FLOWS6_MAP}` as a hash map: {e}")))?;
+        let mut out = Vec::new();
+        for entry in flows.iter() {
+            let (k, v) =
+                entry.map_err(|e| ProbeError::Map(format!("iterate `{FLOWS6_MAP}`: {e}")))?;
+            let (Some(key), Some(counts)) = (FlowKey6::from_bytes(&k), FlowCounts::from_bytes(&v))
+            else {
+                return Err(ProbeError::Map(format!(
+                    "decode a `{FLOWS6_MAP}` entry: {}-byte key / {}-byte value don't match the shared record",
+                    k.len(),
+                    v.len()
+                )));
+            };
+            out.push((key, counts));
+        }
+        Ok(out)
+    }
+
+    /// The **denied** guest-sent IPv6 packets as `(FlowKey6, count)` pairs from the `DENIALS6` map, the
+    /// v6 twin of [`denials`](Self::denials). Empty until v6 enforcement drops something.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if the `DENIALS6` map is missing or a read fails mid-iteration.
+    pub fn denials6(&self) -> Result<Vec<(FlowKey6, u64)>, ProbeError> {
+        let map = self
+            .ebpf
+            .map(DENIALS6_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{DENIALS6_MAP}` not found")))?;
+        let denials: AyaHashMap<_, [u8; FLOW_KEY6_SIZE], u64> = AyaHashMap::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{DENIALS6_MAP}` as a hash map: {e}")))?;
+        let mut out = Vec::new();
+        for entry in denials.iter() {
+            let (k, count) =
+                entry.map_err(|e| ProbeError::Map(format!("iterate `{DENIALS6_MAP}`: {e}")))?;
+            let Some(key) = FlowKey6::from_bytes(&k) else {
+                return Err(ProbeError::Map(format!(
+                    "decode a `{DENIALS6_MAP}` key: {}-byte key doesn't match the shared record",
+                    k.len()
+                )));
+            };
+            out.push((key, count));
+        }
+        Ok(out)
+    }
+
     /// Install an [`EgressPolicy`] on this **already-attached** monitor: write its rules
     /// into the `POLICY` map (zeroing the unused slots so no stale rule lingers) and arm the `ENFORCE`
     /// toggle. From here the tap's ingress hook drops any guest-sent IPv4 packet whose destination matches
@@ -849,6 +919,7 @@ impl TapMonitor {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EgressPolicy {
     rules: Vec<PolicyRule>,
+    rules6: Vec<PolicyRule6>,
 }
 
 /// A validated IPv4 **CIDR**, a network address and a prefix length that is guaranteed `0..=32` by
@@ -887,12 +958,45 @@ impl Ipv4Cidr {
     }
 }
 
+/// A validated IPv6 **CIDR**, the v6 twin of [`Ipv4Cidr`]: prefix length guaranteed `0..=128` by
+/// construction, so an out-of-range prefix can never reach the kernel `POLICY6` map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv6Cidr {
+    network: Ipv6Addr,
+    prefix_len: u8,
+}
+
+impl Ipv6Cidr {
+    /// A CIDR `network/prefix_len`, or [`PolicyError::PrefixTooLong`] if `prefix_len > 128`.
+    ///
+    /// # Errors
+    /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds 128.
+    pub fn new(network: Ipv6Addr, prefix_len: u8) -> Result<Self, PolicyError> {
+        if prefix_len > 128 {
+            return Err(PolicyError::PrefixTooLong(prefix_len));
+        }
+        Ok(Self {
+            network,
+            prefix_len,
+        })
+    }
+
+    /// The `/128` CIDR of a single v6 host, infallible.
+    #[must_use]
+    pub fn host(addr: Ipv6Addr) -> Self {
+        Self {
+            network: addr,
+            prefix_len: 128,
+        }
+    }
+}
+
 impl EgressPolicy {
-    /// The **deny-everything** policy: no rules, so every guest-sent packet is dropped once
-    /// enforced. The safe default, build up from here by adding explicit allowances.
+    /// The **deny-everything** policy: no rules (v4 or v6), so every guest-sent packet is dropped
+    /// once enforced. The safe default, build up from here by adding explicit allowances.
     #[must_use]
     pub fn deny_all() -> Self {
-        Self { rules: Vec::new() }
+        Self::default()
     }
 
     /// Allow a destination [`Ipv4Cidr`] on an optional `port` and `proto` ([`None`] = any), consuming and
@@ -917,17 +1021,43 @@ impl EgressPolicy {
         self.allow(Ipv4Cidr::host(host), port, proto)
     }
 
+    /// Allow a destination [`Ipv6Cidr`] on an optional `port`/`proto`, the v6 twin of
+    /// [`allow`](Self::allow). The address goes in as its network-order octets (`Ipv6Addr::octets`),
+    /// matching the kernel's byte-wise matcher.
+    #[must_use]
+    pub fn allow6(mut self, cidr: Ipv6Cidr, port: Option<u16>, proto: Option<Protocol>) -> Self {
+        self.rules6.push(PolicyRule6::allow(
+            cidr.network.octets(),
+            cidr.prefix_len,
+            port.unwrap_or(0),
+            proto.map_or(0, Protocol::as_u8),
+        ));
+        self
+    }
+
+    /// Allow a single v6 destination **host** (`/128`), sugar over [`allow6`](Self::allow6).
+    #[must_use]
+    pub fn allow_host6(self, host: Ipv6Addr, port: Option<u16>, proto: Option<Protocol>) -> Self {
+        self.allow6(Ipv6Cidr::host(host), port, proto)
+    }
+
     /// The lowered [`PolicyRule`]s, as written into the kernel `POLICY` map.
     #[must_use]
     pub fn rules(&self) -> &[PolicyRule] {
         &self.rules
     }
 
-    /// Whether this policy allows nothing (deny-by-default). `true` for [`deny_all`](Self::deny_all) and
-    /// the [`Default`].
+    /// The lowered [`PolicyRule6`]s, as written into the kernel `POLICY6` map.
+    #[must_use]
+    pub fn rules6(&self) -> &[PolicyRule6] {
+        &self.rules6
+    }
+
+    /// Whether this policy allows nothing (deny-by-default): no v4 **and** no v6 rules. `true` for
+    /// [`deny_all`](Self::deny_all) and the [`Default`].
     #[must_use]
     pub fn is_deny_all(&self) -> bool {
-        self.rules.is_empty()
+        self.rules.is_empty() && self.rules6.is_empty()
     }
 }
 
@@ -963,6 +1093,7 @@ impl TapMonitor {
 /// and the pre-attach [`TapMonitor::enforce_in_netns`] (arm-before-attach, no un-enforced window).
 fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError> {
     let rules = policy.rules();
+    let rules6 = policy.rules6();
     if rules.len() > MAX_POLICY_RULES {
         return Err(PolicyError::TooManyRules {
             got: rules.len(),
@@ -970,7 +1101,15 @@ fn apply_policy(ebpf: &mut Ebpf, policy: &EgressPolicy) -> Result<(), ProbeError
         }
         .into());
     }
+    if rules6.len() > MAX_POLICY_RULES {
+        return Err(PolicyError::TooManyRules {
+            got: rules6.len(),
+            max: MAX_POLICY_RULES,
+        }
+        .into());
+    }
     write_policy(ebpf, rules)?;
+    write_policy6(ebpf, rules6)?;
     set_enforce(ebpf, true)
 }
 
@@ -991,6 +1130,25 @@ fn write_policy(ebpf: &mut Ebpf, rules: &[PolicyRule]) -> Result<(), ProbeError>
         policy
             .set(i as u32, bytes, 0)
             .map_err(|e| ProbeError::Map(format!("write `{POLICY_MAP}`[{i}]: {e}")))?;
+    }
+    Ok(())
+}
+
+/// The IPv6 twin of [`write_policy`]: fill every `POLICY6` slot (the rest zeroed, an all-zero slot is
+/// `active == 0`), rules as raw native bytes via [`PolicyRule6::to_bytes`].
+fn write_policy6(ebpf: &mut Ebpf, rules: &[PolicyRule6]) -> Result<(), ProbeError> {
+    let map = ebpf
+        .map_mut(POLICY6_MAP)
+        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY6_MAP}` not found")))?;
+    let mut policy: Array<_, [u8; POLICY_RULE6_SIZE]> = Array::try_from(map)
+        .map_err(|e| ProbeError::Map(format!("open `{POLICY6_MAP}` as an array: {e}")))?;
+    for i in 0..MAX_POLICY_RULES {
+        let bytes = rules
+            .get(i)
+            .map_or([0u8; POLICY_RULE6_SIZE], PolicyRule6::to_bytes);
+        policy
+            .set(i as u32, bytes, 0)
+            .map_err(|e| ProbeError::Map(format!("write `{POLICY6_MAP}`[{i}]: {e}")))?;
     }
     Ok(())
 }
@@ -1818,6 +1976,44 @@ mod tests {
         assert!(!egress_allowed(
             p.rules(),
             ip(10, 200, 0, 2),
+            9999,
+            Protocol::Udp.as_u8()
+        ));
+    }
+
+    #[test]
+    fn ipv6_cidr_rejects_an_out_of_range_prefix() {
+        assert_eq!(
+            Ipv6Cidr::new("fd00:200::".parse().unwrap(), 200),
+            Err(PolicyError::PrefixTooLong(200))
+        );
+        assert!(Ipv6Cidr::new("fd00:200::".parse().unwrap(), 64).is_ok());
+        assert!(Ipv6Cidr::new("fd00:200::1".parse().unwrap(), 128).is_ok());
+    }
+
+    #[test]
+    fn allow_host6_builds_a_slash128_rule_and_counts_toward_deny_all() {
+        let host: Ipv6Addr = "fd00:200::1".parse().unwrap();
+        // A v6-only policy is *not* deny-all (is_deny_all must consider both families).
+        let p = EgressPolicy::deny_all().allow_host6(host, Some(9999), Some(Protocol::Udp));
+        assert!(!p.is_deny_all());
+        assert!(p.rules().is_empty(), "no v4 rules");
+        let rule = p.rules6()[0];
+        assert_eq!(rule.active, 1);
+        assert_eq!(rule.prefix_len, 128);
+        assert_eq!(rule.addr, host.octets());
+        assert_eq!(rule.port, 9999);
+        // Only that exact v6 host/port/proto is admitted; another v6 host is denied.
+        assert!(agent_probes_common::egress_allowed6(
+            p.rules6(),
+            host.octets(),
+            9999,
+            Protocol::Udp.as_u8()
+        ));
+        let other: Ipv6Addr = "fd00:200::2".parse().unwrap();
+        assert!(!agent_probes_common::egress_allowed6(
+            p.rules6(),
+            other.octets(),
             9999,
             Protocol::Udp.as_u8()
         ));

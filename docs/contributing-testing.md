@@ -43,7 +43,7 @@ is the order to exercise the whole engine end to end; each step links to its det
    what is missing; `doctor` exits non-zero on a missing hard requirement.
    ([Supported platforms](./cli-install.md#supported-platforms).)
 2. **Stand it up.** `cargo xtask self-host` does the whole build: the guest kernel + rootfs + eBPF
-   object, installs `agent`/`agentd`, and boots one proof sandbox.
+   object, installs the `agent` binary, and boots one proof sandbox.
    ([Self-host in one command](./cli-install.md#self-host-in-one-command).)
 3. **Run one sandbox, confined.** With real root you exercise the jailed default (not `--unjailed`):
    `agent run -- python3 -c 'print(2 ** 100)'`. Add `--net` / `--trace` / `--record` / `--watch` to
@@ -53,8 +53,8 @@ is the order to exercise the whole engine end to end; each step links to its det
    cannot reach. It self-checks its prerequisites and prints the fix if an artifact is missing.
 5. **The live demos.** One probe end to end each: `trace-sandbox`, `watch-sandbox`, `enforce-sandbox`,
    `meter-sandbox`. ([Host-side observability, *Try it*](./probes.md#try-it).)
-6. **The daemon.** `agentd --socket ./agentd.sock`, then drive it with the reference client or `socat`.
-   ([Using the `agentd` daemon](./daemon.md).)
+6. **The daemon.** `agent serve --socket ./agent.sock`, then drive it with the reference client or `socat`.
+   ([Using the `agent` daemon](./daemon.md).)
 7. **The embedding API.** The reference integration
    [`crates/probes-loader/examples/reference_integration.rs`](../crates/probes-loader/examples/reference_integration.rs)
    composes the whole lifecycle (open, attach, exec, collect, close) in one small program.

@@ -173,6 +173,92 @@ fn addresses_the_guest_and_routes_host_to_guest() {
 
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
+    // The IPv6 twin of `addresses_the_guest_and_routes_host_to_guest` (ADR 008 dual-stack). The kernel
+    // `ip=`/`CONFIG_IP_PNP` param is v4-only, so the guest's v6 address rides the `agent_guest_ip6=`
+    // cmdline token that `/sbin/net-up` applies to `eth0`. Prove: the guest carries its static v6
+    // address, reaches the host v6 end over the connected /64, and (deny-by-default) cannot reach an
+    // off-link v6 address, no v6 default route is installed. This is the live proof of P4.9a's link.
+    if !have_net_admin() {
+        eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
+        return;
+    }
+    let mut cfg = agent_rootfs_config();
+    cfg.enable_network = true;
+    let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
+    let host_ip6 = vm.host_ip6().expect("host v6 when networked").to_string();
+    let guest_ip6 = vm.guest_ip6().expect("guest v6 when networked").to_string();
+
+    // The guest applied its static v6 address to eth0 (via `/sbin/net-up`, `ip` then `ifconfig`). A
+    // missing address here means net-up didn't run or the guest busybox lacks v6 address support, the
+    // one runtime unknown this test exists to catch.
+    let addr = vm
+        .exec(
+            &[
+                "ip".into(),
+                "-6".into(),
+                "addr".into(),
+                "show".into(),
+                "eth0".into(),
+            ],
+            b"",
+        )
+        .expect("show guest eth0 v6");
+    assert!(
+        String::from_utf8_lossy(&addr.stdout).contains(&guest_ip6),
+        "guest eth0 should carry {guest_ip6} (via /sbin/net-up); got:\n{}\nconsole:\n{}",
+        String::from_utf8_lossy(&addr.stdout),
+        vm.console()
+    );
+
+    // Host<->guest v6 reachability: the guest reaches the host end of the connected /64.
+    let ping = vm
+        .exec(
+            &[
+                "ping".into(),
+                "-6".into(),
+                "-c".into(),
+                "1".into(),
+                "-W".into(),
+                "1".into(),
+                host_ip6.clone(),
+            ],
+            b"",
+        )
+        .expect("ping the host tap v6 address");
+    assert_eq!(
+        ping.exit_code,
+        0,
+        "guest should reach the host v6 end {host_ip6}; console:\n{}",
+        vm.console()
+    );
+
+    // Deny-by-default: an off-link v6 address is unreachable (no v6 default route). RFC 3849
+    // documentation range `2001:db8::/32` is provably off the /64.
+    let off = vm
+        .exec(
+            &[
+                "ping".into(),
+                "-6".into(),
+                "-c".into(),
+                "1".into(),
+                "-W".into(),
+                "1".into(),
+                "2001:db8::1".into(),
+            ],
+            b"",
+        )
+        .expect("ping an off-link v6 address");
+    assert_ne!(
+        off.exit_code, 0,
+        "deny-by-default: the guest must not reach an off-link v6 address"
+    );
+
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_networked_vms_run_in_isolated_netns() {
     // Under the netns model: per-VM isolation is now **kernel-enforced** by a per-VM network
     // namespace, not the earlier unique-/30 reservation. Two concurrently-booted networked VMs hold

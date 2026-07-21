@@ -56,9 +56,9 @@ crates/
                  so the two sides can't drift.
   probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
                  maps, stream events into the audit log.
-  cli/           two binaries: `agent` (the CLI, `run`, `shell`, `doctor`; the audit record on
-                 `--trace`/`--record`/`--record-summary`/`--watch`) and `agentd` (the driver
-                 daemon: the versioned newline-JSON wire API over a unix socket, decision 034).
+  cli/           one binary, `agent`: the CLI (`run`, `shell`, `doctor`; the audit record on
+                 `--trace`/`--record`/`--record-summary`/`--watch`) plus `agent serve`, the driver
+                 daemon (the versioned newline-JSON wire API over a unix socket, decision 034).
 docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): running the engine
                  (`cli*.md`), the embedder contract (`embedding.md`), the eBPF half (`probes.md`),
                  the contributing chapters (incl. `contributing-architecture.md`, the architecture

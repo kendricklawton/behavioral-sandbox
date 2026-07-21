@@ -9,10 +9,10 @@ Once you have the [prerequisites](#prerequisites), the whole stand-up is a singl
 
 ```console
 cargo xtask self-host           # obtain the pinned kernel + rootfs, build the guest image + eBPF
-                                # object, install `agent`/`agentd`, then boot one sandbox to prove it
+                                # object, install `agent`, then boot one sandbox to prove it
 ```
 
-It installs the `agent` and `agentd` binaries into `~/.local/bin` (override with `--prefix DIR`) and,
+It installs the `agent` binary into `~/.local/bin` (override with `--prefix DIR`) and,
 on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
 KVM box. `--no-run` skips the boot proof (build + install only).
@@ -52,8 +52,14 @@ tracks their supported set.
 - **Host-safe gate** (build, unit tests, lints, docs, the eBPF object build) runs in CI on **Ubuntu
   24.04**, both `x86_64` and `aarch64`, on every change.
 - **The privileged path** (microVM boot, the jailer, the eBPF probes, the end-to-end integration
-  suite) is currently exercised **by hand on Arch Linux** (rolling) with **Firecracker v1.9**; it
-  needs a real KVM host, which stock CI runners can't nest. **Ubuntu LTS validation is in progress.**
+  suite) runs in CI on a GitHub-hosted **Ubuntu 24.04** runner (`x86_64`, nested KVM) and by hand
+  on **Arch Linux** (rolling) during development, both with **Firecracker v1.9**. Those two are the
+  continuously-tested distros, and they bracket the tool-version spectrum (rolling-newest against
+  LTS-oldest; Ubuntu's e2fsprogs and IPv6 defaults each caught a real issue Arch could not). Other
+  distros are supported per the checks above but not continuously exercised; `agent doctor` names
+  exactly what a given host is missing.
+- The **`aarch64` privileged path has no CI lane yet**: hosted arm64 runners expose no `/dev/kvm`,
+  so it waits on a self-hosted arm64 KVM box (`ci-privileged.yml` is that lane's workflow).
 - One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
   systemd default on Arch, and some Ubuntu setups), the jailed default fails because the jailer's
   chroot `/dev/kvm` there is inert, point `AGENT_SCRATCH_DIR` at a non-`nodev` path. `agent doctor`

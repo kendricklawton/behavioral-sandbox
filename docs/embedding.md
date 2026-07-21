@@ -133,7 +133,7 @@ It composes the driver and the loader the way a downstream host application woul
 `--output-cap`, `--json` (the structured result as one JSON object on stdout, stderr carries the
 logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `agent shell` holds one sandbox
 open as an interactive stateful session. If you're writing an SDK, start from the daemon's
-[reference client](./daemon.md#the-reference-client) (`agentd-client`), it drives the same
+[reference client](./daemon.md#the-reference-client) (`agent-client`), it drives the same
 lifecycle over the wire API with nothing of the engine linked, which is exactly the surface a
 non-Rust SDK has.
 
@@ -152,7 +152,7 @@ non-goals, these belong to whatever hosts the engine, and PRs adding them are wr
   queues, and autoscaling are the hoster's: the engine runs sandboxes on its host; it doesn't
   schedule a cluster.
 - **No dashboard, no platform API.** The programmatic surface is the Rust library, the CLI, and
-  the [`agentd` daemon](./daemon.md), a *local* driver daemon over a unix socket, a thin host of
+  the [`agent` daemon](./daemon.md), a *local* driver daemon over a unix socket, a thin host of
   the same library's public API, with no auth and no tenancy (access control is the socket
   directory's permissions). A daemon that grows multi-tenant identity or a public HTTP surface is
   a *hoster*, not this repo.

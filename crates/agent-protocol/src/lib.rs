@@ -1,10 +1,10 @@
-//! The `agentd` wire protocol: a **versioned, newline-delimited JSON** contract. A client sends one
+//! The `agent` wire protocol: a **versioned, newline-delimited JSON** contract. A client sends one
 //! [`Request`] line, the daemon answers with one or more [`Response`] lines; every message carries a
 //! leading [`schema`](Envelope::schema) field, so the two sides agree on the shape before either
 //! trusts the other's bytes.
 //!
 //! **This is the SDK contract seed (ADR 034).** It is the one artifact the daemon
-//! ([`agentd`](../agent_cli/index.html)), the reference client (`agentd-client`), and the eventual
+//! ([`agent`](../agent_cli/index.html)), the reference client (`agent-client`), and the eventual
 //! polyglot SDKs all share, so it lives in its own **`agent-vmm`-free** crate: the wire is the
 //! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
 //! linking the engine. Freezing and formally speccing it comes with the polyglot SDKs (separate
@@ -133,7 +133,7 @@ pub enum Request {
     /// Ask for the session's **model-legible summary** so far ([`Response::TraceSummary`]): the same
     /// compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied,
     /// its resource envelope, any coverage gap), sampled **live** and non-destructively like
-    /// [`Trace`](Self::Trace), the face an agent driving `agentd` reads between turns, so the wire
+    /// [`Trace`](Self::Trace), the face an agent driving `agent` reads between turns, so the wire
     /// exposes the projection, not just the full record. Fail-open, same as `trace`.
     TraceSummary,
     /// End the session: tear the sandbox down and close the connection. Dropping the connection
@@ -492,7 +492,7 @@ mod tests {
                 present: true,
             },
             Response::Snapshotted {
-                dir: "/var/lib/agentd/snap-1".into(),
+                dir: "/var/lib/agent/snap-1".into(),
             },
             Response::Trace {
                 record: serde_json::json!({"schema": 1, "timing": {}}),

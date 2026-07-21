@@ -1,6 +1,6 @@
-# 034. The wire API is versioned newline-JSON in a shared `agentd-protocol` crate, not gRPC *(2026-07-17)*
+# 034. The wire API is versioned newline-JSON in a shared `agent-protocol` crate, not gRPC *(2026-07-17)*
 
-**Context.** `agentd` exposes the engine over a wire API, and that wire is a contract downstream
+**Context.** `agent` exposes the engine over a wire API, and that wire is a contract downstream
 depends on: the language SDKs (separate repos) freeze against it, so its shape is a long-lived
 commitment, not an implementation detail. Two forces set that shape. First, the peer is a **local,
 trusted-ish client** the hoster runs, not the untrusted guest, so hand-debuggability (`socat`/`nc` by
@@ -11,7 +11,7 @@ and a `tokio` stack into that posture for no gain here. The one adversarial conc
 is guardrail 5: even a trusted-ish peer's input is bounded, so every decode has a message-size cap and
 returns a typed error, never a panic/hang/unbounded allocation.
 
-**Decision.** `agentd`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
+**Decision.** `agent`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
 over a unix socket**, and every message (request *and* response) carries a leading `schema` field.
 The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\*
 → `close`. It is **not gRPC**.
@@ -23,12 +23,12 @@ half-understood. The stamp is the seam the SDKs freeze against. (It is distinct 
 record's own `schema` and the CLI's `--json` run-result `schema`: three surfaces, three independent
 versions.)
 
-**Why a shared `agentd-protocol` crate (serde-only, no `agent-vmm`).** The wire is the contract, not
+**Why a shared `agent-protocol` crate (serde-only, no `agent-vmm`).** The wire is the contract, not
 shared Rust internals. Putting the `Request`/`Response`/`Envelope` shapes and the bounded line codec
-in their own **engine-free** crate means the daemon and the **reference client** (`agentd-client`)
+in their own **engine-free** crate means the daemon and the **reference client** (`agent-client`)
 share one source of truth, while a non-Rust SDK reimplements the same JSON shapes with only a JSON
 library, the proof a caller needs nothing of the engine but the wire. The reference client depends on
-`agentd-protocol` and a JSON value **only, never `agent-vmm`**; if it ever linked the engine, that
+`agent-protocol` and a JSON value **only, never `agent-vmm`**; if it ever linked the engine, that
 proof would be void.
 
 **Verb semantics (faithful to the engine, no new machinery).** `put`/`get` write/read a

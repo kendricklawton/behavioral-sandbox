@@ -146,19 +146,49 @@ fn net_summary(out: &mut String, net: &NetSection) {
         .map(|f| (f.key.dst_addr, f.key.dst_port, f.key.proto))
         .filter(|triple| !denied.contains(triple))
         .collect();
+    // The IPv6 half (ADR 008 dual-stack), same reached-minus-denied logic keyed on the v6 destination.
+    let denied6: BTreeSet<([u8; 16], u16, u8)> = net
+        .denials6
+        .iter()
+        .map(|d| (d.dst_addr, d.dst_port, d.proto))
+        .collect();
+    let dests6: BTreeSet<([u8; 16], u16, u8)> = net
+        .flows6
+        .iter()
+        .map(|f| (f.key.dst_addr, f.key.dst_port, f.key.proto))
+        .filter(|triple| !denied6.contains(triple))
+        .collect();
     out.push_str("{\"reached\":[");
-    for (i, &(addr, port, proto)) in dests.iter().enumerate() {
-        if i > 0 {
+    let mut wrote = false;
+    for &(addr, port, proto) in &dests {
+        if wrote {
             out.push(',');
         }
         endpoint(out, addr, port, proto);
+        wrote = true;
+    }
+    for &(addr, port, proto) in &dests6 {
+        if wrote {
+            out.push(',');
+        }
+        endpoint6(out, addr, port, proto);
+        wrote = true;
     }
     out.push_str("],\"denied\":[");
-    for (i, d) in net.denials.iter().enumerate() {
-        if i > 0 {
+    let mut wrote = false;
+    for d in &net.denials {
+        if wrote {
             out.push(',');
         }
         endpoint(out, d.dst_addr, d.dst_port, d.proto);
+        wrote = true;
+    }
+    for d in &net.denials6 {
+        if wrote {
+            out.push(',');
+        }
+        endpoint6(out, d.dst_addr, d.dst_port, d.proto);
+        wrote = true;
     }
     out.push(']');
     // Guest-view bytes: the record's tap-view `ingress` is what the guest sent, `egress` what it received.
@@ -212,6 +242,13 @@ fn gap_line(gap: &AxisGap) -> String {
 fn endpoint(out: &mut String, addr: u32, port: u16, proto: u8) {
     let b = addr.to_be_bytes();
     let _ = write!(out, "\"{}.{}.{}.{}:{}/", b[0], b[1], b[2], b[3], port);
+    proto_name(out, proto);
+    out.push('"');
+}
+
+/// The v6 twin of [`endpoint`]: `"[v6]:port/proto"`.
+fn endpoint6(out: &mut String, addr: [u8; 16], port: u16, proto: u8) {
+    let _ = write!(out, "\"[{}]:{}/", std::net::Ipv6Addr::from(addr), port);
     proto_name(out, proto);
     out.push('"');
 }

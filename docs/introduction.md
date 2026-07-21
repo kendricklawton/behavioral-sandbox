@@ -15,7 +15,7 @@ can't be forged by the code it is recording.
 
 The engine can be driven three ways: as the **`agent` CLI** (one sandbox per command), as a
 **Rust library** embedded in a larger application, or programmatically over a unix socket through
-the **`agentd` daemon** and its versioned wire API.
+the **`agent` daemon** and its versioned wire API.
 
 ## How it fits together
 
@@ -53,7 +53,7 @@ full non-goals list is in [Using the engine API](./embedding.md).
 - **[Using the engine API](./embedding.md)**, the embedder's contract: the `Sandbox` lifecycle,
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
-- **[Using the agentd daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
+- **[Using the `agent serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
   wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`), the pre-warmed pool for fast
   `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
 - **[Examples](./examples.md)**, worked, end-to-end walkthroughs: [running untrusted

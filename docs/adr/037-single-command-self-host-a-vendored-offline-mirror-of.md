@@ -9,8 +9,8 @@ fetched-not-pinned, the last input a self-hoster could not reproduce from a mirr
 reproducible, offline-verifiable build closes that gap.
 
 **Decision.** Standing the engine up is one command, `cargo xtask self-host`: it obtains the pinned
-guest kernel + rootfs, builds the guest image and the eBPF probe object, installs the `agent` and
-`agentd` binaries into a prefix (`~/.local/bin` by default), and, on a KVM host, boots one sandbox
+guest kernel + rootfs, builds the guest image and the eBPF probe object, installs the `agent`
+binary into a prefix (`~/.local/bin` by default), and, on a KVM host, boots one sandbox
 to prove it end to end (`--no-run` prints the proof command instead). It is orchestration over the
 already-tested `xtask` steps, not a second code path.
 

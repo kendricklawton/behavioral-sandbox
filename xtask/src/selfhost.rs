@@ -1,6 +1,6 @@
 //! `cargo xtask self-host`, the one command a self-hoster runs to stand the engine up end to end:
 //! obtain the pinned guest kernel + rootfs, build the guest image and the eBPF probe object, install
-//! the `agent` and `agentd` binaries, and (on a KVM host) boot one sandbox to prove it works.
+//! the `agent` binary, and (on a KVM host) boot one sandbox to prove it works.
 //!
 //! Every step reuses the same tested building blocks the individual `xtask` commands do, so this is
 //! orchestration, not a second code path. **Vendor-aware:** with `AGENT_VENDOR_DIR` set, the fetch +
@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// The binaries a self-host installs: the CLI and the driver daemon, both from the `agent-cli` crate.
-const BINARIES: &[&str] = &["agent", "agentd"];
+const BINARIES: &[&str] = &["agent"];
 
 /// `cargo xtask self-host [--prefix DIR] [--no-run]`: build the artifacts + binaries and prove one
 /// sandbox boots. `--prefix` is the install dir (default `~/.local/bin`); `--no-run` skips the boot
@@ -49,7 +49,7 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     println!("\n== 3/5  build the eBPF probe object (the audit half) ==");
     build_probes()?;
 
-    println!("\n== 4/5  build + install the agent / agentd binaries ==");
+    println!("\n== 4/5  build + install the agent binary ==");
     cargo(&["build", "--release", "--locked", "-p", "agent-cli"])?;
     let prefix = resolve_prefix(prefix)?;
     let agent = install_binaries(&prefix)?;
@@ -58,8 +58,8 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     prove(&agent, no_run)?;
 
     println!(
-        "\n✓ self-host complete. Binaries in {}; start the daemon with `agentd` (see `agentd \
-         --help`).",
+        "\n✓ self-host complete. Binary in {}; start the daemon with `agent serve` (see \
+         `agent serve --help`).",
         prefix.display()
     );
     Ok(())

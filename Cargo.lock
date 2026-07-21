@@ -10,11 +10,11 @@ version = "0.1.0"
 name = "agent-cli"
 version = "0.1.0"
 dependencies = [
+ "agent-client",
  "agent-probes-loader",
+ "agent-protocol",
  "agent-test-support",
  "agent-vmm",
- "agentd-client",
- "agentd-protocol",
  "clap",
  "ratatui",
  "serde",
@@ -23,6 +23,14 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "agent-client"
+version = "0.1.0"
+dependencies = [
+ "agent-protocol",
+ "serde_json",
 ]
 
 [[package]]
@@ -51,6 +59,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agent-test-support"
 version = "0.1.0"
 
@@ -65,22 +81,6 @@ dependencies = [
  "serde_json",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "agentd-client"
-version = "0.1.0"
-dependencies = [
- "agentd-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "agentd-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

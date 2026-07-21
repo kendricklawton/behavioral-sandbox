@@ -903,10 +903,17 @@ impl Spawned {
         // userspace via `CONFIG_IP_PNP`. The gateway field is **empty**, so the kernel installs only
         // the connected /30 route (guest ⇄ host over the tap) and **no default route**, the guest
         // reaches the host and nothing else (deny-by-default, ADR 008). Netmask is a /30.
+        //
+        // IPv6 rides alongside as the `agent_guest_ip6=<addr>/<plen>` token: `ip=`/`CONFIG_IP_PNP`
+        // has no v6 form, so the guest's `/sbin/net-up` sysinit reads this token and applies it to
+        // `eth0`. Same deny-by-default shape as v4, a connected /64 route only, no v6 default route.
         if let Some(tap) = self.tap.as_ref() {
             boot_args = format!(
-                "{boot_args} ip={}:::255.255.255.252::eth0:off",
-                tap.guest_ip
+                "{boot_args} ip={}:::255.255.255.252::eth0:off {}={}/{}",
+                tap.guest_ip,
+                agent_channel::GUEST_IP6_CMDLINE_KEY,
+                tap.guest_ip6,
+                crate::net::HOST_PREFIX6,
             );
         }
         still_before(deadline, "PUT /boot-source")?;
@@ -992,9 +999,10 @@ impl Spawned {
             tracing::debug!(guest_cid = cid, uds = uds_path, "vsock device configured");
         }
 
-        // Per-VM virtio-net, backed by the host tap created in `launch`. Deny-by-default: the
-        // guest gets an *unconfigured* `eth0` (no `ip=` boot arg, no host route or masquerade), so it
-        // reaches nothing until addressing lands. The tap is deleted on every teardown path.
+        // Per-VM virtio-net, backed by the host tap created in `launch`. Deny-by-default: the guest
+        // reaches only the connected host end over this tap, the v4 `/30` and the v6 `/64` each carry
+        // a connected-prefix route and no default route (no masquerade, no forwarding), from the
+        // `ip=`/`agent_guest_ip6=` addressing set above. The tap is deleted on every teardown path.
         if let Some(tap) = self.tap.as_ref() {
             still_before(deadline, "PUT /network-interfaces")?;
             self.api.put(

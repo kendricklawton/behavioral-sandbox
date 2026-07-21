@@ -36,19 +36,22 @@
 //! footprint instead of the whole machine's.
 //!
 //! **Network flows on the tap.** [`tap_ingress`]/[`tap_egress`] are `tc`/clsact
-//! classifiers on a VM's tap device: each parses the frame's IPv4 5-tuple and adds the packet to that
-//! flow's per-direction byte/packet counters in the [`FLOWS`] map. Unlike the syscall tracepoints, this
-//! *is* the guest's own traffic, a microVM's packets cross its tap on the host, so the host sees every
-//! one (the strong cross-boundary signal core property 1 leaves intact).
+//! classifiers on a VM's tap device: each parses the frame's 5-tuple, IPv4 into [`FLOWS`] or IPv6 into
+//! [`FLOWS6`] (ADR 008 dual-stack, parallel maps so the v4 path is untouched), and adds the packet to
+//! that flow's per-direction byte/packet counters. Unlike the syscall tracepoints, this *is* the
+//! guest's own traffic, a microVM's packets cross its tap on the host, so the host sees every one (the
+//! strong cross-boundary signal core property 1 leaves intact).
 //!
 //! **Egress enforcement in the kernel.** The ingress hook (a frame the guest
-//! *sends*) also consults a per-sandbox allow-list, the [`POLICY`] map of [`PolicyRule`]s the loader
-//! fills, and, when the [`ENFORCE`] toggle is on, returns `TC_ACT_SHOT` to drop any guest-sent IPv4
-//! packet whose destination matches no rule (deny-by-default), accepting the rest. A dropped packet is
-//! first counted against its destination in [`DENIALS`], so the host can report which endpoints
-//! a sandbox was blocked from, the audit trail the per-run record folds in. Enforcement is opt-in: a monitor that
-//! never sets `ENFORCE` stays observe-only (both hooks accept, the observe-only default). ARP is always
-//! allowed so the guest can resolve its gateway; the egress hook (reply → guest) always accepts.
+//! *sends*) also consults a per-sandbox allow-list, [`POLICY`]/[`POLICY6`] of [`PolicyRule`]/
+//! [`PolicyRule6`]s the loader fills, and, when the [`ENFORCE`] toggle is on, returns `TC_ACT_SHOT` to
+//! drop any guest-sent packet (v4 or v6) whose destination matches no rule (deny-by-default),
+//! accepting the rest. A dropped packet is first counted against its destination in
+//! [`DENIALS`]/[`DENIALS6`], so the host can report which endpoints a sandbox was blocked from, the
+//! audit trail the per-run record folds in. Enforcement is opt-in: a monitor that never sets
+//! `ENFORCE` stays observe-only (both hooks accept, the observe-only default). ARP (v4) and ICMPv6
+//! (v6 neighbor discovery / MLD) are always allowed so the guest can resolve its on-link host end;
+//! the egress hook (reply → guest) always accepts.
 //!
 //! **Per-cgroup resource accounting from the scheduler.** [`account_sched_switch`] attaches
 //! **once** to the `sched/sched_switch` tracepoint and accumulates each cgroup's on-CPU **nanoseconds**
@@ -76,9 +79,10 @@ use aya_ebpf::{
     programs::{TcContext, TracePointContext},
 };
 use agent_probes_common::{
-    rule_matches, FlowCounts, FlowKey, PolicyRule, Syscall, SyscallEvent, DETAIL_CAP,
-    ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPPROTO_TCP,
-    IPPROTO_UDP, MAX_POLICY_RULES, SOCKADDR_SNAP,
+    rule_matches, rule_matches6, FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Syscall,
+    SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP,
+    ETH_P_IPV6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, MAX_POLICY_RULES, SOCKADDR_SNAP,
+    SOCKADDR_SNAP_V4,
 };
 
 /// The object's kernel `license` section. Without it every program loads as **non-GPL-compatible**,
@@ -253,9 +257,15 @@ fn record(ctx: &TracePointContext, kind: Syscall, arg_off: usize, path_like: boo
             }
         } else {
             // SAFETY: copies a fixed, constant count of leading sockaddr bytes from user space; a
-            // short or unmapped user buffer simply fails, leaving `detail_len` at 0.
+            // short or unmapped user buffer simply fails, leaving `detail_len` at 0. Try the full
+            // `sockaddr_in6` length first (a complete IPv6 address); if that read faults on a buffer
+            // only sized for a v4 `sockaddr_in`, fall back to the shorter copy so no v4 capture is lost.
             if unsafe { bpf_probe_read_user_buf(src, &mut ev.detail[..SOCKADDR_SNAP]) }.is_ok() {
                 ev.detail_len = SOCKADDR_SNAP as u32;
+            } else if unsafe { bpf_probe_read_user_buf(src, &mut ev.detail[..SOCKADDR_SNAP_V4]) }
+                .is_ok()
+            {
+                ev.detail_len = SOCKADDR_SNAP_V4 as u32;
             }
         }
     }
@@ -312,6 +322,18 @@ const MAX_FLOWS: u32 = 4096;
 #[map]
 static DENIALS: HashMap<FlowKey, u64> = HashMap::with_max_entries(MAX_FLOWS, 0);
 
+/// The IPv6 twin of [`FLOWS`], keyed by the directional [`FlowKey6`] (ADR 008 dual-stack). A separate
+/// map, not a widened key, so the v4 path stays byte-for-byte unchanged. Shares the [`FLOW_DROPS`]
+/// counter on overflow (a lost flow row is a lost flow row, whichever family), so the record's honest
+/// truncation signal covers both.
+#[map]
+static FLOWS6: HashMap<FlowKey6, FlowCounts> = HashMap::with_max_entries(MAX_FLOWS, 0);
+
+/// The IPv6 twin of [`DENIALS`]: per-destination denied-packet counts for guest-sent v6 frames the
+/// egress policy dropped, keyed by [`FlowKey6`]. Shares [`DENIAL_DROPS`] on overflow.
+#[map]
+static DENIALS6: HashMap<FlowKey6, u64> = HashMap::with_max_entries(MAX_FLOWS, 0);
+
 /// A single-slot **per-CPU** counter of new flows a full [`FLOWS`] map **dropped** (the insert
 /// rejected, so that 5-tuple's traffic is absent from the map and undercounted in the totals). The
 /// loader sums the slots and surfaces a nonzero value as a truncated network section plus a coverage
@@ -327,11 +349,12 @@ static FLOW_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 #[map]
 static DENIAL_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
-/// A single-slot **per-CPU** counter of **non-IPv4** frames (IPv6 or 802.1Q VLAN) that crossed the tap
-/// but can't be represented as an IPv4 [`FlowKey`], so they'd vanish from the flow view silently. The
-/// loader reads it and gaps the network section as IPv4-only when nonzero. ARP is deliberately *not*
-/// counted (it is expected on-link, not a flow); neither IPv6 nor VLAN is configured on a sandbox's
-/// tap (ADR 017), so a nonzero count is a guest emitting frames the audit can't otherwise show.
+/// A single-slot **per-CPU** counter of frames that crossed the tap but couldn't be represented as a
+/// [`FlowKey`] *or* a [`FlowKey6`], so they'd vanish from the flow view silently: an 802.1Q VLAN tag,
+/// or a truncated IPv4/IPv6 frame a parse ran off. The loader reads it and gaps the network section
+/// when nonzero. ARP is deliberately *not* counted (expected on-link, not a flow), and a well-formed
+/// IPv6 frame is now parsed into [`FLOWS6`] rather than counted here (ADR 008 dual-stack); a nonzero
+/// count is a guest emitting frames the audit still can't otherwise show.
 #[map]
 static UNPARSED_L3: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
@@ -382,6 +405,12 @@ impl Verdict {
 #[map]
 static POLICY: Array<PolicyRule> = Array::with_max_entries(MAX_POLICY_RULES as u32, 0);
 
+/// The IPv6 twin of [`POLICY`]: a fixed [`MAX_POLICY_RULES`] array of [`PolicyRule6`] the loader
+/// fills and the v6 ingress path scans, governed by the same [`ENFORCE`] toggle. Zero-initialized, so
+/// an un-configured monitor enforces nothing on v6 either.
+#[map]
+static POLICY6: Array<PolicyRule6> = Array::with_max_entries(MAX_POLICY_RULES as u32, 0);
+
 /// Enforcement toggle: slot 0 is `0` for **observe-only** (accept every packet, the original
 /// behavior) or `1` for **deny-by-default egress** (guest-sent IPv4 packets must match [`POLICY`]).
 /// Zero-initialized at load, so a monitor enforces nothing until the loader opts in, existing
@@ -405,17 +434,32 @@ enum Direction {
 pub fn tap_ingress(ctx: TcContext) -> i32 {
     // Parse the 5-tuple **once** and hand it to both the counter and the verdict: on the enforcement
     // hot path this halves the per-packet `bpf_skb_load_bytes` calls (the old shape parsed in `count`
-    // and again in `egress_verdict`). `FlowKey` is `Copy`, so sharing it adds no stack pressure.
-    let key = parse(&ctx);
-    count(&ctx, Direction::Ingress, key);
-    egress_verdict(&ctx, key).as_tc()
+    // and again in `egress_verdict`). IPv4 first (the common path), then IPv6 (ADR 008 dual-stack),
+    // each family with its own flow map + policy; a frame that is neither falls through to the
+    // non-IP handling (VLAN counted as unparsed, ARP spared, everything else deny-by-default).
+    if let Some(key) = parse(&ctx) {
+        count(&ctx, Direction::Ingress, Some(key));
+        return egress_verdict(&ctx, Some(key)).as_tc();
+    }
+    if let Some(key6) = parse6(&ctx) {
+        count6(&ctx, Direction::Ingress, &key6);
+        return egress_verdict6(&ctx, &key6).as_tc();
+    }
+    count(&ctx, Direction::Ingress, None);
+    egress_verdict(&ctx, None).as_tc()
 }
 
 /// `tc`/clsact **egress** on a VM's tap, a frame delivered to the guest. Always accepted: egress policy
 /// governs what the guest *sends* (the ingress hook), and replies to allowed traffic must come back in.
 #[classifier]
 pub fn tap_egress(ctx: TcContext) -> i32 {
-    count(&ctx, Direction::Egress, parse(&ctx));
+    if let Some(key) = parse(&ctx) {
+        count(&ctx, Direction::Egress, Some(key));
+    } else if let Some(key6) = parse6(&ctx) {
+        count6(&ctx, Direction::Egress, &key6);
+    } else {
+        count(&ctx, Direction::Egress, None);
+    }
     Verdict::Pass.as_tc()
 }
 
@@ -448,6 +492,29 @@ fn egress_verdict(ctx: &TcContext, key: Option<FlowKey>) -> Verdict {
     }
 }
 
+/// The IPv6 twin of [`egress_verdict`]: the allow/drop decision for a **guest-sent** v6 frame the
+/// caller already parsed. Observe-only ([`ENFORCE`] off) accepts; under enforcement a v6 destination
+/// is accepted only if it matches [`POLICY6`], else it is recorded in [`DENIALS6`] and dropped
+/// (deny-by-default, the same posture as v4). ARP is IPv4-only, so there is no v6 analogue to spare.
+#[inline(always)]
+fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
+    if ENFORCE.get(0).copied().unwrap_or(0) == 0 {
+        return Verdict::Pass;
+    }
+    // ICMPv6 is always allowed, the v6 twin of ARP: neighbor discovery (NS/NA) and MLD must flow for
+    // the guest to resolve its on-link host end and reach *any* allowed v6 endpoint. It can't route
+    // off the link regardless (no v6 default route), so this doesn't widen egress.
+    if key.proto == IPPROTO_ICMPV6 {
+        return Verdict::Pass;
+    }
+    if policy_allows6(key.dst_addr, key.dst_port, key.proto) {
+        Verdict::Pass
+    } else {
+        record_denial6(key);
+        Verdict::Drop
+    }
+}
+
 /// Record one denied guest-sent packet against its destination flow in [`DENIALS`]. Best-effort
 /// like [`FLOWS`]: a lookup-or-init counter (the verifier's mandatory null-check on the map pointer), not
 /// atomic across CPUs, so a burst can undercount by one, fine for an audit signal. A full map drops new
@@ -474,6 +541,23 @@ fn record_denial(key: &FlowKey) {
     }
 }
 
+/// The IPv6 twin of [`record_denial`]: log one denied guest-sent v6 packet against its destination in
+/// [`DENIALS6`], keyed by **destination only** (src address/port zeroed) for the same per-endpoint
+/// aggregation reason. Shares [`DENIAL_DROPS`] on a full map.
+#[inline(always)]
+fn record_denial6(key: &FlowKey6) {
+    let dst = FlowKey6::new([0u8; 16], key.dst_addr, 0, key.dst_port, key.proto);
+    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
+    // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
+    unsafe {
+        if let Some(count) = DENIALS6.get_ptr_mut(&dst) {
+            *count += 1;
+        } else if DENIALS6.insert(&dst, &1, 0).is_err() {
+            count_map_drop(&DENIAL_DROPS);
+        }
+    }
+}
+
 /// Whether the sandbox's [`POLICY`] allow-list admits destination `(addr, port, proto)`: scan
 /// the fixed rule array in a **bounded loop** (the compile-time [`MAX_POLICY_RULES`] cap the verifier
 /// needs) and accept on the first active rule that matches. Deny-by-default: no match means drop. The
@@ -492,6 +576,23 @@ fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     false
 }
 
+/// The IPv6 twin of [`policy_allows`]: scan the fixed [`POLICY6`] array in the same bounded loop and
+/// accept on the first active rule that matches, else deny-by-default. Per-rule test is
+/// [`rule_matches6`] (byte-wise, no `u128`), single-sourced with the host-tested parser.
+#[inline(always)]
+fn policy_allows6(dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
+    let mut i: u32 = 0;
+    while i < MAX_POLICY_RULES as u32 {
+        if let Some(rule) = POLICY6.get(i) {
+            if rule_matches6(rule, dst_addr, dst_port, proto) {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Add one packet to its flow's per-direction counters. `key` is the caller's single parse of the
 /// frame (`None` for a non-IPv4 or truncated one, which a flow can't represent and this skips, the
 /// caller still accepts it). `#[inline(always)]` so each classifier stays one self-contained program
@@ -499,9 +600,11 @@ fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
 #[inline(always)]
 fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
     let Some(key) = key else {
-        // Not our IPv4. Count an IPv6 or VLAN-tagged frame (which a flow can't represent) so its
-        // presence isn't silently absent from the record; skip ARP (expected on-link, not a flow)
-        // and anything else. A second small `load` only on this uncommon path.
+        // Reached only when neither the v4 nor the v6 parser could key the frame: a VLAN tag, or a
+        // truncated v4/v6 frame. Count it (so its presence isn't silently absent from the record),
+        // skip ARP (expected on-link, not a flow) and anything else. A well-formed IPv6 frame never
+        // reaches here, the caller counted it into `FLOWS6` first. A second small `load` on this
+        // uncommon path.
         if let Ok(ethertype) = ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be) {
             if ethertype == ETH_P_IPV6 || ethertype == ETH_P_8021Q {
                 count_map_drop(&UNPARSED_L3);
@@ -547,6 +650,45 @@ fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
     }
 }
 
+/// The IPv6 twin of [`count`]: add one packet to its v6 flow's per-direction counters in [`FLOWS6`].
+/// The caller only passes a real parsed [`FlowKey6`] (the non-IP / unparsed accounting stays in
+/// [`count`]), so this takes the key by reference (a 40-byte key, not `Copy`-cheap like the v4 one).
+#[inline(always)]
+fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
+    let bytes = u64::from(ctx.skb.len());
+    // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
+    // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
+    unsafe {
+        if let Some(counts) = FLOWS6.get_ptr_mut(key) {
+            match dir {
+                Direction::Ingress => {
+                    (*counts).ingress_packets += 1;
+                    (*counts).ingress_bytes += bytes;
+                }
+                Direction::Egress => {
+                    (*counts).egress_packets += 1;
+                    (*counts).egress_bytes += bytes;
+                }
+            }
+        } else {
+            let mut init = FlowCounts::default();
+            match dir {
+                Direction::Ingress => {
+                    init.ingress_packets = 1;
+                    init.ingress_bytes = bytes;
+                }
+                Direction::Egress => {
+                    init.egress_packets = 1;
+                    init.egress_bytes = bytes;
+                }
+            }
+            if FLOWS6.insert(key, &init, 0).is_err() {
+                count_map_drop(&FLOW_DROPS);
+            }
+        }
+    }
+}
+
 /// Read the frame's IPv4 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes` at a
 /// constant, or `ihl`-bounded, offset), or `None` if it is not IPv4-over-Ethernet or a read runs off
 /// the packet. Mirrors [`agent_probes_common::parse_ipv4_5tuple`] at the same shared offsets, so the
@@ -577,6 +719,31 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
         dst_port = u16::from_be(ctx.load::<u16>(l4 + 2).ok()?);
     }
     Some(FlowKey::new(src, dst, src_port, dst_port, proto))
+}
+
+/// Read the frame's IPv6 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes`), or
+/// `None` if it is not IPv6-over-Ethernet or a read runs off the packet. Mirrors
+/// [`agent_probes_common::parse_ipv6_5tuple`] at the same offsets, so the in-kernel reader and the
+/// host-tested pure parser can't drift. Extension headers are not walked (a first cut): a next-header
+/// that isn't TCP/UDP directly after the fixed 40-byte header leaves the ports 0, the same honest
+/// shape as the v4 parser's fragment handling.
+#[inline(always)]
+fn parse6(ctx: &TcContext) -> Option<FlowKey6> {
+    let ethertype = u16::from_be(ctx.load::<u16>(ETHERTYPE_OFFSET).ok()?);
+    if ethertype != ETH_P_IPV6 {
+        return None;
+    }
+    // The fixed IPv6 header (from the L3 start `ETH_HLEN`): next-header at +6, src at +8, dst at +24.
+    let next_header: u8 = ctx.load(ETH_HLEN + 6).ok()?;
+    let src: [u8; 16] = ctx.load(ETH_HLEN + 8).ok()?;
+    let dst: [u8; 16] = ctx.load(ETH_HLEN + 24).ok()?;
+    let (mut src_port, mut dst_port) = (0u16, 0u16);
+    if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
+        let l4 = ETH_HLEN + 40;
+        src_port = u16::from_be(ctx.load::<u16>(l4).ok()?);
+        dst_port = u16::from_be(ctx.load::<u16>(l4 + 2).ok()?);
+    }
+    Some(FlowKey6::new(src, dst, src_port, dst_port, next_header))
 }
 
 // ---------------------------------------------------------------------------

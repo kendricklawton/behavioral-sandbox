@@ -37,7 +37,7 @@ body:
       label: Which surface does it touch?
       options:
         - CLI (agent run / shell / doctor)
-        - agentd daemon + wire API
+        - agent serve (daemon) + wire API
         - engine API (the vmm library)
         - probes / audit record
         - benchmarks / docs / tooling

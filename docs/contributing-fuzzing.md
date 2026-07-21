@@ -51,15 +51,21 @@ The deep tier needs the toolchain once, then run a target:
 
 ```console
 cargo install cargo-fuzz                 # one-time
-rustup toolchain install nightly         # one-time
+rustup toolchain install nightly         # one-time: libFuzzer's sanitizer flags are nightly-only
 
 cargo xtask fuzz                         # channel_response, 60s (the default)
 cargo xtask fuzz channel_request --seconds 300
 cargo xtask fuzz channel_frame --seconds 0     # run until a crash or Ctrl-C
 ```
 
+You only need nightly *installed*, not as your default: `cargo xtask fuzz` invokes cargo-fuzz under
+`+nightly` for you, so your default toolchain stays stable. The nightly CI job
+(`.github/workflows/fuzz.yml`) runs the exact same `cargo xtask fuzz` command, so a green local run
+and a green CI run mean the same thing.
+
 The targets are `channel_response` (host reads guest, the highest-value one), `channel_request`
 (guest reads host), `channel_frame` (the shared framing), and `channel_handshake` (the magic +
 version exchanged before any message). A crash is written under `fuzz/artifacts/` and replays with
-`cargo fuzz run <target> fuzz/artifacts/<file>`; feed a minimized reproducer back as a
-`crates/channel` unit test when you fix it.
+`cargo +nightly fuzz run <target> fuzz/artifacts/<file>` (libFuzzer needs nightly, which is why
+`cargo xtask fuzz` selects it for you); feed a minimized reproducer back as a `crates/channel` unit
+test when you fix it.

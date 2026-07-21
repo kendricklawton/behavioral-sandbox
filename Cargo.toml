@@ -6,8 +6,8 @@ members = [
     "crates/guest-agent",
     "crates/probes-common",
     "crates/probes-loader",
-    "crates/agentd-protocol",
-    "crates/agentd-client",
+    "crates/agent-protocol",
+    "crates/agent-client",
     "crates/cli",
     "crates/test-support",
     "xtask",
@@ -29,7 +29,7 @@ edition = "2021"
 # noted change, not incidental.
 rust-version = "1.94"
 license = "Apache-2.0"
-authors = ["k-henry <khe4r6@gmail.com>"]
+authors = ["Kendrick Lawton <khe4r6@gmail.com>", "Kendrick Lawton <khlawton@asu.edu>"]
 repository = "https://github.com/kendricklawton/agent"
 
 # Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON

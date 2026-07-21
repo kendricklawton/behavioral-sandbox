@@ -8,7 +8,7 @@
 //!   agent + the agent rootfs first, so the in-VM exec test has something to boot.
 //! - **`setup`**, checks the host can do KVM + eBPF and reports what's missing.
 //! - **`self-host`**, the single self-host command: obtain the pinned kernel + rootfs, build the
-//!   guest image + eBPF object, install `agent`/`agentd`, and (on a KVM host) boot one sandbox to
+//!   guest image + eBPF object, install `agent`, and (on a KVM host) boot one sandbox to
 //!   prove it. Offline when `AGENT_VENDOR_DIR` points at a `vendor` mirror.
 //! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
 //!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
@@ -97,10 +97,10 @@ enum Cmd {
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
     /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
-    /// object, install the `agent`/`agentd` binaries, and (on a KVM host) boot one sandbox to prove
+    /// object, install the `agent` binary, and (on a KVM host) boot one sandbox to prove
     /// it. Offline when `AGENT_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
     SelfHost {
-        /// Where to install the `agent`/`agentd` binaries (default `~/.local/bin`).
+        /// Where to install the `agent` binary (default `~/.local/bin`).
         #[arg(long, value_name = "DIR")]
         prefix: Option<PathBuf>,
         /// Build + install only; skip the sandbox boot proof (it just prints the command).
@@ -317,9 +317,13 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
     // cargo-fuzz discovers the `fuzz/` crate from the repo root. `-max_total_time=0` means run until
     // a crash or Ctrl-C; any positive value bounds the run (handy for CI or a quick local pass).
     let max_time = format!("-max_total_time={seconds}");
-    println!("$ cargo fuzz run {target} -- {max_time}");
+    // libFuzzer builds with `-Zsanitizer=address`, a nightly-only flag, so force the nightly
+    // toolchain via the rustup proxy rather than inheriting whatever the default is (stable on CI
+    // and most dev boxes, where the build would fail with "the option `Z` is only accepted on the
+    // nightly compiler"). rustup propagates the selection to cargo-fuzz's inner `cargo build`.
+    println!("$ cargo +nightly fuzz run {target} -- {max_time}");
     let status = Command::new("cargo")
-        .args(["fuzz", "run", target, "--", &max_time])
+        .args(["+nightly", "fuzz", "run", target, "--", &max_time])
         .current_dir(workspace_root())
         .status()
         .context("running cargo fuzz")?;

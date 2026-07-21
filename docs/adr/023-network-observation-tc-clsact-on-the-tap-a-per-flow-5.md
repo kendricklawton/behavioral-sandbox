@@ -47,8 +47,10 @@ its own netns, decision 017, so scoping is entangled with netns entry).
   and keeps the record single-sourced.
 
 **Consequences and notes.**
-- **IPv4 only for now.** A non-IPv4 (or truncated) frame is skipped, counted nowhere; IPv6 is a later,
-  additive widening of `FlowKey` and the parser.
+- **Dual-stack (IPv4 and IPv6).** IPv4 parses into `FlowKey`/`FLOWS` and IPv6 into a parallel
+  `FlowKey6`/`FLOWS6` (parallel types and maps, not a widened key, so the v4 path is unchanged; ADR
+  008). A VLAN-tagged or truncated frame is still skipped and counted as an unparsed-L3 coverage
+  signal, never silently dropped.
 - **No leaked filter.** The classifier links are drop-owned (decision 020, nothing pinned), and a
   sandbox's netns teardown (`ip netns del`, decision 017) cascades the tap, its clsact qdisc, and the
   filters away, so a torn-down sandbox leaves no dangling `tc` program even if the loader is gone.

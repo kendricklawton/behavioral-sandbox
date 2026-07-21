@@ -25,7 +25,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use agent_probes_loader::{
-    check_support, object_path, AxisGap, SandboxProbes, SharedMeter, SharedTracer, Timing,
+    check_support, object_path, AxisGap, EgressPolicy, Protocol, SandboxProbes, SharedMeter,
+    SharedTracer, Timing,
 };
 use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
@@ -195,6 +196,106 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     assert!(
         json.contains(&format!("\"dst\":\"{host_ip}\"")) && json.contains("\"proto\":\"udp\""),
         "the JSON audit surface should show the guest's flow: {json}"
+    );
+
+    vm.shutdown().expect("shut the sandbox down");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
+    // The dual-stack (ADR 008) twin of the test above, and the load-time proof that the kernel
+    // **verifier accepts** the v6 datapath (a compiled-and-linked object still has to load). Boots a
+    // networked sandbox, attaches with a v6 egress policy allowing only the host end on udp/9999, then
+    // sends UDP to two v6 ports on the on-link host: :9999 (allowed) and :8888 (denied). Both reach the
+    // tap (the host end is the on-link neighbour, so ND resolves), so `flows6` records both and
+    // `denials6` records the blocked port, the v6 audit trail folded into the record.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record: {why}");
+        return;
+    }
+
+    let tracer = SharedTracer::load().expect("load the shared syscall tracer");
+    let meter = SharedMeter::load().expect("load the shared CPU meter");
+    let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
+    let host_ip6 = vm
+        .host_ip6()
+        .expect("a networked VM exposes its v6 host end");
+
+    // Enforce a v6 policy: only host_ip6:9999/udp is allowed (ICMPv6 ND is always allowed in-kernel,
+    // so the guest can still resolve the host end). Attaching with `Some(policy)` arms enforcement
+    // before the tap goes live, the same no-un-enforced-window path the v4 tests use.
+    let policy = EgressPolicy::deny_all().allow_host6(host_ip6, Some(9999), Some(Protocol::Udp));
+    let probes = SandboxProbes::attach(
+        vm.vmm_pid(),
+        vm.netns(),
+        vm.tap_name(),
+        Some(&policy),
+        &tracer,
+        &meter,
+    );
+    assert!(
+        probes.coverage().is_empty(),
+        "all axes should bind on a capable host (this also proves the v6 datapath loaded + verified); \
+         gaps: {:?}",
+        probes.coverage()
+    );
+
+    // Send UDP over v6 to the allowed port and a denied one, both to the on-link host end.
+    let workload = format!(
+        "import socket, time\n\
+         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)\n\
+         for _ in range(5):\n    s.sendto(b'agent-v6', ('{host_ip6}', 9999)); time.sleep(0.02)\n\
+         for _ in range(5):\n    \
+             try:\n        s.sendto(b'agent-v6', ('{host_ip6}', 8888))\n    \
+             except OSError:\n        pass\n    time.sleep(0.02)\n"
+    );
+    let out = vm
+        .exec(&["python3".into(), "-c".into(), workload], b"")
+        .expect("run the guest v6 workload");
+    assert_eq!(
+        out.exit_code,
+        0,
+        "guest v6 workload exited {}: {}",
+        out.exit_code,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::thread::sleep(Duration::from_millis(100)); // let the last datagrams settle onto the tap
+
+    let record = probes.collect(Timing {
+        boot: vm.boot_latency(),
+        exec_wall: out.metrics.wall,
+    });
+
+    let network = record
+        .network
+        .as_ref()
+        .expect("a networked sandbox has a network section");
+    let octets = host_ip6.octets();
+    // The allowed v6 flow is recorded on the tap (a flow is counted before the egress verdict, so the
+    // denied port appears among flows6 too, only the *verdict* differs).
+    assert!(
+        network.flows6.iter().any(|f| f.key.dst_addr == octets
+            && f.key.dst_port == 9999
+            && f.key.proto == IPPROTO_UDP),
+        "no allowed v6 UDP flow to [{host_ip6}]:9999 in the record: {:?}",
+        network.flows6
+    );
+    // The blocked port is in the v6 denial trail.
+    assert!(
+        network
+            .denials6
+            .iter()
+            .any(|d| d.dst_addr == octets && d.dst_port == 8888),
+        "the blocked v6 endpoint [{host_ip6}]:8888 should be in denials6: {:?}",
+        network.denials6
+    );
+
+    // The deterministic JSON surface shows the v6 flow.
+    let json = record.to_json();
+    assert!(
+        json.contains(&format!("\"dst\":\"{host_ip6}\"")),
+        "the JSON audit surface should show the guest's v6 flow: {json}"
     );
 
     vm.shutdown().expect("shut the sandbox down");

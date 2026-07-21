@@ -1,6 +1,6 @@
 //! CLI/daemon parity golden (the wire API, ADR 034): the **CLI** (`agent run --json`) and the
-//! **daemon wire API** (`agentd`, driven
-//! through the reference [`agentd_client::Client`]) render the *same* command **identically**, same
+//! **daemon wire API** (`agent`, driven
+//! through the reference [`agent_client::Client`]) render the *same* command **identically**, same
 //! exit code, same stdout, same stderr. The two faces are thin hosts of one `agent-vmm` lifecycle, so
 //! a run must never depend on which door it came through; this pins that invariant against drift (a
 //! stream captured differently, an exit code mapped differently, a default limit that diverged).
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agentd_client::{Client, OpenOptions};
+use agent_client::{Client, OpenOptions};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -91,7 +91,7 @@ fn cases() -> Vec<(Vec<String>, String, RunOutcome)> {
     ]
 }
 
-/// A spawned `agentd` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
+/// A spawned `agent` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
 /// session VM is then reaped by the lifetime sentinel; the socket file is cleared on the next bind).
 struct Daemon {
     child: Child,
@@ -118,23 +118,26 @@ fn shared_env(cmd: &mut Command, root: &std::path::Path) {
     }
 }
 
-/// Launch `agentd --unjailed` on a private socket, returning once the socket is connectable.
+/// Launch `agent --unjailed` on a private socket, returning once the socket is connectable.
 fn launch_daemon() -> (Daemon, PathBuf) {
     let root = workspace_root();
-    let dir = std::env::temp_dir().join(format!("agentd-golden-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("agent-golden-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
     }
-    let socket = dir.join("agentd.sock");
+    let socket = dir.join("agent.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_agentd"));
-    cmd.arg("--unjailed").arg("--socket").arg(&socket);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent"));
+    cmd.arg("serve")
+        .arg("--unjailed")
+        .arg("--socket")
+        .arg(&socket);
     shared_env(&mut cmd, &root);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn agentd: {e}"));
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn agent: {e}"));
     let daemon = Daemon { child, dir };
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -144,7 +147,7 @@ fn launch_daemon() -> (Daemon, PathBuf) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("agentd never began accepting on {}", socket.display());
+    panic!("agent never began accepting on {}", socket.display());
 }
 
 /// Run one command through the **CLI** face: `agent run --unjailed --json -- <argv>`, feeding
@@ -205,7 +208,7 @@ fn run_via_daemon(client: &mut Client, argv: &[String], stdin: &str) -> RunOutco
 }
 
 #[test]
-#[ignore = "spawns agentd + agent; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns agent + agent; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_cli_and_the_daemon_render_a_run_identically() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_cli_and_the_daemon_render_a_run_identically: {why}");

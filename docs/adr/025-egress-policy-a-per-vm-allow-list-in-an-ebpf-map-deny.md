@@ -22,28 +22,30 @@ ingress classifier, deny-by-default, opt-in per monitor**.
   empty slot from a `0.0.0.0/0` allow-all, so a zeroed map is deny-all, never accidental allow-all.
 - **The userspace surface is typed, not stringly/magic.** The loader exposes an ergonomic builder
   (`EgressPolicy::deny_all().allow_host(ip, Some(port), Some(Protocol::Udp))` / `.allow(cidr, port,
-  proto)`) that lowers to the wire `PolicyRule`s. The types carry the intent the raw record can't:
+  proto)`) that lowers to the wire `PolicyRule`s (and, dual-stack, `allow6`/`allow_host6` → `PolicyRule6`,
+  ADR 008). The types carry the intent the raw record can't:
   `Protocol` is an enum (no magic `6`/`17`), the port and protocol are `Option` (`None` = the wildcard,
-  no `0`-sentinel at the API), and a CIDR is a validated `Ipv4Cidr` whose prefix is guaranteed `0..=32`
-  by construction (`parse, don't validate`, an out-of-range prefix is a typed `PolicyError`, never a
-  silent clamp). `TapMonitor::set_egress_policy` applies it to an attached monitor;
+  no `0`-sentinel at the API), and a CIDR is a validated `Ipv4Cidr`/`Ipv6Cidr` whose prefix is guaranteed
+  `0..=32`/`0..=128` by construction (`parse, don't validate`, an out-of-range prefix is a typed
+  `PolicyError`, never a silent clamp). `TapMonitor::set_egress_policy` applies it to an attached monitor;
   `TapMonitor::enforce_in_netns` applies it **at launch**, arming the maps *before* the tc programs go
   live so there is no un-enforced window (the first guest packet is already policed). On the kernel side
   the classifier's logic speaks a `Verdict` enum (`Pass`/`Drop`), lowering to the `tc` ABI only at the
   return, so no bare action number leaks into the decision code.
 - **Applied at the *ingress* hook (guest → world), not egress.** Egress policy governs what the guest
   *sends*, which on a tap is the ingress hook (decision 023). The egress hook (reply → guest) always
-  accepts, so replies to allowed traffic return without connection tracking. **ARP is always allowed**,
-  the guest must resolve its on-link gateway (`10.200.0.1`, decision 017) before it can reach anything,
-  so dropping ARP would make deny-by-default trivially deny-everything.
+  accepts, so replies to allowed traffic return without connection tracking. **ARP (v4) and ICMPv6
+  neighbor discovery (v6) are always allowed**, the guest must resolve its on-link host end
+  (`10.200.0.1` / `fd00:200::1`, decision 017) before it can reach anything, so dropping them would make
+  deny-by-default trivially deny-everything.
 - **Deny-by-default, opt-in enforcement.** `ENFORCE` off (the load default) is observe-only, preserving
   the prior observe-only tap. `ENFORCE` on with no rules drops everything: a sandbox launched with no
   explicit allowance reaches nothing. This is the eBPF, host-observed complement to the **driver's**
   deny-by-default (decision 008 gives the guest no route to the world); the tap layer drops anything
   unlisted where the host can see and record it.
-- **Denials are recorded.** A dropped IPv4 packet is counted per destination in a `DENIALS` map
-  before the drop, read back by `TapMonitor::denials`, the audit trail of blocked endpoints later
-  folded into the per-run record.
+- **Denials are recorded.** A dropped packet (v4 or v6) is counted per destination in a
+  `DENIALS`/`DENIALS6` map before the drop, read back by `TapMonitor::denials`/`denials6`, the audit
+  trail of blocked endpoints later folded into the per-run record.
 
 **Alternatives considered.**
 - **An LPM-trie map (`BPF_MAP_TYPE_LPM_TRIE`) keyed by CIDR.** Rejected: it does longest-prefix address

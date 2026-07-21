@@ -434,6 +434,59 @@ Give the microVM a network with per-VM isolation, the classic tap/bridge setup.
       `ip_forward`, no bridge, no netns. Teardown is the inverse of one line (`ip link del`). The
       point: the full host-side network change set is small and enumerable, which is what makes
       deny-by-default auditable, cross-referenced from decisions 008/009.)*
+- [x] **P4.9** IPv6 (dual-stack): the network is IPv4 **and** IPv6, deny-by-default for both. *(Done as
+      one coherent change in the forced order a→e: every surface that watches or governs the tap learned
+      IPv6 (host+guest addressing, the eBPF flow parser + policy + denials, the record, the CLI/JSON/
+      summary faces) **before** the guest `ipv6.disable=1` lifted, so deny-by-default and "observe
+      everything that crosses" held throughout. Host-verified (unit tests + gate + the eBPF object
+      builds); the live link, verifier acceptance, and enforcement are proven under `ci-privileged` by
+      the P4.9e tests. Landed pre-v0.1.0. ADR 008.)*
+- [x] **P4.9a** Guest v6 stack + host↔guest routing. *(Done: the guest kernel drops `ipv6.disable=1`
+      (dual-stack, `vm.rs`), the tap in each netns gets the host v6 end `fd00:200::1/64` alongside the
+      v4 /30 (`net.rs`), and the guest end `fd00:200::2/64` reaches the guest via a new
+      `agent_guest_ip6=<addr>/<plen>` kernel-cmdline token (`ip=`/`CONFIG_IP_PNP` is v4-only): a
+      `/sbin/net-up` sysinit step reads it from `/proc/cmdline` and assigns it, best-effort (`ip` then
+      `ifconfig`). The token key is single-sourced in `agent-channel` so the driver's writer and the
+      guest's reader can't drift. Deny-by-default holds by construction: only the connected /64 route
+      is added, never a v6 default route, the v6 twin of the /30. Teardown is unchanged (`ip netns del`
+      cascades both). `RunningVm::host_ip6()`/`guest_ip6()` expose the ends. Host-verified: net address
+      math + the token contract are unit-tested, the gate is green; the live host↔guest v6 link is
+      proven under `ci-privileged` in P4.9e.)*
+- [x] **P4.9b** Observers parse IPv6 (ADR 021/023). *(Done: `agent-probes-common` gained the v6 twins
+      `FlowKey6`/`PolicyRule6` + `parse_ipv6_5tuple` + byte-wise `rule_matches6` (no `u128`, so it runs
+      in the eBPF kernel too), all host-unit-tested; the tc program parses the fixed 40-byte v6 header
+      into a parallel `FLOWS6` map (parallel types/maps, v4 path byte-for-byte unchanged), so a
+      well-formed v6 frame is now a recorded flow instead of an unparsed-L3 coverage gap. Extension
+      headers aren't walked yet (ports 0, honest, like a v4 fragment). The `connect` sockaddr snapshot
+      grew to a full `sockaddr_in6` (28 B) with a v4-sized fallback read, and `describe_sockaddr`
+      renders `[v6]:port`. The eBPF object builds for `bpfel-unknown-none`; verifier acceptance is
+      proven at load under `ci-privileged` (P4.9e). The kernel v6 egress path (`POLICY6`/`DENIALS6` +
+      `policy_allows6`/`record_denial6`) landed here too, the loader wires it in P4.9c/d.)*
+- [x] **P4.9c** Egress policy enforces v6. *(Done: `EgressPolicy` gained `Ipv6Cidr` + `allow6`/
+      `allow_host6`/`rules6`, lowered to `PolicyRule6` and written into the kernel `POLICY6` map by
+      `write_policy6` under the one shared `ENFORCE` toggle. `is_deny_all` now considers both families,
+      so a v6-only allowance is not deny-all. Deny-by-default and "every block recorded" hold via the
+      kernel `DENIALS6` path (P4.9b), symmetric with v4. Host-unit-tested.)*
+- [x] **P4.9d** The record carries v6. *(Done: `TapMonitor::flows6`/`denials6` read `FLOWS6`/`DENIALS6`;
+      `NetSection::with_v6` folds them into the section, summing v6 byte/packet counts into the
+      dual-stack `totals` and sorting/aggregating v6 flows + denials deterministically; the observer's
+      `collect`/`snapshot` wire it in with per-axis gaps. All three faces render v6: the deterministic
+      JSON gains additive `flows6`/`denials6` arrays (schema stays 1), and the model-legible summary
+      lists v6 `reached`/`denied` endpoints. The unparsed-L3 gap now fires only for VLAN/truncated
+      frames (v6 is parsed), so the coverage machinery stays armed as the failsafe. Golden + builder
+      unit tests pass, gate green.)*
+- [x] **P4.9e** Lift the disables and prove it. *(Done: the guest `ipv6.disable=1` boot arg and the
+      netns `disable_ipv6` sysctls were removed as the *first* step (P4.9a), safe because a→d landed with
+      it. Two `ci-privileged` tests mirror the v4 suite:
+      `addresses_the_guest_over_ipv6_and_routes_host_to_guest` (vmm) proves the guest carries its static
+      v6 address, reaches the host v6 end, and cannot reach an off-link v6 address (deny-by-default); and
+      `an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record` (probes-loader) attaches a v6 egress
+      policy, sends UDP to an allowed and a blocked v6 port, and asserts the record's `flows6` +
+      `denials6` show them (also the load-time proof the verifier accepts the v6 datapath). Fixed here:
+      the kernel now spares **ICMPv6** under v6 enforcement (the v6 twin of the ARP exception), without
+      which neighbor discovery would be dropped and no v6 endpoint would be reachable. The CLI human
+      `--trace` renderer now prints v6 flows/denials too. These run on a KVM host, not the host-safe
+      gate.)*
 - **Exit gate:** a microVM has controlled network.
   *(Done: recorded in decisions 008/009 and the box annotations above: the tap backend (and
   why not a bridge/veth), virtio-net host-tap-to-guest-`eth0`, kernel `ip=`/`CONFIG_IP_PNP` static
@@ -1228,7 +1281,7 @@ Watch every packet a microVM sends/receives, at its tap device, in the kernel.
       (ingress/egress packets+bytes), single-sourced in `crates/probes-common`. The parse is mirrored by
       a pure `parse_ipv4_5tuple` at the same shared offsets, host-unit-tested on crafted TCP/UDP/ARP/
       truncated frames; the loader reads the map as raw bytes and decodes with the shared `from_bytes`,
-      so both crates stay `unsafe`-free. IPv4 only for now; best-effort counters like `EXECVE_BY_PID`.
+      so both crates stay `unsafe`-free. IPv4 at this phase (IPv6 added later, P4.9b); best-effort counters like `EXECVE_BY_PID`.
       The live "guest traffic shows up in the counters" proof is P10.6.)*
 - [x] **P10.3** Export per-VM network stats to userspace via a map.
       *(Landed: `TapMonitor::flows` reads the `FLOWS` map into `(FlowKey, FlowCounts)` pairs (per
@@ -1524,7 +1577,7 @@ emits is an unversioned de-facto contract. This interphase closes exactly that g
 more. The deliberate exclusions stay excluded: snapshot/pool verbs are the daemon's (P16.3, a warm
 pool is a long-lived-process concern, wrong for a one-shot CLI), the wire API is P16.2, and image/
 registry management is platform territory (guardrail 4) that never lands. The design rule this
-phase pins: **grow verbs, not modes**, `run`, `shell`, `doctor`, later `agentd`; not twenty
+phase pins: **grow verbs, not modes**, `run`, `shell`, `doctor`, later `agent`; not twenty
 interacting flags on `run`.
 
 - [x] **P14.9a** Project `Limits` onto the CLI: `--vcpus N` / `--mem MIB` on `run` and `shell`,
@@ -1740,8 +1793,8 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
 
 A local daemon others drive over a socket: still engine, not PaaS.
 
-- [x] **P16.1** `agentd`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
-      *(A second binary in the `agent-cli` crate (`src/agentd/`), a thin host of the same
+- [x] **P16.1** `agent`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
+      *(The `agent serve` subcommand in the `agent-cli` crate (`src/serve.rs`), a thin host of the same
       `agent-vmm` public API, engine, not platform (no auth/tenancy/billing). One connection is one
       sandbox **session** (the VM is the session, decision 019), served on its own thread
       (synchronous, no async runtime): `open` boots it, `exec`* run commands sharing one working dir,
@@ -1752,7 +1805,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       this carries **no schema number**. Confinement is the **daemon's** launch posture (jailed by
       default, `--unjailed` opt-out), never a client's, a caller can't weaken the jail. Teardown is
       crash-only: a session's `Sandbox` drops with its connection, and daemon-process death can't leak
-      a VM (the lifetime sentinel, decision 014). Demoed by `tests/agentd_e2e.rs`: spawns the real
+      a VM (the lifetime sentinel, decision 014). Demoed by `tests/agent_e2e.rs`: spawns the real
       daemon and drives a full session over the socket (open → exec `echo`/`cat`/stateful writes → a
       non-fatal guest fault the session survives → close → a fresh independent session), plus
       `docs/daemon.md`. `#[ignore]`d/privileged. Access control (socket-dir perms) and the wire-API
@@ -1763,7 +1816,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       and the peer is a local trusted-ish client, so hand-debuggability (`socat`) and "any language +
       a JSON lib + a socket" beat a compact wire. Every message carries a leading `schema` field,
       rejected on mismatch **before the body is trusted**, the seam Phase 21 freezes against (distinct
-      from the audit-record and `--json` schemas). Lives in a new **`agentd-protocol`** crate
+      from the audit-record and `--json` schemas). Lives in a new **`agent-protocol`** crate
       (serde-only, **no `agent-vmm`**): the shared `Request`/`Response`/`Envelope` shapes + a bounded,
       typed line codec (guardrail 5, host-safe unit-tested, round-trips, schema-gate, blank-line/EOF,
       over-cap). The full verb set landed on the daemon (`session.rs`, now on `RunningVm` so a pooled
@@ -1773,7 +1826,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       **non-destructively** from a live probe snapshot (fail-open, repeatable mid-session). Non-`api:`,
      the pinned `agent-vmm` surface is untouched; the daemon only consumes it.)*
 - [x] **P16.3** Pre-warmed-pool management lives in the daemon (fast `exec`).
-      *(`agentd --prewarm N`: at startup the daemon boots one **unjailed** prewarm source (a jailed
+      *(`agent --prewarm N`: at startup the daemon boots one **unjailed** prewarm source (a jailed
       disk can't be snapshotted), snapshots it, and restores `N` clones under the daemon's confinement
       posture into an `agent-vmm::Pool` behind a `Mutex` (sessions are thread-per-connection). A
       **bare-default** `open` pops a warm clone, `opened{pooled:true}`, since the clones carry the
@@ -1781,13 +1834,13 @@ A local daemon others drive over a socket: still engine, not PaaS.
       up on session close, off the hot path (the moment the `Pool` doc reserves for restore cost).
       Fail-open: a host that can't build the pool (no KVM, no root) logs one warning and every session
       cold-boots. Non-`api:`.)*
-- [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agentd` over the
+- [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `agent` over the
       wire API, the seed the **polyglot SDKs (Phase 21)** harden into Go/Python/Node/C#. (The full
       SDK set is post-`v0.1.0`.)
-      *(New **`agentd-client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
-      `snapshot`/`trace`/`close`) with typed errors, no panics. Depends on `agentd-protocol` + a JSON
+      *(New **`agent-client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
+      `snapshot`/`trace`/`close`) with typed errors, no panics. Depends on `agent-protocol` + a JSON
       value **only, never `agent-vmm`**, that dependency set *is* the proof a caller needs nothing of
-      the engine but the wire. Demoed by `tests/agentd_e2e.rs`, now three angles: the full versioned
+      the engine but the wire. Demoed by `tests/agent_e2e.rs`, now three angles: the full versioned
       API hand-driven as raw JSON (the wire is socat-debuggable, every message schema-stamped, a
       wrong schema is a fatal error), the **same daemon driven through the reference client**, and a
       `--prewarm 1` daemon answering a bare `open` `pooled:true`. Plus `docs/daemon.md` rewritten for
@@ -1796,8 +1849,8 @@ A local daemon others drive over a socket: still engine, not PaaS.
       *(Logs: the daemon's `tracing` events (already structured, `vmm_pid`/`boot_ms`/`pooled`) gain a
       machine encoding, `--log-json` / `AGENT_LOG_FORMAT=json` (one JSON object per line for a log
       shipper; same events, different framing) via `tracing-subscriber`'s `json` feature. Metrics:
-      `agentd --metrics ADDR` serves the Prometheus **text-exposition** format at `GET /metrics` from
-      a **hand-rolled**, bounded HTTP/1.1 responder on one thread (`agentd/metrics.rs`), no async
+      `agent --metrics ADDR` serves the Prometheus **text-exposition** format at `GET /metrics` from
+      a **hand-rolled**, bounded HTTP/1.1 responder on one thread (`agent/metrics.rs`), no async
       stack or metrics crate for one GET route, same discipline as the driver's hand-rolled FC client;
       the request head is byte-capped + socket-timed so a hostile scraper is a dropped connection
       (guardrail 5). The registry is plain atomics (no lock on the session hot path): sessions
@@ -1813,7 +1866,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       it just drove. Non-`api:`.)*
 - [x] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
       *(Restated where the programmatic interface actually lives: a **crate-level non-goals paragraph**
-      on `agentd-protocol` (the wire is the SDK contract, so the API surface is the code itself),
+      on `agent-protocol` (the wire is the SDK contract, so the API surface is the code itself),
       the protocol carries no tenant/credential/quota/price/host-to-schedule field, and that absence
       is a design commitment (guardrail 4), a schema bump adds a verb never a tenancy field. Plus a
       dedicated **"Non-goals: where a PaaS would begin"** section in `docs/daemon.md` (no
@@ -1822,7 +1875,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       ends". Docs/comments only, non-`api:`.)*
 - [x] **P16.7** Golden: the CLI and the daemon API produce identical run results.
       *(`tests/cli_daemon_golden.rs`: the same command through both faces, `agent run --json` and
-      `agentd` driven by the reference client, must render an **identical** `(exit_code, stdout,
+      `agent` driven by the reference client, must render an **identical** `(exit_code, stdout,
       stderr)`, since both are thin hosts of one `agent-vmm` lifecycle; the two agree with each other
       **and** with the expected literal, so a shared bug can't pass by matching itself. Cases: a plain
       success, a command that runs and exits non-zero writing both streams (a faithful result, not an
@@ -1958,13 +2011,13 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       fourth face. `Cmd::Run` boxed to keep the added flag under `clippy::large_enum_variant`.
       non-`api:` (probes-loader + CLI, not the pinned `vmm` surface).)*
 - [x] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
-      **Phase 21 SDKs** expose it as part of the SDK contract, an agent driving `agentd` from any
+      **Phase 21 SDKs** expose it as part of the SDK contract, an agent driving `agent` from any
       language reads the same model-legible observation the CLI writes, not a CLI-only convenience.
-      *(New `trace_summary` verb in `agentd-protocol`, parallel to `trace`: `Request::TraceSummary` →
+      *(New `trace_summary` verb in `agent-protocol`, parallel to `trace`: `Request::TraceSummary` →
       `Response::TraceSummary { summary }` (the projection JSON carried opaquely, so the protocol crate
       stays free of the probes-loader types), sampled **live** and non-destructively like `trace`,
       fail-open. The daemon handler projects the same live record via `to_summary_json`; the reference
-      `agentd-client` gains `trace_summary()`; the `Verb` metrics enum + `agentd_e2e` (raw-JSON *and*
+      `agent-client` gains `trace_summary()`; the `Verb` metrics enum + `agent_e2e` (raw-JSON *and*
       client paths) + `docs/daemon.md` verb/response tables all extended. Additive under `WIRE_SCHEMA`
       (a new verb, old messages unchanged); the pinned `vmm`/`channel` surfaces are untouched, so
       non-`api:`.)*
@@ -1990,7 +2043,7 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
   (from the CLI and over the wire API) shows what it did and what was blocked, its size measured
   against the full record, **with no model anywhere in the host path.** **Met:** decision 035 fixes
   the AI-scope boundary (model is the caller); `RunRecord::to_summary_json` (P18.2) is the projection,
-  golden + size-bound tested; `agentd`'s `trace_summary` verb (P18.3) serves it over the wire; and the
+  golden + size-bound tested; `agent`'s `trace_summary` verb (P18.3) serves it over the wire; and the
   scripted-agent example + its privileged e2e (P18.4) prove containment with the record showing
   reached-vs-blocked, no model in the host path.
 
@@ -2017,14 +2070,14 @@ JSON surface (P13.4) and the trust boundary already written down (decision 033);
 - [ ] **P19.2** **Sign the finalized record.** The loader signs the canonical (deterministic-JSON,
       P13.4) `RunRecord` bytes with a host key loaded at startup (generated on first run; path via the
       layered config, `AGENT_*` > file > default). The guest never sees the key (it's host-side, like
-      the eBPF). `--record` / the `agentd` `trace` verb carry a `signature` + `key_id` envelope
+      the eBPF). `--record` / the `agent` `trace` verb carry a `signature` + `key_id` envelope
       alongside the record; the JSON surface gains that envelope (a `schema` bump, versioned per P14.9e).
-- [ ] **P19.3** **`agent verify <record>`** (plus an `agentd` verb and a library entry point):
+- [ ] **P19.3** **`agent verify <record>`** (plus an `agent` verb and a library entry point):
       re-canonicalize the record, check the signature against the trusted public key(s), exit non-zero
       on mismatch. **Demo:** flip one byte of a `--record` file and `agent verify` rejects it, while an
       untouched record verifies clean.
 - [ ] **P19.4** **Session hash-chain (append-only evidence).** Each record carries the prior record's
-      hash, so a *sequence* (a `shell`/`agentd` session's runs) is tamper-evident as a whole: a deleted,
+      hash, so a *sequence* (a `shell`/`agent` session's runs) is tamper-evident as a whole: a deleted,
       reordered, or inserted run is detectable, not just a single-record edit. Off by default for a
       one-shot `agent run`; on for a session.
 - [ ] **P19.5** **Key rotation + `key_id`.** Records name the key that signed them; `verify` accepts a
@@ -2049,7 +2102,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       `.apk` closure (decision 007's note, P6.9d's recording), so a fresh host's setup no longer
       depends on the FC S3 bucket or the Alpine CDN staying alive.)*
       *(**Done** as decision 037. `cargo xtask self-host` is the single command: it obtains the pinned
-      kernel + rootfs, builds the guest image + eBPF object, installs `agent`/`agentd` into a prefix
+      kernel + rootfs, builds the guest image + eBPF object, installs `agent`/`agent` into a prefix
       (`~/.local/bin` default, `--prefix DIR`), and on a KVM host boots one sandbox to prove it
       (`--no-run` prints the proof command instead). `cargo xtask vendor` snapshots all four
       sha-pinned inputs **plus the resolved `.apk` closure** (the fetched-not-pinned piece decision
@@ -2150,14 +2203,14 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 ## Phase 21, Polyglot SDKs (Go · Python · C# · Node.js)
 
-Thin, idiomatic clients so non-Rust callers can drive `agentd`, a client-SDK surface, still
+Thin, idiomatic clients so non-Rust callers can drive `agent`, a client-SDK surface, still
 **engine, not platform**.
 
 - [ ] **P21.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
       SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/adr/`.
 - [ ] **P21.2** A **cross-language conformance suite** (golden request/response + audit-log
       round-trips) every SDK must pass, the single source of SDK correctness, run in CI.
-- [ ] **P21.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agentd`.
+- [ ] **P21.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agent`.
 - [ ] **P21.4** **Python** SDK (own repo; sync + async).
 - [ ] **P21.5** **Node.js / TypeScript** SDK (own repo).
 - [ ] **P21.6** **C# / .NET** SDK (own repo).
@@ -2167,7 +2220,7 @@ Thin, idiomatic clients so non-Rust callers can drive `agentd`, a client-SDK sur
 - [ ] **P21.8** Each SDK is a **thin protocol client**, no tenancy/auth/billing/scheduling; deny-by-
       default and the non-goals hold at the SDK layer too (note).
 - **Exit gate:** four languages run the same golden `exec` and read the same host-observed
-  audit log through `agentd`, against one stable polyglot wire API with a shared conformance suite.
+  audit log through `agent`, against one stable polyglot wire API with a shared conformance suite.
 
 ## Phase 22, The Wasmtime sibling (a second isolation boundary)
 

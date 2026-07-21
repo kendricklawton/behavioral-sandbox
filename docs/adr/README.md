@@ -39,7 +39,7 @@ phase), so each stands on its own as the roadmap evolves. The overview and repo 
 - [031. The `.agent.toml` config file layer: nearest-up-from-cwd, env-mirrored keys, typos are errors](./031-the-agent-toml-config-file-layer-nearest-up-from-cwd.md) *(2026-07-17)*
 - [032. `agent doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them](./032-agent-doctor-shares-one-host-check-implementation-the.md) *(2026-07-17)*
 - [033. The whole security boundary: what's trusted, what the adversary is, and what's assumed sound](./033-the-whole-security-boundary-what-s-trusted-what-the.md) *(2026-07-17)*
-- [034. The wire API is versioned newline-JSON in a shared `agentd-protocol` crate, not gRPC](./034-the-wire-api-is-versioned-newline-json-in-a-shared.md) *(2026-07-17)*
+- [034. The wire API is versioned newline-JSON in a shared `agent-protocol` crate, not gRPC](./034-the-wire-api-is-versioned-newline-json-in-a-shared.md) *(2026-07-17)*
 - [035. The AI-scope boundary: the model is always the caller, never an engine component](./035-the-ai-scope-boundary-the-model-is-always-the-caller.md) *(2026-07-17)*
 - [036. Supported platforms: two architectures, a security-maintained host-kernel floor, and pinned upstream versions](./036-supported-platforms-two-architectures-a-security.md) *(2026-07-17)*
 - [037. Single-command self-host + a vendored offline mirror of every pinned input](./037-single-command-self-host-a-vendored-offline-mirror-of.md) *(2026-07-17)*

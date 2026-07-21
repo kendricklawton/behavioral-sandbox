@@ -19,17 +19,19 @@ of a running sandbox is auditable from the host. This settles the queued network
 (deny-by-default over NAT-to-world) in favor of denying, and orders it ahead of the addressing/tap work,
 so the tap lands already denying, not opened-then-restricted.
 
-The same posture fixes the protocol surface: **the sandbox's network world is IPv4-only.** The flow
-view, the egress policy, and the denial records all speak IPv4; a protocol the observers cannot parse
-is an unobserved channel, which deny-by-default forbids ("every allowance is explicit and recorded",
-and no policy can express an IPv6 allowance). So IPv6 is disabled at both ends of the tap rather than
-left to kernel defaults: the guest kernel boots with `ipv6.disable=1` (a hostile guest cannot restart
-a stack its kernel never started) and the per-VM netns sets the `disable_ipv6` sysctls before any
-interface comes up (silencing the host stack's own link-up chatter, MLD reports and duplicate-address
-detection, which surfaced as honest non-IPv4 coverage gaps on hosted CI runners). The record's
-non-IPv4 gap machinery stays armed as the failsafe: if a frame crosses anyway, the record says so
-rather than claiming completeness. Re-enabling IPv6 is a deliberate future capability with a forced
-order: the flow view, policy shape, and record learn IPv6 *first*, then the two disables lift.
+The same posture sets the protocol surface: **the network is IPv4 and IPv6, deny-by-default for
+both, and both are implemented.** The invariant is that only what the observers can fully parse may
+cross the tap, because a protocol they can't read is an unobserved channel deny-by-default forbids
+("every allowance is explicit and recorded"). Each family has its own **parallel** types and maps
+(so the v4 datapath is byte-for-byte unchanged): the flow view (`FlowKey`/`FlowKey6`), egress policy
+(`PolicyRule`/`PolicyRule6`, byte-wise v6 matching since eBPF has no `u128`), and denial records all
+speak both. The guest is dual-stack: it gets a static v6 ULA link (`fd00:200::/64`, host `::1` /
+guest `::2`) via an `agent_guest_ip6=` cmdline token a guest sysinit applies, the connected /64 route
+only and **no v6 default route**, so v6 egress is denied by construction exactly as v4 is. ICMPv6
+neighbor discovery is always allowed under enforcement (the v6 twin of ARP), so the guest can resolve
+its host end. The build order was forced (observers → policy → record learned v6 *before* the guest's
+`ipv6.disable=1` lifted), so "observe everything that crosses" held through the change; the record's
+non-IPv4 gap machinery stays armed as the failsafe for a VLAN tag or a truncated frame.
 
 **Alternatives considered.**
 - **Default `MASQUERADE` to give the guest general egress (the "it just works" NAT).** Rejected: it is

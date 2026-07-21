@@ -200,7 +200,7 @@ few orthogonal verbs, or named below as deliberately out of scope. The map:
 is intent, not omission):
 
 - **Snapshots + the pre-warmed pool**, a pre-warmed pool is a long-lived-process concern; it lives
-  in the [`agentd` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
+  in the [`agent` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
 - **The wire API**, the programmatic driver surface is the
   [daemon's](./daemon.md#the-wire-protocol-versioned-json-schema-1), not a subcommand.
 - **Bulk block-device I/O** (`BootConfig::input_dir`/`output_dir`, whole directories / large files

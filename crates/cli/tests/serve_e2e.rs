@@ -1,16 +1,16 @@
-//! The `agentd` daemon end to end, as tests (the wire API, ADR 034, docs/daemon.md): drive the
+//! The `agent` daemon end to end, as tests (the wire API, ADR 034, docs/daemon.md): drive the
 //! real daemon over its unix socket through the full
 //! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.
 //! Three angles:
 //!
-//! 1. [`agentd_serves_the_full_wire_api_over_a_unix_socket`] drives it with **hand-built JSON lines**
+//! 1. [`agent_serves_the_full_wire_api_over_a_unix_socket`] drives it with **hand-built JSON lines**
 //!    (parsed with `serde_json::Value`, no access to the daemon's Rust types), the proof the wire is
 //!    hand-debuggable and every message carries its `schema`.
 //! 2. [`the_reference_client_drives_a_full_session`] drives the same daemon through the **reference
-//!    client** ([`agentd_client::Client`]), the proof a caller needs only the wire contract
+//!    client** ([`agent_client::Client`]), the proof a caller needs only the wire contract
 //!    (the client links no `agent-vmm`).
-//! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agentd --prewarm 1` and asserts a bare
+//! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agent --prewarm 1` and asserts a bare
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the agent
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agentd_client::{Client, OpenOptions};
+use agent_client::{Client, OpenOptions};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -48,7 +48,7 @@ fn skip_reason() -> Option<String> {
     None
 }
 
-/// A spawned `agentd` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
+/// A spawned `agent` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
 /// session VMs are then reaped by the lifetime sentinel; the socket file it leaves is cleared on the
 /// next bind).
 struct Daemon {
@@ -94,20 +94,23 @@ fn scrape_metrics(port: u16) -> String {
     response
 }
 
-/// Launch `agentd` on a private socket, pointed at the workspace's agent rootfs. `prewarm` becomes
+/// Launch `agent` on a private socket, pointed at the workspace's agent rootfs. `prewarm` becomes
 /// `--prewarm N` when set (the pool path); `metrics_port` becomes `--metrics 127.0.0.1:PORT`.
 /// Returns once the socket is connectable.
 fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, PathBuf) {
     let root = workspace_root();
-    let dir = std::env::temp_dir().join(format!("agentd-e2e-{}-{:?}", std::process::id(), prewarm));
+    let dir = std::env::temp_dir().join(format!("agent-e2e-{}-{:?}", std::process::id(), prewarm));
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
     }
-    let socket = dir.join("agentd.sock");
+    let socket = dir.join("agent.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_agentd"));
-    cmd.arg("--unjailed").arg("--socket").arg(&socket);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent"));
+    cmd.arg("serve")
+        .arg("--unjailed")
+        .arg("--socket")
+        .arg(&socket);
     if let Some(n) = prewarm {
         cmd.arg("--prewarm").arg(n.to_string());
     }
@@ -124,7 +127,7 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     if std::env::var_os("AGENT_KERNEL").is_none() {
         cmd.env("AGENT_KERNEL", root.join("artifacts/vmlinux"));
     }
-    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn agentd: {e}"));
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn agent: {e}"));
     let daemon = Daemon { child, dir };
 
     // Wait for the daemon to bind and start accepting. A prewarmed daemon boots a source + clones
@@ -137,7 +140,7 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("agentd never began accepting on {}", socket.display());
+    panic!("agent never began accepting on {}", socket.display());
 }
 
 /// A tiny **raw-JSON** client over the daemon's newline protocol: send a request line, read one
@@ -151,7 +154,7 @@ struct RawClient {
 impl RawClient {
     fn connect(socket: &PathBuf) -> Self {
         let stream =
-            UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect to agentd: {e}"));
+            UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect to agent: {e}"));
         if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(45))) {
             panic!("set read timeout: {e}");
         }
@@ -190,10 +193,10 @@ impl RawClient {
 }
 
 #[test]
-#[ignore = "spawns agentd; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
-fn agentd_serves_the_full_wire_api_over_a_unix_socket() {
+#[ignore = "spawns agent; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     if let Some(why) = skip_reason() {
-        eprintln!("skipping agentd_serves_the_full_wire_api_over_a_unix_socket: {why}");
+        eprintln!("skipping agent_serves_the_full_wire_api_over_a_unix_socket: {why}");
         return;
     }
     let metrics_port = free_loopback_port();
@@ -353,37 +356,37 @@ fn agentd_serves_the_full_wire_api_over_a_unix_socket() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let scraped = loop {
         let body = scrape_metrics(metrics_port);
-        if body.contains("agentd_sessions_active 0") || Instant::now() >= deadline {
+        if body.contains("agent_sessions_active 0") || Instant::now() >= deadline {
             break body;
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
-        scraped.contains("agentd_sessions_opened_total{pooled=\"false\"} 2"),
+        scraped.contains("agent_sessions_opened_total{pooled=\"false\"} 2"),
         "{scraped}"
     );
-    assert!(scraped.contains("agentd_sessions_active 0"), "{scraped}");
+    assert!(scraped.contains("agent_sessions_active 0"), "{scraped}");
     assert!(
-        scraped.contains("agentd_requests_total{verb=\"put\"} 1"),
-        "{scraped}"
-    );
-    assert!(
-        scraped.contains("agentd_requests_total{verb=\"snapshot\"} 1"),
+        scraped.contains("agent_requests_total{verb=\"put\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("agentd_request_errors_total{kind=\"guest\"} 1"),
+        scraped.contains("agent_requests_total{verb=\"snapshot\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("agentd_protocol_errors_total 1"),
+        scraped.contains("agent_request_errors_total{kind=\"guest\"} 1"),
         "{scraped}"
     );
-    assert!(scraped.contains("agentd_boot_seconds_count 2"), "{scraped}");
+    assert!(
+        scraped.contains("agent_protocol_errors_total 1"),
+        "{scraped}"
+    );
+    assert!(scraped.contains("agent_boot_seconds_count 2"), "{scraped}");
 }
 
 #[test]
-#[ignore = "spawns agentd; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns agent; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_reference_client_drives_a_full_session() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_reference_client_drives_a_full_session: {why}");
@@ -452,7 +455,7 @@ fn the_reference_client_drives_a_full_session() {
 }
 
 #[test]
-#[ignore = "spawns agentd --prewarm; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns agent --prewarm; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_prewarmed_open_is_served_from_the_pool() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_prewarmed_open_is_served_from_the_pool: {why}");

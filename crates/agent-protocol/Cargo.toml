@@ -1,5 +1,5 @@
 [package]
-name = "agentd-protocol"
+name = "agent-protocol"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The agentd wire protocol: the versioned newline-JSON contract the daemon and its clients (the reference client, the polyglot SDKs) share."
+description = "The agent wire protocol: the versioned newline-JSON contract the daemon and its clients (the reference client, the polyglot SDKs) share."
 
 # Deliberately a leaf: serde only, **no `agent-vmm`**. The wire is the contract, not shared Rust
 # internals, so a non-Rust SDK reimplements these JSON shapes without linking the engine. The one

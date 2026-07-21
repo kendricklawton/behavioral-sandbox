@@ -89,10 +89,10 @@ measurably smaller so it fits back into an agent's context. See
 
 ## Over the wire, too
 
-An agent driving the daemon reads the same projection, not a CLI-only convenience: `agentd` serves it
+An agent driving the daemon reads the same projection, not a CLI-only convenience: `agent` serves it
 as the `trace_summary` verb (alongside `trace` for the full record), so a supervisor written in any
 language gets the identical model-legible observation over the socket. See
-[Using the agentd daemon](./daemon.md). (Daemon sessions are observe-only, the `--allow`
+[Using the agent daemon](./daemon.md). (Daemon sessions are observe-only, the `--allow`
 *enforcement* that blocks the forbidden tool is the CLI/embedding path; the daemon serves the
 *observation* of any session bound to the probes.)
 

@@ -29,11 +29,11 @@ use std::time::{Duration, Instant};
 use agent_cli::audit::RunProbes;
 use agent_cli::MAX_VCPUS;
 use agent_probes_loader::Timing;
+use agent_protocol::{read_message, write_message, ProtocolError, Request, Response};
 use agent_vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
-use agentd_protocol::{read_message, write_message, ProtocolError, Request, Response};
 
 use crate::metrics::{Metrics, Verb};
-use crate::Server;
+use crate::serve::Server;
 
 /// The no-op command `put`/`get` run: the engine injects files and returns artifacts only *around an
 /// exec*, so a bare file write/read rides a command that does nothing but carry them. `true` exits 0

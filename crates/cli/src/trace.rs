@@ -64,6 +64,29 @@ pub fn render(record: &RunRecord) -> String {
                     denial.count
                 );
             }
+            // The IPv6 half (ADR 008 dual-stack): the same lines for v6 flows/denials. `FlowKey6`'s
+            // `Display` already renders `[v6]:port -> [v6]:port proto`.
+            for flow in &net.flows6 {
+                let _ = writeln!(
+                    out,
+                    "    flow     {} · sent {} pkts / {} · received {} pkts / {}",
+                    flow.key,
+                    flow.counts.ingress_packets,
+                    human_bytes(flow.counts.ingress_bytes),
+                    flow.counts.egress_packets,
+                    human_bytes(flow.counts.egress_bytes)
+                );
+            }
+            for denial in &net.denials6 {
+                let _ = writeln!(
+                    out,
+                    "    denied   [{}]:{} {} · {} packet(s) dropped by the egress policy",
+                    std::net::Ipv6Addr::from(denial.dst_addr),
+                    denial.dst_port,
+                    proto_name(denial.proto),
+                    denial.count
+                );
+            }
         }
     }
 
@@ -179,8 +202,8 @@ pub(crate) fn syscall_name(kind: Syscall) -> &'static str {
 mod tests {
     use super::*;
     use agent_probes_loader::{
-        FlowCounts, FlowKey, NetSection, NetStats, ResourceSummary, SyscallEvent, SyscallFootprint,
-        Timing,
+        FlowCounts, FlowKey, FlowKey6, NetSection, NetStats, ResourceSummary, SyscallEvent,
+        SyscallFootprint, Timing,
     };
 
     /// A synthetic event from public fields, as the loader's own unit tests build them.
@@ -227,6 +250,24 @@ mod tests {
             FlowKey::new(0, u32::from_be_bytes([9, 9, 9, 9]), 0, 443, 6),
             4,
         )];
+        // A v6 flow + denial (ADR 008 dual-stack): `with_v6` folds the v6 counts into `totals`.
+        let ula = |n: u8| {
+            let mut a = [0u8; 16];
+            a[0] = 0xfd;
+            a[2] = 0x02;
+            a[15] = n;
+            a
+        };
+        let flows6 = vec![(
+            FlowKey6::new(ula(2), ula(1), 40000, 9999, 17),
+            FlowCounts {
+                ingress_packets: 3,
+                ingress_bytes: 300,
+                egress_packets: 1,
+                egress_bytes: 100,
+            },
+        )];
+        let denials6 = vec![(FlowKey6::new(ula(2), ula(9), 55555, 443, 6), 4)];
         let mut resources = ResourceSummary::default();
         resources.cpu_time = Duration::from_micros(5200);
         resources.cgroup.cpu_usage_usec = Some(6);
@@ -234,7 +275,7 @@ mod tests {
         resources.cgroup.memory_peak = Some(14 * 1024 * 1024);
         resources.cgroup.io_wbytes = Some(512);
         RunRecord::from_parts(
-            Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
+            Some(NetSection::from_tap(flows, totals, denials, 0, 0).with_v6(flows6, denials6)),
             resources,
             SyscallFootprint::from_events(
                 0x42,
@@ -257,9 +298,11 @@ mod tests {
         let expected = "\
 audit trail (host-observed, from outside the guest)
   timing     boot 120.0 ms · exec 42.0 ms
-  network    guest sent 5 pkts / 470 B · received 0 pkts / 0 B
+  network    guest sent 8 pkts / 770 B · received 1 pkts / 100 B
     flow     10.200.0.2:40000 -> 10.200.0.1:9999 udp · sent 5 pkts / 470 B · received 0 pkts / 0 B
     denied   9.9.9.9:443 tcp · 4 packet(s) dropped by the egress policy
+    flow     [fd00:200::2]:40000 -> [fd00:200::1]:9999 udp · sent 3 pkts / 300 B · received 1 pkts / 100 B
+    denied   [fd00:200::9]:443 tcp · 4 packet(s) dropped by the egress policy
   resources  cpu 5.2 ms · mem 12.0 MiB (peak 14.0 MiB) · io read n/a / written 512 B
   syscalls   3 total · execve 1 · openat 2 · connect 0 · unknown 0   (the VMM's host footprint, not the guest's)
     openat   /etc/hosts (sh) x2

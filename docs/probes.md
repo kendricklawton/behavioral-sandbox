@@ -115,12 +115,14 @@ load fail with a cryptic verifier reject or `EPERM`. A host that can't run the p
 `count_execve` sees only the *host's* syscalls, but a microVM's **network** is different: every packet
 the guest sends or receives crosses its **tap** device on the host, so a program on the tap sees the
 guest's own traffic directly. `TapMonitor` attaches two `tc`/clsact classifiers, `tap_ingress` and
-`tap_egress`, the two hooks clsact adds to a device, and each parses the frame's IPv4 5-tuple and adds
-the packet to that flow's per-direction byte/packet counters in the `FLOWS` map. `tc` (not XDP) because
+`tap_egress`, the two hooks clsact adds to a device, and each parses the frame's 5-tuple, IPv4 into the
+`FLOWS` map or IPv6 into a parallel `FLOWS6` (ADR 008 dual-stack: parallel `FlowKey`/`FlowKey6` types
+and maps, so the v4 path is byte-for-byte unchanged), adding the packet to that flow's per-direction
+byte/packet counters. `tc` (not XDP) because
 clsact gives *both* directions uniformly on any device, and because egress enforcement (dropping a
 denied flow, the next section) lives at the same hook; observation alone is exactly that, observe-only
 (both hooks return `TC_ACT_OK`). The flow record
-(`FlowKey` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
+(`FlowKey`/`FlowKey6` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
 the loader stays `#![forbid(unsafe_code)]` (decision 023). A sandbox's tap lives in its own network
 namespace (decision 017), so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
 safe wrapper, decision 024) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
@@ -132,24 +134,26 @@ this axis's live view.
 ## Egress enforcement in the kernel
 
 Observation watches; enforcement turns the same tap hook into **control**. The ingress classifier (a frame
-the guest *sends*) now also consults a per-sandbox allow-list, the `POLICY` map of `PolicyRule`s
-(destination CIDR + optional port/proto), single-sourced in `crates/probes-common` next to the flow
-record. When the `ENFORCE` toggle is on, a guest-sent IPv4 packet whose destination matches no active
-rule returns `TC_ACT_SHOT` (dropped at the tap, never leaves the host); a match returns `TC_ACT_OK`.
-The per-rule test (`rule_matches`, a masked-CIDR + wildcard-port/proto compare) is shared by the kernel
-scan and a host-unit-tested `egress_allowed`, so the verdict can't drift. The program scans the fixed
-`MAX_POLICY_RULES` array in a **bounded loop** (the verifier's compile-time cap), and the mask is built
-so the shift operand is always `< 32` (an out-of-range shift is a verifier reject).
+the guest *sends*) now also consults a per-sandbox allow-list, the `POLICY`/`POLICY6` maps of
+`PolicyRule`/`PolicyRule6`s (destination CIDR + optional port/proto), single-sourced in
+`crates/probes-common` next to the flow record. When the `ENFORCE` toggle is on, a guest-sent packet
+(v4 or v6) whose destination matches no active rule returns `TC_ACT_SHOT` (dropped at the tap, never
+leaves the host); a match returns `TC_ACT_OK`. The per-rule test (`rule_matches`/`rule_matches6`, a
+masked-CIDR + wildcard-port/proto compare, byte-wise for v6 since eBPF has no `u128`) is shared by the
+kernel scan and a host-unit-tested `egress_allowed`/`egress_allowed6`, so the verdict can't drift. The
+program scans the fixed `MAX_POLICY_RULES` array in a **bounded loop** (the verifier's compile-time
+cap), and the v4 mask is built so the shift operand is always `< 32` (an out-of-range shift is a
+verifier reject).
 
-Two deliberate carve-outs keep deny-by-default from being deny-*everything*: **ARP** is always allowed
-(the guest must resolve its on-link gateway `10.200.0.1` before it can reach any endpoint), and the
-**egress hook** (a reply arriving *to* the guest) always accepts, since egress policy governs what the
-guest sends and replies to allowed traffic must return. Enforcement is **opt-in and per VM**: each
-`TapMonitor` owns its own maps, and a monitor that never sets a policy stays observe-only (both hooks
-accept, exactly the observe-only behavior above).
+Two deliberate carve-outs keep deny-by-default from being deny-*everything*: **ARP** (v4) and **ICMPv6**
+neighbor discovery (v6) are always allowed (the guest must resolve its on-link host end before it can
+reach any endpoint), and the **egress hook** (a reply arriving *to* the guest) always accepts, since
+egress policy governs what the guest sends and replies to allowed traffic must return. Enforcement is
+**opt-in and per VM**: each `TapMonitor` owns its own maps, and a monitor that never sets a policy stays
+observe-only (both hooks accept, exactly the observe-only behavior above).
 
-The userspace schema is `EgressPolicy`, an allow-list built from friendly `Ipv4Addr` CIDRs and ports,
-lowered to the `PolicyRule`s the map holds. Its **deny-by-default** is the safe default: the empty
+The userspace schema is `EgressPolicy`, an allow-list built from friendly `Ipv4Addr`/`Ipv6Addr` CIDRs
+(`Ipv4Cidr`/`Ipv6Cidr`) and ports, lowered to the `PolicyRule`/`PolicyRule6`s the maps hold. Its **deny-by-default** is the safe default: the empty
 policy (`EgressPolicy::deny_all()`, the `Default`) allows nothing, so a sandbox launched with no explicit
 allowance reaches nothing, the eBPF, host-observed complement to the driver's no-route-to-the-world
 deny-by-default (decision 008). `TapMonitor::set_egress_policy` applies a policy to an already-attached
@@ -159,7 +163,7 @@ packet is already policed). Rules go in as raw bytes (`PolicyRule::to_bytes`, so
 `unsafe` `aya::Pod` binding); `clear_egress_policy` disarms.
 
 Every dropped packet is **recorded** before the drop: the classifier counts it against its destination
-in a `DENIALS` map, which `TapMonitor::denials()` reads back, the audit trail of which endpoints a
+in a `DENIALS`/`DENIALS6` map, which `TapMonitor::denials()`/`denials6()` reads back, the audit trail of which endpoints a
 sandbox was blocked from, folded into the per-run record (below). Both the flow table and the denial
 map are fixed-size (4096 entries), and saturation is **counted, never silent**: a full map bumps a
 per-CPU drop counter (`TapMonitor::dropped_flows()`/`dropped_denials()`), the record's network
@@ -303,7 +307,7 @@ turns that into a real **stream of per-event records**:
   on every syscall (O(sandboxes)); the set keeps it one hash lookup. Off by default, so the single-target
   path above is unchanged. Decision 028.
 - **A live trace, attributed to a sandbox.** `SyscallTracer::stream` loops the drain,
-  decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` sockaddr) and handing
+  decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` / `[v6]:port` sockaddr) and handing
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop
   with the Firecracker track: it resolves a VMM pid to its cgroup id (the inode of the cgroup dir,
   which equals `bpf_get_current_cgroup_id`), so `watch_cgroup(cgroup_id_of_pid(vmm_pid)?)` scopes the

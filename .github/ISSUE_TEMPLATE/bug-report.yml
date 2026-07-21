@@ -24,7 +24,7 @@ body:
     attributes:
       label: How to reproduce it
       description: >-
-        The exact command line (`agent run …` / `agent shell …` / `agentd` + client verbs) or the
+        The exact command line (`agent run …` / `agent shell …` / `agent serve` + client verbs) or the
         embedding code, plus the workload that triggers it. The smaller the repro, the faster the fix.
       placeholder: |
         agent run --net -- python3 -c '...'
@@ -58,7 +58,7 @@ body:
       options:
         - CLI, jailed (the default)
         - CLI, --unjailed
-        - agentd daemon
+        - agent serve (daemon)
         - embedded (the vmm library API)
       multiple: true
     validations:

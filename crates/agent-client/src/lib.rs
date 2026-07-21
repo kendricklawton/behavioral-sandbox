@@ -1,6 +1,6 @@
-//! The reference **Rust client** for the `agentd` wire API (ADR 034): drive a sandbox **session**
+//! The reference **Rust client** for the `agent` wire API (ADR 034): drive a sandbox **session**
 //! over a unix socket, `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`, using
-//! nothing but the shared wire contract ([`agentd_protocol`]) and a JSON value for the opaque trace
+//! nothing but the shared wire contract ([`agent_protocol`]) and a JSON value for the opaque trace
 //! record.
 //!
 //! **This is the proof, and the seed.** The proof: it links **no `agent-vmm`**, so it demonstrates
@@ -10,12 +10,12 @@
 //!
 //! **Synchronous and blocking**, matching the daemon: one [`Client`] owns one connection (one
 //! session), each call sends a request line and blocks for the one response line. Errors are typed
-//! ([`ClientError`]), a decode fault, a remote [`Error`](agentd_protocol::Response::Error), or an
+//! ([`ClientError`]), a decode fault, a remote [`Error`](agent_protocol::Response::Error), or an
 //! unexpected reply, never a panic.
 //!
 //! ```no_run
-//! use agentd_client::Client;
-//! let mut client = Client::connect("/run/agent/agentd.sock")?;
+//! use agent_client::Client;
+//! let mut client = Client::connect("/run/agent/agent.sock")?;
 //! client.open(Default::default())?;                 // boot the session's sandbox
 //! let run = client.exec(&["echo".into(), "hi".into()], "")?;
 //! assert_eq!(run.stdout, "hi\n");
@@ -30,7 +30,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use agentd_protocol::{read_message, write_message, ProtocolError, Request, Response};
+use agent_protocol::{read_message, write_message, ProtocolError, Request, Response};
 
 /// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]
@@ -57,10 +57,10 @@ impl std::fmt::Display for ClientError {
         match self {
             ClientError::Protocol(e) => write!(f, "{e}"),
             ClientError::Remote { message, fatal } => {
-                write!(f, "agentd error (fatal={fatal}): {message}")
+                write!(f, "agent error (fatal={fatal}): {message}")
             }
-            ClientError::Unexpected(resp) => write!(f, "unexpected reply from agentd: {resp:?}"),
-            ClientError::Closed => write!(f, "agentd closed the connection without replying"),
+            ClientError::Unexpected(resp) => write!(f, "unexpected reply from agent: {resp:?}"),
+            ClientError::Closed => write!(f, "agent closed the connection without replying"),
         }
     }
 }
@@ -117,7 +117,7 @@ pub struct ExecOutcome {
     pub exec_wall_ms: u64,
 }
 
-/// One connection to a running `agentd`, i.e. one sandbox session. Dropping it hangs up the
+/// One connection to a running `agent`, i.e. one sandbox session. Dropping it hangs up the
 /// connection, which tears the session's sandbox down daemon-side (the same as [`close`](Self::close)
 /// without the acknowledgement).
 #[derive(Debug)]

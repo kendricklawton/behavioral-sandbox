@@ -17,7 +17,7 @@
 use std::collections::btree_map::BTreeMap;
 use std::time::Duration;
 
-use agent_probes_common::{FlowCounts, FlowKey, Syscall, SyscallEvent};
+use agent_probes_common::{FlowCounts, FlowKey, FlowKey6, Syscall, SyscallEvent};
 
 use crate::{NetStats, ResourceSummary};
 
@@ -78,10 +78,15 @@ pub struct NetSection {
     pub totals: NetStats,
     /// Per-flow byte/packet counters, sorted deterministically by destination then source.
     pub flows: Vec<FlowRecord>,
+    /// The IPv6 per-flow breakdown (ADR 008 dual-stack), sorted the same way. Separate from
+    /// [`flows`](Self::flows) so a v4-only consumer is unaffected; [`totals`](Self::totals) sums both.
+    pub flows6: Vec<FlowRecord6>,
     /// Destinations the egress policy blocked, with the dropped-packet count, the audit trail
     /// ADR 025 folds in here. **Aggregated by destination** (one row per blocked endpoint,
     /// summed across guest source ports) and sorted by that destination triple.
     pub denials: Vec<DenialRecord>,
+    /// The IPv6 blocked-destination trail, aggregated and sorted like [`denials`](Self::denials).
+    pub denials6: Vec<DenialRecord6>,
     /// New flows the kernel could not admit because the flow table was full: their traffic is
     /// **absent** from [`flows`](Self::flows) and undercounted in [`totals`](Self::totals). Nonzero
     /// means the section is [`truncated`](Self::truncated), a guest churning source ports must not
@@ -141,10 +146,66 @@ impl NetSection {
         Self {
             totals,
             flows,
+            flows6: Vec::new(),
             denials,
+            denials6: Vec::new(),
             dropped_flows,
             dropped_denials,
         }
+    }
+
+    /// Fold the IPv6 half of the tap reads into a section built by [`from_tap`](Self::from_tap): the v6
+    /// flows and denials, sorted/aggregated exactly as the v4 ones, and their byte/packet counts summed
+    /// into [`totals`](Self::totals) so the rollup is dual-stack. A builder (not a `from_tap` parameter)
+    /// so every v4-only caller and test is untouched; a section with no v6 traffic just carries empty
+    /// v6 vectors. The v6 drop counters share the v4 `dropped_flows`/`dropped_denials` (a lost row is a
+    /// lost row, whichever family), so [`truncated`](Self::truncated) already covers both.
+    #[must_use]
+    pub fn with_v6(
+        mut self,
+        flows6: Vec<(FlowKey6, FlowCounts)>,
+        denials6: Vec<(FlowKey6, u64)>,
+    ) -> Self {
+        let mut recs: Vec<FlowRecord6> = flows6
+            .into_iter()
+            .map(|(key, counts)| {
+                self.totals.ingress_packets = self
+                    .totals
+                    .ingress_packets
+                    .saturating_add(counts.ingress_packets);
+                self.totals.ingress_bytes = self
+                    .totals
+                    .ingress_bytes
+                    .saturating_add(counts.ingress_bytes);
+                self.totals.egress_packets = self
+                    .totals
+                    .egress_packets
+                    .saturating_add(counts.egress_packets);
+                self.totals.egress_bytes =
+                    self.totals.egress_bytes.saturating_add(counts.egress_bytes);
+                FlowRecord6 { key, counts }
+            })
+            .collect();
+        recs.sort_by(|a, b| flow_order6(&a.key).cmp(&flow_order6(&b.key)));
+        self.flows6 = recs;
+        // Aggregate v6 denials by destination triple, like the v4 path.
+        let mut by_dst: BTreeMap<([u8; 16], u16, u8), u64> = BTreeMap::new();
+        for (key, count) in denials6 {
+            let slot = by_dst
+                .entry((key.dst_addr, key.dst_port, key.proto))
+                .or_insert(0);
+            *slot = slot.saturating_add(count);
+        }
+        self.denials6 = by_dst
+            .into_iter()
+            .map(|((dst_addr, dst_port, proto), count)| DenialRecord6 {
+                dst_addr,
+                dst_port,
+                proto,
+                count,
+            })
+            .collect();
+        self
     }
 
     /// Whether the section is **incomplete**: the kernel dropped at least one flow or denial row
@@ -185,6 +246,35 @@ pub struct DenialRecord {
 /// order is total and the record byte-stable.
 fn flow_order(k: &FlowKey) -> (u32, u16, u8, u32, u16) {
     (k.dst_addr, k.dst_port, k.proto, k.src_addr, k.src_port)
+}
+
+/// The IPv6 twin of [`flow_order`]: destination-first total order over the v6 5-tuple (addresses
+/// compared as their network-order bytes, which orders them numerically since they're big-endian).
+fn flow_order6(k: &FlowKey6) -> ([u8; 16], u16, u8, [u8; 16], u16) {
+    (k.dst_addr, k.dst_port, k.proto, k.src_addr, k.src_port)
+}
+
+/// One IPv6 flow's identity and its per-direction counters, the v6 twin of [`FlowRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FlowRecord6 {
+    pub key: FlowKey6,
+    pub counts: FlowCounts,
+}
+
+/// One blocked IPv6 **destination** and how many packets to it were dropped, the v6 twin of
+/// [`DenialRecord`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct DenialRecord6 {
+    /// Destination IPv6 address, network byte order (as [`FlowKey6::dst_addr`]).
+    pub dst_addr: [u8; 16],
+    /// Destination L4 port.
+    pub dst_port: u16,
+    /// IP protocol number.
+    pub proto: u8,
+    /// Dropped packets to this destination, summed across all source 5-tuples.
+    pub count: u64,
 }
 
 /// The VMM's host syscall footprint: exact counts plus a bounded, de-duplicated sample of notable
@@ -531,6 +621,48 @@ mod tests {
         assert_eq!(a.denials[0].dst_addr, dst);
         assert_eq!(a.denials[0].dst_port, 443);
         assert_eq!(a.denials[0].count, 7, "per-source counts are summed");
+    }
+
+    #[test]
+    fn with_v6_folds_totals_sorts_flows_and_aggregates_denials() {
+        use agent_probes_common::IPPROTO_TCP;
+        let ula = |n: u8| {
+            let mut a = [0u8; 16];
+            a[0] = 0xfd;
+            a[2] = 0x02;
+            a[15] = n;
+            a
+        };
+        let counts = FlowCounts {
+            ingress_packets: 1,
+            ingress_bytes: 100,
+            egress_packets: 2,
+            egress_bytes: 200,
+        };
+        let f = |dst: u8| {
+            (
+                FlowKey6::new(ula(2), ula(dst), 40000, 443, IPPROTO_TCP),
+                counts,
+            )
+        };
+        let dn = |dst: u8, c: u64| (FlowKey6::new(ula(2), ula(dst), 55555, 443, IPPROTO_TCP), c);
+        // Two v6 flows + two denials to one endpoint, fed in two different orders.
+        let a = NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0)
+            .with_v6(vec![f(9), f(1)], vec![dn(7, 3), dn(7, 4)]);
+        let b = NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0)
+            .with_v6(vec![f(1), f(9)], vec![dn(7, 4), dn(7, 3)]);
+        assert_eq!(a, b, "shuffled v6 input yields an identical section");
+        // Flows sorted by destination (::1 before ::9); totals summed across both v6 flows.
+        assert_eq!(a.flows6.len(), 2);
+        assert_eq!(a.flows6[0].key.dst_addr, ula(1));
+        assert_eq!(
+            a.totals.egress_bytes, 400,
+            "both v6 flows' bytes fold into totals"
+        );
+        // Denials aggregated to one per-endpoint row.
+        assert_eq!(a.denials6.len(), 1);
+        assert_eq!(a.denials6[0].dst_addr, ula(7));
+        assert_eq!(a.denials6[0].count, 7, "per-source v6 denials summed");
     }
 
     #[test]

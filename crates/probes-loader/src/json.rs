@@ -20,7 +20,7 @@ use std::fmt::Display;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use agent_probes_common::{FlowKey, Syscall};
+use agent_probes_common::{FlowKey, FlowKey6, Syscall};
 
 use crate::record::{AxisGap, NetSection, RunRecord, SyscallFootprint};
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
@@ -113,6 +113,36 @@ fn net_to_json(out: &mut String, net: &NetSection) {
         field(out, "packets", denial.count, false);
         out.push('}');
     }
+    // The IPv6 flows and denials (ADR 008 dual-stack), additive `flows6`/`denials6` arrays so a v4-only
+    // consumer is unaffected and the schema stays 1. Addresses render as v6 strings.
+    out.push_str("],\"flows6\":[");
+    for (i, flow) in net.flows6.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        endpoints6(out, &flow.key);
+        counts(out, &flow.counts);
+        out.push('}');
+    }
+    out.push_str("],\"denials6\":[");
+    for (i, denial) in net.denials6.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push('{');
+        let _ = write!(
+            out,
+            "\"dst\":\"{}\"",
+            std::net::Ipv6Addr::from(denial.dst_addr)
+        );
+        field(out, "dst_port", denial.dst_port, false);
+        out.push_str(",\"proto\":\"");
+        proto_name(out, denial.proto);
+        out.push('"');
+        field(out, "packets", denial.count, false);
+        out.push('}');
+    }
     out.push(']');
     // The kernel's full-map drop counters + the one flag a consumer checks before trusting the
     // flow list as exhaustive. Additive keys (schema stays 1); 0/false is the healthy shape.
@@ -140,6 +170,26 @@ fn endpoints(out: &mut String, key: &FlowKey) {
     let _ = write!(out, "\"src\":\"{}.{}.{}.{}\"", s[0], s[1], s[2], s[3]);
     field(out, "src_port", key.src_port, false);
     let _ = write!(out, ",\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]);
+    field(out, "dst_port", key.dst_port, false);
+    out.push_str(",\"proto\":\"");
+    proto_name(out, key.proto);
+    out.push('"');
+}
+
+/// The v6 5-tuple identity fields of a flow, the twin of [`endpoints`]. Addresses render as v6
+/// strings via [`std::net::Ipv6Addr`], matching [`FlowKey6`]'s `Display`.
+fn endpoints6(out: &mut String, key: &FlowKey6) {
+    let _ = write!(
+        out,
+        "\"src\":\"{}\"",
+        std::net::Ipv6Addr::from(key.src_addr)
+    );
+    field(out, "src_port", key.src_port, false);
+    let _ = write!(
+        out,
+        ",\"dst\":\"{}\"",
+        std::net::Ipv6Addr::from(key.dst_addr)
+    );
     field(out, "dst_port", key.dst_port, false);
     out.push_str(",\"proto\":\"");
     proto_name(out, key.proto);
@@ -393,6 +443,7 @@ mod tests {
             "\"proto\":\"tcp\",\"ingress_packets\":2,\"ingress_bytes\":120,\"egress_packets\":3,",
             "\"egress_bytes\":200}],",
             "\"denials\":[{\"dst\":\"9.9.9.9\",\"dst_port\":443,\"proto\":\"tcp\",\"packets\":4}],",
+            "\"flows6\":[],\"denials6\":[],",
             "\"dropped_flows\":0,\"dropped_denials\":0,\"truncated\":false}",
             ",\"resources\":{\"cpu_time_ns\":5000,\"cgroup\":{\"cpu_usage_usec\":6,",
             "\"memory_current\":1024,\"memory_peak\":4096,\"io_rbytes\":null,\"io_wbytes\":512}}",

@@ -1,6 +1,6 @@
-# Using the `agentd` daemon
+# Using the `agent serve` daemon
 
-`agentd` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
+`agent serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
 lifecycle over a **unix socket**, so a local client drives microVMs without linking the `agent-vmm`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
 use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
@@ -14,9 +14,9 @@ the hoster's, above the engine, and are a recorded non-goal).
 ## Run it
 
 ```console
-agentd --socket /run/agent/agentd.sock              # jailed by default (needs root + the jailer)
-agentd --socket ./agentd.sock --unjailed            # dev host that can't jail
-agentd --socket ./agentd.sock --prewarm 4           # a pre-warmed pool of 4 clones for fast `open`
+agent serve --socket /run/agent/agent.sock              # jailed by default (needs root + the jailer)
+agent serve --socket ./agent.sock --unjailed            # dev host that can't jail
+agent serve --socket ./agent.sock --prewarm 4           # a pre-warmed pool of 4 clones for fast `open`
 ```
 
 Logs go to **stderr** (`--log` / `AGENT_LOG`, default `info`); the socket carries only the protocol.
@@ -70,7 +70,7 @@ malformed or oversize line is an error the daemon reports or drops, never a pani
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
 working directory, and closing the connection tears the sandbox down.
 
-The shared wire contract lives in the `agentd-protocol` crate (serde-only, no `agent-vmm`), so the
+The shared wire contract lives in the `agent-protocol` crate (serde-only, no `agent-vmm`), so the
 daemon, the [reference client](#the-reference-client), and the future polyglot SDKs all speak exactly
 the same shapes.
 
@@ -98,7 +98,7 @@ the same shapes.
 | `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `agent run --json`; a non-zero `exit_code` is a *result*, not an error). |
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
-| `{"schema":1,"reply":"snapshotted","dir":"/tmp/agentd-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
+| `{"schema":1,"reply":"snapshotted","dir":"/tmp/agent-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
 | `{"schema":1,"reply":"trace","record":{…}}` | The audit record as its own JSON object (with its own `schema` field, the *record* version). |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
@@ -111,7 +111,7 @@ $ printf '%s\n' \
     '{"schema":1,"op":"open"}' \
     '{"schema":1,"op":"exec","argv":["echo","hi"]}' \
     '{"schema":1,"op":"close"}' \
-  | socat - UNIX-CONNECT:./agentd.sock
+  | socat - UNIX-CONNECT:./agent.sock
 {"schema":1,"reply":"opened","boot_ms":118,"pooled":false}
 {"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}
 {"schema":1,"reply":"closed"}
@@ -131,7 +131,7 @@ changes only the framing. The filter is `--log` / `AGENT_LOG` (default `info`, t
 open/close lines are the daemon's operational trace).
 
 ```console
-agentd --socket ./agentd.sock --log-json --log info 2>> /var/log/agentd.jsonl
+agent serve --socket ./agent.sock --log-json --log info 2>> /var/log/agent.jsonl
 ```
 
 ### Metrics (Prometheus)
@@ -139,7 +139,7 @@ agentd --socket ./agentd.sock --log-json --log info 2>> /var/log/agentd.jsonl
 `--metrics ADDR` serves the Prometheus text-exposition format at `GET /metrics`:
 
 ```console
-agentd --socket ./agentd.sock --metrics 127.0.0.1:9920
+agent serve --socket ./agent.sock --metrics 127.0.0.1:9920
 curl -s http://127.0.0.1:9920/metrics
 ```
 
@@ -151,38 +151,38 @@ convention of base units: **seconds**, never milliseconds.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `agentd_build_info{version=…}` | gauge | Build metadata (value always 1). |
-| `agentd_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
-| `agentd_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
-| `agentd_sessions_active` | gauge | Sessions currently open (one live microVM each). |
-| `agentd_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
-| `agentd_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
-| `agentd_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
-| `agentd_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
-| `agentd_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
-| `agentd_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
+| `agent_build_info{version=…}` | gauge | Build metadata (value always 1). |
+| `agent_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
+| `agent_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
+| `agent_sessions_active` | gauge | Sessions currently open (one live microVM each). |
+| `agent_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
+| `agent_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
+| `agent_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
+| `agent_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
+| `agent_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
+| `agent_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
 
 A minimal scrape config:
 
 ```yaml
 scrape_configs:
-  - job_name: agentd
+  - job_name: agent
     static_configs:
       - targets: ["127.0.0.1:9920"]
 ```
 
 ## The reference client
 
-`agentd-client` is the **reference Rust client**: a `Client` type that drives the whole session
+`agent-client` is the **reference Rust client**: a `Client` type that drives the whole session
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
-`agentd-protocol` and a JSON value **only, never `agent-vmm`**, which is the point: it proves a
+`agent-protocol` and a JSON value **only, never `agent-vmm`**, which is the point: it proves a
 caller drives the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
 The polyglot SDKs (Go/Python/Node/C#, planned) are this client's method set hardened per language.
 
 ```rust,ignore
-use agentd_client::{Client, OpenOptions};
+use agent_client::{Client, OpenOptions};
 
-let mut client = Client::connect("/run/agent/agentd.sock")?;
+let mut client = Client::connect("/run/agent/agent.sock")?;
 client.open(OpenOptions::default())?;               // boot the session's sandbox
 let run = client.exec(&["echo".into(), "hi".into()], "")?;
 assert_eq!(run.stdout, "hi\n");
@@ -194,7 +194,7 @@ client.close()?;                                    // tear the sandbox down
 ## Non-goals: where a PaaS would begin
 
 The daemon is the engine's *programmatic interface*, and it stops exactly where a platform would
-start. These are the features a hoster builds **above** `agentd`, deliberately absent from the wire
+start. These are the features a hoster builds **above** `agent`, deliberately absent from the wire
 and the daemon, and PRs adding them are wrong by design (engine, not platform):
 
 - **No tenancy or identity.** No message carries a tenant, account, or user. One connection drives
@@ -207,7 +207,7 @@ and the daemon, and PRs adding them are wrong by design (engine, not platform):
 - **No billing or quotas.** The daemon *measures* (the [metrics endpoint](#metrics-prometheus),
   host-observed) but never *charges* or *caps by account*. Turning numbers into a bill or a per-tenant
   limit is the hoster's.
-- **No fleet scheduling.** One `agentd` drives sandboxes on its one host. Bin-packing across hosts,
+- **No fleet scheduling.** One `agent` drives sandboxes on its one host. Bin-packing across hosts,
   queues, and autoscaling are the hoster's scheduler; the daemon has no notion of another host.
 - **No public/HTTP platform API.** The surface is a *local* unix socket speaking newline-JSON. A
   daemon that grew a multi-tenant identity model or a public HTTP surface would be a **hoster**, not

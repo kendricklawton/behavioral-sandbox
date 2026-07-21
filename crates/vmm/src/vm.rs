@@ -12,7 +12,7 @@
 //! [`BootConfig::jail`]) preserves this: it is not run with `--daemonize`, so Firecracker keeps the
 //! piped stdout and the console still reaches [`Console`].
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::{NonZeroU32, NonZeroU8};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -37,14 +37,12 @@ use crate::{Limits, RunResult, VmmError};
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
 /// Firecracker hands to our stdout); `reboot=k panic=1` make a guest panic/reboot exit the VMM
 /// promptly; `pci=off` trims an unused bus; `random.trust_cpu=on` avoids an entropy stall at boot.
-/// `ipv6.disable=1` because the sandbox's network world is IPv4-only (ADR 008): a boot-time
-/// disable means the guest never emits IPv6 link-up chatter (MLD, duplicate-address detection)
-/// that the tap monitor would honestly flag as a non-IPv4 coverage gap, and a hostile guest
-/// cannot re-enable what its kernel never started. The host side of the same stance is
-/// `net::disable_ipv6_in_ns`. Firecracker adds `root=/dev/vda` itself from the root drive, so it
-/// is not listed here.
-const DEFAULT_BOOT_ARGS: &str =
-    "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on ipv6.disable=1";
+/// The guest kernel boots with IPv6 **enabled**: the sandbox's network is dual-stack, v4 and v6,
+/// both deny-by-default (ADR 008). The guest gets a static v6 address from the `agent_guest_ip6=`
+/// token `spawn.rs` appends (the kernel `ip=` param is v4-only), and reaches only the connected host
+/// end because no v6 default route is installed, exactly as for v4. Firecracker adds `root=/dev/vda`
+/// itself from the root drive, so it is not listed here.
+const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
 
 /// Substring that marks the guest reached userspace. The default is the **agent rootfs's** ready
 /// sentinel, printed by `agent-guest` once its vsock listener accepts: that image is what the
@@ -484,6 +482,22 @@ impl RunningVm {
     #[must_use]
     pub fn guest_ip(&self) -> Option<Ipv4Addr> {
         self.tap.as_ref().map(|t| t.guest_ip)
+    }
+
+    /// The host end of the per-VM **IPv6** link, the v6 twin of [`host_ip`](Self::host_ip); `None`
+    /// without [`enable_network`](BootConfig::enable_network). The guest reaches this and nothing
+    /// beyond it (deny-by-default: connected-prefix route only, no v6 default route).
+    #[must_use]
+    pub fn host_ip6(&self) -> Option<Ipv6Addr> {
+        self.tap.as_ref().map(|t| t.host_ip6)
+    }
+
+    /// The guest's `eth0` **IPv6** address, the v6 twin of [`guest_ip`](Self::guest_ip); `None`
+    /// without [`enable_network`](BootConfig::enable_network). Applied in-guest from the
+    /// `agent_guest_ip6=` cmdline token (the kernel `ip=` param is v4-only).
+    #[must_use]
+    pub fn guest_ip6(&self) -> Option<Ipv6Addr> {
+        self.tap.as_ref().map(|t| t.guest_ip6)
     }
 
     /// The host tap interface backing this VM's NIC, when booted with

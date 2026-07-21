@@ -1,5 +1,5 @@
-//! `agentd`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
-//! [wire API](agentd_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
+//! `agent`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
+//! [wire API](agent_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
 //! socket**, so a local client drives microVMs without linking the `agent-vmm` library itself. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
 //! use, **still engine, not platform**, no tenancy, no auth, no billing, no scheduler (those are the
@@ -7,7 +7,7 @@
 //!
 //! **Shape.** One connection is one sandbox **session** (the VM *is* the session, ADR 019),
 //! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`agentd_protocol`] crate (ADR 034);
+//! is the versioned newline-JSON contract in the shared [`agent_protocol`] crate (ADR 034);
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
@@ -18,7 +18,7 @@
 //!
 //! **Observable by the hoster.** Logs are structured `tracing` lines on stderr (human text by
 //! default, JSON with `--log-json` for a log shipper), and `--metrics ADDR` serves a Prometheus
-//! text-exposition endpoint ([`metrics`]) the hoster scrapes, sessions, verbs, faults, boot and
+//! text-exposition endpoint ([`crate::metrics`]) the hoster scrapes, sessions, verbs, faults, boot and
 //! exec latency histograms, pool stock. The daemon exposes its numbers; dashboards and alerting are
 //! the hoster's (engine, not platform).
 //!
@@ -40,10 +40,6 @@
 //! socket file. A supervisor's SIGTERM/SIGINT is handled: the daemon logs, unlinks its socket, and
 //! exits cleanly (in-flight sessions end crash-consistently, their VMs reaped by the sentinel); a
 //! graceful *drain* of in-flight sessions remains a later ops concern.
-#![forbid(unsafe_code)]
-
-mod metrics;
-mod session;
 
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -54,21 +50,17 @@ use std::sync::{Arc, Mutex};
 
 use agent_cli::audit::Observability;
 use agent_vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
-use clap::Parser;
 
 use crate::metrics::Metrics;
 
-/// Exit code for an operational failure (a bad socket path, a bind failure): conventional "2", the
-/// same convention the `agent` CLI and the guest agent use.
-const EXIT_OPERATIONAL: u8 = 2;
+// The operational-failure exit code (a bad socket path, a bind failure) is the CLI's own
+// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `agent` binary.
+use crate::EXIT_OPERATIONAL;
 
-/// `agentd`, drive the sandbox lifecycle over a unix socket.
-#[derive(Parser)]
-#[command(
-    name = "agentd",
-    about = "the agent driver daemon: run sandboxes over a unix socket"
-)]
-struct Cli {
+/// `agent serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
+/// is the shared global flag on the `agent` CLI, so it is not repeated here.
+#[derive(clap::Args)]
+pub struct ServeArgs {
     /// The unix socket to listen on. Its directory's permissions are the access control (the daemon
     /// does no auth, a recorded non-goal), so place it where only trusted local clients can reach.
     #[arg(long, value_name = "PATH")]
@@ -92,9 +84,6 @@ struct Cli {
     /// enabled by `AGENT_LOG_FORMAT=json`.
     #[arg(long)]
     log_json: bool,
-    /// Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`.
-    #[arg(long, value_name = "FILTER")]
-    log: Option<String>,
     /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
     /// cgroup), so the daemon bounds its own core resource: at the ceiling a new connection is
     /// refused with a typed "at capacity" error *before* any VM boots, rather than exhausting the
@@ -116,17 +105,20 @@ struct Cli {
 /// each session boots from, the launch-time confinement posture, the process-wide host-side probes
 /// (loaded once, one `sched_switch` meter, one tracer, the bounded-overhead shared model), the
 /// optional pre-warmed pool, and a monotonic source of snapshot-bundle directories.
-struct Server {
+// `pub(crate)` (not private) because the `session` module is a crate-root sibling of `serve` (both
+// flat under `src/`), so it reaches the daemon context through crate visibility, not the ancestor
+// visibility a submodule would have. Still crate-internal, this is the `agent` binary, not a library.
+pub(crate) struct Server {
     /// The env-layered base config; a session's `open` folds its resource knobs on top.
-    base: BootConfig,
+    pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
-    jailed: bool,
+    pub(crate) jailed: bool,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
-    observ: Observability,
+    pub(crate) observ: Observability,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
     /// pool could not be built. Behind a `Mutex`: `take`/`refill` need `&mut`, and sessions run on
     /// many threads.
-    pool: Option<Mutex<Pool>>,
+    pub(crate) pool: Option<Mutex<Pool>>,
     /// Where `snapshot` bundle directories are created (per-daemon, so concurrent daemons don't
     /// collide), each named by the monotonic [`snapshot_seq`](Self::snapshot_seq).
     snapshot_base: PathBuf,
@@ -134,40 +126,43 @@ struct Server {
     snapshot_seq: AtomicU64,
     /// The metric registry the session threads bump; `Arc` so the metrics endpoint thread renders it
     /// independently of the `Server` borrow.
-    metrics: Arc<Metrics>,
+    pub(crate) metrics: Arc<Metrics>,
     /// The `--max-sessions` ceiling (`0` = unlimited), enforced by [`SessionTicket::acquire`].
-    max_sessions: usize,
+    pub(crate) max_sessions: usize,
     /// The per-session idle timeout (`None` = disabled), from `--idle-timeout`: a read that waits this
     /// long with no client bytes ends the session, freeing its VM and `--max-sessions` slot.
-    idle_timeout: Option<std::time::Duration>,
+    pub(crate) idle_timeout: Option<std::time::Duration>,
     /// Live sessions right now, the counter the admission check compares against the ceiling.
     /// Incremented by a successful [`SessionTicket::acquire`], decremented by the ticket's `Drop`.
-    active_sessions: AtomicUsize,
+    pub(crate) active_sessions: AtomicUsize,
 }
 
 impl Server {
     /// A fresh, unique directory for the next `snapshot` bundle. Monotonic across threads, so two
     /// concurrent sessions snapshotting at once can't target the same directory.
-    fn next_snapshot_dir(&self) -> PathBuf {
+    pub(crate) fn next_snapshot_dir(&self) -> PathBuf {
         let n = self.snapshot_seq.fetch_add(1, Ordering::Relaxed);
         self.snapshot_base.join(format!("snap-{n}"))
     }
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-    let log_json = cli.log_json
+/// Run the daemon (`agent serve`): the `--log` filter comes from the CLI's shared global flag, the
+/// rest of the knobs from [`ServeArgs`]. Its own tracing init (info default, optional JSON) and its
+/// own config (flags + environment, no `.agent.toml`), so the CLI dispatches this **before** its
+/// project-file/tracing setup ([`crate::main`]).
+pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
+    let log_json = args.log_json
         || std::env::var("AGENT_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
-    init_tracing(cli.log.as_deref(), log_json);
+    init_tracing(log.as_deref(), log_json);
 
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
     // on top). The daemon has no `.agent.toml` cwd discovery, that's a CLI-in-a-project convenience;
     // a daemon's config is its own flags + environment. Computed up front so the signal handler and
     // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
     let base = BootConfig::from_env();
-    let jailed = !cli.unjailed;
+    let jailed = !args.unjailed;
 
-    let listener = match bind(&cli.socket) {
+    let listener = match bind(&args.socket) {
         Ok(listener) => listener,
         Err(e) => {
             tracing::error!("{e}");
@@ -179,7 +174,7 @@ fn main() -> ExitCode {
     // `--prewarm` restart leaks a guest-RAM-sized bundle each time), and exit 0. In-flight sessions
     // end crash-consistently; their VMs are reaped by the lifetime sentinel (ADR 014).
     install_signal_handler(
-        cli.socket.clone(),
+        args.socket.clone(),
         vec![
             prewarm_dir(&base.scratch_dir),
             snapshots_dir(&base.scratch_dir),
@@ -187,7 +182,7 @@ fn main() -> ExitCode {
     );
     // Reclaim bundle dirs a *crashed* prior daemon (SIGKILL/OOM, no handler) leaked, before this one
     // adds its own. Best-effort, this-user, dead-pid only.
-    sweep_stale_agentd_bundles(&base.scratch_dir);
+    sweep_stale_agent_bundles(&base.scratch_dir);
     // Also reclaim the per-VM residue (scratch dirs + their network namespaces) a crashed *driver*
     // leaves: the lifetime sentinel reaps the VM processes, but dirs and netns are out of its scope
     // (ADR 014), so without this they accumulate across restarts. This is the boot-time GC the engine
@@ -196,7 +191,7 @@ fn main() -> ExitCode {
     // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
     // explicitly either works or the daemon refuses to start, an operational surface the hoster
     // requested must not silently be absent (the same posture as `--allow`'s enforcement refusal).
-    let metrics_listener = match cli.metrics.map(TcpListener::bind).transpose() {
+    let metrics_listener = match args.metrics.map(TcpListener::bind).transpose() {
         Ok(l) => l,
         Err(e) => {
             tracing::error!(error = %e, "cannot bind the metrics endpoint; refusing to start");
@@ -206,7 +201,7 @@ fn main() -> ExitCode {
     // The endpoint is plain HTTP with no auth (the doc says bind loopback or a private scrape
     // network); a public bind may be a deliberate private-network choice, so warn, don't refuse,
     // a fat-fingered `0.0.0.0` must at least be visible in the startup log.
-    if let Some(addr) = cli.metrics {
+    if let Some(addr) = args.metrics {
         if !addr.ip().is_loopback() {
             tracing::warn!(
                 %addr,
@@ -220,7 +215,7 @@ fn main() -> ExitCode {
     // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
     // large artifact (boot scratch, prewarm, snapshots) follows.
     let snapshot_base = snapshots_dir(&base.scratch_dir);
-    let pool = build_optional_pool(cli.prewarm, &base, jailed);
+    let pool = build_optional_pool(args.prewarm, &base, jailed);
     let server = Arc::new(Server {
         base,
         jailed,
@@ -229,20 +224,20 @@ fn main() -> ExitCode {
         snapshot_base,
         snapshot_seq: AtomicU64::new(0),
         metrics: Arc::new(Metrics::default()),
-        max_sessions: cli.max_sessions,
-        idle_timeout: (cli.idle_timeout > 0)
-            .then(|| std::time::Duration::from_secs(cli.idle_timeout)),
+        max_sessions: args.max_sessions,
+        idle_timeout: (args.idle_timeout > 0)
+            .then(|| std::time::Duration::from_secs(args.idle_timeout)),
         active_sessions: AtomicUsize::new(0),
     });
     if let Some(metrics_listener) = metrics_listener {
         spawn_metrics(metrics_listener, &server);
     }
     tracing::info!(
-        socket = %cli.socket.display(),
+        socket = %args.socket.display(),
         jailed,
         prewarmed = server.pool.is_some(),
-        metrics = cli.metrics.as_ref().map(tracing::field::display),
-        "agentd listening"
+        metrics = args.metrics.as_ref().map(tracing::field::display),
+        "agent listening"
     );
 
     // Accept forever, one thread per connection. A daemon runs until its supervisor stops it; the
@@ -264,12 +259,12 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
     let registry = Arc::clone(&server.metrics);
     let sampled = Arc::clone(server);
     let spawned = std::thread::Builder::new()
-        .name("agentd-metrics".into())
+        .name("agent-metrics".into())
         .spawn(move || {
-            metrics::serve(listener, registry, move || {
+            crate::metrics::serve(listener, registry, move || {
                 // `try_lock`, never a blocking acquire (16-C): the scrape must not stall behind a
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
-                // this scrape, `agentd_pool_ready` is momentarily absent, the same absent-not-zero
+                // this scrape, `agent_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
                 // visibility surface freezing under the load it exists to report on.
                 sampled
@@ -297,12 +292,12 @@ fn spawn_session(stream: UnixStream, server: Arc<Server>) {
         return;
     };
     let spawned = std::thread::Builder::new()
-        .name("agentd-session".into())
+        .name("agent-session".into())
         .spawn(move || {
             // The ticket lives exactly as long as the session: its `Drop` releases the slot
             // however `serve` ends (clean close, client hang-up, or a panic unwinding).
             let _ticket = ticket;
-            session::serve(stream, &server);
+            crate::session::serve(stream, &server);
         });
     if let Err(e) = spawned {
         // The ticket was moved into the failed closure and dropped with it: the slot is free.
@@ -347,7 +342,7 @@ impl Drop for SessionTicket {
 }
 
 /// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed fatal
-/// [`agentd_protocol::Response::Error`] (the client's `open` reads it as the reply), then the
+/// [`agent_protocol::Response::Error`] (the client's `open` reads it as the reply), then the
 /// connection drops. The write is timeout-bounded so a stalled client can't park the accept loop,
 /// and best-effort, the refusal itself must never take the daemon down.
 fn refuse_at_capacity(stream: UnixStream, server: &Server) {
@@ -357,7 +352,7 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     );
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     let mut stream = stream;
-    let refusal = agentd_protocol::Response::Error {
+    let refusal = agent_protocol::Response::Error {
         message: format!(
             "at capacity: {} session(s) live, the daemon's --max-sessions ceiling; retry later \
              or raise the ceiling",
@@ -365,17 +360,17 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
         ),
         fatal: true,
     };
-    let _ = agentd_protocol::write_message(&mut stream, &refusal);
+    let _ = agent_protocol::write_message(&mut stream, &refusal);
 }
 
 /// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
 fn prewarm_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("agentd-prewarm-{}", std::process::id()))
+    scratch.join(format!("agent-prewarm-{}", std::process::id()))
 }
 
 /// This daemon's session-snapshot bundle dir (holds each session's `snap-N`), under the scratch knob.
 fn snapshots_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("agentd-snapshots-{}", std::process::id()))
+    scratch.join(format!("agent-snapshots-{}", std::process::id()))
 }
 
 /// The effective uid this process runs as, so the startup sweep only reclaims bundle dirs *it* owns
@@ -386,7 +381,7 @@ fn own_euid() -> Option<u32> {
     uid.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// Reclaim this-user `agentd-prewarm-<pid>` / `agentd-snapshots-<pid>` bundle dirs left by **dead**
+/// Reclaim this-user `agent-prewarm-<pid>` / `agent-snapshots-<pid>` bundle dirs left by **dead**
 /// prior daemons: their guest-memory-sized files are pure leak once the daemon that owned them is
 /// gone (SIGKILL/OOM skips the signal-handler cleanup). Best-effort, per-entry: a dir we can't stat
 /// or remove is logged and skipped. Skips our own pid and any live pid (a concurrently-running
@@ -394,7 +389,7 @@ fn own_euid() -> Option<u32> {
 /// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
 /// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
 /// ([`agent_vmm::sweep_orphans`]), logging what it reclaimed. The complement of
-/// [`sweep_stale_agentd_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
+/// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
 fn sweep_orphaned_vms(scratch: &Path) {
     match sweep_orphans(scratch) {
@@ -408,7 +403,7 @@ fn sweep_orphaned_vms(scratch: &Path) {
     }
 }
 
-fn sweep_stale_agentd_bundles(scratch: &Path) {
+fn sweep_stale_agent_bundles(scratch: &Path) {
     use std::os::unix::fs::MetadataExt as _;
     let Some(me) = own_euid() else {
         return; // without our euid we can't prove ownership; skip rather than risk a wrong delete
@@ -420,8 +415,8 @@ fn sweep_stale_agentd_bundles(scratch: &Path) {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         let Some(pid) = name
-            .strip_prefix("agentd-prewarm-")
-            .or_else(|| name.strip_prefix("agentd-snapshots-"))
+            .strip_prefix("agent-prewarm-")
+            .or_else(|| name.strip_prefix("agent-snapshots-"))
         else {
             continue; // not a bundle dir this daemon mints
         };
@@ -440,12 +435,12 @@ fn sweep_stale_agentd_bundles(scratch: &Path) {
         match std::fs::remove_dir_all(entry.path()) {
             Ok(()) => tracing::info!(
                 dir = %entry.path().display(),
-                "swept a stale agentd bundle dir from a dead daemon"
+                "swept a stale agent bundle dir from a dead daemon"
             ),
             Err(e) => tracing::warn!(
                 dir = %entry.path().display(),
                 error = %e,
-                "could not sweep a stale agentd bundle dir"
+                "could not sweep a stale agent bundle dir"
             ),
         }
     }
@@ -457,7 +452,7 @@ fn sweep_stale_agentd_bundles(scratch: &Path) {
 /// VMs; the next start clears the stale socket and the startup sweep reclaims the leaked bundle dirs).
 fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
     let spawned = std::thread::Builder::new()
-        .name("agentd-signals".into())
+        .name("agent-signals".into())
         .spawn(move || {
             let mut signals = match signal_hook::iterator::Signals::new([
                 signal_hook::consts::SIGTERM,
@@ -517,7 +512,7 @@ fn build_optional_pool(
 /// Prewarm the pool: boot an **unjailed** source with the default profile (a jailed disk can't be
 /// snapshotted, it lives in the chroot), snapshot it, then restore `target` clones under the
 /// daemon's confinement posture. The clones carry the default profile, which is why only a
-/// bare-default `open` is pool-eligible (`session::boot_session_vm`).
+/// bare-default `open` is pool-eligible (`crate::session::boot_session_vm`).
 fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, VmmError> {
     // Snapshot into a per-daemon dir under the engine's scratch knob (`AGENT_SCRATCH_DIR`), the same
     // routing as the session bundles: guest-memory-sized files belong where the operator pointed
@@ -571,7 +566,7 @@ fn build_pool_from(
 }
 
 /// Bind the listener at `socket`, clearing a **stale** socket file first but refusing to clobber a
-/// **live** daemon. If the path exists, a successful connect means another `agentd` is already
+/// **live** daemon. If the path exists, a successful connect means another `agent` is already
 /// listening (a typed refusal); a refused connect means the file is leftover from a dead daemon, so
 /// remove it and bind. The parent directory must already exist (the hoster's to create, with the
 /// permissions that gate access).
@@ -579,7 +574,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
             return Err(format!(
-                "another agentd is already listening on {}",
+                "another agent is already listening on {}",
                 socket.display()
             ));
         }

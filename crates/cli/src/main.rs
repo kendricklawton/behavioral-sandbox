@@ -14,6 +14,9 @@
 use agent_cli::audit;
 mod config;
 mod doctor;
+mod metrics;
+mod serve;
+mod session;
 mod trace;
 mod watch;
 
@@ -98,6 +101,11 @@ enum Cmd {
     /// Check this host's readiness to run the engine, KVM, the jailer, tools, artifacts, eBPF
     /// capabilities, and print what will work, degrade, or refuse before the first sandbox.
     Doctor,
+    /// Run the long-lived driver **daemon**: expose the sandbox lifecycle over a unix socket
+    /// (the versioned newline-JSON wire API, ADR 034), so a local client drives microVMs without
+    /// linking the engine. The daemon half of this one binary; access control is the socket's
+    /// directory permissions (no auth, a recorded non-goal).
+    Serve(Box<serve::ServeArgs>),
 }
 
 #[derive(clap::Args)]
@@ -192,6 +200,13 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The daemon owns its own logging (info default, optional JSON) and reads no `.agent.toml`
+    // (its config is flags + environment), so `serve` dispatches *before* the CLI's project-file
+    // discovery and tracing init below, which are the run/shell/doctor conveniences. It still
+    // receives the shared global `--log` filter.
+    if let Cmd::Serve(args) = cli.cmd {
+        return serve::serve(*args, cli.log);
+    }
     // The `.agent.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
     // failure here, before any boot (config typos must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -225,6 +240,12 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
             shell(args, file)
         }
         Cmd::Doctor => Ok(doctor::report(&base_config(file))),
+        // `serve` is dispatched in `main` before this point (it skips the project-file/tracing
+        // setup `run` runs under), so this arm is never reached; a typed error rather than a
+        // panic keeps the no-panic discipline even for the impossible case.
+        Cmd::Serve(_) => Err(CliError::Cli(
+            "internal: serve is dispatched in main() before run()".into(),
+        )),
     }
 }
 

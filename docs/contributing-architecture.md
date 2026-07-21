@@ -25,13 +25,14 @@ boundaries:
 - `crates/channel`, the **host↔guest wire protocol**: dependency-free length-prefixed framing over
   `Read`/`Write`, shared by the driver and the guest agent (see decision 002).
 - `crates/guest-agent`, the **in-guest agent** (`agent-guest`): runs one command per connection and
-  streams stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at Phase 3.
+  streams stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs by the build.
   Exec/IO convenience only, never the security boundary.
 - `crates/probes`, the **eBPF programs** (`#![no_std]`, built for `bpfel-unknown-none` via
   `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting. CO-RE/BTF.
 - `crates/probes-loader`, the **userspace loader** (aya): attaches the probes to a specific
   sandbox, reads their maps, and streams events into the audit log.
-- `crates/cli`, the `agent` binary (`run`, `shell`, `--trace`) and later the `agentd` daemon.
+- `crates/cli`, the single `agent` binary: the CLI (`run`, `shell`, `--trace`) plus the
+  `agent serve` driver daemon.
 - `xtask`, dev orchestration; `cargo xtask ci` runs the host-safe gate and builds the eBPF
   object, `ci-privileged` runs the VM-boot + probe-attach integration tests, `setup` verifies the
   host, and the rootfs/kernel build lives here. Never shipped.

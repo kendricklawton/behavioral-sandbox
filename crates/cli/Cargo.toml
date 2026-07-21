@@ -9,25 +9,20 @@ authors.workspace = true
 publish = false
 description = "The `agent` CLI: drive the Firecracker + aya code-execution sandbox."
 
+# One binary: the `agent` CLI. The driver daemon is the `agent serve` subcommand (`src/serve.rs`,
+# with its `session`/`metrics` modules), not a separate binary, so there is a single shipped artifact.
 [[bin]]
 name = "agent"
 path = "src/main.rs"
-
-# The driver daemon: exposes the sandbox lifecycle over a unix socket (newline-JSON). Ships in the
-# same crate as the `agent` CLI (both thin hosts of the `agent-vmm` public API); its own module tree
-# under `src/agentd/`, so it shares nothing with the CLI's `src/main.rs` bin beyond the library deps.
-[[bin]]
-name = "agentd"
-path = "src/agentd/main.rs"
 
 [dependencies]
 # The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
 # tracks: it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
 agent-probes-loader = { path = "../probes-loader" }
 agent-vmm = { path = "../vmm" }
-# The `agentd` daemon's wire protocol: the versioned newline-JSON contract it shares with the
+# The `agent` daemon's wire protocol: the versioned newline-JSON contract it shares with the
 # reference client and the polyglot SDKs (ADR 034). A serde-only leaf, no engine internals.
-agentd-protocol = { path = "../agentd-protocol" }
+agent-protocol = { path = "../agent-protocol" }
 clap = { workspace = true }
 # `agent run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
@@ -36,7 +31,7 @@ ratatui = { workspace = true }
 serde = { workspace = true }
 # `agent run --json`: the structured run result is one JSON object on stdout.
 serde_json = { workspace = true }
-# `agentd`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
+# `agent`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
 # Already in the dependency tree transitively (crossterm), so no new crate enters the tree.
 signal-hook = "0.3"
 toml = { workspace = true }
@@ -45,10 +40,10 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # The reference client for the versioned wire API (ADR 034, docs/daemon.md), used by the
-# daemon's e2e demo to prove a caller drives `agentd` over the wire alone. A dev-dep so the daemon
-# crate can spawn `agentd` (it owns the artifacts)
+# daemon's e2e demo to prove a caller drives `agent` over the wire alone. A dev-dep so the daemon
+# crate can spawn `agent` (it owns the artifacts)
 # while the client itself stays free of `agent-vmm`.
-agentd-client = { path = "../agentd-client" }
+agent-client = { path = "../agent-client" }
 # The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).
 agent-test-support = { path = "../test-support" }
 

@@ -1,21 +1,20 @@
-# Try the privileged suite on a GitHub-HOSTED runner, before standing up a self-hosted box.
-# Since 2023 the hosted ubuntu x86_64 runners expose /dev/kvm, so this self-provisions everything the
-# privileged path needs, KVM access, firecracker/jailer, net/fs tools, the eBPF toolchain, the guest
-# artifacts, and runs `cargo xtask ci-privileged` as root. If this stays green you may not need a
-# self-hosted runner at all; if the preflight fails on /dev/kvm or BTF, that is the signal to fall
-# back to the self-hosted `ci-privileged.yml`.
+# The x86_64 privileged gate on a GitHub-HOSTED runner. The hosted ubuntu x86_64 runners expose
+# /dev/kvm (nested virtualization, since 2023), so this self-provisions everything the privileged
+# path needs, KVM access, firecracker/jailer, net/fs tools, a SOURCE_DATE_EPOCH-capable mke2fs, the
+# eBPF toolchain, the guest artifacts, and runs `cargo xtask ci-privileged` as root. Proven green
+# end to end (boot, jailer, probes, restore, the audit record), so it runs nightly plus on demand.
+# Correctness only: nested KVM makes performance numbers unrepresentative, so the benches are not
+# gated here ("measured, not marketed" means measured on bare metal). The self-hosted
+# `ci-privileged.yml` remains only as the future aarch64 lane (hosted arm64 runners have no KVM).
 #
-# SECURITY: dispatch-only. NEVER add a fork `pull_request` trigger, this runs untrusted-capable code
-# as root with KVM. Manual dispatch (and later a schedule / push-to-main) only, on code already yours.
-name: CI (privileged, hosted probe)
+# SECURITY: NEVER add a fork `pull_request` trigger, this runs untrusted-capable code as root with
+# KVM. Schedule + manual dispatch only, on code already yours.
+name: CI (privileged, hosted)
 
 on:
   workflow_dispatch:
-  # Uncomment once it is proven green on a real run:
-  # push:
-  #   branches: [main]
-  # schedule:
-  #   - cron: "0 4 * * *"
+  schedule:
+    - cron: "0 4 * * *"
 
 permissions:
   contents: read

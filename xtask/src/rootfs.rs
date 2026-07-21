@@ -97,6 +97,10 @@ fn rootfs_inittab() -> String {
 # their /dev/vdX order doesn't matter. Best-effort: a missing device is skipped, so plain boots are
 # unaffected. Runs after devtmpfs/proc are up (findfs needs the device nodes + /proc/partitions).
 ::sysinit:/sbin/mount-drives
+# Static IPv6 on the guest NIC: the kernel `ip=` param configures v4 but has no v6 form, so the
+# driver passes the v6 address as a cmdline token and `/sbin/net-up` applies it. Best-effort (a
+# plain no-NIC boot is a clean no-op). Runs after /proc is mounted (it reads /proc/cmdline).
+::sysinit:/sbin/net-up
 ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r
@@ -123,6 +127,35 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 ",
         input = agent_channel::INPUT_LABEL,
         output = agent_channel::OUTPUT_LABEL,
+    )
+}
+
+/// `/sbin/net-up`, the guest's static-IPv6 step (run from the inittab sysinit line). The kernel
+/// `ip=`/`CONFIG_IP_PNP` param configures the guest's v4 `eth0` before userspace but has **no** IPv6
+/// form, so the driver passes the guest v6 address as an `<key>=<addr>/<plen>` kernel cmdline token
+/// (`spawn.rs`) and this reads it back from `/proc/cmdline` and assigns it. The key is
+/// `agent_channel::GUEST_IP6_CMDLINE_KEY`, the one host↔guest definition the driver's writer and this
+/// reader share, so they can't drift (the address itself is never baked into the image, the host owns
+/// it). Best-effort by construction: a plain (no-NIC) boot has no `eth0` and exits cleanly, and a
+/// missing token is a clean no-op, so a non-networked boot is unaffected. Deny-by-default holds for
+/// v6 exactly as for v4 (ADR 008): only the connected `/64` route is added, never a v6 default
+/// route, so the guest reaches the host end and nothing else. `ip` first, `ifconfig` as the fallback,
+/// so it works whether or not busybox's `ip` applet carries v6 address support.
+fn net_up_script() -> String {
+    format!(
+        "\
+#!/bin/sh
+[ -e /sys/class/net/eth0 ] || exit 0
+for tok in $(cat /proc/cmdline); do
+	case \"$tok\" in
+	{key}=*) addr=\"${{tok#{key}=}}\" ;;
+	esac
+done
+[ -n \"$addr\" ] || exit 0
+ip addr add \"$addr\" dev eth0 2>/dev/null || ifconfig eth0 add \"$addr\" 2>/dev/null
+exit 0
+",
+        key = agent_channel::GUEST_IP6_CMDLINE_KEY,
     )
 }
 
@@ -273,6 +306,13 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     set_mode_0755(&mount_drives)?;
     std::fs::create_dir_all(staging.join("input")).context("create /input mountpoint")?;
     std::fs::create_dir_all(staging.join("output")).context("create /output mountpoint")?;
+
+    // The static-IPv6 step: the kernel `ip=` param configures v4 but has no v6 form, so the driver
+    // passes the guest v6 address as a cmdline token and `/sbin/net-up` (an inittab sysinit line)
+    // applies it. Best-effort, so a non-networked boot is unaffected.
+    let net_up = staging.join("sbin/net-up");
+    std::fs::write(&net_up, net_up_script()).context("write /sbin/net-up")?;
+    set_mode_0755(&net_up)?;
 
     // Build the ext4 from the staging dir, rootless, via `mke2fs -d`, and **deterministic**:
     // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` (honoured from e2fsprogs
@@ -722,7 +762,22 @@ fn set_mode_0755(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_mke2fs_version, MKE2FS_SOURCE_DATE_EPOCH_MIN};
+    use super::{net_up_script, parse_mke2fs_version, MKE2FS_SOURCE_DATE_EPOCH_MIN};
+
+    #[test]
+    fn net_up_reads_the_shared_cmdline_key() {
+        let script = net_up_script();
+        let key = agent_channel::GUEST_IP6_CMDLINE_KEY;
+        // The guest parses the *same* token key the driver writes (single-sourced in `agent-channel`),
+        // so the two sides can't drift: the case pattern that matches it and the `${tok#…}` that
+        // strips it both carry the key.
+        assert!(script.contains(&format!("{key}=*)")));
+        assert!(script.contains(&format!("${{tok#{key}=}}")));
+        // A no-NIC boot is a clean no-op, and the assignment tries `ip` then falls back to `ifconfig`.
+        assert!(script.contains("[ -e /sys/class/net/eth0 ] || exit 0"));
+        assert!(script.contains("ip addr add"));
+        assert!(script.contains("ifconfig eth0 add"));
+    }
 
     #[test]
     fn parses_the_stock_banner() {

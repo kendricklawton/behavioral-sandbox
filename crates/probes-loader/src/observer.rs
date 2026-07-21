@@ -402,21 +402,36 @@ impl SandboxProbes {
                     // failed read of the counter is itself a gap (unknown coverage is a gap).
                     match monitor.unparsed_l3() {
                         Ok(n) if n > 0 => self.gaps.push(AxisGap::Network(format!(
-                            "{n} non-IPv4 (IPv6/VLAN) frame(s) crossed the tap; the flow view covers \
-                             IPv4 only, so this section is not the complete tap traffic"
+                            "{n} unrepresentable frame(s) (VLAN, or a truncated IPv4/IPv6 frame) \
+                             crossed the tap; this section is not the complete tap traffic"
                         ))),
                         Ok(_) => {}
-                        Err(e) => self
-                            .gaps
-                            .push(AxisGap::Network(format!("read tap unparsed-L3 counter: {e}"))),
+                        Err(e) => self.gaps.push(AxisGap::Network(format!(
+                            "read tap unparsed-L3 counter: {e}"
+                        ))),
                     }
-                    Some(NetSection::from_tap(
-                        flows,
-                        totals,
-                        denials,
-                        dropped_flows,
-                        dropped_denials,
-                    ))
+                    // The IPv6 half (ADR 008 dual-stack): folded into the same section, an unreadable
+                    // v6 map is its own gap so v6 traffic is never silently absent.
+                    let flows6 = monitor.flows6().unwrap_or_else(|e| {
+                        self.gaps
+                            .push(AxisGap::Network(format!("read tap v6 flows: {e}")));
+                        Vec::new()
+                    });
+                    let denials6 = monitor.denials6().unwrap_or_else(|e| {
+                        self.gaps
+                            .push(AxisGap::Network(format!("read tap v6 denials: {e}")));
+                        Vec::new()
+                    });
+                    Some(
+                        NetSection::from_tap(
+                            flows,
+                            totals,
+                            denials,
+                            dropped_flows,
+                            dropped_denials,
+                        )
+                        .with_v6(flows6, denials6),
+                    )
                 }
             },
             None => None,
@@ -481,13 +496,14 @@ impl SandboxProbes {
             // gap-recording read is `collect`); a real nonzero still marks the view truncated.
             let dropped_flows = monitor.dropped_flows().unwrap_or(0);
             let dropped_denials = monitor.dropped_denials().unwrap_or(0);
-            Some(NetSection::from_tap(
-                flows,
-                totals,
-                denials,
-                dropped_flows,
-                dropped_denials,
-            ))
+            // Live view: v6 reads that transiently fail read as empty (the authoritative read is
+            // `collect`); a real v6 flow still shows here.
+            let flows6 = monitor.flows6().unwrap_or_default();
+            let denials6 = monitor.denials6().unwrap_or_default();
+            Some(
+                NetSection::from_tap(flows, totals, denials, dropped_flows, dropped_denials)
+                    .with_v6(flows6, denials6),
+            )
         });
         let resources = self
             .meter

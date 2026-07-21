@@ -22,10 +22,15 @@ pub const COMM_CAP: usize = 16;
 pub const DETAIL_CAP: usize = 128;
 
 /// How many leading bytes of a `connect` sockaddr the probe copies into [`SyscallEvent::detail`].
-/// 16 is `sizeof(struct sockaddr_in)`, a full IPv4 address (family + port + addr); an IPv6 sockaddr
-/// is captured only up to here (family + port + the first 8 bytes), enough to identify the family and
-/// port without risking an over-read past a short user buffer.
-pub const SOCKADDR_SNAP: usize = 16;
+/// 28 is `sizeof(struct sockaddr_in6)` (family + port + flowinfo + the 16-byte address + scope), so a
+/// full **IPv6** address is captured, not just its first 8 bytes (ADR 008 dual-stack). A `sockaddr_in`
+/// (IPv4) is only 16 bytes, so the probe falls back to [`SOCKADDR_SNAP_V4`] when the full read would
+/// run past a short user buffer, no v4 capture regresses.
+pub const SOCKADDR_SNAP: usize = 28;
+
+/// The IPv4 `sockaddr_in` size (family + port + 4-byte address), the probe's fallback copy length when
+/// the full [`SOCKADDR_SNAP`] read faults on a buffer only big enough for a v4 address.
+pub const SOCKADDR_SNAP_V4: usize = 16;
 
 /// Which syscall a [`SyscallEvent`] records. The wire field is a raw [`u32`]
 /// ([`SyscallEvent::syscall`]) rather than this enum, so reconstructing an event from arbitrary bytes
@@ -192,17 +197,25 @@ impl SyscallEvent {
     }
 }
 
-/// A best-effort human form of the leading sockaddr bytes: `AF_INET` yields `a.b.c.d:port`, other
-/// families name the family number, and a too-short capture says so.
+/// A best-effort human form of the leading sockaddr bytes: `AF_INET` yields `a.b.c.d:port`, `AF_INET6`
+/// yields `[v6]:port`, other families name the family number, and a too-short capture says so.
 #[cfg(any(feature = "std", test))]
 fn describe_sockaddr(bytes: &[u8]) -> String {
-    // sa_family is a native-endian u16; AF_INET == 2, its sockaddr_in is family, be16 port, 4-byte ip.
+    // sa_family is a native-endian u16. AF_INET == 2 (sockaddr_in: family, be16 port, 4-byte addr);
+    // AF_INET6 == 10 (sockaddr_in6: family, be16 port, 4-byte flowinfo, then the 16-byte addr at 8).
     const AF_INET: u16 = 2;
+    const AF_INET6: u16 = 10;
     if bytes.len() >= 8 {
         let family = u16::from_ne_bytes([bytes[0], bytes[1]]);
         if family == AF_INET {
             let port = u16::from_be_bytes([bytes[2], bytes[3]]);
             return format!("{}.{}.{}.{}:{port}", bytes[4], bytes[5], bytes[6], bytes[7]);
+        }
+        if family == AF_INET6 && bytes.len() >= 24 {
+            let port = u16::from_be_bytes([bytes[2], bytes[3]]);
+            let mut addr = [0u8; 16];
+            addr.copy_from_slice(&bytes[8..24]);
+            return format!("[{}]:{port}", std::net::Ipv6Addr::from(addr));
         }
         return format!("<sockaddr family {family}>");
     }
@@ -270,6 +283,13 @@ impl Protocol {
 pub const IPPROTO_TCP: u8 = Protocol::Tcp as u8;
 /// IP protocol number for UDP (same leading source/destination port layout as TCP).
 pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
+
+/// IP protocol number for **ICMPv6** (next-header 58). Egress enforcement always lets it through under
+/// v6, the way it always lets ARP through under v4: the guest needs neighbor discovery (NS/NA) to
+/// resolve its on-link host end, and multicast-listener (MLD) messages to join the solicited-node
+/// group, before it can reach *any* allowed v6 endpoint. Link-local ICMPv6 can't route off the link
+/// anyway (no v6 default route), so allowing it does not widen egress.
+pub const IPPROTO_ICMPV6: u8 = 58;
 
 /// One **directional** network flow's identity: the IPv4 5-tuple, in host byte order (so a consumer
 /// formats `src_addr` straight to dotted-quad). `#[repr(C)]` and padding-free, the trailing `_pad` is
@@ -530,6 +550,232 @@ pub fn egress_allowed(rules: &[PolicyRule], dst_addr: u32, dst_port: u16, proto:
         .any(|r| rule_matches(r, dst_addr, dst_port, proto))
 }
 
+// ---------------------------------------------------------------------------
+// IPv6: the v6 twins of the flow key, parser, and egress policy above. Deliberately **parallel**
+// types and maps rather than widening the v4 ones, so the proven v4 datapath stays byte-for-byte
+// unchanged (ADR 008 dual-stack). Addresses are `[u8; 16]` in **network byte order** and all address
+// math is **byte-wise**: the eBPF target has no native `u128` (`bpf-linker` would emit compiler-rt
+// calls that don't exist there), so a shared `u128` matcher couldn't run in the kernel. The byte-wise
+// form runs identically in the kernel and in these host tests, single-sourced so they can't drift.
+// ---------------------------------------------------------------------------
+
+/// One **directional** IPv6 network flow's identity: the v6 5-tuple, addresses in network byte order.
+/// `#[repr(C)]` and padding-free (an explicit zeroed `_pad`), a stable 40-byte BPF **hash-map key**
+/// exactly like [`FlowKey`]: an uninitialized pad byte would make two identical flows hash to
+/// different slots. Build it with [`FlowKey6::new`], which zeroes the pad.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct FlowKey6 {
+    /// Source IPv6 address, network byte order (the 16 octets as they appear on the wire).
+    pub src_addr: [u8; 16],
+    /// Destination IPv6 address, network byte order.
+    pub dst_addr: [u8; 16],
+    /// Source L4 port (0 for a non-TCP/UDP next-header).
+    pub src_port: u16,
+    /// Destination L4 port (0 for a non-TCP/UDP next-header).
+    pub dst_port: u16,
+    /// The IPv6 **next-header** value at the fixed header (TCP/UDP, or an extension-header number when
+    /// the chain isn't walked, in which case the ports are 0).
+    pub proto: u8,
+    /// Explicit zeroed padding to a stable, hashable 40-byte key (see the type doc).
+    pub _pad: [u8; 3],
+}
+
+/// The on-wire size of a [`FlowKey6`] (the map key length the loader reads).
+pub const FLOW_KEY6_SIZE: usize = core::mem::size_of::<FlowKey6>();
+
+impl FlowKey6 {
+    /// Build a v6 key from the 5-tuple, zeroing the padding so it hashes deterministically.
+    #[must_use]
+    pub fn new(
+        src_addr: [u8; 16],
+        dst_addr: [u8; 16],
+        src_port: u16,
+        dst_port: u16,
+        proto: u8,
+    ) -> Self {
+        Self {
+            src_addr,
+            dst_addr,
+            src_port,
+            dst_port,
+            proto,
+            _pad: [0; 3],
+        }
+    }
+
+    /// Reconstruct a key from a map key's raw bytes (as the loader reads them), or `None` if the slice
+    /// is too short. Reads each field at its fixed `#[repr(C)]` offset, the v6 twin of
+    /// [`FlowKey::from_bytes`], defined next to the fields so it can't drift from the kernel writer.
+    #[must_use]
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < FLOW_KEY6_SIZE {
+            return None;
+        }
+        let mut src = [0u8; 16];
+        let mut dst = [0u8; 16];
+        src.copy_from_slice(b.get(0..16)?);
+        dst.copy_from_slice(b.get(16..32)?);
+        Some(Self::new(
+            src,
+            dst,
+            u16::from_ne_bytes(b.get(32..34)?.try_into().ok()?),
+            u16::from_ne_bytes(b.get(34..36)?.try_into().ok()?),
+            *b.get(36)?,
+        ))
+    }
+}
+
+impl core::fmt::Display for FlowKey6 {
+    /// `[src]:sport -> [dst]:dport <proto>`, addresses via [`core::net::Ipv6Addr`].
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let src = core::net::Ipv6Addr::from(self.src_addr);
+        let dst = core::net::Ipv6Addr::from(self.dst_addr);
+        write!(f, "[{src}]:{} -> [{dst}]:{} ", self.src_port, self.dst_port)?;
+        match self.proto {
+            IPPROTO_TCP => f.write_str("tcp"),
+            IPPROTO_UDP => f.write_str("udp"),
+            p => write!(f, "proto {p}"),
+        }
+    }
+}
+
+/// Parse the IPv6 5-tuple out of an Ethernet `frame` (addresses network order, ports host order), or
+/// `None` if it is not IPv6-over-Ethernet or is truncated. TCP/UDP directly after the fixed 40-byte
+/// header carry their ports; **extension headers are not walked** (a first cut), so a frame whose
+/// next-header is an extension (or a fragment) reports ports 0 and `proto` = that next-header value,
+/// still a recorded flow, never silently dropped, mirroring how the v4 parser leaves fragment ports 0.
+/// The tc program in `crates/probes` mirrors this at the same offsets (single-sourced), this pure form
+/// is what the host gate unit-tests.
+#[must_use]
+pub fn parse_ipv6_5tuple(frame: &[u8]) -> Option<FlowKey6> {
+    let ethertype = u16::from_be_bytes([
+        *frame.get(ETHERTYPE_OFFSET)?,
+        *frame.get(ETHERTYPE_OFFSET + 1)?,
+    ]);
+    if ethertype != ETH_P_IPV6 {
+        return None;
+    }
+    let ip = frame.get(ETH_HLEN..)?;
+    // The fixed IPv6 header is 40 bytes: next-header at offset 6, src at 8..24, dst at 24..40.
+    let next_header = *ip.get(6)?;
+    let mut src = [0u8; 16];
+    let mut dst = [0u8; 16];
+    src.copy_from_slice(ip.get(8..24)?);
+    dst.copy_from_slice(ip.get(24..40)?);
+    let (mut src_port, mut dst_port) = (0u16, 0u16);
+    if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
+        let l4 = ip.get(40..)?;
+        src_port = u16::from_be_bytes([*l4.first()?, *l4.get(1)?]);
+        dst_port = u16::from_be_bytes([*l4.get(2)?, *l4.get(3)?]);
+    }
+    Some(FlowKey6::new(src, dst, src_port, dst_port, next_header))
+}
+
+/// One entry in a sandbox's **IPv6** egress allow-list: a destination v6 CIDR plus optional port and
+/// protocol, the v6 twin of [`PolicyRule`]. `#[repr(C)]` and padding-free (explicit zeroed `_pad`), a
+/// stable 24-byte map value. `addr` is network byte order and matched byte-wise to `prefix_len` (no
+/// `u128`, see the module note above).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct PolicyRule6 {
+    /// Allowed destination network, network byte order (compared byte-wise, masked to `prefix_len`).
+    pub addr: [u8; 16],
+    /// Allowed destination port, or `0` for "any port".
+    pub port: u16,
+    /// Prefix length in bits, `0..=128`; `0` matches any address (a `::/0` allow-all).
+    pub prefix_len: u8,
+    /// IP protocol to match ([`IPPROTO_TCP`] / [`IPPROTO_UDP`]), or `0` for "any protocol".
+    pub proto: u8,
+    /// `1` if this slot holds a real rule, `0` if empty (an all-zero slot must not read as `::/0`).
+    pub active: u8,
+    /// Zeroed padding to a stable 24-byte record.
+    pub _pad: [u8; 3],
+}
+
+/// The on-wire size of a [`PolicyRule6`] (the map value length the loader writes).
+pub const POLICY_RULE6_SIZE: usize = core::mem::size_of::<PolicyRule6>();
+
+impl PolicyRule6 {
+    /// Build an **active** v6 allow-rule for `addr/prefix_len`, optional `port`/`proto` (`0` = any),
+    /// zeroing the padding so it is a byte-stable map value.
+    #[must_use]
+    pub fn allow(addr: [u8; 16], prefix_len: u8, port: u16, proto: u8) -> Self {
+        Self {
+            addr,
+            port,
+            prefix_len,
+            proto,
+            active: 1,
+            _pad: [0; 3],
+        }
+    }
+
+    /// Serialize to the map value's raw native bytes (the write-side twin of [`FlowKey6::from_bytes`]),
+    /// so the loader writes the policy without an `unsafe` `aya::Pod` binding.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; POLICY_RULE6_SIZE] {
+        let mut b = [0u8; POLICY_RULE6_SIZE];
+        b[0..16].copy_from_slice(&self.addr);
+        b[16..18].copy_from_slice(&self.port.to_ne_bytes());
+        b[18] = self.prefix_len;
+        b[19] = self.proto;
+        b[20] = self.active;
+        b
+    }
+}
+
+/// Whether IPv6 address `addr` lies in `net/prefix_len`, compared **byte-wise** (no `u128`, so this
+/// runs in the eBPF kernel too). Loops a **compile-time-bounded** 16 bytes for the verifier; a
+/// `prefix_len > 128` is treated as no match by the caller.
+#[must_use]
+pub fn addr6_in_prefix(addr: [u8; 16], net: [u8; 16], prefix_len: u8) -> bool {
+    let full = (prefix_len / 8) as usize; // whole bytes that must match exactly
+    let rem = prefix_len % 8; // leftover high bits of the next byte
+    let mut i = 0usize;
+    while i < 16 {
+        if i < full && addr[i] != net[i] {
+            return false;
+        }
+        // The one partial byte: compare only its top `rem` bits.
+        if i == full && rem != 0 {
+            let mask = 0xffu8 << (8 - rem);
+            if (addr[i] & mask) != (net[i] & mask) {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Whether one [`PolicyRule6`] admits `(dst_addr, dst_port, proto)` (address network order), the v6
+/// twin of [`rule_matches`]: `active`, its CIDR contains the address (byte-wise), and its port/proto
+/// match (a `0` port or proto is a wildcard). Single-sourced so the tc program and this agree.
+#[must_use]
+pub fn rule_matches6(rule: &PolicyRule6, dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
+    if rule.active == 0 || rule.prefix_len > 128 {
+        return false;
+    }
+    addr6_in_prefix(dst_addr, rule.addr, rule.prefix_len)
+        && (rule.port == 0 || rule.port == dst_port)
+        && (rule.proto == 0 || rule.proto == proto)
+}
+
+/// Whether a sandbox's IPv6 allow-list `rules` admits `(dst_addr, dst_port, proto)`: any active rule
+/// matching means allow, none means deny (deny-by-default). The v6 twin of [`egress_allowed`].
+#[must_use]
+pub fn egress_allowed6(
+    rules: &[PolicyRule6],
+    dst_addr: [u8; 16],
+    dst_port: u16,
+    proto: u8,
+) -> bool {
+    rules
+        .iter()
+        .any(|r| rule_matches6(r, dst_addr, dst_port, proto))
+}
+
 #[cfg(test)]
 mod flow_tests {
     use super::*;
@@ -738,6 +984,141 @@ mod policy_tests {
 }
 
 #[cfg(test)]
+mod v6_tests {
+    use super::*;
+
+    /// A minimal Ethernet+IPv6+L4 frame: 12 B of MACs, the IPv6 EtherType, a 40-byte fixed IPv6 header
+    /// (`next_header` at offset 6, src at 8..24, dst at 24..40), then the 4 port bytes.
+    fn frame6(next: u8, src: [u8; 16], dst: [u8; 16], sport: u16, dport: u16) -> Vec<u8> {
+        let mut f = vec![0u8; ETH_HLEN];
+        f[ETHERTYPE_OFFSET] = 0x86; // ETH_P_IPV6, big-endian
+        f[ETHERTYPE_OFFSET + 1] = 0xdd;
+        let mut ip = vec![0u8; 40];
+        ip[0] = 0x60; // version 6
+        ip[6] = next;
+        ip[8..24].copy_from_slice(&src);
+        ip[24..40].copy_from_slice(&dst);
+        f.extend_from_slice(&ip);
+        f.extend_from_slice(&sport.to_be_bytes());
+        f.extend_from_slice(&dport.to_be_bytes());
+        f
+    }
+
+    /// `fd00:200::N` as its 16 network-order octets (the sandbox's ULA link): first hextet `fd00`
+    /// (bytes 0,1), second hextet `0200` (bytes 2,3), host byte last.
+    fn ula(n: u8) -> [u8; 16] {
+        let mut a = [0u8; 16];
+        a[0] = 0xfd;
+        a[2] = 0x02; // second hextet 0x0200
+        a[15] = n;
+        a
+    }
+
+    #[test]
+    fn v6_layout_is_padding_free_and_known_size() {
+        assert_eq!(FLOW_KEY6_SIZE, 40);
+        assert_eq!(POLICY_RULE6_SIZE, 24);
+        let a = FlowKey6::new(ula(2), ula(1), 3, 4, IPPROTO_TCP);
+        assert_eq!(a, FlowKey6::new(ula(2), ula(1), 3, 4, IPPROTO_TCP));
+        assert_eq!(a._pad, [0, 0, 0]);
+        assert_eq!(PolicyRule6::default().active, 0);
+    }
+
+    #[test]
+    fn parses_a_v6_tcp_5tuple() {
+        let f = frame6(IPPROTO_TCP, ula(2), ula(1), 51000, 443);
+        let key = parse_ipv6_5tuple(&f).expect("a well-formed IPv6/TCP frame parses");
+        assert_eq!(key.src_addr, ula(2));
+        assert_eq!(key.dst_addr, ula(1));
+        assert_eq!(key.src_port, 51000);
+        assert_eq!(key.dst_port, 443);
+        assert_eq!(key.proto, IPPROTO_TCP);
+    }
+
+    #[test]
+    fn skips_non_v6_truncated_and_leaves_ext_header_ports_zero() {
+        // An IPv4 EtherType is not our v6 frame.
+        let mut v4 = frame6(IPPROTO_UDP, ula(2), ula(1), 53, 53);
+        v4[ETHERTYPE_OFFSET] = 0x08;
+        v4[ETHERTYPE_OFFSET + 1] = 0x00;
+        assert!(parse_ipv6_5tuple(&v4).is_none());
+        // Truncated below a full 40-byte header (and the empty slice) are skipped, never a panic.
+        let ok = frame6(IPPROTO_UDP, ula(2), ula(1), 53, 53);
+        assert!(parse_ipv6_5tuple(&ok[..ETH_HLEN + 30]).is_none());
+        assert!(parse_ipv6_5tuple(&[]).is_none());
+        // A next-header that is an extension header (0 = hop-by-hop) is not walked: addresses parse,
+        // proto is the next-header value, and ports stay 0 (honest, never a bogus port from options).
+        let hbh = frame6(0, ula(2), ula(1), 51000, 443);
+        let key = parse_ipv6_5tuple(&hbh).expect("addresses still parse");
+        assert_eq!(key.proto, 0);
+        assert_eq!(key.src_port, 0);
+        assert_eq!(key.dst_port, 0);
+    }
+
+    #[test]
+    fn addr6_prefix_covers_full_partial_and_wildcard() {
+        let host = ula(1);
+        // /128 matches exactly one address.
+        assert!(addr6_in_prefix(host, ula(1), 128));
+        assert!(!addr6_in_prefix(host, ula(2), 128));
+        // /0 matches anything.
+        assert!(addr6_in_prefix(host, [0u8; 16], 0));
+        // /64 matches the whole link (host bits differ, network bits equal).
+        assert!(addr6_in_prefix(ula(2), ula(1), 64));
+        // A partial byte: /125 keeps the low 3 bits free, so ::1..=::7 match ::0/125 but ::8 does not.
+        let net = ula(0);
+        assert!(addr6_in_prefix(ula(7), net, 125));
+        assert!(!addr6_in_prefix(ula(8), net, 125));
+        // A different high byte fails even a short prefix.
+        let mut other = ula(1);
+        other[0] = 0xfe;
+        assert!(!addr6_in_prefix(other, ula(1), 16));
+    }
+
+    #[test]
+    fn rule_matches6_and_deny_by_default() {
+        // Allow only the host end on udp/9999, /128.
+        let rule = PolicyRule6::allow(ula(1), 128, 9999, IPPROTO_UDP);
+        assert!(rule_matches6(&rule, ula(1), 9999, IPPROTO_UDP));
+        assert!(!rule_matches6(&rule, ula(2), 9999, IPPROTO_UDP)); // other host
+        assert!(!rule_matches6(&rule, ula(1), 9998, IPPROTO_UDP)); // other port
+        assert!(!rule_matches6(&rule, ula(1), 9999, IPPROTO_TCP)); // other proto
+                                                                   // An out-of-range prefix (a garbled write) never matches, no panic.
+        let bad = PolicyRule6 {
+            prefix_len: 200,
+            ..PolicyRule6::allow(ula(0), 64, 0, 0)
+        };
+        assert!(!rule_matches6(&bad, ula(1), 443, IPPROTO_TCP));
+        // any-match + deny-by-default over a list, and an empty list denies all.
+        let rules = [PolicyRule6::allow(ula(0), 64, 0, 0)];
+        assert!(egress_allowed6(&rules, ula(9), 80, IPPROTO_TCP));
+        assert!(!egress_allowed6(&[], ula(1), 9999, IPPROTO_UDP));
+    }
+
+    #[test]
+    fn v6_bytes_round_trip_and_display() {
+        let key = FlowKey6::new(ula(2), ula(1), 1234, 53, IPPROTO_UDP);
+        // The loader reads a v6 map key as raw native bytes; `from_bytes` must reconstruct it.
+        let mut bytes = [0u8; FLOW_KEY6_SIZE];
+        bytes[0..16].copy_from_slice(&key.src_addr);
+        bytes[16..32].copy_from_slice(&key.dst_addr);
+        bytes[32..34].copy_from_slice(&key.src_port.to_ne_bytes());
+        bytes[34..36].copy_from_slice(&key.dst_port.to_ne_bytes());
+        bytes[36] = key.proto;
+        assert_eq!(FlowKey6::from_bytes(&bytes), Some(key));
+        assert!(FlowKey6::from_bytes(&bytes[..FLOW_KEY6_SIZE - 1]).is_none());
+        assert_eq!(
+            key.to_string(),
+            "[fd00:200::2]:1234 -> [fd00:200::1]:53 udp"
+        );
+        // The policy value round-trips through its native bytes too.
+        let rule = PolicyRule6::allow(ula(0), 64, 443, IPPROTO_TCP);
+        assert_eq!(&rule.to_bytes()[0..16], &ula(0));
+        assert_eq!(rule.to_bytes()[18], 64);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -821,6 +1202,18 @@ mod tests {
         let mut sa = vec![2u8, 0, 0, 9, 127, 0, 0, 1];
         sa.resize(16, 0);
         assert_eq!(ev(Syscall::Connect, &sa).detail_display(), "127.0.0.1:9");
+        // An [fd00:200::1]:443 sockaddr_in6: AF_INET6 (native u16 = 10), be16 port 443, 4 B flowinfo,
+        // then the 16-byte address (a full v6 capture, SOCKADDR_SNAP = 28).
+        let mut sa6 = vec![10u8, 0, 0x01, 0xbb, 0, 0, 0, 0];
+        let mut addr = [0u8; 16];
+        addr[0] = 0xfd;
+        addr[2] = 0x02;
+        addr[15] = 0x01;
+        sa6.extend_from_slice(&addr);
+        assert_eq!(
+            ev(Syscall::Connect, &sa6).detail_display(),
+            "[fd00:200::1]:443"
+        );
         assert_eq!(
             ev(Syscall::Execve, b"/bin/true").describe(),
             "pid=7 comm=sh execve /bin/true"

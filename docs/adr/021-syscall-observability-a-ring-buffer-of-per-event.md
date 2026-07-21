@@ -58,8 +58,9 @@ corruption, no leak.
   to the Firecracker track is plain `u32`/`u64` values, so `probes-loader` stays independent of `vmm`.
 - `SyscallEvent` is an **internal** kernel↔loader contract, *not* the frozen public wire API (the
   `channel` protocol + audit-log format); it can change without an `api:` marker.
-- The `detail` blob is bounded (128 bytes): long paths truncate, and a `connect` captures only the
-  leading sockaddr bytes (a full IPv4 address; IPv6 partially) to avoid over-reading a short user
+- The `detail` blob is bounded (128 bytes): long paths truncate, and a `connect` captures the leading
+  sockaddr bytes (a full IPv4 `sockaddr_in`, or a full IPv6 `sockaddr_in6` including the 16-byte
+  address; ADR 008), falling back to the shorter v4 read if the full copy would over-read a short user
   buffer. The streaming consumer is a poll-with-sleep [`SyscallTracer::stream`] rather than the
   `epoll` wait sketched above, keeping the crate sync + `unsafe`-free; cgroup attribution rests on
   `cgroup_id_of_pid`; the per-syscall overhead is measured (`cargo xtask bench-trace`); and an
