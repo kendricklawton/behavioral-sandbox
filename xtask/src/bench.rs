@@ -1108,6 +1108,11 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
             "bench-scale",
             run_section("bench-scale", ebpf, || bench_scale(runs)),
         ),
+        (
+            // Host-only: no KVM, no eBPF, so it always runs (skip is `None`).
+            "bench-sign",
+            run_section("bench-sign", None, || bench_sign(runs)),
+        ),
     ];
     let failed: Vec<&str> = results
         .iter()
@@ -1125,6 +1130,80 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
     if !failed.is_empty() {
         bail!("{} section(s) failed: {}", failed.len(), failed.join(", "));
     }
+    Ok(())
+}
+
+/// A representative canonical record (a `--net` run with a couple of flows, a denial, and a handful
+/// of notable syscalls), the size a real record signs over. The `ed25519` sign cost tracks the
+/// message length (it SHA-512s the message internally), so a realistic size keeps the number honest.
+const SAMPLE_RECORD: &str = concat!(
+    r#"{"schema":1,"timing":{"boot_ns":120000000,"exec_wall_ns":42000000},"#,
+    r#""network":{"totals":{"ingress_packets":12,"ingress_bytes":1840,"egress_packets":9,"egress_bytes":1204},"#,
+    r#""flows":[{"dst":"1.1.1.1","port":53,"proto":"udp","ingress_bytes":120,"egress_bytes":88},"#,
+    r#"{"dst":"93.184.216.34","port":443,"proto":"tcp","ingress_bytes":1720,"egress_bytes":1116}],"#,
+    r#""denials":[{"dst":"10.0.0.5","port":8080,"proto":"tcp","packets":3}],"flows6":[],"denials6":[]},"#,
+    r#""resources":{"cpu_ns":38000000,"cgroup":{"memory_peak_bytes":41943040,"io_read_bytes":0,"io_write_bytes":65536}},"#,
+    r#""host_syscalls":{"total":214,"by_kind":{"execve":3,"openat":181,"connect":2},"#,
+    r#""notable":[{"kind":"connect","detail":"1.1.1.1:53","hits":1}],"notable_truncated":false,"distinct_dropped":0},"#,
+    r#""coverage":[]}"#,
+);
+
+/// Bench the record-signing overhead (decision 034): one `ed25519` sign over already-canonical record
+/// bytes, plus verify, the SHA-256 chain hash, and a chained sign. **Host-only** (no KVM, no eBPF), so
+/// it never skips; the point is that the integrity step is **sub-millisecond and off the boot/exec
+/// path** (it runs once at record finalization), measured like everything else.
+pub(crate) fn bench_sign(runs: usize) -> Result<()> {
+    if runs == 0 {
+        bail!("--runs must be >= 1");
+    }
+    let key = agent_probes_loader::HostKey::from_seed([0x5a; 32]);
+    let trusted = [key.verifying_key()];
+    let prev = agent_probes_loader::record_hash(SAMPLE_RECORD);
+    let envelope = key.sign_canonical(SAMPLE_RECORD);
+
+    println!(
+        "bench-sign: ed25519 sign/verify + sha256 chain hash over a {}-byte canonical record, n={runs}\n",
+        SAMPLE_RECORD.len()
+    );
+
+    // Warm the CPU before the first timed loop (same reason as `bench_trace`).
+    for _ in 0..runs.min(1000) {
+        std::hint::black_box(key.sign_canonical(SAMPLE_RECORD));
+    }
+
+    let mut sign_ns = Vec::with_capacity(runs);
+    let mut chain_ns = Vec::with_capacity(runs);
+    let mut verify_ns = Vec::with_capacity(runs);
+    let mut hash_ns = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        let t = Instant::now();
+        std::hint::black_box(key.sign_canonical(SAMPLE_RECORD));
+        sign_ns.push(t.elapsed().as_nanos() as u64);
+
+        let t = Instant::now();
+        std::hint::black_box(key.sign_canonical_chained(SAMPLE_RECORD, Some(&prev)));
+        chain_ns.push(t.elapsed().as_nanos() as u64);
+
+        let t = Instant::now();
+        let _ = std::hint::black_box(agent_probes_loader::verify(&envelope, &trusted));
+        verify_ns.push(t.elapsed().as_nanos() as u64);
+
+        let t = Instant::now();
+        std::hint::black_box(agent_probes_loader::record_hash(SAMPLE_RECORD));
+        hash_ns.push(t.elapsed().as_nanos() as u64);
+    }
+
+    report_percentiles("sign (unchained)", &mut sign_ns, "ns");
+    report_percentiles("sign (chained)", &mut chain_ns, "ns");
+    report_percentiles("verify", &mut verify_ns, "ns");
+    report_percentiles("record_hash (sha256)", &mut hash_ns, "ns");
+
+    let sign_p50 = nearest_p50(&mut sign_ns);
+    println!(
+        "\nSign p50 {sign_p50} ns (~{} µs): well under a millisecond, and it runs once at record\n\
+         finalization, off the boot/exec path, so signing adds no measurable latency to a run.",
+        sign_p50.div_ceil(1000)
+    );
     Ok(())
 }
 

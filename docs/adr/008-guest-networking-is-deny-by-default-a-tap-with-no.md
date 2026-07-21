@@ -25,9 +25,13 @@ cross the tap, because a protocol they can't read is an unobserved channel deny-
 ("every allowance is explicit and recorded"). Each family has its own **parallel** types and maps
 (so the v4 datapath is byte-for-byte unchanged): the flow view (`FlowKey`/`FlowKey6`), egress policy
 (`PolicyRule`/`PolicyRule6`, byte-wise v6 matching since eBPF has no `u128`), and denial records all
-speak both. The guest is dual-stack: it gets a static v6 ULA link (`fd00:200::/64`, host `::1` /
-guest `::2`) via an `agent_guest_ip6=` cmdline token a guest sysinit applies, the connected /64 route
-only and **no v6 default route**, so v6 egress is denied by construction exactly as v4 is. ICMPv6
+speak both. The guest is dual-stack where the host supports v6: it gets a static v6 ULA link
+(`fd00:200::/64`, host `::1` / guest `::2`) via an `agent_guest_ip6=` cmdline token a guest sysinit
+applies, the connected /64 route only and **no v6 default route**, so v6 egress is denied by
+construction exactly as v4 is. The v6 link is **best-effort**: on a host with IPv6 disabled the
+driver brings up no v6 end, emits no token, and reports no v6 link (`RunningVm::ipv6()` is `None`),
+so the guest never holds an unreachable v6 address; isolation never rests on the v6 address (it
+rests on the absent default route and the eBPF hook), so v4 and isolation are unaffected. ICMPv6
 neighbor discovery is always allowed under enforcement (the v6 twin of ARP), so the guest can resolve
 its host end. The build order was forced (observers → policy → record learned v6 *before* the guest's
 `ipv6.disable=1` lifted), so "observe everything that crosses" held through the change; the record's

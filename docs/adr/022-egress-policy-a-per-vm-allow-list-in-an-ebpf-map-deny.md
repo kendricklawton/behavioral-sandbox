@@ -1,6 +1,6 @@
-# 025. Egress policy: a per-VM allow-list in an eBPF map, deny-by-default, enforced at the tap *(2026-07-16)*
+# 022. Egress policy: a per-VM allow-list in an eBPF map, deny-by-default, enforced at the tap *(2026-07-16)*
 
-**Context.** The engine observes a sandbox's traffic at the tap (decision 023); the step that follows
+**Context.** The engine observes a sandbox's traffic at the tap (decision 020); the step that follows
 observation is **enforcement**: deciding which world endpoints a sandbox may reach. Enforcement needs
 three things fixed together, a place the policy *lives*, a *schema* for it, and a rule for *where it is
 applied*, and two forces shape how they are fixed. First, the engine must supply only the **mechanism**
@@ -14,7 +14,7 @@ ingress classifier, deny-by-default, opt-in per monitor**.
 - **Where it lives: two `#[map]`s per loaded object.** `POLICY`, a fixed `MAX_POLICY_RULES` (16) array of
   `PolicyRule`, and `ENFORCE`, a one-slot toggle. Because each `TapMonitor` loads its own object, the
   maps are **naturally per VM**, no shared table, no tenant key. Single-sourced in `crates/probes-common`
-  next to the flow record (decision 023), so the kernel writer and host reader can't drift.
+  next to the flow record (decision 020), so the kernel writer and host reader can't drift.
 - **The schema: a masked-CIDR 5-tuple prefix.** A `PolicyRule` is `{ addr, prefix_len, port, proto,
   active }`, a destination **CIDR** (`0` prefix = any address) with an optional **port** and **protocol**
   (`0` = any). A packet is allowed iff its destination matches **any** active rule (`rule_matches`, shared
@@ -33,10 +33,10 @@ ingress classifier, deny-by-default, opt-in per monitor**.
   the classifier's logic speaks a `Verdict` enum (`Pass`/`Drop`), lowering to the `tc` ABI only at the
   return, so no bare action number leaks into the decision code.
 - **Applied at the *ingress* hook (guest → world), not egress.** Egress policy governs what the guest
-  *sends*, which on a tap is the ingress hook (decision 023). The egress hook (reply → guest) always
+  *sends*, which on a tap is the ingress hook (decision 020). The egress hook (reply → guest) always
   accepts, so replies to allowed traffic return without connection tracking. **ARP (v4) and ICMPv6
   neighbor discovery (v6) are always allowed**, the guest must resolve its on-link host end
-  (`10.200.0.1` / `fd00:200::1`, decision 017) before it can reach anything, so dropping them would make
+  (`10.200.0.1` / `fd00:200::1`, decision 014) before it can reach anything, so dropping them would make
   deny-by-default trivially deny-everything.
 - **Deny-by-default, opt-in enforcement.** `ENFORCE` off (the load default) is observe-only, preserving
   the prior observe-only tap. `ENFORCE` on with no rules drops everything: a sandbox launched with no
@@ -65,7 +65,7 @@ ingress classifier, deny-by-default, opt-in per monitor**.
 
 **Consequences.**
 - **Per-VM, no shared state**, so enforcement scales with monitors and one sandbox's policy can't affect
-  another's, the same per-object isolation as the flow map (decision 023).
+  another's, the same per-object isolation as the flow map (decision 020).
 - **The mask shift is built to stay `< 32`** (`prefix_len == 0` → zero mask, out-of-range → no match), so
   the kernel scan has no undefined shift and the verifier accepts the bounded loop.
 - **Not the pinned public API.** The policy surface is on `probes-loader` (`EgressPolicy`,

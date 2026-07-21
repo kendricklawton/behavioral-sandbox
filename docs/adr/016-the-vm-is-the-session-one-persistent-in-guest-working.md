@@ -1,4 +1,4 @@
-# 019. The VM is the session: one persistent in-guest working directory per agent process *(2026-07-15)*
+# 016. The VM is the session: one persistent in-guest working directory per agent process *(2026-07-15)*
 
 **Context.** A stateful session, install a package, write a file, use both three execs later, needs
 somewhere for state to live and a rule for when it dies. The guest filesystem already persists for

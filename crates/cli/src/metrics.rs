@@ -4,7 +4,7 @@
 //! are the hoster's, above the engine).
 //!
 //! **Hand-rolled on purpose.** The exposition format is a few lines of stable text, and the daemon is
-//! synchronous with no async runtime (ADR 034's posture), so the endpoint is a plain
+//! synchronous with no async runtime (ADR 030's posture), so the endpoint is a plain
 //! `TcpListener` + a bounded HTTP/1.1 responder on one thread, the same discipline as the driver's
 //! hand-rolled Firecracker HTTP client, not a `tokio`/framework import for one GET route. Scrapes are
 //! served sequentially (a scraper polls every few seconds; there is no fan-in to manage), each under
@@ -143,7 +143,7 @@ impl Histogram {
         }
         // `+Inf`/`_count` must be >= every finite bucket cumulative (the exposition spec's
         // monotonicity). `observe` bumps `count` before the slot so x86's store order keeps that
-        // true, but on a weaker-ordered arch (aarch64 is supported) a `Relaxed` scrape can see a
+        // true in practice, but `Relaxed` promises no cross-thread order, so a scrape can see a
         // slot increment without the matching `count` one. Clamp up to `cumulative` so a mid-observe
         // scrape never emits a non-monotonic histogram. Steady state (count >= cumulative) is a
         // no-op; the raised value keeps `+Inf` and `_count` equal, as the spec also requires.
@@ -629,8 +629,8 @@ mod tests {
     #[test]
     fn a_bucket_visible_before_its_count_still_renders_monotonic() {
         // The weak-ordering transient the render-side clamp guards: a scrape sees a per-bucket
-        // increment but not yet the matching `count` one (on aarch64 the two `Relaxed` writes in
-        // `observe` can be reordered). Model it directly, a bucket at 1 with `count` still 0, and
+        // increment but not yet the matching `count` one (the two `Relaxed` writes in `observe`
+        // carry no cross-thread order guarantee). Model it directly, a bucket at 1 with `count` still 0, and
         // assert the exposition stays monotonic: `+Inf` (and `_count`) clamp up to the bucket
         // cumulative rather than emitting a finite bucket that exceeds `+Inf`.
         let h = Histogram::default();

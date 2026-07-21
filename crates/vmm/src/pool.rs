@@ -29,7 +29,7 @@ const POOL_FD_HEADROOM: usize = 64;
 /// Dropping the pool tears down every pooled clone (each [`RunningVm`]'s own `Drop`);
 /// [`shutdown`](Pool::shutdown) is the graceful form. **Networked snapshots** pool without a
 /// concurrency limit: each clone recreates the baked-in tap in its own network namespace
-/// (ADR 017). **Confined pool**: set [`jail`](crate::BootConfig::jail) on `config` and
+/// (ADR 014). **Confined pool**: set [`jail`](crate::BootConfig::jail) on `config` and
 /// every pooled clone restores under the jailer, chroot, dropped uid, seccomp, its own netns,
 /// so prewarmed starts and confinement compose (needs real root, like any jailed boot).
 ///
@@ -38,7 +38,7 @@ const POOL_FD_HEADROOM: usize = 64;
 /// the bound, don't discover it via `EMFILE` mid-restore. [`new`](Pool::new) enforces the
 /// *stating*: an over-budget target logs one `tracing::warn!` naming the numbers and the fix
 /// (raise `ulimit -n`, or shrink the target) before the prefill runs. A warning, not a refusal,
-/// like the cgroup caps (ADR 013), sizing is fairness hygiene, not the isolation boundary,
+/// like the cgroup caps (ADR 010), sizing is fairness hygiene, not the isolation boundary,
 /// and the soft limit may be raised by the embedder after this process was probed.
 #[derive(Debug)]
 #[must_use = "dropping a Pool kills its pooled microVMs"]
@@ -64,7 +64,7 @@ impl Pool {
     pub fn new(snapshot: Snapshot, config: BootConfig, target: usize) -> Result<Self, VmmError> {
         // State the fd bound up front rather than letting the prefill discover it as an
         // illegible mid-restore `EMFILE` in whatever syscall lands first. Warn-only: sizing is
-        // fairness hygiene, not the isolation boundary (the ADR-013 fail-open posture).
+        // fairness hygiene, not the isolation boundary (the ADR 010 fail-open posture).
         if let Some((need, soft)) = nofile_soft_limit().and_then(|s| fd_budget_excess(target, s)) {
             tracing::warn!(
                 target,

@@ -24,6 +24,10 @@ allow = [
     # `foldhash` (the default hasher for aya's `hashbrown`, via `aya`/`aya-obj` in the eBPF
     # loader) is Zlib-licensed: OSI-approved and FSF-free/permissive. Added when aya entered the tree.
     "Zlib",
+    # The `dalek` record-signing subtree (`ed25519-dalek`, `curve25519-dalek`, `subtle`) is
+    # BSD-3-Clause: OSI-approved and FSF-free/permissive. Added when record signing entered the tree
+    # (decision 034).
+    "BSD-3-Clause",
 ]
 confidence-threshold = 0.9
 

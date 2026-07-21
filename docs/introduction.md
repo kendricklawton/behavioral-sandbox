@@ -11,7 +11,10 @@ dependency's install script, an AI-generated snippet, a sample under analysis) y
 at once: strong isolation, and a trustworthy account of what the code actually did. This is the
 engine for exactly that, the code stays on your own infrastructure (air-gapped or regulated is
 fine), and the watching and the policy live in the host kernel, outside the guest, so the record
-can't be forged by the code it is recording.
+can't be forged by the code it is recording. The finished record is also **host-signed**, so
+alteration after the run is detectable off-host (verify with `agent verify`); see the [threat
+model](./threat-model.md#record-integrity-beyond-the-guest) for exactly what that does and does not
+prove.
 
 The engine can be driven three ways: as the **`agent` CLI** (one sandbox per command), as a
 **Rust library** embedded in a larger application, or programmatically over a unix socket through

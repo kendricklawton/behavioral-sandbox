@@ -50,10 +50,12 @@ because `test_sneaky` raised, its `urlopen` never connected. The report is back 
 the record shows why it failed the way it did:
 
 ```console
-$ jq '{network, timing}' ci.json
+$ agent verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
+verified
+$ jq -r .record ci.json | jq '{network, timing}'   # unwrap the signed envelope, then project
 {
   "network": null,                     ← no NIC at all: the job could not touch the network
-  "timing": { "boot_ns": 127000000, "exec_ns": 2100000000 }
+  "timing": { "boot_ns": 127000000, "exec_wall_ns": 2100000000 }
 }
 $ tail -1 report.txt
 status=fail

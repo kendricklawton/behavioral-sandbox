@@ -61,10 +61,13 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     // A workload that touches a file in-guest and prints, interesting enough to leave a footprint
     // on every axis the CLI surfaces. Unjailed on purpose: the proof here is the audit face, and
     // the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
+    let signing_key = scratch.path().join("signing.key");
     let out = Command::new(env!("CARGO_BIN_EXE_agent"))
         .current_dir(&root)
         .env("AGENT_ROOTFS", root.join("artifacts/rootfs-agent.ext4"))
         .env("AGENT_MARKER", "AGENT-GUEST-READY")
+        // Keep the generated host signing key inside the scratch dir, not the real default path.
+        .env("AGENT_SIGNING_KEY", &signing_key)
         .args(["run", "--unjailed", "--net", "--trace", "--record"])
         .arg(&record_path)
         .arg("--record-summary")
@@ -100,11 +103,21 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         "the syscall axis is labeled honestly: {stdout}"
     );
 
-    // The exported record is one line of parseable JSON with the pinned top-level shape, and a
-    // capable host binds every axis (no coverage gap).
+    // The exported record is a signed envelope (decision 034): one line of JSON carrying the
+    // canonical record as an embedded string alongside an `ed25519` signature and its `key_id`.
     let json = std::fs::read_to_string(&record_path).expect("read the --record file");
     assert_eq!(json.lines().count(), 1, "one line of JSON: {json}");
-    let record: serde_json::Value = serde_json::from_str(&json).expect("record parses");
+    let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
+    assert_eq!(envelope["schema"], 2, "the signed delivery surface: {json}");
+    assert!(envelope["key_id"].as_str().is_some_and(|s| s.len() == 64));
+    assert!(envelope["signature"]
+        .as_str()
+        .is_some_and(|s| s.len() == 128));
+    // The record rides inside as a string; parse it and check the pinned top-level shape, and a
+    // capable host binds every axis (no coverage gap).
+    let record: serde_json::Value =
+        serde_json::from_str(envelope["record"].as_str().expect("record string"))
+            .expect("record parses");
     assert!(record["timing"]["boot_ns"]
         .as_u64()
         .is_some_and(|ns| ns > 0));
@@ -117,6 +130,47 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         record["coverage"].as_array().map(Vec::len),
         Some(0),
         "every axis binds on a capable host: {json}"
+    );
+
+    // The P19.3 demo: `agent verify` accepts the untouched record, and rejects it after one flipped
+    // byte, trusting the same host key that signed it (resolved from AGENT_SIGNING_KEY).
+    let verify_ok = Command::new(env!("CARGO_BIN_EXE_agent"))
+        .current_dir(&root)
+        .env("AGENT_SIGNING_KEY", &signing_key)
+        .args(["verify"])
+        .arg(&record_path)
+        .output()
+        .expect("run agent verify");
+    assert!(
+        verify_ok.status.success(),
+        "an untouched record verifies: {}",
+        String::from_utf8_lossy(&verify_ok.stderr)
+    );
+    // Flip one byte of the signature and re-verify: it must be rejected, not accepted.
+    let mut tampered = envelope.clone();
+    let sig = envelope["signature"].as_str().expect("sig");
+    let flipped = format!(
+        "{}{}",
+        if sig.starts_with('0') { "1" } else { "0" },
+        &sig[1..]
+    );
+    tampered["signature"] = serde_json::Value::String(flipped);
+    let tampered_path = scratch.path().join("tampered.json");
+    std::fs::write(
+        &tampered_path,
+        serde_json::to_string(&tampered).expect("reserialize") + "\n",
+    )
+    .expect("write tampered record");
+    let verify_bad = Command::new(env!("CARGO_BIN_EXE_agent"))
+        .current_dir(&root)
+        .env("AGENT_SIGNING_KEY", &signing_key)
+        .args(["verify"])
+        .arg(&tampered_path)
+        .output()
+        .expect("run agent verify on tampered");
+    assert!(
+        !verify_bad.status.success(),
+        "a flipped signature byte is rejected"
     );
 
     // The model-legible summary is a parseable one-line projection of the *same* run, materially
@@ -344,7 +398,7 @@ print('p14-9f-complete')
     );
 }
 
-/// The reference **agent-containment** example (ADR 035, docs/embedding.md), as a CI-reproducible proof.
+/// The reference **agent-containment** example (ADR 031, docs/embedding.md), as a CI-reproducible proof.
 /// The scripted agent (`docs/examples/agent-tool-loop.py`, no model, no secrets) runs in a sandbox
 /// egress-policed to **one** endpoint, calls one allowed "tool" and one forbidden one, and the
 /// host-observed record + its model-legible summary prove **exactly what it reached and what was

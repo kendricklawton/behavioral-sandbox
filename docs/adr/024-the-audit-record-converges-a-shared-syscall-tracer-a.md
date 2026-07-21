@@ -1,4 +1,4 @@
-# 028. The audit record converges: a shared syscall tracer, a single post-boot attach, and deterministic JSON *(2026-07-17)*
+# 024. The audit record converges: a shared syscall tracer, a single post-boot attach, and deterministic JSON *(2026-07-17)*
 
 **Context.** The audit record is the engine's deliverable: a host-observed account of what a run did,
 and its format is a contract the language SDKs parse. Closing it well answers four standing
@@ -7,9 +7,9 @@ structured JSON, the per-run overhead stays bounded even under concurrency, and 
 proven end to end.
 
 Those requirements collide with an earlier shape. A per-VM `SyscallTracer`, reconciled against the
-tap/meter's "attach after boot" via `ArmedProbes::arm()` → `bind()` (decision 027), attaches *N* copies
+tap/meter's "attach after boot" via the original `ArmedProbes::arm()` → `bind()`, attaches *N* copies
 of each `sys_enter_*` tracepoint and runs all of them on **every** matching host syscall, the
-O(sandboxes)-per-event shape decision 026 already rejected for `sched_switch`. Two forces pull against
+O(sandboxes)-per-event shape decision 023 already rejected for `sched_switch`. Two forces pull against
 each other: per-VM attach exists to catch the boot window before the guest is up, while a shared probe
 exists to keep the per-event cost and the ring-buffer volume bounded. The record's core (network +
 resources + denials) does not depend on the boot window, so the design resolves toward bounded
@@ -84,8 +84,8 @@ overhead. Every other axis fails loud rather than silent: a poisoned lock, a fai
 ring buffer each surface as a named gap in the record (the refinements above), so an empty footprint or
 zero CPU always means a quiet sandbox, never a dropped read.
 
-**Relationship to prior decisions.** This **supersedes the two-phase arm/bind of decision 027**: with
+**Relationship to prior decisions.** This **supersedes the original two-phase arm/bind attach**: with
 nothing per-VM left to pre-attach, its `arm()` → `bind()` reconciliation is gone. It extends the
 shared-probe treatment the CPU meter already used, closing the O(sandboxes)-per-event shape decision
-026 rejected for `sched_switch`. And the hand-rolled JSON follows the hand-framed wire of decision 002,
+023 rejected for `sched_switch`. And the hand-rolled JSON follows the hand-framed wire of decision 002,
 an SDK-parsed contract whose exact bytes are pinned, not derived.

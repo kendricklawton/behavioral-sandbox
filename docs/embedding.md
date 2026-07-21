@@ -6,7 +6,7 @@ API. The rustdoc on each item is the reference; this is the contract's shape and
 The second half draws the line this project refuses to cross, what the engine deliberately is
 **not**, because a runtime that quietly grows platform features stops being embeddable.
 
-Numbers in parentheses (013, 015, …) are dated
+Numbers in parentheses (010, 012, …) are dated
 [decision records](./adr/README.md); each ADR records the rationale and the alternatives that
 lost.
 
@@ -29,7 +29,7 @@ hardware) and Firecracker's jailer (chroot, uid/gid drop, seccomp, its own mount
 namespaces, a cgroup). An unset `jail` becomes `Jail::default()`; the opt-out for hosts that can't
 jail (no real root, no `jailer` binary) is the *differently named constructor*
 `Sandbox::open_unjailed`, so an unconfined sandbox is greppable in your source and can never happen
-by a forgotten flag (015). Artifacts (kernel, rootfs, `firecracker`) layer from the environment
+by a forgotten flag (012). Artifacts (kernel, rootfs, `firecracker`) layer from the environment
 (`AGENT_KERNEL`, `AGENT_ROOTFS`, …) under explicit `BootConfig` fields.
 
 ### Exec: synchronous, bounded, faithful
@@ -45,7 +45,7 @@ the driver observed, the guest can't lie about it). Three properties are load-be
   cooperatively → `ExecTimeout`), but the host keeps its own derived deadline (`ExecUnresponsive`)
   and an output cap (`OutputCap`), so a hostile or wedged guest can never park the caller or grow
   host memory. The in-guest agent is exec/IO convenience, never the security boundary.
-- **Per-exec inputs ride the call, under a secret-hygiene contract (018).** `stdin`, injected
+- **Per-exec inputs ride the call, under a secret-hygiene contract (015).** `stdin`, injected
   `files`, and `env` arrive with the request; env lands on the spawned command only, never the
   agent's process. Injected file contents and env *values* never appear in an engine log line, in
   any `VmmError`'s `Display`/`Debug`, or on the serial console, an error may name a file path or
@@ -55,7 +55,7 @@ the driver observed, the guest can't lie about it). Three properties are load-be
   dir) and `output_dir` + `collect_outputs()` (a writable image extracted rootlessly after
   teardown).
 
-### Sessions: the VM is the session (019)
+### Sessions: the VM is the session (016)
 
 Repeated `exec`s against one sandbox compose: the in-guest agent serves every connection from one
 persistent working directory, and the boot's overlay makes the wider guest filesystem accumulate
@@ -63,7 +63,7 @@ too. Install a package in exec 1, use it in exec 3. Session identity is VM ident
 ids, no session protocol: two isolated sessions are two VMs, so isolation between sessions is KVM,
 not agent bookkeeping. State's lifetime is the VM's; `shutdown` discards it with the overlay.
 
-### Budgets: quantities on one struct, failing open (013)
+### Budgets: quantities on one struct, failing open (010)
 
 `Limits` is the per-sandbox resource policy: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`),
 `wall` (one wall for the whole run, the boot deadline and each exec's budget), and `output_cap`.
@@ -91,21 +91,21 @@ it's deliberately bucketed).
 ### Lifetime: nothing leaks, even when *you* die
 
 Teardown is layered so no exit path leaks a VMM, a scratch dir, a tap, or a cgroup: `shutdown` is
-the polite form, `Drop` is the guarantee, and a cgroup-owned sentinel (014) reaps the VM even if
+the polite form, `Drop` is the guarantee, and a cgroup-owned sentinel (011) reaps the VM even if
 the embedding *process* is SIGKILL'd or OOM-killed. A `KillHandle` (cheap, cloneable, thread-safe)
 force-kills a sandbox whose `exec` some other thread is blocked in, the host-gave-up path.
 Residue from crashed embedders is reclaimed by `sweep_orphans` (ownership keyed on liveness, never
-on names; only your own euid's residue), so a crash-looping host stays serviceable (016).
+on names; only your own euid's residue), so a crash-looping host stays serviceable (013).
 
 ### Pre-warmed starts: snapshot an unjailed source, restore jailed clones
 
 `snapshot(dir)` pauses the VM and writes a portable bundle; `Vm::restore` (and the `Pool` built on
 it) brings up exec-ready clones in milliseconds, sharing the base disk and memory file read-only
-across clones. The confinement story is deliberate (010, 015): a *jailed* VM refuses snapshotting
+across clones. The confinement story is deliberate (009, 012): a *jailed* VM refuses snapshotting
 (its disk lives in the chroot), you snapshot an **unjailed pre-warmed source** that runs only your own
 warm-up, and restore **jailed clones** from it, which is where the untrusted code runs. A pooled
 clone is a pre-warmed session; entropy is reseeded per clone (VMGenID), and networked clones each
-recreate their tap in a private netns (017), so any number coexist.
+recreate their tap in a private netns (014), so any number coexist.
 
 **Sizing rule** (stated here so you never meet it as `EMFILE`): each live VM holds up to
 `FDS_PER_VM` (8) driver-side fds, so keep
@@ -157,7 +157,7 @@ non-goals, these belong to whatever hosts the engine, and PRs adding them are wr
   directory's permissions). A daemon that grows multi-tenant identity or a public HTTP surface is
   a *hoster*, not this repo.
 
-The line is a security boundary too (016): everything the engine ships is inert without host
+The line is a security boundary too (013): everything the engine ships is inert without host
 privileges the *hoster* grants, it self-limits (deny-by-default network, dropped-uid jail,
 own-euid sweep), and turning its tools into a multi-tenant service safely is the hoster's job.
 

@@ -104,8 +104,8 @@ fn addresses_the_guest_and_routes_host_to_guest() {
     let mut cfg = agent_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
-    let host_ip = vm.host_ip().expect("host ip when networked").to_string();
-    let guest_ip = vm.guest_ip().expect("guest ip when networked").to_string();
+    let host_ip = vm.ipv4().expect("ipv4 when networked").host.to_string();
+    let guest_ip = vm.ipv4().expect("ipv4 when networked").guest.to_string();
 
     // The guest kernel configured eth0 with its assigned address.
     let addr = vm
@@ -186,8 +186,8 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
     let mut cfg = agent_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
-    let host_ip6 = vm.host_ip6().expect("host v6 when networked").to_string();
-    let guest_ip6 = vm.guest_ip6().expect("guest v6 when networked").to_string();
+    let host_ip6 = vm.ipv6().expect("ipv6 when networked").host.to_string();
+    let guest_ip6 = vm.ipv6().expect("ipv6 when networked").guest.to_string();
 
     // The guest applied its static v6 address to eth0 (via `/sbin/net-up`, `ip` then `ifconfig`). A
     // missing address here means net-up didn't run or the guest busybox lacks v6 address support, the
@@ -284,8 +284,8 @@ fn two_networked_vms_run_in_isolated_netns() {
         "the two VMs must run in distinct network namespaces"
     );
     assert_eq!(
-        vm_a.guest_ip(),
-        vm_b.guest_ip(),
+        vm_a.ipv4().map(|l| l.guest),
+        vm_b.ipv4().map(|l| l.guest),
         "the netns model gives every VM the same fixed /30 (isolation is the namespace, not the address)"
     );
 
@@ -335,7 +335,7 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let netns = vm.netns().expect("netns when networked").to_string();
-    let host_ip = vm.host_ip().expect("host ip when networked").to_string();
+    let host_ip = vm.ipv4().expect("ipv4 when networked").host.to_string();
     let port = 45_000u16; // fixed; the netns is private, so no host-side port contention
 
     // A genuine host-side endpoint on the tap's host address, bound **inside the VM's netns**. It

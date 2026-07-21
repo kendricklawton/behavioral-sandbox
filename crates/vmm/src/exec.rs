@@ -142,7 +142,7 @@ pub(crate) fn run_exec<S: Read + Write>(
     // Inject input files first, then the terminal exec request. The injected bytes are secrets by
     // presumption (the secret-hygiene contract on `RunningVm::exec_with_files`): the borrowed-send
     // path serializes straight from the caller's slices into a single exact-sized wire buffer that
-    // the channel wipes after each send (ADR 018), so the engine keeps no extra copy of a file
+    // the channel wipes after each send (ADR 015), so the engine keeps no extra copy of a file
     // body or env value to strand, and nothing on this path logs one.
     let sent = (|| -> Result<(), VmmError> {
         for (path, data) in files_in {

@@ -9,7 +9,7 @@ proves **exactly what it reached and what was blocked**.
 
 The engine's contribution here is not a smarter agent; it is the containment and the trustworthy
 record. The model is always the *caller*, never part of the engine (see
-[decision 035](./adr/035-the-ai-scope-boundary-the-model-is-always-the-caller.md)):
+[decision 031](./adr/031-the-ai-scope-boundary-the-model-is-always-the-caller.md)):
 nothing in the host path runs inference or holds a key, which is exactly why this demo is
 CI-reproducible.
 
@@ -82,8 +82,10 @@ not have to: the record is observed from *outside* the guest, where the agent ca
 forge it.
 
 The full record (`record.json`) carries the same facts with the forensic detail, the per-flow byte
-and packet counts, the dropped-packet count on the denial, the VMM's host-syscall footprint. The
-summary is a **view** of it (no new observation; [decision 035](./adr/035-the-ai-scope-boundary-the-model-is-always-the-caller.md)),
+and packet counts, the dropped-packet count on the denial, the VMM's host-syscall footprint. It is
+signed with the host key, so `agent verify record.json` catches any tampering *after* the run, not
+just the guest's (decision 034). The
+summary is a **view** of it (no new observation; [decision 031](./adr/031-the-ai-scope-boundary-the-model-is-always-the-caller.md)),
 measurably smaller so it fits back into an agent's context. See
 [Using the agent CLI](./cli.md#watching-a-run-from-the-host) for all four faces of the one record.
 

@@ -2,7 +2,7 @@
 //! (`agent-vmm`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
 //! (`vmm_pid`/`netns`/`tap_name`) and fuse their output into the per-run [`RunRecord`].
 //!
-//! This is the caller-side launch sequence the loader's ADR log promises (ADRs 024/028):
+//! This is the caller-side launch sequence the loader's ADR log promises (ADRs 021/024):
 //! the driver and the eBPF loader stay independent crates; the CLI is where they meet.
 //!
 //! **Observation fails open; enforcement does not.** A host that can't load the shared probes (no
@@ -56,7 +56,7 @@ impl Observability {
 
     /// Bind the probes to one booted sandbox (post-boot, by plain values). With both shared probes
     /// live this is [`SandboxProbes::attach`], passing `egress` through: `Some(policy)` arms
-    /// enforcement on the tap (armed before it goes live, ADR 025), `None` is observe-only.
+    /// enforcement on the tap (armed before it goes live, ADR 022), `None` is observe-only.
     ///
     /// **Observation fails open; enforcement does not.** Without the shared probes the bundle
     /// simply doesn't attach and the record's coverage explains every unbound axis (a thinner but

@@ -1,4 +1,4 @@
-# 021. Syscall observability: a ring buffer of per-event records, a shared POD type, and an in-kernel filter *(2026-07-15)*
+# 018. Syscall observability: a ring buffer of per-event records, a shared POD type, and an in-kernel filter *(2026-07-15)*
 
 **Context.** The engine observes a sandbox's host footprint from outside the guest, and a bare
 syscall counter answers only "how many `execve`s". Real observability needs a **stream of per-event
@@ -14,7 +14,7 @@ three record shapes (a program path, a file path, a socket address), and a ring 
 shared POD type is what keeps the eBPF side isomorphic to the driver side: typed, ordered, no silent
 corruption, no leak.
 
-**Decision.** Three coupled choices, extending decision 020's loader:
+**Decision.** Three coupled choices, extending decision 017's loader:
 - **A ring buffer (`BPF_MAP_TYPE_RINGBUF`), not a perf event array.** The three `sys_enter_*`
   tracepoint programs `output` a fixed-size record into one MPSC `EVENTS` ring buffer; the loader
   drains it with a single in-order consumer ([`SyscallTracer::drain`]). The ring buffer is the modern
@@ -51,7 +51,7 @@ corruption, no leak.
   field reads (and their relocations) arrive when a later phase reads kernel structs.
 
 **Consequences and notes.**
-- This is still the **host's** footprint, not the guest's (decision 020's honest limit stands): a
+- This is still the **host's** footprint, not the guest's (decision 017's honest limit stands): a
   microVM services its syscalls in-guest. The filter's cgroup axis is how events are attributed to a
   specific sandbox: `cgroup_id_of_pid` resolves a VMM pid to its cgroup id (the inode of the cgroup
   dir, which equals `bpf_get_current_cgroup_id`), and `watch_cgroup` scopes the trace to it. The bridge

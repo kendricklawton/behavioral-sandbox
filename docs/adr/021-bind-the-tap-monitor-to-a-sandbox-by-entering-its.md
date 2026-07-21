@@ -1,7 +1,7 @@
-# 024. Bind the tap monitor to a sandbox by entering its network namespace *(2026-07-16)*
+# 021. Bind the tap monitor to a sandbox by entering its network namespace *(2026-07-16)*
 
 **Context.** A sandbox's tap (`fc0`) lives inside that sandbox's **own** network namespace
-(decision 017), so binding the tap monitor to one specific sandbox's traffic means attaching the `tc`
+(decision 014), so binding the tap monitor to one specific sandbox's traffic means attaching the `tc`
 programs to `fc0` *inside* that netns. Two forces make that awkward. First, aya resolves the interface
 and opens its netlink socket in the **calling thread's** netns, so the attach must physically run there.
 Second, the driver's existing netns tooling (`ip netns exec`, the jailer's `--netns`) all shells out or
@@ -25,15 +25,15 @@ the sandbox's netns while the rest of the loader stays in the host netns.
   `#![forbid(unsafe_code)]`, no `unsafe` block of ours. This is the first in-process netns entry in the
   repo; the driver's shell-out model can't carry a live attachment, so it doesn't apply here.
 - **Cleanup is netns teardown, not the loader's drop.** The in-kernel `tc` filter lives in the
-  sandbox's netns; the sandbox's teardown (`ip netns del`, decision 017) cascades the tap, its clsact
+  sandbox's netns; the sandbox's teardown (`ip netns del`, decision 014) cascades the tap, its clsact
   qdisc, and the filters away. So dropping the monitor frees only its userspace fds (the map, the
   programs), and a torn-down sandbox leaves no dangling filter even if the loader is gone, the same
-  no-pin, no-leak model as decisions 020/023. (The loader's own drop-detach targets the caller's netns,
+  no-pin, no-leak model as decisions 017/020. (The loader's own drop-detach targets the caller's netns,
   where the filter isn't, so it is a harmless no-op; the netns is the real reclaimer.)
 
 **Alternatives considered.**
 - **`ip netns exec <ns> <helper>` that pins the program + map to bpffs**, with the main loader reading
-  the pinned map. Rejected: it reintroduces **pinned residue** (against decision 020's no-pin default),
+  the pinned map. Rejected: it reintroduces **pinned residue** (against decision 017's no-pin default),
   needs an attach subcommand on the loader binary, and complicates teardown (unpin). `setns` keeps the
   drop-owned, no-pin lifetime.
 - **Move the whole process (or a dedicated long-lived thread) into the netns.** Rejected: the process

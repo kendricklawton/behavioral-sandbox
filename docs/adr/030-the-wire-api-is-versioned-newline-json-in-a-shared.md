@@ -1,4 +1,4 @@
-# 034. The wire API is versioned newline-JSON in a shared `agent-protocol` crate, not gRPC *(2026-07-17)*
+# 030. The wire API is versioned newline-JSON in a shared `agent-protocol` crate, not gRPC *(2026-07-17)*
 
 **Context.** `agent` exposes the engine over a wire API, and that wire is a contract downstream
 depends on: the language SDKs (separate repos) freeze against it, so its shape is a long-lived
@@ -13,15 +13,15 @@ returns a typed error, never a panic/hang/unbounded allocation.
 
 **Decision.** `agent`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
 over a unix socket**, and every message (request *and* response) carries a leading `schema` field.
-The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\*
-→ `close`. It is **not gRPC**.
+The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
+`trace_summary`)\* → `close`. It is **not gRPC**.
 
 **Why a `schema` field now, when the shape isn't frozen.** Precisely *because* it isn't frozen yet:
 stamping `schema: 1` on every message and rejecting a mismatch **up front, before the body is
 trusted**, means a client built against a future revision fails loudly instead of being
 half-understood. The stamp is the seam the SDKs freeze against. (It is distinct from the audit
-record's own `schema` and the CLI's `--json` run-result `schema`: three surfaces, three independent
-versions.)
+record's own `schema`, the CLI's `--json` run-result `schema`, and decision 034's signed-envelope
+`schema`: independent surfaces, independently versioned.)
 
 **Why a shared `agent-protocol` crate (serde-only, no `agent-vmm`).** The wire is the contract, not
 shared Rust internals. Putting the `Request`/`Response`/`Envelope` shapes and the bounded line codec
@@ -36,7 +36,8 @@ working-directory file by riding the engine's only file seam, a no-op `exec` tha
 returns an artifact, since the engine stages files *around* an exec, never standalone. `snapshot`
 calls `Sandbox::snapshot`, so a **jailed** session is a typed refusal (its disk is in the chroot),
 exactly as the library behaves; the client gets the bundle's **daemon-host directory**, not its bytes
-(bulk bytes stay off this line). `trace` returns the host-observed `RunRecord` built **non-destructively**
+(bulk bytes stay off this line). `trace` returns the host-observed `RunRecord` (since decision 034:
+wrapped in a host-signed envelope, hash-chained across the session) built **non-destructively**
 from a live probe snapshot, so a client may ask repeatedly mid-session without finalizing observation;
 it is fail-open (a capability-less host answers a coverage-gapped record, never an error). The
 pre-warmed **pool** (`--prewarm N`) serves only a **bare-default** `open` (the pool's clones carry the

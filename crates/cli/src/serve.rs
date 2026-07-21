@@ -5,9 +5,9 @@
 //! use, **still engine, not platform**, no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
-//! **Shape.** One connection is one sandbox **session** (the VM *is* the session, ADR 019),
+//! **Shape.** One connection is one sandbox **session** (the VM *is* the session, ADR 016),
 //! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`agent_protocol`] crate (ADR 034);
+//! is the versioned newline-JSON contract in the shared [`agent_protocol`] crate (ADR 030);
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
@@ -36,7 +36,7 @@
 //!
 //! **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
 //! ends, tearing the microVM down; and losing the whole daemon process (SIGKILL, OOM) can't leak a
-//! VM either, the lifetime sentinel (ADR 014) reaps it, and the next start clears a stale
+//! VM either, the lifetime sentinel (ADR 011) reaps it, and the next start clears a stale
 //! socket file. A supervisor's SIGTERM/SIGINT is handled: the daemon logs, unlinks its socket, and
 //! exits cleanly (in-flight sessions end crash-consistently, their VMs reaped by the sentinel); a
 //! graceful *drain* of in-flight sessions remains a later ops concern.
@@ -70,7 +70,7 @@ pub struct ServeArgs {
     /// built (no KVM, no root for jailed clones), every session cold-boots. Omit (or `0`) to disable.
     #[arg(long, value_name = "N")]
     prewarm: Option<usize>,
-    /// Run every session's VMM without the jailer. The default is confined (jailed, ADR 015,
+    /// Run every session's VMM without the jailer. The default is confined (jailed, ADR 012,
     /// needs real root + the `jailer` binary); this is the daemon-wide opt-out for hosts that can't
     /// jail. A **client never chooses this**, the confinement posture is the hoster's, set here.
     #[arg(long)]
@@ -115,6 +115,9 @@ pub(crate) struct Server {
     pub(crate) jailed: bool,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
     pub(crate) observ: Observability,
+    /// The host record-signing key (decision 034): the `trace` reply signs the finalized record with
+    /// it so a client detects post-hoc alteration. Host-side; the guest never sees it.
+    pub(crate) signing_key: agent_probes_loader::HostKey,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
     /// pool could not be built. Behind a `Mutex`: `take`/`refill` need `&mut`, and sessions run on
     /// many threads.
@@ -172,7 +175,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // A supervisor's stop signal gets a prompt, clean exit: log, unlink the socket (so a restart
     // never depends on the stale-path heuristic), remove this daemon's bundle dirs (else a
     // `--prewarm` restart leaks a guest-RAM-sized bundle each time), and exit 0. In-flight sessions
-    // end crash-consistently; their VMs are reaped by the lifetime sentinel (ADR 014).
+    // end crash-consistently; their VMs are reaped by the lifetime sentinel (ADR 011).
     install_signal_handler(
         args.socket.clone(),
         vec![
@@ -185,8 +188,8 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     sweep_stale_agent_bundles(&base.scratch_dir);
     // Also reclaim the per-VM residue (scratch dirs + their network namespaces) a crashed *driver*
     // leaves: the lifetime sentinel reaps the VM processes, but dirs and netns are out of its scope
-    // (ADR 014), so without this they accumulate across restarts. This is the boot-time GC the engine
-    // owes its host (ADR 016); safe alongside live sessions (per-dir liveness + euid ownership).
+    // (ADR 011), so without this they accumulate across restarts. This is the boot-time GC the engine
+    // owes its host (ADR 013); safe alongside live sessions (per-dir liveness + euid ownership).
     sweep_orphaned_vms(&base.scratch_dir);
     // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
     // explicitly either works or the daemon refuses to start, an operational surface the hoster
@@ -215,11 +218,25 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
     // large artifact (boot scratch, prewarm, snapshots) follows.
     let snapshot_base = snapshots_dir(&base.scratch_dir);
+    // Load (or generate on first use) the host record-signing key, so the `trace` reply carries a
+    // signed envelope (decision 034). Fail-closed like the metrics bind: refuse to start rather than
+    // serve records that claim to be verifiable but aren't signed. The daemon has no `.agent.toml`
+    // layer (env + flags only), so the path resolves from `AGENT_SIGNING_KEY` or the default.
+    let signing_key = match agent_probes_loader::HostKey::load_or_generate(
+        &crate::config::signing_key_path(None),
+    ) {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::error!(error = %e, "cannot establish the record-signing key; refusing to start");
+            return ExitCode::from(EXIT_OPERATIONAL);
+        }
+    };
     let pool = build_optional_pool(args.prewarm, &base, jailed);
     let server = Arc::new(Server {
         base,
         jailed,
         observ: Observability::load(),
+        signing_key,
         pool,
         snapshot_base,
         snapshot_seq: AtomicU64::new(0),

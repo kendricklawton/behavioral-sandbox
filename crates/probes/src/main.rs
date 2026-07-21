@@ -174,7 +174,7 @@ const FILTER_CGROUP: u32 = 1;
 ///. **One shared tracer, a target *set*** is what keeps host-syscall observation bounded under
 /// many concurrent sandboxes: the three `sys_enter_*` tracepoints are global, so a tracer-per-sandbox
 /// would attach (and run) *N* copies of each program on *every* matching syscall (O(sandboxes) per
-/// syscall, the shape ADR 026 rejects for `sched_switch`). Instead one shared tracer is attached
+/// syscall, the shape ADR 023 rejects for `sched_switch`). Instead one shared tracer is attached
 /// once and every sandbox registers its cgroup here; the hot path is a single hash lookup, and
 /// [`EVENTS`] only ever carries the registered cgroups' events (not the whole host's). Consulted only
 /// when [`TRACE_SET`] is on; empty + off is the load-time single-[`FILTER`] behaviour.

@@ -2,6 +2,8 @@
 # eBPF objects build to their own target dir under the git-ignored root target
 **/target/
 **/*.rs.bk
+# Crash core dumps (e.g. a linker OOM writes `core.<pid>` to the cwd) — never committed.
+core.*
 .env
 .env.local
 *.log

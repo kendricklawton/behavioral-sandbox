@@ -27,7 +27,7 @@
 //! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
 //! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`], the shared-base path, not a
 //! full rootfs copy), a **NIC** (the tap lives in a per-VM netns the jailer joins via `--netns`,
-//! ADR 017), **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
+//! ADR 014), **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
 //! (the bundle staged into the chroot; a confined prewarmed pool falls out). Leak-proof, cgroup-owned
 //! teardown lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's
 //! cgroup at its precomputed path, so host death can't leak a jailed VMM either.
@@ -300,7 +300,7 @@ pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result
 /// jailed Firecracker sees it. When the scratch base is **not** a shared mount (a hoster pointed
 /// `scratch_dir` at a private mount, so the propagation can't reach the slave namespace), fall back
 /// to a read-only **copy**, correct and still base-immutable, just not page-cache-deduped. Memory-sharing is
-/// a best-effort property; the isolation is not (ADR 013/014), and the copy confines identically.
+/// a best-effort property; the isolation is not (ADR 010/011), and the copy confines identically.
 ///
 /// Returns the chroot-relative path to name in the API, and `Some(host_mount_path)` when a bind mount
 /// was made, so teardown unmounts it before reclaiming the scratch dir (`None` for the copy fallback,
@@ -521,7 +521,7 @@ struct Delegated {
 }
 
 /// Read which controllers the cgroup root delegates. Absent/unreadable (a bare container) reads all
-/// false, so the caller passes no `--cgroup` and the jailed boot still runs (fail-open, ADR 013).
+/// false, so the caller passes no `--cgroup` and the jailed boot still runs (fail-open, ADR 010).
 fn read_delegated() -> Delegated {
     let subtree =
         std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control").unwrap_or_default();

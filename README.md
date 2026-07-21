@@ -11,8 +11,9 @@ host-observed record of exactly what it did.**
 agent runs untrusted code inside a **Firecracker** microVM, so the trust boundary is the CPU (KVM),
 not guest-side software. Around that microVM, **host-side eBPF** (via **aya**) watches and enforces
 what the code does, its syscalls, its network, its cgroup, from *outside* the guest, where the code
-can't see or subvert it. Every run yields a tamper-evident **audit record**, host-observed, of
-exactly what happened: the network flows, the notable syscalls, the resources it used, and any
+can't see or subvert it. Every run yields a tamper-evident **audit record**, host-observed and
+**host-signed** (so alteration after the run is detectable off-host, verify it with `agent verify`),
+of exactly what happened: the network flows, the notable syscalls, the resources it used, and any
 egress that was denied.
 
 It is an **engine, not a platform**: a runtime plus a clean driver API you self-host, with no
@@ -24,7 +25,7 @@ Built in the open, milestone by milestone, each one shipping as a working demo.
 
 ## Getting started
 
-**Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` or `aarch64` host, kernel
+**Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` host, kernel
 **≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.9 on
 `PATH` (the engine drives it, it doesn't bundle it). `cargo xtask setup` (or `agent doctor` once
 built) reports exactly what your host is missing before the first sandbox.
@@ -84,11 +85,13 @@ rev. A first stable release is planned but **not yet scheduled**, and there is a
 work before it. The project is developed by a small group: **only project collaborators commit code**
 (the repo is not open to outside pull requests yet, see [CONTRIBUTING](CONTRIBUTING.md)).
 
-**Verified on:** the host-safe gate (build, tests, lints) runs in CI on **Ubuntu 24.04** (`x86_64`
-and `aarch64`) on every change; the privileged path (microVM boot, the jailer, the eBPF probes, the
-integration suite) is currently hand-verified on **Arch Linux** with **Firecracker v1.9**, with
-Ubuntu LTS validation in progress. `agent doctor` reports your own host's readiness. See
-[Supported platforms](docs/cli-install.md#supported-platforms).
+**Verified on:** the host-safe gate (build, tests, lints) runs in CI on **Ubuntu 24.04** `x86_64`
+on every change; the privileged path (microVM boot, the jailer, the eBPF probes, the integration
+suite) runs nightly in CI on a GitHub-hosted **Ubuntu 24.04** `x86_64` runner (nested KVM) and is
+hand-verified on **Arch Linux** during development, both with **Firecracker v1.9**. `x86_64` is the
+only supported architecture: nothing untestable is claimed, and aarch64 returns only with hardware
+and a privileged CI lane behind it (decision 032). `agent doctor` reports your own host's
+readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).
 
 ## How it fits together
 

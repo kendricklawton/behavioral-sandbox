@@ -1,23 +1,24 @@
-# 029. The observability face: the CLI carries the audit surface on flags, the live view draws on stderr *(2026-07-17)*
+# 025. The observability face: the CLI carries the audit surface on flags, the live view draws on stderr *(2026-07-17)*
 
 **Context.** The engine's product is a host-observed record of what untrusted code did; that record
 is worthless if it is not *legible* at the point of use, the CLI. Three audiences pull in different
 directions from the one run: a human wants a readable trail after the fact, a machine wants a
 deterministic surface it can diff, and an operator wants to watch the network and syscalls unfold
 live. Serving all three could sprawl into three mechanisms and three frozen formats; the standing
-constraint is that only one machine contract exists to freeze (`RunRecord::to_json`, decision 028)
+constraint is that only one machine contract exists to freeze (`RunRecord::to_json`, decision 024)
 and that the house stream rule (stderr carries diagnostics, stdout carries the run's result) keeps a
 pipeline clean. This decision fits all three faces onto one launch path without a second promised
 format.
 
 **Decision.** What a run did becomes *legible* at the CLI, on three composable `run` flags over one
 mechanism: `--trace` (the human-readable trail, on **stdout** after the run), `--record FILE` (the
-deterministic JSON record, the machine surface), and `--watch` (a live full-screen view, on
+deterministic JSON record, the machine surface; decision 034 later wraps this file in a host-signed
+envelope that `agent verify` checks), and `--watch` (a live full-screen view, on
 **stderr**, while the command runs). A fourth flag, `--net`, boots the sandbox with its NIC so
 there is a tap to observe (deny-by-default unchanged: no allowance means nothing past the host /30).
-Any of the three audit flags triggers the same launch sequence decision 028 defined, load the
+Any of the three audit flags triggers the same launch sequence decision 024 defined, load the
 shared tracer + meter, boot, `SandboxProbes::attach` by plain values, exec, `collect` while the
-sandbox is alive, composed **in the CLI**, never in `agent-vmm` (decisions 024/026 hold: the two
+sandbox is alive, composed **in the CLI**, never in `agent-vmm` (decisions 021/023 hold: the two
 tracks still bridge only by `vmm_pid`/`netns`/`tap_name`).
 
 **Stream discipline decides where each face lives.** The house rule is "stderr carries diagnostics,
@@ -26,7 +27,8 @@ diagnostics* and draws on **stderr** (ratatui over a stderr backend; stdout stil
 guest's output afterwards, `--watch --json` composes). The trail and the record are *requested run
 output*, stdout / a file. `--trace` conflicts with `--json` (two formats interleaved on one stream
 helps no one); machine consumers combine `--json --record FILE` instead. The pretty trail makes
-**no stability promise**, the byte-stable contract is `RunRecord::to_json` alone (decision 028),
+**no stability promise**, the byte-stable contract is `RunRecord::to_json` alone (decision 024;
+decision 034 later adds the signed envelope as a second pinned schema *carrying* those bytes),
 and the trail says so in the docs rather than growing a second frozen format.
 
 **The live view is a reader, and the record stays authoritative.** `--watch` polls a new

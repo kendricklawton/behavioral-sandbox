@@ -1,4 +1,4 @@
-//! The consolidated **trust-story** suite (the security boundary, ADR 033): one hostile guest
+//! The consolidated **trust-story** suite (the security boundary, ADR 029): one hostile guest
 //! run, contained on every axis, and the containment **shown in the host-observed audit record**,
 //! plus the proof that the guest can neither see nor disable the probes doing the observing.
 //!
@@ -102,7 +102,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     let meter = SharedMeter::load().expect("load the shared CPU meter");
 
     let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
-    let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
+    let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
     let host_u32 = u32::from(host_ip);
 
     // Attach the full bundle to this sandbox **enforcing** a deny-by-default egress policy whose
@@ -260,7 +260,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
     let meter = SharedMeter::load().expect("load the shared CPU meter");
 
     let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
-    let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
+    let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
     let host_u32 = u32::from(host_ip);
 
     // Observe-only (no egress policy): the point is visibility of the probe, not enforcement.
@@ -372,7 +372,7 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         return;
     };
     let vm = Vm::boot(cfg).expect("a networked agent microVM should boot");
-    let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
+    let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
     let host_u32 = u32::from(host_ip);
 
     // Cap first, then attach: the VMM enters the limited cgroup before the probes resolve its cgroup

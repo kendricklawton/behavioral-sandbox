@@ -19,7 +19,9 @@ What the engine is protecting, in priority order:
    bleed between two sandboxes on one host. (This is what lets a hoster place mutually-distrusting
    callers on shared hardware; *whose* run is whose is the hoster's concern, not the engine's.)
 3. **The audit record's integrity.** What the host reports a run did is truthful: the guest can
-   neither forge, evade, nor disable the observation.
+   neither forge, evade, nor disable the observation, and once finalized the record is **host-signed**,
+   so a consumer detects any alteration made after it leaves the producing host (see [Record integrity
+   beyond the guest](#record-integrity-beyond-the-guest)).
 4. **Deny-by-default.** A run with no explicit policy reaches no network and holds minimal
    capability; every allowance is explicit and recorded.
 
@@ -63,6 +65,31 @@ on every axis at once: it exfiltrates (denied and recorded), floods the network 
 exhausts memory and forks a storm (bounded by the cgroup, zero host threads), and hunts for the
 probes (finds nothing, and is recorded anyway), and each attempt fails while the run stays
 contained and usable. "Safe for multi-tenant hosting" means exactly this suite green, nothing less.
+
+## Record integrity beyond the guest
+
+The property above (the guest can neither forge nor evade the observation) is one half of
+"tamper-evident." The other half concerns a **different** adversary than the hostile guest this model
+otherwise assumes: a party that alters the record **after** it leaves the producing host, a
+compromised relay, an operator, or the transport a supervisor reads it over. To close that gap the
+loader **signs** each finalized record with a host key the guest never sees (an `ed25519` detached
+signature over the canonical record bytes, decision 034), and ships a verify path (`agent verify`, the
+library `verify`, and the daemon's signed `trace` reply).
+
+- **What the signature proves:** the record was not altered after the producing host signed it. A
+  consumer holding the trusted public key detects any changed byte, dropped field, or substituted
+  record, without trusting the host, operator, or transport that relayed it.
+- **What it does not prove:** that a **compromised producing host** told the truth. A host that holds
+  the signing key at signing time can sign a consistent lie; the signature authenticates *"this host
+  attests to these bytes,"* not *"these bytes are true."* This is the same trust root the boundary
+  already fixes (trust the host, not the guest), now verifiable off-host, not a new anchor. Detecting a
+  lying host is the hoster's key custody and host hardening, outside this engine.
+- **Custody is the hoster's** (engine, not platform): the engine generates a host key on first use and
+  signs; tenant keys, a KMS, key distribution, and revocation are the hoster's. A record's `key_id`
+  names the signing key, so a rotated key doesn't invalidate records already signed.
+
+See [decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md) for the full model
+and [`agent verify`](./cli.md#agent-verify) for the verify path.
 
 ## Assumptions and residual risk
 

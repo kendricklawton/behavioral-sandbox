@@ -243,10 +243,10 @@ fn restored_clones_do_not_bleed_state_under_load() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_networked_clones_coexist_each_in_its_own_netns() {
-    // Retires ADR 011's one-live-networked-clone limit. On v1.9 (no `network_overrides`)
-    // every clone must present the snapshot's baked-in tap name, which in a shared host netns could
-    // exist only once, so only one networked clone could be live. Under the netns model each clone
-    // recreates that tap in its **own** network namespace, where the baked-in identity is already
+    // The netns model (ADR 014) retires the one-live-networked-clone limit. On v1.9
+    // (no `network_overrides`) every clone must present the snapshot's baked-in tap name, which in a
+    // shared host netns could exist only once, so only one networked clone could be live. Each clone
+    // now recreates that tap in its **own** network namespace, where the baked-in identity is already
     // correct, so N networked clones run at once. This proves two concurrent networked clones, each
     // isolated in its own netns, each carrying the baked identity, each reaching its own host end.
     if !have_net_admin() {
@@ -259,7 +259,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
     let mut cfg = agent_rootfs_config();
     cfg.enable_network = true;
     let source = Vm::boot(cfg.clone()).expect("networked agent microVM should boot");
-    let source_guest_ip = source.guest_ip().expect("source guest ip");
+    let source_guest_ip = source.ipv4().expect("source ipv4").guest;
     let source_tap = source.tap_name().expect("source tap name").to_string();
     let bundle = TmpDir::new("snap-net-warm");
     let snap = source
@@ -280,7 +280,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
             "each clone reuses the snapshot's recorded tap name"
         );
         assert_eq!(
-            clone.guest_ip(),
+            clone.ipv4().map(|l| l.guest),
             Some(source_guest_ip),
             "each clone keeps the snapshot's baked-in /30 (correct in its own netns)"
         );
@@ -294,7 +294,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
     // Both are actually functional at the same time: each guest reaches its own host end (proving the
     // recreated tap in each netns is live), and stays deny-by-default (no default route).
     for (label, clone) in [("A", &clone_a), ("B", &clone_b)] {
-        let host_ip = clone.host_ip().expect("clone host ip").to_string();
+        let host_ip = clone.ipv4().expect("clone ipv4").host.to_string();
         let ping = clone
             .exec(
                 &[
@@ -486,12 +486,12 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
-    // ADR 011, entropy + clocks. Every clone wakes from the same memory image, so if the
+    // ADR 009, entropy + clocks. Every clone wakes from the same memory image, so if the
     // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical, the
     // classic clone-entropy vulnerability (shared session keys/nonces/UUIDs). The pinned stack has
     // both halves of the fix (Firecracker v1.9 ships VMGenID; kernel 6.1 has the vmgenid driver,
     // which reseeds the CRNG on a generation bump): this proves it end to end. Clock skew is
-    // measured and reported, not asserted (ADR 011 records the posture).
+    // measured and reported, not asserted (ADR 009 records the posture).
     let bundle = TmpDir::new("snap-entropy");
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 

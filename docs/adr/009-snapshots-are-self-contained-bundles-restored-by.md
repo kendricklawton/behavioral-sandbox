@@ -1,4 +1,4 @@
-# 010. Snapshots are self-contained bundles restored by staging the disk *(2026-07-12)*
+# 009. Snapshots are self-contained bundles restored by staging the disk *(2026-07-12)*
 
 **Context.** The engine's fast-start story rests on snapshots: boot one microVM, snapshot it, then
 restore many clones (and keep a pre-warmed pool warm) instead of cold-booting each. Restore is
@@ -74,9 +74,25 @@ contract without a shared mutable backing file.
   before returning, its analogue of boot's userspace-marker wait. Restore of a pre-warmed agent VM measured
   ~8 ms vs ~300 ms cold boot, then the clone runs code.
 - **Still deferred:** a snapshot with an **input or output device** is a typed error (per-clone
-  images a restore can't yet recreate). A **NIC** is no longer deferred: decision 011 restores
-  networked clones with a fresh identity. `ci-privileged` now runs the VM tests serially (they boot
+  images a restore can't yet recreate). A **NIC** is no longer deferred: a networked clone restores
+  into a fresh per-VM netns and reuses the snapshot's baked-in identity, isolated by its namespace
+  (decision 014, superseding the earlier fresh-identity re-addressing).
+  `ci-privileged` now runs the VM tests serially (they boot
   real microVMs and some assert on host-global leak state).
+- **Restore identity: entropy and clocks** *(folded from the retired restore-identity record,
+  2026-07-21)*. **Entropy: rely on VMGenID, and prove it.** Both halves are already in the pinned
+  stack: Firecracker v1.9 ships the VMGenID device and bumps the generation on snapshot restore, and
+  the pinned guest kernel's `vmgenid` driver reseeds the kernel CRNG on a generation bump.
+  `restored_clones_do_not_share_entropy_or_freeze_the_clock` proves it end to end: two clones
+  restored from one snapshot draw from `getrandom` immediately after restore, the dangerous window
+  before any interrupt-entropy reseed, and the draws differ. No engine mechanism was added because
+  none is needed; if a future kernel/VMM pin loses either half, that test fails and the gap is
+  visible, not silent. **Clocks: document the staleness; don't fix it up.** kvm-clock keeps the
+  monotonic clock sane across restore, but the guest's wall clock lags by the snapshot's age; the
+  engine does not reach into the guest to set the time (a fix-up belongs to the workload, and the
+  audit log timestamps host-side). A documented limitation the pre-warmed-pool docs carry: code that
+  trusts guest wall-clock time (TLS validity windows, token expiry) can misbehave in a clone until
+  it resyncs.
 - **Jailed restore stages the bundle into the chroot** *(2026-07-14)*: with `BootConfig.jail`
   set, the clone spawns under the jailer and this decision's staging happens chroot-relative, the
   state file copied in, the memory file and a shared base disk **bind-mounted read-only** (clones

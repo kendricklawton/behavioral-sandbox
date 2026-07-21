@@ -43,7 +43,7 @@ agent run [FLAGS] -- <cmd> [args…]
 | `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host end of its /30. |
 | `--allow IP[/CIDR][:PORT][/PROTO]` | Allow one egress destination past the deny-by-default tap (repeatable), e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires `--net`; builds the run's egress policy, armed before the tap goes live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced run. |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
-| `--record FILE` | Attach the probes and write the run's deterministic **audit record** (one line of byte-stable JSON) to `FILE` for later inspection. |
+| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope (decision 034) so alteration is detectable; check it with [`agent verify`](#agent-verify). |
 | `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record (what it reached, what egress was denied, its resource envelope, any coverage gap) shaped for an agent's observe→act loop. |
 | `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues (after the command finishes, the view stays up until closed). |
 | `--log FILTER` | Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`. |
@@ -84,6 +84,39 @@ delegation, the kernel version, the boot artifacts, and the eBPF capabilities, e
 without it). It exits non-zero when a hard prerequisite is missing, so `agent doctor && agent run …`
 gates cleanly. A footer restates the fails-open-vs-hard split. (`cargo xtask setup` renders the same
 checks for a dev box, plus the build-toolchain rows.)
+
+## `agent verify`
+
+`agent run --record` and the daemon's `trace` reply sign the finalized record with a **host key** the
+guest never sees (an `ed25519` detached signature over the canonical record bytes, decision 034), so a
+consumer can detect any alteration made *after* the producing host. The record file is a schema-2
+envelope, `{schema, key_id, signature, record}`, with the record carried inside as a string.
+
+`agent verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
+mismatch:
+
+```console
+agent verify run.json                      # trusts this host's own signing key
+agent verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
+```
+
+The trust root is the host signing key (decision 029: trust the host, not the guest). This detects
+post-hoc alteration; it does **not** prove a *compromised* producing host didn't sign a lie. Key
+custody and rotation are the hoster's: the key path resolves from `AGENT_SIGNING_KEY` (or
+`signing_key` in `.agent.toml`, else a data-dir default), generated on first use; a record's `key_id`
+names the key that signed it.
+
+**Key rotation.** `agent verify` trusts a *set* of keys, so rotating the host key doesn't invalidate
+records already signed. Keep the retired public keys (their `key_id`s) listed in `AGENT_TRUSTED_KEYS`
+(comma-separated) or `trusted_keys` in `.agent.toml`, and `agent verify` trusts that set together with
+the current signing key and any `--key` given, so old and new records both verify.
+
+**Session hash-chain.** A one-shot `agent run --record` writes a single, unchained record. Within a
+**session** (the [daemon](./daemon.md)'s `trace` verb), each record additionally commits to the
+previous one's hash (a `prev` field), so the *sequence* is tamper-evident as a whole: a client that
+collects the records can detect a reordered, inserted, or deleted one, not just a single-record edit
+(via the library `verify_chain`). Truncating the tail of a chain is not detectable without an external
+anchor (the append-only limitation).
 
 ## Configuration
 
@@ -192,6 +225,7 @@ few orthogonal verbs, or named below as deliberately out of scope. The map:
 | Networking (NIC) | `--net` |
 | Egress policy (`EgressPolicy`) | `--allow IP[/CIDR][:PORT][/PROTO]` |
 | Host-observed audit record | `--trace` (human), `--record FILE` (JSON), `--record-summary FILE` (model-legible), `--watch` (live) |
+| Verify a signed record | `agent verify <record>` |
 | Structured run result | `--json` |
 | Host readiness | `agent doctor` |
 | Config layering | flags > env (`AGENT_*`) > `.agent.toml` > defaults |

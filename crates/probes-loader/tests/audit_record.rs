@@ -95,7 +95,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     // Boot a networked sandbox. Unjailed on purpose: the proof is the fused record and the tap flows,
     // not the jailer, and the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
-    let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
+    let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
 
     // Attach the bundle to *this* sandbox by the plain values the driver exposes, the exact
     // arm-free, single post-boot `attach` a caller will use. Observe-only (no egress policy).
@@ -219,8 +219,9 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
     let meter = SharedMeter::load().expect("load the shared CPU meter");
     let vm = Vm::boot(networked_agent_config()).expect("a networked agent microVM should boot");
     let host_ip6 = vm
-        .host_ip6()
-        .expect("a networked VM exposes its v6 host end");
+        .ipv6()
+        .expect("a networked VM exposes its v6 host end")
+        .host;
 
     // Enforce a v6 policy: only host_ip6:9999/udp is allowed (ICMPv6 ND is always allowed in-kernel,
     // so the guest can still resolve the host end). Attaching with `Some(policy)` arms enforcement

@@ -24,7 +24,7 @@
 //! **Honest limits.** The unprotected window is spawn → cgroup enrollment (microseconds; a driver
 //! killed inside it leaks that one VMM, as before). A host that offers no writable cgroup v2 (no
 //! `/sys/fs/cgroup`, or an unwritable one) degrades to `Drop`-only teardown with a warning, the
-//! caps here are leak-proofing, not the isolation boundary, so they fail open (ADR 013). And
+//! caps here are leak-proofing, not the isolation boundary, so they fail open (ADR 010). And
 //! the sentinel reclaims the VM *process tree* and its cgroups; scratch dirs and taps left by a
 //! `SIGKILL`ed driver are inert residue (no CPU, no RAM, no KVM), reclaimed by the next boot's leak
 //! checks or a reboot, not by the sentinel.
@@ -161,7 +161,7 @@ impl VmLifetime {
     /// Adopt a directly-spawned VMM: enroll `pid` in a fresh lifetime cgroup named `name` under the
     /// driver's own cgroup, and arm the sentinel on it. Best-effort, a host without writable
     /// cgroup v2 gets a warning and `Drop`-only teardown (never an error: leak-proofing fails open,
-    /// ADR 013).
+    /// ADR 010).
     pub(crate) fn adopt(pid: u32, name: &str) -> Self {
         let own_cgroup = match create_lifetime_cgroup(pid, name) {
             Ok(dir) => Some(dir),

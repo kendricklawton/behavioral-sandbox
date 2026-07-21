@@ -45,6 +45,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The CLI's `.agent.toml` config file layer. Parse-only; keys mirror the `AGENT_*` env names.
 toml = "0.8"
+# Record integrity: an `ed25519` detached signature over the canonical record bytes (decision 034),
+# so a consumer detects post-hoc alteration off-host. The audited, standard implementation, never a
+# hand-rolled one; keygen randomness is read from `/dev/urandom` (Linux-only engine), so no `rand`.
+ed25519-dalek = "2"
+# SHA-256 for the record hash-chain (decision 034): each record commits to the previous one's hash.
+# Already pulled in transitively by `ed25519-dalek`; pinned here so the loader names it directly.
+sha2 = "0.10"
 # Structured logging to stderr; stdout stays reserved for a run's result / audit log.
 tracing = "0.1"
 # `json`: the daemon's `--log-json` machine-readable encoding of the same structured events.
@@ -54,6 +61,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`
 # re-allows them in tests. Enforced by the `clippy … -D warnings` step in CI and `cargo xtask ci`.
 # Each crate opts in with `[lints] workspace = true`.
+# The `ed25519`/`sha2` record-signing path (decision 034) is heavy in an unoptimized build, curve
+# arithmetic runs 10-40x slower, which makes debug tests crawl and `bench-sign` in a dev build report
+# meaningless numbers. Optimize just those crates even in the dev profile (the dalek crates' own
+# recommendation); it leaves everything else debuggable. The definitive `bench-sign` number is still
+# a `--release` run.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"

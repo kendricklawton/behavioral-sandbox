@@ -140,9 +140,9 @@ fn defined_decisions(root: &Path) -> Result<BTreeSet<u32>> {
 }
 
 /// Every ADR number the text cites, with its 1-based line. Two interchangeable spellings are
-/// scanned, `ADR 013` (crate comments) and `decision 013` (docs/ROADMAP/.rules), each in singular,
-/// plural, and joined forms: `Decision 013`, `decision 013/014`, `decisions 024, 026`,
-/// `ADRs 024 and 026`.
+/// scanned, `ADR 010` (crate comments) and `decision 010` (docs/ROADMAP/.rules), each in singular,
+/// plural, and joined forms: `Decision 010`, `decision 010/011`, `decisions 021, 026`,
+/// `ADRs 021 and 026`.
 ///
 /// Scans a **line-joined** view (each source line separated by a single space) so a citation
 /// wrapped across a line break (`decision\n029`, as several live docs do) still parses as one token;
@@ -351,12 +351,12 @@ mod tests {
 
     #[test]
     fn citations_parse_single_joined_and_plural_forms() {
-        let text = "per decision 013.\nDecisions 024 and 026 agree; decision 013/014 too.\n\
+        let text = "per decision 010.\nDecisions 021 and 026 agree; decision 010/011 too.\n\
                     predecision 999 is not a citation, nor is decision 12 or 1234.";
         let got = cited_decisions(text);
         assert_eq!(
             got,
-            vec![(1, 13), (2, 24), (2, 26), (2, 13), (2, 14)],
+            vec![(1, 10), (2, 21), (2, 26), (2, 10), (2, 11)],
             "{got:?}"
         );
     }
@@ -365,18 +365,18 @@ mod tests {
     fn adr_spelling_is_cited_like_decision() {
         // `ADR NNN` cites the same log as `decision NNN`; both spellings and their plural/joined
         // forms parse, and a word that merely contains "adr" (quadratic) is not a citation.
-        let text = "see ADR 013 and ADRs 024/026.\nquadratic 999 is not one; ADR013 is.";
+        let text = "see ADR 010 and ADRs 021/023.\nquadratic 999 is not one; ADR013 is.";
         let got = cited_decisions(text);
-        assert_eq!(got, vec![(1, 13), (1, 24), (1, 26), (2, 13)], "{got:?}");
+        assert_eq!(got, vec![(1, 10), (1, 21), (1, 23), (2, 13)], "{got:?}");
     }
 
     #[test]
     fn citations_wrapped_across_a_line_break_are_caught() {
         // The word "decision" ending a line with its number on the next is still one citation
         // (attributed to the line the word sits on), the live-doc drift the line-joined scan closes.
-        let text = "see decision\n029 for why, and decisions 024,\n026 too.";
+        let text = "see decision\n029 for why, and decisions 021,\n026 too.";
         let got = cited_decisions(text);
-        assert_eq!(got, vec![(1, 29), (2, 24), (2, 26)], "{got:?}");
+        assert_eq!(got, vec![(1, 29), (2, 21), (2, 26)], "{got:?}");
     }
 
     #[test]

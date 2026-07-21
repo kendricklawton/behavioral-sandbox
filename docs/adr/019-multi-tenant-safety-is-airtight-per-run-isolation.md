@@ -1,4 +1,4 @@
-# 022. Multi-tenant safety is airtight per-run isolation, proven by the containment suite *(2026-07-15)*
+# 019. Multi-tenant safety is airtight per-run isolation, proven by the containment suite *(2026-07-15)*
 
 **Context.** A hoster places untrusted code from mutually-distrusting callers on one shared host, and
 the engine has to make that safe while staying ignorant of tenants: no team / account / tenant concept
@@ -18,9 +18,9 @@ and self-hostable, it works on a lone KVM host with no cloud at all.
 contract is "any run is fully contained from every other run and from the host"; the hoster decides
 whose run is whose. The confinement stack that delivers it is tenant-agnostic by construction:
 - **Jailer**, Firecracker runs under its jailer: chroot, uid/gid drop, PID/mount/network namespaces,
-  seccomp (decision 012); the `Sandbox` surface jails by default (decision 015).
-- **cgroups**, a per-VM v2 cgroup caps `cpu.max` + `memory.max` (decision 013), with a whole-tree
-  `cgroup.kill` (decision 014). `pids.max` is added too (host-side defense in depth: a guest fork-bomb
+  seccomp; the `Sandbox` surface jails by default (decision 012).
+- **cgroups**, a per-VM v2 cgroup caps `cpu.max` + `memory.max` (decision 010), with a whole-tree
+  `cgroup.kill` (decision 011). `pids.max` is added too (host-side defense in depth: a guest fork-bomb
   is already memory-bounded, but a hypervisor-level exploit forking *host* processes is capped). The
   last leg, bounding guest **IO bandwidth** so a disk-thrashing run can't starve a co-resident one, is
   still to land (Firecracker's per-drive rate limiter, or host `io.max`).
@@ -28,9 +28,9 @@ whose run is whose. The confinement stack that delivers it is tenant-agnostic by
   (decision 008).
 - **No-leak teardown**, cgroup-owned VM lifetime + a sentinel that outlives the driver + the orphan
   sweep, so a killed / panicked / timed-out run releases its VMM, jail, cgroup, and scratch (decision
-  014).
+  011).
 - **Engine/hoster line**, the engine's privileged tools can't be weaponized; deployment (scheduling,
-  per-identity GC, base hardening, dividing the address pool) is the hoster's (decision 016).
+  per-identity GC, base hardening, dividing the address pool) is the hoster's (decision 013).
 
 **"Safe for multi-tenant hosting" is defined as exactly one thing: the containment suite is green.** A
 single hostile guest tries to escape the VM, reach the network, exceed its cpu / mem / pid / io caps,

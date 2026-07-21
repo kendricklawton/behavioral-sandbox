@@ -236,12 +236,12 @@ pub const ETHERTYPE_OFFSET: usize = 12;
 /// EtherType for IPv4.
 pub const ETH_P_IP: u16 = 0x0800;
 /// EtherType for ARP. Egress enforcement lets ARP through even under deny-by-default: the guest must
-/// resolve its on-link gateway (`10.200.0.1`, ADR 017) before it can reach *any* allowed endpoint.
+/// resolve its on-link gateway (`10.200.0.1`, ADR 014) before it can reach *any* allowed endpoint.
 pub const ETH_P_ARP: u16 = 0x0806;
 /// EtherType for IPv6, and for an 802.1Q VLAN tag. The tap parser handles only IPv4, so a frame with
 /// either of these is *unrepresentable* as a flow: the kernel counts it (as an honest coverage
 /// signal) rather than dropping it from the record silently. Neither is expected on a sandbox's
-/// IPv4-only tap (ADR 017), unlike ARP, which is why ARP is not counted here.
+/// IPv4-only tap (ADR 014), unlike ARP, which is why ARP is not counted here.
 pub const ETH_P_IPV6: u16 = 0x86dd;
 /// See [`ETH_P_IPV6`].
 pub const ETH_P_8021Q: u16 = 0x8100;

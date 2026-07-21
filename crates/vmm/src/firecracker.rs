@@ -322,7 +322,7 @@ const GUEST_IO_ONE_TIME_BURST_BYTES: u64 = 1024 * 1024 * 1024;
 
 impl RateLimiter {
     /// The driver's derived default drive bound: a bandwidth cap with a boot-sized burst, no ops cap.
-    /// An **internal derived default** (ADR 013's "quantities the engine derives, not new
+    /// An **internal derived default** (ADR 010's "quantities the engine derives, not new
     /// `Limits` knobs"), so the public contract is unchanged; surfacing it as a `Limits` field later
     /// would be an additive, `api:`-marked change.
     pub(crate) fn default_guest_io() -> Self {

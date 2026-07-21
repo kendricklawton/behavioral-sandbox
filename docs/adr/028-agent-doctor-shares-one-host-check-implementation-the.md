@@ -1,4 +1,4 @@
-# 032. `agent doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them *(2026-07-17)*
+# 028. `agent doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them *(2026-07-17)*
 
 **Context.** The engine's isolation rests on the host, so whether a given host can run a sandbox at all
 is a property an operator has to know *before* the first run, not discover mid-flight. That pulls in two
@@ -20,7 +20,7 @@ mirrors the engine's own error discipline: the isolation boundary (`/dev/kvm`) a
 **hard** (`Fail` gives a non-zero exit, so `agent doctor && agent run …` gates), while the jailer,
 resource caps, and networking/bulk-I/O tools **fail open** (`Warn` with a named consequence). The
 eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of `agent-vmm`
-(decisions 024/026); each entry point appends it. `xtask setup` keeps its dev-only rows (bpf-linker,
+(decisions 021/023); each entry point appends it. `xtask setup` keeps its dev-only rows (bpf-linker,
 nightly, readelf) local, since an operator running the shipped engine doesn't need them.
 
 Both machine JSON surfaces carry a leading integer `schema` field: the `--json` run result
@@ -36,5 +36,5 @@ explicitly rather than by omission. The fail-open rows are the residual risk: a 
 resource caps, or networking tools still runs, degraded, and the operator carries the consequence named in
 the `Warn`. Independent schema counters cost a second version to reason about, but they buy each surface
 its own evolution rate. The audit record's previously-open field questions were already settled by
-decision 028's hardening pass (`overflow_events` semantics, the u64-nanosecond ceiling), so v1 is a
+decision 024's hardening pass (`overflow_events` semantics, the u64-nanosecond ceiling), so v1 is a
 considered shape, not a placeholder.

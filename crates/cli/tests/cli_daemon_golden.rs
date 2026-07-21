@@ -1,4 +1,4 @@
-//! CLI/daemon parity golden (the wire API, ADR 034): the **CLI** (`agent run --json`) and the
+//! CLI/daemon parity golden (the wire API, ADR 030): the **CLI** (`agent run --json`) and the
 //! **daemon wire API** (`agent`, driven
 //! through the reference [`agent_client::Client`]) render the *same* command **identically**, same
 //! exit code, same stdout, same stderr. The two faces are thin hosts of one `agent-vmm` lifecycle, so

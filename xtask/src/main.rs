@@ -45,6 +45,8 @@
 //! - **`bench-scale`**, the probe overhead *under load*: per-event cost as the watched-target set
 //!   (concurrent sandboxes) grows 1 → 512, showing it stays flat (O(1) lookup). Same needs as
 //!   `bench-meter`.
+//! - **`bench-sign`**, the record-signing overhead: per-record `ed25519` sign/verify + the SHA-256
+//!   chain hash (decision 034), sub-millisecond and off the boot path. Host-only (no KVM/eBPF).
 //! - **`meter-sandbox`**, the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
@@ -225,6 +227,15 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
+    /// Measure the record-signing overhead (decision 034): the per-record cost of one `ed25519` sign
+    /// over already-canonical bytes, plus verify, the SHA-256 chain hash, and a chained sign, so the
+    /// integrity step is measured like everything else. Host-only (no KVM, no eBPF); the point is
+    /// that it is sub-millisecond and off the boot/exec path.
+    BenchSign {
+        /// How many iterations to time per operation (more → tighter tail percentiles). Default 1000.
+        #[arg(long, default_value_t = 1000)]
+        runs: usize,
+    },
     /// The syscall-trace demo: boot a real sandbox and stream its host syscall footprint,
     /// attributed to the sandbox's cgroup (the VMM's host syscalls, the guest's stay in-guest).
     /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
@@ -295,6 +306,7 @@ fn main() -> Result<()> {
         Cmd::BenchTrace { runs } => bench::bench_trace(runs),
         Cmd::BenchMeter { runs } => bench::bench_meter(runs),
         Cmd::BenchScale { runs } => bench::bench_scale(runs),
+        Cmd::BenchSign { runs } => bench::bench_sign(runs),
         Cmd::TraceSandbox { seconds } => demo::trace_sandbox(seconds),
         Cmd::WatchSandbox { rounds } => demo::watch_sandbox(rounds),
         Cmd::EnforceSandbox => demo::enforce_sandbox(),
@@ -453,7 +465,7 @@ fn ci_privileged() -> Result<()> {
 fn setup() -> Result<()> {
     println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `agent doctor` renders (decision 032): one
+    // The runtime host checks are the *same* implementation `agent doctor` renders (decision 028): one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
@@ -496,9 +508,9 @@ fn setup() -> Result<()> {
         println!("  {line}");
     }
 
-    // The engine/hoster line (decision 016): the engine guarantees its own privileged tools can't
+    // The engine/hoster line (decision 013): the engine guarantees its own privileged tools can't
     // be weaponized; *deploying* them, as whom, when, over what directory, is the hoster's, and
-    // these are the four calls only they can make. Surfaced here, in the host-check tool, because
+    // these are the calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
     println!("\nHardening: the hoster's responsibility (the engine can't decide these for you):");
     println!(
@@ -511,10 +523,6 @@ fn setup() -> Result<()> {
     println!("                  engine exposes it; when/how often it runs is your ops call");
     println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
     println!("                  run drivers as several users, each user must run its own sweep");
-    println!("    the /16 pool: 10.200.0.0/16 is one finite, shared reservation pool; dividing it");
-    println!(
-        "                  across tenants (quota/fairness) is platform policy, above the engine"
-    );
 
     println!("\neBPF probes: loading + attaching needs CAP_BPF + CAP_PERFMON, not full");
     println!(

@@ -478,7 +478,7 @@ impl Spawned {
     /// **jailer** for a snapshot restore, so a prewarmed clone runs confined from its first instruction.
     /// The bundle (state, memory, disk) is staged into the chroot in
     /// [`run_restore`](Self::run_restore), once the API socket proves the chroot exists. A networked
-    /// snapshot's baked-in tap is recreated in a fresh per-VM netns the jailer joins (ADR 017),
+    /// snapshot's baked-in tap is recreated in a fresh per-VM netns the jailer joins (ADR 014),
     /// owned by the jailed uid.
     ///
     /// The cgroup **resource caps** are re-applied here, derived from the *clone's true envelope*
@@ -487,7 +487,7 @@ impl Spawned {
     /// from a mis-declaring `config` would throttle or OOM-kill a legitimate clone. `cpu.max` uses the
     /// snapshot's recorded vCPU count and `memory.max` the memory file's true guest RAM; `pids.max`
     /// is a constant. Fail-open like a cold boot's caps (empty without delegated controllers,
-    /// ADR 013), the isolation walls (chroot, uid drop, seccomp, netns) are all present either way.
+    /// ADR 010), the isolation walls (chroot, uid drop, seccomp, netns) are all present either way.
     fn launch_jailed_for_restore(
         config: &BootConfig,
         snapshot: &Snapshot,
@@ -495,13 +495,13 @@ impl Spawned {
     ) -> Result<Self, VmmError> {
         // Re-apply the resource caps a cold jailed boot gets, so a restored clone (where the
         // untrusted code runs) is confined too, not just isolated, the co-resident-safety property
-        // (ADR 022). Both caps derive from the snapshot's true envelope, never `config`'s declaration:
+        // (ADR 019). Both caps derive from the snapshot's true envelope, never `config`'s declaration:
         // `memory.max` from the memory file's true size (`restore_mem_mib`, never below what the
         // clone actually uses, the OOM hazard that once kept restore uncapped), `cpu.max` from the
         // vCPU count recorded in the bundle (the clone's real parallelism; a `config` defaulting to
         // fewer vCPUs than the source must not silently throttle it), and `pids.max` is a constant.
         // A networked clone gets the fixed-name tap in a fresh netns; its baked-in guest identity is
-        // already correct there (ADR 017).
+        // already correct there (ADR 014).
         let mem_len = std::fs::metadata(&snapshot.mem)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -552,7 +552,7 @@ impl Spawned {
         let _span = span.enter();
 
         // The deadline is computed once by the caller (`boot_deadline`) so it spans the pre-spawn
-        // staging (`launch_for_restore`) and this restore together, one wall (ADR 013).
+        // staging (`launch_for_restore`) and this restore together, one wall (ADR 010).
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 
@@ -669,7 +669,7 @@ impl Spawned {
             .map(|m| u32::try_from(m.len() >> 20).unwrap_or(u32::MAX))
             .unwrap_or(0);
         // Clamp that mem-scaled ceiling to the wall's remaining budget: the ceiling is slow-disk
-        // headroom, but the run's one wall (ADR 013) is the hard bound, a load that would outrun it is
+        // headroom, but the run's one wall (ADR 010) is the hard bound, a load that would outrun it is
         // a Timeout, never an overrun that returns minutes past the wall. `still_before` keeps the
         // remainder positive (a zero socket timeout means "block forever").
         still_before(deadline, "PUT /snapshot/load")?;
@@ -713,10 +713,10 @@ impl Spawned {
         if let Some(uds) = self.vsock_uds.clone() {
             self.await_agent_ready(&uds, deadline)?;
         }
-        // No in-guest re-addressing on restore (was ADR 011's `apply_guest_net_identity`): under
-        // the netns model each clone owns a private network namespace, so the snapshot's baked-in
-        // `eth0` address/MAC/routes are already correct and collision-free in it. The guest's network
-        // identity is untouched; the tap it enforces on stays host-side, in the clone's own netns.
+        // No in-guest re-addressing on restore: under the netns model (ADR 014) each clone owns a
+        // private network namespace, so the snapshot's baked-in `eth0` address/MAC/routes are
+        // already correct and collision-free in it. The guest's network identity is untouched; the
+        // tap it enforces on stays host-side, in the clone's own netns.
 
         tracing::info!(
             restore_ms = latency.as_millis() as u64,
@@ -820,7 +820,7 @@ impl Spawned {
         let _span = span.enter();
 
         // The deadline spans host-side staging (`launch`) *and* this API boot: it's computed once by
-        // the caller (`boot_deadline`) and threaded in, so both share one wall (ADR 013).
+        // the caller (`boot_deadline`) and threaded in, so both share one wall (ADR 010).
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 
@@ -909,12 +909,19 @@ impl Spawned {
         // `eth0`. Same deny-by-default shape as v4, a connected /64 route only, no v6 default route.
         if let Some(tap) = self.tap.as_ref() {
             boot_args = format!(
-                "{boot_args} ip={}:::255.255.255.252::eth0:off {}={}/{}",
-                tap.guest_ip,
-                agent_channel::GUEST_IP6_CMDLINE_KEY,
-                tap.guest_ip6,
-                crate::net::HOST_PREFIX6,
+                "{boot_args} ip={}:::255.255.255.252::eth0:off",
+                tap.v4.guest,
             );
+            // The v6 token rides alongside only when the v6 link is actually live (best-effort host
+            // assignment): no dangling guest v6 address on an IPv6-disabled host.
+            if let Some(v6) = tap.v6 {
+                boot_args = format!(
+                    "{boot_args} {}={}/{}",
+                    agent_channel::GUEST_IP6_CMDLINE_KEY,
+                    v6.guest,
+                    v6.prefix_len,
+                );
+            }
         }
         still_before(deadline, "PUT /boot-source")?;
         self.api.put(
@@ -1346,7 +1353,7 @@ impl Drop for StagedDisk {
 
 /// The Firecracker `(major, minor)` the driver's API bodies are written against (ADR 001).
 /// Field names have drifted across releases and behavior genuinely changes (v1.9 rejects
-/// `network_overrides` on snapshot load, ADR 011), so an unexpected binary means cryptic
+/// `network_overrides` on snapshot load, ADR 014), so an unexpected binary means cryptic
 /// mid-boot API errors or silently different semantics, the runtime-validates-its-VMM guard: a
 /// runtime pinning and checking the version of the lower-level binary it drives.
 const PINNED_FC_VERSION: (u64, u64) = (1, 9);
@@ -1601,7 +1608,7 @@ fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
 
 /// The wall-clock deadline for one whole boot/restore, `now + timeout`, computed **once** by
 /// `Vm::boot`/`Vm::restore` and threaded through host-side staging (`launch`) *and* the API boot
-/// (`run_boot`) so the two share one budget (ADR 013: one wall for the run, not one per phase).
+/// (`run_boot`) so the two share one budget (ADR 010: one wall for the run, not one per phase).
 /// `Instant + Duration` panics on overflow, and `timeout` is caller-set, so a `Duration::MAX`
 /// "no limit" clamps to a day rather than panicking.
 pub(crate) fn boot_deadline(timeout: Duration) -> Instant {

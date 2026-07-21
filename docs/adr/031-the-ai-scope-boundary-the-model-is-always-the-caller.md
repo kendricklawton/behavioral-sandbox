@@ -1,4 +1,4 @@
-# 035. The AI-scope boundary: the model is always the caller, never an engine component *(2026-07-17)*
+# 031. The AI-scope boundary: the model is always the caller, never an engine component *(2026-07-17)*
 
 **Context.** AI-generated code and autonomous agents are a first-class workload for this engine, and the
 pull the instant you say "AI-native" is to reach for a model *inside* the engine: a model that judges
@@ -33,7 +33,7 @@ which is why the line is drawn at the engine's edge and not somewhere softer:
 
 Invariant 2 is untouched, and that is the whole point. Observe-and-enforce-from-the-host is not strained
 by this line; it is *served* by it. The model-legible record is a **projection of the record host-side
-eBPF already built** (decisions 027/028): the model reads a *face* of the host's observation, it does
+eBPF already built** (decision 024): the model reads a *face* of the host's observation, it does
 not help produce it. Observation and enforcement stay entirely host-side, out of the guest and out of
 any model. So the AI-native surface adds a **reader**, never a new **authority**, which is precisely
 what lets it exist without touching the security boundary.
@@ -55,8 +55,8 @@ the engine never adjudicates, classifies, or adapts on its own, so every judgmen
 next* stays with the caller, outside the boundary. That is not a gap to be closed later; it is the line
 that keeps all four properties intact.
 
-**Relationship to prior decisions.** This is the AI-workload face of decision 016 (the engine/hoster
-line) and decision 033 (the whole security boundary): the model sits with the hoster and the caller,
+**Relationship to prior decisions.** This is the AI-workload face of decision 013 (the engine/hoster
+line) and decision 029 (the whole security boundary): the model sits with the hoster and the caller,
 *outside* the trust boundary, exactly where tenancy and scheduling already sit. Any change that puts a
 model in the host path, gives the engine a provider key, or lets a model's output gate containment or
 policy contradicts this decision by construction, the same test the boundary decisions already apply.

@@ -1,4 +1,4 @@
-# 020. The eBPF loader: aya, an object loaded from a path, and links that drop with the loader *(2026-07-15)*
+# 017. The eBPF loader: aya, an object loaded from a path, and links that drop with the loader *(2026-07-15)*
 
 **Context.** The eBPF track needs a shape for three things at once: which library builds and loads the
 programs, how the compiled object reaches the loader, and who owns the in-kernel objects' lifetime.
@@ -48,7 +48,7 @@ engine share the same discipline.
   reason, when aya entered (the allowlist's stated policy).
 - Attaching programs to real per-VM **taps** (in the driver's netns) must hold the same drop-owned,
   no-pin lifetime, so a torn-down sandbox leaves no dangling `tc`/XDP filter; it composes with the
-  netns teardown the driver already guards (decision 017).
+  netns teardown the driver already guards (decision 014).
 - The `sys_enter_execve` counter is the host's footprint, not the guest's: a microVM services its own
   syscalls in-guest, so they never trap to these host tracepoints (the network + cgroup signals, not
   syscalls, are the strong cross-boundary ones).

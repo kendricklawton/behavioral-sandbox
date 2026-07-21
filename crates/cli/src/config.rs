@@ -43,6 +43,13 @@ pub struct AgentToml {
     scratch_dir: Option<PathBuf>,
     /// Mirrors `AGENT_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
+    /// Mirrors `AGENT_SIGNING_KEY` (the host record-signing key path, decision 034). No `BootConfig`
+    /// field; the CLI reads it to sign `--record`.
+    signing_key: Option<PathBuf>,
+    /// Mirrors `AGENT_TRUSTED_KEYS`: public keys (`key_id` hex) `agent verify` trusts *in addition*
+    /// to the current signing key, so rotating the host key doesn't invalidate already-signed records
+    /// (decision 034, key rotation). No `BootConfig` field.
+    trusted_keys: Option<Vec<String>>,
 }
 
 impl AgentToml {
@@ -98,6 +105,52 @@ impl AgentToml {
     pub fn log(&self) -> Option<&str> {
         self.log.as_deref()
     }
+
+    /// The file's `signing_key` path, if set (no `BootConfig` field; folded into
+    /// [`signing_key_path`]'s precedence).
+    #[must_use]
+    pub fn signing_key(&self) -> Option<&Path> {
+        self.signing_key.as_deref()
+    }
+
+    /// The file's `trusted_keys` list (public-key hex), or an empty slice.
+    #[must_use]
+    pub fn trusted_keys(&self) -> &[String] {
+        self.trusted_keys.as_deref().unwrap_or(&[])
+    }
+}
+
+/// Resolve the host record-signing key path with `env (AGENT_SIGNING_KEY) > file > default`
+/// (decision 034). Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
+/// The default is [`agent_probes_loader::default_key_path`] (a data-dir path, generated on first use).
+#[must_use]
+pub fn signing_key_path(file: Option<&AgentToml>) -> PathBuf {
+    std::env::var_os("AGENT_SIGNING_KEY")
+        .map(PathBuf::from)
+        .or_else(|| file.and_then(AgentToml::signing_key).map(Path::to_path_buf))
+        .unwrap_or_else(agent_probes_loader::default_key_path)
+}
+
+/// The configured set of extra trusted public keys (`key_id` hex) for `agent verify`, the **union**
+/// of `AGENT_TRUSTED_KEYS` (comma-separated) and the file's `trusted_keys` list. A set, not an
+/// override: every configured key stays trusted so a record signed before a key rotation still
+/// verifies (decision 034). Parsing/validation is the caller's (`TrustedKey::from_hex`).
+#[must_use]
+pub fn trusted_key_hexes(file: Option<&AgentToml>) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(v) = std::env::var_os("AGENT_TRUSTED_KEYS") {
+        out.extend(
+            v.to_string_lossy()
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
+        );
+    }
+    if let Some(f) = file {
+        out.extend(f.trusted_keys().iter().cloned());
+    }
+    out
 }
 
 /// Resolve the stderr log filter with the full precedence `flag > env (AGENT_LOG) > file > default`.
@@ -145,6 +198,33 @@ mod tests {
             "unset key falls through"
         );
         assert_eq!(toml.log(), Some("debug"));
+    }
+
+    #[test]
+    fn signing_key_parses_from_the_file_layer() {
+        let toml =
+            AgentToml::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
+        assert_eq!(
+            toml.signing_key(),
+            Some(Path::new("/keys/host.ed25519")),
+            "the file layer carries the record-signing key path"
+        );
+        assert_eq!(
+            AgentToml::default().signing_key(),
+            None,
+            "unset falls through"
+        );
+    }
+
+    #[test]
+    fn trusted_keys_parse_as_a_list_from_the_file_layer() {
+        let toml =
+            AgentToml::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
+        assert_eq!(toml.trusted_keys(), ["aa".to_string(), "bb".to_string()]);
+        assert!(
+            AgentToml::default().trusted_keys().is_empty(),
+            "unset is an empty set, not an error"
+        );
     }
 
     #[test]

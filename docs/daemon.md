@@ -64,7 +64,7 @@ number gets a fatal, session-ending error before its body is trusted.
 Line-delimited JSON (not the length-prefixed binary framing of the host↔guest channel), and not gRPC,
 because the peer is a **local, trusted-ish client**: the daemon is synchronous with no async runtime,
 and hand-debuggability (`socat`, `nc`) plus "any language with a JSON library and a unix socket can
-drive it" matter more than a compact wire (decision 034). Every decode is bounded and typed, so a
+drive it" matter more than a compact wire (decision 030). Every decode is bounded and typed, so a
 malformed or oversize line is an error the daemon reports or drops, never a panic (guardrail 5).
 
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
@@ -99,7 +99,7 @@ the same shapes.
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
 | `{"schema":1,"reply":"snapshotted","dir":"/tmp/agent-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
-| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as its own JSON object (with its own `schema` field, the *record* version). |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope** (decision 034): `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `agent verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
 | `{"schema":1,"reply":"error","message":"…","fatal":false}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. |

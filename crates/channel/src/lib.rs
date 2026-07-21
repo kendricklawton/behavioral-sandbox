@@ -349,7 +349,7 @@ fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
 /// The encoded size of one [`put_blob`] (its 4-byte length prefix + the bytes). Used to size the
 /// payload buffer *exactly* up front (see [`write_exec`]/[`write_put_file`]): a secret-bearing
 /// payload must live in **one** buffer so the post-send `fill(0)` wipes every copy, a `Vec` that
-/// grew would strand unwiped plaintext prefixes in the reallocations it freed (ADR 018).
+/// grew would strand unwiped plaintext prefixes in the reallocations it freed (ADR 015).
 fn blob_len(bytes: &[u8]) -> usize {
     4 + bytes.len()
 }
@@ -379,7 +379,7 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
 /// Serialize and send a `PutFile` from **borrowed** parts, no owned [`Request`] to clone the
 /// secret bytes into first. The payload is sized exactly (one buffer, no growth) so the post-send
 /// `fill(0)` wipes the engine's only copy of the injected bytes before it returns to the allocator
-/// (ADR 018; the kernel socket buffer is out of reach, best-effort by design).
+/// (ADR 015; the kernel socket buffer is out of reach, best-effort by design).
 pub(crate) fn write_put_file(
     w: &mut impl Write,
     path: &str,
@@ -1089,7 +1089,7 @@ mod tests {
 
     #[test]
     fn secret_payload_is_exactly_sized_so_one_buffer_holds_it() {
-        // Secret hygiene (ADR 018): the payload must be preallocated to its exact encoded size,
+        // Secret hygiene (ADR 015): the payload must be preallocated to its exact encoded size,
         // so it never reallocates and strands an unwiped plaintext prefix on the heap. Build the
         // payloads the same way the serializers do and assert `len == capacity` (no growth headroom).
         let path = "big.bin";

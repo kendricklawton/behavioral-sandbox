@@ -1,4 +1,4 @@
-# 037. Single-command self-host + a vendored offline mirror of every pinned input *(2026-07-17)*
+# 033. Single-command self-host + a vendored offline mirror of every pinned input *(2026-07-17)*
 
 **Context.** "Self-hostable" is a core property, not a slogan, and two forces shape what it has to
 mean here. First, standing the engine up must be one command a self-hoster can actually run, not a

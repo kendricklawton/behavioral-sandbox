@@ -1,4 +1,4 @@
-# 018. Per-exec inputs (files + env) ride the exec channel under a pinned secret-hygiene contract *(2026-07-14)*
+# 015. Per-exec inputs (files + env) ride the exec channel under a pinned secret-hygiene contract *(2026-07-14)*
 
 **Context.** A real workload needs configuration and credentials inside the guest: input files and
 environment variables. Env could ride several paths, baked into the rootfs, written as a file the
@@ -53,7 +53,7 @@ production credentials through it.
 
 **Consequences and notes.**
 - `Sandbox` is the lifecycle surface (`open → exec_with_files → collect_outputs → snapshot →
-  shutdown`, plus `kill_handle`/`vmm_pid`), jailed by default per decision 015; an embedder never
+  shutdown`, plus `kill_handle`/`vmm_pid`), jailed by default per decision 012; an embedder never
   reaches `RunningVm`.
 - The leak tests are the contract's pin: `injected_secrets_reach_no_observable_surface` (no VM,
   host logs at TRACE, the real in-process agent's logs, every error rendering) and

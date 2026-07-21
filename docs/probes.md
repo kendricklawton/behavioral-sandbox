@@ -24,7 +24,7 @@ path, not the payload.
   (`ExecveCounter::{load, count, counts_by_pid}`) returning a typed `ProbeError`, the eBPF analogue
   of the driver's `VmmError`. It reads the compiled object from a **path** (`cargo xtask build-probes`
   output, or `AGENT_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
-  stable and `cargo xtask ci` runs everywhere (decision 020).
+  stable and `cargo xtask ci` runs everywhere (decision 017).
 
 ## eBPF program types
 
@@ -123,9 +123,9 @@ clsact gives *both* directions uniformly on any device, and because egress enfor
 denied flow, the next section) lives at the same hook; observation alone is exactly that, observe-only
 (both hooks return `TC_ACT_OK`). The flow record
 (`FlowKey`/`FlowKey6` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
-the loader stays `#![forbid(unsafe_code)]` (decision 023). A sandbox's tap lives in its own network
-namespace (decision 017), so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
-safe wrapper, decision 024) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
+the loader stays `#![forbid(unsafe_code)]` (decision 020). A sandbox's tap lives in its own network
+namespace (decision 014), so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
+safe wrapper, decision 021) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
 into a per-VM rollup. Dropping the monitor frees its userspace handles; the sandbox's netns teardown
 reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host residue. `cargo xtask
 watch-sandbox` boots a real networked sandbox and prints the per-VM flows its guest actually generated,
@@ -171,7 +171,7 @@ section carries the counts and a `truncated` flag, and the run gets a coverage g
 churns source ports to fill the table cannot quietly evict its real traffic from its own record
 (the `EVENT_DROPS` honest-loss discipline, applied to the network axis). Enforcement never depends
 on the maps: a denied packet is dropped at the tap whether or not its audit row fit. The whole mechanism (map,
-schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is decision 025; `net_enforce.rs`
+schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is decision 022; `net_enforce.rs`
 (ignored/privileged) proves a guest reaches an allow-listed endpoint and is blocked from everything
 else; and `cargo xtask enforce-sandbox` is the live demo. Folding attach-and-enforce into the launch
 path is the fused record's convergence (below).
@@ -204,10 +204,10 @@ the dir for the other two axes. Memory and IO don't need a probe, cgroup v2 alre
 cgroup, so `CgroupStats::read` reads `memory.peak`/`memory.current`, `io.stat` (rbytes/wbytes summed), and
 `cpu.stat`'s `usage_usec` (an independent cross-check on the eBPF CPU total) straight from the cgroup dir,
 best-effort (every field an `Option`, so a missing controller or older kernel is a `None`, never an error,
-accounting fails open, decision 013). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
+accounting fails open, decision 010). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
 `ResourceSummary` for one sandbox. The split is deliberate, "cgroup-bpf **or** cgroup + tracepoints":
 eBPF where per-event timing earns its keep (CPU), the kernel's own counters where they already exist
-(memory, IO). The whole mechanism is decision 026; `resource_meter.rs` (ignored/privileged) proves a
+(memory, IO). The whole mechanism is decision 023; `resource_meter.rs` (ignored/privileged) proves a
 CPU-heavy run reports more CPU than an idle one attributed to the sandbox; `cargo xtask
 meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 
@@ -216,11 +216,11 @@ meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 The sections above each drive one probe standalone; the fused record binds all three to a launched
 sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
 guest. It lives in
-`probes-loader` (not `agent-vmm`, decisions 024/026/028), bridged to the driver only by plain values:
+`probes-loader` (not `agent-vmm`, decisions 021/023/024), bridged to the driver only by plain values:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
   global, so each is loaded **once** for the host, `SharedMeter` and `SharedTracer`, and every sandbox
-  registers its cgroup as a *target* on both (bounded overhead, decision 028). The tap monitor is per-VM.
+  registers its cgroup as a *target* on both (bounded overhead, decision 024). The tap monitor is per-VM.
 - **One post-boot attach.** `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)` runs
   once after `Sandbox::open`: it resolves the VMM's cgroup, registers it on the shared tracer + meter, and
   attaches the tap in the sandbox's netns (enforcing an egress policy if given). Every axis is fail-open,
@@ -243,7 +243,7 @@ and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** liv
 (`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far), what the
 CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
 (`agent run --net --trace --record --watch`) is documented in [Using the agent CLI](./cli.md); decision
-029 covers where each surface lives.
+025 covers where each surface lives.
 
 ## The hardware-isolation consequence (the honest limit)
 
@@ -299,13 +299,13 @@ turns that into a real **stream of per-event records**:
 - **Filter to one sandbox.** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
-  the default watches the whole host. See decision 021 (an ADR under `docs/adr/`).
+  the default watches the whole host. See decision 018 (an ADR under `docs/adr/`).
 - **Or a *set* of sandboxes, for one shared tracer.** A `TRACE_TARGETS` cgroup set + a
   `TRACE_SET` mode toggle (the `METER_TARGETS`/`METER_ALL` pattern) let **one** attached tracer serve
   every concurrent sandbox, each registers its cgroup with `SyscallTracer::add_target`, and only those
   cgroups' events are emitted. A tracer-per-sandbox would instead run *N* copies of each `sys_enter_*`
   on every syscall (O(sandboxes)); the set keeps it one hash lookup. Off by default, so the single-target
-  path above is unchanged. Decision 028.
+  path above is unchanged. Decision 024.
 - **A live trace, attributed to a sandbox.** `SyscallTracer::stream` loops the drain,
   decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` / `[v6]:port` sockaddr) and handing
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop

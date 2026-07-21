@@ -32,6 +32,16 @@ tracepoint); the strong cross-boundary signals are the guest's **network** (its 
 **resource use** (its cgroup), which the host observes directly. And a sandbox with no explicit
 policy reaches no network and holds minimal capability: every allowance is explicit and recorded.
 
+## Record integrity (host-signed)
+
+The finalized audit record is **signed** with a host key the guest never sees (an `ed25519` detached
+signature over the canonical record bytes, decision 034), so a consumer detects any alteration made
+*after* the producing host. Verify a record with `agent verify <record>` (or against the trusted
+public key directly). The trust root is the host signing key: this makes "tamper-evident" hold
+off-host, but it does **not** protect against a *compromised producing host*, which can sign a
+consistent lie (that is the hoster's key custody, and a compromised host is out of scope below). See
+the [threat model](./threat-model.md#record-integrity-beyond-the-guest) for the full boundary.
+
 ## What counts as a security bug
 
 Given those guarantees, a security bug is anything that breaks one of them:
@@ -40,6 +50,8 @@ Given those guarantees, a security bug is anything that breaks one of them:
 - A guest reaching the network past a deny-by-default (or explicitly configured) egress policy.
 - A guest evading, disabling, or forging the host-side observation (the eBPF probes or the records
   they produce).
+- A signed record that verifies **after** being altered, or a forged signature accepted by
+  `agent verify` without the host key (the record-integrity guarantee, decision 034).
 - A hostile guest causing a host panic, hang, or resource leak through the driver's public API.
 - Injected secrets (`--env` values, injected file contents) appearing in logs, errors, or the
   serial console.
@@ -59,7 +71,7 @@ dismissal:
   uid are trusted; an attacker who already has them has everything, no sandbox can claim
   otherwise.
 - **Hosts below the supported floor.** An unsupported architecture or a host kernel older than the
-  LTS floor is refused by `agent doctor` (decision 036); weaknesses that require running there
+  LTS floor is refused by `agent doctor` (decision 032); weaknesses that require running there
   anyway are the operator's acceptance, not an engine bug. The same goes for an *unpatched* host
   kernel within the floor: patching the substrate is the operator's half of the contract.
 - **`--unjailed` weakening the VMM's own confinement.** That flag is the documented dev-box

@@ -163,3 +163,30 @@ What each measures, and the claim it backs:
 
 Run these on your host and record the deltas; the design guarantee is that both per-event costs are
 bounded and independent of the sandbox count.
+
+## Record signing overhead
+
+Signing the finalized record (decision 034) is one `ed25519` sign over the already-canonical bytes,
+run once at record finalization, **off the boot/exec path**. This bench is host-only (no KVM, no
+eBPF), so it always runs:
+
+```console
+cargo xtask bench-sign --runs 1000        # per-record ed25519 sign/verify + the sha256 chain hash
+```
+
+Measured on the reference host below (a `--release` build over a 760-byte canonical record), per
+operation, in **nanoseconds**:
+
+| operation             | min | p50 | p90 | p99 | max |
+|-----------------------|-----|-----|-----|-----|-----|
+| sign (unchained)      | 47449 | 52130 | 83113 | 132529 | 306601 |
+| sign (chained)        | 47870 | 51897 | 77383 | 112041 | 336789 |
+| verify                | 79750 | 88749 | 129967 | 181759 | 410207 |
+| record_hash (sha256)  | 7073 | 7754 | 11789 | 22940 | 443027 |
+
+The takeaway is the order of magnitude: a sign is **~50 microseconds** (p50), verify ~90, the chain
+hash ~8, all far under a millisecond and dwarfed by a run's boot (hundreds of ms) and exec. Chaining a
+record (the session hash-chain) costs the same as an unchained sign. Signing therefore adds no
+measurable latency to a run. (Run in `--release`: `ed25519` is 10-40x slower in an unoptimized build,
+so a `cargo xtask` debug build reports numbers that aren't representative; the workspace also
+opt-levels the `dalek`/`sha2` crates in the dev profile so tests aren't slowed.)

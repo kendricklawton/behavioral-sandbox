@@ -80,7 +80,7 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
         .tap_name()
         .expect("a networked VM exposes its tap")
         .to_string();
-    let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
+    let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
 
     // Bind the monitor to *this* sandbox's tap, inside its own netns.
     let monitor =
@@ -129,7 +129,7 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
     );
 
     // Close cleanly. Dropping the monitor frees its userspace handles; the VM shutdown tears the
-    // netns down, which reclaims the tc filter (ADR 023), leaving no dangling host state.
+    // netns down, which reclaims the tc filter (ADR 020), leaving no dangling host state.
     drop(monitor);
     vm.shutdown().expect("shut the sandbox down");
 }

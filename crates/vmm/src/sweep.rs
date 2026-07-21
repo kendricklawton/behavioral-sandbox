@@ -1,6 +1,6 @@
 //! The orphan sweep, the engine's garbage collector for crashed-driver residue.
 //!
-//! Teardown is `Drop`-based and the lifetime sentinel (ADR 014) owns the VM *process tree*,
+//! Teardown is `Drop`-based and the lifetime sentinel (ADR 011) owns the VM *process tree*,
 //! but a driver that dies without `Drop` (SIGKILL, OOM) still leaves filesystem and network
 //! residue: its per-VM scratch dirs and its per-VM **network namespaces** (each holding the VM's
 //! tap). The netns model retired the finite-`/30`-pool exhaustion an earlier tap-in-the-host-netns
@@ -25,7 +25,7 @@
 //!   direction is always "kept too long", never "reclaimed a live VM's resources".
 //! - A dead dir with a **still-running VMM** (only possible where the sentinel degraded: no
 //!   writable cgroup v2) is skipped with a warning. The sweep owns fs/net residue; processes are
-//!   the sentinel's (ADR 014), it never kills.
+//!   the sentinel's (ADR 011), it never kills.
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
@@ -67,7 +67,7 @@ pub(crate) const RESTORE_STAGING_MARKER: &str = ".restore-staging";
 /// everything a live pid owns is skipped. Per-entry failures are logged and skipped, never fatal,
 /// so one undeletable dir can't shadow the rest of the sweep.
 ///
-/// **The hoster's half (ADR 016).** The engine guarantees this call can't be weaponized (it
+/// **The hoster's half (ADR 013).** The engine guarantees this call can't be weaponized (it
 /// only ever reclaims dirs the calling euid owns), but *deploying* it is the caller's:
 /// - **Schedule it.** Nothing calls this for you, a self-refilling janitor daemon is platform
 ///   territory. Run it at startup and periodically.
@@ -116,7 +116,7 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
 
     for dir in dead {
         // The one way a dead driver leaves a *running* VMM is a degraded sentinel (no writable
-        // cgroup v2, ADR 014). Deleting files under a live VMM would strand it on unlinked
+        // cgroup v2, ADR 011). Deleting files under a live VMM would strand it on unlinked
         // inodes; processes are the sentinel's jurisdiction, so skip loudly instead.
         if let Some(vmm) = vmm_running_in(&dir) {
             tracing::warn!(

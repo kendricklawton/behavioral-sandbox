@@ -4,8 +4,8 @@
 # eBPF toolchain, the guest artifacts, and runs `cargo xtask ci-privileged` as root. Proven green
 # end to end (boot, jailer, probes, restore, the audit record), so it runs nightly plus on demand.
 # Correctness only: nested KVM makes performance numbers unrepresentative, so the benches are not
-# gated here ("measured, not marketed" means measured on bare metal). The self-hosted
-# `ci-privileged.yml` remains only as the future aarch64 lane (hosted arm64 runners have no KVM).
+# gated here ("measured, not marketed" means measured on bare metal, by hand). This is the only
+# privileged lane: the supported platform is x86_64 (decision 032 as narrowed).
 #
 # SECURITY: NEVER add a fork `pull_request` trigger, this runs untrusted-capable code as root with
 # KVM. Schedule + manual dispatch only, on code already yours.
@@ -50,7 +50,7 @@ jobs:
         run: |
           echo "kernel: $(uname -r)"
           test -e /dev/kvm \
-            || { echo "::error::no /dev/kvm on this runner; use the self-hosted ci-privileged.yml"; exit 1; }
+            || { echo "::error::no /dev/kvm on this runner; run cargo xtask ci-privileged on a KVM box instead"; exit 1; }
           test -e /sys/kernel/btf/vmlinux \
             || { echo "::error::no BTF (/sys/kernel/btf/vmlinux); CO-RE eBPF cannot load here"; exit 1; }
 

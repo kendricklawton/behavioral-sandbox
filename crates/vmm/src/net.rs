@@ -1,5 +1,6 @@
 //! Per-VM guest networking, host side: a **per-VM network namespace** holding the tap that backs
-//! virtio-net (ADRs 008, 009, 011, and the netns ADR that supersedes 011's clone limit).
+//! virtio-net (ADRs 008 and 014: deny-by-default, and the netns model that retired the earlier
+//! one-live-networked-clone limit).
 //!
 //! Each networked VM gets its own netns (`ip netns add <name>`); the tap lives *inside* it, and the
 //! VMM runs there too (the jailer's `--netns`, or `ip netns exec` for a direct boot). Because the tap
@@ -66,6 +67,34 @@ pub(crate) const HOST_PREFIX6: u8 = 64;
 /// jailer's `--netns`, or `ip netns exec` for a direct boot), and every teardown path deletes the
 /// netns (`ip netns del`, which cascades the tap away). Named after the VM's scratch dir, so a crashed
 /// driver's orphaned netns is reclaimable by the same dir-keyed sweep as its scratch dir.
+/// A per-VM point-to-point IP link: the **host end** (assigned to the tap, inside the netns) and the
+/// **guest end** (on the guest's `eth0`), plus the prefix length. Generic over the address family, so
+/// v4 and v6 are the *same shape*: a v6 link is just another `GuestLink`, present only when v6 is
+/// actually live (see [`RunningVm::ipv6`](crate::RunningVm::ipv6)). The guest reaches the host end and
+/// nothing beyond it (deny-by-default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct GuestLink<A> {
+    /// The host end (on the tap).
+    pub host: A,
+    /// The guest end (on the guest's `eth0`).
+    pub guest: A,
+    /// The link's prefix length (`/30` for v4, `/64` for v6).
+    pub prefix_len: u8,
+}
+
+impl<A> GuestLink<A> {
+    /// Construct a link from its two ends and prefix length (crate-internal: only the driver mints
+    /// these; downstream reads them off a [`RunningVm`](crate::RunningVm)).
+    pub(crate) fn new(host: A, guest: A, prefix_len: u8) -> Self {
+        Self {
+            host,
+            guest,
+            prefix_len,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Tap {
     /// The network namespace name (the VM's scratch-dir name), also the `/run/netns/<name>` handle.
@@ -75,14 +104,12 @@ pub(crate) struct Tap {
     pub(crate) name: String,
     /// The guest NIC's MAC.
     pub(crate) mac: String,
-    /// The host end of the point-to-point /30 (assigned to the tap, inside the netns).
-    pub(crate) host_ip: Ipv4Addr,
-    /// The guest end of the /30 (on the guest's `eth0`).
-    pub(crate) guest_ip: Ipv4Addr,
-    /// The host end of the per-VM v6 link (assigned to the tap, inside the netns).
-    pub(crate) host_ip6: Ipv6Addr,
-    /// The guest end of the v6 link (on the guest's `eth0`, applied from the `agent_guest_ip6=` token).
-    pub(crate) guest_ip6: Ipv6Addr,
+    /// The IPv4 link (host + guest ends of the `/30`). Always present on a networked VM.
+    pub(crate) v4: GuestLink<Ipv4Addr>,
+    /// The IPv6 link, `Some` **iff** the host v6 address was assigned. IPv6 is best-effort (absent on
+    /// an IPv6-disabled host, [`add_host_v6`]), so `None` means v6 is not live, callers get honest
+    /// availability rather than an address that silently doesn't work.
+    pub(crate) v6: Option<GuestLink<Ipv6Addr>>,
 }
 
 impl Tap {
@@ -98,25 +125,27 @@ impl Tap {
     /// create never leaks a netns or tap.
     pub(crate) fn create(netns: &str, owner: Option<(u32, u32)>) -> Result<Tap, VmmError> {
         netns_add(netns)?;
-        if let Err(e) = Self::build_tap(netns, owner) {
-            // Reclaim the netns (and any tap already added in it) so a failed create leaks nothing.
-            netns_del(netns);
-            return Err(e);
-        }
+        let v6_up = match Self::build_tap(netns, owner) {
+            Ok(up) => up,
+            Err(e) => {
+                // Reclaim the netns (and any tap already added in it) so a failed create leaks nothing.
+                netns_del(netns);
+                return Err(e);
+            }
+        };
         Ok(Tap {
             netns: netns.to_string(),
             name: TAP_NAME.to_string(),
             mac: GUEST_MAC.to_string(),
-            host_ip: HOST_IP,
-            guest_ip: GUEST_IP,
-            host_ip6: HOST_IP6,
-            guest_ip6: GUEST_IP6,
+            v4: GuestLink::new(HOST_IP, GUEST_IP, HOST_PREFIX),
+            // The v6 link is present only when its host end actually landed on the tap.
+            v6: v6_up.then(|| GuestLink::new(HOST_IP6, GUEST_IP6, HOST_PREFIX6)),
         })
     }
 
-    /// Bring up `lo`, create + up the tap, and assign the host ends of both the v4 /30 and the v6
-    /// link, all *inside* the netns.
-    fn build_tap(netns: &str, owner: Option<(u32, u32)>) -> Result<(), VmmError> {
+    /// Bring up `lo`, create + up the tap, and assign the host end of the v4 /30, all *inside* the
+    /// netns. Returns whether the **v6** host end was also assigned (best-effort, [`add_host_v6`]).
+    fn build_tap(netns: &str, owner: Option<(u32, u32)>) -> Result<bool, VmmError> {
         ip_in_ns(netns, &["link", "set", "dev", "lo", "up"])?;
         let (uid, gid);
         let mut add = vec!["tuntap", "add", "dev", TAP_NAME, "mode", "tap"];
@@ -129,8 +158,7 @@ impl Tap {
         ip_in_ns(netns, &["link", "set", "dev", TAP_NAME, "up"])?;
         let cidr = format!("{HOST_IP}/{HOST_PREFIX}");
         ip_in_ns(netns, &["addr", "add", &cidr, "dev", TAP_NAME])?;
-        add_host_v6(netns);
-        Ok(())
+        Ok(add_host_v6(netns))
     }
 
     /// The `/run/netns/<name>` handle to pass the jailer as `--netns`, so it joins this netns before
@@ -248,24 +276,31 @@ fn ip_in_ns(netns: &str, args: &[&str]) -> Result<(), VmmError> {
 /// `ip -6 addr add` fail. That must **not** fail the whole networked boot, doing so would regress even
 /// v4-only sandboxes on an IPv6-off host. Isolation does not rest on this address: deny-by-default is
 /// the absent v6 default route plus the eBPF egress hook (ADR 008), neither of which needs the tap to
-/// hold a v6 address. So per ADR 036 (fail-open-for-observation) this warns and returns on failure,
+/// hold a v6 address. So per ADR 032 (fail-open-for-observation) this warns and returns on failure,
 /// leaving the v6 link simply absent while v4 and isolation are unaffected.
 ///
 /// `nodad` skips duplicate-address detection: the point-to-point link has exactly one other endpoint
 /// (the guest, on a different address), so DAD would only add link-up multicast chatter with nothing
 /// to detect. A DAD-less `nodad`-unaware `ip` just falls into the same best-effort warning.
-fn add_host_v6(netns: &str) {
+///
+/// Returns whether the address landed, so the caller records the v6 link as present only when it is
+/// actually live (the guest cmdline token and [`RunningVm::ipv6`](crate::RunningVm) both key off this).
+fn add_host_v6(netns: &str) -> bool {
     let cidr6 = format!("{HOST_IP6}/{HOST_PREFIX6}");
-    if let Err(e) = ip_in_ns(
+    match ip_in_ns(
         netns,
         &["-6", "addr", "add", &cidr6, "dev", TAP_NAME, "nodad"],
     ) {
-        tracing::warn!(
-            netns = %netns,
-            error = %e,
-            "could not assign the host IPv6 address to the tap; the v6 link is absent on this host \
-             (IPv6 disabled in the host kernel?). The v4 link and isolation are unaffected."
-        );
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                netns = %netns,
+                error = %e,
+                "could not assign the host IPv6 address to the tap; the v6 link is absent on this host \
+                 (IPv6 disabled in the host kernel?). The v4 link and isolation are unaffected."
+            );
+            false
+        }
     }
 }
 

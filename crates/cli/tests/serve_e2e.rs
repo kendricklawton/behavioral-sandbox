@@ -1,4 +1,4 @@
-//! The `agent` daemon end to end, as tests (the wire API, ADR 034, docs/daemon.md): drive the
+//! The `agent` daemon end to end, as tests (the wire API, ADR 030, docs/daemon.md): drive the
 //! real daemon over its unix socket through the full
 //! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.
@@ -120,6 +120,8 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     cmd.env("AGENT_ROOTFS", root.join("artifacts/rootfs-agent.ext4"))
         // The agent rootfs signals readiness with its own marker, not a getty `login:`.
         .env("AGENT_MARKER", agent_vmm::GUEST_READY_MARKER)
+        // Keep the daemon's generated record-signing key inside the test's socket dir.
+        .env("AGENT_SIGNING_KEY", dir.join("signing.key"))
         .env("AGENT_LOG", "warn")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -279,13 +281,46 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         "the session survives a snapshot"
     );
 
-    // trace: the host-observed audit record, carrying its own (audit) schema.
+    // trace: the host-observed audit record, now a signed envelope (decision 034). The wire `record`
+    // field carries the schema-2 envelope; the record itself rides inside as a string.
     client.send("{\"op\":\"trace\"}");
     let traced = client.recv();
     assert_eq!(traced["reply"], "trace", "{traced}");
+    assert_eq!(
+        traced["record"]["schema"], 2,
+        "the signed envelope: {traced}"
+    );
     assert!(
-        traced["record"]["schema"].as_u64().is_some(),
-        "the record carries its audit schema: {traced}"
+        traced["record"]["signature"]
+            .as_str()
+            .is_some_and(|s| s.len() == 128),
+        "the record is signed: {traced}"
+    );
+    let inner: serde_json::Value =
+        serde_json::from_str(traced["record"]["record"].as_str().expect("record string"))
+            .expect("inner record parses");
+    assert!(
+        inner["schema"].as_u64().is_some(),
+        "the embedded record carries its audit schema: {inner}"
+    );
+    // The first trace is the unchained anchor (no `prev`).
+    assert!(
+        traced["record"].get("prev").is_none(),
+        "the first trace is unchained: {traced}"
+    );
+
+    // A second trace chains to the first (decision 034): its `prev` is the SHA-256 of the first
+    // record, so the sequence is tamper-evident as a whole, not just per record.
+    let first_record = traced["record"]["record"]
+        .as_str()
+        .expect("first record string")
+        .to_string();
+    client.send("{\"op\":\"trace\"}");
+    let traced2 = client.recv();
+    assert_eq!(
+        traced2["record"]["prev"].as_str(),
+        Some(agent_probes_loader::record_hash(&first_record).as_str()),
+        "the second trace commits to the first record's hash: {traced2}"
     );
 
     // trace_summary: the model-legible projection over the wire, its own summary schema, and the
@@ -432,9 +467,13 @@ fn the_reference_client_drives_a_full_session() {
     );
 
     let record = client.trace().unwrap_or_else(|e| panic!("trace: {e}"));
+    assert_eq!(
+        record["schema"], 2,
+        "the signed envelope over the wire: {record}"
+    );
     assert!(
-        record["schema"].as_u64().is_some(),
-        "the trace record carries its audit schema: {record}"
+        record["record"].as_str().is_some(),
+        "the envelope carries the record as a string: {record}"
     );
 
     // The reference client exposes the projection too, the model-legible face over the wire.

@@ -30,7 +30,7 @@ use crate::exec::{
 use crate::firecracker::{Action, ApiClient};
 use crate::jail::{remove_cgroup, Chroot, Jail};
 use crate::lifetime::{KillHandle, VmLifetime};
-use crate::net::Tap;
+use crate::net::{GuestLink, Tap};
 use crate::spawn::Spawned;
 use crate::{Limits, RunResult, VmmError};
 
@@ -111,7 +111,7 @@ pub struct BootConfig {
     pub boot_timeout: Duration,
     /// Wall-clock budget for each command run through this VM's `exec`: the guest agent kills the
     /// command past it, and the host's own give-up deadline is derived from it. At the public API this is
-    /// [`Limits::wall`], one wall for the whole run (ADR 013), which
+    /// [`Limits::wall`], one wall for the whole run (ADR 010), which
     /// [`with_limits`](BootConfig::with_limits) folds into both `boot_timeout` and this; the split
     /// exists at this layer so a driver-level caller can give boot and exec different ceilings.
     /// See [`Limits::wall`] for the semantics (including the nonzero requirement).
@@ -209,7 +209,7 @@ impl BootConfig {
     }
 
     /// Fold a per-sandbox [`Limits`] budget onto the config: vCPUs, memory, the wall (one wall for
-    /// the whole run, ADR 013, it becomes both the boot deadline *and* the per-exec budget),
+    /// the whole run, ADR 010, it becomes both the boot deadline *and* the per-exec budget),
     /// and the output cap.
     #[must_use]
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -339,10 +339,10 @@ pub struct Snapshot {
     /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
     /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
     /// restore must recreate a tap with **exactly this name**, trivially satisfied by the netns
-    /// model (ADR 017): each clone recreates the fixed-name tap inside its **own per-VM network
+    /// model (ADR 014): each clone recreates the fixed-name tap inside its **own per-VM network
     /// namespace**, so any number of networked clones coexist (no name collision across namespaces)
     /// and the snapshot's baked-in guest address/MAC/routes are already correct in each, with no
-    /// re-addressing needed. (This retired ADR 011's one-live-networked-clone limit.)
+    /// re-addressing needed.
     pub(crate) tap_name: Option<String>,
     /// The source's vCPU count, the restored clone's **true** parallelism, since the vCPUs come
     /// from the snapshot state (restore issues no `PUT /machine-config`) and nothing forces the
@@ -404,7 +404,7 @@ impl Vm {
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
-        // (images built in place inside the chroot). The ADR-013 deny-by-default refusal that
+        // (images built in place inside the chroot). The ADR 010 deny-by-default refusal that
         // stood here while combinations were unjailed retired with its last member; a new
         // not-yet-jailed feature must reinstate it rather than boot half-confined.
         //
@@ -415,7 +415,7 @@ impl Vm {
         }
         // One deadline for the whole boot: host-side staging (`launch`) and the API boot (`run_boot`)
         // share it, so a slow rootfs copy can't run unbounded before the boot's own timeout starts
-        // (ADR 013).
+        // (ADR 010).
         let deadline = crate::spawn::boot_deadline(config.boot_timeout);
         let mut spawned = Spawned::launch(&config, deadline)?;
         let boot_latency = match spawned.run_boot(&config, deadline) {
@@ -469,35 +469,21 @@ impl RunningVm {
         self.lifetime.kill_handle()
     }
 
-    /// The host end of the per-VM point-to-point link, when booted with
-    /// [`enable_network`](BootConfig::enable_network); `None` otherwise. The guest can reach this
-    /// address over its `eth0` (and nothing beyond it, deny-by-default).
+    /// The VM's **IPv4 link** (host + guest ends and prefix, a [`GuestLink`]), when booted with
+    /// [`enable_network`](BootConfig::enable_network); `None` otherwise. Always present on a networked
+    /// VM. The guest reaches the host end over its `eth0` and nothing beyond it (deny-by-default).
     #[must_use]
-    pub fn host_ip(&self) -> Option<Ipv4Addr> {
-        self.tap.as_ref().map(|t| t.host_ip)
+    pub fn ipv4(&self) -> Option<GuestLink<Ipv4Addr>> {
+        self.tap.as_ref().map(|t| t.v4)
     }
 
-    /// The guest's `eth0` address, when booted with [`enable_network`](BootConfig::enable_network);
-    /// `None` otherwise. Reachable from the host over the tap.
+    /// The VM's **IPv6 link** ([`GuestLink`]), or `None` when the VM has no NIC **or** IPv6 isn't live
+    /// on the host. IPv6 is best-effort (ADR 008/032): an IPv6-disabled host has no v6 link, so a
+    /// `Some` here means v6 is *actually* reachable, the honest twin of [`ipv4`](Self::ipv4). Applied
+    /// in-guest from the `agent_guest_ip6=` cmdline token (the kernel `ip=` param is v4-only).
     #[must_use]
-    pub fn guest_ip(&self) -> Option<Ipv4Addr> {
-        self.tap.as_ref().map(|t| t.guest_ip)
-    }
-
-    /// The host end of the per-VM **IPv6** link, the v6 twin of [`host_ip`](Self::host_ip); `None`
-    /// without [`enable_network`](BootConfig::enable_network). The guest reaches this and nothing
-    /// beyond it (deny-by-default: connected-prefix route only, no v6 default route).
-    #[must_use]
-    pub fn host_ip6(&self) -> Option<Ipv6Addr> {
-        self.tap.as_ref().map(|t| t.host_ip6)
-    }
-
-    /// The guest's `eth0` **IPv6** address, the v6 twin of [`guest_ip`](Self::guest_ip); `None`
-    /// without [`enable_network`](BootConfig::enable_network). Applied in-guest from the
-    /// `agent_guest_ip6=` cmdline token (the kernel `ip=` param is v4-only).
-    #[must_use]
-    pub fn guest_ip6(&self) -> Option<Ipv6Addr> {
-        self.tap.as_ref().map(|t| t.guest_ip6)
+    pub fn ipv6(&self) -> Option<GuestLink<Ipv6Addr>> {
+        self.tap.as_ref().and_then(|t| t.v6)
     }
 
     /// The host tap interface backing this VM's NIC, when booted with
@@ -559,7 +545,7 @@ impl RunningVm {
     /// the exec protocol. The captured output is bounded ([`BootConfig::output_cap`]); a command
     /// that exits non-zero is a normal [`RunResult`], not an error. Each call opens a fresh
     /// connection (the guest agent serves one command per connection and loops), and repeated
-    /// `exec`s **compose into a stateful session** (ADR 019): the agent serves every one from
+    /// `exec`s **compose into a stateful session** (ADR 016): the agent serves every one from
     /// the same persistent working directory, so files injected or written by one command are
     /// visible to the next, until the VM (and its overlay) is torn down.
     ///
@@ -859,7 +845,7 @@ mod tests {
         });
         assert_eq!(cfg.vcpus.get(), 4);
         assert_eq!(cfg.mem_mib.get(), 1024);
-        // One wall for the whole run (ADR 013): the fold sets the boot deadline *and* the
+        // One wall for the whole run (ADR 010): the fold sets the boot deadline *and* the
         // per-exec budget from it; the output cap rides alongside.
         assert_eq!(cfg.boot_timeout, Duration::from_secs(60));
         assert_eq!(cfg.exec_wall, Duration::from_secs(60));

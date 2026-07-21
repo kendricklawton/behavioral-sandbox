@@ -89,7 +89,7 @@ fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
         .tap_name()
         .expect("a networked VM exposes its tap")
         .to_string();
-    let host_ip = vm.host_ip().expect("a networked VM exposes its host end");
+    let host_ip = vm.ipv4().expect("a networked VM exposes its host end").host;
 
     // Launch enforcement with a single-endpoint allow-list, only host_ip:ALLOWED_PORT/udp.
     // `enforce_in_netns` arms the policy before the tc programs go live, so there is no un-enforced window.

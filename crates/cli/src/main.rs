@@ -6,7 +6,7 @@
 //! or the `--json` structured result / audit log), so `agent run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
 //! flags > env (`AGENT_LOG`) > default. Both subcommands run
-//! **jailed by default** (ADR 015) with `--unjailed` as the explicit opt-out, and both point
+//! **jailed by default** (ADR 012) with `--unjailed` as the explicit opt-out, and both point
 //! at the env-layered artifacts (`AGENT_ROOTFS`/`AGENT_KERNEL`/`AGENT_MARKER`, exec needs the
 //! agent rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
@@ -18,6 +18,7 @@ mod metrics;
 mod serve;
 mod session;
 mod trace;
+mod verify;
 mod watch;
 
 use std::io::{IsTerminal, Read, Write};
@@ -101,8 +102,12 @@ enum Cmd {
     /// Check this host's readiness to run the engine, KVM, the jailer, tools, artifacts, eBPF
     /// capabilities, and print what will work, degrade, or refuse before the first sandbox.
     Doctor,
+    /// Verify a signed audit record (`--record` output): check its `ed25519` signature against a
+    /// trusted key (the host's own, or `--key <hex>`), so alteration after the producing host is
+    /// caught (ADR 034). Exits non-zero if the record was altered or signed by an untrusted key.
+    Verify(verify::VerifyArgs),
     /// Run the long-lived driver **daemon**: expose the sandbox lifecycle over a unix socket
-    /// (the versioned newline-JSON wire API, ADR 034), so a local client drives microVMs without
+    /// (the versioned newline-JSON wire API, ADR 030), so a local client drives microVMs without
     /// linking the engine. The daemon half of this one binary; access control is the socket's
     /// directory permissions (no auth, a recorded non-goal).
     Serve(Box<serve::ServeArgs>),
@@ -114,7 +119,7 @@ struct RunArgs {
     #[arg(long)]
     demo_boot: bool,
     /// Run the VMM without the jailer. The default is confined (jailed, which needs real root and
-    /// the `jailer` binary, ADR 015); this is the explicit opt-out for hosts that can't jail.
+    /// the `jailer` binary, ADR 012); this is the explicit opt-out for hosts that can't jail.
     #[arg(long)]
     unjailed: bool,
     /// Set an environment variable on the guest command (repeatable). Values are treated as
@@ -240,6 +245,7 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
             shell(args, file)
         }
         Cmd::Doctor => Ok(doctor::report(&base_config(file))),
+        Cmd::Verify(args) => verify::run(args, file),
         // `serve` is dispatched in `main` before this point (it skips the project-file/tracing
         // setup `run` runs under), so this arm is never reached; a typed error rather than a
         // panic keeps the no-panic discipline even for the impossible case.
@@ -251,8 +257,8 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
 
 /// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `agent`
 /// run left: a `Ctrl-C`/SIGKILL of a boot subcommand skips `Drop`, so the lifetime sentinel reaps
-/// the VM process but the scratch dir and netns are out of its scope (ADR 014). Run once before a
-/// boot subcommand as the boot-time GC the engine owes its host (ADR 016). Best-effort and
+/// the VM process but the scratch dir and netns are out of its scope (ADR 011). Run once before a
+/// boot subcommand as the boot-time GC the engine owes its host (ADR 013). Best-effort and
 /// conservative: [`sweep_orphans`] only reclaims this euid's dead-pid dirs, so it never touches a
 /// concurrent run's live sandbox.
 fn sweep_vm_residue(file: Option<&config::AgentToml>) {
@@ -481,10 +487,17 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             let _ = writeln!(std::io::stdout(), "\n{}", trace::render(&record).trim_end());
         }
         if let Some(path) = &args.record {
-            // The deterministic JSON record, the machine surface, one line, byte-stable.
-            std::fs::write(path, record.to_json() + "\n")
+            // The machine surface, one line, byte-stable: the deterministic record wrapped in an
+            // `ed25519` signature envelope (decision 034) so a consumer detects post-hoc alteration
+            // off-host. The signing key is host-side (the guest never sees it), loaded/generated at
+            // the config-resolved path.
+            let key_path = config::signing_key_path(file);
+            let key = agent_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+                VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
+            })?;
+            std::fs::write(path, key.sign_record(&record) + "\n")
                 .map_err(|e| VmmError::Artifact(format!("--record {}: {e}", path.display())))?;
-            tracing::info!(path = %path.display(), "wrote audit record");
+            tracing::info!(path = %path.display(), key_id = %key.key_id(), "wrote signed audit record");
         }
         if let Some(path) = &args.record_summary {
             // The model-legible projection, a compact, byte-stable view of the same record.

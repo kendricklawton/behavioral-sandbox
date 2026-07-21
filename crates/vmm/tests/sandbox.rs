@@ -1,5 +1,5 @@
 //! Integration tests for the [`Sandbox`] public API: the lifecycle `open → exec (files + env) →
-//! outputs → snapshot → close`, the jailed-by-default polarity (ADR 015), and the VM half of
+//! outputs → snapshot → close`, the jailed-by-default polarity (ADR 012), and the VM half of
 //! the secret-hygiene leak check (the host-log/error half runs without a VM in `src/exec.rs`).
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the agent rootfs. Run via
@@ -31,7 +31,7 @@ fn vmm_uid(pid: u32) -> Option<String> {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn sandbox_opens_jailed_by_default() {
-    // The ADR-015 polarity flip, proven at the public API: the config sets *no* jail, and `open`
+    // The ADR 012 polarity flip, proven at the public API: the config sets *no* jail, and `open`
     // confines anyway, the VMM runs as the dropped uid and still serves an exec. The unjailed
     // path below is only reachable by writing `open_unjailed`.
     if !have_jailer_privileges() {
@@ -202,7 +202,7 @@ fn exec_budgets_are_per_sandbox_knobs() {
     limits.wall = Duration::from_secs(2);
     limits.output_cap = 4096;
     let mut cfg = agent_rootfs_config().with_limits(limits);
-    // One `wall` covers boot and exec at the public API (ADR 013); this test wants a tight *exec*
+    // One `wall` covers boot and exec at the public API (ADR 010); this test wants a tight *exec*
     // budget without gambling on a 2 s boot, so it uses the driver-level split beneath the public API.
     cfg.boot_timeout = Duration::from_secs(30);
     let sandbox = Sandbox::open_unjailed(cfg).expect("open");
@@ -276,7 +276,7 @@ fn many_sandboxes_run_concurrently_without_interference() {
 #[test]
 #[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_concurrent_stateful_sessions_stay_isolated() {
-    // Two stateful sessions at once: session identity is VM identity (ADR 019), so
+    // Two stateful sessions at once: session identity is VM identity (ADR 016), so
     // isolation between them is KVM, not agent bookkeeping. Both sandboxes are live together and
     // their execs interleave A1 → B1 → A2 → B2 on the *same* relative filename; each session then
     // reads back exactly its own accumulated state, and a file that exists only in B is absent

@@ -12,7 +12,7 @@
 //! Every collection is deterministically sorted, so a record built from the same
 //! observations is byte-stable regardless of map-iteration order, the property the JSON
 //! output will rely on. Kept here, out of `agent-vmm`, so the driver stays independent of the eBPF
-//! loader (ADRs 024/026); the two tracks bridge only by plain values.
+//! loader (ADRs 021/023); the two tracks bridge only by plain values.
 
 use std::collections::btree_map::BTreeMap;
 use std::time::Duration;
@@ -82,7 +82,7 @@ pub struct NetSection {
     /// [`flows`](Self::flows) so a v4-only consumer is unaffected; [`totals`](Self::totals) sums both.
     pub flows6: Vec<FlowRecord6>,
     /// Destinations the egress policy blocked, with the dropped-packet count, the audit trail
-    /// ADR 025 folds in here. **Aggregated by destination** (one row per blocked endpoint,
+    /// ADR 022 folds in here. **Aggregated by destination** (one row per blocked endpoint,
     /// summed across guest source ports) and sorted by that destination triple.
     pub denials: Vec<DenialRecord>,
     /// The IPv6 blocked-destination trail, aggregated and sorted like [`denials`](Self::denials).
@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(a, b); // same flows, different input order → identical section
         assert_eq!(a.flows[0].key.dst_addr, u32::from_be_bytes([1, 1, 1, 1]));
         // A full kernel table marks the section truncated: either counter alone is enough, and the
-        // healthy shape (0/0) reads complete. This is the honest-loss contract of ADR 025's
+        // healthy shape (0/0) reads complete. This is the honest-loss contract of ADR 022's
         // trail: a guest churning source ports can fill the table but not silence the loss.
         assert!(!a.truncated());
         assert!(NetSection::from_tap(vec![], totals, vec![], 1, 0).truncated());

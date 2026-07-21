@@ -1,4 +1,4 @@
-# 013. Per-run resource policy: one `Limits` struct of quantities, enforced at the host cgroup, failing open *(2026-07-14)*
+# 010. Per-run resource policy: one `Limits` struct of quantities, enforced at the host cgroup, failing open *(2026-07-14)*
 
 **Context.** The engine caps each run at the host cgroup: every VMM gets a cgroup with
 `cpu.max`/`memory.max` and a boot deadline. The controls, though, are scattered: [`Limits`]
@@ -12,10 +12,10 @@ makes the follow-on work wiring, not design.
 
 **Decision.** The per-run resource policy is the one already-public, API-pinned, `#[non_exhaustive]`
 struct [`Limits`], carrying **resource quantities**, never mechanism. Its knobs:
-- **`vcpus: u32`** sets the guest's vCPU count *and* the host cgroup `cpu.max` (exactly `vcpus` cores:
+- **`vcpus: NonZeroU8`** sets the guest's vCPU count *and* the host cgroup `cpu.max` (exactly `vcpus` cores:
   `vcpus × 100000` per 100000us period). One number caps both what the guest sees and what the VMM may
   burn.
-- **`mem_mib: u32`** sets guest RAM *and* `memory.max = (mem_mib + 128 MiB)` (the measured host-side VMM
+- **`mem_mib: NonZeroU32`** sets guest RAM *and* `memory.max = (mem_mib + 128 MiB)` (the measured host-side VMM
   overhead above guest RAM), so the guest is never handed RAM its own cgroup would then OOM.
 - **`wall: Duration`** is the run's wall-clock budget: it sets the boot-to-userspace deadline *and* the
   exec wall-clock budget (the internal `DEFAULT_EXEC_TIMEOUT` becomes settable), so one `wall` means the

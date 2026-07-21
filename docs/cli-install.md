@@ -32,12 +32,12 @@ compatibility note: the parts the isolation-and-audit thesis rests on are **hard
 rest **degrade with a stated consequence**. `agent doctor` reports exactly where your host sits and
 exits non-zero if a hard requirement is missing.
 
-**Hard requirements** (off these, the host is not supported, [decision 036](./adr/036-supported-platforms-two-architectures-a-security.md)):
+**Hard requirements** (off these, the host is not supported, [decision 032](./adr/032-supported-platforms-two-architectures-a-security.md)):
 
 | | Requirement | Why |
 |---|---|---|
 | **OS** | Linux | KVM is the isolation boundary |
-| **Architecture** | `x86_64` or `aarch64` | Firecracker's two; the only targets the engine builds |
+| **Architecture** | `x86_64` | the one architecture with tested artifacts and a privileged CI lane; aarch64 support returns only with hardware to test it on (decision 032 as narrowed) |
 | **Host kernel** | **≥ 5.15** (a security-maintained LTS) | untrusted code on an unpatched kernel is a threat-model hole, KVM CVEs land here |
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
 | **Firecracker + jailer** | present on `PATH` | no VMM to launch (the jailer's absence degrades to `--unjailed`) |
@@ -50,7 +50,7 @@ tracks their supported set.
 **Verified on** (measured, not marketed, this is the honest test surface as of pre-1.0):
 
 - **Host-safe gate** (build, unit tests, lints, docs, the eBPF object build) runs in CI on **Ubuntu
-  24.04**, both `x86_64` and `aarch64`, on every change.
+  24.04** `x86_64` on every change.
 - **The privileged path** (microVM boot, the jailer, the eBPF probes, the end-to-end integration
   suite) runs in CI on a GitHub-hosted **Ubuntu 24.04** runner (`x86_64`, nested KVM) and by hand
   on **Arch Linux** (rolling) during development, both with **Firecracker v1.9**. Those two are the
@@ -58,8 +58,10 @@ tracks their supported set.
   LTS-oldest; Ubuntu's e2fsprogs and IPv6 defaults each caught a real issue Arch could not). Other
   distros are supported per the checks above but not continuously exercised; `agent doctor` names
   exactly what a given host is missing.
-- The **`aarch64` privileged path has no CI lane yet**: hosted arm64 runners expose no `/dev/kvm`,
-  so it waits on a self-hosted arm64 KVM box (`ci-privileged.yml` is that lane's workflow).
+- **`aarch64` is not supported at this time**: it was never privileged-tested (no arm64 KVM
+  hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
+  carried untested. A contribution that brings tested arm artifacts plus a privileged CI lane
+  reopens it.
 - One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
   systemd default on Arch, and some Ubuntu setups), the jailed default fails because the jailer's
   chroot `/dev/kvm` there is inert, point `AGENT_SCRATCH_DIR` at a non-`nodev` path. `agent doctor`
@@ -70,7 +72,7 @@ tracks their supported set.
 - No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
   egress enforcement refuses** rather than running unenforced.
 - **cgroup v2** controllers not delegated → jailed VMs run without CPU/memory caps (a fail-open DoS
-  mitigation, not the isolation boundary, [decision 013](./adr/013-per-run-resource-policy-one-limits-struct-of.md)).
+  mitigation, not the isolation boundary, [decision 010](./adr/010-per-run-resource-policy-one-limits-struct-of.md)).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
 - **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
   `/dev/kvm` is inert, so the jailed default fails to open KVM; set `AGENT_SCRATCH_DIR` to a
@@ -157,4 +159,4 @@ The mirror is **not** committed (it holds downloaded images, like `artifacts/`);
 offline convenience, produced once. The `.apk` closure is pinned at vendor time (Alpine branch repos
 delete old package revisions, so there is no stable per-package URL to pin in source), which makes an
 offline build **more** reproducible than the live-CDN one, it installs from the frozen cache the
-manifest hashes. See [decision 037](./adr/037-single-command-self-host-a-vendored-offline-mirror-of.md) for the full rationale.
+manifest hashes. See [decision 033](./adr/033-single-command-self-host-a-vendored-offline-mirror-of.md) for the full rationale.

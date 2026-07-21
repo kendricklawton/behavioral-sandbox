@@ -1,13 +1,13 @@
 //! One client connection = one sandbox **session**. Mirrors `agent shell`'s lifecycle over the wire:
 //! the first message opens the sandbox (jailed by default, the daemon's launch posture, never the
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
-//! session, ADR 019), until `close` (or a hung-up connection) tears it down.
+//! session, ADR 016), until `close` (or a hung-up connection) tears it down.
 //!
 //! The session runs on an owned [`RunningVm`], not a [`Sandbox`](agent_vmm::Sandbox), so a warm clone
 //! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
-//! **The verbs** (the versioned wire API, ADR 034): `open` boots; `exec` runs a command; `put`/`get`
+//! **The verbs** (the versioned wire API, ADR 030): `open` boots; `exec` runs a command; `put`/`get`
 //! write/read a working-directory file (a no-op exec that only injects/returns it, since injection is
 //! the engine's only file seam); `snapshot` writes a bundle (a typed refusal for a jailed session);
 //! `trace` returns the host-observed audit record (`RunRecord`) so far; `close` ends it.
@@ -18,7 +18,7 @@
 //! the CLI's shell: a **guest** fault (a bad command, a timeout, a flooded cap) is per-request and the
 //! session survives it, while an **infra/transport** fault means the VM itself is gone, so the session
 //! ends and its VM drops (tearing the microVM down). Losing the whole daemon process can't leak a VM
-//! either, the lifetime sentinel (ADR 014) owns that.
+//! either, the lifetime sentinel (ADR 011) owns that.
 
 use std::io::BufReader;
 use std::num::{NonZeroU32, NonZeroU8};
@@ -127,6 +127,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
 
     // The command loop: one request per line until `close`, EOF, or a session-ending fault.
     let mut total_exec_wall = Duration::ZERO;
+    // The session's record hash-chain (decision 034): each `trace` reply commits to the previous
+    // one's hash, so a client can `verify_chain` the sequence and detect a reordered/dropped record.
+    // `None` until the first `trace`; the first record is the unchained anchor.
+    let mut record_chain: Option<String> = None;
     loop {
         match read_message::<Request>(&mut reader) {
             Ok(None) => break, // clean EOF, teardown below
@@ -235,10 +239,22 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     boot,
                     exec_wall: total_exec_wall,
                 };
+                // Sign the finalized record with the host key (decision 034) and carry the envelope:
+                // the record rides inside it as a string, so its signed bytes survive the wire's
+                // serde round-trip and a client can verify without trusting this daemon's transport.
+                // Chained to the previous `trace` in this session, so the sequence is tamper-evident
+                // as a whole, not just per record.
                 let resp = match probes.as_ref() {
-                    Some(p) => Response::Trace {
-                        record: record_to_value(&p.live_record(timing).to_json()),
-                    },
+                    Some(p) => {
+                        let canonical = p.live_record(timing).to_json();
+                        let envelope = server
+                            .signing_key
+                            .sign_canonical_chained(&canonical, record_chain.as_deref());
+                        record_chain = Some(agent_probes_loader::record_hash(&canonical));
+                        Response::Trace {
+                            record: record_to_value(&envelope),
+                        }
+                    }
                     None => {
                         server.metrics.request_failed(true);
                         nonfatal("audit probes are not attached for this session")
@@ -411,7 +427,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
     // would orphan an empty `snap-N` on every refusal, and the default daemon posture is jailed (where
     // snapshot is always a refusal), so a client looping `snapshot` would leak dirs unbounded.
     // The returned `Snapshot` is just metadata pointing at the on-disk bundle; the client gets the
-    // directory (the bundle stays on the daemon host, ADR 034 keeps bulk bytes off this line).
+    // directory (the bundle stays on the daemon host, ADR 030 keeps bulk bytes off this line).
     let _snapshot = vm.snapshot(&dir)?;
     Ok(dir.to_string_lossy().into_owned())
 }

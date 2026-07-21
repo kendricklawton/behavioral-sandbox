@@ -1,4 +1,4 @@
-# 014. Cgroup-owned VM lifetime: a sentinel that outlives the driver, and a file-based kill handle *(2026-07-14)*
+# 011. Cgroup-owned VM lifetime: a sentinel that outlives the driver, and a file-based kill handle *(2026-07-14)*
 
 **Context.** A VMM outlives nothing it does not force to die. The obvious teardown path, `Drop`, is
 correct on every path the driver survives, but the driver does not always survive: a `SIGKILL`, an OOM
@@ -14,7 +14,7 @@ all built from the cgroup the VM already has.
 - **A per-VM lifetime cgroup.** Every directly-spawned VMM is enrolled (via `cgroup.procs`) in a fresh
   child of the *driver's own* cgroup, the one place an unprivileged process is guaranteed write access
   when anything is (its delegated systemd session scope; the same no-controllers trick as the guest
-  agent's exec cgroups, decision 012 addendum, so no delegation needed and no internal-process rule).
+  agent's exec cgroups, decision 010, so no delegation needed and no internal-process rule).
   The cgroup gives the whole VMM one kernel handle: `cgroup.kill` SIGKILLs every member atomically, no
   pid races. A **jailed** VMM is *not* enrolled, the jailer moves it into its own cgroup, and a second
   `cgroup.procs` write would race that placement (last write wins membership and could yank the VMM out
@@ -32,8 +32,8 @@ all built from the cgroup the VM already has.
   file, which is why it needs no reference to the `Child` and no `unsafe`, so any thread can force a
   VM down; the blocked `exec` returns a typed error when the vsock peer closes. Where no cgroup exists
   it falls back to signalling the pid (safe while the VM is unreaped; a `torn_down` flag set *before*
-  the reap makes late kills no-ops, so a recycled pid is never signalled). Surfaced on `RunningVm` now,
-  on `Sandbox` once the sandbox lifecycle API lands.
+  the reap makes late kills no-ops, so a recycled pid is never signalled). Surfaced on `RunningVm`
+  and, since the sandbox lifecycle API landed, on `Sandbox` (`kill_handle`).
 
 **Alternatives considered.**
 - **`PR_SET_PDEATHSIG` on the child.** The classic answer, rejected: it needs a `pre_exec` hook
@@ -54,9 +54,9 @@ all built from the cgroup the VM already has.
 - The unprotected windows, stated honestly: spawn → enrollment (microseconds, unjailed) and spawn → the
   jailer's self-placement (milliseconds, jailed), a driver killed inside them leaks that one VMM, as
   before. A host with no writable cgroup v2 degrades to `Drop`-only teardown with a warning (fail-open,
-  decision 013: this is leak-proofing, not the isolation boundary).
-- The sentinel owns the VM *process tree* and its cgroups; a crashed driver's scratch dirs and taps are
-  inert residue (no CPU, no RAM, no KVM), left to the next boot's leak checks or a sweep, deliberately
-  not the sentinel's job, to keep it too simple to be wrong.
+  decision 010: this is leak-proofing, not the isolation boundary).
+- The sentinel owns the VM *process tree* and its cgroups; a crashed driver's scratch dirs and netns
+  (holding its tap) are inert residue (no CPU, no RAM, no KVM), left to the next boot's leak checks
+  or a sweep, deliberately not the sentinel's job, to keep it too simple to be wrong.
 - The host now needs `sh` at runtime (the sentinel, and the kill handle's pid fallback). Precedent: the
   driver already shells out to `ip` for taps.

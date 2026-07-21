@@ -19,12 +19,23 @@ aya = "0.13"
 # `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
 agent-probes-common = { path = "../probes-common", features = ["std"] }
 
-# Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (ADR 024).
+# Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (ADR 021).
 # `setns` has no `std` wrapper; nix's is a *safe* function, so the loader stays
 # `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
 # Pinned to the same 0.31 the workspace already carries (via `vsock` under `agent-vmm`) so the build
 # links one copy of nix, not two.
 nix = { version = "0.31", default-features = false, features = ["sched"] }
+
+# Record integrity (decision 034): an `ed25519` detached signature over the canonical record bytes,
+# so a consumer detects post-hoc alteration off-host. The signing key is host-side (the guest never
+# sees it, like the eBPF). `serde_json` builds/parses the signature envelope only; the record itself
+# stays the hand-rolled deterministic JSON (`json.rs`), and is embedded as an opaque string so its
+# signed bytes survive a serde round-trip over the wire.
+ed25519-dalek = { workspace = true }
+serde_json = { workspace = true }
+# The session hash-chain (decision 034): each record commits to the SHA-256 of the previous one, so a
+# sequence is tamper-evident as a whole. Already in the tree under `ed25519-dalek`; named directly here.
+sha2 = { workspace = true }
 
 [dev-dependencies]
 # The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach
