@@ -5,12 +5,8 @@
 # Fail on any known RustSec advisory in the tree. `yanked` crates are also rejected.
 version = 2
 yanked = "deny"
-ignore = [
-    # `paste` (a compile-time proc-macro, pulled in by ratatui, the CLI's `--watch` live view) is
-    # archived by its author: an *unmaintained* notice, not a vulnerability, and the crate does no
-    # runtime work. Drop this exception when ratatui moves off it upstream.
-    "RUSTSEC-2024-0436",
-]
+# No advisory exceptions: the tree is clean, so `cargo deny check advisories` fails on any new one.
+# Add an `ignore = ["RUSTSEC-…"]` here only with a reason if an unavoidable transitive advisory lands.
 
 [licenses]
 version = 2
