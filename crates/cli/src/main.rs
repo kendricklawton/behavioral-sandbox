@@ -719,7 +719,7 @@ fn read_put_files(puts: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, VmmError> 
 }
 
 /// Write the guest's returned artifacts under the current directory, refusing anything the run
-/// didn't explicitly ask for. Deny-by-default (`.rules` guardrail 3): the operator's `--get` set is
+/// didn't explicitly ask for. Deny-by-default (`AGENTS.md` guardrail 3): the operator's `--get` set is
 /// the *only* allowance, so a returned path that wasn't requested (a planted `.git/config`,
 /// `Makefile`) is refused, never written. The exec API already guarantees each path is relative and
 /// non-climbing (`run_exec`); here we additionally resolve every component without following a

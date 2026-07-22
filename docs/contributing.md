@@ -3,7 +3,7 @@
 Contributions are welcome. This chapter is the orientation; [Building](./contributing-building.md)
 covers the toolchain and the CI gates, and [Testing](./contributing-testing.md) covers the testing
 approach. The operating manual, read every session by humans and coding agents alike, is
-[`.rules`](https://github.com/kendricklawton/agent/blob/main/.rules) at the repo root.
+[`AGENTS.md`](https://github.com/kendricklawton/agent/blob/main/AGENTS.md) at the repo root.
 
 ## How the work is organized
 
@@ -30,13 +30,16 @@ tagged `(decision)` record the hard-to-reverse choice as a dated, numbered
 
 ## Commit & PR conventions
 
-- One logical change per commit; **imperative** subject describing **what was done** ("Boot a
-  microVM from the driver", not "added VM boot"). Don't reference roadmap phase IDs, the
-  roadmap can change.
-- **Public-API changes are called out in the commit subject** with a leading `api:` marker: the
-  engine is embedded downstream at the `vmm` library's public API (`Sandbox`, `Limits`,
-  `RunResult`, `VmmError` including its `kind()` mapping, the `channel` wire protocol), pinned by
-  git rev, so a downstream pin bump must be auditable from the log alone.
+- One logical change per commit, written as a [Conventional Commit](https://www.conventionalcommits.org):
+  `type(scope)?: subject` with the standard types (`feat`, `fix`, `docs`, `test`, `refactor`,
+  `perf`, `chore`, `ci`, `build`). The subject is **imperative** and describes **what was done**
+  ("feat: boot a microVM from the driver", not "added VM boot"). Don't reference roadmap phase
+  IDs, the roadmap can change. A mixed change takes its most significant type rather than
+  splitting hairs.
+- **Public-API changes carry the `api` scope** (`feat(api):` / `fix(api):`, `!` appended when
+  incompatible): the engine is embedded downstream at the `vmm` library's public API (`Sandbox`,
+  `Limits`, `RunResult`, `VmmError` including its `kind()` mapping, the `channel` wire protocol),
+  pinned by git rev, so a downstream pin bump must be auditable from the log alone.
 - **Never add an AI co-author or attribution trailer.** Never commit built rootfs/kernel images
   or generated eBPF objects, they're built by `xtask`.
 - Every PR must pass the host-safe gate (`cargo xtask ci`); privileged integration runs where

@@ -20,7 +20,7 @@ The chapters below are the working manual for **collaborators** (and for reading
 
 Host prerequisites and first-run instructions are in
 [Installation](docs/cli-install.md). The operating manual, the rules read every session, is
-[`.rules`](.rules); the staged plan is [`ROADMAP.md`](ROADMAP.md).
+[`AGENTS.md`](AGENTS.md); the staged plan is [`ROADMAP.md`](ROADMAP.md).
 
 By contributing you agree your contributions are licensed under **Apache-2.0**, the project's
 license (see [`LICENSE`](LICENSE)).

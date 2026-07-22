@@ -15,7 +15,7 @@ members = [
 # `crates/probes` holds the eBPF programs. They build for `bpfel-unknown-none` (not the host
 # triple) via `bpf-linker`, so excluding them keeps the everyday host gate (clippy --all-targets,
 # test) host-only and green; the eBPF object is built separately for its own target. See
-# `.rules` and `docs/contributing-building.md`.
+# `AGENTS.md` and `docs/contributing-building.md`.
 #
 # `fuzz` is the `cargo fuzz` harness: nightly + libFuzzer, its own detached workspace, never part of
 # the everyday stable gate. Excluded here too so `cargo build --workspace` ignores it. See
@@ -30,7 +30,7 @@ edition = "2021"
 # back-support burden this early), never incidental drift.
 rust-version = "1.97"
 license = "Apache-2.0"
-authors = ["Kendrick Lawton <khe4r6@gmail.com>", "Kendrick Lawton <khlawton@asu.edu>"]
+authors = ["Kendrick Lawton <khlawton@asu.edu>"]
 repository = "https://github.com/kendricklawton/agent"
 
 # Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON

@@ -37,7 +37,7 @@ The one remaining decode surface deliberately *not* fuzzed is the Firecracker HT
 it reads bytes from the host-side, trusted VMM process, not attacker-controlled input, so it is
 robustness hygiene rather than a security boundary.
 
-## Two tiers
+## Three tiers
 
 **In the gate, dependency-free (`crates/channel` `fuzz_tests`).** A property test that runs as part of
 `cargo xtask ci` on stable, every time. It uses a tiny deterministic PRNG (no `proptest`/`arbitrary`
@@ -67,6 +67,22 @@ first-byte reject and spends its budget in the decode logic instead of rediscove
 (`.github/workflows/fuzz.yml`): a bounded 15 minutes per target through the same `cargo xtask fuzz` a
 dev box uses; a crash fails the run and uploads the reproducing input as a workflow artifact.
 
+**Per-PR smoke (`cargo xtask fuzz-smoke`, on every pull request).** The middle tier, between the
+in-gate property tests (every push, no toolchain) and the deep nightly run: the *real* fuzzer over
+*every* target for a short bounded time (60s each, seeded), so a change that breaks a decoder is
+caught on the PR that introduced it, not only that night. `.github/workflows/fuzz-smoke.yml` runs it
+on `pull_request` and pushes to `main`; a dev runs the same command before pushing. This mirrors the
+per-PR fuzzing rust-vmm and Cloud Hypervisor run on their device models, applied to our host-side
+decoders. It is still nightly + libFuzzer, so it is **not** part of the host-safe `ci` gate.
+
+**Seeing what a run reached.** `cargo xtask fuzz-coverage <target>` runs the target over its corpus
+and seeds and writes a `coverage.profdata` (needs the nightly `llvm-tools` component:
+`rustup component add llvm-tools --toolchain nightly`); a low reached-fraction means the target is
+bouncing off an early check (stale seeds, an over-tight guard) rather than exercising the decode
+logic, which a green run alone can't reveal. `cargo xtask fuzz-cmin <target>` minimizes a target's accumulated
+on-disk corpus (one input per coverage feature) so replays stay fast; run it periodically and, if a
+minimized input reaches a genuinely new path, promote it into the committed `fuzz/seeds/<target>/`.
+
 ## Running it
 
 The in-gate tier needs nothing extra:
@@ -87,6 +103,10 @@ rustup toolchain install nightly         # one-time: libFuzzer's sanitizer flags
 cargo xtask fuzz                         # channel_response, 60s (the default)
 cargo xtask fuzz channel_request --seconds 300
 cargo xtask fuzz channel_frame --seconds 0     # run until a crash or Ctrl-C
+
+cargo xtask fuzz-smoke                    # every target, 60s each (the per-PR smoke)
+cargo xtask fuzz-coverage protocol_message   # what did the corpus reach?
+cargo xtask fuzz-cmin protocol_message       # shrink the accumulated corpus
 ```
 
 You only need nightly *installed*, not as your default: `cargo xtask fuzz` invokes cargo-fuzz under

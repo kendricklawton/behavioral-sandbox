@@ -87,7 +87,7 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
 - [x] **P0.2** New workspace layout: `crates/vmm` (Firecracker driver), `crates/probes` (aya
       eBPF programs, `no_std`, excluded), `crates/probes-loader` (userspace loader), `crates/cli`
       (`agent`), `xtask`.
-- [x] **P0.3** Rewrite `.rules` / `README.md` / `CONTRIBUTING.md` / `docs/contributing-architecture.md` to the
+- [x] **P0.3** Rewrite `AGENTS.md` / `README.md` / `CONTRIBUTING.md` / `docs/contributing-architecture.md` to the
       sandbox-engine identity and the four core properties.
 - [x] **P0.4** Prerequisites pinned in `CONTRIBUTING.md` (KVM, BTF, `firecracker`+jailer, aya
       toolchain, caps); `cargo xtask setup` checks the host and reports what's missing.
@@ -2131,7 +2131,7 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
       post-host-alteration adversary, what the signature does/does not prove, custody as the hoster's)
       and asset 3 now names the signature; `docs/security.md` gains a "Record integrity (host-signed)"
       section + a security-bug bullet (a tampered record that still verifies). The README, the
-      introduction, `.rules`, and the CI-job/containment examples now point their "tamper-evident/
+      introduction, `AGENTS.md`, and the CI-job/containment examples now point their "tamper-evident/
       resistant" claims at decision 034 + `agent verify`.)*
 - [x] **P19.7** **Measured, not marketed.** Bench the signing overhead per record (one `ed25519` sign
       over already-canonical bytes, expected sub-millisecond, off the boot path) with the rest of the

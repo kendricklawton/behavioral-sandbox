@@ -1,0 +1,53 @@
+# The per-PR fuzz smoke (docs/contributing-fuzzing.md): a short bounded run of *every* libFuzzer
+# target on each pull request (and push to main), so a change that breaks a decoder is caught
+# before it lands, not only on the nightly deep run (.github/workflows/fuzz.yml). This is the
+# coverage-guided complement to the in-gate dependency-light property tests: those run on the
+# host-safe `ci` gate every push; this runs the real fuzzer briefly, seeded, per change. A crash
+# fails the job and uploads the reproducing input from fuzz/artifacts/.
+name: fuzz-smoke
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: fuzz smoke (all targets, 60s each)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install the nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # The fuzz harness is its own workspace; cache it alongside the root (for xtask).
+          workspaces: |
+            .
+            fuzz
+
+      # No prebuilt binary; compiled once per cache key, then served from the cached ~/.cargo/bin.
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      # Every target, 60s each (7 x 60s + build, well inside the 20m timeout). Seeds are folded in
+      # by `fuzz-smoke`, so the short budget reaches the decode logic, not the message shape.
+      - name: Fuzz smoke
+        run: cargo xtask fuzz-smoke --seconds 60
+
+      - name: Upload the crashing input
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fuzz-smoke-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore

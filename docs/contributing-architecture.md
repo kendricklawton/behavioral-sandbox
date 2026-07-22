@@ -8,7 +8,7 @@ and reversing one is a new ADR, not an edit.
 
 **The Firecracker + aya sandbox engine.** A self-hostable, isolated **code-execution sandbox**:
 **Firecracker** microVMs for hardware isolation, **aya/eBPF** for host-side observability and
-enforcement (see `.rules`, `ROADMAP.md`). The guiding properties are the four core properties:
+enforcement (see `AGENTS.md`, `ROADMAP.md`). The guiding properties are the four core properties:
 *isolation is hardware · observe & enforce from the host · engine not platform · measured, not
 marketed.*
 

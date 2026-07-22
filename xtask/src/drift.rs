@@ -2,7 +2,7 @@
 //! compiles or tests, and three kinds are mechanically checkable, so this pass checks them:
 //!
 //! 1. **ADR citations.** `ADR NNN` or `decision NNN` (both spellings cite the same log) in any
-//!    tracked `.rs`/`.md`/`.rules` prose must name an ADR that exists under `docs/adr/` (a
+//!    tracked `.rs`/`.md` prose must name an ADR that exists under `docs/adr/` (a
 //!    `NNN-*.md` file). A renumbered or deleted ADR otherwise turns every citation into a pointer
 //!    at the wrong rationale.
 //! 2. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
@@ -40,7 +40,8 @@ pub fn check(root: &Path) -> Result<()> {
     for rel in &tracked {
         let is_rs = rel.ends_with(".rs");
         let is_md = rel.ends_with(".md");
-        if !is_rs && !is_md && rel != ".rules" {
+        // Prose lives in `.rs` (comments) and `.md` (docs, incl. the `AGENTS.md` operating manual).
+        if !is_rs && !is_md {
             continue;
         }
         // A tracked-but-unreadable file (for example deleted in the working tree) is itself
@@ -60,8 +61,8 @@ pub fn check(root: &Path) -> Result<()> {
                 ));
             }
         }
-        // Backticked repo-path claims are checked in every prose file, `.rs`, `.md`, and `.rules`
-        // (a rename rots a `docs/*.md` or `.rules` path just as it does a comment's).
+        // Backticked repo-path claims are checked in every prose file, `.rs` and `.md`
+        // (a rename rots a `docs/*.md` path just as it does a comment's).
         for (line_no, cand) in path_candidates(&text, &anchors) {
             path_refs += 1;
             if !path_exists(&tracked, &cand) {
@@ -140,7 +141,7 @@ fn defined_decisions(root: &Path) -> Result<BTreeSet<u32>> {
 }
 
 /// Every ADR number the text cites, with its 1-based line. Two interchangeable spellings are
-/// scanned, `ADR 010` (crate comments) and `decision 010` (docs/ROADMAP/.rules), each in singular,
+/// scanned, `ADR 010` (crate comments) and `decision 010` (docs/ROADMAP/AGENTS.md), each in singular,
 /// plural, and joined forms: `Decision 010`, `decision 010/011`, `decisions 021, 026`,
 /// `ADRs 021 and 026`.
 ///
@@ -226,7 +227,7 @@ fn leading_number(s: &str) -> Option<u32> {
 /// so they are not checkable and never anchor.
 fn path_candidates(text: &str, anchors: &BTreeSet<String>) -> Vec<(usize, String)> {
     let mut found = Vec::new();
-    // Skip fenced code blocks: a `.md`/`.rules` example (or a shown command) may name a path that
+    // Skip fenced code blocks: a `.md` example (or a shown command) may name a path that
     // needn't exist. A ```` ``` ```` fence toggles at a line's start; in `.rs` the doc-comment
     // fences are prefixed (`//! ```), so this never triggers there, leaving `.rs` behavior unchanged.
     let mut in_fence = false;

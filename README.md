@@ -136,7 +136,7 @@ never part of its trust boundary, and never traded against the hardware-isolatio
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
-[documentation](docs/contributing.md). The operating manual for agents is [`.rules`](.rules); each hard-to-reverse choice is recorded as one ADR under [`docs/adr/`](docs/adr/README.md).
+[documentation](docs/contributing.md). The operating manual for agents is [`AGENTS.md`](AGENTS.md); each hard-to-reverse choice is recorded as one ADR under [`docs/adr/`](docs/adr/README.md).
 
 ## License
 

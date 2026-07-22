@@ -293,6 +293,28 @@ enum Cmd {
         #[arg(long, default_value_t = 60)]
         seconds: u64,
     },
+    /// Fuzz **every** target briefly (seeded), the per-PR smoke: a change that breaks a decoder is
+    /// caught before it lands, not only on the nightly deep run. Fail-fast on the first crash, whose
+    /// input lands under `fuzz/artifacts/`. Same install needs as `fuzz`; never part of `ci`. Wired
+    /// to the `fuzz-smoke` CI job on pull requests.
+    FuzzSmoke {
+        /// Wall-clock seconds per target.
+        #[arg(long, default_value_t = 60)]
+        seconds: u64,
+    },
+    /// Measure a target's line coverage over its corpus + seeds (`cargo fuzz coverage`), so a target
+    /// stuck bouncing off an early check shows as low coverage instead of a hollow green. Prints where
+    /// the profile landed and how to render a report.
+    FuzzCoverage {
+        #[arg(default_value = "channel_response")]
+        target: String,
+    },
+    /// Minimize a target's on-disk corpus (`cargo fuzz cmin`): drop inputs that add no coverage so the
+    /// corpus (and each run's replay) stays small. A periodic maintenance step, not part of a run.
+    FuzzCmin {
+        #[arg(default_value = "channel_response")]
+        target: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -331,56 +353,159 @@ fn main() -> Result<()> {
         Cmd::EnforceSandbox => demo::enforce_sandbox(),
         Cmd::MeterSandbox => demo::meter_sandbox(),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
+        Cmd::FuzzSmoke { seconds } => fuzz_smoke(seconds),
+        Cmd::FuzzCoverage { target } => fuzz_coverage(&target),
+        Cmd::FuzzCmin { target } => fuzz_cmin(&target),
     }
 }
 
-/// Run a `cargo fuzz` (libFuzzer) target against the untrusted-input decoders. cargo-fuzz drives
-/// libFuzzer under a nightly toolchain, both opt-in installs, so this bails with guidance rather
-/// than pretending, and it is never wired into `ci` (the in-gate coverage is the crates' own
-/// dependency-free mutation tests). See `docs/contributing-fuzzing.md`.
-fn fuzz(target: &str, seconds: u64) -> Result<()> {
-    if !cargo_fuzz_available() {
-        bail!(
-            "cargo-fuzz not found — install it with `cargo install cargo-fuzz` and add a nightly \
-             toolchain (`rustup toolchain install nightly`). See docs/contributing-fuzzing.md."
-        );
+/// Every libFuzzer target in `fuzz/`, ordered by value (outermost untrusted boundary first). The
+/// single source of truth the smoke run iterates; the nightly matrix and the docs mirror it.
+const FUZZ_TARGETS: &[&str] = &[
+    "protocol_message",
+    "channel_response",
+    "signing_envelope",
+    "channel_request",
+    "channel_frame",
+    "channel_handshake",
+    "syscall_event",
+];
+
+/// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance
+/// rather than pretending. Fuzzing is never wired into `ci` (the in-gate coverage is the crates' own
+/// dependency-light mutation tests). See `docs/contributing-fuzzing.md`.
+fn require_cargo_fuzz() -> Result<()> {
+    if cargo_fuzz_available() {
+        return Ok(());
     }
-    // cargo-fuzz discovers the `fuzz/` crate from the repo root. `-max_total_time=0` means run until
-    // a crash or Ctrl-C; any positive value bounds the run (handy for CI or a quick local pass).
-    let max_time = format!("-max_total_time={seconds}");
-    let root = workspace_root();
-    // The writable corpus (libFuzzer accumulates new inputs here; generated, gitignored) plus, when
-    // present, the committed read-only seed corpus. Seeds start a fresh checkout from valid inputs
-    // that reach *past* the first-byte reject, so the JSON/envelope targets spend their budget in the
-    // decode logic, not rediscovering the shape of a message. Create the corpus dir so naming it
-    // explicitly (which we must, to also pass the seeds) doesn't trip cargo-fuzz's default.
+    bail!(
+        "cargo-fuzz not found — install it with `cargo install cargo-fuzz` and add a nightly \
+         toolchain (`rustup toolchain install nightly`). See docs/contributing-fuzzing.md."
+    )
+}
+
+/// Build the shared `+nightly fuzz <sub> <target> <corpus> [seeds]` argv. The writable corpus
+/// (libFuzzer accumulates new inputs here; generated, gitignored) is created so naming it explicitly
+/// (which we must, to also pass the seeds) doesn't trip cargo-fuzz's default. `with_seeds` folds in
+/// the committed read-only seed corpus, so `run`/`coverage` start *past* the first-byte reject (real
+/// inputs reaching the decode logic); `cmin` minimizes only the accumulated corpus, so it omits them.
+fn cargo_fuzz_argv(sub: &str, target: &str, root: &Path, with_seeds: bool) -> Result<Vec<String>> {
     let corpus = root.join("fuzz/corpus").join(target);
     std::fs::create_dir_all(&corpus).context("create the fuzz corpus dir")?;
-    let seeds = root.join("fuzz/seeds").join(target);
-    let mut args: Vec<String> = ["+nightly", "fuzz", "run", target]
+    let mut args: Vec<String> = ["+nightly", "fuzz", sub, target]
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
     args.push(corpus.to_string_lossy().into_owned());
-    if seeds.is_dir() {
+    let seeds = root.join("fuzz/seeds").join(target);
+    if with_seeds && seeds.is_dir() {
         args.push(seeds.to_string_lossy().into_owned());
     }
-    args.push("--".to_owned());
-    args.push(max_time);
-    // libFuzzer builds with `-Zsanitizer=address`, a nightly-only flag, so force the nightly
-    // toolchain via the rustup proxy rather than inheriting whatever the default is (stable on CI
-    // and most dev boxes, where the build would fail with "the option `Z` is only accepted on the
-    // nightly compiler"). rustup propagates the selection to cargo-fuzz's inner `cargo build`.
+    Ok(args)
+}
+
+/// Invoke `cargo <args>` from the repo root (cargo-fuzz discovers the `fuzz/` crate there). The
+/// `+nightly` in `args` forces the nightly toolchain via the rustup proxy: libFuzzer builds with
+/// `-Zsanitizer=address`, nightly-only, so inheriting a stable default would fail with "the option
+/// `Z` is only accepted on the nightly compiler". rustup propagates the selection to the inner build.
+fn run_cargo_fuzz(args: &[String], root: &Path) -> Result<()> {
     println!("$ cargo {}", args.join(" "));
     let status = Command::new("cargo")
-        .args(&args)
+        .args(args)
         .current_dir(root)
         .status()
         .context("running cargo fuzz")?;
     if !status.success() {
-        bail!("cargo fuzz reported a failure — inspect the crash artifact it printed under fuzz/artifacts/");
+        bail!(
+            "`cargo {}` reported a failure — see the output above (a crash input, if any, lands \
+             under fuzz/artifacts/)",
+            args.join(" ")
+        );
     }
     Ok(())
+}
+
+/// `cargo fuzz coverage` renders its profile with `llvm-profdata` from the nightly `llvm-tools`
+/// component, an opt-in install like cargo-fuzz itself, so check for it up front and bail with the
+/// one-line fix rather than letting the run fail cryptically at the merge step.
+fn require_llvm_tools() -> Result<()> {
+    let installed = Command::new("rustup")
+        .args(["component", "list", "--toolchain", "nightly", "--installed"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("llvm-tools"))
+        .unwrap_or(false);
+    if installed {
+        return Ok(());
+    }
+    bail!(
+        "llvm-tools not installed — `cargo fuzz coverage` needs it to merge the profile: \
+         `rustup component add llvm-tools --toolchain nightly`. See docs/contributing-fuzzing.md."
+    )
+}
+
+/// Run one `cargo fuzz` (libFuzzer) target against the untrusted-input decoders, seeded. A positive
+/// `seconds` bounds the run (`0` runs until a crash or Ctrl-C).
+fn fuzz(target: &str, seconds: u64) -> Result<()> {
+    require_cargo_fuzz()?;
+    let root = workspace_root();
+    let mut args = cargo_fuzz_argv("run", target, root, true)?;
+    args.push("--".to_owned());
+    args.push(format!("-max_total_time={seconds}"));
+    run_cargo_fuzz(&args, root)
+}
+
+/// The per-PR smoke: fuzz every [`FUZZ_TARGETS`] target for a bounded time, seeded, fail-fast. Cheap
+/// enough to run before a push (7 targets x the default 60s) yet enough to catch a decoder a change
+/// just broke, the gap between "green nightly" and "this PR regressed a parser".
+fn fuzz_smoke(seconds: u64) -> Result<()> {
+    require_cargo_fuzz()?;
+    println!(
+        "fuzz-smoke: {} targets x {seconds}s each (seeded)",
+        FUZZ_TARGETS.len()
+    );
+    for (i, target) in FUZZ_TARGETS.iter().enumerate() {
+        println!("── [{}/{}] {target} ──", i + 1, FUZZ_TARGETS.len());
+        fuzz(target, seconds)?;
+    }
+    println!(
+        "✓ fuzz-smoke: no crashes across {} targets at {seconds}s each",
+        FUZZ_TARGETS.len()
+    );
+    Ok(())
+}
+
+/// Measure a target's coverage over its corpus + seeds. cargo-fuzz writes a `coverage.profdata`; a
+/// low reached-fraction means the target is bouncing off an early check (bad seeds, an over-tight
+/// guard) rather than exercising the decode logic, which a green run alone can't reveal.
+fn fuzz_coverage(target: &str) -> Result<()> {
+    require_cargo_fuzz()?;
+    require_llvm_tools()?;
+    let root = workspace_root();
+    let args = cargo_fuzz_argv("coverage", target, root, true)?;
+    run_cargo_fuzz(&args, root)?;
+    let profdata = root
+        .join("fuzz/coverage")
+        .join(target)
+        .join("coverage.profdata");
+    println!("\ncoverage profile written: {}", profdata.display());
+    println!(
+        "render a report (needs `cargo install cargo-binutils`): `cargo cov -- show` / `report` \
+         against the target binary under fuzz/target/<triple>/coverage with \
+         `-instr-profile={}`. See docs/contributing-fuzzing.md and the Rust Fuzz Book.",
+        profdata.display()
+    );
+    Ok(())
+}
+
+/// Minimize a target's on-disk corpus in place, keeping one input per coverage feature. A periodic
+/// maintenance step so a corpus that grew over many runs stays fast to replay.
+fn fuzz_cmin(target: &str) -> Result<()> {
+    require_cargo_fuzz()?;
+    let root = workspace_root();
+    let args = cargo_fuzz_argv("cmin", target, root, false)?;
+    run_cargo_fuzz(&args, root)
 }
 
 /// This process's effective uid, read from `/proc/self/status` (`Uid:` line, second value), so the
