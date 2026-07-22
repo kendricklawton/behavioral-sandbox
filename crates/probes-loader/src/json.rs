@@ -458,6 +458,102 @@ mod tests {
     }
 
     #[test]
+    fn every_v1_key_survives_in_a_fully_populated_record() {
+        // The additive-only freeze as its own pin (the compatibility policy on `to_json`): within
+        // schema v1, an existing key may never be renamed or removed, only new keys added. The
+        // byte-golden above legitimately *changes* on an additive extension, so this list is the
+        // part that must never shrink; a key vanishing here means an SDK built against v1 breaks
+        // without a schema bump.
+        let json = sample(vec![flow(
+            [10, 200, 0, 2],
+            40000,
+            [1, 1, 1, 1],
+            53,
+            IPPROTO_UDP,
+        )])
+        .to_json();
+        const REQUIRED_V1_KEYS: &[&str] = &[
+            "\"schema\":",
+            "\"timing\":",
+            "\"boot_ns\":",
+            "\"exec_wall_ns\":",
+            "\"network\":",
+            "\"totals\":",
+            "\"ingress_packets\":",
+            "\"ingress_bytes\":",
+            "\"egress_packets\":",
+            "\"egress_bytes\":",
+            "\"flows\":",
+            "\"src\":",
+            "\"src_port\":",
+            "\"dst\":",
+            "\"dst_port\":",
+            "\"proto\":",
+            "\"denials\":",
+            "\"packets\":",
+            "\"flows6\":",
+            "\"denials6\":",
+            "\"dropped_flows\":",
+            "\"dropped_denials\":",
+            "\"truncated\":",
+            "\"resources\":",
+            "\"cpu_time_ns\":",
+            "\"cgroup\":",
+            "\"cpu_usage_usec\":",
+            "\"memory_current\":",
+            "\"memory_peak\":",
+            "\"io_rbytes\":",
+            "\"io_wbytes\":",
+            "\"host_syscalls\":",
+            "\"total\":",
+            "\"by_kind\":",
+            "\"execve\":",
+            "\"openat\":",
+            "\"connect\":",
+            "\"unknown\":",
+            "\"notable\":",
+            "\"kind\":",
+            "\"detail\":",
+            "\"comm\":",
+            "\"hits\":",
+            "\"notable_truncated\":",
+            "\"overflow_events\":",
+            "\"coverage\":",
+            "\"axis\":",
+            "\"reason\":",
+        ];
+        for key in REQUIRED_V1_KEYS {
+            assert!(json.contains(key), "v1 key {key} missing from: {json}");
+        }
+    }
+
+    #[test]
+    fn a_dropped_row_marks_the_section_truncated_in_the_json() {
+        // The honest-truncation invariant in its non-zero direction (the golden only pins the
+        // zero case): kernel drop counters make the section read as incomplete, in the flag and
+        // in the serialized record a consumer trusts.
+        let totals = NetStats::default();
+        let dropped = NetSection::from_tap(vec![], totals, vec![], 3, 0);
+        assert!(
+            dropped.truncated(),
+            "dropped_flows > 0 must mark truncation"
+        );
+        let record = RunRecord::from_parts(
+            Some(dropped),
+            ResourceSummary::default(),
+            SyscallFootprint::default(),
+            Timing {
+                boot: Duration::ZERO,
+                exec_wall: Duration::ZERO,
+            },
+            vec![],
+        );
+        let json = record.to_json();
+        assert!(json.contains("\"dropped_flows\":3"), "{json}");
+        assert!(json.contains("\"truncated\":true"), "{json}");
+    }
+
+    #[test]
     fn json_is_byte_stable_across_input_order() {
         let a = sample(vec![
             flow([10, 200, 0, 2], 40000, [1, 1, 1, 1], 53, IPPROTO_UDP),

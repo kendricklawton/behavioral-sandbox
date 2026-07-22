@@ -630,6 +630,39 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_denial_counts_saturate_instead_of_wrapping() {
+        // Kernel-supplied counters are adversarial by this crate's bar: two near-max per-source
+        // counts summing over `u64::MAX` must clamp at the ceiling, never wrap to a small number
+        // that would make a flood read as a trickle in the audit record.
+        let dst = u32::from_be_bytes([9, 9, 9, 9]);
+        let d = |sport: u16, count: u64| {
+            (
+                FlowKey::new(
+                    u32::from_be_bytes([10, 200, 0, 2]),
+                    dst,
+                    sport,
+                    443,
+                    agent_probes_common::IPPROTO_TCP,
+                ),
+                count,
+            )
+        };
+        let section = NetSection::from_tap(
+            vec![],
+            NetStats::default(),
+            vec![d(40000, u64::MAX - 1), d(40001, 5)],
+            0,
+            0,
+        );
+        assert_eq!(section.denials.len(), 1);
+        assert_eq!(
+            section.denials[0].count,
+            u64::MAX,
+            "an overflowing sum must saturate, not wrap"
+        );
+    }
+
+    #[test]
     fn with_v6_folds_totals_sorts_flows_and_aggregates_denials() {
         use agent_probes_common::IPPROTO_TCP;
         let ula = |n: u8| {

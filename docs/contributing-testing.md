@@ -32,6 +32,31 @@ host↔guest channel decoders, the daemon's client wire, the signed-record envel
 eBPF-boundary parsers): a deterministic property test per surface runs in the `ci` gate above, and a
 seeded `cargo fuzz` harness does deep nightly runs. See [Fuzzing](./contributing-fuzzing.md).
 
+## Negative-space tests
+
+The bugs that survive a memory-safe language and a happy-path suite share one signature: they live
+in what must *not* happen. New code that matches one of these three shapes carries the matching
+test, host-safe wherever the property allows:
+
+1. **Reads from an untrusted peer → an adversarial-liveness test.** Slow-drip (one byte per
+   interval, inside any per-read timeout), never-terminate, flood, and half-close each get a
+   bounded, typed outcome, never a pinned thread or an unbounded buffer. A bare `SO_RCVTIMEO` is
+   re-armed by every byte, so bound the whole message/request with one absolute deadline.
+   Template: the metrics slow-drip test in `crates/cli/src/metrics.rs` (and its
+   `read_request_head` deadline loop); the session, exec-collect, and Firecracker-client readers
+   carry the same pattern.
+2. **Stages-then-publishes, or tears down, a resource → a fault-injection test.** Cleanup lives in
+   an RAII `Drop` guard (disarmed on publish/handoff), not a per-error-path `remove` a panic can
+   skip, and a `catch_unwind` test proves the guard fires on unwind and spares the published
+   artifact. Template: the `StagingFile` unwind test in `crates/probes-loader/src/signing.rs`;
+   the same shape guards the daemon's temp socket, the boot staging workdir, and the snapshot
+   bundle. (`Drop` cannot run on SIGKILL; the startup sweeps own that half.)
+3. **Documents an invariant → a test that asserts it.** "Counters only go up", "bounded at N",
+   "truncation is flagged": assert the property itself, not just the absence of a panic, and
+   guard against a vacuous pass (a floor on the sample count, a baseline that can't read as
+   zero-equals-zero). Template: the counter-monotonicity and histogram-monotonicity tests in
+   `crates/cli/src/metrics.rs` and the required-keys freeze in `crates/probes-loader/src/json.rs`.
+
 The per-phase exit-gate demos (a real sandbox, one probe end to end) are listed under *Try it* in
 [Host-side observability & enforcement](./probes.md#try-it).
 

@@ -1199,10 +1199,19 @@ mod tests {
             let len = (next() % 200) as usize;
             let buf: Vec<u8> = (0..len).map(|_| (next() >> 33) as u8).collect();
             if let Some(ev) = SyscallEvent::from_bytes(&buf) {
-                // `detail_len` is attacker-influenced; the accessors must clamp, never index past.
-                let _ = ev.detail();
+                // `detail_len` is attacker-influenced; the accessors must *clamp*, asserted as a
+                // bound, not just absence of panic: an out-of-range length yields a capped slice.
+                assert!(
+                    ev.detail().len() <= DETAIL_CAP,
+                    "detail() must clamp to DETAIL_CAP, got {} (detail_len {})",
+                    ev.detail().len(),
+                    ev.detail_len
+                );
+                assert!(
+                    ev.comm_lossy().len() <= COMM_CAP * 4,
+                    "comm_lossy() reads at most the 16-byte comm field (x4 for replacement chars)"
+                );
                 let _ = ev.describe();
-                let _ = ev.comm_lossy();
             }
             let _ = parse_ipv4_5tuple(&buf);
         }

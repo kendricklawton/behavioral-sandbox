@@ -536,12 +536,17 @@ fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, Vm
     // scratch, never a hardcoded `$TMPDIR`. On a **successful** build the pool's clones reference this
     // bundle, so it must live until shutdown (the signal handler / startup sweep reclaim it); on any
     // **failure** below, nothing references it, so remove it rather than leak a guest-RAM-sized bundle.
-    let snap_dir = prewarm_dir(&base.scratch_dir);
-    std::fs::create_dir_all(&snap_dir)
-        .map_err(|e| VmmError::Vmm(format!("create prewarm dir {}: {e}", snap_dir.display())))?;
-    let built = build_pool_from(base, jailed, target, &snap_dir);
-    if built.is_err() {
-        let _ = std::fs::remove_dir_all(&snap_dir);
+    // [`StagedPath`] so the reclaim also covers a *panic* inside the build, not just its `Err`.
+    let snap_dir = StagedPath::new(prewarm_dir(&base.scratch_dir));
+    std::fs::create_dir_all(snap_dir.path()).map_err(|e| {
+        VmmError::Vmm(format!(
+            "create prewarm dir {}: {e}",
+            snap_dir.path().display()
+        ))
+    })?;
+    let built = build_pool_from(base, jailed, target, snap_dir.path());
+    if built.is_ok() {
+        snap_dir.published();
     }
     built
 }
@@ -612,33 +617,71 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
         use std::os::unix::fs::PermissionsExt as _;
         let mut tmp = socket.to_path_buf().into_os_string();
         tmp.push(format!(".{}.tmp", std::process::id()));
-        let tmp = std::path::PathBuf::from(tmp);
-        let _ = std::fs::remove_file(&tmp); // clear a leftover temp from a prior crashed start
-        let listener = UnixListener::bind(&tmp).map_err(|e| {
+        // The guard unlinks the temp socket on every exit from here on, error returns and an
+        // unwinding panic alike, until the rename publishes it (disarm), so a failed start leaves
+        // no `.tmp` orphan beside the canonical path (guardrail 5).
+        let tmp = StagedPath::new(std::path::PathBuf::from(tmp));
+        let _ = std::fs::remove_file(tmp.path()); // clear a leftover temp from a prior crashed start
+        let listener = UnixListener::bind(tmp.path()).map_err(|e| {
             format!(
                 "bind {}: {e} (does its parent directory exist and is it writable?)",
-                tmp.display()
+                tmp.path().display()
             )
         })?;
         // Fatal on failure: refuse to serve on a wide-open socket rather than warn and continue.
-        if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o660)) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!(
-                "chmod the socket {} to 0660 failed: {e}; refusing to serve wide-open",
-                tmp.display()
-            ));
-        }
-        std::fs::rename(&tmp, socket).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o660)).map_err(
+            |e| {
+                format!(
+                    "chmod the socket {} to 0660 failed: {e}; refusing to serve wide-open",
+                    tmp.path().display()
+                )
+            },
+        )?;
+        std::fs::rename(tmp.path(), socket).map_err(|e| {
             format!(
                 "move socket into place ({} -> {}): {e}",
-                tmp.display(),
+                tmp.path().display(),
                 socket.display()
             )
         })?;
+        tmp.published(); // the canonical path owns the inode now; nothing to unlink
         listener
     };
     Ok(listener)
+}
+
+/// An RAII guard for a staged-then-published path (the daemon's temp socket, a pool's snapshot
+/// bundle dir): `Drop` removes it, file or directory, on every scope exit, an error return *or* an
+/// unwinding panic, until [`published`](Self::published) disarms it. Closes the leak a panic
+/// between staging and publishing would otherwise leave behind (guardrail 5); a `SIGKILL` in that
+/// window still leaks, which the next start's stale-path reclaim covers.
+struct StagedPath {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl StagedPath {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Disarm: the path was renamed into place (or handed off), so nothing is removed on drop.
+    fn published(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagedPath {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 /// stderr logging, filter from `--log` else `AGENT_LOG` else `info`. `info` (not the CLI's `warn`):
@@ -662,4 +705,123 @@ fn init_tracing(flag: Option<&str>, json: bool) {
     } else {
         builder.try_init()
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::net::UnixStream;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// A minimal daemon state for admission tests: no pool, no VM, degraded probes. Holding a
+    /// [`SessionTicket`] never touches a sandbox, so the cap is provable host-safe.
+    fn test_server(max_sessions: usize) -> Arc<Server> {
+        Arc::new(Server {
+            base: agent_vmm::BootConfig::default(),
+            jailed: false,
+            observ: Observability::load(),
+            signing_key: agent_probes_loader::HostKey::from_seed([7u8; 32]),
+            pool: None,
+            snapshot_base: std::env::temp_dir(),
+            snapshot_seq: AtomicU64::new(0),
+            metrics: Arc::new(Metrics::default()),
+            max_sessions,
+            idle_timeout: None,
+            active_sessions: AtomicUsize::new(0),
+        })
+    }
+
+    #[test]
+    fn the_ceiling_admits_exactly_max_sessions_and_a_freed_slot_readmits() {
+        // The admission property under clients that never terminate: tickets are what bound the
+        // daemon, and a slot only frees when its ticket drops. Idle connections hold tickets
+        // without booting VMs, so the whole contract is host-safe.
+        let server = test_server(2);
+        let first = SessionTicket::acquire(&server).expect("first admitted");
+        let _second = SessionTicket::acquire(&server).expect("second admitted");
+        assert!(
+            SessionTicket::acquire(&server).is_none(),
+            "the third connection must be refused at a ceiling of 2"
+        );
+        drop(first);
+        let _readmitted =
+            SessionTicket::acquire(&server).expect("a freed slot must readmit the next connection");
+        assert!(
+            SessionTicket::acquire(&server).is_none(),
+            "the ceiling must hold again after the readmission"
+        );
+    }
+
+    #[test]
+    fn zero_max_sessions_means_unlimited() {
+        let server = test_server(0);
+        let tickets: Vec<_> = (0..64)
+            .map(|_| SessionTicket::acquire(&server).expect("unlimited admits every connection"))
+            .collect();
+        assert_eq!(server.active_sessions.load(Ordering::Relaxed), 64);
+        drop(tickets);
+        assert_eq!(
+            server.active_sessions.load(Ordering::Relaxed),
+            0,
+            "every dropped ticket must free its slot"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::panic)] // the deliberate panic *is* the unwind this test exercises
+    fn a_staged_path_is_removed_even_when_the_scope_unwinds() {
+        // The leak `StagedPath` closes: a panic between staging the temp socket (or a pool's
+        // bundle dir) and publishing it must not strand the path. Both file and dir flavors, and
+        // the disarm: a published path must survive the guard's drop.
+        let base = std::env::temp_dir().join(format!("agent-staged-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("mkdir");
+
+        let file = base.join("sock.tmp");
+        std::fs::write(&file, b"x").expect("stage file");
+        let dir = base.join("bundle");
+        std::fs::create_dir(&dir).expect("stage dir");
+        let (file_p, dir_p) = (file.clone(), dir.clone());
+        let caught = std::panic::catch_unwind(move || {
+            let _file_guard = StagedPath::new(file_p);
+            let _dir_guard = StagedPath::new(dir_p);
+            panic!("boom mid-stage");
+        });
+        assert!(caught.is_err(), "the panic propagated");
+        assert!(!file.exists(), "the staged file must be unlinked on unwind");
+        assert!(!dir.exists(), "the staged dir must be removed on unwind");
+
+        let kept = base.join("published");
+        std::fs::write(&kept, b"x").expect("stage");
+        StagedPath::new(kept.clone()).published();
+        assert!(kept.exists(), "a published path must survive the guard");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_refused_connection_gets_the_typed_at_capacity_error_in_bounded_time() {
+        // The refused client's experience: a typed fatal error naming the cap, delivered within
+        // the refusal's 1s write bound even though the daemon commits no VM resources to it.
+        let server = test_server(1);
+        let (client, daemon_end) = UnixStream::pair().expect("socketpair");
+        let started = Instant::now();
+        refuse_at_capacity(daemon_end, &server);
+        let mut reader = std::io::BufReader::new(client);
+        let reply = agent_protocol::read_message::<agent_protocol::Response>(&mut reader)
+            .expect("the refusal parses")
+            .expect("the refusal is a message, not EOF");
+        assert!(
+            matches!(
+                &reply,
+                agent_protocol::Response::Error { message, fatal: true }
+                    if message.contains("at capacity")
+            ),
+            "expected the typed at-capacity refusal, got {reply:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the refusal must be bounded by its write timeout"
+        );
+    }
 }

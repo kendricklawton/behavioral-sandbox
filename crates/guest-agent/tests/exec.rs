@@ -474,3 +474,45 @@ fn stalled_host_does_not_wedge_the_guest() {
     }
     drop(client);
 }
+
+#[test]
+fn a_host_that_stalls_mid_frame_is_a_bounded_typed_error() {
+    // The read-side twin of `stalled_host_does_not_wedge_the_guest`, pinning the caller's half of
+    // the crate's contract (deadlines are the transport owner's job, the crate arms none itself):
+    // with a read deadline armed on the guest stream, a host that goes silent mid-frame (handshake,
+    // then a partial request header, then nothing, the socket held open) is a typed error within
+    // the deadline, never a wedged agent. A trusted-but-dead host is the realistic failure here; a
+    // *hostile* host is out of the guest's threat model, so the per-read deadline is the right
+    // strength for this side.
+    let (host, guest) = UnixStream::pair().expect("socketpair");
+    guest
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("set read timeout");
+    // A raw clone of the host end, so the partial frame can be written outside the typed client.
+    let raw = host.try_clone().expect("clone host end");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let agent = std::thread::spawn(move || {
+        let r = agent_guest::serve(guest);
+        let _ = tx.send(());
+        r
+    });
+
+    let client = ClientConnection::connect(host).expect("client handshake");
+    (&raw)
+        .write_all(&[0x01, 0x00])
+        .expect("write a partial frame header");
+    // ...then silence: the agent's next read must trip the armed deadline, not block forever.
+
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(()) => {
+            let result = agent.join().expect("agent thread");
+            assert!(
+                result.is_err(),
+                "a mid-frame stall must be a typed error, not success"
+            );
+        }
+        Err(_) => panic!("serve wedged: a mid-frame host stall hung the guest agent"),
+    }
+    drop(client);
+}

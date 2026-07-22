@@ -172,6 +172,16 @@ impl RunningVm {
                 state: VmStateKind::Paused,
             },
         )?;
+        // Armed across the create window: a failed create *or* a panic unwinding out of it sweeps
+        // the partial, guest-RAM-sized bundle files (a later `Vm::restore` would pass its
+        // file-existence checks on a torn bundle and fail only deep in the load), so the caller's
+        // dir holds a bundle or nothing. Disarmed once the create is known good.
+        let sweep = PartialBundle {
+            state: &state,
+            mem: &mem,
+            private_disk: (!shared_base).then_some(&root_drive),
+            armed: true,
+        };
         let created = self.write_snapshot_bundle(&state, &mem, &root_drive, shared_base);
         let resumed = self.api.patch(
             "/vm",
@@ -179,13 +189,8 @@ impl RunningVm {
                 state: VmStateKind::Resumed,
             },
         );
-        if let Err(e) = created {
-            // A failed create leaves partial, guest-RAM-sized bundle files that a later
-            // `Vm::restore` would pass its file-existence checks on and fail only deep in the
-            // load; sweep them (best-effort) so the caller's dir holds a bundle or nothing.
-            remove_partial_bundle(&state, &mem, (!shared_base).then_some(&root_drive));
-            return Err(e);
-        }
+        created?;
+        sweep.disarm();
         // Resume failing after a successful create is the one path that can leave the guest paused
         // (the VMM is unresponsive, since the resume PATCH is otherwise instant). There is no public
         // un-pause, and a later `exec` would just burn its whole wall against a frozen guest, so say
@@ -245,15 +250,86 @@ impl RunningVm {
     }
 }
 
-/// Best-effort removal of the files a failed [`snapshot`](RunningVm::snapshot) may have partly
-/// written: the state file, the guest-RAM-sized memory file, and (for a private-copy disk) the
-/// bundled root disk. A shared read-only base is referenced in place, never copied, so it is passed
-/// as `None` and left untouched. Leaves the caller's dir holding a complete bundle or nothing, so a
-/// later `Vm::restore` can't half-open a torn one.
-fn remove_partial_bundle(state: &Path, mem: &Path, private_disk: Option<&Path>) {
-    let _ = std::fs::remove_file(state);
-    let _ = std::fs::remove_file(mem);
-    if let Some(disk) = private_disk {
-        let _ = std::fs::remove_file(disk);
+/// RAII sweep of a possibly-partial snapshot bundle: the state file, the guest-RAM-sized memory
+/// file, and (for a private-copy disk) the bundled root disk; a shared read-only base is referenced
+/// in place, never copied, so it rides as `None` and is left untouched. `Drop` removes the files,
+/// best-effort, on every exit from the create window, an error return *or* an unwinding panic,
+/// until [`disarm`](Self::disarm) marks the bundle complete, so the caller's dir holds a bundle or
+/// nothing and a later `Vm::restore` can't half-open a torn one (guardrail 5).
+struct PartialBundle<'a> {
+    state: &'a Path,
+    mem: &'a Path,
+    private_disk: Option<&'a Path>,
+    armed: bool,
+}
+
+impl PartialBundle<'_> {
+    /// The create succeeded: the bundle is complete, nothing to sweep.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialBundle<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(self.state);
+            let _ = std::fs::remove_file(self.mem);
+            if let Some(disk) = self.private_disk {
+                let _ = std::fs::remove_file(disk);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::panic)] // the deliberate panic *is* the unwind this test exercises
+    fn a_partial_bundle_is_swept_even_when_the_scope_unwinds() {
+        // The leak the guard closes: a panic between the snapshot-create API call and the disarm
+        // must not strand torn, guest-RAM-sized bundle files a later restore would half-open. And
+        // the disarm half: a completed bundle survives the guard.
+        let dir = std::env::temp_dir().join(format!("agent-bundle-unwind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let state = dir.join("snapshot.state");
+        let mem = dir.join("snapshot.mem");
+        let disk = dir.join("rootfs.ext4");
+        for f in [&state, &mem, &disk] {
+            std::fs::write(f, b"partial").expect("stage");
+        }
+
+        let (s, m, d) = (state.clone(), mem.clone(), disk.clone());
+        let caught = std::panic::catch_unwind(move || {
+            let _sweep = PartialBundle {
+                state: &s,
+                mem: &m,
+                private_disk: Some(&d),
+                armed: true,
+            };
+            panic!("boom mid-create");
+        });
+        assert!(caught.is_err(), "the panic propagated");
+        for f in [&state, &mem, &disk] {
+            assert!(!f.exists(), "{} must be swept on unwind", f.display());
+        }
+
+        for f in [&state, &mem] {
+            std::fs::write(f, b"complete").expect("stage again");
+        }
+        PartialBundle {
+            state: &state,
+            mem: &mem,
+            private_disk: None,
+            armed: true,
+        }
+        .disarm();
+        for f in [&state, &mem] {
+            assert!(f.exists(), "a disarmed bundle must survive the guard");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

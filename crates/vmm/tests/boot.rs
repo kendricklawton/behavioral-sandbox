@@ -435,6 +435,21 @@ fn repeated_boots_leave_no_leaks() {
     let netns_before = agent_netns();
     let mut vmm_pids = Vec::new();
 
+    // Process-local baselines: teardown must hand back not just the on-host artifacts scanned
+    // below but this process's own fds and threads, or a long-lived embedder walks into
+    // EMFILE/thread exhaustion across runs. Floors guard against a vacuous read (a failed /proc
+    // scan reading as zero-then-zero would pass without proving anything).
+    let fds_before = open_fds();
+    let threads_before = process_threads();
+    assert!(
+        fds_before >= 3,
+        "stdio alone means >= 3 fds; /proc read failed?"
+    );
+    assert!(
+        threads_before >= 1,
+        "at least this thread; /proc read failed?"
+    );
+
     // Two full cycles back to back; the second only works if the first was fully reclaimed.
     for i in 0..2 {
         let mut cfg = config();
@@ -474,6 +489,35 @@ fn repeated_boots_leave_no_leaks() {
             "leaked per-VM network namespaces: {leaked:?}"
         );
     }
+
+    // And the process-local axes return to baseline: N runs must not accrete fds (console pipes,
+    // API sockets) or threads (console readers) this process never hands back.
+    assert_eq!(
+        open_fds(),
+        fds_before,
+        "fds must return to baseline after repeated boot/teardown cycles"
+    );
+    assert_eq!(
+        process_threads(),
+        threads_before,
+        "threads must return to baseline after repeated boot/teardown cycles"
+    );
+}
+
+/// Threads in this process, via `/proc/self/status` `Threads:` (0 on a failed read; callers floor
+/// the baseline so that failure is loud, not a vacuous 0 == 0 pass).
+fn process_threads() -> usize {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Threads:"))?
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()
+        })
+        .unwrap_or(0)
 }
 
 /// Open fds in this process, counted through `/proc/self/fd`. The count includes the read itself

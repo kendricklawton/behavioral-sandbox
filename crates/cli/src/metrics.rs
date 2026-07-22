@@ -660,6 +660,77 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::panic)] // a disappearing sample is a test failure, reported via panic
+    fn counters_and_histograms_never_decrease_across_any_op_sequence() {
+        // The registry's structural claim ("counters only go up") as an asserted property, not an
+        // argument: drive a randomized-but-deterministic op sequence (xorshift, fixed seed, the
+        // fuzz_tests idiom) and after every op assert each `_total`/`_bucket`/`_count`/`_sum`
+        // sample is >= its previous render. The one gauge is exempt by design (inc/dec paired);
+        // its own clamp/pairing tests cover it.
+        fn samples(render: &str) -> std::collections::HashMap<String, f64> {
+            render
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.is_empty())
+                .filter_map(|l| {
+                    let (name, value) = l.rsplit_once(' ')?;
+                    let is_monotone = ["_total", "_count", "_sum"]
+                        .iter()
+                        .any(|s| name.split('{').next().unwrap_or(name).ends_with(s))
+                        || name.contains("_bucket{");
+                    if is_monotone {
+                        Some((name.to_string(), value.parse().ok()?))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+
+        let m = Metrics::default();
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        let mut prev = samples(&m.render(None));
+        let mut compared = 0usize;
+        for _ in 0..500 {
+            match next() % 8 {
+                0 => m.session_opened(next() % 2 == 0, Duration::from_millis(next() % 3_000)),
+                1 => m.open_failed(),
+                2 => m.session_closed(),
+                3 => m.request(match next() % 4 {
+                    0 => Verb::Exec,
+                    1 => Verb::Put,
+                    2 => Verb::Get,
+                    _ => Verb::Trace,
+                }),
+                4 => m.request_failed(next() % 2 == 0),
+                5 => m.protocol_error(),
+                6 => m.guest_command(Duration::from_millis(next() % 10_000)),
+                _ => {} // a render-only step: sampling must not perturb anything either
+            }
+            let now = samples(&m.render(Some(next() % 4)));
+            for (name, value) in &prev {
+                let current = now
+                    .get(name)
+                    .copied()
+                    .unwrap_or_else(|| panic!("sample {name} disappeared between renders"));
+                assert!(current >= *value, "{name} decreased: {value} -> {current}");
+                compared += 1;
+            }
+            prev = now;
+        }
+        // Anti-vacuous floor: the walk must actually have compared a meaningful sample set.
+        assert!(
+            compared > 1_000,
+            "only {compared} comparisons; the parser went vacuous"
+        );
+    }
+
+    #[test]
     fn the_request_line_parser_only_accepts_get_metrics() {
         assert!(is_get_metrics(b"GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n"));
         assert!(is_get_metrics(b"GET /metrics?ts=1 HTTP/1.0\r\n\r\n"));

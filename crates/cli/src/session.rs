@@ -20,7 +20,7 @@
 //! ends and its VM drops (tearing the microVM down). Losing the whole daemon process can't leak a VM
 //! either, the lifetime sentinel (ADR 011) owns that.
 
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::num::{NonZeroU32, NonZeroU8};
 use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
@@ -52,18 +52,17 @@ pub fn serve(stream: UnixStream, server: &Server) {
             return;
         }
     };
-    let mut reader = BufReader::new(stream);
-
-    // Arm the idle timeout (if configured) on **both** directions: a read that blocks this long with
-    // no client bytes, or a write that blocks this long because the client stopped draining, fails
-    // (`WouldBlock`/`TimedOut`), which the loop treats as a broken connection and ends the session,
-    // so a wedged client can't pin a VM + a `--max-sessions` slot indefinitely. The write half is not
-    // optional: an `exec` reply can be up to a per-message cap (megabytes) against a ~200 KiB socket
-    // buffer, so a client that opens a session and then never reads would otherwise park the session
-    // thread in `write_all` forever, past the read timeout it never reaches. Covers the wait for
-    // `open` too. Best-effort: a platform that refuses the sockopt just runs without it.
+    // The idle timeout (if configured) bounds **both** directions, each with the right shape for its
+    // threat. The read half needs an *absolute per-message deadline* ([`DeadlineStream`]), not a bare
+    // `set_read_timeout`: `SO_RCVTIMEO` is re-armed by the OS on every byte, so a client dripping one
+    // byte per interval inside a 4 MiB line would reset a per-read timeout forever, pinning a session
+    // thread + a `--max-sessions` slot (the same slowloris the metrics endpoint's `read_request_head`
+    // closes). The write half stays a plain socket timeout: an `exec` reply can be megabytes against a
+    // ~200 KiB socket buffer, so a client that opens a session and then never reads would otherwise
+    // park the session thread in `write_all` forever. Best-effort on the sockopts: a platform that
+    // refuses them just runs without them.
+    let mut reader = BufReader::new(DeadlineStream::new(stream, server.idle_timeout));
     if let Some(idle) = server.idle_timeout {
-        let _ = reader.get_ref().set_read_timeout(Some(idle));
         let _ = writer.set_write_timeout(Some(idle));
     }
 
@@ -132,6 +131,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // `None` until the first `trace`; the first record is the unchained anchor.
     let mut record_chain: Option<String> = None;
     loop {
+        // Each message gets a fresh full budget: the clock starts here, not at `open`, so a long
+        // boot or a long-running previous command never eats into the next request's deadline.
+        reader.get_mut().rearm();
         match read_message::<Request>(&mut reader) {
             Ok(None) => break, // clean EOF, teardown below
             Ok(Some(Request::Close)) => {
@@ -546,6 +548,57 @@ fn error(message: String, fatal: bool) -> Response {
     Response::Error { message, fatal }
 }
 
+/// The session's read half, bounded by one **absolute deadline per message** instead of a bare
+/// socket timeout. `SO_RCVTIMEO` is re-armed by the OS on every byte, so a per-read timeout alone
+/// lets a slow-drip client (one byte just inside the interval) stretch a single 4 MiB line
+/// indefinitely while holding a session thread and a `--max-sessions` slot; with this wrapper the
+/// whole message must complete within one idle budget of its first-awaited byte, the same
+/// discipline as the metrics endpoint's `read_request_head` and the VMM's `DeadlineReader`. A
+/// `None` budget (idle timeout disabled) reads plain, today's opt-out.
+struct DeadlineStream {
+    stream: UnixStream,
+    /// The per-message budget; [`rearm`](Self::rearm) restarts the clock for the next message.
+    budget: Option<Duration>,
+    /// When the in-flight message must be complete.
+    deadline: Option<Instant>,
+}
+
+impl DeadlineStream {
+    fn new(stream: UnixStream, budget: Option<Duration>) -> Self {
+        let mut s = Self {
+            stream,
+            budget,
+            deadline: None,
+        };
+        s.rearm();
+        s
+    }
+
+    /// Start the next message's budget clock (a no-op when the idle timeout is disabled).
+    fn rearm(&mut self) {
+        self.deadline = self.budget.map(|b| Instant::now() + b);
+    }
+}
+
+impl Read for DeadlineStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(deadline) = self.deadline {
+            // Shrink the socket timeout to the time left, so the sum of all reads honors one wall
+            // clock; a spent budget is the timeout itself. The sockopt stays best-effort (a refusing
+            // platform still gets the spent-budget check on every read return).
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "session message exceeded the idle deadline",
+                ));
+            }
+            let _ = self.stream.set_read_timeout(Some(remaining));
+        }
+        self.stream.read(buf)
+    }
+}
+
 /// A [`Duration`] as whole milliseconds, saturating (a run never realistically overflows `u64` ms).
 fn ms(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
@@ -655,6 +708,74 @@ mod tests {
         assert_eq!(record_to_value("{\"schema\":1}")["schema"], 1);
         // A malformed string can't happen from `to_json`, but the fallback must still be an object.
         assert!(record_to_value("not json").get("error").is_some());
+    }
+
+    #[test]
+    fn a_slow_drip_message_is_bounded_by_the_absolute_deadline() {
+        // The property `serve` relies on for the read half: a client dripping one byte per interval
+        // (each drip inside what a bare `SO_RCVTIMEO` would allow, so a per-read timeout would reset
+        // forever) is ended when the *message* deadline lapses. Prove it at the socket level, no VM:
+        // the drip happens before any `open` completes.
+        let (client, server_end) = UnixStream::pair().expect("socketpair");
+        let budget = Duration::from_millis(200);
+        let mut reader = BufReader::new(DeadlineStream::new(server_end, Some(budget)));
+
+        let dripper = std::thread::spawn(move || {
+            use std::io::Write;
+            // 20 bytes, 50ms apart: each gap is well inside the 200ms budget, so only an absolute
+            // deadline (not a per-read timeout) can end this read early. Finite, so a regression
+            // fails on timing/EOF instead of hanging the test.
+            for _ in 0..20 {
+                if (&client).write_all(b" ").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+
+        let started = Instant::now();
+        let result = read_message::<Request>(&mut reader);
+        let elapsed = started.elapsed();
+        dripper.join().expect("dripper");
+
+        assert!(
+            matches!(result, Err(ProtocolError::Io(_))),
+            "a dripped never-completing message must be a bounded typed error, got {result:?}"
+        );
+        // Under the fix the error lands at ~200ms; under a per-read-timeout regression the reader
+        // instead drains all 20 drips (~1s) to EOF, failing the `Err` assert above AND this bound.
+        // 800ms leaves scheduling slack for a loaded CI box without losing the discrimination.
+        assert!(
+            elapsed < Duration::from_millis(800),
+            "the deadline must bound the whole message (~200ms), not reset per byte: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn the_deadline_is_per_message_so_legit_traffic_is_never_cut() {
+        // The other half of the contract: `rearm` gives every message a fresh budget, so a client
+        // that idles between requests (within the budget) and then sends promptly is unaffected.
+        let (client, server_end) = UnixStream::pair().expect("socketpair");
+        let mut reader = BufReader::new(DeadlineStream::new(
+            server_end,
+            Some(Duration::from_millis(200)),
+        ));
+
+        let sender = std::thread::spawn(move || {
+            let mut client = client;
+            write_message(&mut client, &Request::Trace).expect("first message");
+            // Idle 150ms: inside the first budget's leftover only if the deadline were cumulative;
+            // well inside a *fresh* 200ms budget after rearm.
+            std::thread::sleep(Duration::from_millis(150));
+            write_message(&mut client, &Request::Close).expect("second message");
+        });
+
+        let first = read_message::<Request>(&mut reader).expect("first parses");
+        assert_eq!(first, Some(Request::Trace));
+        reader.get_mut().rearm();
+        let second = read_message::<Request>(&mut reader).expect("second parses after rearm");
+        assert_eq!(second, Some(Request::Close));
+        sender.join().expect("sender");
     }
 
     #[test]

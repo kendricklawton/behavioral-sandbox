@@ -135,7 +135,11 @@ impl Spawned {
             return Self::launch_jailed(config, jail);
         }
 
-        let workdir = create_workdir(&config.scratch_dir)?;
+        // The staging window: the guard removes the scratch dir on every exit from here, an error
+        // `?` or an unwinding panic in the copy/image builds alike, so a failed stage leaves no
+        // orphan (guardrail 5). Disarmed just before the tap exists: from there a plain removal
+        // could strand a dir-less netns, so the netns-gated `reclaim_scratch*` helpers own cleanup.
+        let staged = WorkdirGuard::new(create_workdir(&config.scratch_dir)?);
 
         // Read-only boot shares the pinned base directly (no per-VM copy): Firecracker opens it
         // `O_RDONLY` so the guest can't mutate it, and the writable layer comes from the guest's
@@ -145,37 +149,20 @@ impl Spawned {
             // The shared base is handed to Firecracker as-is and recorded as the snapshot's disk path,
             // so resolve it to absolute now (each VMM's cwd is its scratch dir; a relative base path
             // would resolve there instead).
-            match absolute(&config.rootfs) {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-            }
+            absolute(&config.rootfs)?
         } else {
             // The whole-rootfs copy is the heaviest host-side step and unbounded on its own (a
             // multi-GiB image on slow storage), so it runs under the shared boot deadline: check
             // before it, and each later staging step re-checks, so a copy that blows the budget
             // surfaces as a typed `Timeout` instead of an unbounded host hang.
-            if let Err(e) = still_before(deadline, "rootfs copy") {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(e);
-            }
-            let copy = workdir.join("rootfs.ext4");
-            if let Err(e) = std::fs::copy(&config.rootfs, &copy) {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(VmmError::Vmm(format!(
-                    "copy rootfs to {}: {e}",
-                    copy.display()
-                )));
-            }
+            still_before(deadline, "rootfs copy")?;
+            let copy = staged.path().join("rootfs.ext4");
+            std::fs::copy(&config.rootfs, &copy)
+                .map_err(|e| VmmError::Vmm(format!("copy rootfs to {}: {e}", copy.display())))?;
             // `fs::copy` propagates the source's mode; a read-only pinned base (0444) would make the
             // read-write root drive unopenable. The copy is ours alone, force owner read-write.
-            if let Err(e) = std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600))
-            {
-                let _ = std::fs::remove_dir_all(&workdir);
-                return Err(VmmError::Vmm(format!("chmod rootfs copy: {e}")));
-            }
+            std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600))
+                .map_err(|e| VmmError::Vmm(format!("chmod rootfs copy: {e}")))?;
             copy
         };
 
@@ -184,17 +171,8 @@ impl Spawned {
         let input_image = match &config.input_dir {
             None => None,
             Some(dir) => {
-                if let Err(e) = still_before(deadline, "input image build") {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-                match build_input_image(dir, &workdir) {
-                    Ok(img) => Some(img),
-                    Err(e) => {
-                        let _ = std::fs::remove_dir_all(&workdir);
-                        return Err(e);
-                    }
-                }
+                still_before(deadline, "input image build")?;
+                Some(build_input_image(dir, staged.path())?)
             }
         };
 
@@ -203,22 +181,16 @@ impl Spawned {
         let output = match &config.output_dir {
             None => None,
             Some(dest) => {
-                if let Err(e) = still_before(deadline, "output image build") {
-                    let _ = std::fs::remove_dir_all(&workdir);
-                    return Err(e);
-                }
-                match build_output_image(&workdir) {
-                    Ok(image) => Some(OutputDevice {
-                        image,
-                        dest: dest.clone(),
-                    }),
-                    Err(e) => {
-                        let _ = std::fs::remove_dir_all(&workdir);
-                        return Err(e);
-                    }
-                }
+                still_before(deadline, "output image build")?;
+                Some(OutputDevice {
+                    image: build_output_image(staged.path())?,
+                    dest: dest.clone(),
+                })
             }
         };
+
+        // Cleanup ownership passes to the netns-aware path below.
+        let workdir = staged.disarm();
 
         // Per-VM network namespace + tap for the guest's virtio-net (netns model), when enabled.
         // Created **before** Firecracker so it can join the netns; named after the scratch dir, so a
@@ -1535,6 +1507,39 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
     )))
 }
 
+/// RAII guard for the boot's scratch dir during the pre-VMM staging window (rootfs copy, bulk-I/O
+/// image builds): `Drop` removes the dir on every scope exit, an error return *or* an unwinding
+/// panic, so a failed stage leaves no orphan (guardrail 5). [`disarm`](Self::disarm) hands the path
+/// back once a netns may exist, from where a plain removal could strand a dir-less netns and the
+/// netns-gated `reclaim_scratch*` helpers own cleanup instead.
+struct WorkdirGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl WorkdirGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn disarm(mut self) -> PathBuf {
+        self.armed = false;
+        std::mem::take(&mut self.path)
+    }
+}
+
+impl Drop for WorkdirGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 /// The scratch dir's basename, the VM's process-unique identity, shared by its tracing span, its
 /// jail id, and its lifetime cgroup, so one name finds all of a VM's residue.
 fn workdir_name(workdir: &Path) -> String {
@@ -1746,6 +1751,71 @@ mod tests {
             stage_restore_disk(&src, &backing).is_err(),
             "re-staging over an existing disk must fail, not overwrite"
         );
+    }
+
+    #[test]
+    #[allow(clippy::panic)] // the deliberate panic *is* the unwind this test exercises
+    fn the_workdir_guard_removes_the_dir_even_when_the_scope_unwinds() {
+        // The leak the guard closes: a panic mid-staging (rootfs copy, an image build) must not
+        // strand the scratch dir. And the disarm half: a dir handed off to the netns-aware path
+        // must survive the guard's drop.
+        let base =
+            std::env::temp_dir().join(format!("agent-workdir-unwind-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("mkdir");
+
+        let doomed = base.join("staging");
+        std::fs::create_dir(&doomed).expect("stage dir");
+        std::fs::write(doomed.join("rootfs.ext4"), b"x").expect("stage file");
+        let doomed_for_panic = doomed.clone();
+        let caught = std::panic::catch_unwind(move || {
+            let _guard = WorkdirGuard::new(doomed_for_panic);
+            panic!("boom mid-staging");
+        });
+        assert!(caught.is_err(), "the panic propagated");
+        assert!(
+            !doomed.exists(),
+            "the staged workdir must be removed as the guard drops on unwind"
+        );
+
+        let kept = base.join("handed-off");
+        std::fs::create_dir(&kept).expect("stage dir");
+        let handed = WorkdirGuard::new(kept.clone()).disarm();
+        assert_eq!(handed, kept, "disarm hands the same path back");
+        assert!(kept.exists(), "a disarmed workdir must survive the guard");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    #[allow(clippy::panic)] // the deliberate panic *is* the unwind this test exercises
+    fn the_staged_disk_is_unstaged_even_when_the_scope_unwinds() {
+        // `StagedDisk`'s rustdoc promises the panic-unwind cover for the out-of-workdir staged
+        // restore disk; pin it: an armed guard dropped by an unwind unstages the file (and its
+        // staging marker + now-empty parent), a `take`n one leaves the disk alone.
+        let base = std::env::temp_dir().join(format!("agent-disk-unwind-{}", std::process::id()));
+        let staging = base.join("stage");
+        std::fs::create_dir_all(&staging).expect("mkdir");
+        let disk = staging.join("rootfs.ext4");
+        std::fs::write(&disk, b"x").expect("stage disk");
+        let disk_for_panic = disk.clone();
+        let caught = std::panic::catch_unwind(move || {
+            let _guard = StagedDisk::armed(disk_for_panic);
+            panic!("boom mid-restore");
+        });
+        assert!(caught.is_err(), "the panic propagated");
+        assert!(
+            !disk.exists(),
+            "the staged disk must be unstaged as the guard drops on unwind"
+        );
+
+        std::fs::create_dir_all(&staging).expect("mkdir again");
+        std::fs::write(&disk, b"x").expect("stage disk again");
+        let mut guard = StagedDisk::armed(disk.clone());
+        assert_eq!(guard.take(), Some(disk.clone()));
+        drop(guard);
+        assert!(disk.exists(), "a taken disk must survive the guard");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
