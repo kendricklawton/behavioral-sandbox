@@ -3,12 +3,12 @@
 Contributions are welcome. This chapter is the orientation; [Building](./contributing-building.md)
 covers the toolchain and the CI gates, and [Testing](./contributing-testing.md) covers the testing
 approach. The operating manual, read every session by humans and coding agents alike, is
-[`AGENTS.md`](https://github.com/kendricklawton/agent/blob/main/AGENTS.md) at the repo root.
+[`AGENTS.md`](https://github.com/k-henry-org/agent/blob/main/AGENTS.md) at the repo root.
 
 ## How the work is organized
 
 Work is organized into sequentially-gated phases in
-[`ROADMAP.md`](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md), the **single source
+[`ROADMAP.md`](https://github.com/k-henry-org/agent/blob/main/ROADMAP.md), the **single source
 of truth for progress** (its checkboxes are the state). Work the first unchecked box in ID order,
 one item per iteration; a phase isn't left until its **Exit gate** passes (a working demo). Items
 tagged `(decision)` record the hard-to-reverse choice as a dated, numbered
@@ -48,4 +48,4 @@ tagged `(decision)` record the hard-to-reverse choice as a dated, numbered
 ## License
 
 By contributing you agree your contributions are licensed under **Apache-2.0**, the project's
-license (see [`LICENSE`](https://github.com/kendricklawton/agent/blob/main/LICENSE)).
+license (see [`LICENSE`](https://github.com/k-henry-org/agent/blob/main/LICENSE)).

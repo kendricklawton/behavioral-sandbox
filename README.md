@@ -1,6 +1,6 @@
 # agent *(working name)*
 
-[![CI](https://github.com/kendricklawton/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/kendricklawton/agent/actions/workflows/ci.yml)
+[![CI](https://github.com/k-henry-org/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/k-henry-org/agent/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **A self-hostable engine for running untrusted code in a hardware-isolated microVM, with a
@@ -31,7 +31,7 @@ Built in the open, milestone by milestone, each one shipping as a working demo.
 built) reports exactly what your host is missing before the first sandbox.
 
 ```console
-git clone https://github.com/kendricklawton/agent && cd agent
+git clone https://github.com/k-henry-org/agent && cd agent
 cargo xtask self-host                                   # build + install agent, boot a proof sandbox
 agent run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
 ```

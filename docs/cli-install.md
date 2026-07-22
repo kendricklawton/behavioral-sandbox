@@ -14,7 +14,7 @@ the binary to `~/.local/bin`, the artifacts to `~/.local/share/agent`, and write
 `~/.agent.toml` (kernel/rootfs paths) if you don't have one:
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/kendricklawton/agent/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/k-henry-org/agent/main/install.sh | sh
 ```
 
 Offline, or straight from a package you built or downloaded by hand:
@@ -158,7 +158,7 @@ Two parts touch the kernel and need more than a plain user:
 ## Setup
 
 ```console
-git clone https://github.com/kendricklawton/agent && cd agent
+git clone https://github.com/k-henry-org/agent && cd agent
 cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
 cargo build
 ```

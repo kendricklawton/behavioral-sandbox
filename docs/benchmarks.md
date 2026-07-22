@@ -2,7 +2,7 @@
 
 *Measured, not marketed.* Every performance claim this engine makes is backed by a benchmark you can
 re-run, reported with percentiles, against an honest baseline. This page is the results report; the
-numbers below come from the benchmark suite in [`xtask`](https://github.com/kendricklawton/agent/tree/main/xtask), re-run with `cargo xtask bench-all`.
+numbers below come from the benchmark suite in [`xtask`](https://github.com/k-henry-org/agent/tree/main/xtask), re-run with `cargo xtask bench-all`.
 
 ## Methodology
 

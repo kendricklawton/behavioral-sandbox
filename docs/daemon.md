@@ -8,7 +8,7 @@ the hoster's, above the engine, and are a recorded non-goal).
 
 > **Status.** The wire API is **versioned** (every message carries a `schema` field) but not yet
 > **frozen**: a later milestone freezes and formally specs it as the SDK contract (see the
-> [roadmap](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md)). Until then the shape may
+> [roadmap](https://github.com/k-henry-org/agent/blob/main/ROADMAP.md)). Until then the shape may
 > still change, which is why every message is schema-stamped and a mismatch is rejected up front.
 
 ## Run it

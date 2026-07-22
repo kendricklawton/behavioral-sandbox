@@ -2,7 +2,7 @@
 # Install the agent sandbox engine from a release package (decision 035).
 #
 # Canonical use (once releases are public):
-#   curl -fsSL https://raw.githubusercontent.com/kendricklawton/agent/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/k-henry-org/agent/main/install.sh | sh
 #
 # Also works from a local package (offline / pre-release testing):
 #   AGENT_DIST_TARBALL=dist/agent-<ver>-x86_64-linux.tar.gz sh install.sh
@@ -10,7 +10,7 @@
 #   sh ./install.sh
 #
 # Knobs (env):
-#   AGENT_REPO            GitHub repo to fetch from        (default kendricklawton/agent)
+#   AGENT_REPO            GitHub repo to fetch from        (default k-henry-org/agent)
 #   AGENT_VERSION         release version, no leading v    (default: the latest release)
 #   AGENT_DIST_TARBALL    local tarball, skips the network
 #   AGENT_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
@@ -22,7 +22,7 @@
 # every extracted file against the package's MANIFEST.sha256. Nothing installs unverified.
 set -eu
 
-REPO="${AGENT_REPO:-kendricklawton/agent}"
+REPO="${AGENT_REPO:-k-henry-org/agent}"
 PREFIX="${AGENT_INSTALL_PREFIX:-$HOME/.local/bin}"
 DATA="${AGENT_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/agent}"
 VERSION="${AGENT_VERSION:-}"

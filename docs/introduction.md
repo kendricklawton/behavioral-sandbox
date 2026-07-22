@@ -77,12 +77,12 @@ full non-goals list is in [Using the engine API](./embedding.md).
 ## Status
 
 Early, under active development, nothing here is production yet. The staged plan and live
-progress live in [`ROADMAP.md`](https://github.com/kendricklawton/agent/blob/main/ROADMAP.md)
+progress live in [`ROADMAP.md`](https://github.com/k-henry-org/agent/blob/main/ROADMAP.md)
 (its checkboxes are the state); hard-to-reverse choices are recorded as dated
 [decision records](./adr/README.md). Every
 completed phase ships a working demo, so each capability documented in this book is proven
 running end to end, not just asserted.
 
 The source for this book lives in the repository's
-[`docs/` directory](https://github.com/kendricklawton/agent/tree/main/docs) and contributions are
+[`docs/` directory](https://github.com/k-henry-org/agent/tree/main/docs) and contributions are
 welcome, see [Contributing](./contributing.md).

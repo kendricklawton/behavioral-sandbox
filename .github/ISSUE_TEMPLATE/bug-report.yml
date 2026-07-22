@@ -8,7 +8,7 @@ body:
         Thanks for the report. One check first: if this is a **suspected vulnerability** (an
         isolation escape, a way to tamper with the audit log, a host-path panic from guest input),
         please use the private
-        [security-advisory form](https://github.com/kendricklawton/agent/security/advisories/new)
+        [security-advisory form](https://github.com/k-henry-org/agent/security/advisories/new)
         instead of a public issue.
 
   - type: textarea

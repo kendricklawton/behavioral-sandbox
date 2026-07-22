@@ -21,7 +21,7 @@ green, so the tag means the whole story works end to end, not a subset.
   in-development working number, distinct from these git tags; every crate is `publish = false`,
   so nothing reaches crates.io before the `v0.1.0` release.)
 - **Tags are a human git step.** The coding agent's job ends at the working tree; the user cuts
-  every tag (see [`AGENTS.md`](https://github.com/kendricklawton/agent/blob/main/AGENTS.md)).
+  every tag (see [`AGENTS.md`](https://github.com/k-henry-org/agent/blob/main/AGENTS.md)).
 
 ## Why there's no changelog yet
 

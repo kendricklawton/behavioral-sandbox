@@ -5,7 +5,7 @@ means executing an untrusted contributor's scripts with your secrets and your ne
 it in a microVM instead: the job builds and tests as usual, but it is denied the network by default,
 and the host record proves it couldn't reach out even if a test tried.
 
-The job script is [`ci-job.sh`](https://github.com/kendricklawton/agent/blob/main/docs/examples/ci-job.sh):
+The job script is [`ci-job.sh`](https://github.com/k-henry-org/agent/blob/main/docs/examples/ci-job.sh):
 it unpacks the submitted sources, runs their `unittest` suite (python3 is baked into the guest
 rootfs), and leaves a `report.txt`. The defaults point at the agent rootfs in `artifacts/`; add
 `--unjailed` on a dev box without real root.

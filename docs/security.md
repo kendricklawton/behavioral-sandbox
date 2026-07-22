@@ -4,7 +4,7 @@ The engine's whole reason to exist is running code you don't trust and getting a
 of what it did, so the security model is the product, not an afterthought. This page states what is
 trusted, what counts as a security bug (and what does not), how to report one, and what happens
 after a report. The reporting mechanism also lives
-in [`SECURITY.md`](https://github.com/kendricklawton/agent/blob/main/SECURITY.md) at the repo root
+in [`SECURITY.md`](https://github.com/k-henry-org/agent/blob/main/SECURITY.md) at the repo root
 (GitHub surfaces it in the Security tab).
 
 ## No supported release yet
@@ -94,7 +94,7 @@ dismissal:
 ## After a report: how a fix ships
 
 The reporting mechanics and response expectations live in
-[`SECURITY.md`](https://github.com/kendricklawton/agent/blob/main/SECURITY.md) (private GitHub
+[`SECURITY.md`](https://github.com/k-henry-org/agent/blob/main/SECURITY.md) (private GitHub
 advisory, acknowledgement within about a week, no bounty). What happens next, honestly scoped to a
 pre-`v0.1.0` single-maintainer project:
 
@@ -104,12 +104,12 @@ pre-`v0.1.0` single-maintainer project:
    regular commit, with a regression test on the gate wherever the bug class allows one.
 3. **Disclose together.** The timeline is agreed with the reporter in the advisory; the default
    ask is that the fix lands before publication. When it does, the GitHub advisory is published,
-   [`RELEASES.md`](https://github.com/kendricklawton/agent/blob/main/RELEASES.md) notes it, and
+   [`RELEASES.md`](https://github.com/k-henry-org/agent/blob/main/RELEASES.md) notes it, and
    the reporter is credited if they want to be.
 
 ## Reporting a vulnerability
 
 Report privately via GitHub's security advisories: the
-[Security tab](https://github.com/kendricklawton/agent/security), or
-[this direct link](https://github.com/kendricklawton/agent/security/advisories/new) to the
+[Security tab](https://github.com/k-henry-org/agent/security), or
+[this direct link](https://github.com/k-henry-org/agent/security/advisories/new) to the
 reporting form. Please do not open a public issue for a suspected vulnerability.

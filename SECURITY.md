@@ -12,8 +12,8 @@ production-ready.
 ## Reporting a vulnerability
 
 Report privately via GitHub's security advisories: the
-[Security tab](https://github.com/kendricklawton/agent/security), or
-[this direct link](https://github.com/kendricklawton/agent/security/advisories/new) to the
+[Security tab](https://github.com/k-henry-org/agent/security), or
+[this direct link](https://github.com/k-henry-org/agent/security/advisories/new) to the
 reporting form. Please do not open a public issue for a suspected vulnerability.
 
 ## What to expect
