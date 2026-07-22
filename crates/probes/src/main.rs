@@ -49,9 +49,10 @@
 //! accepting the rest. A dropped packet is first counted against its destination in
 //! [`DENIALS`]/[`DENIALS6`], so the host can report which endpoints a sandbox was blocked from, the
 //! audit trail the per-run record folds in. Enforcement is opt-in: a monitor that never sets
-//! `ENFORCE` stays observe-only (both hooks accept, the observe-only default). ARP (v4) and ICMPv6
-//! (v6 neighbor discovery / MLD) are always allowed so the guest can resolve its on-link host end;
-//! the egress hook (reply → guest) always accepts.
+//! `ENFORCE` stays observe-only (both hooks accept, the observe-only default). ARP (v4) is always
+//! allowed, and ICMPv6 to an **on-link** scope (v6 neighbor discovery / MLD / NUD) so the guest can
+//! resolve and keep its on-link host end, while ICMPv6 to a routable destination is policed like any
+//! other v6 flow; the egress hook (reply → guest) always accepts.
 //!
 //! **Per-cgroup resource accounting from the scheduler.** [`account_sched_switch`] attaches
 //! **once** to the `sched/sched_switch` tracepoint and accumulates each cgroup's on-CPU **nanoseconds**
@@ -79,10 +80,10 @@ use aya_ebpf::{
     programs::{TcContext, TracePointContext},
 };
 use agent_probes_common::{
-    rule_matches, rule_matches6, FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Syscall,
-    SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP,
-    ETH_P_IPV6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, MAX_POLICY_RULES, SOCKADDR_SNAP,
-    SOCKADDR_SNAP_V4,
+    icmp6_dst_on_link, rule_matches, rule_matches6, FlowCounts, FlowKey, FlowKey6, PolicyRule,
+    PolicyRule6, Syscall, SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q,
+    ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, MAX_POLICY_RULES,
+    SOCKADDR_SNAP, SOCKADDR_SNAP_V4,
 };
 
 /// The object's kernel `license` section. Without it every program loads as **non-GPL-compatible**,
@@ -501,10 +502,14 @@ fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
     if ENFORCE.get(0).copied().unwrap_or(0) == 0 {
         return Verdict::Pass;
     }
-    // ICMPv6 is always allowed, the v6 twin of ARP: neighbor discovery (NS/NA) and MLD must flow for
-    // the guest to resolve its on-link host end and reach *any* allowed v6 endpoint. It can't route
-    // off the link regardless (no v6 default route), so this doesn't widen egress.
-    if key.proto == IPPROTO_ICMPV6 {
+    // ICMPv6 is the v6 twin of ARP, but unlike ARP (its own ethertype) it rides the IPv6 ethertype and
+    // can carry a routable Echo, so spare it only to **on-link** scopes: the neighbor-discovery / MLD /
+    // NUD traffic (link-local, link-scoped multicast, the on-link host end's ULA) the guest needs to
+    // resolve and keep its host end, none of which routes off the link. ICMPv6 to a routable
+    // (global-unicast) destination falls through to `POLICY6` and is denied by default, the same
+    // posture v4 gives ICMPv4, so a spared Echo can't be an egress channel that leans solely on the
+    // netns having no v6 default route (decision 008).
+    if key.proto == IPPROTO_ICMPV6 && icmp6_dst_on_link(key.dst_addr) {
         return Verdict::Pass;
     }
     if policy_allows6(key.dst_addr, key.dst_port, key.proto) {

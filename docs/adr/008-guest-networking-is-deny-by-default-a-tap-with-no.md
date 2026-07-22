@@ -67,3 +67,20 @@ Net effect: the guest reaches its host end of the /30 and nothing else. Proven b
 `addresses_the_guest_and_routes_host_to_guest` integration test, which asserts the guest carries its
 address, reaches the host tap IP, and gets a fast `ENETUNREACH` (not a timeout) for an off-subnet
 address. So this decision is realized, not just intended.
+
+**Addendum (2026-07-22): the ICMPv6 spare is scoped to on-link, not the whole protocol.** The original
+"ICMPv6 neighbor discovery is always allowed" (above) shipped as a blanket pass of *every* guest-sent
+ICMPv6 frame, to any destination. That is broader than the justification: ARP is its own v4 ethertype,
+so sparing it leaves all routable v4 (ICMPv4 included) under deny-by-default policy, but ICMPv6 rides
+the IPv6 ethertype and can carry a routable Echo, so a blanket pass let a guest Echo an arbitrary
+global-unicast host. Containment then rested *solely* on the netns having no v6 default route, an
+external invariant the eBPF valve cannot see or assert, so a routing regression would silently reopen an
+egress channel (the traffic was still counted in `FLOWS6`, so never audit-invisible, but not dropped).
+The valve now spares ICMPv6 only to the **on-link** scopes neighbor discovery / MLD / NUD actually use,
+link-local (`fe80::/10`), link-scoped multicast (`ff02::/16`), and the ULA the host end lives in
+(`fc00::/7`), via the host-tested `agent_probes_common::icmp6_dst_on_link`; ICMPv6 to a routable
+destination now falls through to `POLICY6` and is denied by default, the same posture v4 gives ICMPv4.
+Enforcement no longer leans on the routing invariant alone, and a hoster can still allow a specific
+ICMPv6 endpoint by an explicit, recorded `POLICY6` rule. The `fc00::/7` spare (rather than the exact
+connected prefix) keeps NUD to the on-link host reachable without plumbing the host address into the
+program; a ULA is not globally routable, so this widens nothing off-link.

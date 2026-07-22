@@ -223,8 +223,8 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
         .expect("a networked VM exposes its v6 host end")
         .host;
 
-    // Enforce a v6 policy: only host_ip6:9999/udp is allowed (ICMPv6 ND is always allowed in-kernel,
-    // so the guest can still resolve the host end). Attaching with `Some(policy)` arms enforcement
+    // Enforce a v6 policy: only host_ip6:9999/udp is allowed (ICMPv6 to the on-link host is spared
+    // in-kernel, so the guest can still resolve the host end). Attaching with `Some(policy)` arms enforcement
     // before the tap goes live, the same no-un-enforced-window path the v4 tests use.
     let policy = EgressPolicy::deny_all().allow_host6(host_ip6, Some(9999), Some(Protocol::Udp));
     let probes = SandboxProbes::attach(

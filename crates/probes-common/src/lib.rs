@@ -284,11 +284,12 @@ pub const IPPROTO_TCP: u8 = Protocol::Tcp as u8;
 /// IP protocol number for UDP (same leading source/destination port layout as TCP).
 pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 
-/// IP protocol number for **ICMPv6** (next-header 58). Egress enforcement always lets it through under
-/// v6, the way it always lets ARP through under v4: the guest needs neighbor discovery (NS/NA) to
-/// resolve its on-link host end, and multicast-listener (MLD) messages to join the solicited-node
-/// group, before it can reach *any* allowed v6 endpoint. Link-local ICMPv6 can't route off the link
-/// anyway (no v6 default route), so allowing it does not widen egress.
+/// IP protocol number for **ICMPv6** (next-header 58). Unlike ARP (its own v4 ethertype, cleanly
+/// separable from routable IP), ICMPv6 rides the IPv6 ethertype and can carry a routable Echo, so
+/// egress enforcement spares it only to **on-link** destinations ([`icmp6_dst_on_link`]): the
+/// neighbor-discovery (NS/NA/RS/RA), MLD, and NUD traffic the guest needs to resolve and keep its
+/// on-link host end. ICMPv6 to a routable (global-unicast) destination is policed like any other v6
+/// flow (deny-by-default), so a spared Echo can't become an egress channel (see decision 008).
 pub const IPPROTO_ICMPV6: u8 = 58;
 
 /// One **directional** network flow's identity: the IPv4 5-tuple, in host byte order (so a consumer
@@ -776,6 +777,25 @@ pub fn egress_allowed6(
         .any(|r| rule_matches6(r, dst_addr, dst_port, proto))
 }
 
+/// Whether `dst` is an **on-link** IPv6 scope that guest-originated ICMPv6 must reach for neighbor
+/// discovery / MLD / NUD to work, and only those scopes: link-local unicast (`fe80::/10`), link-scoped
+/// multicast (`ff02::/16`, every NDP/MLD group the guest sends to), or a unique-local address
+/// (`fc00::/7`, where this engine's on-link host end lives, so steady-state NUD to it stays reachable).
+/// None of these route off the connected link. An ICMPv6 destination outside this set is a routable
+/// (global-unicast) target the egress valve must police like any other v6 flow, not spare: it lets a
+/// guest Echo an arbitrary internet host, an egress channel deny-by-default forbids (see decision 008).
+/// Built on [`addr6_in_prefix`] so it holds in the eBPF `#![no_std]` program (byte-wise, no `u128`) and
+/// is single-sourced with the host-tested matcher the tc program calls.
+#[must_use]
+pub fn icmp6_dst_on_link(dst: [u8; 16]) -> bool {
+    const LINK_LOCAL: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // fe80::/10
+    const LINK_MCAST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // ff02::/16
+    const ULA: [u8; 16] = [0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // fc00::/7
+    addr6_in_prefix(dst, LINK_LOCAL, 10)
+        || addr6_in_prefix(dst, LINK_MCAST, 16)
+        || addr6_in_prefix(dst, ULA, 7)
+}
+
 #[cfg(test)]
 mod flow_tests {
     use super::*;
@@ -1093,6 +1113,30 @@ mod v6_tests {
         let rules = [PolicyRule6::allow(ula(0), 64, 0, 0)];
         assert!(egress_allowed6(&rules, ula(9), 80, IPPROTO_TCP));
         assert!(!egress_allowed6(&[], ula(1), 9999, IPPROTO_UDP));
+    }
+
+    #[test]
+    fn icmp6_on_link_scopes_spared_routable_policed() {
+        let a = |s: &str| s.parse::<core::net::Ipv6Addr>().unwrap().octets();
+        // On-link: link-local (fe80::/10, incl. its febf:: upper edge), link-scoped multicast
+        // (all NDP/MLD groups), and the ULA the host end + guest subnet live in. All spared.
+        assert!(icmp6_dst_on_link(a("fe80::1"))); // NDP link-local unicast
+        assert!(icmp6_dst_on_link(a("febf::1"))); // fe80::/10 upper edge
+        assert!(icmp6_dst_on_link(a("ff02::1"))); // all-nodes
+        assert!(icmp6_dst_on_link(a("ff02::2"))); // all-routers (RS)
+        assert!(icmp6_dst_on_link(a("ff02::1:ff00:1"))); // solicited-node (NS)
+        assert!(icmp6_dst_on_link(a("ff02::16"))); // MLDv2 report
+        assert!(icmp6_dst_on_link(a("fc00::1"))); // ULA
+        assert!(icmp6_dst_on_link(ula(1))); // this engine's on-link host end (fd00:200::1)
+
+        // Routable / off-link: policed, not spared. Global unicast, and wider-scope multicast that a
+        // multicast router could carry off the link (only link-local ff02:: is a neighbor group).
+        assert!(!icmp6_dst_on_link(a("2606:4700:4700::1111"))); // global unicast (the exfil case)
+        assert!(!icmp6_dst_on_link(a("2001:4860:4860::8888"))); // global unicast
+        assert!(!icmp6_dst_on_link(a("fec0::1"))); // fec0::/10, outside fe80::/10
+        assert!(!icmp6_dst_on_link(a("ff0e::1"))); // global-scope multicast
+        assert!(!icmp6_dst_on_link(a("ff05::1"))); // site-scope multicast
+        assert!(!icmp6_dst_on_link(a("::1"))); // loopback (never a guest egress dst)
     }
 
     #[test]
