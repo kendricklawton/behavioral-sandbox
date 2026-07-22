@@ -87,6 +87,13 @@ library `verify`, and the daemon's signed `trace` reply).
 - **Custody is the hoster's** (engine, not platform): the engine generates a host key on first use and
   signs; tenant keys, a KMS, key distribution, and revocation are the hoster's. A record's `key_id`
   names the signing key, so a rotated key doesn't invalidate records already signed.
+- **Append-only, so tail truncation is undetectable in isolation.** A session's records form a
+  hash chain (each commits to the prior record's hash), so an edited, reordered, inserted, or
+  middle-deleted run is caught. What the chain alone cannot catch is **truncation of the tail**: a
+  consumer handed only a truncated prefix cannot distinguish it from the whole sequence, since every
+  link it holds is intact. Detecting a dropped tail needs an out-of-band anchor, the latest expected
+  record hash or run count tracked by the consumer, which is the hoster's, the same custody line as
+  the signing key. A deliberate, documented limitation of append-only evidence, not a chain defect.
 
 See [decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md) for the full model
 and [`agent verify`](./cli.md#agent-verify) for the verify path.

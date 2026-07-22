@@ -82,7 +82,7 @@ the same shapes.
 | `{"schema":1,"op":"exec","argv":["echo","hi"],"stdin":"text\n"}` | Run a command, feeding `stdin` (UTF-8 text). |
 | `{"schema":1,"op":"put","path":"in.txt","content":"data\n"}` | Write a UTF-8 file into the working directory, for a later `exec`/`get`. |
 | `{"schema":1,"op":"get","path":"out.txt"}` | Read a working-directory file back. A missing file is `present:false`, not an error. |
-| `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle (a typed refusal for a jailed session). |
+| `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle. A **jailed** session is a typed refusal, deliberately (not a gap): a jailed VM's disk lives at a chroot-relative path torn down with the VM, so a bundle would record an unrestorable backing. Snapshot an unjailed source and restore jailed clones (decision 009). |
 | `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. Sampled **live** (repeatable mid-session): its coverage reflects attach time, and an absent axis may be a transient read, not a finalized gap (unlike the CLI's `--record`). |
 | `{"schema":1,"op":"trace_summary"}` | Return the **model-legible summary** so far, the compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied, its resource envelope, any coverage gap), sampled live like `trace`. The face an agent reads between turns. |
 | `{"schema":1,"op":"close"}` | End the session and tear the sandbox down (a hung-up connection does the same). |

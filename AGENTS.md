@@ -139,6 +139,8 @@ The phase-by-phase plan is the single source of truth in **`ROADMAP.md`** (its *
 the state**). Work it per its §0.5 loop: first unchecked box in ID order, one item per
 iteration, and the box checked **together with the work** so they land in one commit. The
 **user** makes that commit. A phase isn't left until its **Exit gate** passes, *a working demo.*
+Work postponed out of a box becomes its **own new box** (or an explicit won't-do) in the same
+commit, never a bare-prose deferral the first-unchecked-box loop can't see (§0.5).
 Don't duplicate phase status here, update the roadmap. Hard-to-reverse
 choices land as `(decision)` **ADRs** under `docs/adr/` (one `NNN-*.md` file per decision, indexed
 by `docs/adr/README.md`), keyed by their own sequential number and date (never a phase ID, so each

@@ -46,6 +46,13 @@ Four properties every phase must protect:
   in parallel, but the **Convergence** phases need both, so the gate order still holds.
 - **Every phase exits on a demo.** The exit gate is "I can show it running." Design notes are
   recorded in the root `.md` files: the box annotations here + the decision records in `docs/adr/`.
+  An exit gate also covers the **negative-space checklist** for the phase's new code (adversarial
+  liveness, fault-injection cleanup, invariant pinning) per `docs/contributing-testing.md`, so
+  robustness rides each phase instead of accreting into a later retrofit interphase.
+- **A deferral is born as a box.** Work postponed out of a box becomes a **new box** (or an
+  explicit won't-do stated in the annotation) in the same commit, never bare prose: a deferral
+  written only into an annotation is invisible to the first-unchecked-box loop and silently falls
+  out of the queue.
 - **Hard-to-reverse choices** (tagged `(decision)`) land as dated entries in `docs/adr/`.
 - **Git is human-driven.** The user makes every commit/branch/push; the coding agent's job ends at
   changes made, demo working, box checked in the working tree.
@@ -53,16 +60,16 @@ Four properties every phase must protect:
 ## §0.6 Versioning (the finish line)
 
 - **`v0.1.0` is the finish line**, the first real release, cut only once **every phase below is
-  green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; this is
-  P20.8).
+  green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; the tag
+  is P20.9).
 - **The vNext tracks (Phases 21–22) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
   neither pulls tenancy/billing/scheduling into scope, and the Wasmtime sibling never dilutes this
   engine's core properties (it's a separate artifact, see Phase 22).
-- **Everything until then is a pre-release `v0.0.x`.** Tag the foundation baseline (the engine
-  boots and tears down microVMs) as an internal **`v0.0.1`**; later milestones bump the `0.0.x`
-  patch as they land. These are checkpoints, not releases, no stability promise.
+- **Everything until then is a pre-release `v0.0.x`.** Any pre-`v0.1.0` tag, if one is ever cut,
+  is a disposable **pre-rename** checkpoint (decision 035): an internal marker, not a release, with
+  no stability promise. None has been cut so far, and none is required before `v0.1.0`.
 - Tags are a **human git step** (§0.5): the coding agent checks boxes; the user cuts the tag.
 - **No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the roadmap checkboxes and
   the decision records in `docs/adr/` *are* the change record; a curated
@@ -705,7 +712,7 @@ Confine the VMM itself, the other half of the isolation story, and pure Linux in
       because resource caps are DoS mitigation, not the isolation boundary (which never degrades: a jail
       that can't be built is a hard error). Defaults stay a conservative, `api:`-marked floor. So P7.3
       is wiring, not design: no new type, no new enforcement point. A strict `require_limits` fail-closed
-      toggle is deferred for P7.3.)*
+      toggle is tracked as P19.9a.)*
 - [x] **P6.6** Verify isolation: a hostile guest + a hostile-ish workload can't escape the jail.
       *(Two proofs. **The confinement is in force, read off the live VMM:** `boots_under_the_jailer` now
       asserts the running Firecracker is **chrooted** (its root's `(st_dev, st_ino)` differs from the
@@ -1733,7 +1740,7 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       order, the trusted/untrusted boundary, the fully-hostile-guest adversary, an attack-class →
       mechanism → proving-test table, and the explicit assumptions/residual risk (KVM + host-kernel
       soundness, side channels) and out-of-scope (engine, not platform). `security.md` now points at
-      it as its companion. The `(decision)` recording the boundary is P15.6, still open.)*
+      it as its companion. The `(decision)` recording the boundary is P15.6, closed as decision 029.)*
 - [x] **P15.6** `(decision)` the security boundary + assumptions → `docs/adr/`. *(Seeded early
       by decision 013, the engine/hoster line the P6.9a sweep forced: the engine guarantees its
       privileged tools can't be weaponized (euid-scoped, authorship not policy), the hoster owns
@@ -1746,7 +1753,7 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       closure.)*
 - [x] **P15.7** Close the cgroup matrix. **`pids.max` is done** (`jail.rs`, added to the per-VM cgroup
       alongside `cpu.max`/`memory.max`, fail-open per controller, host-gate unit-tested; a privileged
-      readback stays pending). It is host-side *defense in depth*: a guest fork-bomb is already bounded
+      readback is tracked as P19.9b). It is host-side *defense in depth*: a guest fork-bomb is already bounded
       by `memory.max` and never reaches the host (P6.8), but a hypervisor-level exploit that forked
       *host* processes is now capped. **IO bandwidth is now bounded** via Firecracker's per-drive
       **virtio-blk rate limiter** (the engine-native control, not host `io.max`): a derived default
@@ -1757,8 +1764,8 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       snapshot state file, which carries the limiter. (The cgroup caps used *not* to ride restore, a
       pre-existing gap now closed under P15.8.) An **internal derived default,
       not a new `Limits` knob** (decision 010), so the public contract is unchanged and this is
-      non-`api:`; the measured boot-latency-is-unchanged confirmation and a throttle readback stay
-      pending on a privileged host, like `pids.max`. Decision 029 records the boundary this sits in.
+      non-`api:`; the measured boot-latency-is-unchanged confirmation and a throttle readback are
+      tracked as P19.9c, on a privileged host, like `pids.max`. Decision 029 records the boundary this sits in.
 - [x] **P15.8** **Co-resident interference test:** launch a hostile run (cpu/mem/pid/io/network storm)
       alongside a well-behaved run on the same host and assert the victim run is not starved, slowed
       past a bound, or observable by the attacker, the explicitly multi-tenant assertion the hoster
@@ -2111,7 +2118,10 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
       reordered/inserted/middle-deleted record (`ChainError::BrokenLink`) or a bad entry
       (`ChainError::Entry`); the daemon session threads the chain across its `trace` replies. Host-safe
       unit tests cover chain verify + reorder/insert/delete/tamper; the wire e2e asserts the second
-      `trace` commits to the first record's hash. Tail truncation is a noted append-only limitation.
+      `trace` commits to the first record's hash. Tail truncation is a documented append-only
+      limitation (`docs/threat-model.md`, the record-integrity section): a chain proves no
+      middle-of-sequence edit, but a consumer that only ever sees a truncated prefix cannot tell it
+      from the whole, so tracking the latest record hash or expected count out of band is the hoster's.
       `api:` (new `probes-loader` surface: `verify_chain`, `record_hash`, `ChainError`,
       `sign_*_chained`).)*
 - [x] **P19.5** **Key rotation + `key_id`.** Records name the key that signed them; `verify` accepts a
@@ -2151,6 +2161,35 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
   P19.5), exiting non-zero on a flipped byte or an untrusted signer; the session hash-chain (P19.4,
   `verify_chain`) makes a dropped/reordered run in a sequence detectable; the boundary is written down
   in the threat model + security docs (P19.6) and the overhead is benchmarked (P19.7).
+
+## Phase 19.9, Deferral ledger (interphase: pay down the prose debts before the tag)
+
+An audit of the roadmap found work that was **deferred in a box's annotation but never given its own
+box**, so the first-unchecked-box loop (§0.5) could not see it and it silently fell out of the queue
+(the `require_limits` toggle below is the proven case: promised in a P6.5 annotation "for P7.3",
+P7.3 shipped without it). The §0.5 "a deferral is born as a box" rule now prevents new instances;
+this interphase converts the live ones the audit surfaced. It lands **before** the `v0.1.0` tag so
+the release ships with these dispositioned, not dangling. Small concrete work becomes a box; a
+genuine limitation is recorded as an explicit won't-do at the source instead (done in this phase's
+first commit, so no box tracks a non-task).
+
+- [ ] **P19.9a** The **strict-caps toggle** deferred in a P6.5 annotation. Add a `require_limits`
+      fail-closed option (layered per decision 027: flag > env > file) so a hoster can make missing
+      cgroup delegation **refuse the boot** instead of the default warn-and-boot-uncapped. The
+      fail-open default stays the default (decision 010: caps are DoS mitigation, not the isolation
+      boundary, which never degrades); this is the opt-in for a host that wants caps to be load-bearing.
+      Host-safe unit tests for the refusal path.
+- [ ] **P19.9b** The **`pids.max` privileged readback** pending since P15.7. A privileged test reads
+      the value back off the running VM's cgroup (today only the jailer arg string is asserted, the
+      wire-shape unit tests in `crates/vmm/src/jail.rs`), closing the "written but never observed
+      live" gap the annotation left open.
+- [ ] **P19.9c** The **IO-throttle proof** pending since P15.7. A privileged test that the per-drive
+      virtio-blk rate limiter (`RateLimiter::default_guest_io`, `crates/vmm/src/firecracker.rs`)
+      actually throttles sustained guest writes, plus the boot-latency-is-unchanged confirmation the
+      annotation promised (a cold boot's reads fit the burst and must stay unthrottled).
+- **Exit gate:** the three boxes above are green, and the two recorded won't-dos (the jailed-session
+  snapshot refusal and the hash-chain tail-truncation limitation) each carry an explicit disposition
+  at their source, so `grep` for a live "deferred/pending" in the roadmap returns nothing untracked.
 
 ## Phase 20, Packaging & docs
 
@@ -2210,8 +2249,12 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Dedicated `quickstart.md`/`non-goals.md` pages were tried and then folded back to match the
       wasmtime shape, no extra pages the model doesn't carry. `mdbook build` is clean and every
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
-      (GitHub Pages deploy) is left to launch (P20.2/P20.4). Docs only, non-`api:`.)*
-- [ ] **P20.4** A **launch announcement**: what it is, the threat model, and how to self-host it.
+      (GitHub Pages deploy) is left to launch (P20.10). Docs only, non-`api:`.)*
+- [ ] **P20.4** (human-led) **The real name.** Retire the working name "agent" (decision 035): the
+      user picks the name, then one sweep renames the repo, the binary, the crate names, the `AGENT_*`
+      env prefix and `.agent.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
+      **before** the launch announcement (P20.10) or any registry/SDK freeze (Phases 21–22) can cement
+      the working name publicly, so the rename stays a quiet sweep, not a breaking rebrand.
 - [x] **P20.5** A **reference integration**: a small host application embedding the engine end to end.
       *(**Done.** `crates/probes-loader/examples/reference_integration.rs`: the smallest complete host
       app that composes both halves, load the shared observers, `Sandbox::open` (jailed, KVM), attach
@@ -2247,7 +2290,9 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       security-maintained host-kernel LTS) vs the documented degradations, and the pinned upstream
       versions (Firecracker + the guest kernel that tracks its support list).
       *(Pulled forward from packaging: a self-hostable security engine has to state what it runs on
-      before people run untrusted code on it. **Decision 032** fixes it, `x86_64`/`aarch64` and host
+      before people run untrusted code on it. **Decision 032** fixes it (narrowed 2026-07-21):
+      `x86_64` only, an untested isolation boundary must not be claimed as supported, so aarch64 was
+      dropped and returns only with real hardware plus a privileged CI lane behind it. `x86_64` and host
       kernel **≥ 5.15** (a maintained LTS, one `MIN_KERNEL` const) are **hard** (off them, refused),
       while cgroup-v2 caps (decision 010), the jailer, BTF/eBPF, and net/bulk tooling stay documented
       **degradations**; Firecracker stays pinned v1.9 and the baked-in guest kernel tracks Firecracker's
@@ -2256,7 +2301,12 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
       matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
       internal doctor row + docs).)*
-- [ ] **P20.9** v0.0.1 tag: boots a microVM, runs code, enforces + records it, self-hostable, documented.
+- [ ] **P20.9** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
+      microVM boots, runs code, is enforced + recorded, self-hostable, and documented. Cut after the
+      rename (P20.4), so the first stable name is the real one.
+- [ ] **P20.10** The **launch announcement**: what it is, the threat model, and how to self-host it,
+      plus the docs-site deploy (GitHub Pages, deferred from P20.3). After the tag and the rename, so
+      the announcement points at a released, correctly-named engine.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
   and read the eBPF-observed audit trail.
 
@@ -2265,7 +2315,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 ## Post-v0.1.0, vNext tracks
 
-> These land **after** the `v0.1.0` finish line (P20.8) and **do not gate that tag** (§0.6). They
+> These land **after** the `v0.1.0` finish line (P20.9) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
 >, without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.
@@ -2307,17 +2357,19 @@ option, not a replacement for this repo.
       hardware*) is never traded in this engine; the wasm variant carries a **different, weaker**
       guarantee, so it's a distinct artifact that *shares the API*, not a plug-in backend →
       `docs/adr/`.
-- [ ] **P22.2** Wasmtime embedding: `Engine`/`Store`/`Module` with **fuel + epoch** (CPU/timeout) and
-      a `ResourceLimiter` (memory) → typed limits, mirroring the FC engine's no-hang/no-leak contract.
-- [ ] **P22.3** The **host-function (WASI) shim layer** = capabilities + policy + audit log:
-      enforcement moves from host-side eBPF to the **import boundary** (the module has zero ambient
-      authority; deny-by-default becomes "link no imports").
-- [ ] **P22.4** Reuse the `Sandbox` lifecycle shape + the audit-log **JSON schema**, so a caller
-      (and the Phase 21 SDKs) can drive either engine.
-- [ ] **P22.5** Comparative benchmarks: **instantiate latency + fuel overhead + memory-sharing** vs the
-      microVM's boot/restore/memory-sharing, same harness, honest numbers.
-- [ ] **P22.6** Test: the same untrusted program on both engines yields comparable audit-log
-      records; where they *can't* be comparable, document why.
+- [ ] **P22.2** (sibling repo) The sibling embeds Wasmtime: `Engine`/`Store`/`Module` with **fuel +
+      epoch** (CPU/timeout) and a `ResourceLimiter` (memory) → typed limits, mirroring the FC engine's
+      no-hang/no-leak contract. Tracked here as the contract it must honor, not built in this tree.
+- [ ] **P22.3** (sibling repo) The sibling's **host-function (WASI) shim layer** = capabilities +
+      policy + audit log: enforcement moves from host-side eBPF to the **import boundary** (the module
+      has zero ambient authority; deny-by-default becomes "link no imports"). Tracked here as contract.
+- [ ] **P22.4** The shared **contract** this repo owns: the `Sandbox` lifecycle shape + the audit-log
+      **JSON schema** are reused so a caller (and the Phase 21 SDKs) can drive either engine.
+- [ ] **P22.5** (sibling repo) The sibling proves **comparative benchmarks**: **instantiate latency +
+      fuel overhead + memory-sharing** vs the microVM's boot/restore/memory-sharing, same harness,
+      honest numbers. Tracked here against the shared bench methodology.
+- [ ] **P22.6** (sibling repo) The sibling's conformance test: the same untrusted program on both
+      engines yields comparable audit-log records; where they *can't* be comparable, document why.
 - **Exit gate:** two engines, one API, two isolation boundaries, with a documented **hardware vs
   software** comparison: TCB size, startup, memory-sharing, scope, and threat model.
 
