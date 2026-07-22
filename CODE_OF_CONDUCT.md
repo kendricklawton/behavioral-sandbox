@@ -7,5 +7,5 @@ In short: be respectful, be constructive, assume good faith, and keep the discus
 work. Harassment or discrimination of any kind is not tolerated.
 
 Instances of unacceptable behavior may be reported privately to the maintainer at
-**khe4r6@gmail.com**. Reports are handled confidentially. For anything that is also a security
+**founder@khenry.dev**. Reports are handled confidentially. For anything that is also a security
 matter, the private channel in [`SECURITY.md`](SECURITY.md) works too.

@@ -36,3 +36,23 @@ deliberately not a curated changelog, which would only churn every `v0.0.x`. Ins
   work toward the tag.
 
 Curated release notes start accumulating in this file with `v0.1.0`.
+
+## Rust version support
+
+**Policy: the last three stable Rust releases** (current stable and the two before it), the same window
+Wasmtime commits to. The reasoning and the alternatives are in
+[decision 037](docs/adr/037-rust-version-support-the-last-three-stable-releases.md); this section is the
+operating checklist.
+
+- **The floor lives in one place:** `[workspace.package].rust-version` in the root `Cargo.toml`. That is
+  the number; everything else refers to it.
+- **The eBPF crate (`crates/probes`) is exempt:** it builds on its own nightly toolchain, so it has no
+  stable floor. The window covers the host crates only.
+
+**Staying on top of it (do this each release, and any time a dependency bump fails the floor lane):**
+
+1. Find current stable Rust (`rustc +stable --version`), subtract two releases: that is the floor.
+2. If it moved, set `rust-version` in the root `Cargo.toml` to the new floor.
+3. Run the floor lane green: `cargo +<floor> check --locked --workspace` (mirrors the CI job).
+4. Note any raise in the release notes; from `v0.1.0` on, an MSRV raise is a minor-version bump.
+

@@ -53,6 +53,8 @@
     - [033. Single-command self-host + a vendored offline mirror of every pinned input](./adr/033-single-command-self-host-a-vendored-offline-mirror-of.md)
     - [034. The integrity model: a host-signed record, and the boundary a signature does not cross](./adr/034-the-integrity-model-a-host-signed-record-and-the.md)
     - [035. Distribution: a checksummed tarball, an installer script, and a container image; nothing that freezes the working name](./adr/035-distribution-is-a-checksummed-tarball-an-installer.md)
+    - [036. AGENTS.md is the canonical operating manual, the dotfile is retired](./adr/036-agents-md-is-the-canonical-operating-manual.md)
+    - [037. Rust version support: the last three stable releases, one floor tested in CI](./adr/037-rust-version-support-the-last-three-stable-releases.md)
   - [Building](./contributing-building.md)
   - [Testing](./contributing-testing.md)
   - [Fuzzing](./contributing-fuzzing.md)
