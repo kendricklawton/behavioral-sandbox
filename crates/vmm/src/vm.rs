@@ -265,6 +265,31 @@ pub(crate) fn refuse_uncappable_boot(config: &BootConfig) -> Result<(), VmmError
     Ok(())
 }
 
+/// Refuse a **jailed** boot or restore whose scratch dir is on a `nodev` mount: the jailer mknods the
+/// guest's `/dev/kvm` inside its chroot there, and a `nodev` filesystem makes that device node inert,
+/// so Firecracker fails deep in boot with a raw "creating KVM object: Permission denied". Catch it
+/// first, before any spawn, and surface the typed [`VmmError::ScratchDirNodev`] that names the fix.
+/// Only jailed boots use the chroot, so an unjailed run is never blocked, and an *undetermined* mount
+/// (no readable `/proc/self/mountinfo`) is read as fine rather than a false alarm. Host-safe (reads
+/// `/proc`, no KVM, no child), so the one guard covers cold boot and restore.
+pub(crate) fn refuse_nodev_scratch(config: &BootConfig) -> Result<(), VmmError> {
+    nodev_verdict(
+        config.jail.is_some(),
+        crate::doctor::scratch_is_nodev(&config.scratch_dir),
+        &config.scratch_dir,
+    )
+}
+
+/// The pure decision behind [`refuse_nodev_scratch`], split out so the `jailed × nodev` matrix is
+/// unit-tested without a real `/proc`. Refuse only on a **confident** `nodev` under a jail; `None`
+/// (couldn't classify) and every unjailed case pass.
+fn nodev_verdict(jailed: bool, nodev: Option<bool>, scratch: &Path) -> Result<(), VmmError> {
+    if jailed && nodev == Some(true) {
+        return Err(VmmError::ScratchDirNodev(scratch.to_path_buf()));
+    }
+    Ok(())
+}
+
 impl Default for BootConfig {
     /// The pure pinned defaults, no environment reads (that's [`BootConfig::from_env`]), so
     /// `default()` is deterministic. The resource knobs mirror [`Limits::default`] so the two
@@ -450,6 +475,9 @@ impl Vm {
         // spawning anything: the caps live on the jailed VMM's cgroup, so an unjailed run is
         // definitionally uncapped, which require_limits forbids (ADR 010's fail-open is the default).
         refuse_uncappable_boot(&config)?;
+        // Refuse a jailed boot whose scratch dir is nodev with a typed error, rather than letting the
+        // jailer's inert chroot /dev/kvm surface a raw Firecracker "creating KVM object" failure.
+        refuse_nodev_scratch(&config)?;
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
@@ -926,6 +954,23 @@ mod tests {
         cfg.require_limits = true;
         cfg.jail = Some(Jail::default());
         assert!(refuse_uncappable_boot(&cfg).is_ok());
+    }
+
+    #[test]
+    fn nodev_scratch_refuses_only_a_confident_nodev_under_a_jail() {
+        let scratch = Path::new("/some/scratch");
+        // Jailed + a confidently-nodev scratch is the one refused case (the jailer's chroot /dev/kvm
+        // would be inert), and the error carries the offending path for the message.
+        assert!(matches!(
+            nodev_verdict(true, Some(true), scratch),
+            Err(VmmError::ScratchDirNodev(p)) if p == scratch
+        ));
+        // Everything else passes: a jailed boot on a dev-capable fs, an *undetermined* mount (`None`,
+        // never a false alarm), and every unjailed boot (no chroot, so nodev is irrelevant).
+        assert!(nodev_verdict(true, Some(false), scratch).is_ok());
+        assert!(nodev_verdict(true, None, scratch).is_ok());
+        assert!(nodev_verdict(false, Some(true), scratch).is_ok());
+        assert!(nodev_verdict(false, None, scratch).is_ok());
     }
 
     #[test]

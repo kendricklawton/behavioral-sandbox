@@ -177,6 +177,13 @@ pub enum VmmError {
     /// load-bearing. A host-configuration fault, not the guest's, so it buckets [`Infra`](ErrorKind::Infra):
     /// fix the delegation (or drop the jail-less boot) and retry.
     LimitsUnavailable(String),
+    /// A **jailed** boot was asked for, but the scratch dir (`AGENT_SCRATCH_DIR`) is on a `nodev`
+    /// mount, so the `/dev/kvm` device node the jailer mknods inside its chroot is inert and
+    /// Firecracker cannot open KVM. Caught **before** the spawn, so the boot fails with this typed
+    /// pointer at the fix instead of a raw Firecracker "creating KVM object: Permission denied" deep
+    /// in boot. A host-configuration fault (repoint the scratch dir), so it buckets
+    /// [`Infra`](ErrorKind::Infra); unjailed boots have no jailer chroot and are never affected.
+    ScratchDirNodev(std::path::PathBuf),
 }
 
 impl std::fmt::Display for VmmError {
@@ -201,6 +208,12 @@ impl std::fmt::Display for VmmError {
             }
             VmmError::Vmm(e) => write!(f, "vmm error: {e}"),
             VmmError::LimitsUnavailable(e) => write!(f, "resource limits unavailable: {e}"),
+            VmmError::ScratchDirNodev(dir) => write!(
+                f,
+                "scratch dir {} is on a nodev mount: the jailer's chroot /dev/kvm can't be opened \
+                 there, so a jailed boot fails; set AGENT_SCRATCH_DIR to a path off a nodev mount",
+                dir.display()
+            ),
         }
     }
 }
@@ -255,9 +268,11 @@ impl VmmError {
             | VmmError::Timeout(_)
             | VmmError::GuestUnavailable(_)
             | VmmError::Vmm(_)
-            // A host-configuration fault (caps can't be applied), not the guest's: retry after
-            // fixing the delegation or the jail posture, exactly Infra's "fix the host" contract.
-            | VmmError::LimitsUnavailable(_) => ErrorKind::Infra,
+            // Host-configuration faults (caps can't be applied; the scratch dir is nodev), not the
+            // guest's: retry after fixing the delegation, the jail posture, or the scratch path,
+            // exactly Infra's "fix the host" contract.
+            | VmmError::LimitsUnavailable(_)
+            | VmmError::ScratchDirNodev(_) => ErrorKind::Infra,
             // `ExecUnresponsive` is a *liveness* fault (the guest went silent/hostile mid-exec), so
             // it buckets with `Channel` as Transport: its own contract is "retire the VM, not blame
             // the command", which is Transport's, not Guest's.

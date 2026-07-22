@@ -1,6 +1,9 @@
 /target
 # eBPF objects build to their own target dir under the git-ignored root target
 **/target/
+# The privileged gate's throwaway build dir: `sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged"
+# cargo xtask ci-privileged` sends root-owned artifacts here so they never poison `./target`.
+/target-privileged
 **/*.rs.bk
 # Crash core dumps (e.g. a linker OOM writes `core.<pid>` to the cwd) — never committed.
 core.*

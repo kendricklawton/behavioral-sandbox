@@ -2206,7 +2206,14 @@ first commit, so no box tracks a non-task).
       last-three-stable **support window** (its own floor CI lane, a `rust-version` decoupled below the
       pin) is deferred *in that decision* to `v0.1.0`, when external embedders make it worth the
       maintenance, so the window is a scheduled decision, not a silent gap.
-- **Exit gate:** the four boxes above are green, and the two recorded won't-dos (the jailed-session
+- [x] **P19.9e** The **nodev-scratch pre-boot check**, a typed error instead of a cryptic one
+      (surfaced by a first local self-host run). A jailed boot whose `AGENT_SCRATCH_DIR` sits on a
+      `nodev` mount would otherwise fail deep in boot with a raw Firecracker "creating KVM object:
+      Permission denied" (the jailer's chroot `/dev/kvm` node is inert). `Vm::boot`/`Vm::restore` now
+      refuse it up front with `VmmError::ScratchDirNodev` naming the fix, reusing the doctor's tested
+      nodev detector; unit-tested `jailed × nodev` matrix. Turns a documented degradation into the
+      typed error the engine promises (guardrail #5).
+- **Exit gate:** the five boxes above are green, and the two recorded won't-dos (the jailed-session
   snapshot refusal and the hash-chain tail-truncation limitation) each carry an explicit disposition
   at their source, so `grep` for a live "deferred/pending" in the roadmap returns nothing untracked.
 

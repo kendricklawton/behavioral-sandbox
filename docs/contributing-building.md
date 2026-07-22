@@ -34,14 +34,21 @@ resolve; a rename or renumber fails the gate instead of silently orphaning the r
 ## The privileged gate
 
 Booting a microVM and loading/attaching eBPF need `/dev/kvm` and elevated caps, so the
-**integration tests** (VM boot, exec, tap networking, probe attach) are `#[ignore]`d and run under
+**integration tests** (VM boot, exec, tap networking, probe attach) are `#[ignore]`d and run as
+real root:
 
 ```console
-cargo xtask ci-privileged
+sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged" cargo xtask ci-privileged
 ```
 
 on a machine that has them, your dev box, or a bare-metal/nested-virt CI runner (a stock cloud
 VM usually can't nest KVM). **Never gate the everyday loop on a privileged runner.**
+
+The `CARGO_TARGET_DIR` override matters: `sudo cargo …` builds as **root**, so without it this run
+leaves root-owned artifacts in `./target` that then block your normal (non-root) `cargo build`.
+Sending them to a throwaway `target-privileged/` (git-ignored, `rm -rf` it anytime) keeps the
+`./target` your user builds into clean. `-E` preserves your `PATH` and `rustup` so `cargo` resolves
+under `sudo`. (`ci-privileged` prints this reminder if you run it as root without the override.)
 
 ## The book
 

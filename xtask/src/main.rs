@@ -591,6 +591,16 @@ fn ci_privileged() -> Result<()> {
              a pass"
         );
     }
+    // Running as root: without CARGO_TARGET_DIR, this build writes root-owned files into ./target
+    // that then block the user's later non-root `cargo build`. Warn (can't prevent it, the outer
+    // `cargo xtask` build already ran) so the next invocation redirects the output.
+    if std::env::var_os("CARGO_TARGET_DIR").is_none() {
+        eprintln!(
+            "warning: running as root without CARGO_TARGET_DIR: build artifacts land root-owned in \
+             ./target and will block later non-root `cargo` builds. Prefer: \
+             sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" cargo xtask ci-privileged"
+        );
+    }
     if !Path::new("/sys/kernel/btf/vmlinux").exists() {
         bail!(
             "/sys/kernel/btf/vmlinux not present — the eBPF probe tests skip themselves without \

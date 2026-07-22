@@ -70,6 +70,9 @@ impl Vm {
         // capped, so refuse it (a jailed clone's delegation is checked deeper, in the jailer cgroup
         // args). Before the KVM probe so the contradiction fails fast and host-safe.
         crate::vm::refuse_uncappable_boot(config)?;
+        // A restore-into-jail uses the same chroot /dev/kvm, so the nodev scratch guard applies here
+        // too, and fails fast with the typed pointer before the KVM probe.
+        crate::vm::refuse_nodev_scratch(config)?;
         if !Path::new("/dev/kvm").exists() {
             return Err(VmmError::NoKvm);
         }
