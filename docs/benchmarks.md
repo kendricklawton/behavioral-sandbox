@@ -108,6 +108,12 @@ resident, **11× denser** than if nothing were shared. The marginal cost of one 
 of Pss (its copy-on-write dirty pages); the read-only base disk and the 256 MiB snapshot memory file
 stay page-cache-deduped across the whole fleet, not copied per VM.
 
+**Scope: the engine measures, the hoster schedules.** This curve is a sizing input, not a scheduler.
+How far you overcommit RAM or CPU, how you pin across NUMA nodes, and which run lands on which host
+are the hoster's placement policy, not engine work (the engine-not-platform line, decision 038 and the
+[threat model](./threat-model.md#assumptions-and-residual-risk)). The engine hands you the per-clone
+footprint so you can set those ratios; it does not set them for you.
+
 ## Per-sandbox footprint: the effect of the overlay/rootfs choice
 
 `cargo xtask bench-footprint --count 4`. Brings up a cohort of identical sandboxes on each disk

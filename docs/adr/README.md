@@ -43,3 +43,6 @@ phase), so each stands on its own as the roadmap evolves. The overview and repo 
 - [035. Distribution: a checksummed tarball, an installer script, and a container image; nothing that freezes the working name](./035-distribution-is-a-checksummed-tarball-an-installer.md) *(2026-07-21)*
 - [036. AGENTS.md is the canonical operating manual, the dotfile is retired](./036-agents-md-is-the-canonical-operating-manual.md) *(2026-07-21)*
 - [037. Rust version tracks current stable, pinned; a support window waits for v0.1.0](./037-rust-version-tracks-current-stable-no-back-support-yet.md) *(2026-07-22)*
+- [038. Host hardening is the hoster's baseline; the engine advises, it does not enforce](./038-host-hardening-is-the-hosters-baseline-doctor-advises.md) *(2026-07-22)*
+- [039. API stability: a semver and deprecation policy, written now, in force at v0.1.0](./039-api-stability-semver-and-deprecation-policy.md) *(2026-07-22)*
+- [040. Supply-chain provenance: pin the Firecracker binary, sign the release manifest](./040-supply-chain-provenance-pinning-and-release-signing.md) *(2026-07-22)*

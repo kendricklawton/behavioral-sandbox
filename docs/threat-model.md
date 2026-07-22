@@ -34,6 +34,24 @@ What the engine is protecting, in priority order:
   the in-guest agent that carries exec and I/O. **The in-guest agent is a convenience, never a
   security boundary**: a hostile guest is assumed to control it, and its own guest kernel, completely.
 
+The boundary and the crossings the host mediates, as a picture:
+
+```
+        HOST  (trusted)                  boundary             GUEST  (untrusted)
+   ----------------------------      = the CPU (KVM) =      ----------------------------
+    driver + VMM + jailer                  |                 untrusted code
+    host-side eBPF probes                  |                 guest kernel
+    cgroup controller                      |                 in-guest agent (convenience)
+                                           |
+    crossings the host mediates:           |
+      vsock    exec + stdio        <------->|   carried by the in-guest agent
+      tap      all guest packets   <------->|   observed by tc/eBPF, policed deny-by-default
+      block    rootfs RO / in RO / out RAD >|   no host filesystem is handed to the guest
+      cgroup   mem/cpu/pids/io caps ------->|   CPU is also metered from eBPF
+   ----------------------------                       ----------------------------
+   Every security-relevant observation and policy sits on the HOST side of every crossing.
+```
+
 A direct consequence shapes what the host can see. Host-side **syscall** visibility is coarse for a
 microVM: the guest services its own syscalls in its own kernel, so they never trap to a host
 tracepoint (their absence there is the isolation working, not a blind spot). The strong
@@ -65,6 +83,36 @@ on every axis at once: it exfiltrates (denied and recorded), floods the network 
 exhausts memory and forks a storm (bounded by the cgroup, zero host threads), and hunts for the
 probes (finds nothing, and is recorded anyway), and each attempt fails while the run stays
 contained and usable. "Safe for multi-tenant hosting" means exactly this suite green, nothing less.
+
+## Verify it yourself
+
+The table above is only as trustworthy as your ability to re-run it. The containment claims are
+proven by the integration suite, which you can run against your own host rather than take on faith.
+
+The suite is **privileged**: it boots real microVMs and attaches real probes, so it needs a host with
+`/dev/kvm`, real root, `CAP_BPF` + `CAP_PERFMON`, and kernel BTF. Run it with:
+
+```console
+sudo -E cargo xtask ci-privileged
+```
+
+This runs the VM-boot and probe-attach integration tests, including the containment suite. It
+**refuses** to run without root, BTF, or the eBPF object rather than skipping those tests into a
+hollow green (to `cargo`, a skipped test is a pass). The everyday `cargo xtask ci` gate is host-safe
+and runs everywhere, but it does **not** include this suite; the containment proof lives behind the
+privileged lane.
+
+What each claim maps to:
+
+- **Escape, exhaustion, egress, co-resident interference** are `crates/vmm/tests/confinement.rs`:
+  `driver_death_cannot_leak_a_vm`, `kill_handle_unblocks_a_wedged_exec`,
+  `guest_mem_hog_is_bounded_by_the_cgroup`, `guest_fork_bomb_is_bounded_by_the_cgroup`,
+  `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir`, and the consolidated
+  `a_hostile_run_cannot_starve_or_observe_a_co_resident_run` (one hostile guest attacking every axis
+  at once).
+- **No host leak across runs** is `crates/vmm/tests/boot.rs`: `repeated_boots_leave_no_leaks` (scratch
+  dirs, orphan VMMs, netns, process-local fds and threads all return to baseline) and
+  `fd_footprint_per_vm_stays_within_budget_and_never_leaks`.
 
 ## Record integrity beyond the guest
 

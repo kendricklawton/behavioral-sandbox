@@ -61,7 +61,7 @@ Four properties every phase must protect:
 
 - **`v0.1.0` is the finish line**, the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; the tag
-  is P20.9).
+  is P20.16).
 - **The vNext tracks (Phases 21–22) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
@@ -2275,11 +2275,11 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Dedicated `quickstart.md`/`non-goals.md` pages were tried and then folded back to match the
       wasmtime shape, no extra pages the model doesn't carry. `mdbook build` is clean and every
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
-      (GitHub Pages deploy) is left to launch (P20.10). Docs only, non-`api:`.)*
+      (GitHub Pages deploy) is left to launch (P20.17). Docs only, non-`api:`.)*
 - [ ] **P20.4** (human-led) **The real name.** Retire the working name "agent" (decision 035): the
       user picks the name, then one sweep renames the repo, the binary, the crate names, the `AGENT_*`
       env prefix and `.agent.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
-      **before** the launch announcement (P20.10) or any registry/SDK freeze (Phases 21–22) can cement
+      **before** the launch announcement (P20.17) or any registry/SDK freeze (Phases 21–22) can cement
       the working name publicly, so the rename stays a quiet sweep, not a breaking rebrand.
 - [x] **P20.5** A **reference integration**: a small host application embedding the engine end to end.
       *(**Done.** `crates/probes-loader/examples/reference_integration.rs`: the smallest complete host
@@ -2327,10 +2327,47 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
       matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
       internal doctor row + docs).)*
-- [ ] **P20.9** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
+**Operator readiness (P20.9-P20.15).** The posture a serious, hyperscaler-grade evaluator reads before
+betting on the engine, and the code that backs it. Three areas were already strong and needed only
+consolidation (the security boundary, the percentile benchmarks, the no-leak/no-panic suite); three
+had real gaps (a host-hardening posture, two supply-chain holes, an unwritten stability promise). The
+reading list lands as docs now (P20.9); the code below (P20.10-P20.15) gates the `v0.1.0` tag.
+
+- [x] **P20.9** **Operator-readiness posture**: the reading list an evaluator works through, as docs.
+      *(**Done** in this change. Three decisions with three reader pages: host hardening as the
+      hoster's baseline with a doctor advisory (decision 038, `docs/host-hardening.md`); the semver +
+      deprecation policy written now and in force at the tag (decision 039, `docs/stability.md`); and
+      supply-chain provenance consolidated, with the Firecracker-pin and manifest-signing gaps recorded
+      (decision 040, `docs/supply-chain.md`). Plus the boundary made legible: a trust-zone data-flow
+      diagram and a "verify it yourself" containment runbook in `docs/threat-model.md`, and a
+      scheduling-layer scope note in `docs/benchmarks.md`. Docs only, non-`api:`. The backing code is
+      P20.10-P20.15.)*
+- [ ] **P20.10** **Host-hardening advisory in `agent doctor`** (decision 038): read
+      `/sys/devices/system/cpu/vulnerabilities/*`, the SMT state, and the KSM state, and **warn** on an
+      exposed host. Advisory, not a hard floor (a single-tenant dev box is fine); the arch/kernel rows
+      stay hard. Reuses the shared host-check surface (`crates/vmm/src/doctor.rs`, decision 028).
+- [ ] **P20.11** **Soak the leak proof** (the fleet-scale half of the no-leak claim): extend the
+      two-cycle `repeated_boots_leave_no_leaks` in `crates/vmm/tests/boot.rs` into an endurance loop of
+      many start/exec/teardown cycles under churn, asserting fds/threads/netns/scratch return to
+      baseline and reporting a leak-rate, so "no leak" is measured at scale, not at n=2. Privileged.
+- [ ] **P20.12** **Cleanup telemetry**: export the orphan-sweep's `SweepReport` (dirs/netns reclaimed,
+      `crates/vmm/src/sweep.rs`) and a sentinel-degraded gauge (`crates/vmm/src/lifetime.rs`) through
+      the metrics registry (`crates/cli/src/metrics.rs`), so an operator can alarm on reclamation and
+      on hosts that fell back to Drop-only cleanup.
+- [ ] **P20.13** **Pin the Firecracker binary** (decision 040): a sha256 pin alongside the
+      kernel/rootfs pins (`xtask/src/artifacts.rs`), verified in `install.sh`, with an advisory
+      `agent doctor` check on the installed binary's hash. Firecracker is the boundary, so its binary is
+      the one un-pinned input that actually matters.
+- [ ] **P20.14** **Sign the release manifest** (decision 040): sign `SHA256SUMS` with the host
+      `ed25519` signing core (decision 034) in `xtask/src/dist.rs`, and verify it in `install.sh` when a
+      trusted key is present, so provenance does not rest on release-host + TLS trust alone.
+- [ ] **P20.15** **Fail-open degrade, tested**: prove bounded teardown on a host that lacks the sentinel
+      guarantee (the cgroup-v2-unwritable Drop-only path, `crates/vmm/src/lifetime.rs`, decision 011),
+      so the documented degrade is exercised, not just asserted.
+- [ ] **P20.16** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
       microVM boots, runs code, is enforced + recorded, self-hostable, and documented. Cut after the
       rename (P20.4), so the first stable name is the real one.
-- [ ] **P20.10** The **launch announcement**: what it is, the threat model, and how to self-host it,
+- [ ] **P20.17** The **launch announcement**: what it is, the threat model, and how to self-host it,
       plus the docs-site deploy (GitHub Pages, deferred from P20.3). After the tag and the rename, so
       the announcement points at a released, correctly-named engine.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
@@ -2341,7 +2378,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
 
 ## Post-v0.1.0, vNext tracks
 
-> These land **after** the `v0.1.0` finish line (P20.9) and **do not gate that tag** (§0.6). They
+> These land **after** the `v0.1.0` finish line (P20.16) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
 >, without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.
@@ -2358,7 +2395,9 @@ Thin, idiomatic clients so non-Rust callers can drive `agent`, a client-SDK surf
 **engine, not platform**.
 
 - [ ] **P21.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
-      SDK contract): message schema, the error taxonomy, and a semver compat policy → `docs/adr/`.
+      SDK contract): message schema and the error taxonomy → `docs/adr/`, **applying** the semver +
+      deprecation policy already written in decision 039 (which the pre-tag machinery already signals),
+      not inventing a new one.
 - [ ] **P21.2** A **cross-language conformance suite** (golden request/response + audit-log
       round-trips) every SDK must pass, the single source of SDK correctness, run in CI.
 - [ ] **P21.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agent`.
