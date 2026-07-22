@@ -320,7 +320,12 @@ fn per_cpu_sum(ebpf: &Ebpf, name: &str) -> Result<u64, ProbeError> {
     let per_cpu = counter
         .get(&0, 0)
         .map_err(|e| ProbeError::Map(format!("read `{name}`[0]: {e}")))?;
-    Ok(per_cpu.iter().copied().sum())
+    // Saturate, don't `.sum()`: these are adversarial kernel-written counters, and the crate's bar
+    // is that a hostile guest can never wrap a large drop/event count down to a small one (the same
+    // discipline `totals()`/denials use). A plain `.sum()` would also panic on overflow in a debug
+    // build, which the host path forbids. Unreachable in practice (per-CPU drop slots can't sum past
+    // `u64::MAX`), but kept consistent with the stated invariant rather than relying on that.
+    Ok(per_cpu.iter().copied().fold(0u64, u64::saturating_add))
 }
 
 /// The tracepoint programs the syscall tracer attaches, paired with the `syscalls` event each hooks.

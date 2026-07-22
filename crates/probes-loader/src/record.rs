@@ -330,7 +330,9 @@ pub struct SyscallCounts {
 }
 
 /// A notable host syscall: its kind, the decoded detail (an opened/exec'd path, or a connect target),
-/// the `comm` that made it, and how many times this exact `(kind, detail)` occurred.
+/// the `comm` that made it, and how many times this exact `(kind, detail)` occurred. When more than
+/// one `comm` produced the same `(kind, detail)`, the **lexicographically smallest** is kept, an
+/// order-independent choice, so the record stays byte-stable regardless of ring-buffer arrival order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NotableSyscall {
@@ -408,6 +410,16 @@ impl SyscallFold {
         let inner = self.notable.entry(kind as u32).or_default();
         if let Some(acc) = inner.get_mut(detail.as_ref()) {
             acc.hits += 1;
+            // Attribute the lexicographically smallest `comm`, not the first to arrive. The same
+            // `(kind, detail)` is commonly produced by more than one process (e.g. many binaries
+            // `openat` `/etc/ld.so.cache`), so a first-arrival `comm` would make the record depend on
+            // ring-buffer stream order, breaking the "same observations -> byte-stable record"
+            // property signing relies on. The compare borrows `comm` (no alloc for a valid-UTF-8
+            // comm, the common case); the owned copy is taken only on the rare replace.
+            let comm = ev.comm_lossy();
+            if comm.as_ref() < acc.comm.as_str() {
+                acc.comm = comm.into_owned();
+            }
         } else if self.distinct >= MAX_NOTABLE {
             self.overflow_events += 1;
         } else {
@@ -567,6 +579,35 @@ mod tests {
         assert_eq!(hostname.hits, 1000);
         // total counts every event, exactly.
         assert_eq!(f.total, 1000 + (MAX_NOTABLE as u64) + 10);
+    }
+
+    #[test]
+    fn notable_comm_is_independent_of_arrival_order() {
+        // The same (kind, detail) is commonly produced by more than one process. The recorded `comm`
+        // must not depend on which event the ring buffer delivered first, or the signed record would
+        // vary by stream order, breaking the "same observations -> byte-stable record" property.
+        // Two comms, both orders: the footprints must be byte-identical, and the smaller comm wins.
+        let a = SyscallFootprint::from_events(
+            CG,
+            &[
+                ev(Syscall::Openat as u32, CG, b"/etc/ld.so.cache", "zsh"),
+                ev(Syscall::Openat as u32, CG, b"/etc/ld.so.cache", "bash"),
+            ],
+        );
+        let b = SyscallFootprint::from_events(
+            CG,
+            &[
+                ev(Syscall::Openat as u32, CG, b"/etc/ld.so.cache", "bash"),
+                ev(Syscall::Openat as u32, CG, b"/etc/ld.so.cache", "zsh"),
+            ],
+        );
+        assert_eq!(a, b, "shuffled arrival order yields an identical footprint");
+        assert_eq!(a.notable.len(), 1);
+        assert_eq!(a.notable[0].hits, 2);
+        assert_eq!(
+            a.notable[0].comm, "bash",
+            "the lexicographically smallest comm is kept, not the first to arrive"
+        );
     }
 
     #[test]
