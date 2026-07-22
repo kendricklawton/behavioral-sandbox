@@ -139,24 +139,23 @@ impl HostKey {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(KeyError::Io)?;
         }
-        let tmp = temp_sibling(path);
+        // The staging file is unlinked by `tmp`'s `Drop` on *every* exit from here on, the write
+        // error, the hard-link outcome, and an unwinding panic in between, so no `<key>.tmp.<n>`
+        // orphan is left in the key directory (guardrail 5: a failure path leaks nothing). The
+        // published key is the hard-linked `path`, a separate name, so removing the staging copy
+        // unconditionally is correct.
+        let tmp = StagingFile(temp_sibling(path));
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(&tmp)
+            .open(tmp.path())
             .map_err(KeyError::Io)?;
         let mut hex = Zeroizing::new(hex_encode(&self.signing.to_bytes()));
         hex.push('\n');
-        let written = f.write_all(hex.as_bytes());
+        f.write_all(hex.as_bytes()).map_err(KeyError::Io)?;
         drop(f);
-        if let Err(e) = written {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(KeyError::Io(e));
-        }
-        let linked = std::fs::hard_link(&tmp, path);
-        let _ = std::fs::remove_file(&tmp);
-        match linked {
+        match std::fs::hard_link(tmp.path(), path) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
             Err(e) => Err(KeyError::Io(e)),
@@ -392,6 +391,26 @@ fn temp_sibling(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(format!(".tmp.{}.{n}", std::process::id()));
     PathBuf::from(name)
+}
+
+/// An RAII guard for the pre-publish staging file in [`HostKey::persist`]. Its `Drop` unlinks the
+/// file on every scope exit, an error return *or* an unwinding panic, so a failure between creating
+/// the staging copy and hard-linking it into place leaves no orphan behind (guardrail 5). A `SIGKILL`
+/// in that window still leaks, `Drop` cannot run then and no in-process guard can close that, but the
+/// name is process-and-sequence unique (see [`temp_sibling`]), so a leaked file never collides with a
+/// later run and is never read.
+struct StagingFile(PathBuf);
+
+impl StagingFile {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -822,6 +841,30 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
             .collect();
         assert!(litter.is_empty(), "no temp litter: {litter:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[allow(clippy::panic)] // the deliberate panic *is* the unwind this test exercises
+    fn the_staging_file_is_unlinked_even_when_the_scope_unwinds() {
+        // The leak `StagingFile` closes: a panic between creating the staging temp and publishing
+        // it must not strand a `<key>.tmp.<n>` orphan. Catch an unwind out of a scope holding a
+        // live guard and assert the file is gone.
+        let dir = std::env::temp_dir().join(format!("agent-key-unwind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let tmp = dir.join("record-signing.ed25519.tmp.0");
+        std::fs::write(&tmp, b"seed").expect("write staging");
+        assert!(tmp.exists());
+        let tmp_for_panic = tmp.clone();
+        let caught = std::panic::catch_unwind(move || {
+            let _guard = StagingFile(tmp_for_panic);
+            panic!("boom mid-persist");
+        });
+        assert!(caught.is_err(), "the panic propagated");
+        assert!(
+            !tmp.exists(),
+            "the staging file must be unlinked as the guard drops on unwind"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
