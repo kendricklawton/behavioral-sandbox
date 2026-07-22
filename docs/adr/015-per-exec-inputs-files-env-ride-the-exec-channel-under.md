@@ -41,9 +41,19 @@ probably don't log it" is not a contract an SDK can be built on.
 - **Appending env without a version bump** (an old agent tolerates trailing bytes). Rejected: that
   tolerance is exactly the silent-degradation path, the command runs without its env and nobody is
   told. The handshake exists to make skew loud.
-- **A zeroizing-buffer crate.** Rejected for now: `fill(0)` at the two sites the engine owns covers
-  the promise as stated; a compiler-elision-proof `zeroize` can be revisited if the public API ever
-  carries higher-assurance requirements.
+- **A zeroizing-buffer crate.** Adopted *2026-07-21* (originally deferred: `fill(0)` at the two
+  sites the engine owns was taken to cover the promise as stated). A dependency-audit prompt noted
+  that `fill(0)` is dead-store-eligible, so under `--release` the wipe may be elided *entirely*, not
+  merely left incomplete: the buffer is dropped on the next line, so the optimizer can prove the
+  store is unobservable and delete it. That undercuts even the best-effort claim, so `agent-channel`
+  now depends on `zeroize` and the two sites call `payload.zeroize()`, a volatile store the optimizer
+  cannot elide. The two doors this was once deferred behind are weighed and settled: `zeroize` is
+  `no_std` with zero transitive deps, so pulling it into the guest's static binary is negligible (the
+  crate is "near dependency-free," not zero-dep, and says so); and the host path stays `unsafe`-free
+  because the volatile write lives inside the audited crate, not our code (the alternative, a
+  hand-rolled `write_volatile` loop, is the `unsafe` we declined to author). The socket-buffer and
+  caller-buffer copies remain out of the engine's reach, so the wipe is still best-effort *in scope*,
+  now elision-proof *within* that scope.
 
 The public API is embedder-driven: every SDK-shaped caller passes files + env, and the engine's
 observable surfaces are precisely where a hoster's log pipeline would exfiltrate a leaked value.

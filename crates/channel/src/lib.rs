@@ -2,8 +2,8 @@
 //!
 //! One command in, its `stdout`/`stderr`/exit out, over a single bidirectional byte stream (vsock
 //! in the guest, a unix socket in tests, the protocol doesn't care). The transport is chosen in
-//! ADR 002; this crate is only the framing, so it stays dependency-free
-//! and unit-testable without a VM.
+//! ADR 002; this crate is only the framing, so it stays near dependency-free (one `no_std` crate,
+//! `zeroize`, for an elision-proof secret wipe, see ADR 015) and unit-testable without a VM.
 //!
 //! **Shape (why it's built this way).**
 //! - A **handshake** first: a 4-byte magic + a `u16` version. Both peers *send then receive*, so a
@@ -26,6 +26,8 @@
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
+
+use zeroize::Zeroize;
 
 /// Frames the start of a connection so a mismatched peer is rejected before any message. "AGCH".
 /// Internal: callers go through [`ClientConnection`]/[`ServerConnection`], which handle the magic.
@@ -348,7 +350,7 @@ fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
 
 /// The encoded size of one [`put_blob`] (its 4-byte length prefix + the bytes). Used to size the
 /// payload buffer *exactly* up front (see [`write_exec`]/[`write_put_file`]): a secret-bearing
-/// payload must live in **one** buffer so the post-send `fill(0)` wipes every copy, a `Vec` that
+/// payload must live in **one** buffer so the post-send `zeroize` wipes every copy, a `Vec` that
 /// grew would strand unwiped plaintext prefixes in the reallocations it freed (ADR 015).
 fn blob_len(bytes: &[u8]) -> usize {
     4 + bytes.len()
@@ -378,8 +380,9 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
 
 /// Serialize and send a `PutFile` from **borrowed** parts, no owned [`Request`] to clone the
 /// secret bytes into first. The payload is sized exactly (one buffer, no growth) so the post-send
-/// `fill(0)` wipes the engine's only copy of the injected bytes before it returns to the allocator
-/// (ADR 015; the kernel socket buffer is out of reach, best-effort by design).
+/// `zeroize` wipes the engine's only copy of the injected bytes before it returns to the allocator
+/// (ADR 015; a volatile store the optimizer cannot elide, unlike a plain `fill(0)`. The kernel
+/// socket buffer is out of reach, best-effort by design).
 pub(crate) fn write_put_file(
     w: &mut impl Write,
     path: &str,
@@ -389,13 +392,13 @@ pub(crate) fn write_put_file(
     put_blob(&mut payload, path.as_bytes());
     put_blob(&mut payload, data);
     let sent = write_frame(w, TAG_PUTFILE, &payload);
-    payload.fill(0);
+    payload.zeroize();
     sent
 }
 
 /// Serialize and send an `Exec` from **borrowed** parts. Like [`write_put_file`], the payload is
 /// preallocated to its exact encoded size so the serialized stdin + env values live in one buffer
-/// the post-send `fill(0)` fully wipes.
+/// the post-send `zeroize` fully wipes.
 pub(crate) fn write_exec(
     w: &mut impl Write,
     argv: &[String],
@@ -432,7 +435,7 @@ pub(crate) fn write_exec(
         put_blob(&mut payload, value.as_bytes());
     }
     let sent = write_frame(w, TAG_EXEC, &payload);
-    payload.fill(0);
+    payload.zeroize();
     sent
 }
 
@@ -692,7 +695,10 @@ impl<'a> Body<'a> {
     /// A `u32`-length-prefixed UTF-8 string.
     fn string(&mut self) -> Result<String, ChannelError> {
         let bytes = self.blob()?;
-        String::from_utf8(bytes.to_vec())
+        // Validate the borrowed slice before allocating: a hostile peer sending an oversize
+        // invalid-UTF-8 field is rejected without a throwaway heap copy first.
+        std::str::from_utf8(bytes)
+            .map(str::to_owned)
             .map_err(|_| ChannelError::Protocol("field is not valid UTF-8".into()))
     }
 
