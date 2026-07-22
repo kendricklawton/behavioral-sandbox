@@ -39,20 +39,20 @@ Curated release notes start accumulating in this file with `v0.1.0`.
 
 ## Rust version support
 
-**Policy: the last three stable Rust releases** (current stable and the two before it), the same window
-Wasmtime commits to. The reasoning and the alternatives are in
-[decision 037](docs/adr/037-rust-version-support-the-last-three-stable-releases.md); this section is the
-operating checklist.
+**Policy: the supported Rust is current stable, pinned exactly, with no back-support before `v0.1.0`.**
+The reasoning, and the Wasmtime-style last-three-stable window deferred to `v0.1.0`, are in
+[decision 037](docs/adr/037-rust-version-tracks-current-stable-no-back-support-yet.md); this section is
+the operating checklist.
 
-- **The floor lives in one place:** `[workspace.package].rust-version` in the root `Cargo.toml`. That is
-  the number; everything else refers to it.
-- **The eBPF crate (`crates/probes`) is exempt:** it builds on its own nightly toolchain, so it has no
-  stable floor. The window covers the host crates only.
+- **Two files, kept in step:** `rust-toolchain.toml` pins the build and lint toolchain;
+  `[workspace.package].rust-version` in the root `Cargo.toml` mirrors it and is the stated downstream
+  floor. They move together, never apart, so there is no untested floor below the pin.
+- **The eBPF crate (`crates/probes`) is nightly by construction** and outside this entirely.
 
-**Staying on top of it (do this each release, and any time a dependency bump fails the floor lane):**
+**Bumping Rust (one deliberate move, never incidental drift):**
 
-1. Find current stable Rust (`rustc +stable --version`), subtract two releases: that is the floor.
-2. If it moved, set `rust-version` in the root `Cargo.toml` to the new floor.
-3. Run the floor lane green: `cargo +<floor> check --locked --workspace` (mirrors the CI job).
-4. Note any raise in the release notes; from `v0.1.0` on, an MSRV raise is a minor-version bump.
+1. Pick the new stable.
+2. Set `channel` in `rust-toolchain.toml` and `rust-version` in the root `Cargo.toml` to it, together.
+3. Run the gate green: `cargo xtask ci`.
+4. Note the bump in the release notes.
 

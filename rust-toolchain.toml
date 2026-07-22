@@ -2,7 +2,8 @@
 # and clippy: a lint that passes locally can then never surprise CI. Floating `channel = "stable"`
 # only holds that if every dev's installed stable is current, which is exactly the drift that bit us
 # (a stale local stable passing a lint a newer CI stable rejects). Bump this deliberately when moving
-# to a newer Rust, and keep `rust-version` in Cargo.toml in step (that is the downstream MSRV floor).
+# to a newer Rust, and keep `rust-version` in Cargo.toml in step (that is the downstream MSRV floor;
+# the current-stable-tracking, no-back-support-yet policy is decision 037).
 # No nightly here (see AGENTS.md); the eBPF crate (`crates/probes`) targets `bpfel-unknown-none`, which
 # rustup has no std for, and builds via `bpf-linker` (see docs/contributing-building.md), so no
 # `targets` entry is needed.

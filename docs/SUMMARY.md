@@ -54,7 +54,7 @@
     - [034. The integrity model: a host-signed record, and the boundary a signature does not cross](./adr/034-the-integrity-model-a-host-signed-record-and-the.md)
     - [035. Distribution: a checksummed tarball, an installer script, and a container image; nothing that freezes the working name](./adr/035-distribution-is-a-checksummed-tarball-an-installer.md)
     - [036. AGENTS.md is the canonical operating manual, the dotfile is retired](./adr/036-agents-md-is-the-canonical-operating-manual.md)
-    - [037. Rust version support: the last three stable releases, one floor tested in CI](./adr/037-rust-version-support-the-last-three-stable-releases.md)
+    - [037. Rust version tracks current stable, pinned; a support window waits for v0.1.0](./adr/037-rust-version-tracks-current-stable-no-back-support-yet.md)
   - [Building](./contributing-building.md)
   - [Testing](./contributing-testing.md)
   - [Fuzzing](./contributing-fuzzing.md)

@@ -2199,12 +2199,13 @@ first commit, so no box tracks a non-task).
       virtio-blk rate limiter (`RateLimiter::default_guest_io`, `crates/vmm/src/firecracker.rs`)
       actually throttles sustained guest writes, plus the boot-latency-is-unchanged confirmation the
       annotation promised (a cold boot's reads fit the burst and must stay unthrottled).
-- [ ] **P19.9d** The **MSRV floor** the Rust-version policy (decision 037) prescribes. Set
-      `[workspace.package].rust-version` in the root `Cargo.toml` to the tested floor
-      (current stable minus two releases) and add a floor CI lane
-      (`cargo +<floor> check --locked --workspace`) to `.github/workflows/ci.yml` and a matching
-      `cargo xtask` step, so the last-three-stable window is enforced, not just documented. The eBPF
-      crate (`crates/probes`) stays nightly and is out of the window by construction.
+- [x] **P19.9d** The **Rust-version policy**, recorded rather than left implicit. Decision 037 states
+      it: the supported Rust is current stable, pinned via `rust-toolchain.toml` with `Cargo.toml`'s
+      `rust-version` kept in step, and no back-support before `v0.1.0`. `RELEASES.md` carries the
+      "bump both together" checklist and both pin comments cite the decision. The Wasmtime-style
+      last-three-stable **support window** (its own floor CI lane, a `rust-version` decoupled below the
+      pin) is deferred *in that decision* to `v0.1.0`, when external embedders make it worth the
+      maintenance, so the window is a scheduled decision, not a silent gap.
 - **Exit gate:** the four boxes above are green, and the two recorded won't-dos (the jailed-session
   snapshot refusal and the hash-chain tail-truncation limitation) each carry an explicit disposition
   at their source, so `grep` for a live "deferred/pending" in the roadmap returns nothing untracked.

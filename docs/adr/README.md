@@ -42,4 +42,4 @@ phase), so each stands on its own as the roadmap evolves. The overview and repo 
 - [034. The integrity model: a host-signed record, and the boundary a signature does not cross](./034-the-integrity-model-a-host-signed-record-and-the.md) *(2026-07-21)*
 - [035. Distribution: a checksummed tarball, an installer script, and a container image; nothing that freezes the working name](./035-distribution-is-a-checksummed-tarball-an-installer.md) *(2026-07-21)*
 - [036. AGENTS.md is the canonical operating manual, the dotfile is retired](./036-agents-md-is-the-canonical-operating-manual.md) *(2026-07-21)*
-- [037. Rust version support: the last three stable releases, one floor tested in CI](./037-rust-version-support-the-last-three-stable-releases.md) *(2026-07-22)*
+- [037. Rust version tracks current stable, pinned; a support window waits for v0.1.0](./037-rust-version-tracks-current-stable-no-back-support-yet.md) *(2026-07-22)*

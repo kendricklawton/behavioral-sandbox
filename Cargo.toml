@@ -27,7 +27,8 @@ edition = "2021"
 # The minimum supported Rust version: the downstream MSRV floor. Kept in step with the exact
 # toolchain pinned in `rust-toolchain.toml`, so local, CI, and this floor are one Rust version and a
 # lint can't pass locally yet fail CI. The project tracks current stable with deliberate bumps (no
-# back-support burden this early), never incidental drift.
+# back-support burden this early), never incidental drift; a support window is revisited at v0.1.0
+# (decision 037).
 rust-version = "1.97"
 license = "Apache-2.0"
 authors = ["K Henry LLC <founder@khenry.dev>"]
