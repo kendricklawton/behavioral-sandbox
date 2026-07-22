@@ -22,9 +22,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Ordered by value: channel_response is the host reading guest-controlled bytes;
-        # signing_envelope is the verifier reading a record relayed by an untrusted host.
-        target: [channel_response, signing_envelope, channel_request, channel_frame, channel_handshake]
+        # Ordered by value: protocol_message is the daemon's outermost boundary (any client's bytes
+        # off agent serve's socket); channel_response is the host reading guest-controlled bytes;
+        # signing_envelope is the verifier reading a record relayed by an untrusted host. syscall_event
+        # is defense-in-depth (the record is kernel-written; the tap frame is guest-crafted).
+        target: [protocol_message, channel_response, signing_envelope, channel_request, channel_frame, channel_handshake, syscall_event]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

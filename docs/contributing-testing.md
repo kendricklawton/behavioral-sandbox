@@ -27,9 +27,10 @@ Four layers, cheapest first, the split exists so the everyday loop never waits o
 
    The recorded numbers and full methodology live in the [Benchmarks](./benchmarks.md) report.
 
-A fifth layer, **fuzzing**, guards the one place attacker-controlled bytes meet the host path (the
-host↔guest channel decoders): a dependency-free property test runs in the `ci` gate above, and a
-`cargo fuzz` harness does deep nightly runs. See [Fuzzing](./contributing-fuzzing.md).
+A fifth layer, **fuzzing**, guards the places attacker-controlled bytes meet the host path (the
+host↔guest channel decoders, the daemon's client wire, the signed-record envelope, and the
+eBPF-boundary parsers): a deterministic property test per surface runs in the `ci` gate above, and a
+seeded `cargo fuzz` harness does deep nightly runs. See [Fuzzing](./contributing-fuzzing.md).
 
 The per-phase exit-gate demos (a real sandbox, one probe end to end) are listed under *Try it* in
 [Host-side observability & enforcement](./probes.md#try-it).

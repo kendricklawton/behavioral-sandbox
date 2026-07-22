@@ -54,9 +54,10 @@
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
 //! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the untrusted-input decoders: the
-//!   host↔guest channel (the guest→host boundary) and the signed-record envelope (attacker-relayed
-//!   by design). Nightly + `cargo install cargo-fuzz`; never part of `ci` (the in-gate coverage is
-//!   the crates' own dependency-free mutation tests).
+//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`agent serve`'s socket,
+//!   the outermost boundary), the signed-record envelope (attacker-relayed by design), and the
+//!   eBPF-boundary parsers. Nightly + `cargo install cargo-fuzz`; never part of `ci` (the in-gate
+//!   coverage is the crates' own dependency-light mutation tests).
 //!
 //! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
 //! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch), `vendor`
@@ -278,11 +279,12 @@ enum Cmd {
     /// most of a core, plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
     /// `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
     MeterSandbox,
-    /// Fuzz the untrusted-input decoders (the host↔guest channel, the signed-record envelope) with
-    /// `cargo fuzz` (libFuzzer), the deep, nightly-only counterpart to the in-gate mutation tests.
-    /// Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of `ci`. Targets:
-    /// `channel_response` (default), `channel_request`, `channel_frame`, `channel_handshake`,
-    /// `signing_envelope`.
+    /// Fuzz the untrusted-input decoders (the host↔guest channel, the daemon's client wire, the
+    /// signed-record envelope, the eBPF-boundary parsers) with `cargo fuzz` (libFuzzer), the deep,
+    /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
+    /// `fuzz/seeds/<target>/`. Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of
+    /// `ci`. Targets: `channel_response` (default), `channel_request`, `channel_frame`,
+    /// `channel_handshake`, `signing_envelope`, `protocol_message`, `syscall_event`.
     Fuzz {
         /// The libFuzzer target to run.
         #[arg(default_value = "channel_response")]
@@ -346,14 +348,33 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
     // cargo-fuzz discovers the `fuzz/` crate from the repo root. `-max_total_time=0` means run until
     // a crash or Ctrl-C; any positive value bounds the run (handy for CI or a quick local pass).
     let max_time = format!("-max_total_time={seconds}");
+    let root = workspace_root();
+    // The writable corpus (libFuzzer accumulates new inputs here; generated, gitignored) plus, when
+    // present, the committed read-only seed corpus. Seeds start a fresh checkout from valid inputs
+    // that reach *past* the first-byte reject, so the JSON/envelope targets spend their budget in the
+    // decode logic, not rediscovering the shape of a message. Create the corpus dir so naming it
+    // explicitly (which we must, to also pass the seeds) doesn't trip cargo-fuzz's default.
+    let corpus = root.join("fuzz/corpus").join(target);
+    std::fs::create_dir_all(&corpus).context("create the fuzz corpus dir")?;
+    let seeds = root.join("fuzz/seeds").join(target);
+    let mut args: Vec<String> = ["+nightly", "fuzz", "run", target]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+    args.push(corpus.to_string_lossy().into_owned());
+    if seeds.is_dir() {
+        args.push(seeds.to_string_lossy().into_owned());
+    }
+    args.push("--".to_owned());
+    args.push(max_time);
     // libFuzzer builds with `-Zsanitizer=address`, a nightly-only flag, so force the nightly
     // toolchain via the rustup proxy rather than inheriting whatever the default is (stable on CI
     // and most dev boxes, where the build would fail with "the option `Z` is only accepted on the
     // nightly compiler"). rustup propagates the selection to cargo-fuzz's inner `cargo build`.
-    println!("$ cargo +nightly fuzz run {target} -- {max_time}");
+    println!("$ cargo {}", args.join(" "));
     let status = Command::new("cargo")
-        .args(["+nightly", "fuzz", "run", target, "--", &max_time])
-        .current_dir(workspace_root())
+        .args(&args)
+        .current_dir(root)
         .status()
         .context("running cargo fuzz")?;
     if !status.success() {

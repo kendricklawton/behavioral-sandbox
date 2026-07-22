@@ -24,6 +24,18 @@ features = ["fuzzing"]
 [dependencies.agent-probes-loader]
 path = "../crates/probes-loader"
 
+# The daemon's untrusted-client wire (`read_message` over the newline-JSON contract). The `fuzzing`
+# feature exposes the internal line reader + schema gate behind module `fuzz`.
+[dependencies.agent-protocol]
+path = "../crates/agent-protocol"
+features = ["fuzzing"]
+
+# The shared eBPF-boundary parsers (`SyscallEvent::from_bytes`, `parse_ipv4_5tuple`). `std` gives the
+# host-side formatting helpers; the parse surface itself is public, so no feature flag is needed.
+[dependencies.agent-probes-common]
+path = "../crates/probes-common"
+features = ["std"]
+
 # A separate one-crate workspace: detaches this crate from the repo's workspace so the everyday
 # stable gate never tries to build it.
 [workspace]
@@ -63,6 +75,20 @@ bench = false
 [[bin]]
 name = "signing_envelope"
 path = "fuzz_targets/signing_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protocol_message"
+path = "fuzz_targets/protocol_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "syscall_event"
+path = "fuzz_targets/syscall_event.rs"
 test = false
 doc = false
 bench = false

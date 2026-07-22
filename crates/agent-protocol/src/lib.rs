@@ -423,6 +423,37 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
     w.flush().map_err(ProtocolError::Io)
 }
 
+/// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
+/// bytes to the daemon's untrusted-client parse path (the hand-rolled line reader + schema gate,
+/// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`agent serve`)
+/// reads exactly these bytes off its socket from any client, so a panic, hang, or unbounded
+/// allocation on any input is the bug being hunted (guardrail 5). Not built by default; the harness
+/// lives in `fuzz/` (excluded from the workspace). The in-gate, dependency-light counterpart is
+/// [`fuzz_tests`].
+#[cfg(feature = "fuzzing")]
+pub mod fuzz {
+    use std::io::Cursor;
+
+    use crate::{read_message, Request, Response};
+
+    /// Read a stream of `Request`s from `data` (the daemon's view of a client's bytes), the
+    /// highest-value target: `agent serve` decodes exactly this off its socket. Drains to EOF so a
+    /// lying length, a blank-line flood, or a mid-line truncation are all exercised.
+    pub fn read_requests(data: &[u8]) {
+        let mut cur = Cursor::new(data);
+        while let Ok(Some(_)) = read_message::<Request>(&mut cur) {}
+    }
+
+    /// Read a stream of `Response`s from `data` (a client decoding a hostile/garbled daemon).
+    pub fn read_responses(data: &[u8]) {
+        let mut cur = Cursor::new(data);
+        while let Ok(Some(_)) = read_message::<Response>(&mut cur) {}
+    }
+}
+
+#[cfg(test)]
+mod fuzz_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1177,6 +1177,37 @@ mod tests {
         assert!(SyscallEvent::from_bytes(&[]).is_none());
     }
 
+    /// The in-gate half of this crate's fuzzing (the deep `cargo fuzz` half is the `syscall_event`
+    /// target in `fuzz/`). The kernel writes the [`SyscallEvent`] record, so its bytes are trusted,
+    /// but `parse_ipv4_5tuple` reads a **guest-crafted** Ethernet frame off the tap: attacker bytes.
+    /// Guardrail 5 says either must be a value-or-`None`, never a panic, on any input. This sprays
+    /// arbitrary-length buffers at both parsers (and the formatting helpers that build strings from
+    /// the parsed bytes) with a tiny deterministic PRNG, no dependency, fixed seed so it never flakes.
+    #[test]
+    fn parsers_never_panic_on_arbitrary_bytes() {
+        // xorshift64*: deterministic, zero-dependency (this crate is `#![no_std]`, zero deps).
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        };
+        for _ in 0..50_000 {
+            // Lengths straddle the record size and the L2/L3/L4 header boundaries, so mid-field EOF
+            // (a truncated frame, an oversized `detail_len`) is stressed, not just full buffers.
+            let len = (next() % 200) as usize;
+            let buf: Vec<u8> = (0..len).map(|_| (next() >> 33) as u8).collect();
+            if let Some(ev) = SyscallEvent::from_bytes(&buf) {
+                // `detail_len` is attacker-influenced; the accessors must clamp, never index past.
+                let _ = ev.detail();
+                let _ = ev.describe();
+                let _ = ev.comm_lossy();
+            }
+            let _ = parse_ipv4_5tuple(&buf);
+        }
+    }
+
     #[test]
     fn decodes_a_trace_line_for_each_syscall() {
         let ev = |syscall: Syscall, detail: &[u8]| {

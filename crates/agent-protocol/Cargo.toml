@@ -16,5 +16,11 @@ description = "The agent wire protocol: the versioned newline-JSON contract the 
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# Off by default. Exposes the internal line reader + schema-gated decoder (module `fuzz`) so the
+# `cargo fuzz` target in `fuzz/` can drive the daemon's untrusted-client parse path directly; never
+# enabled in the normal build. See `docs/contributing-fuzzing.md`.
+[features]
+fuzzing = []
+
 [lints]
 workspace = true
