@@ -168,6 +168,15 @@ pub enum VmmError {
     ExecUnresponsive { limit: Duration },
     /// A Firecracker API, boot, or process failure.
     Vmm(String),
+    /// `require_limits` was set, but the host can't apply the cpu/memory cgroup caps that would
+    /// bound this run, so the boot is **refused** rather than run uncapped. Two ways the caps go
+    /// missing: the cgroup v2 cpu/memory controllers aren't delegated to the cgroup root, or the
+    /// boot is **unjailed** (the caps live on the jailed VMM's cgroup, so there is nothing to
+    /// enforce them). The inverse of the default fail-open posture (ADR 010, caps are DoS
+    /// mitigation, not the isolation boundary): a hoster opts in to make the resource envelope
+    /// load-bearing. A host-configuration fault, not the guest's, so it buckets [`Infra`](ErrorKind::Infra):
+    /// fix the delegation (or drop the jail-less boot) and retry.
+    LimitsUnavailable(String),
 }
 
 impl std::fmt::Display for VmmError {
@@ -191,6 +200,7 @@ impl std::fmt::Display for VmmError {
                 write!(f, "guest went unresponsive; host gave up after {limit:?}")
             }
             VmmError::Vmm(e) => write!(f, "vmm error: {e}"),
+            VmmError::LimitsUnavailable(e) => write!(f, "resource limits unavailable: {e}"),
         }
     }
 }
@@ -244,7 +254,10 @@ impl VmmError {
             | VmmError::Artifact(_)
             | VmmError::Timeout(_)
             | VmmError::GuestUnavailable(_)
-            | VmmError::Vmm(_) => ErrorKind::Infra,
+            | VmmError::Vmm(_)
+            // A host-configuration fault (caps can't be applied), not the guest's: retry after
+            // fixing the delegation or the jail posture, exactly Infra's "fix the host" contract.
+            | VmmError::LimitsUnavailable(_) => ErrorKind::Infra,
             // `ExecUnresponsive` is a *liveness* fault (the guest went silent/hostile mid-exec), so
             // it buckets with `Channel` as Transport: its own contract is "retire the VM, not blame
             // the command", which is Transport's, not Guest's.

@@ -264,7 +264,7 @@ impl Spawned {
     fn launch_jailed(config: &BootConfig, jail: &Jail) -> Result<Self, VmmError> {
         // CPU/memory limits derived from the guest's own resource envelope (vcpus, mem_mib);
         // empty when the host doesn't delegate the cgroup controllers, so the jailed boot still runs.
-        let cgroup_args = cgroup_limit_args(config.vcpus, config.mem_mib);
+        let cgroup_args = cgroup_limit_args(config.require_limits, config.vcpus, config.mem_mib)?;
         let s = Self::spawn_jailed(config, jail, config.enable_network, &cgroup_args)?;
         // The exec channel's vsock socket, when enabled: Firecracker (cwd = chroot root after the
         // jailer chroots) binds it at the chroot-relative `JAILED_VSOCK_UDS`, and the host dials the
@@ -477,8 +477,11 @@ impl Spawned {
         let mem_len = std::fs::metadata(&snapshot.mem)
             .map(|m| m.len())
             .unwrap_or(0);
-        let cgroup_args =
-            cgroup_limit_args(snapshot.vcpus, restore_mem_mib(config.mem_mib, mem_len));
+        let cgroup_args = cgroup_limit_args(
+            config.require_limits,
+            snapshot.vcpus,
+            restore_mem_mib(config.mem_mib, mem_len),
+        )?;
         let s = Self::spawn_jailed(config, jail, snapshot.tap_name.is_some(), &cgroup_args)?;
         // A prewarmed snapshot baked the **relative** `v.sock` (every snapshot source is unjailed, a
         // jailed VM refuses snapshotting), and the jailed clone's cwd is the chroot root, so

@@ -555,23 +555,55 @@ fn cgroup_args_for(d: &Delegated, vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<
     args
 }
 
+/// Resolve the jailer `--cgroup` args from the delegation state, honoring a `require_limits` caller.
+/// With `require_limits` set, a host that can't apply the cpu/memory caps is a typed refusal
+/// ([`VmmError::LimitsUnavailable`]) instead of the default empty-args fail-open (ADR 010). Pure
+/// (takes the [`Delegated`] state), so both the fail-open and fail-closed paths are unit-tested
+/// without a live cgroup fs. `require_limits` keys on cpu **and** memory, the caps that bound the
+/// resource envelope; the `pids.max` defense-in-depth cap stays best-effort either way (its absence
+/// can't let a guest exceed its cpu/memory envelope, so it never forces a refusal).
+fn resolve_cgroup_caps(
+    require_limits: bool,
+    d: &Delegated,
+    vcpus: NonZeroU8,
+    mem_mib: NonZeroU32,
+) -> Result<Vec<String>, VmmError> {
+    if require_limits && !(d.cpu && d.memory) {
+        return Err(VmmError::LimitsUnavailable(
+            "cgroup v2 cpu/memory controllers are not delegated to the cgroup root, so the jailed \
+             microVM cannot be capped; require_limits refuses an uncapped run (a systemd host \
+             delegates them by default)"
+                .to_string(),
+        ));
+    }
+    Ok(cgroup_args_for(d, vcpus, mem_mib))
+}
+
 /// The `--cgroup <file>=<value>` limits that cap the jailed VMM at the guest's own resource envelope
-/// (see [`cgroup_args_for`]). Returns empty when the cpu/memory controllers aren't delegated, so the
-/// caller passes no `--cgroup` and the jailed boot still runs; warns on each fail-open path.
-pub(crate) fn cgroup_limit_args(vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<String> {
+/// (see [`cgroup_args_for`]). Fails open when the cpu/memory controllers aren't delegated (empty
+/// args, the boot still runs) *unless* `require_limits` is set, which turns that miss into a typed
+/// [`VmmError::LimitsUnavailable`] refusal ([`resolve_cgroup_caps`]); warns on each fail-open path.
+pub(crate) fn cgroup_limit_args(
+    require_limits: bool,
+    vcpus: NonZeroU8,
+    mem_mib: NonZeroU32,
+) -> Result<Vec<String>, VmmError> {
     let delegated = read_delegated();
-    if !(delegated.cpu && delegated.memory) {
+    let caps_ok = delegated.cpu && delegated.memory;
+    // Warn only on a fail-*open* miss: under `require_limits` the same miss returns the typed error
+    // below, whose message carries the same information, so a preceding warn would just be noise.
+    if !caps_ok && !require_limits {
         tracing::warn!(
             "cgroup v2 cpu/memory controllers are not delegated to the cgroup root; the jailed \
              microVM runs without CPU/memory limits (a systemd host delegates them by default)"
         );
-    } else if !delegated.pids {
+    } else if caps_ok && !delegated.pids {
         tracing::warn!(
             "cgroup v2 pids controller is not delegated to the cgroup root; the jailed microVM runs \
              without a host-side PID cap (cpu/memory limits still apply)"
         );
     }
-    cgroup_args_for(&delegated, vcpus, mem_mib)
+    resolve_cgroup_caps(require_limits, &delegated, vcpus, mem_mib)
 }
 
 /// The memory envelope to cap a **restored** jailed clone at: the larger of the caller's `config`
@@ -664,6 +696,37 @@ mod tests {
         ] {
             assert!(cgroup_args_for(&d, vcpus, mem_mib).is_empty());
         }
+    }
+
+    #[test]
+    fn require_limits_refuses_when_cpu_memory_are_undelegated() {
+        let vcpus = NonZeroU8::new(2).unwrap();
+        let mem_mib = NonZeroU32::new(256).unwrap();
+        let undelegated = Delegated {
+            cpu: false,
+            memory: false,
+            pids: false,
+        };
+
+        // Fail-open default: undelegated + !require_limits yields empty args (boot uncapped), no error.
+        let open = resolve_cgroup_caps(false, &undelegated, vcpus, mem_mib);
+        assert!(matches!(open, Ok(ref args) if args.is_empty()));
+
+        // Fail-closed opt-in: the same host + require_limits is a typed refusal, not a silent uncapped run.
+        let closed = resolve_cgroup_caps(true, &undelegated, vcpus, mem_mib);
+        assert!(matches!(closed, Err(VmmError::LimitsUnavailable(_))));
+        assert_eq!(closed.unwrap_err().kind(), crate::ErrorKind::Infra);
+
+        // With cpu+memory delegated, require_limits is satisfied and returns the caps (the pids
+        // controller stays best-effort: its absence never forces a refusal).
+        let no_pids = Delegated {
+            cpu: true,
+            memory: true,
+            pids: false,
+        };
+        let args = resolve_cgroup_caps(true, &no_pids, vcpus, mem_mib).expect("caps applicable");
+        assert!(args.iter().any(|s| s.starts_with("cpu.max=")));
+        assert!(args.iter().any(|s| s.starts_with("memory.max=")));
     }
 
     #[test]

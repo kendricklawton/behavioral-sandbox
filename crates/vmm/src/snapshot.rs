@@ -60,11 +60,16 @@ impl Vm {
     /// cold-boot-vs-restore comparison.
     ///
     /// # Errors
-    /// [`VmmError::NoKvm`] without `/dev/kvm`; [`VmmError::Artifact`] if a bundle file is missing or
-    /// `firecracker` isn't found; [`VmmError::Timeout`] if the VMM never becomes ready; and
-    /// [`VmmError::Vmm`] on any load/rebase/resume failure. On error the VMM is killed and the fresh
-    /// scratch dir removed before returning.
+    /// [`VmmError::LimitsUnavailable`] if [`require_limits`](BootConfig::require_limits) is set on an
+    /// unjailed restore; [`VmmError::NoKvm`] without `/dev/kvm`; [`VmmError::Artifact`] if a bundle
+    /// file is missing or `firecracker` isn't found; [`VmmError::Timeout`] if the VMM never becomes
+    /// ready; and [`VmmError::Vmm`] on any load/rebase/resume failure. On error the VMM is killed and
+    /// the fresh scratch dir removed before returning.
     pub fn restore(snapshot: &Snapshot, config: &BootConfig) -> Result<RunningVm, VmmError> {
+        // Same posture guard as a cold boot: a require_limits restore into an unjailed clone can't be
+        // capped, so refuse it (a jailed clone's delegation is checked deeper, in the jailer cgroup
+        // args). Before the KVM probe so the contradiction fails fast and host-safe.
+        crate::vm::refuse_uncappable_boot(config)?;
         if !Path::new("/dev/kvm").exists() {
             return Err(VmmError::NoKvm);
         }

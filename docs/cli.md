@@ -32,6 +32,7 @@ agent run [FLAGS] -- <cmd> [args…]
 |------|--------------|
 | `--demo-boot` | Just boot a microVM and read its console, no command. |
 | `--unjailed` | Run the VMM without the jailer (see above). Default is confined. |
+| `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `AGENT_REQUIRE_LIMITS` / `.agent.toml`. |
 | `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the engine never logs them. |
 | `--put FILE` | Inject a host file into the run's working directory (repeatable; guest name = basename). |
 | `--get PATH` | Fetch a file from the run's working directory afterwards (repeatable; written under the current directory at the same relative path). Deny-by-default: only what you asked for is written. |
@@ -135,6 +136,7 @@ unknown key is a typed error, never a silent no-op.
 | `AGENT_MARKER` | `marker` | the console line that means "userspace is up" | `AGENT-GUEST-READY` (the agent image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
 | `AGENT_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
 | `AGENT_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
+| `AGENT_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
 | `AGENT_PROBES_OBJECT` | — | the built eBPF object (for the probe demos; env only, no `.agent.toml` key) | the `cargo xtask build-probes` output path |
 
 ```toml

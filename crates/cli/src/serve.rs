@@ -75,6 +75,12 @@ pub struct ServeArgs {
     /// jail. A **client never chooses this**, the confinement posture is the hoster's, set here.
     #[arg(long)]
     unjailed: bool,
+    /// Refuse to boot a session's VMM when the cpu/memory cgroup caps can't be applied, instead of
+    /// the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing on a
+    /// multi-tenant host; needs the jailer (so not with `--unjailed`) and delegated cgroup v2
+    /// controllers. Also settable via `AGENT_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
+    #[arg(long)]
+    require_limits: bool,
     /// Serve a Prometheus metrics endpoint at this address (e.g. `127.0.0.1:9920`) for the hoster to
     /// scrape (`GET /metrics`). Plain HTTP, no auth, bind loopback or a private scrape network. Off
     /// when omitted.
@@ -162,8 +168,25 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // on top). The daemon has no `.agent.toml` cwd discovery, that's a CLI-in-a-project convenience;
     // a daemon's config is its own flags + environment. Computed up front so the signal handler and
     // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
-    let base = BootConfig::from_env();
+    let mut base = BootConfig::from_env();
+    // Flag layer over `AGENT_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
+    // hardening posture, so an absent flag leaves an env-set `true` intact (it never forces `false`).
+    if args.require_limits {
+        base.require_limits = true;
+    }
     let jailed = !args.unjailed;
+
+    // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an
+    // unjailed daemon could never satisfy it and would accept connections only to refuse every
+    // session with `LimitsUnavailable`. Reject it at startup (covers the flag and
+    // `AGENT_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
+    if base.require_limits && !jailed {
+        tracing::error!(
+            "require_limits needs the jailer, but this daemon is --unjailed; an unjailed VMM has no \
+             cgroup to cap. Drop --unjailed (and AGENT_REQUIRE_LIMITS) or don't require limits."
+        );
+        return ExitCode::from(EXIT_OPERATIONAL);
+    }
 
     let listener = match bind(&args.socket) {
         Ok(listener) => listener,
@@ -560,8 +583,12 @@ fn build_pool_from(
     snap_dir: &Path,
 ) -> Result<Pool, VmmError> {
     // 1. An unjailed prewarm source running only the default profile (no untrusted code, the source
-    //    is the daemon's own, its clones are where sessions run).
-    let source_config = base.clone().with_limits(Limits::default());
+    //    is the daemon's own, its clones are where sessions run). `require_limits` is cleared here:
+    //    the source *must* be unjailed to be snapshotted, and an unjailed boot can't be capped, so a
+    //    require_limits daemon would otherwise refuse to build its own pool. The enforcement lands on
+    //    the jailed clones (step 3), which is where untrusted code actually runs.
+    let mut source_config = base.clone().with_limits(Limits::default());
+    source_config.require_limits = false;
     let source = Sandbox::open_unjailed(source_config)?;
 
     // 2. Snapshot it into the per-daemon bundle dir the caller prepared.

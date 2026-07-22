@@ -24,7 +24,12 @@ The guest kernel/rootfs come from the environment (`AGENT_KERNEL` / `AGENT_ROOTF
 the same `AGENT_*` layer the CLI reads, a daemon has no `.agent.toml` cwd discovery.
 
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
-jail posture is fixed when the daemon launches, so a caller can never weaken it.
+jail posture is fixed when the daemon launches, so a caller can never weaken it. The same holds for
+`--require-limits` (also `AGENT_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
+can't be applied is refused rather than booted uncapped (ADR 010's fail-open is the default), so a
+hoster can make the resource envelope load-bearing on a shared host. Both are hoster postures, not
+per-session wire fields; the prewarm source clears `require_limits` (it must be unjailed to snapshot,
+so it can't be capped) while the jailed clones that run sessions enforce it.
 
 **Access control is the hoster's.** The daemon does no authentication. Who may connect is governed by
 the filesystem permissions on the socket and its directory, place the socket where only trusted

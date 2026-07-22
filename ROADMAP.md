@@ -2173,12 +2173,24 @@ the release ships with these dispositioned, not dangling. Small concrete work be
 genuine limitation is recorded as an explicit won't-do at the source instead (done in this phase's
 first commit, so no box tracks a non-task).
 
-- [ ] **P19.9a** The **strict-caps toggle** deferred in a P6.5 annotation. Add a `require_limits`
+- [x] **P19.9a** The **strict-caps toggle** deferred in a P6.5 annotation. Add a `require_limits`
       fail-closed option (layered per decision 027: flag > env > file) so a hoster can make missing
       cgroup delegation **refuse the boot** instead of the default warn-and-boot-uncapped. The
       fail-open default stays the default (decision 010: caps are DoS mitigation, not the isolation
       boundary, which never degrades); this is the opt-in for a host that wants caps to be load-bearing.
       Host-safe unit tests for the refusal path.
+      *(**Done.** `BootConfig::require_limits` (a host **posture**, not a `Limits` quantity, so off the
+      wire like the jail) drives two refusal choke points: `refuse_uncappable_boot` in `Vm::boot`
+      /`Vm::restore` rejects the unjailed contradiction (caps live on the jailed VMM's cgroup, so an
+      unjailed run is definitionally uncapped) before any spawn, and `jail::resolve_cgroup_caps` turns
+      an undelegated cpu/memory cgroup from the fail-open empty-args into a typed
+      `VmmError::LimitsUnavailable` (`api:`, bucketed `Infra` in `kind()`). Keyed on cpu **and** memory,
+      the caps that bound the envelope; `pids.max` stays best-effort (its absence can't breach the
+      envelope). Layered `flag (--require-limits, run/shell/serve) > env (AGENT_REQUIRE_LIMITS) > file
+      (require_limits) > default false`; the prewarm source clears it (must be unjailed to snapshot, so
+      it can't be capped), the jailed clones that run sessions enforce it. Host-safe unit tests cover
+      the pure refusal decision, the unjailed-posture guard, and the env/file precedence; docs in
+      `docs/cli.md` + `docs/daemon.md`.)*
 - [ ] **P19.9b** The **`pids.max` privileged readback** pending since P15.7. A privileged test reads
       the value back off the running VM's cgroup (today only the jailer arg string is asserted, the
       wire-shape unit tests in `crates/vmm/src/jail.rs`), closing the "written but never observed
@@ -2338,11 +2350,10 @@ Thin, idiomatic clients so non-Rust callers can drive `agent`, a client-SDK surf
 - [ ] **P21.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `agent`.
 - [ ] **P21.4** **Python** SDK (own repo; sync + async).
 - [ ] **P21.5** **Node.js / TypeScript** SDK (own repo).
-- [ ] **P21.6** **C# / .NET** SDK (own repo).
-- [ ] **P21.7** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
+- [ ] **P21.6** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
       to a wire-API version, certified by the P21.2 conformance suite, and published to its language
       registry with checksums.
-- [ ] **P21.8** Each SDK is a **thin protocol client**, no tenancy/auth/billing/scheduling; deny-by-
+- [ ] **P21.7** Each SDK is a **thin protocol client**, no tenancy/auth/billing/scheduling; deny-by-
       default and the non-goals hold at the SDK layer too (note).
 - **Exit gate:** four languages run the same golden `exec` and read the same host-observed
   audit log through `agent`, against one stable polyglot wire API with a shared conformance suite.

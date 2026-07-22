@@ -41,6 +41,8 @@ pub struct AgentToml {
     marker: Option<String>,
     /// Mirrors `AGENT_SCRATCH_DIR`.
     scratch_dir: Option<PathBuf>,
+    /// Mirrors `AGENT_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied, ADR 010).
+    require_limits: Option<bool>,
     /// Mirrors `AGENT_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
     /// Mirrors `AGENT_SIGNING_KEY` (the host record-signing key path, decision 034). No `BootConfig`
@@ -95,6 +97,11 @@ impl AgentToml {
             "AGENT_ROOTFS" => self.rootfs.clone().map(PathBuf::into_os_string),
             "AGENT_MARKER" => self.marker.as_ref().map(OsString::from),
             "AGENT_SCRATCH_DIR" => self.scratch_dir.clone().map(PathBuf::into_os_string),
+            // A bool rendered as the canonical token `from_env_with`'s `parse_env_bool` accepts, so
+            // the file slots under the env in the same composed lookup as the string keys.
+            "AGENT_REQUIRE_LIMITS" => self
+                .require_limits
+                .map(|b| OsString::from(if b { "true" } else { "false" })),
             _ => None,
         }
     }
@@ -198,6 +205,29 @@ mod tests {
             "unset key falls through"
         );
         assert_eq!(toml.log(), Some("debug"));
+    }
+
+    #[test]
+    fn require_limits_bool_renders_the_env_token_from_env_parses() {
+        // The file bool slots under the env in one composed lookup: `env_value` renders the canonical
+        // token, and `BootConfig::from_env_with` parses it back onto the posture (env > file > default).
+        let on = AgentToml::parse("require_limits = true\n").expect("valid toml parses");
+        assert_eq!(
+            on.env_value("AGENT_REQUIRE_LIMITS"),
+            Some(OsString::from("true"))
+        );
+        assert!(agent_vmm::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
+
+        let off = AgentToml::parse("require_limits = false\n").expect("valid toml parses");
+        assert_eq!(
+            off.env_value("AGENT_REQUIRE_LIMITS"),
+            Some(OsString::from("false"))
+        );
+        assert!(!agent_vmm::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
+
+        // Unset in the file falls through to the default.
+        let bare = AgentToml::parse("marker = \"UP\"\n").expect("valid toml parses");
+        assert_eq!(bare.env_value("AGENT_REQUIRE_LIMITS"), None);
     }
 
     #[test]

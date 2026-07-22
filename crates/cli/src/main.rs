@@ -122,6 +122,11 @@ struct RunArgs {
     /// the `jailer` binary, ADR 012); this is the explicit opt-out for hosts that can't jail.
     #[arg(long)]
     unjailed: bool,
+    /// Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default
+    /// warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with `--unjailed`) and delegated
+    /// cgroup v2 controllers; also settable via `AGENT_REQUIRE_LIMITS` or `.agent.toml`.
+    #[arg(long)]
+    require_limits: bool,
     /// Set an environment variable on the guest command (repeatable). Values are treated as
     /// secrets: the engine never logs them.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair)]
@@ -195,6 +200,9 @@ struct ShellArgs {
     /// Run the VMM without the jailer (see `run --unjailed`).
     #[arg(long)]
     unjailed: bool,
+    /// Refuse the boot if the cpu/memory cgroup caps can't be applied (see `run --require-limits`).
+    #[arg(long)]
+    require_limits: bool,
     /// Guest vCPUs (default 1). A whole number in 1..=32 (see `run --vcpus`).
     #[arg(long, value_name = "N", value_parser = parse_vcpus)]
     vcpus: Option<NonZeroU8>,
@@ -329,6 +337,11 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     let files_in = read_put_files(&args.put)?;
     let mut config = base_config(file).with_limits(limits);
     config.enable_network = args.net;
+    // Flag layer over env/file (both folded by `base_config`): the flag only strengthens the
+    // posture, so an env/file `true` survives an absent flag.
+    if args.require_limits {
+        config.require_limits = true;
+    }
     let sandbox = open(config, args.unjailed)?;
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
@@ -515,10 +528,11 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
 fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
-    let sandbox = open(
-        base_config(file).with_limits(limits_with(args.vcpus, args.mem)),
-        args.unjailed,
-    )?;
+    let mut config = base_config(file).with_limits(limits_with(args.vcpus, args.mem));
+    if args.require_limits {
+        config.require_limits = true;
+    }
+    let sandbox = open(config, args.unjailed)?;
     let mut err_out = std::io::stderr();
     let _ = writeln!(
         err_out,

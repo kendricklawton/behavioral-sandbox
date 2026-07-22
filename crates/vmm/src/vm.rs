@@ -161,6 +161,17 @@ pub struct BootConfig {
     /// `enable_network` (the tap lives in a per-VM netns the jailer joins via `--netns`), and
     /// `input_dir`/`output_dir` (the images are built in place inside the chroot).
     pub jail: Option<Jail>,
+    /// Refuse the boot when the cpu/memory cgroup caps can't be applied, instead of the default
+    /// fail-open (warn and boot uncapped, ADR 010). The caps are unavailable two ways: the cgroup v2
+    /// cpu/memory controllers aren't delegated to the cgroup root, or the boot is **unjailed** (the
+    /// caps live on the jailed VMM's cgroup, so an unjailed run has none). `false` (the default) keeps
+    /// the fail-open posture, resource caps are DoS mitigation, not the isolation boundary (which
+    /// never degrades). Set it when a hoster wants the resource envelope to be **load-bearing**: then
+    /// a run the host can't cap is a typed [`VmmError::LimitsUnavailable`], not a silently-uncapped
+    /// one. A host posture, not a per-run quantity (so it lives here, not on [`Limits`]) and not
+    /// client-settable over the wire (the daemon fixes it, like the jail). Layered
+    /// `flag > env (AGENT_REQUIRE_LIMITS) > file > default` at the CLI.
+    pub require_limits: bool,
     /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/agent-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
     /// (overridable via `AGENT_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
@@ -174,9 +185,10 @@ pub struct BootConfig {
 
 impl BootConfig {
     /// Layer the environment overrides, `AGENT_FIRECRACKER`, `AGENT_KERNEL`, `AGENT_ROOTFS`,
-    /// `AGENT_MARKER`, onto [`BootConfig::default`]. The resource knobs (`vcpus`, `mem_mib`,
-    /// `boot_timeout`) have no env key; they come from [`Limits`] via
-    /// [`with_limits`](BootConfig::with_limits).
+    /// `AGENT_MARKER`, `AGENT_SCRATCH_DIR`, `AGENT_REQUIRE_LIMITS`, onto [`BootConfig::default`]. The
+    /// resource *quantities* (`vcpus`, `mem_mib`, `boot_timeout`) have no env key; they come from
+    /// [`Limits`] via [`with_limits`](BootConfig::with_limits). `require_limits` is a host **posture**,
+    /// not a quantity, so it does take an env key here.
     pub fn from_env() -> Self {
         Self::from_env_with(|key| std::env::var_os(key))
     }
@@ -205,6 +217,9 @@ impl BootConfig {
         if let Some(v) = lookup("AGENT_SCRATCH_DIR") {
             cfg.scratch_dir = PathBuf::from(v);
         }
+        if let Some(v) = lookup("AGENT_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
+            cfg.require_limits = v;
+        }
         cfg
     }
 
@@ -220,6 +235,34 @@ impl BootConfig {
         self.output_cap = limits.output_cap;
         self
     }
+}
+
+/// Parse an `AGENT_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
+/// value is `None` (the caller keeps the default) rather than a silent `false`, so a typo'd
+/// `AGENT_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
+fn parse_env_bool(v: &std::ffi::OsStr) -> Option<bool> {
+    match v.to_str()?.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Refuse an **unjailed** boot or restore that asked for `require_limits`: the cpu/memory caps live
+/// on the jailed VMM's cgroup, so without the jailer there is nothing to enforce them and the run
+/// would be uncapped, exactly what `require_limits` forbids. The *jailed-but-undelegated* case is
+/// caught deeper, where the jailer cgroup args are built ([`crate::jail::cgroup_limit_args`]); this
+/// catches the posture contradiction before any spawn, so the same guard covers cold boot and
+/// restore and is host-safe (no KVM, no child). Pure, unit-tested.
+pub(crate) fn refuse_uncappable_boot(config: &BootConfig) -> Result<(), VmmError> {
+    if config.require_limits && config.jail.is_none() {
+        return Err(VmmError::LimitsUnavailable(
+            "require_limits is set but this boot is unjailed; the cgroup cpu/memory caps live on the \
+             jailed VMM, so an unjailed run cannot be capped (jail the run, or unset require_limits)"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl Default for BootConfig {
@@ -248,6 +291,7 @@ impl Default for BootConfig {
             output_dir: None,
             enable_network: false,
             jail: None,
+            require_limits: false,
             scratch_dir: PathBuf::from("/tmp"),
         }
     }
@@ -396,11 +440,16 @@ impl Vm {
     /// far less per-VM cost.
     ///
     /// # Errors
-    /// [`VmmError::NoKvm`] without `/dev/kvm`, [`VmmError::Artifact`] for a missing kernel/rootfs
-    /// /binary, [`VmmError::Timeout`] if boot-to-userspace exceeds `boot_timeout`, and
-    /// [`VmmError::Vmm`] for any Firecracker API or process failure. On any error the child is
-    /// killed and the scratch dir removed before returning.
+    /// [`VmmError::LimitsUnavailable`] if [`require_limits`](BootConfig::require_limits) is set on an
+    /// unjailed boot (nothing can enforce the caps), [`VmmError::NoKvm`] without `/dev/kvm`,
+    /// [`VmmError::Artifact`] for a missing kernel/rootfs/binary, [`VmmError::Timeout`] if
+    /// boot-to-userspace exceeds `boot_timeout`, and [`VmmError::Vmm`] for any Firecracker API or
+    /// process failure. On any error the child is killed and the scratch dir removed before returning.
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
+        // Refuse a require_limits boot that can't be capped (unjailed) before touching /dev/kvm or
+        // spawning anything: the caps live on the jailed VMM's cgroup, so an unjailed run is
+        // definitionally uncapped, which require_limits forbids (ADR 010's fail-open is the default).
+        refuse_uncappable_boot(&config)?;
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
@@ -855,6 +904,47 @@ mod tests {
     // (`jail_refuses_half_confined_boots` lived here while some boot features were not yet jailed;
     // it retired once the jail composed with every feature, so there is nothing left to
     // refuse. If a future feature ships unjailed, reinstate the refusal in `Vm::boot` and this test.)
+
+    #[test]
+    fn require_limits_refuses_an_unjailed_boot() {
+        // Unjailed + require_limits is a contradiction (caps live on the jailed cgroup), refused
+        // before any spawn, so this is host-safe (no KVM, no child).
+        let mut cfg = BootConfig {
+            require_limits: true,
+            ..BootConfig::default()
+        };
+        assert!(cfg.jail.is_none());
+        assert!(matches!(
+            refuse_uncappable_boot(&cfg),
+            Err(VmmError::LimitsUnavailable(_))
+        ));
+
+        // The two non-contradictory postures both pass the guard: an unjailed boot that didn't ask
+        // for caps, and a jailed boot that did (its delegation is checked deeper, at cgroup-arg time).
+        cfg.require_limits = false;
+        assert!(refuse_uncappable_boot(&cfg).is_ok());
+        cfg.require_limits = true;
+        cfg.jail = Some(Jail::default());
+        assert!(refuse_uncappable_boot(&cfg).is_ok());
+    }
+
+    #[test]
+    fn require_limits_reads_from_the_environment() {
+        // `from_env_with` layers `AGENT_REQUIRE_LIMITS` (a posture, not a resource quantity) onto the
+        // default `false`, tolerant of spelling/case; an unrecognized value keeps the default.
+        let on =
+            BootConfig::from_env_with(|k| (k == "AGENT_REQUIRE_LIMITS").then(|| "TRUE".into()));
+        assert!(on.require_limits);
+        let off = BootConfig::from_env_with(|k| (k == "AGENT_REQUIRE_LIMITS").then(|| "0".into()));
+        assert!(!off.require_limits);
+        let typo =
+            BootConfig::from_env_with(|k| (k == "AGENT_REQUIRE_LIMITS").then(|| "ture".into()));
+        assert!(
+            !typo.require_limits,
+            "an unrecognized value keeps the default"
+        );
+        assert!(!BootConfig::default().require_limits);
+    }
 
     #[test]
     fn default_is_pure_and_matches_limits_defaults() {
