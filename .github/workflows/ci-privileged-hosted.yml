@@ -7,14 +7,29 @@
 # gated here ("measured, not marketed" means measured on bare metal, by hand). This is the only
 # privileged lane: the supported platform is x86_64 (decision 032 as narrowed).
 #
-# SECURITY: NEVER add a fork `pull_request` trigger, this runs untrusted-capable code as root with
-# KVM. Schedule + manual dispatch only, on code already yours.
+# SECURITY: this runs untrusted-capable code as ROOT with KVM, so it must NEVER execute fork code.
+# Triggers are schedule + manual dispatch, plus **same-repo** PRs that touch the isolation path. The
+# job-level `if` skips every fork PR, and `pull_request` (NEVER `pull_request_target`) already denies a
+# fork any secret or write token. Keep both guards: no `pull_request_target`, never drop the fork check.
 name: CI (privileged, hosted)
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "0 4 * * *"
+  # Same-repo PRs that touch the isolation path get the privileged gate per-change, not only nightly.
+  # Fork PRs are excluded by the job's `if` (see SECURITY above). Scoped by path so a docs- or
+  # CLI-only change does not spend 45 minutes booting a VM it cannot affect.
+  pull_request:
+    paths:
+      - "crates/vmm/**"
+      - "crates/probes/**"
+      - "crates/probes-common/**"
+      - "crates/probes-loader/**"
+      - "crates/channel/**"
+      - "crates/guest-agent/**"
+      - "xtask/**"
+      - ".github/workflows/ci-privileged-hosted.yml"
 
 permissions:
   contents: read
@@ -32,6 +47,11 @@ env:
 jobs:
   hosted:
     name: VM boot + probe attach (ubuntu-24.04 hosted)
+    # Fork guard (SECURITY, load-bearing): run for schedule/dispatch always, and for a PR only when the
+    # head branch lives in THIS repo, never a fork. Root + KVM must never execute untrusted fork code.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
