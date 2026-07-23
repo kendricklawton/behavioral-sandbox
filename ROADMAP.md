@@ -2392,7 +2392,10 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       *(**Done.** (1) `ci-privileged` now **refuses** to run as root without `CARGO_TARGET_DIR`
       instead of warning: the redirect must be on the outer `cargo` to keep `./target` clean at all,
       so root-owned artifacts blocking later non-root builds is now unreachable rather than
-      documented. (2) `agent --version` exists (the crate version, the in-development working number
+      documented. (The refusal caught its first caller immediately: `ci-privileged-hosted.yml` and
+      `docs/threat-model.md` both still invoked the gate as root without the override, so both were
+      updated to pass `CARGO_TARGET_DIR="$PWD/target-privileged"`. Turning a warning into a refusal
+      means every documented invocation is part of the change, not just the code.) (2) `agent --version` exists (the crate version, the in-development working number
       per `RELEASES.md`), so a stale installed binary is tellable from a fresh one. (3)
       `cargo xtask self-host` writes `~/.agent.toml` with absolute artifact paths like `install.sh`
       does, so the installed binary stops being usable only from inside the source tree; while

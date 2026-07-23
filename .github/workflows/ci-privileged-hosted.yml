@@ -128,6 +128,12 @@ jobs:
             "AGENT_SCRATCH_DIR=$AGENT_SCRATCH_DIR" cargo xtask setup || true
 
       - name: Run the privileged gate (root, for the jailer + eBPF caps)
+        # `CARGO_TARGET_DIR` is required, not a nicety: the gate refuses to run as root without it,
+        # because a root build into ./target leaves root-owned artifacts that block every later
+        # non-root `cargo`. Here that is the cached ./target the earlier steps populated, so the
+        # redirect keeps the cache reusable. The privileged tree is not cached (a root rebuild each
+        # run is the price of not poisoning the one that is).
         run: |
           sudo -E env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
+            "CARGO_TARGET_DIR=$PWD/target-privileged" \
             "AGENT_SCRATCH_DIR=$AGENT_SCRATCH_DIR" cargo xtask ci-privileged

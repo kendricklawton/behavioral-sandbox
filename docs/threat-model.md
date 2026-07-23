@@ -93,8 +93,12 @@ The suite is **privileged**: it boots real microVMs and attaches real probes, so
 `/dev/kvm`, real root, `CAP_BPF` + `CAP_PERFMON`, and kernel BTF. Run it with:
 
 ```console
-sudo -E cargo xtask ci-privileged
+sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged" cargo xtask ci-privileged
 ```
+
+The target-directory override is required, not optional: the gate refuses to run as root without it,
+so a root build cannot leave root-owned artifacts in `./target` that block your later non-root
+builds.
 
 This runs the VM-boot and probe-attach integration tests, including the containment suite. It
 **refuses** to run without root, BTF, or the eBPF object rather than skipping those tests into a
