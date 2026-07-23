@@ -2377,8 +2377,17 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       (`doctor::jailed_run_available()` single-sources the euid + jailer facts), and its not-ready
       message says to fix the FAIL rows and re-run. (4) An `Infra`-bucket failure now points back at
       `agent doctor`, keyed on the `kind()` bucket so it can't drift as `VmmError` grows.
-      `docs/cli-install.md` gains a "Your first run" section. non-`api:` (the pinned surface does not
-      move; `doctor::jailed_run_available` is an additive helper).)*
+      `docs/cli-install.md` gains a "Your first run" section. (5) `doctor` colours its status tags on
+      a terminal, so the rows a reader must act on stop hiding in a long green list; gated on stdout
+      being a TTY (the report is a stdout *result*, and a piped one stays byte-clean) plus `NO_COLOR`
+      and `TERM=dumb`. (6) The help and the report were restructured around what a first reader
+      scans: every flag's doc comment splits into a one-line summary (`-h`) and detail (`--help`), so
+      the internal boxing rationale stopped leaking into user-facing text; `run`'s 22 flags group
+      under headings (isolation, guest resources, network, files and environment, result and audit
+      trail) instead of one flat list; the root help and `run` carry worked examples; and `doctor`
+      moved its 30-line fail-open matrix behind `--explain`, leaving a row tally and, when anything
+      is not `ok`, a pointer to it. non-`api:` (the pinned surface does not move;
+      `doctor::jailed_run_available` is an additive helper, `--explain` an additive flag).)*
 - [x] **P20.17** **Contributor loop**: the papercuts that cost the most time per day.
       *(**Done.** (1) `ci-privileged` now **refuses** to run as root without `CARGO_TARGET_DIR`
       instead of warning: the redirect must be on the outer `cargo` to keep `./target` clean at all,

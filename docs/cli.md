@@ -83,8 +83,10 @@ prerequisite, KVM, the jailer + real-root, `firecracker` v1.9, iproute2/e2fsprog
 delegation, the kernel version, the boot artifacts, and the eBPF capabilities, each marked `ok`,
 `warn` (a fail-open degradation, with the consequence named), or `FAIL` (a hard miss: no boot
 without it). It exits non-zero when a hard prerequisite is missing, so `agent doctor && agent run …`
-gates cleanly. A footer restates the fails-open-vs-hard split. (`cargo xtask setup` renders the same
-checks for a dev box, plus the build-toolchain rows.)
+gates cleanly. A footer tallies the rows; `agent doctor --explain` adds the full
+fails-open-vs-hard-error matrix behind it, kept off the default report so the rows stay scannable
+(each non-`ok` row already names its own fix). (`cargo xtask setup` renders the same checks for a dev
+box, plus the build-toolchain rows.)
 
 ## `agent verify`
 

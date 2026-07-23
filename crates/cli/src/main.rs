@@ -83,7 +83,17 @@ impl From<VmmError> for CliError {
     // (`RELEASES.md`): `agent --version` exists so an installed binary can be told from a stale one,
     // which is a different question from "which release is this".
     version,
-    about = "a self-hostable Firecracker + aya code-execution sandbox"
+    about = "Run untrusted code in a Firecracker microVM, with a host-observed audit trail.",
+    // A first-run reader needs a command to type, not a feature list: `doctor` explains the host,
+    // then the two run forms differ only by whether this host can jail (ADR 012).
+    after_help = "\
+Getting started:
+  agent doctor                          check what this host can do
+  sudo -E agent run -- echo hello       run a command in a sandbox (jailed, the default)
+  agent run --unjailed -- echo hello    same, without the jailer (needs no root)
+  agent run --trace -- <cmd>            run it and print the audit trail
+
+Config layers, highest first: flags, AGENT_* env, .agent.toml, defaults."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -95,104 +105,168 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Boot a microVM and run one command inside it. Boxed: `run` carries far more flags than the
-    /// other subcommands, so keeping it behind an indirection stops the whole `Cmd` enum from being
-    /// sized to it (the `clippy::large_enum_variant` this would otherwise trip).
+    // Each variant's doc comment is user-facing help, so the first line is a one-line summary (what
+    // `agent --help` lists) and the detail follows after a blank line (what `agent <cmd> --help`
+    // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
+    /// Run one command in a microVM.
+    ///
+    /// Boots a sandbox, runs the command inside it, and tears it down. Jailed by default (ADR 012),
+    /// with `--unjailed` as the explicit opt-out. The run's host-observed audit surface rides on
+    /// `--trace`, `--record`, `--record-summary`, and `--watch`.
+    // Boxed because `run` carries far more flags than the other subcommands: behind an indirection
+    // the whole `Cmd` enum isn't sized to it (the `clippy::large_enum_variant` this would trip).
+    #[command(after_help = "\
+Examples:
+  agent run -- echo hello
+  agent run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
+  agent run --put main.rs --get a.out -- rustc main.rs -o a.out
+  agent run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
+  agent run --record run.json -- ./untrusted && agent verify run.json
+
+Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
-    /// Open an interactive session in a microVM: one command per line, state persists on the
-    /// session's filesystem until you exit (shell process state like `cd`/variables does not,
-    /// each line is its own exec).
+    /// Open an interactive session in a microVM.
+    ///
+    /// One command per line. State persists on the session's filesystem until you exit; shell
+    /// process state (a `cd`, a variable) does not, because each line is its own exec.
     Shell(ShellArgs),
-    /// Check this host's readiness to run the engine, KVM, the jailer, tools, artifacts, eBPF
-    /// capabilities, and print what will work, degrade, or refuse before the first sandbox.
-    Doctor,
-    /// Verify a signed audit record (`--record` output): check its `ed25519` signature against a
-    /// trusted key (the host's own, or `--key <hex>`), so alteration after the producing host is
-    /// caught (ADR 034). Exits non-zero if the record was altered or signed by an untrusted key.
+    /// Check whether this host can run the engine.
+    ///
+    /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
+    /// will work, degrade, or refuse before the first sandbox, and names a first command that works
+    /// on this host. Exits non-zero when a hard prerequisite is missing, so `agent doctor && agent
+    /// run …` gates correctly.
+    Doctor(doctor::DoctorArgs),
+    /// Verify a signed audit record.
+    ///
+    /// Checks a `--record` file's `ed25519` signature against a trusted key (the host's own, or
+    /// `--key <hex>`), so alteration after the producing host is caught (ADR 034). Exits non-zero
+    /// if the record was altered or signed by an untrusted key.
     Verify(verify::VerifyArgs),
-    /// Run the long-lived driver **daemon**: expose the sandbox lifecycle over a unix socket
-    /// (the versioned newline-JSON wire API, ADR 030), so a local client drives microVMs without
-    /// linking the engine. The daemon half of this one binary; access control is the socket's
-    /// directory permissions (no auth, a recorded non-goal).
+    /// Run the driver daemon.
+    ///
+    /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API,
+    /// ADR 030), so a local client drives microVMs without linking the engine. Access control is
+    /// the socket directory's permissions (no auth, a recorded non-goal).
     Serve(Box<serve::ServeArgs>),
 }
 
 #[derive(clap::Args)]
 struct RunArgs {
-    /// Just boot a microVM and read its console, no command (the boot-only demo).
+    // Every flag's doc comment is user-facing: the first line is the one-line summary `-h` lists,
+    // and the detail follows a blank line, where only `--help` shows it. Keeping the summary to one
+    // line is what makes `-h` a usable table rather than a wall of paragraphs.
+    /// Boot only, run no command (the boot-only demo).
     #[arg(long)]
     demo_boot: bool,
-    /// Run the VMM without the jailer. The default is confined (jailed, which needs real root and
-    /// the `jailer` binary, ADR 012); this is the explicit opt-out for hosts that can't jail.
-    #[arg(long)]
+    /// Run the VMM without the jailer.
+    ///
+    /// The default is confined (jailed, which needs real root and the `jailer` binary, ADR 012);
+    /// this is the explicit opt-out for hosts that can't jail. The guest stays behind KVM either way.
+    #[arg(long, help_heading = "Isolation")]
     unjailed: bool,
-    /// Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default
-    /// warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with `--unjailed`) and delegated
-    /// cgroup v2 controllers; also settable via `AGENT_REQUIRE_LIMITS` or `.agent.toml`.
-    #[arg(long)]
+    /// Refuse the boot if the cgroup caps can't be applied.
+    ///
+    /// Instead of the default warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with
+    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `AGENT_REQUIRE_LIMITS`
+    /// or `.agent.toml`.
+    #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
-    /// Set an environment variable on the guest command (repeatable). Values are treated as
-    /// secrets: the engine never logs them.
-    #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair)]
-    env: Vec<(String, String)>,
-    /// Inject a host file into the run's working directory (repeatable; guest name = basename).
-    #[arg(long, value_name = "FILE")]
-    put: Vec<PathBuf>,
-    /// Fetch a file from the run's working directory afterwards (repeatable; written under the
-    /// current directory at the same relative path).
-    #[arg(long, value_name = "PATH")]
-    get: Vec<String>,
-    /// Wall-clock budget in seconds (default 30, minimum 1): the boot deadline and the command's
-    /// runtime budget alike, the guest kills the command past it. Zero is rejected at parse
-    /// (there is no "no limit"), never silently rounded up.
-    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..))]
-    wall: Option<u64>,
-    /// Cap, in bytes, on captured stdout+stderr+artifacts (default 16 MiB).
-    #[arg(long, value_name = "BYTES")]
-    output_cap: Option<usize>,
-    /// Guest vCPUs (default 1). A whole number in 1..=32; zero or over-cap is a typed CLI error,
-    /// never a silent clamp (Firecracker v1.9 caps a microVM at 32, ADR 001).
-    #[arg(long, value_name = "N", value_parser = parse_vcpus)]
+    /// Guest vCPUs, 1..=32 [default: 1].
+    ///
+    /// Zero or over-cap is a typed CLI error, never a silent clamp (Firecracker v1.9 caps a microVM
+    /// at 32, ADR 001).
+    #[arg(long, value_name = "N", value_parser = parse_vcpus, help_heading = "Guest resources")]
     vcpus: Option<NonZeroU8>,
-    /// Guest memory in MiB (default 256). A whole number of at least 1; zero is a typed CLI error.
-    #[arg(long, value_name = "MIB", value_parser = parse_mem_mib)]
+    /// Guest memory in MiB [default: 256].
+    ///
+    /// At least 1; zero is a typed CLI error.
+    #[arg(long, value_name = "MIB", value_parser = parse_mem_mib, help_heading = "Guest resources")]
     mem: Option<NonZeroU32>,
-    /// Emit the structured run result as one JSON object on stdout (exit code, lossy
-    /// stdout/stderr, artifact list, metrics, and the effective limits) instead of relaying the
-    /// raw streams.
-    #[arg(long)]
-    json: bool,
-    /// Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged:
-    /// with no egress allowance the guest reaches nothing beyond the host end of its /30. What
-    /// crosses the tap lands in the audit record's network section.
-    #[arg(long, conflicts_with = "demo_boot")]
+    /// Wall-clock budget in seconds [default: 30].
+    ///
+    /// The boot deadline and the command's runtime budget alike; the guest kills the command past
+    /// it. Zero is rejected at parse (there is no "no limit"), never silently rounded up.
+    #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..), help_heading = "Guest resources")]
+    wall: Option<u64>,
+    /// Cap on captured stdout+stderr+artifacts, in bytes [default: 16 MiB].
+    #[arg(long, value_name = "BYTES", help_heading = "Guest resources")]
+    output_cap: Option<usize>,
+    /// Boot with a NIC (a per-VM tap the host-side probes observe).
+    ///
+    /// Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the
+    /// host end of its /30. What crosses the tap lands in the audit record's network section.
+    #[arg(long, conflicts_with = "demo_boot", help_heading = "Network")]
     net: bool,
-    /// Allow one egress destination past the deny-by-default tap (repeatable), as
-    /// `IP[/CIDR][:PORT][/PROTO]`, e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires
-    /// `--net`; the allowances build the run's egress policy, armed before the tap goes live. A
-    /// host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced
-    /// run.
-    #[arg(long, value_name = "IP[/CIDR][:PORT][/PROTO]", value_parser = parse_allow, requires = "net")]
+    /// Allow one egress destination past the deny-by-default tap (repeatable).
+    ///
+    /// Given as `IP[/CIDR][:PORT][/PROTO]`, e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`.
+    /// Requires `--net`; the allowances build the run's egress policy, armed before the tap goes
+    /// live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent
+    /// unenforced run.
+    #[arg(long, value_name = "IP[:PORT]", value_parser = parse_allow, requires = "net", help_heading = "Network")]
     allow: Vec<AllowRule>,
-    /// Attach the host-side probes and print the run's audit trail (human-readable) on stdout
-    /// after the run. Fail-open: a host without eBPF caps still runs, with the gaps explained.
-    /// Machine consumers use `--record` (so this conflicts with `--json`).
-    #[arg(long, conflicts_with_all = ["json", "demo_boot"])]
+    /// Set an environment variable on the guest command (repeatable).
+    ///
+    /// Values are treated as secrets: the engine never logs them.
+    #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair, help_heading = "Files and environment")]
+    env: Vec<(String, String)>,
+    /// Inject a host file into the run's working directory (repeatable).
+    ///
+    /// The guest-side name is the basename.
+    #[arg(long, value_name = "FILE", help_heading = "Files and environment")]
+    put: Vec<PathBuf>,
+    /// Fetch a file back from the run's working directory (repeatable).
+    ///
+    /// Written under the current directory at the same relative path.
+    #[arg(long, value_name = "PATH", help_heading = "Files and environment")]
+    get: Vec<String>,
+    /// Emit the structured run result as JSON on stdout.
+    ///
+    /// One object carrying the exit code, lossy stdout/stderr, the artifact list, metrics, and the
+    /// effective limits, instead of relaying the raw streams.
+    #[arg(long, help_heading = "Result and audit trail")]
+    json: bool,
+    /// Print the run's audit trail on stdout afterwards.
+    ///
+    /// Attaches the host-side probes and renders the trail human-readably. Fail-open: a host without
+    /// eBPF caps still runs, with the gaps explained. Machine consumers use `--record` (so this
+    /// conflicts with `--json`).
+    #[arg(long, conflicts_with_all = ["json", "demo_boot"], help_heading = "Result and audit trail")]
     trace: bool,
-    /// Attach the host-side probes and write the run's deterministic audit record (one line of
-    /// JSON, the machine surface) to this file for later inspection.
-    #[arg(long, value_name = "FILE", conflicts_with = "demo_boot")]
+    /// Write the run's deterministic audit record to a file.
+    ///
+    /// Attaches the host-side probes and writes one line of JSON, the machine surface, for later
+    /// inspection or `agent verify`.
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "demo_boot",
+        help_heading = "Result and audit trail"
+    )]
     record: Option<PathBuf>,
-    /// Attach the host-side probes and write the run's **model-legible summary** (one line of JSON, a
-    /// compact projection of the audit record shaped for an agent's observe→act loop: what it reached,
-    /// what egress was denied, its resource envelope, and any coverage gap) to this file.
-    #[arg(long, value_name = "FILE", conflicts_with = "demo_boot")]
+    /// Write a model-legible summary of the run to a file.
+    ///
+    /// One line of JSON: a compact projection of the audit record shaped for an agent's
+    /// observe-then-act loop (what it reached, what egress was denied, its resource envelope, and
+    /// any coverage gap).
+    #[arg(
+        long,
+        value_name = "FILE",
+        conflicts_with = "demo_boot",
+        help_heading = "Result and audit trail"
+    )]
     record_summary: Option<PathBuf>,
-    /// Watch the run live: a full-screen view on stderr (network flows and denials, resources,
-    /// the VMM's host syscalls, a timeline) while the command runs. Needs stderr on a terminal.
-    /// `q` closes the view (the run continues); after the command finishes, the view stays up
-    /// until closed.
-    #[arg(long, conflicts_with = "demo_boot")]
+    /// Watch the run live in a full-screen view on stderr.
+    ///
+    /// Shows network flows and denials, resources, the VMM's host syscalls, and a timeline while the
+    /// command runs. Needs stderr on a terminal. `q` closes the view (the run continues); after the
+    /// command finishes, the view stays up until closed.
+    #[arg(
+        long,
+        conflicts_with = "demo_boot",
+        help_heading = "Result and audit trail"
+    )]
     watch: bool,
     /// The command to run in the guest, after `--`.
     #[arg(trailing_var_arg = true)]
@@ -265,7 +339,7 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
             sweep_vm_residue(file);
             shell(args, file)
         }
-        Cmd::Doctor => Ok(doctor::report(&base_config(file))),
+        Cmd::Doctor(args) => Ok(doctor::report(&base_config(file), &args)),
         Cmd::Verify(args) => verify::run(args, file),
         // `serve` is dispatched in `main` before this point (it skips the project-file/tracing
         // setup `run` runs under), so this arm is never reached; a typed error rather than a
