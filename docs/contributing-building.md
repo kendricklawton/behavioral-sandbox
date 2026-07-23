@@ -6,15 +6,48 @@ back-compatibility burden this early, so building expects a recent stable toolch
 if `cargo` complains the installed version is older than the manifest's `rust-version`). The eBPF
 programs (`crates/probes`) are the exception: excluded from the workspace, built for
 `bpfel-unknown-none` under their own pinned nightly (`-Z build-std=core`, since rustup ships no
-prebuilt `core` for the BPF target) and linked by `bpf-linker`. Host prerequisites are covered in [Installation](./cli-install.md);
-`cargo xtask setup` reports what's missing.
+prebuilt `core` for the BPF target) and linked by `bpf-linker`.
+
+## Prerequisites
+
+The **host** requirements (KVM, Firecracker, `e2fsprogs`, `iproute2`) are the engine's own, and
+[Installation](./cli-install.md#preparing-the-host) walks a bare machine through them. Building adds
+two more:
+
+- **Rust, stable** ([`rustup`](https://www.rust-lang.org/tools/install)). The pinned version lives in
+  `rust-toolchain.toml`, so `rustup` selects it for you inside the repo.
+- **For the eBPF probes** (optional until you want the observability half): **`bpf-linker`** plus a
+  **nightly** toolchain with **`rust-src`**, since `-Z build-std=core` needs the standard library
+  source:
+
+  ```console
+  cargo install bpf-linker
+  rustup toolchain install nightly --component rust-src
+  ```
+
+`cargo xtask setup` reports what a given host is still missing, build toolchain and runtime
+dependencies alike.
+
+## Getting a source tree ready
 
 ```console
+git clone https://github.com/k-henry-org/agent && cd agent
+cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
 cargo build                  # the workspace: driver, loader, CLI, guest agent
-cargo xtask build-probes     # the eBPF object (skips with a note when bpf-linker/nightly are absent)
-cargo xtask fetch-artifacts  # the pinned guest kernel + boot rootfs (sha256-verified)
-cargo xtask build-rootfs     # the agent rootfs (reproducible; --check asserts byte-identical)
 ```
+
+The repo ships **no binary images**, so the guest artifacts are fetched or built into `artifacts/`
+(gitignored):
+
+```console
+cargo xtask fetch-artifacts  # the pinned guest kernel (vmlinux) + boot rootfs (sha256-verified)
+cargo xtask build-rootfs     # the agent rootfs: Alpine + python3 + the static guest agent
+                             # (reproducible; --verify asserts two builds are byte-identical)
+cargo xtask build-probes     # the eBPF object (skips with a note when bpf-linker/nightly are absent)
+```
+
+To build without reaching either upstream, populate a mirror first: see
+[Vendoring for offline builds](./cli-install.md#vendoring-for-offline-builds).
 
 ## While you work, the fast loop
 

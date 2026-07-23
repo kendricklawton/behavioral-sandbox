@@ -61,7 +61,7 @@ Four properties every phase must protect:
 
 - **`v0.1.0` is the finish line**, the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; the tag
-  is P20.21).
+  is P20.22).
 - **The vNext tracks (Phases 21–22) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
@@ -2275,11 +2275,11 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Dedicated `quickstart.md`/`non-goals.md` pages were tried and then folded back to match the
       wasmtime shape, no extra pages the model doesn't carry. `mdbook build` is clean and every
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
-      (GitHub Pages deploy) is left to launch (P20.22). Docs only, non-`api:`.)*
+      (GitHub Pages deploy) is left to launch (P20.23). Docs only, non-`api:`.)*
 - [ ] **P20.4** (human-led) **The real name.** Retire the working name "agent" (decision 035): the
       user picks the name, then one sweep renames the repo, the binary, the crate names, the `AGENT_*`
       env prefix and `.agent.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
-      **before** the launch announcement (P20.22) or any registry/SDK freeze (Phases 21–22) can cement
+      **before** the launch announcement (P20.23) or any registry/SDK freeze (Phases 21–22) can cement
       the working name publicly, so the rename stays a quiet sweep, not a breaking rebrand.
 - [x] **P20.5** A **reference integration**: a small host application embedding the engine end to end.
       *(**Done.** `crates/probes-loader/examples/reference_integration.rs`: the smallest complete host
@@ -2429,10 +2429,26 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       writing to a configured records directory. Touches the record pipeline rather than the config
       resolver, and needs its own answers (file naming, and whether a failed record write must fail
       the run, which it must, or the posture is decorative).
-- [ ] **P20.21** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
+- [x] **P20.21** **Docs: clear ownership between installing and building.** The install page and the
+      building page each deferred prerequisites to the other, so neither owned them and the artifact
+      commands were duplicated in both.
+      *(**Done.** Measured against the wasmtime shape this book already follows: their
+      `cli-install.md` ends at "compiling from source, consult the contributing docs", and
+      `contributing-building.md` owns the toolchain and its own prerequisites. Ours had the arrow
+      reversed (`contributing-building.md` deferred host prerequisites to Installation, while
+      Installation carried the Rust toolchain, `bpf-linker`, `git clone`, and the artifact builds),
+      and `fetch-artifacts`/`build-rootfs`/`build-probes` appeared in both files. Building now owns a
+      `Prerequisites` section (stable Rust plus the probes crate's nightly + `bpf-linker`) and a
+      `Getting a source tree ready` section (clone, setup, artifacts); Installation keeps only what an
+      operator needs and ends in a pointer, matching wasmtime. Two sections **stayed** in
+      Installation against the first plan, because ADRs pin them there: `Supported platforms` is the
+      reader-facing statement decision 032 keeps in sync with itself, and `Vendoring` is decision
+      033's, and it backs the operator-facing `self-host --offline` path rather than the contributor
+      one. Docs only, non-`api:`.)*
+- [ ] **P20.22** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
       microVM boots, runs code, is enforced + recorded, self-hostable, and documented. Cut after the
       rename (P20.4), so the first stable name is the real one.
-- [ ] **P20.22** The **launch announcement**: what it is, the threat model, and how to self-host it,
+- [ ] **P20.23** The **launch announcement**: what it is, the threat model, and how to self-host it,
       plus the docs-site deploy (GitHub Pages, deferred from P20.3). After the tag and the rename, so
       the announcement points at a released, correctly-named engine.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
@@ -2443,7 +2459,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
 
 ## Post-v0.1.0, vNext tracks
 
-> These land **after** the `v0.1.0` finish line (P20.21) and **do not gate that tag** (§0.6). They
+> These land **after** the `v0.1.0` finish line (P20.22) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
 >, without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.

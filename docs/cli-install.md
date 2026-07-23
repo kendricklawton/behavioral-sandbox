@@ -275,13 +275,14 @@ tracks their supported set.
 
 ## Prerequisites
 
-This is the reference list: what each dependency is for, and which are optional. For the commands
-that install them on a fresh box, see [Preparing the host](#preparing-the-host).
+What the **engine** needs at runtime: what each dependency is for, and which are optional. For the
+commands that install them on a fresh box, see [Preparing the host](#preparing-the-host); for what
+**building from source** additionally needs (the Rust toolchain, `bpf-linker`), see
+[Building](./contributing-building.md#prerequisites).
 
 - **A Linux host with `/dev/kvm`** (kernel ≥ 5.15, see [Supported platforms](#supported-platforms))
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
   for CO-RE eBPF, most modern distros ship it.
-- **Rust, stable** ([`rustup`](https://www.rust-lang.org/tools/install)) for the host/driver.
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on
   `PATH` or named via `AGENT_FIRECRACKER`.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
@@ -294,11 +295,6 @@ that install them on a fresh box, see [Preparing the host](#preparing-the-host).
   guest's virtio-net. Creating a tap needs `CAP_NET_ADMIN`.
 - **`curl`**: `cargo xtask fetch-artifacts` and `cargo xtask build-rootfs` download the pinned
   guest kernel and Alpine packages (sha256-verified).
-- **For the eBPF probes** (optional until you want the observability demos): **`bpf-linker`**
-  plus a **nightly** toolchain with **`rust-src`** for `-Z build-std`
-  (`cargo install bpf-linker`; `rustup toolchain install nightly --component rust-src`). The
-  probes crate is excluded from the workspace and pins its own nightly, so the host/driver stays
-  on stable.
 
 ### Capabilities
 
@@ -330,26 +326,16 @@ mkdir -p ~/agent-scratch
 sudo -E env AGENT_SCRATCH_DIR="$HOME/agent-scratch" "$(command -v agent)" run -- echo hello
 ```
 
-## Setup
+## Compiling from source
 
-```console
-git clone https://github.com/k-henry-org/agent && cd agent
-cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
-cargo build
-```
+[Self-host in one command](#self-host-in-one-command) is the short path: it obtains the guest
+artifacts, builds the eBPF object, installs the binary, and proves the result by booting a sandbox.
 
-## Build the guest artifacts
+To drive the individual steps instead, or to work on the engine itself, consult
+[Building](./contributing-building.md), which owns the build toolchain (the Rust version policy, the
+probes crate's pinned nightly and `bpf-linker`), the artifact commands, and the two test gates.
 
-The repo ships no binary images, `xtask` fetches or builds them into `artifacts/` (gitignored):
-
-```console
-cargo xtask fetch-artifacts    # the pinned guest kernel (vmlinux) + boot rootfs, sha256-verified
-cargo xtask build-rootfs       # the agent rootfs: Alpine + python3 + the static guest agent
-                               # (reproducible: two builds are byte-identical)
-cargo xtask build-probes       # the eBPF object, for the observability demos (needs bpf-linker + nightly)
-```
-
-You're ready, head to [Using the agent CLI](./cli.md) to run something.
+Once you have a binary, head to [Using the agent CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 
