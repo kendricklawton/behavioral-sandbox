@@ -27,8 +27,10 @@ Built in the open, milestone by milestone, each one shipping as a working demo.
 
 **Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` host, kernel
 **≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.9 on
-`PATH` (the engine drives it, it doesn't bundle it). `cargo xtask setup` (or `agent doctor` once
-built) reports exactly what your host is missing before the first sandbox.
+`PATH` (the engine drives it, it doesn't bundle it). Starting from a bare machine,
+[Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version of all of
+that; `cargo xtask setup` (or `agent doctor` once built) then reports exactly what your host is still
+missing before the first sandbox.
 
 ```console
 git clone https://github.com/k-henry-org/agent && cd agent

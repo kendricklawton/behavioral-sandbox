@@ -5,6 +5,135 @@ install a packaged release (tarball / `install.sh` / container, decision 035). P
 are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setup` (or
 `agent doctor` once installed) tells you what your host is missing at every step.
 
+## Preparing the host
+
+Every install path below assumes a host that can already boot a microVM. On a fresh machine that
+means four things, in this order.
+
+Commands are given for **Ubuntu/Debian** and **Arch**, the two distros this engine is continuously
+tested on (Ubuntu 24.04 in CI, Arch by hand during development, see
+[Verified on](#supported-platforms)). Any other distro follows the same four steps with its own
+package manager. The two differ in ways that actually bite, so read your own column rather than
+assuming; [Distro differences](#distro-differences-that-bite) collects them.
+
+### 1. Check that the box qualifies
+
+```console
+uname -m                      # must print x86_64
+uname -r                      # must be 5.15 or newer
+ls -l /dev/kvm                # must exist
+ls /sys/kernel/btf/vmlinux    # needed for the eBPF half; most distro kernels ship it
+```
+
+If `/dev/kvm` is missing, stop here: there is no software isolation fallback, so nothing below will
+help. The usual cause is a **cloud VM without nested virtualization**: a stock EC2, DigitalOcean, or
+Hetzner cloud instance cannot boot a microVM. You need bare metal (an AWS `.metal` instance, a
+dedicated server, your own machine) or a provider that exposes nested virt (GCP, some Azure SKUs).
+On a laptop or desktop, check that virtualization is enabled in the firmware.
+
+### 2. Install the host tools
+
+Ubuntu / Debian:
+
+```console
+sudo apt update
+sudo apt install -y iproute2 e2fsprogs curl ca-certificates
+sudo apt install -y build-essential git        # only if you will build from source
+```
+
+Arch:
+
+```console
+sudo pacman -Syu
+sudo pacman -S --needed iproute2 e2fsprogs curl ca-certificates
+sudo pacman -S --needed base-devel git         # only if you will build from source
+```
+
+Most are already present on a normal install. [Prerequisites](#prerequisites) says what each one is
+for and which are optional.
+
+### 3. Get access to `/dev/kvm`
+
+This is where the two distros differ, so check what your host actually ships before doing anything:
+
+```console
+ls -l /dev/kvm
+```
+
+- **`crw-rw---- root kvm`** (Ubuntu/Debian): mode `0660`, so a plain user cannot open it until they
+  join the `kvm` group. Do step 3.
+- **`crw-rw-rw- root kvm`** (Arch): mode `0666` from systemd's shipped udev rule
+  (`/usr/lib/udev/rules.d/50-udev-default.rules`), so anyone can already open it. Skip to step 4.
+
+To join the group:
+
+```console
+sudo usermod -aG kvm "$USER"
+```
+
+Membership is picked up at login, so **log out and back in** (or run `newgrp kvm` in the current
+shell), then confirm it took:
+
+```console
+id -nG | tr ' ' '\n' | grep -x kvm   # prints kvm once the group is in effect
+```
+
+### 4. Install Firecracker and its jailer
+
+The engine drives Firecracker, it does not bundle it (the container image is the one exception), so
+both binaries have to be on `PATH`. v1.9 is the pinned version; a different one boots with a warning
+because its API bodies may not match.
+
+```console
+VER=v1.9.1
+ARCH=x86_64
+curl -fsSL -o /tmp/fc.tgz \
+  "https://github.com/firecracker-microvm/firecracker/releases/download/${VER}/firecracker-${VER}-${ARCH}.tgz"
+tar -xzf /tmp/fc.tgz -C /tmp
+sudo install -m0755 "/tmp/release-${VER}-${ARCH}/firecracker-${VER}-${ARCH}" /usr/local/bin/firecracker
+sudo install -m0755 "/tmp/release-${VER}-${ARCH}/jailer-${VER}-${ARCH}"      /usr/local/bin/jailer
+firecracker --version
+```
+
+Verifying that download against a pinned hash is tracked work, not yet done
+([decision 040](./adr/040-supply-chain-provenance-pinning-and-release-signing.md)).
+
+On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
+pinned-version check are exercised against, so prefer them.
+
+Now pick an install path below. Whichever you pick, running `agent doctor` afterwards is how you
+confirm these four steps actually took.
+
+### Distro differences that bite
+
+Neither distro is more supported than the other; they bracket the tool-version spectrum, which is
+why both are tested (Arch rolling-newest against Ubuntu LTS-oldest, and each has caught issues the
+other could not).
+
+| | Ubuntu | Arch |
+|---|---|---|
+| Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the supported floor | rolling, comfortably above the floor |
+| `/dev/kvm` | `0660 root:kvm`, so you must join the group | `0666`, usually usable already |
+| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default fails until you set `AGENT_SCRATCH_DIR` |
+| `e2fsprogs` | 24.04 ships **1.47.0**, below the 1.47.1 floor where `mke2fs` honours `SOURCE_DATE_EPOCH`, so `cargo xtask build-rootfs --verify` fails (normal builds are fine) | current, above the floor |
+| AppArmor | **enabled by default**, and can deny the jailer in ways that look like an engine bug | not installed by default |
+| Build toolchain | `build-essential` | `base-devel` |
+
+Test the `/tmp` question rather than trusting the table, since it depends on your own mount setup:
+
+```console
+findmnt -no OPTIONS -T /tmp | tr , '\n' | grep nodev   # prints nodev if you are affected
+```
+
+If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.agent.toml`:
+
+```toml
+scratch_dir = "/home/you/agent-scratch"
+```
+
+`agent doctor` flags every one of these against your actual host, so treat it as the authority and
+this table as orientation.
+
 ## Install from a release package
 
 Every release ships one tarball per platform plus `SHA256SUMS`, assembled by `cargo xtask dist`:
@@ -125,7 +254,12 @@ tracks their supported set.
 - One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
   systemd default on Arch, and some Ubuntu setups), the jailed default fails because the jailer's
   chroot `/dev/kvm` there is inert, point `AGENT_SCRATCH_DIR` at a non-`nodev` path. `agent doctor`
-  flags this, and reports your own host's arch, kernel, and Firecracker version.
+  flags this, and reports your own host's arch, kernel, and Firecracker version. See
+  [Distro differences](#distro-differences-that-bite) for how to test it and the rest of the
+  per-distro list.
+- On distros that enable **AppArmor** by default (Ubuntu and Debian), a confinement profile can deny
+  the jailer or Firecracker in ways that look like an engine bug. If a jailed boot fails for a reason
+  none of the checks above explain, read `dmesg | grep -i apparmor` before chasing it further.
 
 **Degradations** (the run still works, minus the named capability):
 
@@ -140,6 +274,9 @@ tracks their supported set.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
 ## Prerequisites
+
+This is the reference list: what each dependency is for, and which are optional. For the commands
+that install them on a fresh box, see [Preparing the host](#preparing-the-host).
 
 - **A Linux host with `/dev/kvm`** (kernel ≥ 5.15, see [Supported platforms](#supported-platforms))
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
@@ -165,13 +302,33 @@ tracks their supported set.
 
 ### Capabilities
 
-Two parts touch the kernel and need more than a plain user:
+How much of the engine you get depends on what the process is allowed to do, and this is the part
+that most often surprises a first-time operator. Nothing here degrades silently: a capability you
+lack either names itself in `agent doctor` or produces a typed refusal.
 
-- Creating **tap** devices (networked sandboxes): `CAP_NET_ADMIN`.
-- Loading/attaching **eBPF**: `CAP_BPF` + `CAP_PERFMON`, not full root. Grant a binary just those
-  two with `setcap cap_bpf,cap_perfmon+ep <binary>`.
-- The **jailer** (the default confinement for `agent run`) needs **real root**; on a dev box
-  without it, `--unjailed` is the explicit opt-out (the guest still sits behind KVM).
+| What you want | What it needs | Without it |
+|---|---|---|
+| Run code, VMM unconfined | membership in the `kvm` group | this *is* the fallback: `--unjailed` |
+| **Jailed run** (the default, the supported posture) | **real root**, so `sudo`, plus a scratch dir that is not on a `nodev` mount | the boot fails; ask for `--unjailed` explicitly |
+| `--net`, a guest NIC | `CAP_NET_ADMIN`, to create the per-VM tap | only networked runs fail; the rest are unaffected |
+| `--trace` / `--record` / `--watch` | `CAP_BPF` + `CAP_PERFMON` + kernel BTF | the run still happens and reports its coverage gap |
+| `--allow` egress **enforcement** | the same eBPF capabilities | **refused**, rather than running unenforced |
+
+Root covers every row. To keep the eBPF half off root, grant the binary just those two capabilities:
+
+```console
+sudo setcap cap_bpf,cap_perfmon+ep "$(command -v agent)"
+```
+
+The jailer's requirement cannot be narrowed the same way: it needs **real root** (euid 0) because it
+builds a chroot with device nodes in it and then drops privileges itself, so no capability subset
+substitutes. A jailed run therefore looks like this, with `-E` to keep your environment and an
+explicit scratch dir if `/tmp` is `nodev`:
+
+```console
+mkdir -p ~/agent-scratch
+sudo -E env AGENT_SCRATCH_DIR="$HOME/agent-scratch" "$(command -v agent)" run -- echo hello
+```
 
 ## Setup
 
