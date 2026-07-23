@@ -26,8 +26,26 @@ AGENT_DIST_TARBALL=dist/agent-<ver>-x86_64-linux.tar.gz sh install.sh
 
 Knobs (env): `AGENT_INSTALL_PREFIX` (binary dir), `AGENT_DATA_DIR` (artifact dir), `AGENT_VERSION`
 (a specific release), `AGENT_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
-prerequisite (the engine drives it, it doesn't bundle it); eBPF observability wants
-`AGENT_PROBES_OBJECT` pointed at the installed `probes` object, which the installer prints.
+prerequisite (the engine drives it, it doesn't bundle it). eBPF observability needs no configuration:
+the engine finds the installed `probes` object under the data dir on its own, so
+`AGENT_PROBES_OBJECT` is only needed if you relocated the install with `AGENT_DATA_DIR`.
+
+## Your first run
+
+`agent doctor` is the tool that explains the host: every row it flags names its own fix, and when the
+host is ready it prints the exact run command **for this host**. Run it first.
+
+The one thing worth knowing before you do: a run is **jailed by default**, and the jailer needs real
+root (it creates device nodes in the chroot). So on a normal user account the first command is either
+
+```console
+sudo -E agent run -- echo hello       # jailed, the supported posture
+agent run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
+```
+
+There is deliberately no silent fallback between the two: dropping the jail is something you ask for,
+never something the engine does quietly for you. If a run fails on a host-readiness cause, the error
+points you back at `agent doctor`.
 
 ## Run it as a container
 

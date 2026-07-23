@@ -16,6 +16,19 @@ cargo xtask fetch-artifacts  # the pinned guest kernel + boot rootfs (sha256-ver
 cargo xtask build-rootfs     # the agent rootfs (reproducible; --check asserts byte-identical)
 ```
 
+## While you work, the fast loop
+
+```console
+cargo xtask check
+```
+
+fmt · the prose-drift lint · clippy `-D warnings`, and **no tests**. That last part is the point:
+measured on this workspace after a source edit, the test step is ~16s of a ~17s `ci` run and every
+other step rounds to nothing once warm, so not running tests is the only thing that buys a faster
+loop (~4s). So `check` tells you the code formats, lints, and compiles; it cannot tell you it works.
+Steps it shares with `ci` use identical flags and environment, so the two share one build cache and
+alternating between them doesn't trigger a rebuild. Run the gate before you push.
+
 ## Before you push, the local gate
 
 ```console
@@ -48,7 +61,9 @@ The `CARGO_TARGET_DIR` override matters: `sudo cargo …` builds as **root**, so
 leaves root-owned artifacts in `./target` that then block your normal (non-root) `cargo build`.
 Sending them to a throwaway `target-privileged/` (git-ignored, `rm -rf` it anytime) keeps the
 `./target` your user builds into clean. `-E` preserves your `PATH` and `rustup` so `cargo` resolves
-under `sudo`. (`ci-privileged` prints this reminder if you run it as root without the override.)
+under `sudo`. **`ci-privileged` refuses to run as root without the override**, rather than warning
+after the fact: the redirect has to be on the outer `cargo` (the one that builds `xtask` itself) to
+keep `./target` clean at all, so it can only ever come from your invocation.
 
 ## The book
 

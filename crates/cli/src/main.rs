@@ -28,8 +28,8 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
+use agent_cli::policy::Requested;
 use agent_cli::MAX_VCPUS;
 use agent_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
 use agent_vmm::{
@@ -79,6 +79,10 @@ impl From<VmmError> for CliError {
 #[derive(Parser)]
 #[command(
     name = "agent",
+    // The crate version, which is the in-development working number until the first tag
+    // (`RELEASES.md`): `agent --version` exists so an installed binary can be told from a stale one,
+    // which is a different question from "which release is this".
+    version,
     about = "a self-hostable Firecracker + aya code-execution sandbox"
 )]
 struct Cli {
@@ -237,6 +241,15 @@ fn main() -> ExitCode {
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
             let _ = writeln!(std::io::stderr(), "agent: {e}");
+            // An infra-bucket failure means the host couldn't stand the microVM up, so point at the
+            // tool that explains the host. Keyed on the `kind()` bucket rather than on variants, so
+            // the hint can't drift as `VmmError` (which is `#[non_exhaustive]`) grows.
+            if matches!(&e, CliError::Engine(err) if err.kind() == ErrorKind::Infra) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "agent: the host may not be ready, run `agent doctor`"
+                );
+            }
             ExitCode::from(EXIT_OPERATIONAL)
         }
     }
@@ -302,13 +315,24 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     // ties these log lines to the audit record and the host's own process table.
     let span = tracing::info_span!("run", vmm_pid = tracing::field::Empty);
     let _span = span.enter();
-    let mut limits = limits_with(args.vcpus, args.mem);
-    if let Some(secs) = args.wall {
-        limits.wall = Duration::from_secs(secs); // clap enforced >= 1 at parse
-    }
-    if let Some(bytes) = args.output_cap {
-        limits.output_cap = bytes;
-    }
+    // Resolve the caller's knobs against the operator's policy (decision 041). For the CLI this is a
+    // guardrail rather than a boundary (a local caller owns the config file, and `docs/security.md`
+    // trusts them), but it keeps a host's defaults and ceilings consistent across both entry points.
+    let host_policy = config::policy_of(file);
+    let limits = host_policy
+        .resolve(&Requested {
+            vcpus: args.vcpus,
+            mem_mib: args.mem,
+            wall_secs: args.wall,
+            output_cap: args.output_cap,
+        })
+        .map_err(|e| CliError::Cli(e.to_string()))?;
+    host_policy
+        .check_jail(args.unjailed)
+        .map_err(|e| CliError::Cli(e.to_string()))?;
+    host_policy
+        .check_net(args.net)
+        .map_err(|e| CliError::Cli(e.to_string()))?;
     // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
     if args.watch && !std::io::stderr().is_terminal() {
         return Err(CliError::Cli(

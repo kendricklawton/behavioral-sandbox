@@ -41,13 +41,26 @@ pub fn report(config: &BootConfig) -> ExitCode {
 
     if doctor::can_boot(&checks) {
         let _ = writeln!(out, "\nReady: this host can boot a sandbox.");
+        // Name a first command that works *here*: the jailed default needs real root plus the
+        // jailer, so suggesting it unconditionally would hand a fresh operator a failing command.
+        if doctor::jailed_run_available() {
+            let _ = writeln!(out, "\nTry it:\n  agent run -- echo hello");
+        } else {
+            let _ = writeln!(
+                out,
+                "\nTry it (the default jails the VMM, which needs real root):\
+                 \n  sudo -E agent run -- echo hello       # jailed, the supported posture\
+                 \n  agent run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+            );
+        }
         ExitCode::SUCCESS
     } else {
         // A hard prerequisite is missing, say so on stderr (the report itself is the stdout result),
         // and exit non-zero so a script can gate on it.
         let _ = writeln!(
             std::io::stderr(),
-            "agent: not ready, a hard prerequisite above is missing (see the FAIL rows)"
+            "agent: not ready, a hard prerequisite above is missing (see the FAIL rows above, \
+             each names its fix), then re-run `agent doctor`"
         );
         ExitCode::from(2)
     }

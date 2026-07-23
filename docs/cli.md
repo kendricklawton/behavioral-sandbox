@@ -137,7 +137,7 @@ unknown key is a typed error, never a silent no-op.
 | `AGENT_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
 | `AGENT_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
 | `AGENT_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
-| `AGENT_PROBES_OBJECT` | — | the built eBPF object (for the probe demos; env only, no `.agent.toml` key) | the `cargo xtask build-probes` output path |
+| `AGENT_PROBES_OBJECT` | — | the built eBPF object (env only, no `.agent.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |
 
 ```toml
 # .agent.toml — pinned beside a project's code
@@ -146,6 +146,44 @@ rootfs = "/srv/agent/rootfs-agent.ext4"
 marker = "AGENT-GUEST-READY"
 log = "info"
 ```
+
+## Operator policy
+
+A second group of `.agent.toml` keys sets the **host's** posture rather than a per-run knob. These
+have **no `AGENT_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling
+whose bounded party can override it is not a ceiling ([decision
+041](./adr/041-operator-policy-defaults-clamp-explicit-asks-refuse.md)).
+
+| key | kind | effect |
+|-----|------|--------|
+| `vcpus`, `mem_mib`, `wall_secs`, `output_cap` | default | the house profile when a caller does not ask |
+| `max_vcpus`, `max_mem_mib`, `max_wall_secs`, `max_output_cap` | ceiling | bounds what a caller may ask for |
+| `require_jail` | posture | withdraws the `--unjailed` opt-out on this host |
+| `allow_net` | posture | `false` refuses `--net` outright (a NIC still gets deny-by-default egress) |
+
+The two kinds compose differently, and the difference is whether a caller actually asked:
+
+- **An explicit request above a ceiling is refused**, naming the knob, the ask, and the bound.
+  Silently serving less would be the degradation [decision
+  026](./adr/026-allow-projects-the-egress-policy-enforcement-is-a.md) forbids.
+- **A default above a ceiling is clamped.** Nobody asked for it, so there is nothing to contradict.
+  This is what lets you set only `max_wall_secs = 10` without refusing every bare run (the engine's
+  own default is 30s).
+
+```toml
+# a shared host: 4 vCPU / 1 GiB ceiling, jail mandatory, no guest networking
+max_vcpus = 4
+max_mem_mib = 1024
+require_jail = true
+allow_net = false
+```
+
+**Where this is enforcement, and where it is a guardrail.** For the CLI it is a guardrail: a local
+caller owns this file, and [Security](./security.md#what-is-not-a-security-bug) already treats them as
+trusted. The real boundary is [`agent serve`](./daemon.md), whose clients control neither the daemon's
+config nor its environment, so it takes its ceilings as **explicit flags** (`--max-vcpus`,
+`--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`) rather than from a discovered file: a daemon
+must not read a security control out of whatever directory it was started in.
 
 ## Watching a run from the host
 

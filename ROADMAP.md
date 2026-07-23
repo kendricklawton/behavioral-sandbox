@@ -61,7 +61,7 @@ Four properties every phase must protect:
 
 - **`v0.1.0` is the finish line**, the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; the tag
-  is P20.16).
+  is P20.21).
 - **The vNext tracks (Phases 21–22) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
@@ -2275,11 +2275,11 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Dedicated `quickstart.md`/`non-goals.md` pages were tried and then folded back to match the
       wasmtime shape, no extra pages the model doesn't carry. `mdbook build` is clean and every
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
-      (GitHub Pages deploy) is left to launch (P20.17). Docs only, non-`api:`.)*
+      (GitHub Pages deploy) is left to launch (P20.22). Docs only, non-`api:`.)*
 - [ ] **P20.4** (human-led) **The real name.** Retire the working name "agent" (decision 035): the
       user picks the name, then one sweep renames the repo, the binary, the crate names, the `AGENT_*`
       env prefix and `.agent.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
-      **before** the launch announcement (P20.17) or any registry/SDK freeze (Phases 21–22) can cement
+      **before** the launch announcement (P20.22) or any registry/SDK freeze (Phases 21–22) can cement
       the working name publicly, so the rename stays a quiet sweep, not a breaking rebrand.
 - [x] **P20.5** A **reference integration**: a small host application embedding the engine end to end.
       *(**Done.** `crates/probes-loader/examples/reference_integration.rs`: the smallest complete host
@@ -2327,11 +2327,12 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
       matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
       internal doctor row + docs).)*
-**Operator readiness (P20.9-P20.15).** The posture a serious, hyperscaler-grade evaluator reads before
+**Operator readiness (P20.9-P20.16).** The posture a serious, hyperscaler-grade evaluator reads before
 betting on the engine, and the code that backs it. Three areas were already strong and needed only
 consolidation (the security boundary, the percentile benchmarks, the no-leak/no-panic suite); three
-had real gaps (a host-hardening posture, two supply-chain holes, an unwritten stability promise). The
-reading list lands as docs now (P20.9); the code below (P20.10-P20.15) gates the `v0.1.0` tag.
+had real gaps (a host-hardening posture, two supply-chain holes, an unwritten stability promise), and
+the first-run path printed commands that did not work. The reading list lands as docs (P20.9); the
+code (P20.10-P20.16) gates the `v0.1.0` tag.
 
 - [x] **P20.9** **Operator-readiness posture**: the reading list an evaluator works through, as docs.
       *(**Done** in this change. Three decisions with three reader pages: host hardening as the
@@ -2364,10 +2365,65 @@ reading list lands as docs now (P20.9); the code below (P20.10-P20.15) gates the
 - [ ] **P20.15** **Fail-open degrade, tested**: prove bounded teardown on a host that lacks the sentinel
       guarantee (the cgroup-v2-unwritable Drop-only path, `crates/vmm/src/lifetime.rs`, decision 011),
       so the documented degrade is exercised, not just asserted.
-- [ ] **P20.16** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
+- [x] **P20.16** **Guided first run**: every command the tooling prints is one that works on the host
+      it is printed on.
+      *(**Done.** Four gaps a fresh operator hit. (1) The eBPF object now resolves with **no**
+      configuration: `object_path` falls back to the installed copy under the data dir
+      (`crates/probes-loader/src/lib.rs`, precedence unit-tested via a pure `pick_object_path`), so
+      the `AGENT_PROBES_OBJECT` export is gone from the happy path; a developer's freshly built object
+      still wins. (2) `install.sh` no longer ends by suggesting a command that fails: it names the
+      jailed-needs-root reality with both working forms, and points at the actual Firecracker release
+      URL instead of "install it". (3) `agent doctor` prints the exact run command **for this host**
+      (`doctor::jailed_run_available()` single-sources the euid + jailer facts), and its not-ready
+      message says to fix the FAIL rows and re-run. (4) An `Infra`-bucket failure now points back at
+      `agent doctor`, keyed on the `kind()` bucket so it can't drift as `VmmError` grows.
+      `docs/cli-install.md` gains a "Your first run" section. non-`api:` (the pinned surface does not
+      move; `doctor::jailed_run_available` is an additive helper).)*
+- [x] **P20.17** **Contributor loop**: the papercuts that cost the most time per day.
+      *(**Done.** (1) `ci-privileged` now **refuses** to run as root without `CARGO_TARGET_DIR`
+      instead of warning: the redirect must be on the outer `cargo` to keep `./target` clean at all,
+      so root-owned artifacts blocking later non-root builds is now unreachable rather than
+      documented. (2) `agent --version` exists (the crate version, the in-development working number
+      per `RELEASES.md`), so a stale installed binary is tellable from a fresh one. (3)
+      `cargo xtask self-host` writes `~/.agent.toml` with absolute artifact paths like `install.sh`
+      does, so the installed binary stops being usable only from inside the source tree; while
+      wiring it, `install_binaries` was found resolving `./target/release` while ignoring
+      `CARGO_TARGET_DIR` (the build honours it), which could silently install a **stale** binary,
+      now fixed to match `dist`. (4) `cargo xtask check` is the fast inner loop (fmt · drift ·
+      clippy, **no tests**), sharing `ci`'s exact flags and environment so the two reuse one build
+      cache. It was first written to skip only docs/deny/eBPF and measured at *no* speedup (17s vs
+      the gate's 16s): the test step is ~16s of a ~17s run and everything else rounds to nothing
+      warm, so it was redesigned around the measurement to drop tests, landing at ~3s.
+      non-`api:` (xtask + an additive CLI flag).)*
+- [x] **P20.18** `(decision)` **Operator policy**: the host's defaults, ceilings, and postures.
+      *(**Done** as decision 041. The config surface had the split backwards: `.agent.toml` covered
+      where artifacts live, while every *containment* knob was caller-controlled with a
+      compiled-in default, and the wire `open` let a socket client ask for 32 vCPUs on someone else's
+      host. Adding keys alone would not have fixed it, since flags > env > file makes any file value
+      a default the bounded party overrides. So: defaults (`vcpus`/`mem_mib`/`wall_secs`/
+      `output_cap`), ceilings (`max_*`), and postures (`require_jail`, `allow_net`), resolved in one
+      shared `crates/cli/src/policy.rs` with table-driven tests. An **explicit** ask above a ceiling
+      is refused (decision 026); an unasked-for **default** above one is clamped, a distinction a test
+      forced after the first implementation refused every bare run whose engine-default wall (30s)
+      exceeded a `max_wall_secs = 10`. Enforced where it counts: the daemon bounds a client at
+      `open_limits` (`crates/cli/src/session.rs`) with ceilings from explicit `agent serve` flags, never
+      a cwd-discovered file; the CLI applies the same resolver from `.agent.toml` as a guardrail, since
+      a local caller is already trusted. non-`api:` (the pinned engine API does not move; an embedder
+      *is* the operator).)*
+- [ ] **P20.19** **Egress allow-list ceiling**: bound `--allow` to operator-approved CIDRs, so a
+      caller may narrow the deny-by-default policy but never widen it past the host's range. Set
+      containment over egress rules, not a scalar clamp (does a `10.0.0.0/8` ceiling admit
+      `10.1.2.3:443/tcp`, `0.0.0.0/0`, a v6 rule under a v4 ceiling, a port/proto narrowing?), and it
+      lands on the enforcement path of decisions 022/026, so it is its own box rather than more of
+      decision 041's mechanism.
+- [ ] **P20.20** **`require_record`**: make the audit record non-optional on a host that says so,
+      writing to a configured records directory. Touches the record pipeline rather than the config
+      resolver, and needs its own answers (file naming, and whether a failed record write must fail
+      the run, which it must, or the posture is decorative).
+- [ ] **P20.21** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
       microVM boots, runs code, is enforced + recorded, self-hostable, and documented. Cut after the
       rename (P20.4), so the first stable name is the real one.
-- [ ] **P20.17** The **launch announcement**: what it is, the threat model, and how to self-host it,
+- [ ] **P20.22** The **launch announcement**: what it is, the threat model, and how to self-host it,
       plus the docs-site deploy (GitHub Pages, deferred from P20.3). After the tag and the rename, so
       the announcement points at a released, correctly-named engine.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
@@ -2378,7 +2434,7 @@ reading list lands as docs now (P20.9); the code below (P20.10-P20.15) gates the
 
 ## Post-v0.1.0, vNext tracks
 
-> These land **after** the `v0.1.0` finish line (P20.16) and **do not gate that tag** (§0.6). They
+> These land **after** the `v0.1.0` finish line (P20.21) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
 >, without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.

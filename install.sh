@@ -115,7 +115,16 @@ case ":$PATH:" in
     *":$PREFIX:"*) ;;
     *) say "  - add $PREFIX to your PATH" ;;
 esac
-say "  - observability needs the eBPF object: export AGENT_PROBES_OBJECT=\"$DATA/probes\""
-say "  - the engine drives Firecracker v1.9 (not bundled): install firecracker + jailer on PATH"
-say "  - check the host: agent doctor"
-say "  - run something:  agent run -- echo hello"
+# The engine finds the eBPF object under the default data dir on its own, so only a *relocated*
+# install still needs the override spelled out.
+if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/agent" ]; then
+    say "  - non-default data dir, so observability needs: export AGENT_PROBES_OBJECT=\"$DATA/probes\""
+fi
+say "  - Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH, from"
+say "      https://github.com/firecracker-microvm/firecracker/releases (or use the container image,"
+say "      which bundles a pinned one)"
+say "  - check the host; it prints the exact run command for this host:"
+say "      agent doctor"
+say "  - then run something (the default jails the VMM, which needs real root):"
+say "      sudo -E agent run -- echo hello       # jailed, the supported posture"
+say "      agent run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"

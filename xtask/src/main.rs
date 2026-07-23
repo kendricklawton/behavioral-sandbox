@@ -100,6 +100,9 @@ struct Cli {
 enum Cmd {
     /// Host-safe gate: fmt · prose-drift · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
+    /// Fast inner loop: fmt · prose-drift · clippy `-D warnings`. Runs **no tests** (that is what
+    /// makes it fast: ~4s vs ~17s), so it says the code compiles and lints, not that it works.
+    Check,
     /// Privileged integration tests (KVM + eBPF), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
     CiPrivileged,
     /// Check the host can do KVM + eBPF; report what's missing.
@@ -320,6 +323,7 @@ enum Cmd {
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Ci => ci(),
+        Cmd::Check => fast_check(),
         Cmd::CiPrivileged => ci_privileged(),
         Cmd::Setup => setup(),
         Cmd::SelfHost { prefix, no_run } => selfhost::self_host(prefix, no_run),
@@ -574,6 +578,36 @@ fn ci() -> Result<()> {
     Ok(())
 }
 
+/// The fast inner loop: does it format, lint, and compile. **Deliberately runs no tests**, which is
+/// the whole point, measured on this workspace, the test step is ~16s of a ~17s `ci` and everything
+/// else rounds to nothing, so dropping it is the only thing that makes a faster loop (~4s). Skipping
+/// docs and `cargo deny` saves nothing once they're warm; they're left out only because a
+/// no-test run can't honestly claim to be the gate anyway.
+///
+/// Not a substitute for [`ci`]: it cannot tell you the code *works*. Run the gate before handing
+/// work over.
+///
+/// Each step it does share with `ci` is byte-identical, flags *and* environment: a differing
+/// `RUSTFLAGS` would give the two commands separate build fingerprints, so alternating between them
+/// would rebuild the world each time and make the fast loop the slow one.
+fn fast_check() -> Result<()> {
+    cargo(&["fmt", "--all", "--check"])?;
+    drift::check(workspace_root())?;
+    cargo(&[
+        "clippy",
+        "--workspace",
+        "--all-targets",
+        "--locked",
+        "--",
+        "-D",
+        "warnings",
+    ])?;
+    println!(
+        "\n✓ check passed: formats, lints, compiles. No tests ran, the gate is `cargo xtask ci`"
+    );
+    Ok(())
+}
+
 /// Booting a microVM and loading/attaching eBPF need `/dev/kvm` + elevated caps, so those tests are
 /// `#[ignore]`d and run only here, on a machine that has them.
 fn ci_privileged() -> Result<()> {
@@ -591,14 +625,16 @@ fn ci_privileged() -> Result<()> {
              a pass"
         );
     }
-    // Running as root: without CARGO_TARGET_DIR, this build writes root-owned files into ./target
-    // that then block the user's later non-root `cargo build`. Warn (can't prevent it, the outer
-    // `cargo xtask` build already ran) so the next invocation redirects the output.
+    // Running as root without CARGO_TARGET_DIR leaves root-owned artifacts in ./target that block
+    // every later non-root `cargo build`. Refuse rather than warn: the redirect has to be on the
+    // *outer* cargo (which built this binary) to keep ./target clean at all, so it can only ever be
+    // the caller's invocation, and a warning here just documents the damage after it starts.
     if std::env::var_os("CARGO_TARGET_DIR").is_none() {
-        eprintln!(
-            "warning: running as root without CARGO_TARGET_DIR: build artifacts land root-owned in \
-             ./target and will block later non-root `cargo` builds. Prefer: \
-             sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" cargo xtask ci-privileged"
+        bail!(
+            "refusing to run as root without CARGO_TARGET_DIR: the build would leave root-owned \
+             artifacts in ./target and block later non-root `cargo` builds.\n  Re-run as:\n    \
+             sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" cargo xtask ci-privileged\n  \
+             (if ./target is already root-owned from this attempt: sudo chown -R \"$USER:$USER\" target)"
         );
     }
     if !Path::new("/sys/kernel/btf/vmlinux").exists() {

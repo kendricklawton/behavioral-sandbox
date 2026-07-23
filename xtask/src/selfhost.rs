@@ -54,6 +54,8 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     let prefix = resolve_prefix(prefix)?;
     let agent = install_binaries(&prefix)?;
 
+    write_starter_config()?;
+
     println!("\n== 5/5  run a sandbox ==");
     prove(&agent, no_run)?;
 
@@ -62,6 +64,42 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
          `agent serve --help`).",
         prefix.display()
     );
+    Ok(())
+}
+
+/// Write `~/.agent.toml` with **absolute** artifact paths, matching what `install.sh` does for a
+/// packaged install.
+///
+/// Without it a self-hosted binary only works from inside the source tree: the artifact defaults are
+/// resolved relative to the working directory, so the same binary reports "Ready" in the repo and
+/// fails with a missing kernel/rootfs one directory up. Config discovery walks up from the cwd, so
+/// this file covers any cwd **under `$HOME`**, not literally everywhere; from outside `$HOME` (say
+/// `/tmp`) pass the paths by env or flag. Never overwrites an existing file (your config is yours),
+/// and `AGENT_NO_TOML=1` skips it, the same escape hatch `install.sh` offers.
+fn write_starter_config() -> Result<()> {
+    if std::env::var_os("AGENT_NO_TOML").is_some() {
+        return Ok(());
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        println!("  (HOME unset: skipping the starter .agent.toml)");
+        return Ok(());
+    };
+    let dest = home.join(".agent.toml");
+    if dest.exists() {
+        println!("  {} exists, left alone", dest.display());
+        return Ok(());
+    }
+    let body = format!(
+        "# Written by `cargo xtask self-host`; the engine reads the nearest .agent.toml walking up\n\
+         # from the cwd, so this covers any working directory under $HOME. Absolute paths, so the\n\
+         # installed binary no longer depends on being run from the source tree.\n\
+         kernel = \"{}\"\n\
+         rootfs = \"{}\"\n",
+        kernel_path().display(),
+        agent_rootfs_path().display()
+    );
+    std::fs::write(&dest, body).with_context(|| format!("write {}", dest.display()))?;
+    println!("  wrote {} (kernel + rootfs paths)", dest.display());
     Ok(())
 }
 
@@ -84,7 +122,12 @@ fn resolve_prefix(prefix: Option<PathBuf>) -> Result<PathBuf> {
 /// for the boot proof. A missing build output is a clear error (the `cargo build` above should have
 /// produced it), not a silent skip.
 fn install_binaries(prefix: &Path) -> Result<PathBuf> {
-    let release = workspace_root().join("target/release");
+    // Honour `CARGO_TARGET_DIR` (as `dist` does): the build above respects it, so resolving the
+    // output against `./target` unconditionally would install whatever stale binary happened to sit
+    // there from an earlier default-target-dir build, silently, with a fresh build's log above it.
+    let release = std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| workspace_root().join("target"), PathBuf::from)
+        .join("release");
     let mut agent = None;
     for name in BINARIES {
         let src = release.join(name);

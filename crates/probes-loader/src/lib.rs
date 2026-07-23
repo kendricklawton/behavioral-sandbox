@@ -1276,16 +1276,42 @@ fn with_netns<T: Send>(
     })
 }
 
-/// Where the compiled BPF object lives: the `AGENT_PROBES_OBJECT` override if set, else the
+/// Where the compiled BPF object lives, in precedence order: the `AGENT_PROBES_OBJECT` override, the
 /// `cargo xtask build-probes` output under the source tree
-/// (`crates/probes/target/bpfel-unknown-none/release/probes`). The object is a *build artifact*
-/// (like the guest kernel/rootfs), built separately and loaded at runtime, not linked into this crate.
+/// (`crates/probes/target/bpfel-unknown-none/release/probes`), then the installed copy under the
+/// per-host data dir. The object is a *build artifact* (like the guest kernel/rootfs), built
+/// separately and loaded at runtime, not linked into this crate.
+///
+/// The data-dir fallback is what makes a **packaged install** work with no configuration: `install.sh`
+/// puts the object there, and the source-tree path is baked at compile time so it simply does not
+/// exist on an operator's host. A developer working in the tree still wins, because their built
+/// object is checked first.
 #[must_use]
 pub fn object_path() -> PathBuf {
-    if let Some(p) = std::env::var_os(OBJECT_ENV) {
-        return PathBuf::from(p);
-    }
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../probes/target/bpfel-unknown-none/release/probes")
+    let built = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../probes/target/bpfel-unknown-none/release/probes");
+    let installed = signing::data_dir().join("probes");
+    pick_object_path(
+        std::env::var_os(OBJECT_ENV).map(PathBuf::from),
+        built.is_file().then_some(built.as_path()),
+        installed.is_file().then_some(installed.as_path()),
+        &built,
+    )
+}
+
+/// The pure precedence rule behind [`object_path`]. `built`/`installed` are `Some` only when that
+/// candidate actually exists; `fallback` is returned when none do, so the resulting read error names
+/// the source-tree path and its "build it with `cargo xtask build-probes`" hint.
+fn pick_object_path(
+    env_override: Option<PathBuf>,
+    built: Option<&Path>,
+    installed: Option<&Path>,
+    fallback: &Path,
+) -> PathBuf {
+    env_override
+        .or_else(|| built.map(Path::to_path_buf))
+        .or_else(|| installed.map(Path::to_path_buf))
+        .unwrap_or_else(|| fallback.to_path_buf())
 }
 
 /// Read the compiled BPF object (from [`object_path`]) and load it into the kernel: `Ebpf::load`
@@ -2155,5 +2181,31 @@ mod tests {
 
         // A wholly nonexistent dir yields the all-None default, still no error.
         assert_eq!(CgroupStats::read(&dir.join("gone")), CgroupStats::default());
+    }
+
+    #[test]
+    fn object_path_precedence_lets_a_packaged_install_work_unconfigured() {
+        let built = Path::new("/src/probes");
+        let installed = Path::new("/data/probes");
+        let env = PathBuf::from("/env/probes");
+
+        // The env override wins even when both candidates exist.
+        assert_eq!(
+            pick_object_path(Some(env.clone()), Some(built), Some(installed), built),
+            env
+        );
+        // A developer in the tree gets their freshly built object, not a stale installed one.
+        assert_eq!(
+            pick_object_path(None, Some(built), Some(installed), built),
+            built
+        );
+        // The packaged case: no source tree on the host, so the installed copy is found with no
+        // AGENT_PROBES_OBJECT set. This is what makes an install work unconfigured.
+        assert_eq!(
+            pick_object_path(None, None, Some(installed), built),
+            installed
+        );
+        // Nothing present: fall back to the source-tree path, whose read error is the actionable one.
+        assert_eq!(pick_object_path(None, None, None, built), built);
     }
 }

@@ -218,6 +218,15 @@ pub fn can_boot(checks: &[Check]) -> bool {
     checks.iter().all(|c| c.status != CheckStatus::Fail)
 }
 
+/// Whether a **jailed** run (the default, decision 012) can work on this host as invoked right now:
+/// real root *and* the `jailer` binary. Not a readiness check (an unjailed run is still a valid boot,
+/// which is why the two rows above only warn); it exists so a caller can suggest a first-run command
+/// that actually works here instead of one that fails.
+#[must_use]
+pub fn jailed_run_available() -> bool {
+    geteuid() == Some(0) && command_on_path("jailer")
+}
+
 /// `/dev/kvm` opens read-write (root, or the `kvm` group).
 fn kvm_writable() -> bool {
     std::fs::OpenOptions::new()

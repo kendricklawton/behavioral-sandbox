@@ -48,7 +48,10 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use std::num::{NonZeroU32, NonZeroU8};
+
 use agent_cli::audit::Observability;
+use agent_cli::policy::Policy;
 use agent_vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::Metrics;
@@ -105,6 +108,19 @@ pub struct ServeArgs {
     /// the timeout. Default 300 (5 min).
     #[arg(long, value_name = "SECONDS", default_value_t = 300)]
     idle_timeout: u64,
+    /// Ceiling on the vCPUs a session's `open` may ask for. Past it the `open` is **refused**, never
+    /// quietly clamped (decision 041). A hoster posture, no client chooses it.
+    #[arg(long, value_name = "N")]
+    max_vcpus: Option<NonZeroU8>,
+    /// Ceiling on the guest memory (MiB) a session's `open` may ask for.
+    #[arg(long, value_name = "MIB")]
+    max_mem_mib: Option<NonZeroU32>,
+    /// Ceiling on the wall-clock budget (seconds) a session's `open` may ask for.
+    #[arg(long, value_name = "SECONDS")]
+    max_wall_secs: Option<u64>,
+    /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for.
+    #[arg(long, value_name = "BYTES")]
+    max_output_cap: Option<usize>,
 }
 
 /// The daemon's shared context, handed by `Arc` to every session thread: the env-layered base config
@@ -119,6 +135,10 @@ pub(crate) struct Server {
     pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     pub(crate) jailed: bool,
+    /// The operator's per-run policy (decision 041), read from the daemon's `.agent.toml` at startup.
+    /// This is the enforcing copy: a client controls neither that file nor this process's
+    /// environment, so the ceilings here bound what any `open` may ask for.
+    pub(crate) policy: Policy,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
     pub(crate) observ: Observability,
     /// The host record-signing key (decision 034): the `trace` reply signs the finalized record with
@@ -255,9 +275,21 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         }
     };
     let pool = build_optional_pool(args.prewarm, &base, jailed);
+    // The daemon takes policy from its flags, not from a discovered `.agent.toml`: a daemon must not
+    // read a security control out of whatever directory it happened to be started in. Jail and
+    // networking are already daemon-wide and client-immutable (`--unjailed` above), so only the
+    // ceilings need to travel to the session boundary.
+    let policy = Policy {
+        max_vcpus: args.max_vcpus,
+        max_mem_mib: args.max_mem_mib,
+        max_wall_secs: args.max_wall_secs,
+        max_output_cap: args.max_output_cap,
+        ..Policy::default()
+    };
     let server = Arc::new(Server {
         base,
         jailed,
+        policy,
         observ: Observability::load(),
         signing_key,
         pool,
@@ -747,6 +779,7 @@ mod tests {
         Arc::new(Server {
             base: agent_vmm::BootConfig::default(),
             jailed: false,
+            policy: Policy::default(),
             observ: Observability::load(),
             signing_key: agent_probes_loader::HostKey::from_seed([7u8; 32]),
             pool: None,

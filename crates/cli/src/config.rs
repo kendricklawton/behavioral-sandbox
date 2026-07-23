@@ -17,10 +17,13 @@
 //! key has no `BootConfig` field (it drives `tracing`), so the CLI reads it from here directly.
 
 use std::ffi::OsString;
+use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Path, PathBuf};
 
 use agent_vmm::VmmError;
 use serde::Deserialize;
+
+use agent_cli::policy::Policy;
 
 /// The file name discovered up from the cwd.
 const FILE_NAME: &str = ".agent.toml";
@@ -52,6 +55,32 @@ pub struct AgentToml {
     /// to the current signing key, so rotating the host key doesn't invalidate already-signed records
     /// (decision 034, key rotation). No `BootConfig` field.
     trusted_keys: Option<Vec<String>>,
+
+    // Operator policy (decision 041). These do **not** mirror `AGENT_*` env keys: they are the
+    // host's posture, not a per-invocation knob, and the ceilings exist precisely to bound what a
+    // caller may ask for, so routing them through the flags > env > file precedence would let the
+    // caller they bound edit them. See `crate::policy` for where this binds and where it is only a
+    // guardrail.
+    /// House default vCPUs when a caller does not ask.
+    vcpus: Option<NonZeroU8>,
+    /// House default guest memory, MiB.
+    mem_mib: Option<NonZeroU32>,
+    /// House default wall-clock budget, seconds.
+    wall_secs: Option<u64>,
+    /// House default captured-output cap, bytes.
+    output_cap: Option<usize>,
+    /// Ceiling on vCPUs; a caller asking for more is refused.
+    max_vcpus: Option<NonZeroU8>,
+    /// Ceiling on guest memory, MiB.
+    max_mem_mib: Option<NonZeroU32>,
+    /// Ceiling on the wall-clock budget, seconds.
+    max_wall_secs: Option<u64>,
+    /// Ceiling on the captured-output cap, bytes.
+    max_output_cap: Option<usize>,
+    /// Withdraw the `--unjailed` opt-out on this host (decision 012's escape hatch, closed).
+    require_jail: Option<bool>,
+    /// Whether a caller may attach a guest NIC at all; unset permits it.
+    allow_net: Option<bool>,
 }
 
 impl AgentToml {
@@ -125,6 +154,31 @@ impl AgentToml {
     pub fn trusted_keys(&self) -> &[String] {
         self.trusted_keys.as_deref().unwrap_or(&[])
     }
+
+    /// The operator policy this file declares (decision 041). An absent file, or one that sets none
+    /// of these keys, yields the default policy, which changes nothing.
+    #[must_use]
+    pub fn policy(&self) -> Policy {
+        Policy {
+            vcpus: self.vcpus,
+            mem_mib: self.mem_mib,
+            wall_secs: self.wall_secs,
+            output_cap: self.output_cap,
+            max_vcpus: self.max_vcpus,
+            max_mem_mib: self.max_mem_mib,
+            max_wall_secs: self.max_wall_secs,
+            max_output_cap: self.max_output_cap,
+            require_jail: self.require_jail.unwrap_or(false),
+            allow_net: self.allow_net,
+        }
+    }
+}
+
+/// The operator policy for this process: the nearest `.agent.toml`'s, or the permissive default when
+/// there is no file. One call site so the CLI and the daemon can't drift on how policy is sourced.
+#[must_use]
+pub fn policy_of(file: Option<&AgentToml>) -> Policy {
+    file.map(AgentToml::policy).unwrap_or_default()
 }
 
 /// Resolve the host record-signing key path with `env (AGENT_SIGNING_KEY) > file > default`

@@ -273,17 +273,25 @@ impl TrustedKey {
     }
 }
 
-/// The default host-key path when neither a flag, `AGENT_SIGNING_KEY`, nor a config file sets one:
-/// `$XDG_DATA_HOME/agent/record-signing.ed25519` (falling back to `$HOME/.local/share`, then
-/// `/var/lib`). A signing key is host **state**, so it lives under a data dir, not a config dir.
-#[must_use]
-pub fn default_key_path() -> PathBuf {
+/// The engine's per-host data directory: `$XDG_DATA_HOME/agent` (falling back to
+/// `$HOME/.local/share/agent`, then `/var/lib/agent`). This is where an installed deployment keeps
+/// host **state** and runtime artifacts, and is the directory `install.sh` writes into.
+pub(crate) fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
         .unwrap_or_else(|| PathBuf::from("/var/lib"));
-    base.join("agent").join("record-signing.ed25519")
+    base.join("agent")
+}
+
+/// The default host-key path when neither a flag, `AGENT_SIGNING_KEY`, nor a config file sets one:
+/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/agent`, else
+/// `$HOME/.local/share/agent`, else `/var/lib/agent`). A signing key is host **state**, so it lives
+/// under a data dir, not a config dir.
+#[must_use]
+pub fn default_key_path() -> PathBuf {
+    data_dir().join("record-signing.ed25519")
 }
 
 /// Verify a signed record envelope against a set of **trusted** verifying keys, returning the exact

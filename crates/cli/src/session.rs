@@ -27,6 +27,7 @@ use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
 use agent_cli::audit::RunProbes;
+use agent_cli::policy::{Policy, Requested};
 use agent_cli::MAX_VCPUS;
 use agent_probes_loader::Timing;
 use agent_protocol::{read_message, write_message, ProtocolError, Request, Response};
@@ -79,7 +80,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
             return;
         }
     };
-    let (limits, bare) = match open_limits(&open) {
+    let (limits, bare) = match open_limits(&open, &server.policy) {
         Ok(parsed) => parsed,
         Err(message) => {
             server.metrics.open_failed();
@@ -466,11 +467,16 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
     }
 }
 
-/// Fold an [`Request::Open`]'s optional knobs onto the conservative [`Limits`] default, validating
-/// each as a typed message (never a panic): vCPUs in `1..=32`, memory and wall nonzero. Also reports
-/// whether the `open` was **bare** (every knob defaulted), which decides pool eligibility. A non-`Open`
-/// first message is the caller's error too.
-fn open_limits(req: &Request) -> Result<(Limits, bool), String> {
+/// Fold an [`Request::Open`]'s optional knobs onto the [`Limits`] the operator's `policy` allows,
+/// validating each as a typed message (never a panic): vCPUs in `1..=32`, memory and wall nonzero.
+/// Also reports whether the `open` was **bare** (every knob defaulted), which decides pool
+/// eligibility. A non-`Open` first message is the caller's error too.
+///
+/// This is the daemon's policy boundary, not a convenience: a client arrives over a socket and
+/// controls neither this process's environment nor its `.agent.toml`, so bounding the request here
+/// is what makes an operator ceiling real (decision 041). Asking past a ceiling is refused, never
+/// quietly clamped.
+fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String> {
     let Request::Open {
         vcpus,
         mem_mib,
@@ -481,26 +487,29 @@ fn open_limits(req: &Request) -> Result<(Limits, bool), String> {
         return Err("first message must be `open`".to_string());
     };
     let bare = vcpus.is_none() && mem_mib.is_none() && wall_secs.is_none() && output_cap.is_none();
-    let mut limits = Limits::default();
+
+    // Shape errors first (a 0 or an over-32 vCPU count is malformed regardless of policy), so the
+    // caller gets the specific complaint rather than a ceiling message about a nonsense value.
+    let mut requested = Requested::default();
     if let Some(v) = vcpus {
         if *v == 0 || *v > MAX_VCPUS {
             return Err(format!("vcpus must be in 1..={MAX_VCPUS}, got {v}"));
         }
-        limits.vcpus = NonZeroU8::new(*v).unwrap_or(NonZeroU8::MIN);
+        requested.vcpus = NonZeroU8::new(*v);
     }
     if let Some(m) = mem_mib {
-        limits.mem_mib =
-            NonZeroU32::new(*m).ok_or_else(|| "mem_mib must be at least 1".to_string())?;
+        requested.mem_mib =
+            Some(NonZeroU32::new(*m).ok_or_else(|| "mem_mib must be at least 1".to_string())?);
     }
     if let Some(s) = wall_secs {
         if *s == 0 {
             return Err("wall_secs must be at least 1".to_string());
         }
-        limits.wall = Duration::from_secs(*s);
+        requested.wall_secs = Some(*s);
     }
-    if let Some(c) = output_cap {
-        limits.output_cap = *c;
-    }
+    requested.output_cap = *output_cap;
+
+    let limits = policy.resolve(&requested).map_err(|e| e.to_string())?;
     Ok((limits, bare))
 }
 
@@ -611,12 +620,15 @@ mod tests {
     #[test]
     fn open_limits_folds_validates_and_flags_bare() {
         // A full open folds each knob and is not bare; the defaults stand where omitted.
-        let (limits, bare) = open_limits(&Request::Open {
-            vcpus: Some(4),
-            mem_mib: Some(1024),
-            wall_secs: Some(60),
-            output_cap: Some(4096),
-        })
+        let (limits, bare) = open_limits(
+            &Request::Open {
+                vcpus: Some(4),
+                mem_mib: Some(1024),
+                wall_secs: Some(60),
+                output_cap: Some(4096),
+            },
+            &Policy::default(),
+        )
         .expect("valid open");
         assert!(!bare, "a knobbed open is not pool-eligible");
         assert_eq!(limits.vcpus.get(), 4);
@@ -625,12 +637,15 @@ mod tests {
         assert_eq!(limits.output_cap, 4096);
 
         let d = Limits::default();
-        let (base, bare) = open_limits(&Request::Open {
-            vcpus: None,
-            mem_mib: None,
-            wall_secs: None,
-            output_cap: None,
-        })
+        let (base, bare) = open_limits(
+            &Request::Open {
+                vcpus: None,
+                mem_mib: None,
+                wall_secs: None,
+                output_cap: None,
+            },
+            &Policy::default(),
+        )
         .expect("bare open");
         assert!(bare, "a fully-defaulted open is pool-eligible");
         assert_eq!(base.vcpus, d.vcpus);
@@ -640,14 +655,79 @@ mod tests {
     }
 
     #[test]
+    fn an_operator_ceiling_refuses_a_greedy_client_open() {
+        // The daemon's policy boundary: a client controls neither the daemon's flags nor its
+        // environment, so this is the point where an operator ceiling becomes real. Asking past it
+        // must be refused, not served a quietly smaller VM (decision 026/041).
+        let policy = Policy {
+            max_vcpus: NonZeroU8::new(2),
+            max_mem_mib: NonZeroU32::new(512),
+            ..Policy::default()
+        };
+        let err = open_limits(
+            &Request::Open {
+                vcpus: Some(16),
+                mem_mib: None,
+                wall_secs: None,
+                output_cap: None,
+            },
+            &policy,
+        )
+        .expect_err("16 vCPUs is past the operator's ceiling");
+        assert!(
+            err.contains("vcpus") && err.contains('2'),
+            "the refusal names the knob and the bound: {err}"
+        );
+
+        // Under the ceiling still works, and the pool-eligibility signal is unaffected by policy.
+        let (limits, bare) = open_limits(
+            &Request::Open {
+                vcpus: Some(2),
+                mem_mib: None,
+                wall_secs: None,
+                output_cap: None,
+            },
+            &policy,
+        )
+        .expect("at the ceiling is allowed");
+        assert_eq!(limits.vcpus.get(), 2);
+        assert!(!bare);
+    }
+
+    #[test]
+    fn an_operator_default_fills_in_a_bare_client_open() {
+        // A silent client gets the house profile, and stays pool-eligible: `bare` tracks what the
+        // *client* asked for, not what policy resolved to.
+        let policy = Policy {
+            mem_mib: NonZeroU32::new(768),
+            ..Policy::default()
+        };
+        let (limits, bare) = open_limits(
+            &Request::Open {
+                vcpus: None,
+                mem_mib: None,
+                wall_secs: None,
+                output_cap: None,
+            },
+            &policy,
+        )
+        .expect("bare open under policy");
+        assert_eq!(limits.mem_mib.get(), 768, "the house default applied");
+        assert!(bare, "policy does not make a bare open non-bare");
+    }
+
+    #[test]
     fn a_single_knob_makes_the_open_non_bare() {
         // Even one custom knob means the pool's default-profile clone can't serve it, cold boot.
-        let (_, bare) = open_limits(&Request::Open {
-            vcpus: None,
-            mem_mib: Some(512),
-            wall_secs: None,
-            output_cap: None,
-        })
+        let (_, bare) = open_limits(
+            &Request::Open {
+                vcpus: None,
+                mem_mib: Some(512),
+                wall_secs: None,
+                output_cap: None,
+            },
+            &Policy::default(),
+        )
         .expect("valid open");
         assert!(!bare);
     }
@@ -692,14 +772,16 @@ mod tests {
                 "wall_secs",
             ),
         ] {
-            let err = open_limits(&req).expect_err("illegal value must be rejected");
+            let err =
+                open_limits(&req, &Policy::default()).expect_err("illegal value must be rejected");
             assert!(err.contains(needle), "error should name {needle}: {err}");
         }
     }
 
     #[test]
     fn a_non_open_first_message_is_rejected() {
-        let err = open_limits(&Request::Close).expect_err("close is not an open");
+        let err =
+            open_limits(&Request::Close, &Policy::default()).expect_err("close is not an open");
         assert!(err.contains("open"), "{err}");
     }
 
