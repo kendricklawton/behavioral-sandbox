@@ -1,4 +1,4 @@
-# 028. `kee doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them *(2026-07-17)*
+# 028. `ebpf-kvm-engine doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them *(2026-07-17)*
 
 **Context.** The engine's isolation rests on the host, so whether a given host can run a sandbox at all
 is a property an operator has to know *before* the first run, not discover mid-flight. That pulls in two
@@ -11,15 +11,15 @@ input alike. In parallel, the two machine-readable surfaces the engine emits, th
 and the audit record, are about to become a contract that external consumers parse; a contract that gains
 a stable meaning only once something depends on it is far cheaper to shape now than to migrate later.
 
-**Decision.** The host readiness check ships as an engine subcommand, `kee doctor`, so an operator on
+**Decision.** The host readiness check ships as an engine subcommand, `ebpf-kvm-engine doctor`, so an operator on
 a fresh host reads what will work, degrade, or refuse before the first sandbox. The **one implementation**
-lives in `eke-vmm::doctor` (a structured `Vec<Check>` with an `Ok`/`Warn`/`Fail` status plus the
-degradation matrix), where the engine-runtime prerequisites are its domain; both `kee doctor` and
+lives in `vmm::doctor` (a structured `Vec<Check>` with an `Ok`/`Warn`/`Fail` status plus the
+degradation matrix), where the engine-runtime prerequisites are its domain; both `ebpf-kvm-engine doctor` and
 `cargo xtask setup` render it, so the dev-box check and the operator's can't drift. The status split
 mirrors the engine's own error discipline: the isolation boundary (`/dev/kvm`) and the boot artifacts are
-**hard** (`Fail` gives a non-zero exit, so `kee doctor && eke run …` gates), while the jailer,
+**hard** (`Fail` gives a non-zero exit, so `ebpf-kvm-engine doctor && ebpf-kvm-engine run …` gates), while the jailer,
 resource caps, and networking/bulk-I/O tools **fail open** (`Warn` with a named consequence). The
-eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of `eke-vmm`
+eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of `vmm`
 (decisions 021/023); each entry point appends it. `xtask setup` keeps its dev-only rows (bpf-linker,
 nightly, readelf) local, since an operator running the shipped engine doesn't need them.
 
@@ -30,7 +30,7 @@ changes are *additive only* (a new field a consumer can ignore); renaming or rem
 a value's meaning, **bumps** the integer. This lands before anything external parses the bytes, so the
 wire API and the SDK freeze harden a stable contract rather than a moving one.
 
-**Consequences.** The single `eke-vmm::doctor` source means one place to keep correct, and any new
+**Consequences.** The single `vmm::doctor` source means one place to keep correct, and any new
 prerequisite must declare itself hard or fail-open, forcing the isolation-vs-convenience call to be made
 explicitly rather than by omission. The fail-open rows are the residual risk: a host missing the jailer,
 resource caps, or networking tools still runs, degraded, and the operator carries the consequence named in

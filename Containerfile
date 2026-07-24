@@ -3,11 +3,11 @@
 # engine drives. The KVM boundary cannot come from the image: run it with the host's /dev/kvm.
 #
 #   cargo xtask dist
-#   docker build -f Containerfile --build-arg DIST=dist/kee-<ver>-x86_64-linux -t kee:<ver> .
+#   docker build -f Containerfile --build-arg DIST=dist/ebpf-kvm-engine-<ver>-x86_64-linux -t ebpf-kvm-engine:<ver> .
 #
-#   docker run --rm kee:<ver>                                # doctor: what this host can do
-#   docker run --rm --device /dev/kvm kee:<ver> run --unjailed -- echo hi
-#   docker run --rm --device /dev/kvm --cap-add NET_ADMIN kee:<ver> run --unjailed --net ...
+#   docker run --rm ebpf-kvm-engine:<ver>                                # doctor: what this host can do
+#   docker run --rm --device /dev/kvm ebpf-kvm-engine:<ver> run --unjailed -- echo hi
+#   docker run --rm --device /dev/kvm --cap-add NET_ADMIN ebpf-kvm-engine:<ver> run --unjailed --net ...
 #
 # The jailed default and eBPF observation need more of the host (real root in the user namespace,
 # CAP_BPF/CAP_PERFMON, cgroup v2 delegation); a hardened deployment runs those on the host or in a
@@ -33,10 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fspr
     && rm -rf /var/lib/apt/lists/*
 COPY --from=firecracker /usr/local/bin/firecracker /usr/local/bin/jailer /usr/local/bin/
 ARG DIST
-COPY ${DIST}/ /opt/kee/
-ENV KEE_KERNEL=/opt/kee/share/kee/vmlinux \
-    KEE_ROOTFS=/opt/kee/share/kee/rootfs-kee.ext4 \
-    KEE_PROBES_OBJECT=/opt/kee/share/kee/probes \
-    PATH=/opt/kee/bin:/usr/local/bin:/usr/bin:/bin
-ENTRYPOINT ["/opt/kee/bin/kee"]
+COPY ${DIST}/ /opt/ebpf-kvm-engine/
+ENV EBPF_KVM_ENGINE_KERNEL=/opt/ebpf-kvm-engine/share/ebpf-kvm-engine/vmlinux \
+    EBPF_KVM_ENGINE_ROOTFS=/opt/ebpf-kvm-engine/share/ebpf-kvm-engine/rootfs-guest.ext4 \
+    EBPF_KVM_ENGINE_PROBES_OBJECT=/opt/ebpf-kvm-engine/share/ebpf-kvm-engine/probes \
+    PATH=/opt/ebpf-kvm-engine/bin:/usr/local/bin:/usr/bin:/bin
+ENTRYPOINT ["/opt/ebpf-kvm-engine/bin/ebpf-kvm-engine"]
 CMD ["doctor"]

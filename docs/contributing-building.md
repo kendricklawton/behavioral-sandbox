@@ -31,7 +31,7 @@ dependencies alike.
 ## Getting a source tree ready
 
 ```console
-git clone https://github.com/k-henry-org/kvm-ebpf-engine && cd kvm-ebpf-engine
+git clone https://github.com/k-henry-org/ebpf-kvm-engine && cd ebpf-kvm-engine
 cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
 cargo build                  # the workspace: driver, loader, CLI, guest agent
 ```

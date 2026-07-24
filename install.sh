@@ -1,32 +1,32 @@
 #!/bin/sh
-# Install the kvm-ebpf-engine sandbox engine from a release package (decision 035).
+# Install the ebpf-kvm-engine sandbox engine from a release package (decision 035).
 #
 # Canonical use (once releases are public):
-#   curl -fsSL https://raw.githubusercontent.com/k-henry-org/kvm-ebpf-engine/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/k-henry-org/ebpf-kvm-engine/main/install.sh | sh
 #
 # Also works from a local package (offline / pre-release testing):
-#   EKE_DIST_TARBALL=dist/eke-<ver>-x86_64-linux.tar.gz sh install.sh
-# and from inside an extracted tarball (the copy packed next to bin/kee):
+#   EBPF_KVM_ENGINE_DIST_TARBALL=dist/ebpf-kvm-engine-<ver>-x86_64-linux.tar.gz sh install.sh
+# and from inside an extracted tarball (the copy packed next to bin/ebpf-kvm-engine):
 #   sh ./install.sh
 #
 # Knobs (env):
-#   EKE_REPO            GitHub repo to fetch from        (default k-henry-org/kvm-ebpf-engine)
-#   EKE_VERSION         release version, no leading v    (default: the latest release)
-#   EKE_DIST_TARBALL    local tarball, skips the network
-#   EKE_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
-#   EKE_DATA_DIR        where the artifacts go           (default $XDG_DATA_HOME/kee or
-#                                                           ~/.local/share/kee)
-#   EKE_NO_TOML=1       don't write ~/.eke.toml
+#   EBPF_KVM_ENGINE_REPO            GitHub repo to fetch from        (default k-henry-org/ebpf-kvm-engine)
+#   EBPF_KVM_ENGINE_VERSION         release version, no leading v    (default: the latest release)
+#   EBPF_KVM_ENGINE_DIST_TARBALL    local tarball, skips the network
+#   EBPF_KVM_ENGINE_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
+#   EBPF_KVM_ENGINE_DATA_DIR        where the artifacts go           (default $XDG_DATA_HOME/ebpf-kvm-engine or
+#                                                           ~/.local/share/ebpf-kvm-engine)
+#   EBPF_KVM_ENGINE_NO_TOML=1       don't write ~/.ebpf-kvm-engine.toml
 #
 # The sha256 is the contract at both layers: the tarball against SHA256SUMS (when available), and
 # every extracted file against the package's MANIFEST.sha256. Nothing installs unverified.
 set -eu
 
-REPO="${EKE_REPO:-k-henry-org/kvm-ebpf-engine}"
-PREFIX="${EKE_INSTALL_PREFIX:-$HOME/.local/bin}"
-DATA="${EKE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kee}"
-VERSION="${EKE_VERSION:-}"
-TARBALL="${EKE_DIST_TARBALL:-}"
+REPO="${EBPF_KVM_ENGINE_REPO:-k-henry-org/ebpf-kvm-engine}"
+PREFIX="${EBPF_KVM_ENGINE_INSTALL_PREFIX:-$HOME/.local/bin}"
+DATA="${EBPF_KVM_ENGINE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ebpf-kvm-engine}"
+VERSION="${EBPF_KVM_ENGINE_VERSION:-}"
+TARBALL="${EBPF_KVM_ENGINE_DIST_TARBALL:-}"
 
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -41,12 +41,12 @@ TMP=""
 cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
-# Where this script itself lives: inside an extracted package it sits next to bin/kee, and then
+# Where this script itself lives: inside an extracted package it sits next to bin/ebpf-kvm-engine, and then
 # the surrounding stage IS the install source (no download, no re-extract).
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
 
 STAGE=""
-if [ -n "$SCRIPT_DIR" ] && [ -x "$SCRIPT_DIR/bin/kee" ] && [ -f "$SCRIPT_DIR/MANIFEST.sha256" ]; then
+if [ -n "$SCRIPT_DIR" ] && [ -x "$SCRIPT_DIR/bin/ebpf-kvm-engine" ] && [ -f "$SCRIPT_DIR/MANIFEST.sha256" ]; then
     say "installing from the extracted package at $SCRIPT_DIR"
     STAGE="$SCRIPT_DIR"
 else
@@ -55,9 +55,9 @@ else
         if [ -z "$VERSION" ]; then
             VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
                 | sed -n 's/^ *"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)
-            [ -n "$VERSION" ] || fail "could not resolve the latest release of $REPO (private repo, or no release yet?) — set EKE_VERSION or EKE_DIST_TARBALL"
+            [ -n "$VERSION" ] || fail "could not resolve the latest release of $REPO (private repo, or no release yet?) — set EBPF_KVM_ENGINE_VERSION or EBPF_KVM_ENGINE_DIST_TARBALL"
         fi
-        ASSET="kee-$VERSION-x86_64-linux.tar.gz"
+        ASSET="ebpf-kvm-engine-$VERSION-x86_64-linux.tar.gz"
         BASE="https://github.com/$REPO/releases/download/v$VERSION"
         TMP=$(mktemp -d)
         say "downloading $ASSET from $REPO v$VERSION"
@@ -68,7 +68,7 @@ else
         say "sha256 verified against SHA256SUMS"
         TARBALL="$TMP/$ASSET"
     else
-        [ -f "$TARBALL" ] || fail "EKE_DIST_TARBALL not found: $TARBALL"
+        [ -f "$TARBALL" ] || fail "EBPF_KVM_ENGINE_DIST_TARBALL not found: $TARBALL"
         SUMS=$(dirname -- "$TARBALL")/SHA256SUMS
         if [ -f "$SUMS" ]; then
             ( cd "$(dirname -- "$TARBALL")" && grep "  $(basename -- "$TARBALL")\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
@@ -81,8 +81,8 @@ else
     fi
 
     tar -C "$TMP" -xzf "$TARBALL" || fail "extract failed: $TARBALL"
-    STAGE=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'kee-*' | head -n1)
-    [ -n "$STAGE" ] || fail "no kee-* directory inside the tarball"
+    STAGE=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'ebpf-kvm-engine-*' | head -n1)
+    [ -n "$STAGE" ] || fail "no ebpf-kvm-engine-* directory inside the tarball"
 fi
 
 # Every file must match the package manifest before anything is copied into place.
@@ -91,22 +91,22 @@ fi
 say "package manifest verified ($(wc -l < "$STAGE/MANIFEST.sha256") files)"
 
 mkdir -p "$PREFIX" "$DATA"
-install -m 0755 "$STAGE/bin/kee" "$PREFIX/kee"
-say "installed $PREFIX/kee"
-for f in vmlinux rootfs-kee.ext4 probes; do
-    install -m 0644 "$STAGE/share/kee/$f" "$DATA/$f"
+install -m 0755 "$STAGE/bin/ebpf-kvm-engine" "$PREFIX/ebpf-kvm-engine"
+say "installed $PREFIX/ebpf-kvm-engine"
+for f in vmlinux rootfs-guest.ext4 probes; do
+    install -m 0644 "$STAGE/share/ebpf-kvm-engine/$f" "$DATA/$f"
     say "installed $DATA/$f"
 done
 
 # A starter config, written only if none exists (the engine's own nearest-up-from-cwd discovery
-# finds ~/.eke.toml for anything under $HOME). Never overwrites: your config is yours.
-if [ -z "${EKE_NO_TOML:-}" ] && [ ! -e "$HOME/.eke.toml" ]; then
-    cat > "$HOME/.eke.toml" <<EOF
-# Written by install.sh; the engine reads the nearest .eke.toml walking up from the cwd.
+# finds ~/.ebpf-kvm-engine.toml for anything under $HOME). Never overwrites: your config is yours.
+if [ -z "${EBPF_KVM_ENGINE_NO_TOML:-}" ] && [ ! -e "$HOME/.ebpf-kvm-engine.toml" ]; then
+    cat > "$HOME/.ebpf-kvm-engine.toml" <<EOF
+# Written by install.sh; the engine reads the nearest .ebpf-kvm-engine.toml walking up from the cwd.
 kernel = "$DATA/vmlinux"
-rootfs = "$DATA/rootfs-kee.ext4"
+rootfs = "$DATA/rootfs-guest.ext4"
 EOF
-    say "wrote $HOME/.eke.toml (kernel + rootfs paths)"
+    say "wrote $HOME/.ebpf-kvm-engine.toml (kernel + rootfs paths)"
 fi
 
 say ""
@@ -117,14 +117,14 @@ case ":$PATH:" in
 esac
 # The engine finds the eBPF object under the default data dir on its own, so only a *relocated*
 # install still needs the override spelled out.
-if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/kee" ]; then
-    say "  - non-default data dir, so observability needs: export EKE_PROBES_OBJECT=\"$DATA/probes\""
+if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/ebpf-kvm-engine" ]; then
+    say "  - non-default data dir, so observability needs: export EBPF_KVM_ENGINE_PROBES_OBJECT=\"$DATA/probes\""
 fi
 say "  - Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH, from"
 say "      https://github.com/firecracker-microvm/firecracker/releases (or use the container image,"
 say "      which bundles a pinned one)"
 say "  - check the host; it prints the exact run command for this host:"
-say "      eke doctor"
+say "      ebpf-kvm-engine doctor"
 say "  - then run something (the default jails the VMM, which needs real root):"
-say "      sudo -E eke run -- echo hello       # jailed, the supported posture"
-say "      eke run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+say "      sudo -E ebpf-kvm-engine run -- echo hello       # jailed, the supported posture"
+say "      ebpf-kvm-engine run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"

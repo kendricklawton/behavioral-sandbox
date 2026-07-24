@@ -406,7 +406,7 @@ mod tests {
             "crates/vmm/src/lib.rs",
             "docs/probes.md",
             "crates/probes",
-            "guest-agent/src/lib.rs",
+            "crates/guest-agent/src/lib.rs",
         ] {
             assert!(is_path_candidate(good, &anchors), "{good}");
         }

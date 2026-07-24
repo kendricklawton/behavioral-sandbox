@@ -9,7 +9,7 @@
 //! - **`setup`**, checks the host can do KVM + eBPF and reports what's missing.
 //! - **`self-host`**, the single self-host command: obtain the pinned kernel + rootfs, build the
 //!   guest image + eBPF object, install `agent`, and (on a KVM host) boot one sandbox to
-//!   prove it. Offline when `EKE_VENDOR_DIR` points at a `vendor` mirror.
+//!   prove it. Offline when `EBPF_KVM_ENGINE_VENDOR_DIR` points at a `vendor` mirror.
 //! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
 //!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
 //!   bucket or the Alpine CDN; `--verify` re-checks the mirror offline.
@@ -54,7 +54,7 @@
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
 //! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the untrusted-input decoders: the
-//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`kee serve`'s socket,
+//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`ebpf-kvm-engine serve`'s socket,
 //!   the outermost boundary), the signed-record envelope (attacker-relayed by design), and the
 //!   eBPF-boundary parsers. Nightly + `cargo install cargo-fuzz`; never part of `ci` (the in-gate
 //!   coverage is the crates' own dependency-light mutation tests).
@@ -109,7 +109,7 @@ enum Cmd {
     Setup,
     /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
     /// object, install the `agent` binary, and (on a KVM host) boot one sandbox to prove
-    /// it. Offline when `EKE_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
+    /// it. Offline when `EBPF_KVM_ENGINE_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
     SelfHost {
         /// Where to install the `agent` binary (default `~/.local/bin`).
         #[arg(long, value_name = "DIR")]
@@ -138,7 +138,7 @@ enum Cmd {
     FetchArtifacts,
     /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
     /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`
-    /// (decision 035). Vendor-aware via `EKE_VENDOR_DIR`; the eBPF toolchain is required (a
+    /// (decision 035). Vendor-aware via `EBPF_KVM_ENGINE_VENDOR_DIR`; the eBPF toolchain is required (a
     /// package without the audit half is not the product).
     Dist {
         /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
@@ -152,7 +152,7 @@ enum Cmd {
     /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
     BuildGuestExample,
     /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
-    /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-kee.ext4` (needs `curl`,
+    /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-guest.ext4` (needs `curl`,
     /// `tar`, `mke2fs`, `truncate`). Reproducible: two builds are byte-identical.
     BuildRootfs {
         /// Build a second time and assert the image is byte-identical, and fail if the resolved
@@ -792,24 +792,24 @@ fn ci_privileged() -> Result<()> {
 fn setup() -> Result<()> {
     println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `kee doctor` renders (decision 028): one
+    // The runtime host checks are the *same* implementation `ebpf-kvm-engine doctor` renders (decision 028): one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
-    let config = eke_vmm::BootConfig::from_env();
-    for c in eke_vmm::doctor::checks(&config) {
-        let ok = c.status == eke_vmm::doctor::CheckStatus::Ok;
+    let config = vmm::BootConfig::from_env();
+    for c in vmm::doctor::checks(&config) {
+        let ok = c.status == vmm::doctor::CheckStatus::Ok;
         check(&c.label, ok);
     }
-    // The eBPF-observability capability row (owned by the probe loader, out of `eke-vmm`).
+    // The eBPF-observability capability row (owned by the probe loader, out of `vmm`).
     check(
         "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
-        eke_probes_loader::check_support().is_ok(),
+        probes_loader::check_support().is_ok(),
     );
 
     // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
     // verifying static links); an operator running the shipped engine does not, so they are not in
-    // the shared `kee doctor` set.
+    // the shared `ebpf-kvm-engine doctor` set.
     println!("\ndev toolchain (for building, not running):");
     check(
         "bpf-linker installed",
@@ -828,10 +828,10 @@ fn setup() -> Result<()> {
         matches!(rootfs::mke2fs_version(), Some(v) if v >= rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN),
     );
 
-    // The degradation matrix, the same fails-open-vs-hard split `kee doctor` prints, from the one
+    // The degradation matrix, the same fails-open-vs-hard split `ebpf-kvm-engine doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.
     println!("\nDegradation matrix: what a missing item above means at runtime:");
-    for line in eke_vmm::doctor::matrix() {
+    for line in vmm::doctor::matrix() {
         println!("  {line}");
     }
 
@@ -840,11 +840,11 @@ fn setup() -> Result<()> {
     // these are the calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
     println!("\nHardening: the hoster's responsibility (the engine can't decide these for you):");
-    println!("    scratch base: point EKE_SCRATCH_DIR at a dir only the engine user owns (not the");
+    println!("    scratch base: point EBPF_KVM_ENGINE_SCRATCH_DIR at a dir only the engine user owns (not the");
     println!(
         "                  world-writable /tmp default), so no other local user can plant residue"
     );
-    println!("    run the sweep: schedule eke_vmm::sweep_orphans() (boot-time + periodic), the");
+    println!("    run the sweep: schedule vmm::sweep_orphans() (boot-time + periodic), the");
     println!("                  engine exposes it; when/how often it runs is your ops call");
     println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
     println!("                  run drivers as several users, each user must run its own sweep");
@@ -856,7 +856,7 @@ fn setup() -> Result<()> {
     println!(
         "             A host without kernel BTF or those caps is named by a typed error, not a"
     );
-    println!("             cryptic verifier reject (eke_probes_loader::check_support).");
+    println!("             cryptic verifier reject (probes_loader::check_support).");
 
     println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
     Ok(())
@@ -1046,11 +1046,11 @@ fn require_kvm(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// The local vendor mirror, if the operator set `EKE_VENDOR_DIR`: the offline source for every
+/// The local vendor mirror, if the operator set `EBPF_KVM_ENGINE_VENDOR_DIR`: the offline source for every
 /// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Firecracker S3
 /// bucket or the Alpine CDN. `None` means fetch from pinned upstream (the default).
 fn vendor_dir() -> Option<PathBuf> {
-    std::env::var_os("EKE_VENDOR_DIR")
+    std::env::var_os("EBPF_KVM_ENGINE_VENDOR_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }
@@ -1064,8 +1064,8 @@ fn kernel_path() -> PathBuf {
 fn boot_rootfs_path() -> PathBuf {
     artifacts_dir().join("rootfs.ext4")
 }
-fn eke_rootfs_path() -> PathBuf {
-    artifacts_dir().join("rootfs-eke.ext4")
+fn guest_rootfs_path() -> PathBuf {
+    artifacts_dir().join("rootfs-guest.ext4")
 }
 
 /// Run an external build tool, echoing the command; fail with context if it's missing or errors.

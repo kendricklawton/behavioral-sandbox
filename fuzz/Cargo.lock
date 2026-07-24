@@ -316,34 +316,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "kee-channel"
+name = "channel"
 version = "0.1.0"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
-name = "kee-fuzz"
+name = "fuzz"
 version = "0.0.0"
 dependencies = [
- "kee-channel",
- "kee-probes-common",
- "kee-probes-loader",
- "kee-protocol",
+ "channel",
+ "probes-common",
+ "probes-loader",
+ "protocol",
  "libfuzzer-sys",
 ]
 
 [[package]]
-name = "kee-probes-common"
+name = "probes-common"
 version = "0.1.0"
 
 [[package]]
-name = "kee-probes-loader"
+name = "probes-loader"
 version = "0.1.0"
 dependencies = [
  "aya",
  "ed25519-dalek",
- "kee-probes-common",
+ "probes-common",
  "nix",
  "serde_json",
  "sha2",
@@ -351,7 +351,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kee-protocol"
+name = "protocol"
 version = "0.1.0"
 dependencies = [
  "serde",

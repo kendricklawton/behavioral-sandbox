@@ -5,7 +5,7 @@
 //! boot artifacts. `install.sh` (repo root, also packed into the tarball) consumes the result.
 //!
 //! Every step reuses the tested building blocks the individual `xtask` commands use, so this is
-//! orchestration, not a second build path. Vendor-aware like `self-host`: with `EKE_VENDOR_DIR`
+//! orchestration, not a second build path. Vendor-aware like `self-host`: with `EBPF_KVM_ENGINE_VENDOR_DIR`
 //! set the whole assembly runs offline.
 
 use std::path::{Path, PathBuf};
@@ -14,10 +14,10 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::artifacts::sha256_of;
-use crate::{build_probes, cargo, eke_rootfs_path, kernel_path, workspace_root};
+use crate::{build_probes, cargo, guest_rootfs_path, kernel_path, workspace_root};
 
-/// The packaged eBPF object's name inside `share/kee/` (the loader finds it via
-/// `EKE_PROBES_OBJECT`, which `install.sh` and the container image point here).
+/// The packaged eBPF object's name inside `share/ebpf-kvm-engine/` (the loader finds it via
+/// `EBPF_KVM_ENGINE_PROBES_OBJECT`, which `install.sh` and the container image point here).
 const PROBES_NAME: &str = "probes";
 
 /// `cargo xtask dist [--version V]`: build binary + artifacts, stage, checksum, tar.
@@ -34,7 +34,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         Some(v) => v,
         None => default_version(),
     };
-    let name = format!("kee-{version}-x86_64-linux");
+    let name = format!("ebpf-kvm-engine-{version}-x86_64-linux");
     println!("dist: assembling {name}\n");
 
     println!("== 1/5  obtain the pinned guest kernel ==");
@@ -62,10 +62,10 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     }
 
     println!("\n== 4/5  build the release binary ==");
-    cargo(&["build", "--release", "--locked", "-p", "kee-cli"])?;
+    cargo(&["build", "--release", "--locked", "-p", "cli"])?;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace_root().join("target"), PathBuf::from);
-    let bin = target.join("release/kee");
+    let bin = target.join("release/ebpf-kvm-engine");
     if !bin.is_file() {
         bail!("built binary {} not found", bin.display());
     }
@@ -77,13 +77,17 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         std::fs::remove_dir_all(&stage)
             .with_context(|| format!("clear stale stage {}", stage.display()))?;
     }
-    let share = stage.join("share/kee");
+    let share = stage.join("share/ebpf-kvm-engine");
     std::fs::create_dir_all(stage.join("bin")).context("create stage bin/")?;
-    std::fs::create_dir_all(&share).context("create stage share/kee/")?;
+    std::fs::create_dir_all(&share).context("create stage share/ebpf-kvm-engine/")?;
 
-    copy_mode(&bin, &stage.join("bin/kee"), 0o755)?;
+    copy_mode(&bin, &stage.join("bin/ebpf-kvm-engine"), 0o755)?;
     copy_mode(&kernel, &share.join("vmlinux"), 0o644)?;
-    copy_mode(&eke_rootfs_path(), &share.join("rootfs-eke.ext4"), 0o644)?;
+    copy_mode(
+        &guest_rootfs_path(),
+        &share.join("rootfs-guest.ext4"),
+        0o644,
+    )?;
     copy_mode(&object, &share.join(PROBES_NAME), 0o644)?;
     copy_mode(
         &workspace_root().join("install.sh"),
@@ -112,11 +116,11 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         stage.display()
     );
     println!(
-        "  or from the tarball:     EKE_DIST_TARBALL={} sh install.sh",
+        "  or from the tarball:     EBPF_KVM_ENGINE_DIST_TARBALL={} sh install.sh",
         tarball.display()
     );
     println!(
-        "  container image:         docker build -f Containerfile --build-arg DIST=dist/{name} -t kee:{version} ."
+        "  container image:         docker build -f Containerfile --build-arg DIST=dist/{name} -t ebpf-kvm-engine:{version} ."
     );
     Ok(())
 }

@@ -6,7 +6,7 @@
 
 #![no_main]
 
-use eke_probes_common::{parse_ipv4_5tuple, SyscallEvent};
+use probes_common::{parse_ipv4_5tuple, SyscallEvent};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

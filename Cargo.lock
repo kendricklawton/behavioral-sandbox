@@ -228,6 +228,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "channel"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "clap"
 version = "4.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -266,6 +273,33 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
+
+[[package]]
+name = "cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "client",
+ "probes-loader",
+ "protocol",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "test-support",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "vmm",
+]
+
+[[package]]
+name = "client"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+ "serde_json",
+]
 
 [[package]]
 name = "colorchoice"
@@ -537,94 +571,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
-name = "eke-channel"
-version = "0.1.0"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "eke-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "eke-client",
- "eke-probes-loader",
- "eke-protocol",
- "eke-test-support",
- "eke-vmm",
- "ratatui",
- "serde",
- "serde_json",
- "signal-hook",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "eke-client"
-version = "0.1.0"
-dependencies = [
- "eke-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "eke-guest-agent"
-version = "0.1.0"
-dependencies = [
- "eke-channel",
- "tracing",
- "tracing-subscriber",
- "vsock",
-]
-
-[[package]]
-name = "eke-probes-common"
-version = "0.1.0"
-
-[[package]]
-name = "eke-probes-loader"
-version = "0.1.0"
-dependencies = [
- "aya",
- "ed25519-dalek",
- "eke-probes-common",
- "eke-test-support",
- "eke-vmm",
- "nix 0.31.3",
- "serde_json",
- "sha2",
- "zeroize",
-]
-
-[[package]]
-name = "eke-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "eke-test-support"
-version = "0.1.0"
-
-[[package]]
-name = "eke-vmm"
-version = "0.1.0"
-dependencies = [
- "eke-channel",
- "eke-guest-agent",
- "eke-test-support",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -778,6 +724,16 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+]
+
+[[package]]
+name = "guest-agent"
+version = "0.1.0"
+dependencies = [
+ "channel",
+ "tracing",
+ "tracing-subscriber",
+ "vsock",
 ]
 
 [[package]]
@@ -1316,12 +1272,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
+name = "probes-common"
+version = "0.1.0"
+
+[[package]]
+name = "probes-loader"
+version = "0.1.0"
+dependencies = [
+ "aya",
+ "ed25519-dalek",
+ "nix 0.31.3",
+ "probes-common",
+ "serde_json",
+ "sha2",
+ "test-support",
+ "vmm",
+ "zeroize",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1837,6 +1820,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "test-support"
+version = "0.1.0"
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2093,6 +2080,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
+name = "vmm"
+version = "0.1.0"
+dependencies = [
+ "channel",
+ "guest-agent",
+ "serde",
+ "serde_json",
+ "test-support",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "vsock"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2300,10 +2300,10 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "channel",
  "clap",
- "eke-channel",
- "eke-probes-loader",
- "eke-vmm",
+ "probes-loader",
+ "vmm",
 ]
 
 [[package]]

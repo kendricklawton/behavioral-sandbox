@@ -12,7 +12,7 @@
 //!
 //! **Prometheus conventions, followed.** Base units (**seconds**, never milliseconds), `_total`
 //! suffixes on counters, `# HELP`/`# TYPE` for every family, cumulative histogram buckets with an
-//! explicit `+Inf` plus `_sum`/`_count`, an `eke_build_info` gauge carrying the version as a
+//! explicit `+Inf` plus `_sum`/`_count`, an `ebpf_kvm_engine_build_info` gauge carrying the version as a
 //! label, and deliberately **low label cardinality** (fixed `pooled`/`verb`/`kind` sets, nothing
 //! per-session or per-client, which would grow without bound).
 //!
@@ -241,72 +241,72 @@ impl Metrics {
 
         family(
             &mut out,
-            "eke_build_info",
+            "ebpf_kvm_engine_build_info",
             "Build metadata; the value is always 1.",
             "gauge",
         );
         sample(
             &mut out,
-            "eke_build_info",
+            "ebpf_kvm_engine_build_info",
             concat!("{version=\"", env!("CARGO_PKG_VERSION"), "\"}"),
             1,
         );
 
         family(
             &mut out,
-            "eke_sessions_opened_total",
+            "ebpf_kvm_engine_sessions_opened_total",
             "Sessions opened, by whether the warm pool served the boot.",
             "counter",
         );
         sample(
             &mut out,
-            "eke_sessions_opened_total",
+            "ebpf_kvm_engine_sessions_opened_total",
             "{pooled=\"true\"}",
             self.opened_pooled.load(Ordering::Relaxed),
         );
         sample(
             &mut out,
-            "eke_sessions_opened_total",
+            "ebpf_kvm_engine_sessions_opened_total",
             "{pooled=\"false\"}",
             self.opened_cold.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "eke_session_open_failures_total",
+            "ebpf_kvm_engine_session_open_failures_total",
             "Session opens that failed to produce a sandbox.",
             "counter",
         );
         sample(
             &mut out,
-            "eke_session_open_failures_total",
+            "ebpf_kvm_engine_session_open_failures_total",
             "",
             self.open_failures.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "eke_sessions_active",
+            "ebpf_kvm_engine_sessions_active",
             "Sessions currently open (one live microVM each).",
             "gauge",
         );
         sample(
             &mut out,
-            "eke_sessions_active",
+            "ebpf_kvm_engine_sessions_active",
             "",
             self.active.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "eke_requests_total",
+            "ebpf_kvm_engine_requests_total",
             "Requests served after open, by wire verb.",
             "counter",
         );
         for verb in Verb::ALL {
             sample(
                 &mut out,
-                "eke_requests_total",
+                "ebpf_kvm_engine_requests_total",
                 &format!("{{verb=\"{}\"}}", verb.name()),
                 self.requests[verb.index()].load(Ordering::Relaxed),
             );
@@ -314,63 +314,64 @@ impl Metrics {
 
         family(
             &mut out,
-            "eke_request_errors_total",
+            "ebpf_kvm_engine_request_errors_total",
             "Requests answered with an error, by fault kind (guest faults are per-request; infra \
              faults end the session).",
             "counter",
         );
         sample(
             &mut out,
-            "eke_request_errors_total",
+            "ebpf_kvm_engine_request_errors_total",
             "{kind=\"guest\"}",
             self.errors_guest.load(Ordering::Relaxed),
         );
         sample(
             &mut out,
-            "eke_request_errors_total",
+            "ebpf_kvm_engine_request_errors_total",
             "{kind=\"infra\"}",
             self.errors_infra.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "eke_protocol_errors_total",
+            "protocol_errors_total",
             "Wire lines that failed to decode (malformed, oversize, wrong schema).",
             "counter",
         );
         sample(
             &mut out,
-            "eke_protocol_errors_total",
+            "protocol_errors_total",
             "",
             self.protocol_errors.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "eke_boot_seconds",
+            "ebpf_kvm_engine_boot_seconds",
             "Boot-to-serving latency of session sandboxes (warm pops and cold boots alike; split \
-             them via eke_sessions_opened_total's pooled label).",
+             them via ebpf_kvm_engine_sessions_opened_total's pooled label).",
             "histogram",
         );
-        self.boot_seconds.render(&mut out, "eke_boot_seconds");
+        self.boot_seconds
+            .render(&mut out, "ebpf_kvm_engine_boot_seconds");
 
         family(
             &mut out,
-            "eke_guest_command_seconds",
+            "ebpf_kvm_engine_guest_command_seconds",
             "Host-observed wall time of guest commands (exec, and the no-op runs carrying put/get).",
             "histogram",
         );
         self.guest_command_seconds
-            .render(&mut out, "eke_guest_command_seconds");
+            .render(&mut out, "ebpf_kvm_engine_guest_command_seconds");
 
         if let Some(ready) = pool_ready {
             family(
                 &mut out,
-                "eke_pool_ready",
+                "ebpf_kvm_engine_pool_ready",
                 "Warm clones currently ready in the pre-warmed pool (absent when no pool).",
                 "gauge",
             );
-            sample(&mut out, "eke_pool_ready", "", ready);
+            sample(&mut out, "ebpf_kvm_engine_pool_ready", "", ready);
         }
 
         out
@@ -517,39 +518,45 @@ mod tests {
         // Cumulative: the 3ms one is in every bucket from 0.005 up; the 30ms joins at 0.05; the
         // 7s one appears only at le="10" and +Inf.
         assert!(
-            text.contains("eke_boot_seconds_bucket{le=\"0.005\"} 1"),
+            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"0.005\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("eke_boot_seconds_bucket{le=\"0.025\"} 1"),
+            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"0.025\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("eke_boot_seconds_bucket{le=\"0.05\"} 2"),
+            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"0.05\"} 2"),
             "{text}"
         );
         assert!(
-            text.contains("eke_boot_seconds_bucket{le=\"5\"} 2"),
+            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"5\"} 2"),
             "{text}"
         );
         assert!(
-            text.contains("eke_boot_seconds_bucket{le=\"10\"} 3"),
+            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"10\"} 3"),
             "{text}"
         );
         assert!(
-            text.contains("eke_boot_seconds_bucket{le=\"+Inf\"} 3"),
+            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"+Inf\"} 3"),
             "{text}"
         );
-        assert!(text.contains("eke_boot_seconds_count 3"), "{text}");
+        assert!(
+            text.contains("ebpf_kvm_engine_boot_seconds_count 3"),
+            "{text}"
+        );
         // Sum in seconds: 0.003 + 0.030 + 7 = 7.033.
-        assert!(text.contains("eke_boot_seconds_sum 7.033000"), "{text}");
+        assert!(
+            text.contains("ebpf_kvm_engine_boot_seconds_sum 7.033000"),
+            "{text}"
+        );
         // The pooled/cold split rode along.
         assert!(
-            text.contains("eke_sessions_opened_total{pooled=\"true\"} 1"),
+            text.contains("ebpf_kvm_engine_sessions_opened_total{pooled=\"true\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("eke_sessions_opened_total{pooled=\"false\"} 2"),
+            text.contains("ebpf_kvm_engine_sessions_opened_total{pooled=\"false\"} 2"),
             "{text}"
         );
     }
@@ -570,16 +577,16 @@ mod tests {
 
         let text = m.render(Some(2));
         for name in [
-            "eke_build_info",
-            "eke_sessions_opened_total",
-            "eke_session_open_failures_total",
-            "eke_sessions_active",
-            "eke_requests_total",
-            "eke_request_errors_total",
-            "eke_protocol_errors_total",
-            "eke_boot_seconds",
-            "eke_guest_command_seconds",
-            "eke_pool_ready",
+            "ebpf_kvm_engine_build_info",
+            "ebpf_kvm_engine_sessions_opened_total",
+            "ebpf_kvm_engine_session_open_failures_total",
+            "ebpf_kvm_engine_sessions_active",
+            "ebpf_kvm_engine_requests_total",
+            "ebpf_kvm_engine_request_errors_total",
+            "protocol_errors_total",
+            "ebpf_kvm_engine_boot_seconds",
+            "ebpf_kvm_engine_guest_command_seconds",
+            "ebpf_kvm_engine_pool_ready",
         ] {
             assert!(
                 text.contains(&format!("# HELP {name} ")),
@@ -591,32 +598,35 @@ mod tests {
             );
         }
         assert!(
-            text.contains("eke_sessions_active 1"),
+            text.contains("ebpf_kvm_engine_sessions_active 1"),
             "opened twice, closed once: {text}"
         );
-        assert!(text.contains("eke_session_open_failures_total 1"), "{text}");
         assert!(
-            text.contains("eke_requests_total{verb=\"exec\"} 1"),
+            text.contains("ebpf_kvm_engine_session_open_failures_total 1"),
             "{text}"
         );
         assert!(
-            text.contains("eke_requests_total{verb=\"trace\"} 1"),
+            text.contains("ebpf_kvm_engine_requests_total{verb=\"exec\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("eke_requests_total{verb=\"put\"} 0"),
+            text.contains("ebpf_kvm_engine_requests_total{verb=\"trace\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("eke_request_errors_total{kind=\"guest\"} 1"),
+            text.contains("ebpf_kvm_engine_requests_total{verb=\"put\"} 0"),
             "{text}"
         );
         assert!(
-            text.contains("eke_request_errors_total{kind=\"infra\"} 1"),
+            text.contains("ebpf_kvm_engine_request_errors_total{kind=\"guest\"} 1"),
             "{text}"
         );
-        assert!(text.contains("eke_protocol_errors_total 1"), "{text}");
-        assert!(text.contains("eke_pool_ready 2"), "{text}");
+        assert!(
+            text.contains("ebpf_kvm_engine_request_errors_total{kind=\"infra\"} 1"),
+            "{text}"
+        );
+        assert!(text.contains("protocol_errors_total 1"), "{text}");
+        assert!(text.contains("ebpf_kvm_engine_pool_ready 2"), "{text}");
         assert!(text.contains(concat!("{version=\"", env!("CARGO_PKG_VERSION"), "\"} 1")));
     }
 
@@ -624,9 +634,9 @@ mod tests {
     fn without_a_pool_the_pool_family_is_absent_not_zero() {
         // "No pool" and "empty pool" must stay distinguishable to an alert.
         let none = Metrics::default().render(None);
-        assert!(!none.contains("eke_pool_ready"), "{none}");
+        assert!(!none.contains("ebpf_kvm_engine_pool_ready"), "{none}");
         let empty = Metrics::default().render(Some(0));
-        assert!(empty.contains("eke_pool_ready 0"), "{empty}");
+        assert!(empty.contains("ebpf_kvm_engine_pool_ready 0"), "{empty}");
     }
 
     #[test]
@@ -634,7 +644,7 @@ mod tests {
         // An unpaired decrement is a bug, but the scraped value must never wrap to u64::MAX.
         let m = Metrics::default();
         m.session_closed();
-        assert!(m.render(None).contains("eke_sessions_active 0"));
+        assert!(m.render(None).contains("ebpf_kvm_engine_sessions_active 0"));
     }
 
     #[test]
@@ -764,10 +774,10 @@ mod tests {
         assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"), "{ok}");
         assert!(ok.contains("text/plain; version=0.0.4"), "{ok}");
         assert!(
-            ok.contains("eke_sessions_opened_total{pooled=\"true\"} 1"),
+            ok.contains("ebpf_kvm_engine_sessions_opened_total{pooled=\"true\"} 1"),
             "{ok}"
         );
-        assert!(ok.contains("eke_pool_ready 1"), "{ok}");
+        assert!(ok.contains("ebpf_kvm_engine_pool_ready 1"), "{ok}");
 
         let missing = scrape("GET /other HTTP/1.1\r\nHost: t\r\n\r\n");
         assert!(
