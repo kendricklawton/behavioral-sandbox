@@ -106,7 +106,7 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     }
     let socket = dir.join("ebpf-kvm-engine.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"));
     cmd.arg("serve")
         .arg("--unjailed")
         .arg("--socket")

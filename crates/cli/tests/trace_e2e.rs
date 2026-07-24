@@ -6,7 +6,7 @@
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches the
 //! host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
 //! object). Run via `cargo xtask ci-privileged`. Drives the **built `agent` binary** (Cargo's
-//! `CARGO_BIN_EXE_ebpf_kvm_engine`), so what's tested is exactly what an operator runs.
+//! `CARGO_BIN_EXE_ebpf-kvm-engine`), so what's tested is exactly what an operator runs.
 
 // A test binary: `expect`/`panic!` in non-`#[test]` helpers are the idiomatic assertions, which the
 // workspace's deny doesn't auto-exempt outside `#[test]` fns (same note as the vmm suites).
@@ -62,7 +62,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     // on every axis the CLI surfaces. Unjailed on purpose: the proof here is the audit face, and
     // the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let signing_key = scratch.path().join("signing.key");
-    let out = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"))
+    let out = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
         .current_dir(&root)
         .env(
             "EBPF_KVM_ENGINE_ROOTFS",
@@ -137,7 +137,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
 
     // The P19.3 demo: `ebpf-kvm-engine verify` accepts the untouched record, and rejects it after one flipped
     // byte, trusting the same host key that signed it (resolved from EBPF_KVM_ENGINE_SIGNING_KEY).
-    let verify_ok = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"))
+    let verify_ok = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
         .current_dir(&root)
         .env("EBPF_KVM_ENGINE_SIGNING_KEY", &signing_key)
         .args(["verify"])
@@ -164,7 +164,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         serde_json::to_string(&tampered).expect("reserialize") + "\n",
     )
     .expect("write tampered record");
-    let verify_bad = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"))
+    let verify_bad = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
         .current_dir(&root)
         .env("EBPF_KVM_ENGINE_SIGNING_KEY", &signing_key)
         .args(["verify"])
@@ -240,7 +240,7 @@ for _ in range(5):
         pass
 print('p14-9b-egress')
 ";
-    let out = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"))
+    let out = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
         .current_dir(&root)
         .env(
             "EBPF_KVM_ENGINE_ROOTFS",
@@ -330,7 +330,7 @@ fn doctor_passes_then_one_run_drives_every_projection_at_once() {
     let env = artifact_env();
 
     // 1) `ebpf-kvm-engine doctor` on a capable host reports ready (exit 0): the gate an operator runs first.
-    let doc = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"))
+    let doc = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
         .envs(env.iter().cloned())
         .arg("doctor")
         .output()
@@ -356,7 +356,7 @@ open('result.txt', 'w').write(data + '|' + put)
 socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('10.200.0.1', 9999))
 print('p14-9f-complete')
 ";
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
         .current_dir(scratch.path()) // --get writes result.txt here
         .envs(env.iter().cloned())
         .args([
@@ -447,7 +447,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     // Allow only the `search-index` tool (10.200.0.1:9000/udp); the `exfil-webhook` (:9100) is
     // deny-by-default. `--record` + `--record-summary` capture both faces of the one host-observed
     // record.
-    let out = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"))
+    let out = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
         .current_dir(&root)
         .env(
             "EBPF_KVM_ENGINE_ROOTFS",

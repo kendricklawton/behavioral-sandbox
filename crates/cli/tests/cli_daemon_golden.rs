@@ -131,7 +131,7 @@ fn launch_daemon() -> (Daemon, PathBuf) {
     }
     let socket = dir.join("ebpf-kvm-engine.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"));
     cmd.arg("serve")
         .arg("--unjailed")
         .arg("--socket")
@@ -163,7 +163,7 @@ fn launch_daemon() -> (Daemon, PathBuf) {
 /// JSON object).
 fn run_via_cli(argv: &[String], stdin: &str) -> RunOutcome {
     let root = workspace_root();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf_kvm_engine"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"));
     cmd.arg("run").arg("--unjailed").arg("--json").arg("--");
     cmd.args(argv);
     shared_env(&mut cmd, &root);
