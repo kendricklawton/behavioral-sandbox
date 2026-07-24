@@ -257,7 +257,7 @@ fn endpoint6(out: &mut String, addr: [u8; 16], port: u16, proto: u8) {
 mod tests {
     use std::time::Duration;
 
-    use agent_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
+    use kee_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
 
     use super::SUMMARY_NOTABLE_CAP;
     use crate::record::{NetSection, RunRecord, SyscallFootprint, Timing};
@@ -265,10 +265,10 @@ mod tests {
 
     /// A synthetic `SyscallEvent` from public fields (no eBPF), matching the other modules' helper.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; agent_probes_common::DETAIL_CAP];
+        let mut d = [0u8; kee_probes_common::DETAIL_CAP];
         let n = detail.len().min(d.len());
         d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; agent_probes_common::COMM_CAP];
+        let mut c = [0u8; kee_probes_common::COMM_CAP];
         let m = comm.len().min(c.len());
         c[..m].copy_from_slice(&comm.as_bytes()[..m]);
         SyscallEvent {

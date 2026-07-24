@@ -1,9 +1,9 @@
-# Contributing to agent
+# Contributing to kvm-ebpf-engine
 
 Thanks for your interest. A heads-up on where things stand: this project is in **early, pre-1.0
 development** and is **not open to outside code contributions yet**. Only project collaborators commit
 code, and pull requests from non-collaborators aren't being merged while the core is still churning,
-the `Sandbox`/`vmm` API, the `agent serve` wire protocol, the audit-log/record format, and even the
+the `Sandbox`/`vmm` API, the `kee serve` wire protocol, the audit-log/record format, and even the
 crate and project names all still change without notice, and will until the first stable release
 (planned, but not yet scheduled). You're very welcome to read the code, run it, and open issues; direct
 code contribution opens up once the surface stabilizes. This project follows the

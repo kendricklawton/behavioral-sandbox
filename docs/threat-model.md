@@ -125,7 +125,7 @@ The property above (the guest can neither forge nor evade the observation) is on
 otherwise assumes: a party that alters the record **after** it leaves the producing host, a
 compromised relay, an operator, or the transport a supervisor reads it over. To close that gap the
 loader **signs** each finalized record with a host key the guest never sees (an `ed25519` detached
-signature over the canonical record bytes, decision 034), and ships a verify path (`agent verify`, the
+signature over the canonical record bytes, decision 034), and ships a verify path (`kee verify`, the
 library `verify`, and the daemon's signed `trace` reply).
 
 - **What the signature proves:** the record was not altered after the producing host signed it. A
@@ -148,7 +148,7 @@ library `verify`, and the daemon's signed `trace` reply).
   the signing key. A deliberate, documented limitation of append-only evidence, not a chain defect.
 
 See [decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md) for the full model
-and [`agent verify`](./cli.md#agent-verify) for the verify path.
+and [`kee verify`](./cli.md#kee-verify) for the verify path.
 
 ## Assumptions and residual risk
 

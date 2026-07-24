@@ -6,8 +6,8 @@ members = [
     "crates/guest-agent",
     "crates/probes-common",
     "crates/probes-loader",
-    "crates/agent-protocol",
-    "crates/agent-client",
+    "crates/kee-protocol",
+    "crates/kee-client",
     "crates/cli",
     "crates/test-support",
     "xtask",
@@ -32,19 +32,19 @@ edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
 authors = ["K Henry LLC <founder@khenry.dev>"]
-repository = "https://github.com/k-henry-org/agent"
+repository = "https://github.com/k-henry-org/kvm-ebpf-engine"
 
 # Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON
 # over a unix socket (serde), the CLI parses with clap, logs with tracing.
 [workspace.dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-# The CLI's live view (`agent run --watch`), rendered to **stderr** so stdout stays pipe-clean.
+# The CLI's live view (`kee run --watch`), rendered to **stderr** so stdout stays pipe-clean.
 # Terminal I/O rides ratatui's re-exported crossterm, so the two can't version-skew.
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The CLI's `.agent.toml` config file layer. Parse-only; keys mirror the `AGENT_*` env names.
+# The CLI's `.kee.toml` config file layer. Parse-only; keys mirror the `KEE_*` env names.
 toml = "0.8"
 # Record integrity: an `ed25519` detached signature over the canonical record bytes (decision 034),
 # so a consumer detects post-hoc alteration off-host. The audited, standard implementation, never a

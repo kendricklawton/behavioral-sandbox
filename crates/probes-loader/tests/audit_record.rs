@@ -1,9 +1,9 @@
 //! End-to-end test: a workload that touches the network + a file yields a per-run audit record
 //! that shows exactly what the host could observe of it.
 //!
-//! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches all three
+//! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches all three
 //! host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built object). Run
-//! via `cargo xtask ci-privileged`. Uses `agent-vmm` as a **dev-dependency only**, so the loader library
+//! via `cargo xtask ci-privileged`. Uses `kee-vmm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a VMM pid, a netns, a tap).
 //!
 //! This is the convergence proof, the microVM and the eBPF observability as **one system**. It drives
@@ -24,11 +24,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_probes_loader::{
+use kee_probes_loader::{
     check_support, object_path, AxisGap, EgressPolicy, Protocol, SandboxProbes, SharedMeter,
     SharedTracer, Timing,
 };
-use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use kee_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
 const IPPROTO_UDP: u8 = 17;
@@ -53,11 +53,8 @@ fn skip_reason() -> Option<String> {
     if !Path::new("/dev/kvm").exists() {
         return Some("/dev/kvm not present".into());
     }
-    if !workspace_root()
-        .join("artifacts/rootfs-agent.ext4")
-        .is_file()
-    {
-        return Some("agent rootfs not built (run `cargo xtask build-rootfs`)".into());
+    if !workspace_root().join("artifacts/rootfs-kee.ext4").is_file() {
+        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
     }
     None
 }
@@ -67,10 +64,10 @@ fn skip_reason() -> Option<String> {
 fn networked_agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("AGENT_KERNEL").is_none() {
+    if std::env::var_os("KEE_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
+    cfg.rootfs = root.join("artifacts/rootfs-kee.ext4");
     cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     cfg.read_only_root = true;
@@ -80,7 +77,7 @@ fn networked_agent_config() -> BootConfig {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_networked_file_touching_run_yields_a_faithful_audit_record: {why}");
@@ -116,7 +113,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     );
 
     // The workload: read a file *in-guest* (touches files) and send UDP to the host end (touches the
-    // network). Python is in the agent rootfs, so this is deterministic where a busybox applet's
+    // network). Python is in the guest rootfs, so this is deterministic where a busybox applet's
     // raw-socket permissions might not be. No listener is needed, the datagrams still cross the tap.
     let workload = format!(
         "import socket, time\n\
@@ -202,7 +199,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
     // The dual-stack (ADR 008) twin of the test above, and the load-time proof that the kernel
     // **verifier accepts** the v6 datapath (a compiled-and-linked object still has to load). Boots a

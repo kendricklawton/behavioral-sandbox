@@ -4,7 +4,7 @@ The engine's whole reason to exist is running code you don't trust and getting a
 of what it did, so the security model is the product, not an afterthought. This page states what is
 trusted, what counts as a security bug (and what does not), how to report one, and what happens
 after a report. The reporting mechanism also lives
-in [`SECURITY.md`](https://github.com/k-henry-org/agent/blob/main/SECURITY.md) at the repo root
+in [`SECURITY.md`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/SECURITY.md) at the repo root
 (GitHub surfaces it in the Security tab).
 
 ## No supported release yet
@@ -36,7 +36,7 @@ policy reaches no network and holds minimal capability: every allowance is expli
 
 The finalized audit record is **signed** with a host key the guest never sees (an `ed25519` detached
 signature over the canonical record bytes, decision 034), so a consumer detects any alteration made
-*after* the producing host. Verify a record with `agent verify <record>` (or against the trusted
+*after* the producing host. Verify a record with `kee verify <record>` (or against the trusted
 public key directly). The trust root is the host signing key: this makes "tamper-evident" hold
 off-host, but it does **not** protect against a *compromised producing host*, which can sign a
 consistent lie (that is the hoster's key custody, and a compromised host is out of scope below). See
@@ -51,7 +51,7 @@ Given those guarantees, a security bug is anything that breaks one of them:
 - A guest evading, disabling, or forging the host-side observation (the eBPF probes or the records
   they produce).
 - A signed record that verifies **after** being altered, or a forged signature accepted by
-  `agent verify` without the host key (the record-integrity guarantee, decision 034).
+  `kee verify` without the host key (the record-integrity guarantee, decision 034).
 - A hostile guest causing a host panic, hang, or resource leak through the driver's public API.
 - Injected secrets (`--env` values, injected file contents) appearing in logs, errors, or the
   serial console.
@@ -71,7 +71,7 @@ dismissal:
   uid are trusted; an attacker who already has them has everything, no sandbox can claim
   otherwise.
 - **Hosts below the supported floor.** An unsupported architecture or a host kernel older than the
-  LTS floor is refused by `agent doctor` (decision 032); weaknesses that require running there
+  LTS floor is refused by `kee doctor` (decision 032); weaknesses that require running there
   anyway are the operator's acceptance, not an engine bug. The same goes for an *unpatched* host
   kernel within the floor: patching the substrate is the operator's half of the contract.
 - **`--unjailed` weakening the VMM's own confinement.** That flag is the documented dev-box
@@ -94,7 +94,7 @@ dismissal:
 ## After a report: how a fix ships
 
 The reporting mechanics and response expectations live in
-[`SECURITY.md`](https://github.com/k-henry-org/agent/blob/main/SECURITY.md) (private GitHub
+[`SECURITY.md`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/SECURITY.md) (private GitHub
 advisory, acknowledgement within about a week, no bounty). What happens next, honestly scoped to a
 pre-`v0.1.0` single-maintainer project:
 
@@ -104,12 +104,12 @@ pre-`v0.1.0` single-maintainer project:
    regular commit, with a regression test on the gate wherever the bug class allows one.
 3. **Disclose together.** The timeline is agreed with the reporter in the advisory; the default
    ask is that the fix lands before publication. When it does, the GitHub advisory is published,
-   [`RELEASES.md`](https://github.com/k-henry-org/agent/blob/main/RELEASES.md) notes it, and
+   [`RELEASES.md`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/RELEASES.md) notes it, and
    the reporter is credited if they want to be.
 
 ## Reporting a vulnerability
 
 Report privately via GitHub's security advisories: the
-[Security tab](https://github.com/k-henry-org/agent/security), or
-[this direct link](https://github.com/k-henry-org/agent/security/advisories/new) to the
+[Security tab](https://github.com/k-henry-org/kvm-ebpf-engine/security), or
+[this direct link](https://github.com/k-henry-org/kvm-ebpf-engine/security/advisories/new) to the
 reporting form. Please do not open a public issue for a suspected vulnerability.

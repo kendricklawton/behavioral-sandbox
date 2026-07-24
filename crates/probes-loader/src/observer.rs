@@ -1,7 +1,7 @@
 //! The attach bundle: bind the three host-side probes to one sandbox and roll their
 //! output into a [`RunRecord`], and detach + finalize on close.
 //!
-//! `agent-vmm` stays independent of this crate (ADRs 021/023/024), so the bundle takes **plain
+//! `kee-vmm` stays independent of this crate (ADRs 021/023/024), so the bundle takes **plain
 //! values** the driver already exposes, the VMM pid (→ its cgroup, for the syscall tracer and the CPU
 //! meter) and the netns + tap names (for the network monitor), never a `Sandbox`. The composition is
 //! the caller's (the CLI/daemon later): a short launch sequence around `Sandbox::open`.
@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use agent_probes_common::SyscallEvent;
+use kee_probes_common::SyscallEvent;
 
 use crate::record::{AxisGap, NetSection, RunRecord, SyscallFold, SyscallFootprint, Timing};
 use crate::{cgroup_id_of_pid, EgressPolicy, ProbeError, ResourceMeter, SyscallTracer, TapMonitor};
@@ -307,7 +307,7 @@ impl SandboxProbes {
     /// **Finalize + detach on close**: read the three probes into a [`RunRecord`] and
     /// unregister this run's cgroup from the shared tracer + meter. **Must run while the sandbox is still
     /// alive**, the cgroup dir and map fds must be live. `timing` comes from the caller
-    /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `agent-vmm`.
+    /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `kee-vmm`.
     /// Each axis degrades to a recorded gap on a read error.
     pub fn collect(mut self, timing: Timing) -> RunRecord {
         // Host syscalls: drain + finish this cgroup's fold on the shared tracer (also unregisters it).

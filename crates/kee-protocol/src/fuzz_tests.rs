@@ -2,7 +2,7 @@
 //! crate's fuzzing (the deep, nightly `cargo fuzz` half lives in `fuzz/`; see
 //! `docs/contributing-fuzzing.md`).
 //!
-//! **Why here.** The daemon (`agent serve`) reads these bytes off its unix socket from *any* client:
+//! **Why here.** The daemon (`kee serve`) reads these bytes off its unix socket from *any* client:
 //! this is the outermost untrusted-input boundary the engine exposes, unlike the channel decoder,
 //! which only sees a guest already contained inside a VM. Guardrail 5 says a hostile or buggy peer is
 //! a typed [`ProtocolError`], never a host panic, hang, or leak. These tests assert exactly that: for

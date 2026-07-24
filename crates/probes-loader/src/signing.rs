@@ -273,8 +273,8 @@ impl TrustedKey {
     }
 }
 
-/// The engine's per-host data directory: `$XDG_DATA_HOME/agent` (falling back to
-/// `$HOME/.local/share/agent`, then `/var/lib/agent`). This is where an installed deployment keeps
+/// The engine's per-host data directory: `$XDG_DATA_HOME/kee` (falling back to
+/// `$HOME/.local/share/kee`, then `/var/lib/kee`). This is where an installed deployment keeps
 /// host **state** and runtime artifacts, and is the directory `install.sh` writes into.
 pub(crate) fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
@@ -282,12 +282,12 @@ pub(crate) fn data_dir() -> PathBuf {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
         .unwrap_or_else(|| PathBuf::from("/var/lib"));
-    base.join("agent")
+    base.join("kee")
 }
 
-/// The default host-key path when neither a flag, `AGENT_SIGNING_KEY`, nor a config file sets one:
-/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/agent`, else
-/// `$HOME/.local/share/agent`, else `/var/lib/agent`). A signing key is host **state**, so it lives
+/// The default host-key path when neither a flag, `KEE_SIGNING_KEY`, nor a config file sets one:
+/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/kee`, else
+/// `$HOME/.local/share/kee`, else `/var/lib/kee`). A signing key is host **state**, so it lives
 /// under a data dir, not a config dir.
 #[must_use]
 pub fn default_key_path() -> PathBuf {

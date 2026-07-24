@@ -4,14 +4,14 @@
 //! `#[ignore]`d: loading eBPF needs `CAP_BPF`+`CAP_PERFMON` (or root), a BTF-capable kernel, and the
 //! built object (`cargo xtask build-probes`). Run them via `cargo xtask ci-privileged` (as root), or
 //! grant the two caps to the test binary and run it unprivileged:
-//! `cargo test -p agent-probes-loader --test counter --no-run` then
+//! `cargo test -p kee-probes-loader --test counter --no-run` then
 //! `sudo setcap cap_bpf,cap_perfmon+ep <binary>` then `<binary> --ignored`. Each self-skips
 //! when its prerequisites are absent, so an unprivileged run reports a clean skip, not a failure.
 #![allow(clippy::panic)]
 
 use std::process::Command;
 
-use agent_probes_loader::{check_support, object_path, ExecveCounter};
+use kee_probes_loader::{check_support, object_path, ExecveCounter};
 
 /// Whether this host can actually load the probe, as a skip reason (`Some`) when it can't, so each
 /// test prints *why* it skipped. Capability-aware: `check_support` passes under

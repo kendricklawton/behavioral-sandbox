@@ -1,6 +1,6 @@
-# Using the `agent` CLI
+# Using the `kee` CLI
 
-`agent` is the reference embedder of the engine: the whole sandbox lifecycle, open (confined by
+`kee` is the reference embedder of the engine: the whole sandbox lifecycle, open (confined by
 default), exec with inputs, collect artifacts, close, in one command. If you haven't set up the
 host and built the guest artifacts yet, do [Installation](./cli-install.md) first.
 
@@ -8,31 +8,31 @@ host and built the guest artifacts yet, do [Installation](./cli-install.md) firs
 
 ```console
 # Prove the boundary: boot a microVM to userspace and read its console.
-cargo run -p agent-cli -- run --demo-boot
+cargo run -p kee-cli -- run --demo-boot
 
-# Run code inside one. The defaults point at the agent rootfs (built by
+# Run code inside one. The defaults point at the guest rootfs (built by
 # `cargo xtask build-rootfs` or `self-host`), which carries python3 and the in-guest exec agent:
-cargo run -p agent-cli -- run -- python3 -c 'print(2 + 2)'
+cargo run -p kee-cli -- run -- python3 -c 'print(2 + 2)'
 ```
 
-`agent run` is **jailed by default**, the VMM runs under Firecracker's jailer (chroot, uid/gid
+`kee run` is **jailed by default**, the VMM runs under Firecracker's jailer (chroot, uid/gid
 drop, seccomp, its own namespaces, a cgroup), which needs real root and the `jailer` binary. On a
 dev box without them, `--unjailed` is the explicit, greppable opt-out: the guest still sits behind
 the KVM hardware boundary, only the VMM process itself runs unconfined.
 
-## `agent run`
+## `kee run`
 
 One sandbox, one command, everything as flags:
 
 ```console
-agent run [FLAGS] -- <cmd> [args…]
+kee run [FLAGS] -- <cmd> [args…]
 ```
 
 | Flag | What it does |
 |------|--------------|
 | `--demo-boot` | Just boot a microVM and read its console, no command. |
 | `--unjailed` | Run the VMM without the jailer (see above). Default is confined. |
-| `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `AGENT_REQUIRE_LIMITS` / `.agent.toml`. |
+| `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `KEE_REQUIRE_LIMITS` / `.kee.toml`. |
 | `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the engine never logs them. |
 | `--put FILE` | Inject a host file into the run's working directory (repeatable; guest name = basename). |
 | `--get PATH` | Fetch a file from the run's working directory afterwards (repeatable; written under the current directory at the same relative path). Deny-by-default: only what you asked for is written. |
@@ -44,10 +44,10 @@ agent run [FLAGS] -- <cmd> [args…]
 | `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host end of its /30. |
 | `--allow IP[/CIDR][:PORT][/PROTO]` | Allow one egress destination past the deny-by-default tap (repeatable), e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires `--net`; builds the run's egress policy, armed before the tap goes live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced run. |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
-| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope (decision 034) so alteration is detectable; check it with [`agent verify`](#agent-verify). |
+| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope (decision 034) so alteration is detectable; check it with [`kee verify`](#kee-verify). |
 | `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record (what it reached, what egress was denied, its resource envelope, any coverage gap) shaped for an agent's observe→act loop. |
 | `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues (after the command finishes, the view stays up until closed). |
-| `--log FILTER` | Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`. |
+| `--log FILTER` | Log filter for stderr (overrides `KEE_LOG`), e.g. `info`, `debug`. |
 
 Piped stdin is forwarded to the guest command. Bulk data belongs on the block-device paths
 instead (`input_dir`/`output_dir` in the [engine API](./embedding.md)), the exec request is a
@@ -56,18 +56,18 @@ single bounded frame.
 ### Streams and exit codes
 
 Logs go to **stderr**; the run's output (raw relay, or the `--json` result object) goes to
-**stdout**, so `agent run … 2>/dev/null` stays pipe-clean and `--json | jq` just works. The
-guest command's exit code becomes `agent run`'s own (a crash *inside* the sandbox is a result,
+**stdout**, so `kee run … 2>/dev/null` stays pipe-clean and `--json | jq` just works. The
+guest command's exit code becomes `kee run`'s own (a crash *inside* the sandbox is a result,
 not an error, death by signal comes back as `128 + signal`); exit code **2** is reserved for an
 operational failure of the engine itself (no KVM, a missing artifact, a boot timeout, a broken
 channel).
 
 ```console
-$ echo 'hi' | agent run --json -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
+$ echo 'hi' | kee run --json -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
 {"schema":1,"exit_code":0,"stdout":"HI\n", …, "metrics":{…},"limits":{…}}
 ```
 
-## `agent shell`
+## `kee shell`
 
 One sandbox held open as an interactive, stateful session: one `sh -c` exec per input line, every
 line sharing the guest's working directory and (via the boot overlay) the wider filesystem, so a
@@ -76,46 +76,46 @@ state (`cd`, variables) does not persist: each line is its own exec. The prompt 
 to stderr, command output to stdout, so a piped script of lines stays clean. `--unjailed`, `--vcpus`,
 and `--mem` work the same as on `run`.
 
-## `agent doctor`
+## `kee doctor`
 
-Check this host's readiness *before* the first sandbox: `agent doctor` prints one line per
+Check this host's readiness *before* the first sandbox: `kee doctor` prints one line per
 prerequisite, KVM, the jailer + real-root, `firecracker` v1.9, iproute2/e2fsprogs, cgroup
 delegation, the kernel version, the boot artifacts, and the eBPF capabilities, each marked `ok`,
 `warn` (a fail-open degradation, with the consequence named), or `FAIL` (a hard miss: no boot
-without it). It exits non-zero when a hard prerequisite is missing, so `agent doctor && agent run …`
-gates cleanly. A footer tallies the rows; `agent doctor --explain` adds the full
+without it). It exits non-zero when a hard prerequisite is missing, so `kee doctor && kee run …`
+gates cleanly. A footer tallies the rows; `kee doctor --explain` adds the full
 fails-open-vs-hard-error matrix behind it, kept off the default report so the rows stay scannable
 (each non-`ok` row already names its own fix). (`cargo xtask setup` renders the same checks for a dev
 box, plus the build-toolchain rows.)
 
-## `agent verify`
+## `kee verify`
 
-`agent run --record` and the daemon's `trace` reply sign the finalized record with a **host key** the
+`kee run --record` and the daemon's `trace` reply sign the finalized record with a **host key** the
 guest never sees (an `ed25519` detached signature over the canonical record bytes, decision 034), so a
 consumer can detect any alteration made *after* the producing host. The record file is a schema-2
 envelope, `{schema, key_id, signature, record}`, with the record carried inside as a string.
 
-`agent verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
+`kee verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
 mismatch. The input is treated as untrusted (that is the point of verifying) and is bounded: a file
 over 16 MiB is rejected as "not a signed record" without being read in, a real envelope is kilobytes.
 
 ```console
-agent verify run.json                      # trusts this host's own signing key
-agent verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
+kee verify run.json                      # trusts this host's own signing key
+kee verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
 ```
 
 The trust root is the host signing key (decision 029: trust the host, not the guest). This detects
 post-hoc alteration; it does **not** prove a *compromised* producing host didn't sign a lie. Key
-custody and rotation are the hoster's: the key path resolves from `AGENT_SIGNING_KEY` (or
-`signing_key` in `.agent.toml`, else a data-dir default), generated on first use; a record's `key_id`
+custody and rotation are the hoster's: the key path resolves from `KEE_SIGNING_KEY` (or
+`signing_key` in `.kee.toml`, else a data-dir default), generated on first use; a record's `key_id`
 names the key that signed it.
 
-**Key rotation.** `agent verify` trusts a *set* of keys, so rotating the host key doesn't invalidate
-records already signed. Keep the retired public keys (their `key_id`s) listed in `AGENT_TRUSTED_KEYS`
-(comma-separated) or `trusted_keys` in `.agent.toml`, and `agent verify` trusts that set together with
+**Key rotation.** `kee verify` trusts a *set* of keys, so rotating the host key doesn't invalidate
+records already signed. Keep the retired public keys (their `key_id`s) listed in `KEE_TRUSTED_KEYS`
+(comma-separated) or `trusted_keys` in `.kee.toml`, and `kee verify` trusts that set together with
 the current signing key and any `--key` given, so old and new records both verify.
 
-**Session hash-chain.** A one-shot `agent run --record` writes a single, unchained record. Within a
+**Session hash-chain.** A one-shot `kee run --record` writes a single, unchained record. Within a
 **session** (the [daemon](./daemon.md)'s `trace` verb), each record additionally commits to the
 previous one's hash (a `prev` field), so the *sequence* is tamper-evident as a whole: a client that
 collects the records can detect a reordered, inserted, or deleted one, not just a single-record edit
@@ -124,35 +124,35 @@ anchor (the append-only limitation).
 
 ## Configuration
 
-Configuration layers **flags > environment (`AGENT_*`) > file (`.agent.toml`) > defaults**, one
-value, four sources, highest wins. The **file** layer is the nearest `.agent.toml` walking up from
+Configuration layers **flags > environment (`KEE_*`) > file (`.kee.toml`) > defaults**, one
+value, four sources, highest wins. The **file** layer is the nearest `.kee.toml` walking up from
 the current directory (the `.gitignore` convention), so a project pins its engine config beside its
-code; its keys mirror the environment names 1:1 (minus the `AGENT_` prefix, lowercased), and an
+code; its keys mirror the environment names 1:1 (minus the `KEE_` prefix, lowercased), and an
 unknown key is a typed error, never a silent no-op.
 
-| Variable | `.agent.toml` key | What it points at | Default |
+| Variable | `.kee.toml` key | What it points at | Default |
 |----------|-------------------|-------------------|---------|
-| `AGENT_FIRECRACKER` | `firecracker` | the `firecracker` binary | `firecracker` (PATH) |
-| `AGENT_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
-| `AGENT_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-agent.ext4` (the agent image) |
-| `AGENT_MARKER` | `marker` | the console line that means "userspace is up" | `AGENT-GUEST-READY` (the agent image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
-| `AGENT_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
-| `AGENT_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
-| `AGENT_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
-| `AGENT_PROBES_OBJECT` | — | the built eBPF object (env only, no `.agent.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |
+| `KEE_FIRECRACKER` | `firecracker` | the `firecracker` binary | `firecracker` (PATH) |
+| `KEE_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
+| `KEE_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-kee.ext4` (the guest rootfs image) |
+| `KEE_MARKER` | `marker` | the console line that means "userspace is up" | `KEE-GUEST-READY` (the guest rootfs image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
+| `KEE_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
+| `KEE_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
+| `KEE_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
+| `KEE_PROBES_OBJECT` | — | the built eBPF object (env only, no `.kee.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |
 
 ```toml
-# .agent.toml — pinned beside a project's code
-kernel = "/srv/agent/vmlinux"
-rootfs = "/srv/agent/rootfs-agent.ext4"
-marker = "AGENT-GUEST-READY"
+# .kee.toml — pinned beside a project's code
+kernel = "/srv/kee/vmlinux"
+rootfs = "/srv/kee/rootfs-kee.ext4"
+marker = "KEE-GUEST-READY"
 log = "info"
 ```
 
 ## Operator policy
 
-A second group of `.agent.toml` keys sets the **host's** posture rather than a per-run knob. These
-have **no `AGENT_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling
+A second group of `.kee.toml` keys sets the **host's** posture rather than a per-run knob. These
+have **no `KEE_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling
 whose bounded party can override it is not a ceiling ([decision
 041](./adr/041-operator-policy-defaults-clamp-explicit-asks-refuse.md)).
 
@@ -182,20 +182,20 @@ allow_net = false
 
 **Where this is enforcement, and where it is a guardrail.** For the CLI it is a guardrail: a local
 caller owns this file, and [Security](./security.md#what-is-not-a-security-bug) already treats them as
-trusted. The real boundary is [`agent serve`](./daemon.md), whose clients control neither the daemon's
+trusted. The real boundary is [`kee serve`](./daemon.md), whose clients control neither the daemon's
 config nor its environment, so it takes its ceilings as **explicit flags** (`--max-vcpus`,
 `--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`) rather than from a discovered file: a daemon
 must not read a security control out of whatever directory it was started in.
 
 ## Watching a run from the host
 
-`agent run` carries the engine's convergence on flags: `--trace`, `--record`, and `--watch` bind
+`kee run` carries the engine's convergence on flags: `--trace`, `--record`, and `--watch` bind
 the host-side eBPF probes to the sandbox at launch and fuse what they saw into one per-run audit
 record, observed from *outside* the guest, where the code can't forge or disable it.
 
 ```console
 # Watch it live, read the trail after, keep the machine record + the model-legible summary:
-agent run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
+kee run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
 ```
 
 Four faces, one record:
@@ -239,7 +239,7 @@ destination with a repeatable `--allow` (which requires `--net`):
 
 ```console
 # Allow DNS to one resolver and HTTPS to a subnet; everything else is dropped at the tap and recorded.
-agent run --unjailed --net \
+kee run --unjailed --net \
     --allow 1.1.1.1:53/udp --allow 10.0.0.0/8:443/tcp --record run.json -- ...
 ```
 
@@ -259,8 +259,8 @@ few orthogonal verbs, or named below as deliberately out of scope. The map:
 
 | Engine capability | CLI surface |
 |-------------------|-------------|
-| Boot + one exec | `agent run -- <cmd>` |
-| Stateful session | `agent shell` |
+| Boot + one exec | `kee run -- <cmd>` |
+| Stateful session | `kee shell` |
 | Confinement (jail) | jailed by default; `--unjailed` opts out |
 | Resource limits (`Limits`) | `--vcpus`, `--mem`, `--wall`, `--output-cap` |
 | Per-exec inputs | `--env`, `--put`, piped stdin |
@@ -268,16 +268,16 @@ few orthogonal verbs, or named below as deliberately out of scope. The map:
 | Networking (NIC) | `--net` |
 | Egress policy (`EgressPolicy`) | `--allow IP[/CIDR][:PORT][/PROTO]` |
 | Host-observed audit record | `--trace` (human), `--record FILE` (JSON), `--record-summary FILE` (model-legible), `--watch` (live) |
-| Verify a signed record | `agent verify <record>` |
+| Verify a signed record | `kee verify <record>` |
 | Structured run result | `--json` |
-| Host readiness | `agent doctor` |
-| Config layering | flags > env (`AGENT_*`) > `.agent.toml` > defaults |
+| Host readiness | `kee doctor` |
+| Config layering | flags > env (`KEE_*`) > `.kee.toml` > defaults |
 
 **Deliberately not in the CLI, daemon-scoped, embedding-API, or platform, by design** (their absence
 is intent, not omission):
 
 - **Snapshots + the pre-warmed pool**, a pre-warmed pool is a long-lived-process concern; it lives
-  in the [`agent` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
+  in the [`kee` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
 - **The wire API**, the programmatic driver surface is the
   [daemon's](./daemon.md#the-wire-protocol-versioned-json-schema-1), not a subcommand.
 - **Bulk block-device I/O** (`BootConfig::input_dir`/`output_dir`, whole directories / large files

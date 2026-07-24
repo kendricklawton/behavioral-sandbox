@@ -2,7 +2,7 @@
 //! the Python/Node/static-native runtimes, and the bulk input/output block devices.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p agent-vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p kee-vmm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -12,21 +12,21 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use agent_vmm::Vm;
+use kee_vmm::Vm;
 
 use common::{
-    agent_rootfs_config, have_jailer_privileges, jailed_agent_config, jailed_overlay_config,
+    have_jailer_privileges, jailed_agent_config, jailed_overlay_config, kee_rootfs_config,
     sha256_hex, TmpDir,
 };
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn execs_a_command_in_the_microvm() {
-    // Closes the provisional "in a microVM" gate: the agent baked into `rootfs-agent.ext4`
+    // Closes the provisional "in a microVM" gate: the agent baked into `rootfs-kee.ext4`
     // actually binds vsock in a real guest, so `exec` round-trips end to end, not against a faked
     // socket. Boot returns once the agent's readiness marker reaches the console, so the connect
     // can't race the bind.
-    let vm = Vm::boot(agent_rootfs_config())
+    let vm = Vm::boot(kee_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
     let out = vm
         .exec(&["echo".into(), "hi".into()], b"")
@@ -67,7 +67,7 @@ fn jailed_exec_runs_a_command() {
         });
     assert_eq!(
         uid.as_deref(),
-        Some(agent_vmm::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        Some(kee_vmm::DEFAULT_JAIL_UID.to_string()).as_deref(),
         "the exec'ing VMM should be the dropped jail uid, proving it is confined"
     );
     let out = vm
@@ -120,7 +120,7 @@ fn jailed_bulk_io_round_trips_through_the_chroot() {
         });
     assert_eq!(
         uid.as_deref(),
-        Some(agent_vmm::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        Some(kee_vmm::DEFAULT_JAIL_UID.to_string()).as_deref(),
         "the bulk-I/O VMM should be the dropped jail uid, proving the jail held"
     );
 
@@ -170,12 +170,12 @@ fn jailed_bulk_io_round_trips_through_the_chroot() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn execs_python_in_the_microvm() {
     // The reference language runtime: `build-rootfs` installs python3 from the pinned Alpine
     // branch, and a real interpreter (dynamic musl binary + its stdlib, not a shell builtin) runs
     // in the guest and computes, proving the image carries a working userland, not just busybox.
-    let vm = Vm::boot(agent_rootfs_config())
+    let vm = Vm::boot(kee_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
     let out = vm
         .exec(&["python3".into(), "-c".into(), "print(2+2)".into()], b"")
@@ -191,14 +191,14 @@ fn execs_python_in_the_microvm() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn python_script_writes_a_file_and_we_capture_it() {
     // The runtime payoff, end to end: inject a small **Python script** as a file, run the real
     // interpreter on it inside a microVM, and pull back the file it wrote, the exec surface's
     // inject → run → capture loop with an actual language runtime (using the stdlib, `json`), not a
     // shell builtin. This is the per-file channel path; the bulk block-device paths are
     // covered by the input/output-disk tests below.
-    let vm = Vm::boot(agent_rootfs_config())
+    let vm = Vm::boot(kee_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
 
     // A real script: import a stdlib module, compute, and write a file in the working dir.
@@ -235,12 +235,12 @@ fn python_script_writes_a_file_and_we_capture_it() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn runs_node_a_second_interpreter() {
     // Runtime-agnostic proof, second half: a *different* interpreter (Node) runs unchanged
     // through the same exec path as Python, the rootfs isn't Python-specific. Inject a small `.js`,
     // run the real `node` on it, and capture the file it writes (the per-file channel path).
-    let vm = Vm::boot(agent_rootfs_config())
+    let vm = Vm::boot(kee_rootfs_config())
         .expect("agent microVM should boot and the agent should announce readiness");
 
     // A real Node script: use the runtime's own APIs (JSON + fs) to write a file.
@@ -275,7 +275,7 @@ fn runs_node_a_second_interpreter() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs + the static example (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs + the static example (run via `cargo xtask ci-privileged`)"]
 fn runs_a_static_native_binary_and_captures_its_artifact() {
     // Runtime-agnostic proof: a **static native ELF** (no interpreter, no libc, no loader) runs
     // unchanged through the same exec path. Inject the binary read-only via a block device,
@@ -303,7 +303,7 @@ fn runs_a_static_native_binary_and_captures_its_artifact() {
     // so the guest can exec it directly (the mount is `-o ro`, not `noexec`).
     std::fs::copy(&bin, indir.path().join("writefile")).expect("stage the native binary");
 
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.input_dir = Some(indir.path().to_path_buf());
     cfg.output_dir = Some(outdir.path().to_path_buf());
     let vm = Vm::boot(cfg).expect("microVM with input + output devices should boot");
@@ -339,7 +339,7 @@ fn runs_a_static_native_binary_and_captures_its_artifact() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn injects_a_large_file_via_block_device() {
     // A whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
     // **larger than the 1 MiB channel frame cap** (the whole point) in a host dir, inject it as a
@@ -349,7 +349,7 @@ fn injects_a_large_file_via_block_device() {
     let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect(); // 4 MiB, > 1 MiB
     std::fs::write(dir.join("big.bin"), &payload).expect("write input file");
 
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.input_dir = Some(dir.clone());
     let vm = Vm::boot(cfg).expect("microVM with an input block device should boot");
     let out = vm
@@ -395,7 +395,7 @@ fn injects_a_large_file_via_block_device() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn collects_outputs_via_block_device() {
     // The whole-working-dir / large-file *output* path the vsock channel can't carry, the
     // counterpart to `injects_a_large_file_via_block_device`. Boot with a writable output device, have
@@ -404,7 +404,7 @@ fn collects_outputs_via_block_device() {
     // and that the escaping symlink was dropped, not recreated live on the host.
     let dir = TmpDir::new("p35");
 
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.output_dir = Some(dir.path().to_path_buf());
     let vm = Vm::boot(cfg).expect("microVM with an output block device should boot");
     let out = vm
@@ -476,7 +476,7 @@ fn collects_outputs_via_block_device() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn reaps_the_whole_process_tree_so_a_daemon_cannot_wedge_exec() {
     // Tree reaping (closes the daemon gap): a command double-forks a `setsid` daemon that escapes the process
     // group and inherits the command's stdout, then the parent exits 0. Before tree reaping that daemon kept
@@ -485,7 +485,7 @@ fn reaps_the_whole_process_tree_so_a_daemon_cannot_wedge_exec() {
     // the whole tree via `cgroup.kill`, so the exec returns immediately with the parent's exit code
     // and the daemon is actually gone. `cgroup.kill` catches the `setsid` process a `killpg` would
     // miss, which is the whole point of using the cgroup rather than the process group.
-    let vm = Vm::boot(agent_rootfs_config()).expect("agent microVM should boot");
+    let vm = Vm::boot(kee_rootfs_config()).expect("agent microVM should boot");
 
     // fork -> setsid -> exec `sleep 30` (so its comm is `sleep` and it holds the inherited stdout);
     // the parent exits 0 straight away.

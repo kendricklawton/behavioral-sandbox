@@ -1,6 +1,6 @@
 # Introduction
 
-**agent** *(working name)* is a self-hostable engine for running untrusted code in hardware
+**kvm-ebpf-engine** is a self-hostable engine for running untrusted code in hardware
 isolation, with a tamper-evident record of exactly what it did that you can trust without trusting
 the code. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
 **host-side eBPF** (**aya**) watches and enforces what it does, syscalls, its network, its
@@ -12,13 +12,13 @@ at once: strong isolation, and a trustworthy account of what the code actually d
 engine for exactly that, the code stays on your own infrastructure (air-gapped or regulated is
 fine), and the watching and the policy live in the host kernel, outside the guest, so the record
 can't be forged by the code it is recording. The finished record is also **host-signed**, so
-alteration after the run is detectable off-host (verify with `agent verify`); see the [threat
+alteration after the run is detectable off-host (verify with `kee verify`); see the [threat
 model](./threat-model.md#record-integrity-beyond-the-guest) for exactly what that does and does not
 prove.
 
-The engine can be driven three ways: as the **`agent` CLI** (one sandbox per command), as a
+The engine can be driven three ways: as the **`kee` CLI** (one sandbox per command), as a
 **Rust library** embedded in a larger application, or programmatically over a unix socket through
-the **`agent` daemon** and its versioned wire API.
+the **`kee` daemon** and its versioned wire API.
 
 ## How it fits together
 
@@ -50,13 +50,13 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Reading this book
 
-- **[Using the agent CLI](./cli.md)**, how to run the engine: [install the
+- **[Using the kee CLI](./cli.md)**, how to run the engine: [install the
   prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
-  untrusted code with `agent run` and hold interactive sessions with `agent shell`. Start here.
+  untrusted code with `kee run` and hold interactive sessions with `kee shell`. Start here.
 - **[Using the engine API](./embedding.md)**, the embedder's contract: the `Sandbox` lifecycle,
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
-- **[Using the `agent serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
+- **[Using the `kee serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
   wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`), the pre-warmed pool for fast
   `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
 - **[Examples](./examples.md)**, worked, end-to-end walkthroughs: [running untrusted
@@ -77,12 +77,12 @@ full non-goals list is in [Using the engine API](./embedding.md).
 ## Status
 
 Early, under active development, nothing here is production yet. The staged plan and live
-progress live in [`ROADMAP.md`](https://github.com/k-henry-org/agent/blob/main/ROADMAP.md)
+progress live in [`ROADMAP.md`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/ROADMAP.md)
 (its checkboxes are the state); hard-to-reverse choices are recorded as dated
 [decision records](./adr/README.md). Every
 completed phase ships a working demo, so each capability documented in this book is proven
 running end to end, not just asserted.
 
 The source for this book lives in the repository's
-[`docs/` directory](https://github.com/k-henry-org/agent/tree/main/docs) and contributions are
+[`docs/` directory](https://github.com/k-henry-org/kvm-ebpf-engine/tree/main/docs) and contributions are
 welcome, see [Contributing](./contributing.md).

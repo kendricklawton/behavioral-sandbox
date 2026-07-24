@@ -2,7 +2,7 @@
 //! addressing/reachability, per-VM isolation, and allowed-vs-blocked endpoints.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` + `CAP_NET_ADMIN` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p agent-vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p kee-vmm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -11,9 +11,9 @@ mod common;
 
 use std::process::Command;
 
-use agent_vmm::Vm;
+use kee_vmm::Vm;
 
-use common::{agent_rootfs_config, have_net_admin};
+use common::{have_net_admin, kee_rootfs_config};
 
 /// Run `ip netns exec <netns> <args...>` and return the completed output (for host-side checks that
 /// must happen *inside* the VM's network namespace, where its tap lives).
@@ -27,7 +27,7 @@ fn ip_netns_exec(netns: &str, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
     // Under the netns model: with `enable_network`, the driver creates a per-VM network
     // namespace with a tap inside it, attached as virtio-net, so the guest gets an `eth0` carrying the
@@ -37,7 +37,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
 
@@ -92,7 +92,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn addresses_the_guest_and_routes_host_to_guest() {
     // Static addressing over the tap. The kernel configures `eth0` with the guest's /30 IP via
     // the `ip=` boot param, giving a connected route to the host end and NO default route, so
@@ -101,7 +101,7 @@ fn addresses_the_guest_and_routes_host_to_guest() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let host_ip = vm.ipv4().expect("ipv4 when networked").host.to_string();
@@ -184,10 +184,10 @@ fn addresses_the_guest_and_routes_host_to_guest() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
     // The IPv6 twin of `addresses_the_guest_and_routes_host_to_guest` (ADR 008 dual-stack). The kernel
-    // `ip=`/`CONFIG_IP_PNP` param is v4-only, so the guest's v6 address rides the `agent_guest_ip6=`
+    // `ip=`/`CONFIG_IP_PNP` param is v4-only, so the guest's v6 address rides the `kee_guest_ip6=`
     // cmdline token that `/sbin/net-up` applies to `eth0`. Prove: the guest carries its static v6
     // address, reaches the host v6 end over the connected /64, and (deny-by-default) cannot reach an
     // off-link v6 address, no v6 default route is installed. This is the live proof of P4.9a's link.
@@ -195,7 +195,7 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let host_ip6 = vm.ipv6().expect("ipv6 when networked").host.to_string();
@@ -290,7 +290,7 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_networked_vms_run_in_isolated_netns() {
     // Under the netns model: per-VM isolation is now **kernel-enforced** by a per-VM network
     // namespace, not the earlier unique-/30 reservation. Two concurrently-booted networked VMs hold
@@ -300,10 +300,10 @@ fn two_networked_vms_run_in_isolated_netns() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg_a = agent_rootfs_config();
+    let mut cfg_a = kee_rootfs_config();
     cfg_a.enable_network = true;
     let vm_a = Vm::boot(cfg_a).expect("VM A with a NIC should boot to readiness");
-    let mut cfg_b = agent_rootfs_config();
+    let mut cfg_b = kee_rootfs_config();
     cfg_b.enable_network = true;
     let vm_b = Vm::boot(cfg_b).expect("VM B with a NIC should boot to readiness");
 
@@ -360,7 +360,7 @@ fn two_networked_vms_run_in_isolated_netns() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
     // Prove the allow/deny posture at the transport layer, not just ICMP. Per ADR 008,
     // "allowed" here is host-local (world-egress allow-listing is eBPF-enforced at the tap). Under
@@ -372,7 +372,7 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let netns = vm.netns().expect("netns when networked").to_string();

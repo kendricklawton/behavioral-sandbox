@@ -12,7 +12,7 @@ cwd and break the isolation `RunDir` exists for.
 
 **Decision.** When `BootConfig.input_dir` is set, the driver builds a **read-only** ext4 from that
 host directory (rootless `mke2fs -d` into the per-VM scratch dir) and attaches it as a second block
-device (`/dev/vdb`, `is_read_only: true`); the agent rootfs mounts it read-only at `/input` via a
+device (`/dev/vdb`, `is_read_only: true`); the guest rootfs mounts it read-only at `/input` via a
 best-effort `sysinit` line, so a command reads bulk input as `/input/...`. This is the
 whole-working-dir / large-file path, the vsock channel's `PutFile` carries only small `≤1 MiB`
 per-frame files. **No guest-agent change**: `/input` is a mounted dir the command references; the
@@ -45,8 +45,8 @@ the *guest's* filesystem, never the host's, no traversal escape.
 - **`/dev/vdb` naming was order-dependent.** ~~Fine for a single input device; if a later change adds a
   third (writable output) drive, prefer mounting by filesystem label/UUID.~~ **Resolved when the
   writable output drive landed:** the guest now mounts both data devices by filesystem **label**
-  (`agent-input`/`agent-output`, stamped with `mke2fs -L`, resolved with `findfs`), so the `/dev/vdX`
+  (`kee-input`/`kee-output`, stamped with `mke2fs -L`, resolved with `findfs`), so the `/dev/vdX`
   letter, which shifts when output is present but input isn't, no longer matters. The input image
-  gained an `agent-input` label and the `sysinit` line became `/sbin/mount-drives`.
+  gained an `kee-input` label and the `sysinit` line became `/sbin/mount-drives`.
 - **The image is sized generously** from the input's byte total + a `-N` inode count (many tiny files
   exhaust inodes, not bytes); an input past a 2 GiB ceiling is a typed error, not a giant image.

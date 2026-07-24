@@ -1,18 +1,18 @@
-# agent *(working name)*
+# kvm-ebpf-engine
 
-[![CI](https://github.com/k-henry-org/agent/actions/workflows/ci.yml/badge.svg)](https://github.com/k-henry-org/agent/actions/workflows/ci.yml)
+[![CI](https://github.com/k-henry-org/kvm-ebpf-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/k-henry-org/kvm-ebpf-engine/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **A self-hostable engine for running untrusted code in a hardware-isolated microVM, with a
 host-observed record of exactly what it did.**
 
-## What is agent?
+## What is kvm-ebpf-engine?
 
-agent runs untrusted code inside a **Firecracker** microVM, so the trust boundary is the CPU (KVM),
+kvm-ebpf-engine runs untrusted code inside a **Firecracker** microVM, so the trust boundary is the CPU (KVM),
 not guest-side software. Around that microVM, **host-side eBPF** (via **aya**) watches and enforces
 what the code does, its syscalls, its network, its cgroup, from *outside* the guest, where the code
 can't see or subvert it. Every run yields a tamper-evident **audit record**, host-observed and
-**host-signed** (so alteration after the run is detectable off-host, verify it with `agent verify`),
+**host-signed** (so alteration after the run is detectable off-host, verify it with `kee verify`),
 of exactly what happened: the network flows, the notable syscalls, the resources it used, and any
 egress that was denied.
 
@@ -29,13 +29,13 @@ Built in the open, milestone by milestone, each one shipping as a working demo.
 **≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.9 on
 `PATH` (the engine drives it, it doesn't bundle it). Starting from a bare machine,
 [Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version of all of
-that; `cargo xtask setup` (or `agent doctor` once built) then reports exactly what your host is still
+that; `cargo xtask setup` (or `kee doctor` once built) then reports exactly what your host is still
 missing before the first sandbox.
 
 ```console
-git clone https://github.com/k-henry-org/agent && cd agent
-cargo xtask self-host                                   # build + install agent, boot a proof sandbox
-agent run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
+git clone https://github.com/k-henry-org/kvm-ebpf-engine && cd kvm-ebpf-engine
+cargo xtask self-host                                   # build + install kee, boot a proof sandbox
+kee run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
 ```
 
 `--unjailed` is the explicit opt-out from the default jailer for a dev box without real root; the
@@ -49,8 +49,8 @@ The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook, `mdbook serve docs`, o
 Markdown in place):
 
 - **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
-- **[Using the agent CLI](docs/cli.md)**, how to run the engine:
-  [installation](docs/cli-install.md), building the guest artifacts, `agent run`, `agent shell`.
+- **[Using the kee CLI](docs/cli.md)**, how to run the engine:
+  [installation](docs/cli-install.md), building the guest artifacts, `kee run`, `kee shell`.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract: the `Sandbox`
   lifecycle, budgets, typed errors, snapshots/pool, and the engine's deliberate non-goals.
 - **[Examples](docs/examples.md)**, worked walkthroughs: [running untrusted
@@ -77,13 +77,12 @@ cgroup limits, seccomp); and is wrapped in the embedder-facing `Sandbox` lifecyc
 host syscall footprint and its per-VM network flows, enforces deny-by-default egress in the
 kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)), each with a
 measured overhead and a live demo. The audit log that fuses these into one host-observed per-run
-record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `agent serve` daemon.
+record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `kee serve` daemon.
 
 **Pre-1.0 and unstable, expect breaking changes.** Until the first stable release, nothing here
-carries a compatibility guarantee: the `Sandbox`/`vmm` API, the `agent serve` wire protocol (and its
-`agent-protocol` crate), the audit-log/record format, the crate names, and even the project's name
-(`agent` is a working title) can all change without notice. If you build on it, pin to a specific git
-rev. A first stable release is planned but **not yet scheduled**, and there is a long road of breaking
+carries a compatibility guarantee: the `Sandbox`/`vmm` API, the `kee serve` wire protocol (and its
+`kee-protocol` crate), the audit-log/record format, and the crate names can all change without
+notice. If you build on it, pin to a specific git rev. A first stable release is planned but **not yet scheduled**, and there is a long road of breaking
 work before it. The project is developed by a small group: **only project collaborators commit code**
 (the repo is not open to outside pull requests yet, see [CONTRIBUTING](CONTRIBUTING.md)).
 
@@ -92,7 +91,7 @@ on every change; the privileged path (microVM boot, the jailer, the eBPF probes,
 suite) runs nightly in CI on a GitHub-hosted **Ubuntu 24.04** `x86_64` runner (nested KVM) and is
 hand-verified on **Arch Linux** during development, both with **Firecracker v1.9**. `x86_64` is the
 only supported architecture: nothing untestable is claimed, and aarch64 returns only with hardware
-and a privileged CI lane behind it (decision 032). `agent doctor` reports your own host's
+and a privileged CI lane behind it (decision 032). `kee doctor` reports your own host's
 readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).
 
 ## How it fits together
@@ -113,11 +112,11 @@ isolation *plus* out-of-guest observability and enforcement, is the whole idea.
 |------|------|
 | `crates/vmm` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
 | `crates/channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
-| `crates/guest-agent` | The in-guest agent (`agent-guest`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, never the trust boundary. |
+| `crates/guest-agent` | The in-guest agent (`kee-guest`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, never the trust boundary. |
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
-| `crates/cli` | One binary, `agent`: the CLI (`run`, `shell`, `doctor`) plus the `agent serve` driver daemon. |
+| `crates/cli` | The `kee` CLI (also installed as `kvm-ebpf-engine`): `run`, `shell`, `doctor` plus the `kee serve` driver daemon. |
 | `docs` | This documentation, as an mdBook. |
 | `xtask` | Dev orchestration, `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 

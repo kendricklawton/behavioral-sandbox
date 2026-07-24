@@ -5,7 +5,7 @@
 //! boot artifacts. `install.sh` (repo root, also packed into the tarball) consumes the result.
 //!
 //! Every step reuses the tested building blocks the individual `xtask` commands use, so this is
-//! orchestration, not a second build path. Vendor-aware like `self-host`: with `AGENT_VENDOR_DIR`
+//! orchestration, not a second build path. Vendor-aware like `self-host`: with `KEE_VENDOR_DIR`
 //! set the whole assembly runs offline.
 
 use std::path::{Path, PathBuf};
@@ -14,10 +14,10 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::artifacts::sha256_of;
-use crate::{agent_rootfs_path, build_probes, cargo, kernel_path, workspace_root};
+use crate::{build_probes, cargo, kee_rootfs_path, kernel_path, workspace_root};
 
-/// The packaged eBPF object's name inside `share/agent/` (the loader finds it via
-/// `AGENT_PROBES_OBJECT`, which `install.sh` and the container image point here).
+/// The packaged eBPF object's name inside `share/kee/` (the loader finds it via
+/// `KEE_PROBES_OBJECT`, which `install.sh` and the container image point here).
 const PROBES_NAME: &str = "probes";
 
 /// `cargo xtask dist [--version V]`: build binary + artifacts, stage, checksum, tar.
@@ -34,7 +34,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         Some(v) => v,
         None => default_version(),
     };
-    let name = format!("agent-{version}-x86_64-linux");
+    let name = format!("kee-{version}-x86_64-linux");
     println!("dist: assembling {name}\n");
 
     println!("== 1/5  obtain the pinned guest kernel ==");
@@ -62,12 +62,12 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     }
 
     println!("\n== 4/5  build the release binary ==");
-    cargo(&["build", "--release", "--locked", "-p", "agent-cli"])?;
+    cargo(&["build", "--release", "--locked", "-p", "kee-cli"])?;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace_root().join("target"), PathBuf::from);
-    let agent = target.join("release/agent");
-    if !agent.is_file() {
-        bail!("built binary {} not found", agent.display());
+    let bin = target.join("release/kee");
+    if !bin.is_file() {
+        bail!("built binary {} not found", bin.display());
     }
 
     println!("\n== 5/5  stage + checksum + tar ==");
@@ -77,17 +77,13 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         std::fs::remove_dir_all(&stage)
             .with_context(|| format!("clear stale stage {}", stage.display()))?;
     }
-    let share = stage.join("share/agent");
+    let share = stage.join("share/kee");
     std::fs::create_dir_all(stage.join("bin")).context("create stage bin/")?;
-    std::fs::create_dir_all(&share).context("create stage share/agent/")?;
+    std::fs::create_dir_all(&share).context("create stage share/kee/")?;
 
-    copy_mode(&agent, &stage.join("bin/agent"), 0o755)?;
+    copy_mode(&bin, &stage.join("bin/kee"), 0o755)?;
     copy_mode(&kernel, &share.join("vmlinux"), 0o644)?;
-    copy_mode(
-        &agent_rootfs_path(),
-        &share.join("rootfs-agent.ext4"),
-        0o644,
-    )?;
+    copy_mode(&kee_rootfs_path(), &share.join("rootfs-kee.ext4"), 0o644)?;
     copy_mode(&object, &share.join(PROBES_NAME), 0o644)?;
     copy_mode(
         &workspace_root().join("install.sh"),
@@ -116,11 +112,11 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         stage.display()
     );
     println!(
-        "  or from the tarball:     AGENT_DIST_TARBALL={} sh install.sh",
+        "  or from the tarball:     KEE_DIST_TARBALL={} sh install.sh",
         tarball.display()
     );
     println!(
-        "  container image:         docker build -f Containerfile --build-arg DIST=dist/{name} -t agent:{version} ."
+        "  container image:         docker build -f Containerfile --build-arg DIST=dist/{name} -t kee:{version} ."
     );
     Ok(())
 }

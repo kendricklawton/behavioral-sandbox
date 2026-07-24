@@ -1,4 +1,4 @@
-//! `agent-probes-loader`, the userspace side of the eBPF story: load and attach the probes from
+//! `kee-probes-loader`, the userspace side of the eBPF story: load and attach the probes from
 //! `crates/probes`, read their maps, and stream events into the audit log. The first probe attaches the
 //! one host-global `sys_enter_execve` tracepoint (scoped to nothing); binding a program to a
 //! *specific* sandbox (its cgroup, its tap device) arrives with the per-VM taps.
@@ -88,11 +88,11 @@ use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::{tc, SchedClassifier, TcAttachType, TracePoint};
 use aya::Ebpf;
 
-pub use agent_probes_common::{
+pub use kee_probes_common::{
     FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol, Syscall, SyscallEvent,
     COMM_CAP, DETAIL_CAP, MAX_POLICY_RULES,
 };
-use agent_probes_common::{
+use kee_probes_common::{
     FLOW_COUNTS_SIZE, FLOW_KEY6_SIZE, FLOW_KEY_SIZE, POLICY_RULE6_SIZE, POLICY_RULE_SIZE,
 };
 
@@ -127,7 +127,7 @@ pub use summary::SUMMARY_SCHEMA_VERSION;
 /// Env override for the compiled BPF object's location, for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
 /// output (see [`object_path`]).
-const OBJECT_ENV: &str = "AGENT_PROBES_OBJECT";
+const OBJECT_ENV: &str = "KEE_PROBES_OBJECT";
 
 /// The tracepoint program's name (its ELF section symbol, set by `#[tracepoint] fn count_execve`).
 const PROGRAM: &str = "count_execve";
@@ -1288,7 +1288,7 @@ fn with_netns<T: Send>(
     })
 }
 
-/// Where the compiled BPF object lives, in precedence order: the `AGENT_PROBES_OBJECT` override, the
+/// Where the compiled BPF object lives, in precedence order: the `KEE_PROBES_OBJECT` override, the
 /// `cargo xtask build-probes` output under the source tree
 /// (`crates/probes/target/bpfel-unknown-none/release/probes`), then the installed copy under the
 /// per-host data dir. The object is a *build artifact* (like the guest kernel/rootfs), built
@@ -1672,7 +1672,7 @@ impl ResourceMeter {
     /// A whole [`ResourceSummary`] for the sandbox whose VMM is `pid`: resolve its cgroup
     /// once (id **and** dir, from `/proc/<pid>/cgroup`), read the eBPF CPU total for that cgroup id, and
     /// read the native cgroup v2 memory/IO counters from that cgroup dir. The per-run summary a caller
-    /// ships alongside the run's [`RunResult`](https://docs.rs/agent-vmm), the CPU figure is meaningful
+    /// ships alongside the run's [`RunResult`](https://docs.rs/kee-vmm), the CPU figure is meaningful
     /// only if this cgroup was [`add_target`](Self::add_target)ed (or [`meter_all`](Self::meter_all) is on)
     /// while the run executed; the memory/IO figures are the kernel's regardless.
     ///
@@ -1694,7 +1694,7 @@ impl ResourceMeter {
 /// native cgroup v2 memory/IO counters, the two halves of the primitive rolled into one value a
 /// caller ships with the run. Assembled by [`ResourceMeter::summary_for_pid`] from a VMM pid. The engine
 /// *measures* this; folding it into the persisted per-run audit record (fused with the network denials
-/// and the syscall trace) is the audit record's convergence, kept here, out of `agent-vmm`, so the driver stays
+/// and the syscall trace) is the audit record's convergence, kept here, out of `kee-vmm`, so the driver stays
 /// independent of the eBPF loader (they bridge only by plain values).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -1963,7 +1963,7 @@ mod tests {
     }
 
     // --- Egress policy: the userspace schema, host-testable without a live map ---
-    use agent_probes_common::egress_allowed;
+    use kee_probes_common::egress_allowed;
 
     /// A dotted-quad as the host-order `u32` the matcher takes.
     fn ip(a: u8, b: u8, c: u8, d: u8) -> u32 {
@@ -2054,14 +2054,14 @@ mod tests {
         assert_eq!(rule.addr, host.octets());
         assert_eq!(rule.port, 9999);
         // Only that exact v6 host/port/proto is admitted; another v6 host is denied.
-        assert!(agent_probes_common::egress_allowed6(
+        assert!(kee_probes_common::egress_allowed6(
             p.rules6(),
             host.octets(),
             9999,
             Protocol::Udp.as_u8()
         ));
         let other: Ipv6Addr = "fd00:200::2".parse().unwrap();
-        assert!(!agent_probes_common::egress_allowed6(
+        assert!(!kee_probes_common::egress_allowed6(
             p.rules6(),
             other.octets(),
             9999,
@@ -2212,7 +2212,7 @@ mod tests {
             built
         );
         // The packaged case: no source tree on the host, so the installed copy is found with no
-        // AGENT_PROBES_OBJECT set. This is what makes an install work unconfigured.
+        // KEE_PROBES_OBJECT set. This is what makes an install work unconfigured.
         assert_eq!(
             pick_object_path(None, None, Some(installed), built),
             installed

@@ -13,8 +13,8 @@ verifiable than its own inputs would be backwards.
 nothing that freezes the name:
 
 - **A release tarball + `SHA256SUMS`.** `dist` builds the release binary and the three runtime
-  artifacts (guest kernel, agent rootfs, eBPF object, built at package time, never carried in the
-  source tree), stages them as `bin/` + `share/agent/`, writes a per-file `MANIFEST.sha256` inside
+  artifacts (guest kernel, guest rootfs, eBPF object, built at package time, never carried in the
+  source tree), stages them as `bin/` + `share/kee/`, writes a per-file `MANIFEST.sha256` inside
   the package, and tars deterministically (sorted names, zero owners, `SOURCE_DATE_EPOCH`-pinned
   mtimes when set). The eBPF object is **required**: a package without the audit half is not the
   product, so `dist` hard-fails where the everyday gate would soft-skip. x86_64 only, matching the
@@ -23,7 +23,7 @@ nothing that freezes the name:
   installs itself. It verifies at both layers before touching the system: the tarball against
   `SHA256SUMS`, then every extracted file against `MANIFEST.sha256`; nothing installs unverified.
   Layout: the binary into `~/.local/bin` (the `self-host` precedent), artifacts into
-  `$XDG_DATA_HOME/agent` (default `~/.local/share/agent`), and a starter `~/.agent.toml`
+  `$XDG_DATA_HOME/kee` (default `~/.local/share/kee`), and a starter `~/.kee.toml`
   (kernel/rootfs paths) written **only if none exists**, the nearest-up-from-cwd discovery
   (decision 027) makes it apply anywhere under `$HOME`. Firecracker stays the host's to install
   (decision 001: the engine drives it, it doesn't bundle it), except:
@@ -50,6 +50,6 @@ nothing that freezes the name:
   filesystem is closed and rebuilt, not patched in place.
 
 **Consequences.** `dist/` is gitignored, assembled per package. The installer's every knob is an
-`AGENT_*` env (repo, version, tarball, prefix, data dir), so the rename sweep is a defaults change.
-Verification is testable offline end to end (`AGENT_DIST_TARBALL` mode), which is also how the
+`KEE_*` env (repo, version, tarball, prefix, data dir), so the rename sweep is a defaults change.
+Verification is testable offline end to end (`KEE_DIST_TARBALL` mode), which is also how the
 exit proof runs: package, install into a fresh `$HOME`, boot a sandbox from the installed layout.

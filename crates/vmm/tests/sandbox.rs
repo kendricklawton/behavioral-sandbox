@@ -2,7 +2,7 @@
 //! outputs → snapshot → close`, the jailed-by-default polarity (ADR 012), and the VM half of
 //! the secret-hygiene leak check (the host-log/error half runs without a VM in `src/exec.rs`).
 //!
-//! `#[ignore]`d because they need `/dev/kvm` and the agent rootfs. Run via
+//! `#[ignore]`d because they need `/dev/kvm` and the guest rootfs. Run via
 //! `cargo xtask ci-privileged`; the jailed-default test additionally needs real root and self-skips
 //! without it.
 #![allow(clippy::panic)]
@@ -11,11 +11,11 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use agent_vmm::{Limits, Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
+use kee_vmm::{Limits, Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use common::{agent_rootfs_config, have_jailer_privileges, TmpDir};
+use common::{have_jailer_privileges, kee_rootfs_config, TmpDir};
 
 /// The uid the process behind `pid` runs as (the real uid from `/proc/<pid>/status`), as text.
 fn vmm_uid(pid: u32) -> Option<String> {
@@ -38,7 +38,7 @@ fn sandbox_opens_jailed_by_default() {
         eprintln!("skipping sandbox_opens_jailed_by_default: needs real root (euid 0)");
         return;
     }
-    let cfg = agent_rootfs_config();
+    let cfg = kee_rootfs_config();
     assert!(
         cfg.jail.is_none(),
         "precondition: the config asks for no jail"
@@ -57,7 +57,7 @@ fn sandbox_opens_jailed_by_default() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn lifecycle_runs_inputs_and_collects_outputs() {
     // The embedder's whole loop without ever touching `RunningVm`: open (with a bulk output dir),
     // one exec carrying every input the public API takes, stdin, an injected file, env, an artifact
@@ -65,7 +65,7 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
     // (`open_unjailed`: the explicit dev-host opt-out; the jailed default is proven root-gated
     // above, and the two differ only in confinement, not in this surface.)
     let out_dir = TmpDir::new("sandbox-outputs");
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.output_dir = Some(out_dir.path().to_path_buf());
     let sandbox = Sandbox::open_unjailed(cfg).expect("open");
 
@@ -89,7 +89,7 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
     assert_eq!(result.stdout, b"from stdin\n");
     assert_eq!(
         result.files,
-        vec![agent_vmm::Artifact::new(
+        vec![kee_vmm::Artifact::new(
             "art.txt",
             b"api-test=from a file".to_vec()
         )],
@@ -103,7 +103,7 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn kill_handle_stays_inert_during_output_readback() {
     // `collect_outputs` reaps the VMM, then runs a multi-second `e2fsck`/`debugfs` readback before
     // the sandbox drops into teardown. `power_off_and_wait` marks teardown down *before* that reap,
@@ -113,7 +113,7 @@ fn kill_handle_stays_inert_during_output_readback() {
     // every `kill()` is a no-op `Ok` (never the "could not reach VMM pid" error). On a cgroup host
     // the handle takes the cgroup path; the ordering it guards is the same either way.
     let out_dir = TmpDir::new("readback-killhandle");
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.output_dir = Some(out_dir.path().to_path_buf());
     let sandbox = Sandbox::open_unjailed(cfg).expect("open");
     sandbox
@@ -146,14 +146,14 @@ fn kill_handle_stays_inert_during_output_readback() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn session_state_persists_across_execs() {
     // Stateful sessions against a real guest: the VM is the session. Every exec serves
     // from the agent's one persistent working directory, so a file injected before exec 1 and a
     // file exec 1 writes are both visible to exec 2, and the guest filesystem beyond the workdir
     // (here /root, on the boot's tmpfs overlay) accumulates too. State's lifetime is the VM's:
     // teardown discards the overlay, so nothing outlives the session.
-    let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
+    let sandbox = Sandbox::open_unjailed(kee_rootfs_config()).expect("open");
 
     let first = sandbox
         .exec_with_files(
@@ -192,7 +192,7 @@ fn session_state_persists_across_execs() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn exec_budgets_are_per_sandbox_knobs() {
     // The two budgets as knobs, driven end to end through Limits → BootConfig → every exec:
     // a 2 s wall makes a long sleep the cooperative ExecTimeout (the guest killed it, the
@@ -201,7 +201,7 @@ fn exec_budgets_are_per_sandbox_knobs() {
     let mut limits = Limits::default();
     limits.wall = Duration::from_secs(2);
     limits.output_cap = 4096;
-    let mut cfg = agent_rootfs_config().with_limits(limits);
+    let mut cfg = kee_rootfs_config().with_limits(limits);
     // One `wall` covers boot and exec at the public API (ADR 010); this test wants a tight *exec*
     // budget without gambling on a 2 s boot, so it uses the driver-level split beneath the public API.
     cfg.boot_timeout = Duration::from_secs(30);
@@ -237,7 +237,7 @@ fn exec_budgets_are_per_sandbox_knobs() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn many_sandboxes_run_concurrently_without_interference() {
     // Concurrency: several sandboxes boot and exec *at the same time*, from threads, so
     // the boots genuinely overlap, and each result is exactly its own: no cross-talk on the vsock
@@ -246,7 +246,7 @@ fn many_sandboxes_run_concurrently_without_interference() {
     let workers: Vec<_> = (0..3)
         .map(|i| {
             std::thread::spawn(move || {
-                let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
+                let sandbox = Sandbox::open_unjailed(kee_rootfs_config()).expect("open");
                 let out = sandbox
                     .exec(
                         &[
@@ -274,15 +274,15 @@ fn many_sandboxes_run_concurrently_without_interference() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_concurrent_stateful_sessions_stay_isolated() {
     // Two stateful sessions at once: session identity is VM identity (ADR 016), so
     // isolation between them is KVM, not agent bookkeeping. Both sandboxes are live together and
     // their execs interleave A1 → B1 → A2 → B2 on the *same* relative filename; each session then
     // reads back exactly its own accumulated state, and a file that exists only in B is absent
     // in A.
-    let a = Sandbox::open_unjailed(agent_rootfs_config()).expect("open session A");
-    let b = Sandbox::open_unjailed(agent_rootfs_config()).expect("open session B");
+    let a = Sandbox::open_unjailed(kee_rootfs_config()).expect("open session A");
+    let b = Sandbox::open_unjailed(kee_rootfs_config()).expect("open session B");
 
     let sh = |cmd: &str| vec!["sh".into(), "-c".into(), cmd.to_string()];
     assert_eq!(
@@ -335,13 +335,13 @@ fn two_concurrent_stateful_sessions_stay_isolated() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn snapshot_yields_a_restorable_bundle() {
     // `Sandbox::snapshot` closes the lifecycle: a prewarmed (unjailed, overlay) sandbox snapshots, and
     // the bundle restores to an exec-ready clone. (Jailed clones from such a bundle are the jailed-restore path's
     // proof in tests/snapshot.rs; snapshotting a *jailed* sandbox stays a typed refusal.)
     let bundle = TmpDir::new("sandbox-bundle");
-    let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
+    let sandbox = Sandbox::open_unjailed(kee_rootfs_config()).expect("open");
     let prewarmed = ["python3", "-c", "import json"].map(String::from);
     assert_eq!(
         sandbox.exec(&prewarmed, b"").expect("warm-up").exit_code,
@@ -353,7 +353,7 @@ fn snapshot_yields_a_restorable_bundle() {
         .expect("snapshot the sandbox");
     sandbox.shutdown().expect("close the source");
 
-    let clone = Vm::restore(&snapshot, &agent_rootfs_config()).expect("restore from the bundle");
+    let clone = Vm::restore(&snapshot, &kee_rootfs_config()).expect("restore from the bundle");
     let out = clone
         .exec(&["python3".into(), "-c".into(), "print(6 * 7)".into()], b"")
         .expect("exec in the restored clone");
@@ -362,7 +362,7 @@ fn snapshot_yields_a_restorable_bundle() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn injected_secrets_never_reach_the_console_or_host_logs() {
     // The VM half of the leak gate: a sentinel rides in as an env value and as an injected
     // file against a *real* guest, and is then grepped out of every observable engine surface,
@@ -371,7 +371,7 @@ fn injected_secrets_never_reach_the_console_or_host_logs() {
     // RunResult is the one surface allowed to carry it.
     const SENTINEL: &str = "S3KR1T-vm-canary-41ab88";
 
-    let sandbox = Sandbox::open_unjailed(agent_rootfs_config()).expect("open");
+    let sandbox = Sandbox::open_unjailed(kee_rootfs_config()).expect("open");
 
     // Capture the host-side tracing this thread emits during the execs.
     use std::sync::{Arc, Mutex, PoisonError};

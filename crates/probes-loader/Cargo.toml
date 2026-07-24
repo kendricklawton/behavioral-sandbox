@@ -1,5 +1,5 @@
 [package]
-name = "agent-probes-loader"
+name = "kee-probes-loader"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -17,12 +17,12 @@ aya = "0.13"
 
 # The wire record read out of the ring buffer (`SyscallEvent`), shared with the kernel writer in
 # `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
-agent-probes-common = { path = "../probes-common", features = ["std"] }
+kee-probes-common = { path = "../probes-common", features = ["std"] }
 
 # Enter a sandbox's network namespace to attach the tap monitor to its `fc0` (ADR 021).
 # `setns` has no `std` wrapper; nix's is a *safe* function, so the loader stays
 # `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
-# Pinned to the same 0.31 the workspace already carries (via `vsock` under `agent-vmm`) so the build
+# Pinned to the same 0.31 the workspace already carries (via `vsock` under `kee-vmm`) so the build
 # links one copy of nix, not two.
 nix = { version = "0.31", default-features = false, features = ["sched"] }
 
@@ -44,10 +44,10 @@ zeroize = { workspace = true }
 # The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach
 # the probes, prove what the guest did shows up). A dev-dependency so the loader library
 # stays independent of `vmm`: the eBPF track and the driver track bridge only by plain values.
-agent-vmm = { path = "../vmm" }
+kee-vmm = { path = "../vmm" }
 # Cross-crate test helpers (the cgroup-cap harness, host-capability probes), shared with the driver's
 # confinement tests so they aren't copy-pasted. Dev-only, never shipped.
-agent-test-support = { path = "../test-support" }
+kee-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@
 //!
 //! ```console
 //! cargo xtask build-probes
-//! cargo build -p agent-probes-loader --example count_execve
+//! cargo build -p kee-probes-loader --example count_execve
 //! sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/count_execve
 //! target/debug/examples/count_execve        # unprivileged, with just the two caps
 //! ```
@@ -19,7 +19,7 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-use agent_probes_loader::{ExecveCounter, ProbeError};
+use kee_probes_loader::{ExecveCounter, ProbeError};
 
 fn main() -> Result<(), ProbeError> {
     let counter = ExecveCounter::load()?;

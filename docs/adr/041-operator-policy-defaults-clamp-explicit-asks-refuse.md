@@ -1,7 +1,7 @@
 # 041. Operator policy: defaults clamp, explicit asks are refused *(2026-07-22)*
 
 **Context.** The config surface had the split backwards for an engine whose job is running untrusted
-code. `.agent.toml` covered **where things live** (`kernel`, `rootfs`, `firecracker`, `scratch_dir`),
+code. `.kee.toml` covered **where things live** (`kernel`, `rootfs`, `firecracker`, `scratch_dir`),
 logging, and two postures (`require_limits`, the signing keys), while every **containment** knob was
 caller-controlled with a default compiled into the binary: `--vcpus`, `--mem`, `--wall`,
 `--output-cap`, `--unjailed`, `--net`. An operator could not set the house profile, could not lower
@@ -36,9 +36,9 @@ one shared resolver (`crates/cli/src/policy.rs`) that both entry points call.
 **Where it binds, and where it is only a guardrail.** This asymmetry is the point, and it is recorded
 rather than left implicit:
 
-- **The daemon is the boundary.** `agent serve`'s clients arrive over a socket and control neither its
+- **The daemon is the boundary.** `kee serve`'s clients arrive over a socket and control neither its
   environment nor its config, so bounding a client's `open` is real enforcement. Its policy comes from
-  **explicit flags** (`--max-vcpus` and friends), never a discovered `.agent.toml`: a daemon must not
+  **explicit flags** (`--max-vcpus` and friends), never a discovered `.kee.toml`: a daemon must not
   read a security control out of whatever directory it happened to be started in. Jail and networking
   are already daemon-wide and client-immutable there, so only the ceilings travel to the session.
 - **The CLI is a guardrail.** A local caller owns the config file and the environment, and
@@ -47,7 +47,7 @@ rather than left implicit:
   would be theatre.
 
 **Alternatives considered.**
-- **Just add more `.agent.toml` keys.** Rejected: under flags > env > file, a caller overrides every
+- **Just add more `.kee.toml` keys.** Rejected: under flags > env > file, a caller overrides every
   one of them, so the ceilings would read as enforcement while enforcing nothing, which is worse than
   not having them.
 - **Clamp everything silently, refuse nothing.** Friendlier, and rejected for explicit asks: a caller
@@ -56,12 +56,12 @@ rather than left implicit:
 - **Refuse everything over a ceiling, including defaults.** This was the first implementation, and a
   test killed it: with `max_wall_secs = 10` every bare run was refused, because the engine default is
   30s. Refusing a request the caller never made is absurd.
-- **Put policy in `agent-vmm`.** Rejected: an embedder constructs `Limits` directly and *is* the
+- **Put policy in `kee-vmm`.** Rejected: an embedder constructs `Limits` directly and *is* the
   operator, so there is no second party to bound. Policy belongs at the CLI/daemon edge, which also
   keeps the pinned engine API untouched (non-`api:`).
 
 **Consequences and notes.**
-- **Two vocabularies, deliberately.** The CLI reads `.agent.toml`; the daemon takes flags. Documented,
+- **Two vocabularies, deliberately.** The CLI reads `.kee.toml`; the daemon takes flags. Documented,
   because the alternative (a daemon inheriting cwd-discovered policy) is a footgun in a security
   control.
 - **Absent policy changes nothing.** Every field is optional, and the default `Policy` resolves to
@@ -73,6 +73,6 @@ rather than left implicit:
 
 **As shipped.** `crates/cli/src/policy.rs` holds the resolver and its table-driven tests; the daemon
 enforces at `open_limits` in `crates/cli/src/session.rs` (the seam where a client's request becomes
-`Limits`), with `--max-vcpus`/`--max-mem-mib`/`--max-wall-secs`/`--max-output-cap` on `agent serve`;
-the CLI resolves the same way from `.agent.toml` in `crates/cli/src/main.rs`, plus `require_jail` and
+`Limits`), with `--max-vcpus`/`--max-mem-mib`/`--max-wall-secs`/`--max-output-cap` on `kee serve`;
+the CLI resolves the same way from `.kee.toml` in `crates/cli/src/main.rs`, plus `require_jail` and
 `allow_net`.

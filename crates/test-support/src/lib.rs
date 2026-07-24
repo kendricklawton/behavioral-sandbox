@@ -1,5 +1,5 @@
 //! Test-only helpers shared by the privileged integration-test binaries **across crates**
-//! (`agent-vmm` and `agent-probes-loader` tests). Rust compiles each `tests/*.rs` as its own crate,
+//! (`kee-vmm` and `kee-probes-loader` tests). Rust compiles each `tests/*.rs` as its own crate,
 //! so a helper used by more than one has to live in a real (dev-)dependency crate rather than be
 //! copy-pasted: this is that crate.
 //!
@@ -181,7 +181,7 @@ pub fn have_cap(cap: u32) -> bool {
 
 /// The low 64 bits of the `CapEff:` hex mask out of `/proc/<pid>/status` text, or `None` when the
 /// line is absent or unparseable. Mirrors the loader's audited production parse
-/// (`agent-probes-loader`'s `parse_cap_eff`, which the host path can't share with a dev-only
+/// (`kee-probes-loader`'s `parse_cap_eff`, which the host path can't share with a dev-only
 /// crate): only the **trailing 16 hex digits** (bits 0–63, where every capability lives) are read,
 /// so a hypothetically wider future field can't overflow the `u64` parse into a false "no caps".
 /// Pure (takes the text), so the guard is unit-tested without a live `/proc`.

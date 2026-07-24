@@ -31,7 +31,7 @@ actually hold it.
   the sweep (a self-refilling janitor daemon is platform work, not the library); (2) run *one sweep
   per identity*, since it reclaims only the calling euid's residue (the direct, correct consequence of
   the anti-weaponization rule, a root sweep covering a user driver's dirs would *be* the hole);
-  (3) *harden the scratch base* (point `AGENT_SCRATCH_DIR` at an engine-user-owned dir so no decoy can be
+  (3) *harden the scratch base* (point `KEE_SCRATCH_DIR` at an engine-user-owned dir so no decoy can be
   planted at all); (4) *divide the finite `10.200/16` pool* across tenants (quota/fairness is carving a
   shared resource, the definition of the PaaS layer above the engine). ***(Obligation 4 was retired by
   decision 014: every VM reuses one fixed /30 inside its own netns, so there is no address pool to
@@ -52,13 +52,13 @@ know who the tenants are.
 - **Have the engine harden the base itself** (refuse a world-writable scratch dir, or `chmod` it).
   Rejected as the *default*: `/tmp` is the zero-config dev default and the ownership check already makes
   a world-writable base safe (a decoy is rejected on ownership), so a hard refusal would break dev for a
-  risk the engine already neutralizes. Surfaced as a hardening *recommendation* in `agent setup` instead.
+  risk the engine already neutralizes. Surfaced as a hardening *recommendation* in `kee setup` instead.
 - **A single privileged sweep that reclaims every uid's residue.** Rejected: it is exactly the
   weaponization the euid check exists to prevent (it would act on dirs it didn't author). The per-identity
   cost is the price of that safety, and it's the hoster's to absorb.
 
 **Consequences.**
-- Surfaced where a self-hoster looks: `agent setup` prints a "Hardening, the hoster's responsibility"
+- Surfaced where a self-hoster looks: `kee setup` prints a "Hardening, the hoster's responsibility"
   section (the calls above, three since obligation 4 retired), alongside the host-check degradation
   matrix; `sweep_orphans`' rustdoc carries the same for an embedder.
 - **This is a seed of the full security-boundary record, not its closure.** That record captures the
@@ -66,7 +66,7 @@ know who the tenants are.
   suite behind it; this entry records the one facet the sweep forced early, which the threat model
   builds on. The box stays unchecked until that later work lands.
 - The engine/hoster split now has a concrete precedent to reuse: any future privileged tool
-  (a future `agent gc`, daemon-side reconcilers) inherits the same "authorship not policy, euid-scoped,
+  (a future `kee gc`, daemon-side reconcilers) inherits the same "authorship not policy, euid-scoped,
   refuse-without-identity" rule.
 
 **Relationship to prior decisions.** The sweep it governs is decision 011's GC, and its pid-keyed

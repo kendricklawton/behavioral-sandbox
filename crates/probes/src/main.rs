@@ -79,7 +79,7 @@ use aya_ebpf::{
     maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::{TcContext, TracePointContext},
 };
-use agent_probes_common::{
+use kee_probes_common::{
     icmp6_dst_on_link, rule_matches, rule_matches6, FlowCounts, FlowKey, FlowKey6, PolicyRule,
     PolicyRule6, Syscall, SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q,
     ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, MAX_POLICY_RULES,
@@ -566,7 +566,7 @@ fn record_denial6(key: &FlowKey6) {
 /// Whether the sandbox's [`POLICY`] allow-list admits destination `(addr, port, proto)`: scan
 /// the fixed rule array in a **bounded loop** (the compile-time [`MAX_POLICY_RULES`] cap the verifier
 /// needs) and accept on the first active rule that matches. Deny-by-default: no match means drop. The
-/// per-rule test is [`rule_matches`], single-sourced with the host-tested [`agent_probes_common`] parser.
+/// per-rule test is [`rule_matches`], single-sourced with the host-tested [`kee_probes_common`] parser.
 #[inline(always)]
 fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     let mut i: u32 = 0;
@@ -696,7 +696,7 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
 
 /// Read the frame's IPv4 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes` at a
 /// constant, or `ihl`-bounded, offset), or `None` if it is not IPv4-over-Ethernet or a read runs off
-/// the packet. Mirrors [`agent_probes_common::parse_ipv4_5tuple`] at the same shared offsets, so the
+/// the packet. Mirrors [`kee_probes_common::parse_ipv4_5tuple`] at the same shared offsets, so the
 /// in-kernel reader and the host-tested pure parser can't drift.
 #[inline(always)]
 fn parse(ctx: &TcContext) -> Option<FlowKey> {
@@ -715,7 +715,7 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
     // The low 13 bits of the flags/fragment-offset field (IP header bytes 6..8) are the fragment
     // offset. A non-first fragment (offset != 0) has no L4 header, so reading "ports" there would
     // interpret payload bytes; leave them zero so a guest can't mint bogus 5-tuples with fragments
-    // (mirrors `agent_probes_common::parse_ipv4_5tuple`).
+    // (mirrors `kee_probes_common::parse_ipv4_5tuple`).
     let frag_off = u16::from_be(ctx.load::<u16>(ETH_HLEN + 6).ok()?) & 0x1fff;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
     if frag_off == 0 && (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
@@ -728,7 +728,7 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
 
 /// Read the frame's IPv6 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes`), or
 /// `None` if it is not IPv6-over-Ethernet or a read runs off the packet. Mirrors
-/// [`agent_probes_common::parse_ipv6_5tuple`] at the same offsets, so the in-kernel reader and the
+/// [`kee_probes_common::parse_ipv6_5tuple`] at the same offsets, so the in-kernel reader and the
 /// host-tested pure parser can't drift. Extension headers are not walked (a first cut): a next-header
 /// that isn't TCP/UDP directly after the fixed 40-byte header leaves the ports 0, the same honest
 /// shape as the v4 parser's fragment handling.
@@ -761,7 +761,7 @@ fn parse6(ctx: &TcContext) -> Option<FlowKey6> {
 // ---------------------------------------------------------------------------
 
 /// Per-cgroup accumulated on-CPU time in **nanoseconds**, keyed by cgroup id
-/// (`bpf_get_current_cgroup_id`), the same id [`agent_probes_loader::cgroup_id_of_pid`] resolves from
+/// (`bpf_get_current_cgroup_id`), the same id [`kee_probes_loader::cgroup_id_of_pid`] resolves from
 /// a VMM pid, so the loader reads exactly the sandbox it means. Bounded at [`MAX_CGROUPS`]; with a
 /// target cgroup set (the common case, one sandbox) it holds a single entry. Best-effort like the flow
 /// counters: the read-modify-write is per-CPU-serialized by the scheduler hook but the add across CPUs

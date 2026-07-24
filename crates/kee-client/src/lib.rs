@@ -1,21 +1,21 @@
 //! The reference **Rust client** for the `agent` wire API (ADR 030): drive a sandbox **session**
 //! over a unix socket, `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`, using
-//! nothing but the shared wire contract ([`agent_protocol`]) and a JSON value for the opaque trace
+//! nothing but the shared wire contract ([`kee_protocol`]) and a JSON value for the opaque trace
 //! record.
 //!
-//! **This is the proof, and the seed.** The proof: it links **no `agent-vmm`**, so it demonstrates
+//! **This is the proof, and the seed.** The proof: it links **no `kee-vmm`**, so it demonstrates
 //! that a caller drives the daemon with only a JSON library and a unix socket, the exact surface a
 //! non-Rust SDK has. The seed: the polyglot SDKs (Go/Python/Node/C#, separate repos) are this client's
 //! shape hardened per language, so its method set *is* the SDK's method set.
 //!
 //! **Synchronous and blocking**, matching the daemon: one [`Client`] owns one connection (one
 //! session), each call sends a request line and blocks for the one response line. Errors are typed
-//! ([`ClientError`]), a decode fault, a remote [`Error`](agent_protocol::Response::Error), or an
+//! ([`ClientError`]), a decode fault, a remote [`Error`](kee_protocol::Response::Error), or an
 //! unexpected reply, never a panic.
 //!
 //! ```no_run
-//! use agent_client::Client;
-//! let mut client = Client::connect("/run/agent/agent.sock")?;
+//! use kee_client::Client;
+//! let mut client = Client::connect("/run/kee/kee.sock")?;
 //! client.open(Default::default())?;                 // boot the session's sandbox
 //! let run = client.exec(&["echo".into(), "hi".into()], "")?;
 //! assert_eq!(run.stdout, "hi\n");
@@ -30,7 +30,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use agent_protocol::{read_message, write_message, ProtocolError, Request, Response};
+use kee_protocol::{read_message, write_message, ProtocolError, Request, Response};
 
 /// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]

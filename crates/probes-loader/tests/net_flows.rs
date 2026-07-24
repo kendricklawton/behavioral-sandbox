@@ -1,16 +1,16 @@
 //! End-to-end test: traffic from a guest shows up in the per-VM flow counters.
 //!
-//! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches a `tc`
+//! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches a `tc`
 //! program inside the VM's netns (needs `CAP_BPF`+`CAP_NET_ADMIN` + BTF + the built object). Run via
-//! `cargo xtask ci-privileged`. Uses `agent-vmm` as a **dev-dependency only**, so the loader library
+//! `cargo xtask ci-privileged`. Uses `kee-vmm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a netns name and a tap name).
 #![allow(clippy::panic)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_probes_loader::{check_support, object_path, TapMonitor};
-use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use kee_probes_loader::{check_support, object_path, TapMonitor};
+use kee_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
 const IPPROTO_UDP: u8 = 17;
@@ -35,11 +35,8 @@ fn skip_reason() -> Option<String> {
     if !Path::new("/dev/kvm").exists() {
         return Some("/dev/kvm not present".into());
     }
-    if !workspace_root()
-        .join("artifacts/rootfs-agent.ext4")
-        .is_file()
-    {
-        return Some("agent rootfs not built (run `cargo xtask build-rootfs`)".into());
+    if !workspace_root().join("artifacts/rootfs-kee.ext4").is_file() {
+        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
     }
     None
 }
@@ -49,10 +46,10 @@ fn skip_reason() -> Option<String> {
 fn networked_agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("AGENT_KERNEL").is_none() {
+    if std::env::var_os("KEE_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
+    cfg.rootfs = root.join("artifacts/rootfs-kee.ext4");
     cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     cfg.read_only_root = true;
@@ -62,7 +59,7 @@ fn networked_agent_config() -> BootConfig {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_BPF/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn guest_traffic_shows_up_in_the_per_vm_counters() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping guest_traffic_shows_up_in_the_per_vm_counters: {why}");
@@ -87,7 +84,7 @@ fn guest_traffic_shows_up_in_the_per_vm_counters() {
         TapMonitor::attach_in_netns(&netns, &tap).expect("attach the tap monitor in the VM netns");
 
     // Drive traffic *from the guest*: a few UDP datagrams at the host end of the /30. No listener is
-    // needed (the packets still cross the tap on the way out), and Python is in the agent rootfs, so
+    // needed (the packets still cross the tap on the way out), and Python is in the guest rootfs, so
     // this is deterministic where a busybox `ping` applet's raw-socket permissions might not be.
     let sender = format!(
         "import socket, time\n\

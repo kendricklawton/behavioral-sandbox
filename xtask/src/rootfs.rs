@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use crate::artifacts::{fetch_one, sha256_of, Artifact};
 use crate::bench::image_used_bytes;
 use crate::guest_bins::build_guest_agent;
-use crate::{agent_rootfs_path, artifacts_dir, run_tool, run_tool_env, vendor_dir, workspace_root};
+use crate::{artifacts_dir, kee_rootfs_path, run_tool, run_tool_env, vendor_dir, workspace_root};
 
 /// The apk cache subdirectory (under a build's `artifacts/` or a vendor mirror): the `.apk` closure +
 /// its `APKINDEX`, populated online once and installed from offline thereafter. Defined here with the
@@ -79,7 +79,7 @@ const ROOTFS_BUDGET_MIB: u64 = 160;
 /// own). `sysinit` mounts the pseudo-filesystems a fresh ext4 lacks, a rootless `mke2fs -d` seeds
 /// no device nodes, so `devtmpfs` is what provides `/dev/ttyS0` + the vsock device (the guest kernel
 /// must auto-mount it, `CONFIG_DEVTMPFS_MOUNT`, for PID 1's own console). The agent then respawns on
-/// the contract vsock port (`agent_channel::AGENT_VSOCK_PORT`, the same constant the host dials,
+/// the contract vsock port (`kee_channel::KEE_VSOCK_PORT`, the same constant the host dials,
 /// so the two sides can't drift), attached to `ttyS0` so its readiness line reaches the serial
 /// console the host scans.
 fn rootfs_inittab() -> String {
@@ -101,11 +101,11 @@ fn rootfs_inittab() -> String {
 # driver passes the v6 address as a cmdline token and `/sbin/net-up` applies it. Best-effort (a
 # plain no-NIC boot is a clean no-op). Runs after /proc is mounted (it reads /proc/cmdline).
 ::sysinit:/sbin/net-up
-ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
+ttyS0::respawn:/usr/local/bin/kee-guest vsock:{port}
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r
 ",
-        port = agent_channel::AGENT_VSOCK_PORT
+        port = kee_channel::KEE_VSOCK_PORT
     )
 }
 
@@ -116,7 +116,7 @@ ttyS0::respawn:/usr/local/bin/agent-guest vsock:{port}
 /// yields an empty result, so that mount is silently skipped and a plain boot is unaffected. `-t ext4`
 /// because busybox `mount`'s type autodetection is weaker than util-linux's; the output mount is
 /// `-o sync` so a command's writes are flushed straight to the device, surviving a hard-kill teardown.
-/// Labels come from `agent-channel`, the one definition the driver (which stamps them) also uses.
+/// Labels come from `kee-channel`, the one definition the driver (which stamps them) also uses.
 fn mount_drives_script() -> String {
     format!(
         "\
@@ -125,8 +125,8 @@ fn mount_drives_script() -> String {
 in=$(findfs LABEL={input} 2>/dev/null) && [ -n \"$in\" ] && /bin/mount -t ext4 -o ro \"$in\" /input
 out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext4 -o sync \"$out\" /output
 ",
-        input = agent_channel::INPUT_LABEL,
-        output = agent_channel::OUTPUT_LABEL,
+        input = kee_channel::INPUT_LABEL,
+        output = kee_channel::OUTPUT_LABEL,
     )
 }
 
@@ -134,7 +134,7 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 /// `ip=`/`CONFIG_IP_PNP` param configures the guest's v4 `eth0` before userspace but has **no** IPv6
 /// form, so the driver passes the guest v6 address as an `<key>=<addr>/<plen>` kernel cmdline token
 /// (`spawn.rs`) and this reads it back from `/proc/cmdline` and assigns it. The key is
-/// `agent_channel::GUEST_IP6_CMDLINE_KEY`, the one host↔guest definition the driver's writer and this
+/// `kee_channel::GUEST_IP6_CMDLINE_KEY`, the one host↔guest definition the driver's writer and this
 /// reader share, so they can't drift (the address itself is never baked into the image, the host owns
 /// it). Best-effort by construction: a plain (no-NIC) boot has no `eth0` and exits cleanly, and a
 /// missing token is a clean no-op, so a non-networked boot is unaffected. Deny-by-default holds for
@@ -162,7 +162,7 @@ echo 0 > /proc/sys/net/ipv6/conf/eth0/accept_dad 2>/dev/null
 ip addr add \"$addr\" dev eth0 2>/dev/null || ifconfig eth0 add \"$addr\" 2>/dev/null
 exit 0
 ",
-        key = agent_channel::GUEST_IP6_CMDLINE_KEY,
+        key = kee_channel::GUEST_IP6_CMDLINE_KEY,
     )
 }
 
@@ -285,10 +285,10 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     // (root); the runtime packages are file payloads, and the in-VM exec test proves they run.
     install_guest_packages(&staging)?;
 
-    // Bake the static agent in at /usr/local/bin/agent-guest.
+    // Bake the static agent in at /usr/local/bin/kee-guest.
     let bindir = staging.join("usr/local/bin");
     std::fs::create_dir_all(&bindir)?;
-    let agent_dest = bindir.join("agent-guest");
+    let agent_dest = bindir.join("kee-guest");
     std::fs::copy(&agent, &agent_dest)
         .with_context(|| format!("copy agent into {}", agent_dest.display()))?;
     set_mode_0755(&agent_dest)?;
@@ -414,7 +414,7 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
             println!("! {msg} (building anyway; the image itself is fine)");
         }
     }
-    let out = agent_rootfs_path();
+    let out = kee_rootfs_path();
     let build = assemble_rootfs(&out)?;
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
     println!("  sha256: {}", build.image_sha256);
@@ -445,7 +445,7 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
         // path so the canonical image (which the boot test uses) stays in place. Clean up the temp
         // (and its `.part`, present if the build failed mid-way) on *every* path, before propagating
         // a build error, so a failed second build leaks neither.
-        let tmp = artifacts_dir().join("rootfs-agent.verify.ext4");
+        let tmp = artifacts_dir().join("rootfs-kee.verify.ext4");
         let result = assemble_rootfs(&tmp);
         let _ = std::fs::remove_file(&tmp);
         let _ = std::fs::remove_file(part_path(&tmp));
@@ -462,9 +462,9 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
 
     // The full runnable hint, printed from the contract constants so it can't drift from the code.
     println!(
-        "  exec inside a microVM with:\n  AGENT_ROOTFS={} AGENT_MARKER={} cargo run -p agent-cli -- run -- echo hi",
+        "  exec inside a microVM with:\n  KEE_ROOTFS={} KEE_MARKER={} cargo run -p kee-cli -- run -- echo hi",
         out.display(),
-        agent_channel::GUEST_READY_MARKER
+        kee_channel::GUEST_READY_MARKER
     );
     Ok(())
 }
@@ -510,7 +510,7 @@ fn write_packages_lock(packages: &[String]) -> Result<()> {
     let path = packages_lock_path();
     let mut body = String::from(
         "# Resolved guest rootfs package closure — the exact Alpine packages baked into\n\
-         # artifacts/rootfs-agent.ext4. Regenerate after an upstream bump with:\n\
+         # artifacts/rootfs-kee.ext4. Regenerate after an upstream bump with:\n\
          #   cargo xtask build-rootfs --update-lock\n\
          # Drift from this list means Alpine's branch repo moved and the image no longer reproduces.\n",
     );
@@ -572,7 +572,7 @@ enum ApkSource<'a> {
 }
 
 /// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static`, no chroot, no
-/// root, no host `apk`. Vendor-aware: with `AGENT_VENDOR_DIR` set it installs offline from the
+/// root, no host `apk`. Vendor-aware: with `KEE_VENDOR_DIR` set it installs offline from the
 /// vendored apk cache, otherwise it fetches from the pinned Alpine CDN. The `.apk` is a tarball; its
 /// `sbin/apk.static` is extracted to a scratch dir removed after the install (the packages land in
 /// `staging`, the tool is ephemeral).
@@ -774,8 +774,8 @@ mod tests {
     #[test]
     fn net_up_reads_the_shared_cmdline_key() {
         let script = net_up_script();
-        let key = agent_channel::GUEST_IP6_CMDLINE_KEY;
-        // The guest parses the *same* token key the driver writes (single-sourced in `agent-channel`),
+        let key = kee_channel::GUEST_IP6_CMDLINE_KEY;
+        // The guest parses the *same* token key the driver writes (single-sourced in `kee-channel`),
         // so the two sides can't drift: the case pattern that matches it and the `${tok#…}` that
         // strips it both carry the key.
         assert!(script.contains(&format!("{key}=*)")));

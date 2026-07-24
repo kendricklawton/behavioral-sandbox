@@ -52,11 +52,11 @@ Supported Rust is **current stable, pinned exactly**, with no back-support befor
 Wasmtime-style last-three-stable window is revisited at the tag. The reasoning and the operating
 checklist are [decision 037](./adr/037-rust-version-tracks-current-stable-no-back-support-yet.md) and
 the Rust-version section of
-[`RELEASES.md`](https://github.com/k-henry-org/agent/blob/main/RELEASES.md).
+[`RELEASES.md`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/RELEASES.md).
 
 ## Releases and the changelog
 
 The finish line is `v0.1.0`, cut only once every planned phase is green. There is no `CHANGELOG.md`
 before then: in the pre-release line the decision records and the git log are the change record, and
 curated release notes begin at the tag. Tags are a human git step. The full release model is
-[`RELEASES.md`](https://github.com/k-henry-org/agent/blob/main/RELEASES.md).
+[`RELEASES.md`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/RELEASES.md).

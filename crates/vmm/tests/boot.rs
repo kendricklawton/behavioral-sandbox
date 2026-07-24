@@ -2,7 +2,7 @@
 //! the read-only base + overlay, and the no-leak guarantee across repeated boots.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p agent-vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p kee-vmm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -12,10 +12,10 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_vmm::{Jail, Vm, DEFAULT_GUEST_CID, DEFAULT_JAIL_UID};
+use kee_vmm::{Jail, Vm, DEFAULT_GUEST_CID, DEFAULT_JAIL_UID};
 
 use common::{
-    agent_rootfs_config, config, have_jailer_privileges, have_net_admin, jailed_overlay_config,
+    config, have_jailer_privileges, have_net_admin, jailed_overlay_config, kee_rootfs_config,
 };
 
 #[test]
@@ -48,7 +48,7 @@ fn boots_to_userspace_and_shuts_down() {
 fn boots_with_a_vsock_device() {
     // Real Firecracker must accept `PUT /vsock` and boot to userspace with the device configured.
     // (This proves just the config path on the stock Ubuntu rootfs; the full host→guest-agent
-    // round trip is `execs_a_command_in_the_microvm`, against the agent rootfs.)
+    // round trip is `execs_a_command_in_the_microvm`, against the guest rootfs.)
     let mut cfg = config();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     let marker = cfg.userspace_marker.clone();
@@ -216,10 +216,10 @@ fn boots_under_the_jailer() {
 
     // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup, no
     // `agent-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
-    // via `from_env`, so `AGENT_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
+    // via `from_env`, so `KEE_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
     // not zero leaks.
     let prefix = format!("agent-{}-", std::process::id());
-    let scratch_root = agent_vmm::BootConfig::from_env().scratch_dir;
+    let scratch_root = kee_vmm::BootConfig::from_env().scratch_dir;
     let scratch_leaks = std::fs::read_dir(&scratch_root)
         .expect("scan the scratch root for leaks")
         .flatten()
@@ -232,18 +232,18 @@ fn boots_under_the_jailer() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn overlay_is_writable_and_base_is_untouched() {
     // Acceptance: the read-only base is shared (no copy), a per-run tmpfs overlay makes `/`
     // writable in-guest, and the base file on the host is never mutated.
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-kee.ext4");
     let before = std::fs::metadata(&base).expect("stat base");
     let (before_len, before_mtime) = (before.len(), before.modified().expect("base mtime"));
 
     // Boot twice: writing to `/etc` (a path that lives on the read-only base) succeeds only because
     // the overlay redirects the write to the tmpfs upper. A fresh tmpfs per boot, so each is clean.
     for i in 0..2 {
-        let vm = Vm::boot(agent_rootfs_config())
+        let vm = Vm::boot(kee_rootfs_config())
             .unwrap_or_else(|e| panic!("overlay microVM boot {i} failed: {e}"));
         let out = vm
             .exec(
@@ -290,7 +290,7 @@ fn jailed_overlay_is_dense_and_base_is_untouched() {
         return;
     }
     use std::os::unix::fs::MetadataExt;
-    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-kee.ext4");
     let before = std::fs::metadata(&base).expect("stat base");
     let (base_len, base_mtime, base_ino, base_dev) = (
         before.len(),
@@ -465,7 +465,7 @@ fn repeated_boots_leave_no_leaks() {
     // This process's per-VM scratch dirs (`agent-<pid>-<n>` under the configured scratch root)
     // must all be gone; an unreadable root is a failure, not zero leaks.
     let prefix = format!("agent-{}-", std::process::id());
-    let scratch_root = agent_vmm::BootConfig::from_env().scratch_dir;
+    let scratch_root = kee_vmm::BootConfig::from_env().scratch_dir;
     let leftovers = std::fs::read_dir(&scratch_root)
         .expect("scan the scratch root for leaks")
         .flatten()
@@ -536,7 +536,7 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     // budget (`FDS_PER_VM`) per start path, cold, networked, prewarmed restore, and, just as
     // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any
     // long-lived embedder into EMFILE regardless of the per-VM budget).
-    use agent_vmm::{sweep_orphans, FDS_PER_VM};
+    use kee_vmm::{sweep_orphans, FDS_PER_VM};
 
     let baseline = open_fds();
 
@@ -581,13 +581,13 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
 
     // Pre-warmed restore (the pool's start path, the one an embedder multiplies hardest).
     let agent_rootfs =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-agent.ext4");
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/rootfs-kee.ext4");
     if agent_rootfs.is_file() {
         let bundle = common::TmpDir::new("fd-warm");
         let (snap, _cold_latency) = common::prewarmed_python_snapshot(&bundle);
         let warm_baseline = open_fds();
         let clone =
-            Vm::restore(&snap, &agent_rootfs_config()).expect("prewarmed clone should restore");
+            Vm::restore(&snap, &kee_rootfs_config()).expect("prewarmed clone should restore");
         let prewarmed = open_fds().saturating_sub(warm_baseline);
         eprintln!("fd footprint: prewarmed clone {prewarmed} (budget {FDS_PER_VM})");
         assert!(
@@ -601,9 +601,9 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
             "prewarmed teardown must return every fd"
         );
     } else {
-        eprintln!("fd footprint: skipping the prewarmed leg (agent rootfs not built)");
+        eprintln!("fd footprint: skipping the prewarmed leg (guest rootfs not built)");
     }
 
     // Keep the host tidy for the suite's other leak checks (and dogfood the sweep's live-skip).
-    let _ = sweep_orphans(&agent_vmm::BootConfig::from_env().scratch_dir);
+    let _ = sweep_orphans(&kee_vmm::BootConfig::from_env().scratch_dir);
 }

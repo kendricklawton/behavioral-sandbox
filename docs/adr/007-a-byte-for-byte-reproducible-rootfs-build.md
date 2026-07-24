@@ -2,7 +2,7 @@
 
 **Context.** The rootfs is a build-time input to an isolation boundary, so its reproducibility is a
 first-class "measured, not marketed" property: a build you can't reproduce byte-for-byte is a claim you
-can't check. `cargo xtask build-rootfs` assembles `rootfs-agent.ext4` from an Alpine minirootfs plus an
+can't check. `cargo xtask build-rootfs` assembles `rootfs-kee.ext4` from an Alpine minirootfs plus an
 `apk add` closure and the guest agent binary, and two forces pull against each other. Determinism wants
 every input pinned and every timestamp fixed; the everyday build wants to keep working when upstream
 Alpine moves. `SOURCE_DATE_EPOCH`/`hash_seed`/`lazy_itable_init=0` are the standard ext4 determinism
@@ -11,7 +11,7 @@ checkable without becoming brittle: a recorded closure makes package drift *visi
 build *fail* the day upstream bumps.
 
 **Decision.** `cargo xtask build-rootfs` is **deterministic**: two builds from the same inputs produce
-a byte-identical `rootfs-agent.ext4`. Three non-determinism sources are pinned:
+a byte-identical `rootfs-kee.ext4`. Three non-determinism sources are pinned:
 - **`mke2fs` timestamps + directory-hash seed.** `SOURCE_DATE_EPOCH` (a fixed constant, scoped to the
   `mke2fs` child) stamps the superblock create/write/check times and clamps every `-d`-copied file
   mtime down to it; `-E hash_seed=<fixed UUID>` fixes the htree seed (otherwise random per build);

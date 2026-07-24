@@ -3,7 +3,7 @@
 //! The smallest complete host application that runs untrusted code the way an embedder should:
 //! configure a sandbox, load the host-side observers, boot it (hardware-isolated, jailed), run the
 //! code, then read back **both** what the code produced and the host-observed audit record, and
-//! close. This is the launch sequence the driver (`agent-vmm`) and the loader (`agent-probes-loader`)
+//! close. This is the launch sequence the driver (`kee-vmm`) and the loader (`kee-probes-loader`)
 //! document, composed **by the caller**. The model/agent, if any, is always the caller here, never
 //! in the host path (ADR 031).
 //!
@@ -18,7 +18,7 @@
 //!
 //! ```console
 //! cargo xtask self-host                     # guest kernel + rootfs + eBPF object, one command
-//! cargo build -p agent-probes-loader --example reference_integration
+//! cargo build -p kee-probes-loader --example reference_integration
 //! sudo ./target/debug/examples/reference_integration -- python3 -c 'print(2 ** 100)'
 //! ```
 //!
@@ -28,8 +28,8 @@
 use std::error::Error;
 use std::time::Duration;
 
-use agent_probes_loader::{SandboxProbes, SharedMeter, SharedTracer, Timing};
-use agent_vmm::{BootConfig, Limits, Sandbox};
+use kee_probes_loader::{SandboxProbes, SharedMeter, SharedTracer, Timing};
+use kee_vmm::{BootConfig, Limits, Sandbox};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // The untrusted workload: the tokens after a `--`, or a small default.
@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tracer = SharedTracer::load()?;
     let meter = SharedMeter::load()?;
 
-    // 2. Configure the run. `from_env` layers flags/env/`.agent.toml`/defaults for the artifact
+    // 2. Configure the run. `from_env` layers flags/env/`.kee.toml`/defaults for the artifact
     //    paths; `Limits` is the per-run resource budget (ADR 010). Conservative defaults, with
     //    the whole-run wall-clock budget raised for this demo; `vcpus`/`mem_mib` are `NonZero` knobs
     //    on the same struct.

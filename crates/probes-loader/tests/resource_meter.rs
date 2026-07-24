@@ -1,9 +1,9 @@
 //! End-to-end test: a CPU-heavy run reports higher CPU than an idle one, attributed to the
 //! sandbox's own cgroup.
 //!
-//! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches the
+//! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches the
 //! `sched_switch` accounting probe (needs `CAP_BPF`+`CAP_PERFMON` + kernel BTF + the built object). Run
-//! via `cargo xtask ci-privileged`. Uses `agent-vmm` as a **dev-dependency only**, so the loader library
+//! via `cargo xtask ci-privileged`. Uses `kee-vmm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a VMM pid → its cgroup).
 //!
 //! The proof is the metering primitive doing its job: with the meter targeting the VMM's cgroup, an idle
@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_probes_loader::{cgroup_id_of_pid, check_support, object_path, ResourceMeter};
-use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use kee_probes_loader::{cgroup_id_of_pid, check_support, object_path, ResourceMeter};
+use kee_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -38,11 +38,8 @@ fn skip_reason() -> Option<String> {
     if !Path::new("/dev/kvm").exists() {
         return Some("/dev/kvm not present".into());
     }
-    if !workspace_root()
-        .join("artifacts/rootfs-agent.ext4")
-        .is_file()
-    {
-        return Some("agent rootfs not built (run `cargo xtask build-rootfs`)".into());
+    if !workspace_root().join("artifacts/rootfs-kee.ext4").is_file() {
+        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
     }
     None
 }
@@ -53,10 +50,10 @@ fn skip_reason() -> Option<String> {
 fn agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("AGENT_KERNEL").is_none() {
+    if std::env::var_os("KEE_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
+    cfg.rootfs = root.join("artifacts/rootfs-kee.ext4");
     cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     cfg.read_only_root = true;
@@ -75,7 +72,7 @@ const PHASE: Duration = Duration::from_millis(1500);
 const SETTLE: Duration = Duration::from_millis(300);
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox() {
     if let Some(why) = skip_reason() {
         eprintln!(

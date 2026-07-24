@@ -5,9 +5,9 @@ means executing an untrusted contributor's scripts with your secrets and your ne
 it in a microVM instead: the job builds and tests as usual, but it is denied the network by default,
 and the host record proves it couldn't reach out even if a test tried.
 
-The job script is [`ci-job.sh`](https://github.com/k-henry-org/agent/blob/main/docs/examples/ci-job.sh):
+The job script is [`ci-job.sh`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/docs/examples/ci-job.sh):
 it unpacks the submitted sources, runs their `unittest` suite (python3 is baked into the guest
-rootfs), and leaves a `report.txt`. The defaults point at the agent rootfs in `artifacts/`; add
+rootfs), and leaves a `report.txt`. The defaults point at the kee rootfs in `artifacts/`; add
 `--unjailed` on a dev box without real root.
 
 ## A project to test
@@ -36,7 +36,7 @@ Inject the sources and the job script, ask for the report back, and file the rec
 means deny-by-default: the sandbox reaches nothing:
 
 ```console
-$ cargo run -q -p agent-cli -- run --unjailed \
+$ cargo run -q -p kee-cli -- run --unjailed \
     --put project.tar --put docs/examples/ci-job.sh --get report.txt \
     --record-summary ci.json -- /bin/sh ci-job.sh
 == unpacking submitted sources ==
@@ -45,12 +45,12 @@ FAILED (errors=1)
 status=fail
 ```
 
-`agent run` returns the job's own exit code, so your CI still sees pass/fail: the suite failed
+`kee run` returns the job's own exit code, so your CI still sees pass/fail: the suite failed
 because `test_sneaky` raised, its `urlopen` never connected. The report is back on your host, and
 the record shows why it failed the way it did:
 
 ```console
-$ agent verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
+$ kee verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
 verified
 $ jq -r .record ci.json | jq '{network, timing}'   # unwrap the signed envelope, then project
 {
@@ -71,7 +71,7 @@ reach (`--allow` is deny-by-default and IP-based, resolve the host first, or run
 mirror on a fixed address):
 
 ```console
-$ cargo run -q -p agent-cli -- run --unjailed --net \
+$ cargo run -q -p kee-cli -- run --unjailed --net \
     --allow 151.101.0.223:443/tcp \
     --put project.tar --put docs/examples/ci-job.sh --get report.txt \
     --record-summary ci.json -- /bin/sh ci-job.sh

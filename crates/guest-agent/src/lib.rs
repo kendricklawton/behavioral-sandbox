@@ -1,4 +1,4 @@
-//! `agent-guest`, the in-guest agent that runs a command and reports its result over the channel.
+//! `kee-guest`, the in-guest agent that runs a command and reports its result over the channel.
 //!
 //! [`serve`] handles **one connection**: it accepts a [`ServerConnection`], reads a single
 //! [`Request::Exec`], runs the command, streams its `stdout`/`stderr` back as they arrive, and ends
@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use agent_channel::{ChannelError, Request, Response, ServerConnection};
+use kee_channel::{ChannelError, Request, Response, ServerConnection};
 
 /// Agent-side ceiling on a command's runtime: a host-requested timeout is clamped to this, so a
 /// buggy host can't ask the agent to wait effectively forever.
@@ -586,7 +586,7 @@ impl RunDir {
         // `PayloadTooLarge` catch is the precise-boundary/TOCTOU backstop (a file that grows between
         // this stat and the read still can't overflow a frame).
         match std::fs::metadata(&real) {
-            Ok(md) if md.len() > agent_channel::MAX_PAYLOAD as u64 => {
+            Ok(md) if md.len() > kee_channel::MAX_PAYLOAD as u64 => {
                 tracing::warn!(
                     "artifact {rel:?} exceeds the frame cap ({} bytes); skipped",
                     md.len()

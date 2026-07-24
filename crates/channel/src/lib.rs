@@ -1,4 +1,4 @@
-//! `agent-channel`, the host↔guest wire protocol for the exec channel.
+//! `kee-channel`, the host↔guest wire protocol for the exec channel.
 //!
 //! One command in, its `stdout`/`stderr`/exit out, over a single bidirectional byte stream (vsock
 //! in the guest, a unix socket in tests, the protocol doesn't care). The transport is chosen in
@@ -13,7 +13,7 @@
 //! - Every message is a **length-prefixed frame**, `tag(u8) · len(u32-le) · payload`, never a
 //!   read-to-EOF or a delimiter scan. `len` is checked against [`MAX_PAYLOAD`] *before* allocating,
 //!   so a hostile or buggy peer cannot drive an unbounded read (the same discipline as the HTTP
-//!   client in `agent-vmm`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
+//!   client in `kee-vmm`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
 //!   source; nothing here panics.
 //!
 //! **The API is type-state, not free functions.** [`ClientConnection`] (host) and
@@ -76,13 +76,13 @@ fn sanitize_error_msg(msg: &str) -> String {
 /// emitting it post-`bind` (not from init before the agent starts) is what removes the
 /// connect-before-listen race. Both the guest agent (which prints it) and the driver (which waits
 /// for it) reference this one constant.
-pub const GUEST_READY_MARKER: &str = "AGENT-GUEST-READY";
+pub const GUEST_READY_MARKER: &str = "KEE-GUEST-READY";
 
 /// The vsock port the guest agent listens on and the host dials. Like [`GUEST_READY_MARKER`],
 /// it's a pre-connection half of the host↔guest contract, so it lives here where **both** sides
 /// (the driver that connects, and the rootfs build that writes the guest's init line) consume the
 /// one definition, a drifted copy would strand the host dialing a port nobody binds.
-pub const AGENT_VSOCK_PORT: u32 = 1024;
+pub const KEE_VSOCK_PORT: u32 = 1024;
 
 /// Filesystem labels the driver stamps on the data block devices it attaches, and the guest mounts
 /// by. A boot may attach a bulk-input device, a bulk-output device, both, or neither, which shifts
@@ -90,17 +90,17 @@ pub const AGENT_VSOCK_PORT: u32 = 1024;
 /// than by enumeration order. Like the vsock port above, these are a host↔guest contract: the driver
 /// (which builds the images) and the rootfs build (whose `mount-drives` mounts them) share the one
 /// definition, so a drifted copy can't leave the guest silently skipping a mount.
-pub const INPUT_LABEL: &str = "agent-input";
+pub const INPUT_LABEL: &str = "kee-input";
 /// See [`INPUT_LABEL`]. The output device is writable; the guest mounts it read-write at `/output`.
-pub const OUTPUT_LABEL: &str = "agent-output";
+pub const OUTPUT_LABEL: &str = "kee-output";
 
 /// The kernel-cmdline token key the driver uses to hand the guest its static IPv6 address, as
-/// `agent_guest_ip6=<addr>/<plen>`. The kernel `ip=`/`CONFIG_IP_PNP` param configures the guest's v4
+/// `kee_guest_ip6=<addr>/<plen>`. The kernel `ip=`/`CONFIG_IP_PNP` param configures the guest's v4
 /// `eth0` before userspace but has no IPv6 form, so v6 rides this token instead: the driver appends
 /// it to the boot args and the guest's `/sbin/net-up` reads it back from `/proc/cmdline` and assigns
 /// it. Like the labels and the vsock port above, this is a host↔guest contract single-sourced here so
 /// the driver's writer and the guest's reader can't drift.
-pub const GUEST_IP6_CMDLINE_KEY: &str = "agent_guest_ip6";
+pub const GUEST_IP6_CMDLINE_KEY: &str = "kee_guest_ip6";
 
 const TAG_EXEC: u8 = 1;
 const TAG_STDOUT: u8 = 2;

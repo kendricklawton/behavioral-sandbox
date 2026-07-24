@@ -3,14 +3,14 @@
 //! `#[ignore]`d like the other probe tests: loading + attaching `tc` BPF needs `CAP_BPF` +
 //! `CAP_NET_ADMIN` (or root), a BTF kernel, and the built object (`cargo xtask build-probes`). Run via
 //! `cargo xtask ci-privileged`. This proves the **attach** path and that the flow map reads
-//! back; the header **parsing** is covered host-safe by `agent-probes-common`'s unit tests, and
+//! back; the header **parsing** is covered host-safe by `kee-probes-common`'s unit tests, and
 //! the live "guest traffic shows up in the counters" proof is `net_flows.rs` (it needs a booted VM driving its
 //! tap, which no `#[ignore]`d unit test can stand up on its own).
 #![allow(clippy::panic)]
 
 use std::process::Command;
 
-use agent_probes_loader::{check_support, object_path, ProbeError, TapMonitor};
+use kee_probes_loader::{check_support, object_path, ProbeError, TapMonitor};
 
 /// Why this host can't load the probe (a skip reason), or `None` when it can, so the test prints
 /// *why* it skipped. Same gate the tracer/counter tests use.

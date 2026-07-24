@@ -9,7 +9,7 @@
 //!
 //! ```console
 //! cargo xtask build-probes
-//! cargo build -p agent-probes-loader --example monitor_tap
+//! cargo build -p kee-probes-loader --example monitor_tap
 //! sudo target/debug/examples/monitor_tap <interface>
 //! ```
 //!
@@ -18,7 +18,7 @@
 use std::thread::sleep;
 use std::time::Duration;
 
-use agent_probes_loader::{ProbeError, TapMonitor};
+use kee_probes_loader::{ProbeError, TapMonitor};
 
 fn main() -> Result<(), ProbeError> {
     let Some(interface) = std::env::args().nth(1) else {

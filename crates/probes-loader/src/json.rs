@@ -20,7 +20,7 @@ use std::fmt::Display;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use agent_probes_common::{FlowKey, FlowKey6, Syscall};
+use kee_probes_common::{FlowKey, FlowKey6, Syscall};
 
 use crate::record::{AxisGap, NetSection, RunRecord, SyscallFootprint};
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
@@ -263,8 +263,8 @@ fn gap_to_json(out: &mut String, gap: &AxisGap) {
 
 pub(crate) fn proto_name(out: &mut String, proto: u8) {
     match proto {
-        agent_probes_common::IPPROTO_TCP => out.push_str("tcp"),
-        agent_probes_common::IPPROTO_UDP => out.push_str("udp"),
+        kee_probes_common::IPPROTO_TCP => out.push_str("tcp"),
+        kee_probes_common::IPPROTO_UDP => out.push_str("udp"),
         p => {
             let _ = write!(out, "proto {p}");
         }
@@ -334,17 +334,17 @@ pub(crate) fn json_str(out: &mut String, s: &str) {
 mod tests {
     use std::time::Duration;
 
-    use agent_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
+    use kee_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
 
     use crate::record::{NetSection, RunRecord, SyscallFootprint, Timing};
     use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
 
     /// Build a synthetic `SyscallEvent` from public fields (no eBPF), matching `record.rs`'s helper.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; agent_probes_common::DETAIL_CAP];
+        let mut d = [0u8; kee_probes_common::DETAIL_CAP];
         let n = detail.len().min(d.len());
         d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; agent_probes_common::COMM_CAP];
+        let mut c = [0u8; kee_probes_common::COMM_CAP];
         let m = comm.len().min(c.len());
         c[..m].copy_from_slice(&comm.as_bytes()[..m]);
         SyscallEvent {

@@ -26,7 +26,7 @@ cross the tap, because a protocol they can't read is an unobserved channel deny-
 (so the v4 datapath is byte-for-byte unchanged): the flow view (`FlowKey`/`FlowKey6`), egress policy
 (`PolicyRule`/`PolicyRule6`, byte-wise v6 matching since eBPF has no `u128`), and denial records all
 speak both. The guest is dual-stack where the host supports v6: it gets a static v6 ULA link
-(`fd00:200::/64`, host `::1` / guest `::2`) via an `agent_guest_ip6=` cmdline token a guest sysinit
+(`fd00:200::/64`, host `::1` / guest `::2`) via an `kee_guest_ip6=` cmdline token a guest sysinit
 applies, the connected /64 route only and **no v6 default route**, so v6 egress is denied by
 construction exactly as v4 is. The v6 link is **best-effort**: on a host with IPv6 disabled the
 driver brings up no v6 end, emits no token, and reports no v6 link (`RunningVm::ipv6()` is `None`),
@@ -78,7 +78,7 @@ external invariant the eBPF valve cannot see or assert, so a routing regression 
 egress channel (the traffic was still counted in `FLOWS6`, so never audit-invisible, but not dropped).
 The valve now spares ICMPv6 only to the **on-link** scopes neighbor discovery / MLD / NUD actually use,
 link-local (`fe80::/10`), link-scoped multicast (`ff02::/16`), and the ULA the host end lives in
-(`fc00::/7`), via the host-tested `agent_probes_common::icmp6_dst_on_link`; ICMPv6 to a routable
+(`fc00::/7`), via the host-tested `kee_probes_common::icmp6_dst_on_link`; ICMPv6 to a routable
 destination now falls through to `POLICY6` and is denied by default, the same posture v4 gives ICMPv4.
 Enforcement no longer leans on the routing invariant alone, and a hoster can still allow a specific
 ICMPv6 endpoint by an explicit, recorded `POLICY6` rule. The `fc00::/7` spare (rather than the exact

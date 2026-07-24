@@ -7,13 +7,13 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::{ResourceMeter, SyscallTracer};
-use agent_vmm::{
+use anyhow::{bail, Context, Result};
+use kee_probes_loader::{ResourceMeter, SyscallTracer};
+use kee_vmm::{
     BootConfig, Pool, RunningVm, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID, GUEST_READY_MARKER,
 };
-use anyhow::{bail, Context, Result};
 
-use crate::{agent_rootfs_path, kernel_path};
+use crate::{kee_rootfs_path, kernel_path};
 
 /// Real (non-sparse) bytes an image occupies, the base's actual footprint, matching `du`. The ext4
 /// carries free space, but `mke2fs`/`truncate` leave it unallocated, so allocated blocks ≈ the used
@@ -24,7 +24,7 @@ pub(crate) fn image_used_bytes(path: &Path) -> Result<u64> {
     Ok(meta.blocks().saturating_mul(512))
 }
 
-/// Measure boot-to-userspace latency of the agent rootfs. Boots `runs` times on **each** of
+/// Measure boot-to-userspace latency of the guest rootfs. Boots `runs` times on **each** of
 /// two paths, the read-only *shared* base (no per-VM copy) and the read-write *copy* base, and
 /// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
 /// duplicates the whole image per boot, the shared path doesn't. "Measured, not marketed."
@@ -34,8 +34,8 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
         bail!("--runs must be >= 1");
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -45,7 +45,7 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     }
 
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
-    println!("bench-boot: agent rootfs {used_mib} MiB, {runs} boots per path\n");
+    println!("bench-boot: guest rootfs {used_mib} MiB, {runs} boots per path\n");
 
     let mut p50s = Vec::with_capacity(2);
     for (label, read_only_root) in [
@@ -164,8 +164,8 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
         bail!("--runs must be >= 1");
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {}: run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -175,7 +175,7 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     }
 
     let used_mib = image_used_bytes(&rootfs)? / (1024 * 1024);
-    println!("bench-warm: agent rootfs {used_mib} MiB, {runs} runs per path\n");
+    println!("bench-warm: guest rootfs {used_mib} MiB, {runs} runs per path\n");
 
     // One prewarmed snapshot feeds the restore and pool paths.
     let (snapshot, _bundle) = prewarm_python_snapshot(&kernel, &rootfs, "warm")?;
@@ -313,15 +313,15 @@ impl std::fmt::Display for StopReason {
 /// (proportional set size, the true footprint), and the host's `MemAvailable`. It stops at the target
 /// count, on a restore failure, or when free memory would cross a floor (so it can't drive the host
 /// into swap), and reports **which**, so "how many concurrent microVMs before it degrades" is a
-/// measured number, not a guess. Needs KVM + the built agent rootfs.
+/// measured number, not a guess. Needs KVM + the built guest rootfs.
 pub(crate) fn bench_density(count: usize) -> Result<()> {
     crate::require_kvm("bench-density")?;
     if count == 0 {
         bail!("--count must be >= 1");
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {}: run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -343,7 +343,7 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
     let floor_kib = (mem_total / 20).max(1024 * 1024);
     let start_avail = mem_available_kib()?;
 
-    println!("bench-density: agent rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, target {count} clones");
+    println!("bench-density: guest rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, target {count} clones");
     println!(
         "  keeping ≥ {} MiB available (a floor, so this never swaps the host)",
         floor_kib / 1024
@@ -448,15 +448,15 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
 /// divided by the cohort size. This brings up `count` identical sandboxes per strategy, samples the
 /// per-VM VMM Pss (percentiles, not an average) *and* the whole-host drop, then tears the cohort down
 /// before the next strategy. The RW-copy-minus-shared-base gap is the rootfs choice made a number.
-/// Needs KVM + the built agent rootfs.
+/// Needs KVM + the built guest rootfs.
 pub(crate) fn bench_footprint(count: usize) -> Result<()> {
     crate::require_kvm("bench-footprint")?;
     if count == 0 {
         bail!("--count must be >= 1");
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {}: run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -479,7 +479,7 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
     let mem_total = proc_kib(&meminfo, "MemTotal").context("no MemTotal in /proc/meminfo")?;
     let floor_kib = (mem_total / 20).max(1024 * 1024);
 
-    println!("bench-footprint: agent rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, guest RAM {guest_mib} MiB");
+    println!("bench-footprint: guest rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, guest RAM {guest_mib} MiB");
     println!("  cohort of {count} identical sandboxes per strategy (per-VM Pss from smaps; whole-host from MemAvailable)");
     println!(
         "  keeping ≥ {} MiB available (a floor, so this never swaps the host)",
@@ -631,10 +631,10 @@ fn ns_per_openat(path: &Path, batch: usize) -> u64 {
 /// The delta of (2)/(3) over (1) is the honest, measured overhead, "measured, not marketed". Needs
 /// `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM), so it runs on any eBPF-capable host.
 pub(crate) fn bench_trace(runs: usize) -> Result<()> {
-    if let Err(e) = agent_probes_loader::check_support() {
+    if let Err(e) = kee_probes_loader::check_support() {
         bail!("bench-trace needs eBPF support: {e}");
     }
-    let object = agent_probes_loader::object_path();
+    let object = kee_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "bench-trace needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -777,10 +777,10 @@ fn ns_per_switch(rounds: usize) -> Result<u64> {
 /// switch, independent of how many cgroups are metered. Needs `CAP_BPF`+`CAP_PERFMON` and the built
 /// object (not KVM), so it runs on any eBPF-capable host.
 pub(crate) fn bench_meter(runs: usize) -> Result<()> {
-    if let Err(e) = agent_probes_loader::check_support() {
+    if let Err(e) = kee_probes_loader::check_support() {
         bail!("bench-meter needs eBPF support: {e}");
     }
-    let object = agent_probes_loader::object_path();
+    let object = kee_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "bench-meter needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -825,7 +825,7 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     }
 
     // 3. Attached and metering us: add our own cgroup, so every one of our switches accumulates.
-    let me = agent_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
+    let me = kee_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
     meter.add_target(me).context("register our cgroup")?;
     meter.reset(me).context("zero our CPU baseline")?;
     let mut targeted = Vec::with_capacity(runs);
@@ -888,10 +888,10 @@ fn nearest_p50(samples: &mut [u64]) -> u64 {
 /// for the `sched_switch` meter. A rising column would mean the lookup is not O(1); a flat one is the
 /// evidence. Needs `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM).
 pub(crate) fn bench_scale(runs: usize) -> Result<()> {
-    if let Err(e) = agent_probes_loader::check_support() {
+    if let Err(e) = kee_probes_loader::check_support() {
         bail!("bench-scale needs eBPF support: {e}");
     }
-    let object = agent_probes_loader::object_path();
+    let object = kee_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "bench-scale needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -912,7 +912,7 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     // to pad the target set to a size, they never match, so they only enlarge the map.
     const DUMMY_BASE: u64 = 0xDEAD_0000_0000_0000;
 
-    let me = agent_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
+    let me = kee_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
     println!(
         "bench-scale: per-event cost vs watched-target-set size, {runs} bursts per size\n\
          (the set is our own cgroup — the watched path — plus dummy cgroups to pad the size)\n"
@@ -1024,10 +1024,10 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
     let kvm_skip: Option<String> = if !Path::new("/dev/kvm").exists() {
         Some("needs /dev/kvm".into())
     } else {
-        // The KVM sections boot a real microVM, so they also need the pinned kernel + agent rootfs.
+        // The KVM sections boot a real microVM, so they also need the pinned kernel + guest rootfs.
         // A missing build input is a *stated skip* (the suite's promise: skip what it can't run),
         // not four FAILED sections that exit the suite non-zero.
-        [("kernel", kernel_path()), ("agent rootfs", agent_rootfs_path())]
+        [("kernel", kernel_path()), ("guest rootfs", kee_rootfs_path())]
             .into_iter()
             .find(|(_, p)| !p.is_file())
             .map(|(what, p)| {
@@ -1037,8 +1037,8 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
                 )
             })
     };
-    let object = agent_probes_loader::object_path();
-    let ebpf_skip: Option<String> = match agent_probes_loader::check_support() {
+    let object = kee_probes_loader::object_path();
+    let ebpf_skip: Option<String> = match kee_probes_loader::check_support() {
         Err(e) => Some(e.to_string()),
         Ok(()) if !object.is_file() => Some(format!(
             "missing the built probe object ({}) — run `cargo xtask build-probes`",
@@ -1156,9 +1156,9 @@ pub(crate) fn bench_sign(runs: usize) -> Result<()> {
     if runs == 0 {
         bail!("--runs must be >= 1");
     }
-    let key = agent_probes_loader::HostKey::from_seed([0x5a; 32]);
+    let key = kee_probes_loader::HostKey::from_seed([0x5a; 32]);
     let trusted = [key.verifying_key()];
-    let prev = agent_probes_loader::record_hash(SAMPLE_RECORD);
+    let prev = kee_probes_loader::record_hash(SAMPLE_RECORD);
     let envelope = key.sign_canonical(SAMPLE_RECORD);
 
     println!(
@@ -1185,11 +1185,11 @@ pub(crate) fn bench_sign(runs: usize) -> Result<()> {
         chain_ns.push(t.elapsed().as_nanos() as u64);
 
         let t = Instant::now();
-        let _ = std::hint::black_box(agent_probes_loader::verify(&envelope, &trusted));
+        let _ = std::hint::black_box(kee_probes_loader::verify(&envelope, &trusted));
         verify_ns.push(t.elapsed().as_nanos() as u64);
 
         let t = Instant::now();
-        std::hint::black_box(agent_probes_loader::record_hash(SAMPLE_RECORD));
+        std::hint::black_box(kee_probes_loader::record_hash(SAMPLE_RECORD));
         hash_ns.push(t.elapsed().as_nanos() as u64);
     }
 

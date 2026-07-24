@@ -3,7 +3,7 @@
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
 install a packaged release (tarball / `install.sh` / container, decision 035). Pre-rename releases
 are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setup` (or
-`agent doctor` once installed) tells you what your host is missing at every step.
+`kee doctor` once installed) tells you what your host is missing at every step.
 
 ## Preparing the host
 
@@ -101,7 +101,7 @@ Verifying that download against a pinned hash is tracked work, not yet done
 On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
 pinned-version check are exercised against, so prefer them.
 
-Now pick an install path below. Whichever you pick, running `agent doctor` afterwards is how you
+Now pick an install path below. Whichever you pick, running `kee doctor` afterwards is how you
 confirm these four steps actually took.
 
 ### Distro differences that bite
@@ -114,7 +114,7 @@ other could not).
 |---|---|---|
 | Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the supported floor | rolling, comfortably above the floor |
 | `/dev/kvm` | `0660 root:kvm`, so you must join the group | `0666`, usually usable already |
-| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default fails until you set `AGENT_SCRATCH_DIR` |
+| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default fails until you set `KEE_SCRATCH_DIR` |
 | `e2fsprogs` | 24.04 ships **1.47.0**, below the 1.47.1 floor where `mke2fs` honours `SOURCE_DATE_EPOCH`, so `cargo xtask build-rootfs --verify` fails (normal builds are fine) | current, above the floor |
 | AppArmor | **enabled by default**, and can deny the jailer in ways that look like an engine bug | not installed by default |
 | Build toolchain | `build-essential` | `base-devel` |
@@ -125,56 +125,56 @@ Test the `/tmp` question rather than trusting the table, since it depends on you
 findmnt -no OPTIONS -T /tmp | tr , '\n' | grep nodev   # prints nodev if you are affected
 ```
 
-If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.agent.toml`:
+If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.kee.toml`:
 
 ```toml
-scratch_dir = "/home/you/agent-scratch"
+scratch_dir = "/home/you/kee-scratch"
 ```
 
-`agent doctor` flags every one of these against your actual host, so treat it as the authority and
+`kee doctor` flags every one of these against your actual host, so treat it as the authority and
 this table as orientation.
 
 ## Install from a release package
 
 Every release ships one tarball per platform plus `SHA256SUMS`, assembled by `cargo xtask dist`:
-the `agent` binary, the guest kernel, the agent rootfs, and the eBPF object, with a per-file
+the `kee` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file
 `MANIFEST.sha256` inside. `install.sh` verifies both layers before touching anything, then installs
-the binary to `~/.local/bin`, the artifacts to `~/.local/share/agent`, and writes a starter
-`~/.agent.toml` (kernel/rootfs paths) if you don't have one:
+the binary to `~/.local/bin`, the artifacts to `~/.local/share/kee`, and writes a starter
+`~/.kee.toml` (kernel/rootfs paths) if you don't have one:
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/k-henry-org/agent/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/k-henry-org/kvm-ebpf-engine/main/install.sh | sh
 ```
 
 Offline, or straight from a package you built or downloaded by hand:
 
 ```console
-cargo xtask dist                                            # assemble dist/agent-<ver>-x86_64-linux.tar.gz
-AGENT_DIST_TARBALL=dist/agent-<ver>-x86_64-linux.tar.gz sh install.sh
+cargo xtask dist                                            # assemble dist/kee-<ver>-x86_64-linux.tar.gz
+KEE_DIST_TARBALL=dist/kee-<ver>-x86_64-linux.tar.gz sh install.sh
 ```
 
-Knobs (env): `AGENT_INSTALL_PREFIX` (binary dir), `AGENT_DATA_DIR` (artifact dir), `AGENT_VERSION`
-(a specific release), `AGENT_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
+Knobs (env): `KEE_INSTALL_PREFIX` (binary dir), `KEE_DATA_DIR` (artifact dir), `KEE_VERSION`
+(a specific release), `KEE_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
 prerequisite (the engine drives it, it doesn't bundle it). eBPF observability needs no configuration:
 the engine finds the installed `probes` object under the data dir on its own, so
-`AGENT_PROBES_OBJECT` is only needed if you relocated the install with `AGENT_DATA_DIR`.
+`KEE_PROBES_OBJECT` is only needed if you relocated the install with `KEE_DATA_DIR`.
 
 ## Your first run
 
-`agent doctor` is the tool that explains the host: every row it flags names its own fix, and when the
+`kee doctor` is the tool that explains the host: every row it flags names its own fix, and when the
 host is ready it prints the exact run command **for this host**. Run it first.
 
 The one thing worth knowing before you do: a run is **jailed by default**, and the jailer needs real
 root (it creates device nodes in the chroot). So on a normal user account the first command is either
 
 ```console
-sudo -E agent run -- echo hello       # jailed, the supported posture
-agent run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
+sudo -E kee run -- echo hello       # jailed, the supported posture
+kee run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
 ```
 
 There is deliberately no silent fallback between the two: dropping the jail is something you ask for,
 never something the engine does quietly for you. If a run fails on a host-readiness cause, the error
-points you back at `agent doctor`.
+points you back at `kee doctor`.
 
 ## Run it as a container
 
@@ -183,9 +183,9 @@ rebuilt filesystem) but never the KVM boundary, which is always the host's:
 
 ```console
 cargo xtask dist
-docker build -f Containerfile --build-arg DIST=dist/agent-<ver>-x86_64-linux -t agent:<ver> .
-docker run --rm agent:<ver>                                          # doctor: what this host can do
-docker run --rm --device /dev/kvm agent:<ver> run --unjailed -- echo hi
+docker build -f Containerfile --build-arg DIST=dist/kee-<ver>-x86_64-linux -t kee:<ver> .
+docker run --rm kee:<ver>                                            # doctor: what this host can do
+docker run --rm --device /dev/kvm kee:<ver> run --unjailed -- echo hi
 ```
 
 The jailed default and eBPF observation need more of the host (real root, CAP_BPF/CAP_PERFMON,
@@ -198,10 +198,10 @@ Once you have the [prerequisites](#prerequisites), the whole stand-up is a singl
 
 ```console
 cargo xtask self-host           # obtain the pinned kernel + rootfs, build the guest image + eBPF
-                                # object, install `agent`, then boot one sandbox to prove it
+                                # object, install `kee`, then boot one sandbox to prove it
 ```
 
-It installs the `agent` binary into `~/.local/bin` (override with `--prefix DIR`) and,
+It installs the `kee` binary into `~/.local/bin` (override with `--prefix DIR`) and,
 on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
 KVM box. `--no-run` skips the boot proof (build + install only).
@@ -211,14 +211,14 @@ To build **offline**, no Firecracker S3 bucket, no Alpine CDN, point it at a ven
 
 ```console
 cargo xtask vendor                                  # snapshot every pinned input into ./vendor
-AGENT_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
+KEE_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
 ```
 
 ## Supported platforms
 
 The engine runs untrusted code, so its platform floor is part of its security posture, not just a
 compatibility note: the parts the isolation-and-audit thesis rests on are **hard requirements**, the
-rest **degrade with a stated consequence**. `agent doctor` reports exactly where your host sits and
+rest **degrade with a stated consequence**. `kee doctor` reports exactly where your host sits and
 exits non-zero if a hard requirement is missing.
 
 **Hard requirements** (off these, the host is not supported, [decision 032](./adr/032-supported-platforms-two-architectures-a-security.md)):
@@ -245,7 +245,7 @@ tracks their supported set.
   on **Arch Linux** (rolling) during development, both with **Firecracker v1.9**. Those two are the
   continuously-tested distros, and they bracket the tool-version spectrum (rolling-newest against
   LTS-oldest; Ubuntu's e2fsprogs and IPv6 defaults each caught a real issue Arch could not). Other
-  distros are supported per the checks above but not continuously exercised; `agent doctor` names
+  distros are supported per the checks above but not continuously exercised; `kee doctor` names
   exactly what a given host is missing.
 - **`aarch64` is not supported at this time**: it was never privileged-tested (no arm64 KVM
   hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
@@ -253,7 +253,7 @@ tracks their supported set.
   reopens it.
 - One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
   systemd default on Arch, and some Ubuntu setups), the jailed default fails because the jailer's
-  chroot `/dev/kvm` there is inert, point `AGENT_SCRATCH_DIR` at a non-`nodev` path. `agent doctor`
+  chroot `/dev/kvm` there is inert, point `KEE_SCRATCH_DIR` at a non-`nodev` path. `kee doctor`
   flags this, and reports your own host's arch, kernel, and Firecracker version. See
   [Distro differences](#distro-differences-that-bite) for how to test it and the rest of the
   per-distro list.
@@ -269,8 +269,8 @@ tracks their supported set.
   mitigation, not the isolation boundary, [decision 010](./adr/010-per-run-resource-policy-one-limits-struct-of.md)).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
 - **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
-  `/dev/kvm` is inert, so the jailed default fails to open KVM; set `AGENT_SCRATCH_DIR` to a
-  non-`nodev` path (e.g. under `$HOME`), or use `--unjailed`. `agent doctor` flags this.
+  `/dev/kvm` is inert, so the jailed default fails to open KVM; set `KEE_SCRATCH_DIR` to a
+  non-`nodev` path (e.g. under `$HOME`), or use `--unjailed`. `kee doctor` flags this.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
 ## Prerequisites
@@ -284,7 +284,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
   for CO-RE eBPF, most modern distros ship it.
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on
-  `PATH` or named via `AGENT_FIRECRACKER`.
+  `PATH` or named via `KEE_FIRECRACKER`.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
   rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
   loopback, no `sudo`). A missing tool is a clear typed error. The **reproducible** rootfs build
@@ -300,7 +300,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
 
 How much of the engine you get depends on what the process is allowed to do, and this is the part
 that most often surprises a first-time operator. Nothing here degrades silently: a capability you
-lack either names itself in `agent doctor` or produces a typed refusal.
+lack either names itself in `kee doctor` or produces a typed refusal.
 
 | What you want | What it needs | Without it |
 |---|---|---|
@@ -313,7 +313,7 @@ lack either names itself in `agent doctor` or produces a typed refusal.
 Root covers every row. To keep the eBPF half off root, grant the binary just those two capabilities:
 
 ```console
-sudo setcap cap_bpf,cap_perfmon+ep "$(command -v agent)"
+sudo setcap cap_bpf,cap_perfmon+ep "$(command -v kee)"
 ```
 
 The jailer's requirement cannot be narrowed the same way: it needs **real root** (euid 0) because it
@@ -322,8 +322,8 @@ substitutes. A jailed run therefore looks like this, with `-E` to keep your envi
 explicit scratch dir if `/tmp` is `nodev`:
 
 ```console
-mkdir -p ~/agent-scratch
-sudo -E env AGENT_SCRATCH_DIR="$HOME/agent-scratch" "$(command -v agent)" run -- echo hello
+mkdir -p ~/kee-scratch
+sudo -E env KEE_SCRATCH_DIR="$HOME/kee-scratch" "$(command -v kee)" run -- echo hello
 ```
 
 ## Compiling from source
@@ -335,7 +335,7 @@ To drive the individual steps instead, or to work on the engine itself, consult
 [Building](./contributing-building.md), which owns the build toolchain (the Rust version policy, the
 probes crate's pinned nightly and `bpf-linker`), the artifact commands, and the two test gates.
 
-Once you have a binary, head to [Using the agent CLI](./cli.md) to run something.
+Once you have a binary, head to [Using the kee CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 
@@ -351,11 +351,11 @@ cargo xtask vendor --dir /srv/mirror  # populate a mirror elsewhere
 cargo xtask vendor --verify           # re-check an existing mirror against its manifest (offline)
 ```
 
-Then set `AGENT_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
+Then set `KEE_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
 
 ```console
-AGENT_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
-AGENT_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
+KEE_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
+KEE_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
 ```
 
 The mirror is **not** committed (it holds downloaded images, like `artifacts/`); it is a self-hoster's

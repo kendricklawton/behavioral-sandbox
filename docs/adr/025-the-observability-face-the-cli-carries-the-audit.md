@@ -13,12 +13,12 @@ format.
 **Decision.** What a run did becomes *legible* at the CLI, on three composable `run` flags over one
 mechanism: `--trace` (the human-readable trail, on **stdout** after the run), `--record FILE` (the
 deterministic JSON record, the machine surface; decision 034 later wraps this file in a host-signed
-envelope that `agent verify` checks), and `--watch` (a live full-screen view, on
+envelope that `kee verify` checks), and `--watch` (a live full-screen view, on
 **stderr**, while the command runs). A fourth flag, `--net`, boots the sandbox with its NIC so
 there is a tap to observe (deny-by-default unchanged: no allowance means nothing past the host /30).
 Any of the three audit flags triggers the same launch sequence decision 024 defined, load the
 shared tracer + meter, boot, `SandboxProbes::attach` by plain values, exec, `collect` while the
-sandbox is alive, composed **in the CLI**, never in `agent-vmm` (decisions 021/023 hold: the two
+sandbox is alive, composed **in the CLI**, never in `kee-vmm` (decisions 021/023 hold: the two
 tracks still bridge only by `vmm_pid`/`netns`/`tap_name`).
 
 **Stream discipline decides where each face lives.** The house rule is "stderr carries diagnostics,

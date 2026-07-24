@@ -31,7 +31,7 @@ dependencies alike.
 ## Getting a source tree ready
 
 ```console
-git clone https://github.com/k-henry-org/agent && cd agent
+git clone https://github.com/k-henry-org/kvm-ebpf-engine && cd kvm-ebpf-engine
 cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
 cargo build                  # the workspace: driver, loader, CLI, guest agent
 ```
@@ -41,7 +41,7 @@ The repo ships **no binary images**, so the guest artifacts are fetched or built
 
 ```console
 cargo xtask fetch-artifacts  # the pinned guest kernel (vmlinux) + boot rootfs (sha256-verified)
-cargo xtask build-rootfs     # the agent rootfs: Alpine + python3 + the static guest agent
+cargo xtask build-rootfs     # the guest rootfs: Alpine + python3 + the static guest agent
                              # (reproducible; --verify asserts two builds are byte-identical)
 cargo xtask build-probes     # the eBPF object (skips with a note when bpf-linker/nightly are absent)
 ```

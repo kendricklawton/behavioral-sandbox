@@ -1,4 +1,4 @@
-//! Integration tests for the guest agent, driving [`agent_guest::serve`] through the **public**
+//! Integration tests for the guest agent, driving [`kee_guest::serve`] through the **public**
 //! channel API ([`ClientConnection`]) over a unix socketpair, the same protocol the host will speak
 //! over vsock, but with no VM.
 // This is a test binary; the `run` helper isn't a `#[test]` fn, so the workspace's
@@ -9,14 +9,14 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
-use agent_channel::{ClientConnection, Request, Response};
+use kee_channel::{ClientConnection, Request, Response};
 
 /// Play the host side against `serve`: connect (handshake), send one exec request, then read
 /// responses until a terminal frame. Returns collected stdout, stderr, and the final code or error.
 fn run(argv: &[&str]) -> (Vec<u8>, Vec<u8>, Result<i32, String>) {
     let (host, guest) = UnixStream::pair().expect("socketpair");
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
 
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
@@ -97,7 +97,7 @@ fn stdin_is_fed_to_the_command() {
     // `cat` echoes its stdin to stdout: proves the request's stdin buffer reaches the child and is
     // closed (EOF), so `cat` exits.
     let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::Exec {
@@ -127,13 +127,13 @@ fn env_reaches_the_command_but_never_the_agents_own_process() {
     // The two halves of the env contract in one run: the injected variable is visible to the
     // spawned command, and it is set via `Command::env` only, `serve` runs in *this* process here,
     // so if the agent ever `set_var`'d it, the assertion on our own environment would catch it.
-    let key = "AGENT_TEST_ENV_SCOPE";
+    let key = "KEE_TEST_ENV_SCOPE";
     assert!(
         std::env::var_os(key).is_none(),
         "test precondition: {key} must not be set"
     );
     let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::Exec {
@@ -169,7 +169,7 @@ fn env_reaches_the_command_but_never_the_agents_own_process() {
 fn injected_file_is_read_by_the_command_and_artifact_returned() {
     // Put a file in, `cat` it (proving cwd = the working dir), and pull an artifact back.
     let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::PutFile {
@@ -221,7 +221,7 @@ fn session_state_persists_across_connections() {
     // Exec 1: read the injected file, append to it, and write a new one.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     let session = dir.clone();
-    let agent = std::thread::spawn(move || agent_guest::serve_session(guest, &session));
+    let agent = std::thread::spawn(move || kee_guest::serve_session(guest, &session));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::PutFile {
@@ -250,7 +250,7 @@ fn session_state_persists_across_connections() {
     // Exec 2, a fresh connection on the same session dir: the accumulated file is still there.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     let session = dir.clone();
-    let agent = std::thread::spawn(move || agent_guest::serve_session(guest, &session));
+    let agent = std::thread::spawn(move || kee_guest::serve_session(guest, &session));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::Exec {
@@ -291,7 +291,7 @@ fn a_relative_program_built_in_the_session_runs_by_its_path() {
     let run_argv = |argv: Vec<String>| -> (Vec<u8>, Result<i32, String>) {
         let (host, guest) = UnixStream::pair().expect("socketpair");
         let session = dir.clone();
-        let agent = std::thread::spawn(move || agent_guest::serve_session(guest, &session));
+        let agent = std::thread::spawn(move || kee_guest::serve_session(guest, &session));
         let mut client = ClientConnection::connect(host).expect("client handshake");
         client
             .send_request(&Request::Exec {
@@ -339,7 +339,7 @@ fn hung_command_is_killed_at_its_deadline() {
     // A command that would run far longer than its timeout must be killed and reported as TimedOut,
     // not hang the agent. A short timeout keeps the test fast.
     let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::Exec {
@@ -368,7 +368,7 @@ fn hung_command_is_killed_at_its_deadline() {
 fn command_under_its_deadline_is_not_falsely_killed() {
     // A command that finishes well within its budget must exit normally, never TimedOut.
     let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::Exec {
@@ -397,7 +397,7 @@ fn command_under_its_deadline_is_not_falsely_killed() {
 fn put_file_rejects_path_traversal() {
     // A path that climbs out of the working dir must be rejected with a terminal Error, not written.
     let (host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
     let mut client = ClientConnection::connect(host).expect("client handshake");
     client
         .send_request(&Request::PutFile {
@@ -425,7 +425,7 @@ fn bad_handshake_is_rejected_not_hung() {
     // A peer that opens the connection and sends garbage (≥6 bytes, wrong magic) must make `serve`
     // fail promptly, not block. No deadline needed: read_exact gets its 6 bytes and the magic fails.
     let (mut host, guest) = UnixStream::pair().expect("socketpair");
-    let agent = std::thread::spawn(move || agent_guest::serve(guest));
+    let agent = std::thread::spawn(move || kee_guest::serve(guest));
     host.write_all(b"XXXXXX not a handshake")
         .expect("write garbage");
     let result = agent.join().expect("agent thread");
@@ -445,7 +445,7 @@ fn stalled_host_does_not_wedge_the_guest() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let agent = std::thread::spawn(move || {
-        let r = agent_guest::serve(guest);
+        let r = kee_guest::serve(guest);
         let _ = tx.send(());
         r
     });
@@ -493,7 +493,7 @@ fn a_host_that_stalls_mid_frame_is_a_bounded_typed_error() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let agent = std::thread::spawn(move || {
-        let r = agent_guest::serve(guest);
+        let r = kee_guest::serve(guest);
         let _ = tx.send(());
         r
     });

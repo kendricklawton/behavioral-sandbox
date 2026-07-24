@@ -76,8 +76,8 @@ jobs:
 
       - name: Scratch dir off any nodev mount (the jailer's chroot /dev/kvm lives under it)
         run: |
-          sudo mkdir -p /agent-scratch && sudo chmod 1777 /agent-scratch
-          echo "AGENT_SCRATCH_DIR=/agent-scratch" >> "$GITHUB_ENV"
+          sudo mkdir -p /kee-scratch && sudo chmod 1777 /kee-scratch
+          echo "KEE_SCRATCH_DIR=/kee-scratch" >> "$GITHUB_ENV"
 
       - name: Install host tools (firecracker + jailer + net/fs)
         run: |
@@ -125,7 +125,7 @@ jobs:
       - name: Host check (report; non-blocking)
         run: |
           sudo -E env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
-            "AGENT_SCRATCH_DIR=$AGENT_SCRATCH_DIR" cargo xtask setup || true
+            "KEE_SCRATCH_DIR=$KEE_SCRATCH_DIR" cargo xtask setup || true
 
       - name: Run the privileged gate (root, for the jailer + eBPF caps)
         # `CARGO_TARGET_DIR` is required, not a nicety: the gate refuses to run as root without it,
@@ -136,4 +136,4 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
             "CARGO_TARGET_DIR=$PWD/target-privileged" \
-            "AGENT_SCRATCH_DIR=$AGENT_SCRATCH_DIR" cargo xtask ci-privileged
+            "KEE_SCRATCH_DIR=$KEE_SCRATCH_DIR" cargo xtask ci-privileged

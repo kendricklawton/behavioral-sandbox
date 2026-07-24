@@ -23,7 +23,7 @@ path, not the payload.
   toolchain), synchronous (no async runtime, matching the driver). Its public shape is a typed handle
   (`ExecveCounter::{load, count, counts_by_pid}`) returning a typed `ProbeError`, the eBPF analogue
   of the driver's `VmmError`. It reads the compiled object from a **path** (`cargo xtask build-probes`
-  output, or `AGENT_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
+  output, or `KEE_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
   stable and `cargo xtask ci` runs everywhere (decision 017).
 
 ## eBPF program types
@@ -216,7 +216,7 @@ meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 The sections above each drive one probe standalone; the fused record binds all three to a launched
 sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
 guest. It lives in
-`probes-loader` (not `agent-vmm`, decisions 021/023/024), bridged to the driver only by plain values:
+`probes-loader` (not `kee-vmm`, decisions 021/023/024), bridged to the driver only by plain values:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
   global, so each is loaded **once** for the host, `SharedMeter` and `SharedTracer`, and every sandbox
@@ -242,7 +242,7 @@ appears in the host-syscall axis (below). `SandboxProbes::collect` is finalize-o
 and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** live reading
 (`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far), what the
 CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
-(`agent run --net --trace --record --watch`) is documented in [Using the agent CLI](./cli.md); decision
+(`kee run --net --trace --record --watch`) is documented in [Using the kee CLI](./cli.md); decision
 025 covers where each surface lives.
 
 ## The hardware-isolation consequence (the honest limit)
@@ -258,7 +258,7 @@ syscall introspection the boundary can't deliver.
 
 ```console
 cargo xtask build-probes                       # builds the object (with BTF); asserts .BTF present
-cargo build -p agent-probes-loader --example count_execve
+cargo build -p kee-probes-loader --example count_execve
 sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/count_execve
 target/debug/examples/count_execve             # unprivileged, with just the two caps
 ```
@@ -267,12 +267,12 @@ Or the privileged test, which spawns processes and asserts the counter moved and
 leaves no pinned residue:
 
 ```console
-cargo test -p agent-probes-loader --test counter --no-run
+cargo test -p kee-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
 ```
 
 The per-axis demos each boot a real sandbox and show one probe end to end (all need
-`/dev/kvm` + the agent rootfs + the built object, run as root or with the named caps):
+`/dev/kvm` + the kee rootfs + the built object, run as root or with the named caps):
 
 ```console
 cargo xtask trace-sandbox      # the sandbox's host syscall footprint, by cgroup
@@ -318,7 +318,7 @@ Firecracker worker's `execve`/`openat`/`connect`, never the guest's, which are s
 never trap here.
 
 ```console
-cargo build -p agent-probes-loader --example trace_syscalls
+cargo build -p kee-probes-loader --example trace_syscalls
 sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/trace_syscalls
 target/debug/examples/trace_syscalls           # a filtered trace, then an unfiltered one
 ```

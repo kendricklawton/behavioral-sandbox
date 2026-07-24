@@ -1,7 +1,7 @@
 # Using the engine API
 
 The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
-the `agent-vmm` library promises when you pin it and build on it, stated once, against the real
+the `kee-vmm` library promises when you pin it and build on it, stated once, against the real
 API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
 The second half draws the line this project refuses to cross, what the engine deliberately is
 **not**, because a runtime that quietly grows platform features stops being embeddable.
@@ -30,7 +30,7 @@ namespaces, a cgroup). An unset `jail` becomes `Jail::default()`; the opt-out fo
 jail (no real root, no `jailer` binary) is the *differently named constructor*
 `Sandbox::open_unjailed`, so an unconfined sandbox is greppable in your source and can never happen
 by a forgotten flag (012). Artifacts (kernel, rootfs, `firecracker`) layer from the environment
-(`AGENT_KERNEL`, `AGENT_ROOTFS`, …) under explicit `BootConfig` fields.
+(`KEE_KERNEL`, `KEE_ROOTFS`, …) under explicit `BootConfig` fields.
 
 ### Exec: synchronous, bounded, faithful
 
@@ -129,11 +129,11 @@ It composes the driver and the loader the way a downstream host application woul
 
 ### The CLI is the reference embedder
 
-`agent run` is the lifecycle in one command: piped stdin, `--env`, `--put`/`--get`, `--wall`,
+`kee run` is the lifecycle in one command: piped stdin, `--env`, `--put`/`--get`, `--wall`,
 `--output-cap`, `--json` (the structured result as one JSON object on stdout, stderr carries the
-logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `agent shell` holds one sandbox
+logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `kee shell` holds one sandbox
 open as an interactive stateful session. If you're writing an SDK, start from the daemon's
-[reference client](./daemon.md#the-reference-client) (`agent-client`), it drives the same
+[reference client](./daemon.md#the-reference-client) (`kee-client`), it drives the same
 lifecycle over the wire API with nothing of the engine linked, which is exactly the surface a
 non-Rust SDK has.
 
@@ -152,7 +152,7 @@ non-goals, these belong to whatever hosts the engine, and PRs adding them are wr
   queues, and autoscaling are the hoster's: the engine runs sandboxes on its host; it doesn't
   schedule a cluster.
 - **No dashboard, no platform API.** The programmatic surface is the Rust library, the CLI, and
-  the [`agent` daemon](./daemon.md), a *local* driver daemon over a unix socket, a thin host of
+  the [`kee` daemon](./daemon.md), a *local* driver daemon over a unix socket, a thin host of
   the same library's public API, with no auth and no tenancy (access control is the socket
   directory's permissions). A daemon that grows multi-tenant identity or a public HTTP surface is
   a *hoster*, not this repo.

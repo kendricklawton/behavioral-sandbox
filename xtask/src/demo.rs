@@ -1,24 +1,24 @@
 //! The syscall-trace demo (`trace-sandbox`): a **live syscall trace of a running sandbox**.
 //!
 //! Binds the two tracks an embedder binds, boot a real microVM sandbox (the Firecracker driver,
-//! `agent-vmm`) and watch its host footprint with the eBPF syscall tracer (`agent-probes-loader`),
+//! `kee-vmm`) and watch its host footprint with the eBPF syscall tracer (`kee-probes-loader`),
 //! attributed to the sandbox's cgroup. It is deliberately the *VMM's host footprint* (the
 //! jailer/Firecracker `execve`, the drive/tap/socket `openat`s), not the guest's own syscalls: a
 //! microVM services those in-guest and they never trap to the host (the hardware-isolation
 //! consequence stated up front).
 //!
-//! Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
+//! Needs `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
 //! privileged, user-run demo like `bench-boot`, never part of the host-safe gate.
 
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::{
+use anyhow::{bail, Context, Result};
+use kee_probes_loader::{
     cgroup_id_of_pid, EgressPolicy, Protocol, ResourceMeter, SyscallTracer, TapMonitor,
 };
-use agent_vmm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
-use anyhow::{bail, Context, Result};
+use kee_vmm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
-use crate::{agent_rootfs_path, kernel_path};
+use crate::{kee_rootfs_path, kernel_path};
 
 /// The effective uid from `/proc/self/status` (`Uid:`'s second field), or `None` if unreadable, so
 /// the demo confines when it can (root → jailed) and still runs on a dev host (unjailed) when it
@@ -36,10 +36,10 @@ fn effective_uid() -> Option<u32> {
 /// demo. `seconds` is the length of the live tail after the boot+exec window is printed.
 pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
     crate::require_kvm("trace-sandbox")?;
-    if let Err(e) = agent_probes_loader::check_support() {
+    if let Err(e) = kee_probes_loader::check_support() {
         bail!("trace-sandbox needs eBPF support: {e}");
     }
-    let object = agent_probes_loader::object_path();
+    let object = kee_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "trace-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -47,8 +47,8 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
         );
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -67,7 +67,7 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
         .drain(|_| {})
         .context("clear the pre-boot baseline")?;
 
-    // Boot a sandbox on the agent rootfs. Jailed when we're root (the confinement is the point);
+    // Boot a sandbox on the guest rootfs. Jailed when we're root (the confinement is the point);
     // otherwise the explicit unjailed opt-out, so the demo still runs on a dev host without root. A
     // plain read-write copy (`read_only_root = false`) boots either way, with no overlay dependency.
     let mut cfg = BootConfig::from_env();
@@ -162,15 +162,15 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
 /// scoped to the sandbox's own netns (decision 014). Unlike the syscall trace, this is the guest's
 /// *own* packets: they cross the tap on the host, so the host sees every one.
 ///
-/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
+/// Needs `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
 /// privileged, user-run demo like `trace-sandbox`. `rounds` is how many guest-traffic bursts to send
 /// (watching the counters climb each one).
 pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
     crate::require_kvm("watch-sandbox")?;
-    if let Err(e) = agent_probes_loader::check_support() {
+    if let Err(e) = kee_probes_loader::check_support() {
         bail!("watch-sandbox needs eBPF support: {e}");
     }
-    let object = agent_probes_loader::object_path();
+    let object = kee_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "watch-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -178,8 +178,8 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
         );
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -278,14 +278,14 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
 /// send to that endpoint and to a blocked one, and show the allow-listed traffic passing while everything
 /// else is dropped at the tap and recorded in the denials audit trail.
 ///
-/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
+/// Needs `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
 /// privileged, user-run demo like `watch-sandbox`.
 pub(crate) fn enforce_sandbox() -> Result<()> {
     crate::require_kvm("enforce-sandbox")?;
-    if let Err(e) = agent_probes_loader::check_support() {
+    if let Err(e) = kee_probes_loader::check_support() {
         bail!("enforce-sandbox needs eBPF support: {e}");
     }
-    let object = agent_probes_loader::object_path();
+    let object = kee_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "enforce-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -293,8 +293,8 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
         );
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -411,14 +411,14 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
 /// the hoster *bills*. Prints the full `ResourceSummary` (CPU from eBPF, memory/IO from the kernel's
 /// cgroup v2 counters) for the busy run.
 ///
-/// Needs `/dev/kvm`, the agent rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
+/// Needs `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
 /// privileged, user-run demo like `trace-sandbox`.
 pub(crate) fn meter_sandbox() -> Result<()> {
     crate::require_kvm("meter-sandbox")?;
-    if let Err(e) = agent_probes_loader::check_support() {
+    if let Err(e) = kee_probes_loader::check_support() {
         bail!("meter-sandbox needs eBPF support: {e}");
     }
-    let object = agent_probes_loader::object_path();
+    let object = kee_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "meter-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -426,8 +426,8 @@ pub(crate) fn meter_sandbox() -> Result<()> {
         );
     }
     let kernel = kernel_path();
-    let rootfs = agent_rootfs_path();
-    for (what, p) in [("kernel", &kernel), ("agent rootfs", &rootfs)] {
+    let rootfs = kee_rootfs_path();
+    for (what, p) in [("kernel", &kernel), ("guest rootfs", &rootfs)] {
         if !p.is_file() {
             bail!(
                 "missing {what} at {} — run `cargo xtask fetch-artifacts` + `cargo xtask build-rootfs`",
@@ -436,7 +436,7 @@ pub(crate) fn meter_sandbox() -> Result<()> {
         }
     }
 
-    // Boot a sandbox on the agent rootfs (jailed as root, else the unjailed opt-out so a dev host still
+    // Boot a sandbox on the guest rootfs (jailed as root, else the unjailed opt-out so a dev host still
     // runs it). Its VMM runs in a per-VM lifetime cgroup, the cgroup the meter attributes to.
     let mut cfg = BootConfig::from_env();
     cfg.kernel = kernel.clone();

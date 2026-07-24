@@ -5,11 +5,11 @@
 //!   Runs everywhere, needs no KVM or root, and mirrors `.github/workflows/ci.yml`.
 //! - **`ci-privileged`**, the KVM/eBPF integration tests (the `#[ignore]`d ones). Needs
 //!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop. Builds the guest
-//!   agent + the agent rootfs first, so the in-VM exec test has something to boot.
+//!   agent + the guest rootfs first, so the in-VM exec test has something to boot.
 //! - **`setup`**, checks the host can do KVM + eBPF and reports what's missing.
 //! - **`self-host`**, the single self-host command: obtain the pinned kernel + rootfs, build the
 //!   guest image + eBPF object, install `agent`, and (on a KVM host) boot one sandbox to
-//!   prove it. Offline when `AGENT_VENDOR_DIR` points at a `vendor` mirror.
+//!   prove it. Offline when `KEE_VENDOR_DIR` points at a `vendor` mirror.
 //! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
 //!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
 //!   bucket or the Alpine CDN; `--verify` re-checks the mirror offline.
@@ -23,12 +23,12 @@
 //! - **`bench-boot`**, measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
 //! - **`bench-warm`**, the three start paths' latency percentiles: cold boot vs prewarmed-snapshot
 //!   restore vs prewarmed-pool take, each split into its isolated start and its time-to-first-result.
-//!   Needs KVM + the built agent rootfs.
+//!   Needs KVM + the built guest rootfs.
 //! - **`bench-density`**, memory-sharing under concurrency: summed Rss vs Pss as prewarmed clones
-//!   stack up, and how many fit before it degrades. Needs KVM + the built agent rootfs.
+//!   stack up, and how many fit before it degrades. Needs KVM + the built guest rootfs.
 //! - **`bench-footprint`**, per-sandbox memory footprint and the overlay/rootfs choice's effect:
 //!   per-VM Pss + whole-host cost per sandbox for cold RW-copy vs cold shared-base vs restore. Needs
-//!   KVM + the built agent rootfs.
+//!   KVM + the built guest rootfs.
 //! - **`bench-all`**, the whole suite as one reproducible report, methodology stated + host recorded;
 //!   sections whose prerequisite is missing are skipped with the reason. The written report is
 //!   `docs/benchmarks.md`.
@@ -36,9 +36,9 @@
 //!   attached-but-filtered-out vs attached-and-capturing. Needs `CAP_BPF`+`CAP_PERFMON` + the built
 //!   object (not KVM).
 //! - **`trace-sandbox`**, the syscall-trace demo: boot a real sandbox and stream its
-//!   cgroup-attributed host syscall footprint. Needs KVM + the agent rootfs + `CAP_BPF` + the object.
+//!   cgroup-attributed host syscall footprint. Needs KVM + the guest rootfs + `CAP_BPF` + the object.
 //! - **`watch-sandbox`**, the network-observability demo: boot a real networked sandbox and watch its
-//!   per-VM network flows on the tap. Needs KVM + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
+//!   per-VM network flows on the tap. Needs KVM + the guest rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
 //! - **`enforce-sandbox`**, the egress-enforcement demo: boot a real networked sandbox, arm a
 //!   deny-by-default egress policy allowing one endpoint, and show the allow-listed traffic passing while
 //!   everything else is dropped at the tap and logged. Same needs as `watch-sandbox`.
@@ -52,9 +52,9 @@
 //!   chain hash (decision 034), sub-millisecond and off the boot path. Host-only (no KVM/eBPF).
 //! - **`meter-sandbox`**, the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
-//!   per-run resource summary. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
+//!   per-run resource summary. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
 //! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the untrusted-input decoders: the
-//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`agent serve`'s socket,
+//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`kee serve`'s socket,
 //!   the outermost boundary), the signed-record envelope (attacker-relayed by design), and the
 //!   eBPF-boundary parsers. Nightly + `cargo install cargo-fuzz`; never part of `ci` (the in-gate
 //!   coverage is the crates' own dependency-light mutation tests).
@@ -109,7 +109,7 @@ enum Cmd {
     Setup,
     /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
     /// object, install the `agent` binary, and (on a KVM host) boot one sandbox to prove
-    /// it. Offline when `AGENT_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
+    /// it. Offline when `KEE_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
     SelfHost {
         /// Where to install the `agent` binary (default `~/.local/bin`).
         #[arg(long, value_name = "DIR")]
@@ -138,7 +138,7 @@ enum Cmd {
     FetchArtifacts,
     /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
     /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`
-    /// (decision 035). Vendor-aware via `AGENT_VENDOR_DIR`; the eBPF toolchain is required (a
+    /// (decision 035). Vendor-aware via `KEE_VENDOR_DIR`; the eBPF toolchain is required (a
     /// package without the audit half is not the product).
     Dist {
         /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
@@ -152,7 +152,7 @@ enum Cmd {
     /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
     BuildGuestExample,
     /// Assemble the guest rootfs: a minimal Alpine base + the guest runtimes (python3) + the static
-    /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-agent.ext4` (needs `curl`,
+    /// agent + a vsock init, as an ext4 image at `artifacts/rootfs-kee.ext4` (needs `curl`,
     /// `tar`, `mke2fs`, `truncate`). Reproducible: two builds are byte-identical.
     BuildRootfs {
         /// Build a second time and assert the image is byte-identical, and fail if the resolved
@@ -164,9 +164,9 @@ enum Cmd {
         #[arg(long)]
         update_lock: bool,
     },
-    /// Measure boot-to-userspace latency (percentiles) of the agent rootfs, on both the read-only
+    /// Measure boot-to-userspace latency (percentiles) of the guest rootfs, on both the read-only
     /// shared base and the read-write per-VM copy, so the base **size**'s effect on boot is visible
-    ///. Needs `/dev/kvm` + the built agent rootfs.
+    ///. Needs `/dev/kvm` + the built guest rootfs.
     BenchBoot {
         /// How many boots to time per path (more → tighter tail percentiles). Default 100, the
         /// floor at which a `p99` has any sample above it; below it `p99` prints `—`.
@@ -188,7 +188,7 @@ enum Cmd {
     /// the read-only base disk and the snapshot memory file) and, keeping them all alive, sample the
     /// summed Rss (naive) vs Pss (true, shared pages divided) plus host MemAvailable. Reports how many
     /// concurrent microVMs fit before it degrades (target / restore failure / a memory floor) and the
-    /// sharing density. Needs `/dev/kvm` + the built agent rootfs.
+    /// sharing density. Needs `/dev/kvm` + the built guest rootfs.
     BenchDensity {
         /// Target number of concurrent clones to stack (it stops earlier on a restore failure or the
         /// memory floor, whichever comes first).
@@ -199,7 +199,7 @@ enum Cmd {
     /// cohort per strategy (cold boot with a per-VM RW copy, cold boot on the shared RO base, snapshot
     /// restore) and report the per-VM Pss (percentiles) plus the whole-host MemAvailable drop per
     /// sandbox. The RW-copy-vs-shared-base gap is the rootfs choice made a number. Needs `/dev/kvm` +
-    /// the built agent rootfs.
+    /// the built guest rootfs.
     BenchFootprint {
         /// How many identical sandboxes to bring up per strategy (it stops earlier at the memory
         /// floor). Default 4.
@@ -257,7 +257,7 @@ enum Cmd {
     },
     /// The syscall-trace demo: boot a real sandbox and stream its host syscall footprint,
     /// attributed to the sandbox's cgroup (the VMM's host syscalls, the guest's stay in-guest).
-    /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
+    /// Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
     TraceSandbox {
         /// Seconds to keep streaming the live trace after the boot+exec window is printed (`0` = just
         /// the boot+exec footprint).
@@ -266,7 +266,7 @@ enum Cmd {
     },
     /// The network-observability demo: boot a real networked sandbox, attach a `tc` monitor to its tap
     /// inside its netns, drive guest traffic, and print the per-VM network flows and totals it counts.
-    /// Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + `cargo xtask build-probes`.
+    /// Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + `cargo xtask build-probes`.
     WatchSandbox {
         /// How many guest-traffic bursts to send, watching the per-VM counters climb each one.
         /// At least 1, enforced at parse (a zero-round watch would prove nothing).
@@ -275,12 +275,12 @@ enum Cmd {
     },
     /// The egress-enforcement demo: boot a real networked sandbox, arm a deny-by-default egress policy
     /// allowing one endpoint, and show the allow-listed traffic passing while everything else is dropped
-    /// at the tap and recorded. Needs `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
+    /// at the tap and recorded. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
     EnforceSandbox,
     /// The resource-metering demo: boot a real sandbox, meter its cgroup with the `sched_switch`
     /// accounting probe, and show an idle guest charging near-zero host CPU while a CPU-heavy guest charges
     /// most of a core, plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
-    /// `/dev/kvm` + the agent rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
+    /// `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
     MeterSandbox,
     /// Fuzz the untrusted-input decoders (the host↔guest channel, the daemon's client wire, the
     /// signed-record envelope, the eBPF-boundary parsers) with `cargo fuzz` (libFuzzer), the deep,
@@ -792,24 +792,24 @@ fn ci_privileged() -> Result<()> {
 fn setup() -> Result<()> {
     println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `agent doctor` renders (decision 028): one
+    // The runtime host checks are the *same* implementation `kee doctor` renders (decision 028): one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
-    let config = agent_vmm::BootConfig::from_env();
-    for c in agent_vmm::doctor::checks(&config) {
-        let ok = c.status == agent_vmm::doctor::CheckStatus::Ok;
+    let config = kee_vmm::BootConfig::from_env();
+    for c in kee_vmm::doctor::checks(&config) {
+        let ok = c.status == kee_vmm::doctor::CheckStatus::Ok;
         check(&c.label, ok);
     }
-    // The eBPF-observability capability row (owned by the probe loader, out of `agent-vmm`).
+    // The eBPF-observability capability row (owned by the probe loader, out of `kee-vmm`).
     check(
         "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
-        agent_probes_loader::check_support().is_ok(),
+        kee_probes_loader::check_support().is_ok(),
     );
 
     // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
     // verifying static links); an operator running the shipped engine does not, so they are not in
-    // the shared `agent doctor` set.
+    // the shared `kee doctor` set.
     println!("\ndev toolchain (for building, not running):");
     check(
         "bpf-linker installed",
@@ -828,10 +828,10 @@ fn setup() -> Result<()> {
         matches!(rootfs::mke2fs_version(), Some(v) if v >= rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN),
     );
 
-    // The degradation matrix, the same fails-open-vs-hard split `agent doctor` prints, from the one
+    // The degradation matrix, the same fails-open-vs-hard split `kee doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.
     println!("\nDegradation matrix: what a missing item above means at runtime:");
-    for line in agent_vmm::doctor::matrix() {
+    for line in kee_vmm::doctor::matrix() {
         println!("  {line}");
     }
 
@@ -840,13 +840,11 @@ fn setup() -> Result<()> {
     // these are the calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
     println!("\nHardening: the hoster's responsibility (the engine can't decide these for you):");
-    println!(
-        "    scratch base: point AGENT_SCRATCH_DIR at a dir only the engine user owns (not the"
-    );
+    println!("    scratch base: point KEE_SCRATCH_DIR at a dir only the engine user owns (not the");
     println!(
         "                  world-writable /tmp default), so no other local user can plant residue"
     );
-    println!("    run the sweep: schedule agent_vmm::sweep_orphans() (boot-time + periodic), the");
+    println!("    run the sweep: schedule kee_vmm::sweep_orphans() (boot-time + periodic), the");
     println!("                  engine exposes it; when/how often it runs is your ops call");
     println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
     println!("                  run drivers as several users, each user must run its own sweep");
@@ -858,7 +856,7 @@ fn setup() -> Result<()> {
     println!(
         "             A host without kernel BTF or those caps is named by a typed error, not a"
     );
-    println!("             cryptic verifier reject (agent_probes_loader::check_support).");
+    println!("             cryptic verifier reject (kee_probes_loader::check_support).");
 
     println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
     Ok(())
@@ -1048,26 +1046,26 @@ fn require_kvm(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// The local vendor mirror, if the operator set `AGENT_VENDOR_DIR`: the offline source for every
+/// The local vendor mirror, if the operator set `KEE_VENDOR_DIR`: the offline source for every
 /// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Firecracker S3
 /// bucket or the Alpine CDN. `None` means fetch from pinned upstream (the default).
 fn vendor_dir() -> Option<PathBuf> {
-    std::env::var_os("AGENT_VENDOR_DIR")
+    std::env::var_os("KEE_VENDOR_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }
 
 /// The artifact filenames under [`artifacts_dir`], defined once so the many readers/writers
 /// (`build-rootfs`, `bench-boot`, `setup`, `fetch-artifacts`) can't drift apart: the pinned guest
-/// kernel, the minimal boot rootfs (fetched), and the agent rootfs (`build-rootfs` output).
+/// kernel, the minimal boot rootfs (fetched), and the guest rootfs (`build-rootfs` output).
 fn kernel_path() -> PathBuf {
     artifacts_dir().join("vmlinux")
 }
 fn boot_rootfs_path() -> PathBuf {
     artifacts_dir().join("rootfs.ext4")
 }
-fn agent_rootfs_path() -> PathBuf {
-    artifacts_dir().join("rootfs-agent.ext4")
+fn kee_rootfs_path() -> PathBuf {
+    artifacts_dir().join("rootfs-kee.ext4")
 }
 
 /// Run an external build tool, echoing the command; fail with context if it's missing or errors.

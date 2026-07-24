@@ -51,7 +51,7 @@ const HOST_IP6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, 1);
 
 /// The guest end of the per-VM v6 link, the v6 analogue of [`GUEST_IP`]. The kernel `ip=` boot param
 /// (`CONFIG_IP_PNP`) is IPv4-only, so unlike the v4 end this cannot ride `ip=`: the driver passes it
-/// as the `agent_guest_ip6=<addr>/<plen>` cmdline token (`spawn.rs`) and a guest sysinit step applies
+/// as the `kee_guest_ip6=<addr>/<plen>` cmdline token (`spawn.rs`) and a guest sysinit step applies
 /// it (`rootfs.rs`). Sourced here so the host stays the single owner of the address (no guest-baked
 /// literal to drift from this one).
 pub(crate) const GUEST_IP6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, 2);

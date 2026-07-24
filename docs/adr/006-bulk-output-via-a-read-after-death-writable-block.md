@@ -11,7 +11,7 @@ VMM and could corrupt the image. Second, the guest controls the image's contents
 targets, so extraction has to treat an output symlink as hostile.
 
 **Decision.** When `BootConfig.output_dir` is set, the driver attaches a **blank, writable** ext4 as
-a third block device (labelled `agent-output`, `is_read_only: false`); the guest mounts it read-write
+a third block device (labelled `kee-output`, `is_read_only: false`); the guest mounts it read-write
 at `/output`, so a command's files under `/output/...` are the bulk-output surface. `RunningVm::`
 `collect_outputs` (consumes the VM) then reads that image back into the host directory. It is the
 whole-working-dir / large-file counterpart to the vsock channel's per-frame `Response::File`
@@ -65,5 +65,5 @@ link targets, not the metadata `e2fsck`/`debugfs` parse.
   the filesystem holds), mirroring the channel path's 16 MiB. It becomes a `BootConfig` knob when the
   per-run resource policy lands.
 - **`Sandbox` plumbing is deferred** (as `input_dir` was): `output_dir`/`collect_outputs` live at the
-  `RunningVm` layer for now; a `Sandbox::collect_outputs` + `agent run --output-dir` follow-up is
+  `RunningVm` layer for now; a `Sandbox::collect_outputs` + `kee run --output-dir` follow-up is
   noted in the roadmap.

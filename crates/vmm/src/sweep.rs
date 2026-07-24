@@ -9,14 +9,14 @@
 //! reclaiming. [`sweep_orphans`] reclaims both dir and netns, the garbage collection a long-running
 //! runtime owes its host for the residue a crashed sibling leaves behind.
 //!
-//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`agent-<pid>-<n>`). The netns
+//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`kee-<pid>-<n>`). The netns
 //! is named after the dir it belongs to, so no separate record is needed and no cross-ownership
 //! confusion arises (a restored clone's netns is named after *its own* dir, not the snapshot source's).
 //!
 //! Conservative by construction:
 //! - Only dirs **owned by the sweeping euid** are candidates. The scratch base (`/tmp` by
 //!   default) is world-writable, so a hostile local user could plant a dead-looking
-//!   `agent-<pid>-<n>` dir naming a *victim's* live netns; `create_workdir` makes real per-VM dirs
+//!   `kee-<pid>-<n>` dir naming a *victim's* live netns; `create_workdir` makes real per-VM dirs
 //!   `0700`, driver-owned, so ownership is the authorship proof. The flip side is deliberate: each
 //!   uid sweeps its own residue (root sweeps root's jailed dirs, a user sweeps their user-driver
 //!   dirs), never another's.
@@ -142,7 +142,7 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
             }
         }
         // Defer removing a dir a live restore is staging into: a cross-process restore stages the
-        // source's disk into this dead-source-pid dir (the baked-in `agent-<srcpid>-<n>/rootfs.ext4`),
+        // source's disk into this dead-source-pid dir (the baked-in `kee-<srcpid>-<n>/rootfs.ext4`),
         // and `remove_dir_all` mid-copy would flake it. The stager's pid marker is the witness (a
         // dead driver's own boot disk carries no marker, so it never defers). The netns above is
         // still reclaimed; only the dir removal waits.
@@ -214,10 +214,10 @@ fn restore_staging_in(dir: &Path) -> bool {
 }
 
 /// The owner pid embedded in a per-VM scratch-dir name, iff `name` matches the exact
-/// `agent-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else,
+/// `kee-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else,
 /// including the test suite's `agent-<tag>-<pid>` temp dirs, is not a sweep candidate.
 fn owner_pid(name: &str) -> Option<u32> {
-    let rest = name.strip_prefix("agent-")?;
+    let rest = name.strip_prefix("kee-")?;
     let (pid, seq) = rest.split_once('-')?;
     if pid.is_empty() || seq.is_empty() || !seq.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -298,7 +298,7 @@ fn protected_identities(dir: &Path) -> BTreeSet<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_test_support::ScratchDir;
+    use kee_test_support::ScratchDir;
 
     /// A pid guaranteed dead: spawn a short-lived child and reap it. Immediate recycling of a
     /// just-freed pid is effectively impossible (the kernel allocates pids cyclically).
@@ -314,8 +314,8 @@ mod tests {
     #[test]
     fn sweep_reclaims_dead_dirs_and_spares_live_and_foreign_ones() {
         let base = ScratchDir::created("agent-sweep-base");
-        let dead = base.path().join(format!("agent-{}-0", dead_pid()));
-        let live = base.path().join(format!("agent-{}-0", std::process::id()));
+        let dead = base.path().join(format!("kee-{}-0", dead_pid()));
+        let live = base.path().join(format!("kee-{}-0", std::process::id()));
         let foreign = base.path().join("agent-bundle-1234"); // the test suite's TmpDir shape
         for d in [&dead, &live, &foreign] {
             std::fs::create_dir(d).expect("create test dir");
@@ -337,15 +337,15 @@ mod tests {
 
     #[test]
     fn owner_pid_parses_only_the_workdir_pattern() {
-        assert_eq!(owner_pid("agent-1234-0"), Some(1234));
-        assert_eq!(owner_pid("agent-1234-56"), Some(1234));
+        assert_eq!(owner_pid("kee-1234-0"), Some(1234));
+        assert_eq!(owner_pid("kee-1234-56"), Some(1234));
         for miss in [
-            "agent-1234",        // no sequence
-            "agent-bundle-1234", // a TmpDir tag, not a pid
-            "agent-1234-x",      // non-numeric sequence
-            "agent--0",          // empty pid
-            "other-1234-0",      // wrong prefix
-            "agent-1234-0-x",    // trailing junk in the seq field
+            "kee-1234",        // no sequence
+            "kee-bundle-1234", // a TmpDir tag, not a pid
+            "kee-1234-x",      // non-numeric sequence
+            "kee--0",          // empty pid
+            "other-1234-0",    // wrong prefix
+            "kee-1234-0-x",    // trailing junk in the seq field
         ] {
             assert_eq!(owner_pid(miss), None, "{miss} must not parse");
         }
@@ -384,7 +384,7 @@ mod tests {
         // A cross-process restore stages the source's disk into the source's now-dead-pid dir; the
         // sweep must not `remove_dir_all` it mid-copy. The witness is the stager's live-pid marker.
         let base = ScratchDir::created("agent-sweep-stage");
-        let staging = base.path().join(format!("agent-{}-0", dead_pid()));
+        let staging = base.path().join(format!("kee-{}-0", dead_pid()));
         std::fs::create_dir(&staging).expect("create staging dir");
         std::fs::write(staging.join("rootfs.ext4"), b"disk").expect("stage a disk");
         std::fs::write(
@@ -407,7 +407,7 @@ mod tests {
         // `rootfs.ext4` in its workdir, and a driver that crashes soon after booting must not have
         // its dir mistaken for an in-flight restore stage and left behind.
         let base = ScratchDir::created("agent-sweep-owndisk");
-        let dir = base.path().join(format!("agent-{}-0", dead_pid()));
+        let dir = base.path().join(format!("kee-{}-0", dead_pid()));
         std::fs::create_dir(&dir).expect("create dead driver dir");
         std::fs::write(dir.join("rootfs.ext4"), b"disk").expect("write its boot disk");
         let report = sweep_orphans(base.path()).expect("sweep");

@@ -36,8 +36,8 @@ body:
     attributes:
       label: Which surface does it touch?
       options:
-        - CLI (agent run / shell / doctor)
-        - agent serve (daemon) + wire API
+        - CLI (kee run / shell / doctor)
+        - kee serve (daemon) + wire API
         - engine API (the vmm library)
         - probes / audit record
         - benchmarks / docs / tooling

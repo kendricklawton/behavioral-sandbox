@@ -4,7 +4,7 @@
 //! driver's netns + scratch dir without touching a live sibling's.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p agent-vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p kee-vmm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -15,21 +15,21 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_vmm::{sweep_orphans, BootConfig, Vm, VMM_PIDS_MAX};
+use kee_vmm::{sweep_orphans, BootConfig, Vm, VMM_PIDS_MAX};
 
-use agent_test_support::{process_threads, LimitCgroup};
 use common::{
-    agent_rootfs_config, cgroup_of, config, have_jailer_privileges, have_net_admin,
-    jailed_agent_config,
+    cgroup_of, config, have_jailer_privileges, have_net_admin, jailed_agent_config,
+    kee_rootfs_config,
 };
+use kee_test_support::{process_threads, LimitCgroup};
 
 /// The env var that turns `helper_boot_and_park` from a no-op into the crash-test victim. Without
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
-const HELPER_ENV: &str = "AGENT_CONFINEMENT_HELPER";
+const HELPER_ENV: &str = "KEE_CONFINEMENT_HELPER";
 
 /// The env var that turns `helper_boot_networked_and_park` into the sweep test's victim: a
 /// **networked** boot, so the crash leaves the residue that matters, a per-VM netns holding a tap.
-const HELPER_NET_ENV: &str = "AGENT_CONFINEMENT_HELPER_NET";
+const HELPER_NET_ENV: &str = "KEE_CONFINEMENT_HELPER_NET";
 
 /// Whether `pid` is still a live `firecracker` process (same discipline as `boot.rs`: keyed on the
 /// specific pid via `comm`, so a reaped-then-recycled pid running something else reads as gone).
@@ -362,7 +362,7 @@ fn kill_handle_unblocks_a_wedged_exec() {
     // out-of-band path: cloneable, Send, and it kills through the cgroup file, so firing it from
     // another thread makes the VMM die, the vsock peer close, and the blocked exec return a typed
     // error long before its 30 s command (or budget) would have.
-    let vm = Vm::boot(agent_rootfs_config()).expect("agent microVM should boot");
+    let vm = Vm::boot(kee_rootfs_config()).expect("agent microVM should boot");
     let handle = vm.kill_handle();
 
     let killer = std::thread::spawn(move || {
@@ -403,7 +403,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
         eprintln!("skipping guest_mem_hog_is_bounded_by_the_cgroup: needs real root");
         return;
     }
-    let cfg = agent_rootfs_config();
+    let cfg = kee_rootfs_config();
     let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
     let Some(cg) = LimitCgroup::create(vcpus, mem_mib, "mem-hog") else {
         eprintln!(
@@ -530,7 +530,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
         eprintln!("skipping guest_fork_bomb_is_bounded_by_the_cgroup: needs real root");
         return;
     }
-    let cfg = agent_rootfs_config();
+    let cfg = kee_rootfs_config();
     let mem_mib = cfg.mem_mib.get();
     // Half a core, deliberately *below* the one-vCPU hardware bound: a quota equal to the vCPU
     // count is satisfied by the silicon alone, which would make the CPU assert below unfalsifiable.
@@ -618,7 +618,7 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
         );
         return;
     }
-    let cfg = agent_rootfs_config();
+    let cfg = kee_rootfs_config();
     let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
     let (Some(victim_cg), Some(attacker_cg)) = (
         LimitCgroup::create(vcpus, mem_mib, "victim"),

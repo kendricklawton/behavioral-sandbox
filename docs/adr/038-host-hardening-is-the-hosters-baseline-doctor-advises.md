@@ -12,7 +12,7 @@ evaluator, "documented as out of scope" and "we have no posture" look identical,
 worse than the first.
 
 **Decision.** Keep the boundary where it is (host hardening is the hoster's), but stop shipping it
-as a bare exclusion: **document a recommended baseline, and have `agent doctor` advise on it.** The
+as a bare exclusion: **document a recommended baseline, and have `kee doctor` advise on it.** The
 engine does not, and cannot, enforce micro-architectural isolation from where it sits (host-side
 eBPF observes syscalls, the tap, and the cgroup, not cache timing), so this is advice and a
 recommended floor, never an enforced control. The baseline a hoster running mutually-distrusting
@@ -30,10 +30,10 @@ tenants should meet:
 - **CPU-vulnerability mitigations left on.** Do not boot the worker with `mitigations=off`; keep the
   microcode current.
 - **A patched host kernel within the supported floor.** The floor (`x86_64`, kernel >= 5.15) is
-  already hard in `agent doctor` (decision 032); *patching* the substrate within that floor is the
+  already hard in `kee doctor` (decision 032); *patching* the substrate within that floor is the
   operator's half of the contract (this is the same line `security.md` already draws).
 
-`agent doctor` gains an **advisory** surface for the machine-checkable parts of this: it reads
+`kee doctor` gains an **advisory** surface for the machine-checkable parts of this: it reads
 `/sys/devices/system/cpu/vulnerabilities/*`, the SMT state, and the KSM state, and **warns** on an
 unmitigated or side-channel-exposed host. It is advisory on purpose: a single-tenant dev box with
 SMT on is perfectly fine, so a hard refusal there would be security theater that breaks the common
@@ -58,7 +58,7 @@ case. The existing hard-floor rows (architecture, kernel LTS) stay hard; these n
   size its own packing; it does not schedule. This is the same line the threat model already draws
   for co-resident fairness.
 - **The advisory is the only new code, and it is a box, not this change.** This decision and its
-  reader page (`docs/host-hardening.md`) ship as prose now; the `agent doctor` rows (reading
+  reader page (`docs/host-hardening.md`) ship as prose now; the `kee doctor` rows (reading
   `/sys/devices/system/cpu/vulnerabilities/*`, SMT, KSM off `crates/vmm/src/doctor.rs`) are their own
   roadmap box, so the deferral is tracked, not buried in this annotation.
 - **No boundary moved.** Nothing here puts a security control inside the guest or claims the engine
@@ -66,4 +66,4 @@ case. The existing hard-floor rows (architecture, kernel LTS) stay hard; these n
   on making that host worth trusting.
 
 **As shipped.** `docs/host-hardening.md` (the reader-facing baseline checklist) and this decision
-ship as documentation; the machine-checkable advisory in `agent doctor` is tracked as a roadmap box.
+ship as documentation; the machine-checkable advisory in `kee doctor` is tracked as a roadmap box.

@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use agent_channel::AGENT_VSOCK_PORT;
+use kee_channel::KEE_VSOCK_PORT;
 
 use crate::console::{last_lines, Console};
 use crate::drives::{build_input_image, build_output_image, OutputDevice};
@@ -686,7 +686,7 @@ impl Spawned {
         // (bounded by the deadline), so `restore` hands back a VM that's actually ready to `exec`,
         // never one mid-resume (this is restore's analogue of boot's userspace-marker wait).
         if let Some(uds) = self.vsock_uds.clone() {
-            self.await_agent_ready(&uds, deadline)?;
+            self.await_kee_ready(&uds, deadline)?;
         }
         // No in-guest re-addressing on restore: under the netns model (ADR 014) each clone owns a
         // private network namespace, so the snapshot's baked-in `eth0` address/MAC/routes are
@@ -703,10 +703,10 @@ impl Spawned {
     /// Poll the guest agent's vsock port until a connect + handshake succeeds, so a restored VM is
     /// exec-ready when it's handed back. The probe connection is dropped immediately (the agent serves
     /// one connection then loops back to accept, so a connect-and-close just cycles it).
-    fn await_agent_ready(&mut self, uds: &Path, deadline: Instant) -> Result<(), VmmError> {
+    fn await_kee_ready(&mut self, uds: &Path, deadline: Instant) -> Result<(), VmmError> {
         let mut backoff = PollBackoff::new();
         loop {
-            match connect_agent_at(uds, AGENT_VSOCK_PORT, Duration::from_millis(200)) {
+            match connect_agent_at(uds, KEE_VSOCK_PORT, Duration::from_millis(200)) {
                 Ok(_probe) => return Ok(()),
                 Err(e) => {
                     if let Some(status) = self.exited()? {
@@ -879,7 +879,7 @@ impl Spawned {
         // the connected /30 route (guest ⇄ host over the tap) and **no default route**, the guest
         // reaches the host and nothing else (deny-by-default, ADR 008). Netmask is a /30.
         //
-        // IPv6 rides alongside as the `agent_guest_ip6=<addr>/<plen>` token: `ip=`/`CONFIG_IP_PNP`
+        // IPv6 rides alongside as the `kee_guest_ip6=<addr>/<plen>` token: `ip=`/`CONFIG_IP_PNP`
         // has no v6 form, so the guest's `/sbin/net-up` sysinit reads this token and applies it to
         // `eth0`. Same deny-by-default shape as v4, a connected /64 route only, no v6 default route.
         if let Some(tap) = self.tap.as_ref() {
@@ -892,7 +892,7 @@ impl Spawned {
             if let Some(v6) = tap.v6 {
                 boot_args = format!(
                     "{boot_args} {}={}/{}",
-                    agent_channel::GUEST_IP6_CMDLINE_KEY,
+                    kee_channel::GUEST_IP6_CMDLINE_KEY,
                     v6.guest,
                     v6.prefix_len,
                 );
@@ -932,7 +932,7 @@ impl Spawned {
             )?;
         }
         // Bulk writable output: attach the blank image read-write. The guest mounts it by
-        // label (`agent-output`), so the `/dev/vdX` letter this lands on doesn't matter, a boot may
+        // label (`kee-output`), so the `/dev/vdX` letter this lands on doesn't matter, a boot may
         // attach input, output, both, or neither. Durability of the guest's writes is the guest's
         // `-o sync` mount plus a clean unmount on shutdown; `collect_outputs` reads it after the VMM
         // exits (never while it holds the file open, see `RunningVm::collect_outputs`).
@@ -984,7 +984,7 @@ impl Spawned {
         // Per-VM virtio-net, backed by the host tap created in `launch`. Deny-by-default: the guest
         // reaches only the connected host end over this tap, the v4 `/30` and the v6 `/64` each carry
         // a connected-prefix route and no default route (no masquerade, no forwarding), from the
-        // `ip=`/`agent_guest_ip6=` addressing set above. The tap is deleted on every teardown path.
+        // `ip=`/`kee_guest_ip6=` addressing set above. The tap is deleted on every teardown path.
         if let Some(tap) = self.tap.as_ref() {
             still_before(deadline, "PUT /network-interfaces")?;
             self.api.put(
@@ -1444,7 +1444,7 @@ fn spawn_fc(
 
 /// Linux caps `sockaddr_un.sun_path` at 108 bytes including the trailing NUL. Firecracker binds the
 /// API and vsock sockets *inside* the scratch dir, so a long scratch base (a relocated
-/// `AGENT_SCRATCH_DIR`, or the jailer's deep chroot path) can overflow it, and the `bind()` then
+/// `KEE_SCRATCH_DIR`, or the jailer's deep chroot path) can overflow it, and the `bind()` then
 /// fails deep inside Firecracker, surfacing to us as a cryptic "socket never appeared" boot timeout.
 const SUN_PATH_MAX: usize = 108;
 
@@ -1455,7 +1455,7 @@ pub(crate) fn check_sun_path(socket: &Path) -> Result<(), VmmError> {
     if len + 1 > SUN_PATH_MAX {
         return Err(VmmError::Vmm(format!(
             "unix socket path {} is too long ({len} bytes; the kernel's limit is {}); \
-             use a shorter scratch dir via AGENT_SCRATCH_DIR",
+             use a shorter scratch dir via KEE_SCRATCH_DIR",
             socket.display(),
             SUN_PATH_MAX - 1
         )));
@@ -1475,7 +1475,7 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
     use std::os::unix::fs::DirBuilderExt;
     for _ in 0..1024 {
         let workdir = base.join(format!(
-            "agent-{}-{}",
+            "kee-{}-{}",
             std::process::id(),
             VM_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1493,7 +1493,7 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
                 return Ok(workdir);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            // A missing/unwritable scratch base is the operator's to fix (e.g. `AGENT_SCRATCH_DIR`
+            // A missing/unwritable scratch base is the operator's to fix (e.g. `KEE_SCRATCH_DIR`
             // points nowhere): name it in the error rather than failing cryptically deep in boot.
             Err(e) => {
                 return Err(VmmError::Vmm(format!(
@@ -1646,7 +1646,7 @@ mod version_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_test_support::ScratchDir;
+    use kee_test_support::ScratchDir;
 
     #[test]
     fn poll_backoff_starts_tight_and_caps() {
@@ -1851,6 +1851,6 @@ mod tests {
         let long = PathBuf::from(format!("/{}/fc.sock", "x".repeat(SUN_PATH_MAX)));
         let err = check_sun_path(&long).unwrap_err().to_string();
         assert!(err.contains("too long"), "explains the limit: {err}");
-        assert!(err.contains("AGENT_SCRATCH_DIR"), "names the fix: {err}");
+        assert!(err.contains("KEE_SCRATCH_DIR"), "names the fix: {err}");
     }
 }

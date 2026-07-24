@@ -1,6 +1,6 @@
-# 030. The wire API is versioned newline-JSON in a shared `agent-protocol` crate, not gRPC *(2026-07-17)*
+# 030. The wire API is versioned newline-JSON in a shared `kee-protocol` crate, not gRPC *(2026-07-17)*
 
-**Context.** `agent` exposes the engine over a wire API, and that wire is a contract downstream
+**Context.** `kee` exposes the engine over a wire API, and that wire is a contract downstream
 depends on: the language SDKs (separate repos) freeze against it, so its shape is a long-lived
 commitment, not an implementation detail. Two forces set that shape. First, the peer is a **local,
 trusted-ish client** the hoster runs, not the untrusted guest, so hand-debuggability (`socat`/`nc` by
@@ -11,7 +11,7 @@ and a `tokio` stack into that posture for no gain here. The one adversarial conc
 is guardrail 5: even a trusted-ish peer's input is bounded, so every decode has a message-size cap and
 returns a typed error, never a panic/hang/unbounded allocation.
 
-**Decision.** `agent`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
+**Decision.** `kee`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
 over a unix socket**, and every message (request *and* response) carries a leading `schema` field.
 The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 `trace_summary`)\* → `close`. It is **not gRPC**.
@@ -23,12 +23,12 @@ half-understood. The stamp is the seam the SDKs freeze against. (It is distinct 
 record's own `schema`, the CLI's `--json` run-result `schema`, and decision 034's signed-envelope
 `schema`: independent surfaces, independently versioned.)
 
-**Why a shared `agent-protocol` crate (serde-only, no `agent-vmm`).** The wire is the contract, not
+**Why a shared `kee-protocol` crate (serde-only, no `kee-vmm`).** The wire is the contract, not
 shared Rust internals. Putting the `Request`/`Response`/`Envelope` shapes and the bounded line codec
-in their own **engine-free** crate means the daemon and the **reference client** (`agent-client`)
+in their own **engine-free** crate means the daemon and the **reference client** (`kee-client`)
 share one source of truth, while a non-Rust SDK reimplements the same JSON shapes with only a JSON
 library, the proof a caller needs nothing of the engine but the wire. The reference client depends on
-`agent-protocol` and a JSON value **only, never `agent-vmm`**; if it ever linked the engine, that
+`kee-protocol` and a JSON value **only, never `kee-vmm`**; if it ever linked the engine, that
 proof would be void.
 
 **Verb semantics (faithful to the engine, no new machinery).** `put`/`get` write/read a
@@ -45,6 +45,6 @@ default profile); any custom resource knob cold-boots.
 
 **Scope, unchanged.** Still engine, not platform: no auth (socket-directory permissions are the
 hoster's access control), no tenancy, no billing, no scheduler. The daemon shares nothing with the
-`agent` CLI bin beyond the crate's small shared library (the `audit` composition both bins reuse); the
-pinned `agent-vmm` API (`Sandbox`/`Limits`/`RunResult`/`VmmError`/`channel`) is untouched, the daemon
+`kee` CLI bin beyond the crate's small shared library (the `audit` composition both bins reuse); the
+pinned `kee-vmm` API (`Sandbox`/`Limits`/`RunResult`/`VmmError`/`channel`) is untouched, the daemon
 only *consumes* it.

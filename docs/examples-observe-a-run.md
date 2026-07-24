@@ -5,7 +5,7 @@ where the code can't forge or disable the record. This is the host-side eBPF tra
 is a real demo that boots a sandbox, attaches one probe, drives a workload, and prints what it saw.
 
 The mechanics (program types, maps, the verifier, capabilities) are in [Host-side observability &
-enforcement](./probes.md); this page is the workflow. All of these need `/dev/kvm`, the agent
+enforcement](./probes.md); this page is the workflow. All of these need `/dev/kvm`, the kee
 rootfs, the built probe object (`cargo xtask build-probes`), and the eBPF capabilities
 (`CAP_BPF`+`CAP_PERFMON`, plus `CAP_NET_ADMIN` for the network ones), run as root or grant the
 named caps.
@@ -16,7 +16,7 @@ The CLI carries the fused surface: one run, all three probes bound to it, one au
 Watch it live, read the trail after, keep the machine record:
 
 ```console
-agent run --unjailed --net --watch --trace --record run.json -- \
+kee run --unjailed --net --watch --trace --record run.json -- \
     python3 -c "import socket; open('/etc/hostname').read(); \
                 socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'hi', ('10.200.0.1', 9999))"
 ```
@@ -26,7 +26,7 @@ agent run --unjailed --net --watch --trace --record run.json -- \
   view; the run continues.
 - `--trace` prints the human-readable audit trail on stdout after the run.
 - `--record run.json` writes the deterministic JSON record, the machine surface downstream tools
-  parse (byte-stable; see [Using the agent CLI](./cli.md)).
+  parse (byte-stable; see [Using the kee CLI](./cli.md)).
 
 All of it is fail-open: without the eBPF capabilities the run still works and the record says
 exactly which axes are missing and why. The per-axis demos below are the same probes driven one at
@@ -74,7 +74,7 @@ cargo xtask meter-sandbox
 
 ## Putting it together
 
-A typical loop is: run the workload with `agent run --trace` (or `--watch` to see it live, and
+A typical loop is: run the workload with `kee run --trace` (or `--watch` to see it live, and
 `--record` to keep the JSON), then drill into a single axis with the demos above when something
 looks interesting. The engine *measures* and *records*; what a hoster does with that (bill it,
 alert on it, store it) is the hoster's, by design.

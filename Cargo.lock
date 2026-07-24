@@ -3,94 +3,6 @@
 version = 4
 
 [[package]]
-name = "agent-channel"
-version = "0.1.0"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "agent-cli"
-version = "0.1.0"
-dependencies = [
- "agent-client",
- "agent-probes-loader",
- "agent-protocol",
- "agent-test-support",
- "agent-vmm",
- "clap",
- "ratatui",
- "serde",
- "serde_json",
- "signal-hook",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "agent-client"
-version = "0.1.0"
-dependencies = [
- "agent-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "agent-guest"
-version = "0.1.0"
-dependencies = [
- "agent-channel",
- "tracing",
- "tracing-subscriber",
- "vsock",
-]
-
-[[package]]
-name = "agent-probes-common"
-version = "0.1.0"
-
-[[package]]
-name = "agent-probes-loader"
-version = "0.1.0"
-dependencies = [
- "agent-probes-common",
- "agent-test-support",
- "agent-vmm",
- "aya",
- "ed25519-dalek",
- "nix 0.31.3",
- "serde_json",
- "sha2",
- "zeroize",
-]
-
-[[package]]
-name = "agent-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "agent-test-support"
-version = "0.1.0"
-
-[[package]]
-name = "agent-vmm"
-version = "0.1.0"
-dependencies = [
- "agent-channel",
- "agent-guest",
- "agent-test-support",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -904,6 +816,94 @@ dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
  "thiserror 2.0.19",
+]
+
+[[package]]
+name = "kee-channel"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "kee-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "kee-client",
+ "kee-probes-loader",
+ "kee-protocol",
+ "kee-test-support",
+ "kee-vmm",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "kee-client"
+version = "0.1.0"
+dependencies = [
+ "kee-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "kee-guest"
+version = "0.1.0"
+dependencies = [
+ "kee-channel",
+ "tracing",
+ "tracing-subscriber",
+ "vsock",
+]
+
+[[package]]
+name = "kee-probes-common"
+version = "0.1.0"
+
+[[package]]
+name = "kee-probes-loader"
+version = "0.1.0"
+dependencies = [
+ "aya",
+ "ed25519-dalek",
+ "kee-probes-common",
+ "kee-test-support",
+ "kee-vmm",
+ "nix 0.31.3",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
+name = "kee-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "kee-test-support"
+version = "0.1.0"
+
+[[package]]
+name = "kee-vmm"
+version = "0.1.0"
+dependencies = [
+ "kee-channel",
+ "kee-guest",
+ "kee-test-support",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2299,11 +2299,11 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "agent-channel",
- "agent-probes-loader",
- "agent-vmm",
  "anyhow",
  "clap",
+ "kee-channel",
+ "kee-probes-loader",
+ "kee-vmm",
 ]
 
 [[package]]

@@ -1,9 +1,9 @@
-//! One client connection = one sandbox **session**. Mirrors `agent shell`'s lifecycle over the wire:
+//! One client connection = one sandbox **session**. Mirrors `kee shell`'s lifecycle over the wire:
 //! the first message opens the sandbox (jailed by default, the daemon's launch posture, never the
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
 //! session, ADR 016), until `close` (or a hung-up connection) tears it down.
 //!
-//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](agent_vmm::Sandbox), so a warm clone
+//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](kee_vmm::Sandbox), so a warm clone
 //! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
@@ -26,12 +26,12 @@ use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
-use agent_cli::audit::RunProbes;
-use agent_cli::policy::{Policy, Requested};
-use agent_cli::MAX_VCPUS;
-use agent_probes_loader::Timing;
-use agent_protocol::{read_message, write_message, ProtocolError, Request, Response};
-use agent_vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
+use kee_cli::audit::RunProbes;
+use kee_cli::policy::{Policy, Requested};
+use kee_cli::MAX_VCPUS;
+use kee_probes_loader::Timing;
+use kee_protocol::{read_message, write_message, ProtocolError, Request, Response};
+use kee_vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::{Metrics, Verb};
 use crate::serve::Server;
@@ -253,7 +253,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         let envelope = server
                             .signing_key
                             .sign_canonical_chained(&canonical, record_chain.as_deref());
-                        record_chain = Some(agent_probes_loader::record_hash(&canonical));
+                        record_chain = Some(kee_probes_loader::record_hash(&canonical));
                         Response::Trace {
                             record: record_to_value(&envelope),
                         }
@@ -329,11 +329,11 @@ pub fn serve(stream: UnixStream, server: &Server) {
 fn serve_run(
     w: &mut UnixStream,
     metrics: &Metrics,
-    result: Result<agent_vmm::RunResult, VmmError>,
+    result: Result<kee_vmm::RunResult, VmmError>,
     wall: Duration,
     total_exec_wall: &mut Duration,
     is_command: bool,
-    to_response: impl FnOnce(&agent_vmm::RunResult) -> Response,
+    to_response: impl FnOnce(&kee_vmm::RunResult) -> Response,
 ) -> bool {
     // Only a real `exec` counts as a guest command. `put`/`get` ride a no-op `true` purely to carry a
     // file, so folding their wall into the `guest_command` histogram or the trace `exec_wall` would
@@ -410,7 +410,7 @@ fn boot_session_vm(
 }
 
 /// Cold-boot a `RunningVm` with the daemon's confinement posture, replicating what
-/// [`Sandbox::open`](agent_vmm::Sandbox::open) does before booting, force the vsock exec channel on,
+/// [`Sandbox::open`](kee_vmm::Sandbox::open) does before booting, force the vsock exec channel on,
 /// and set (or clear) the jail, so a cold session and a pooled one are the same shape of VM.
 fn cold_boot(mut config: BootConfig, jailed: bool) -> Result<RunningVm, VmmError> {
     config.jail = if jailed {
@@ -439,7 +439,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
 }
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
-/// between sessions, the moment the [`Pool`](agent_vmm::Pool) doc reserves for restore cost).
+/// between sessions, the moment the [`Pool`](kee_vmm::Pool) doc reserves for restore cost).
 ///
 /// The refill is **best-effort and non-blocking** (16-A): `try_lock`, and skip if the pool is
 /// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
@@ -473,7 +473,7 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
 /// eligibility. A non-`Open` first message is the caller's error too.
 ///
 /// This is the daemon's policy boundary, not a convenience: a client arrives over a socket and
-/// controls neither this process's environment nor its `.agent.toml`, so bounding the request here
+/// controls neither this process's environment nor its `.kee.toml`, so bounding the request here
 /// is what makes an operator ceiling real (decision 041). Asking past a ceiling is refused, never
 /// quietly clamped.
 fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String> {
@@ -537,7 +537,7 @@ fn write_response(w: &mut UnixStream, resp: &Response) -> Result<(), ProtocolErr
     write_message(w, resp)
 }
 
-/// UTF-8-lossy rendering of captured bytes, matching `agent run --json`.
+/// UTF-8-lossy rendering of captured bytes, matching `kee run --json`.
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }

@@ -9,7 +9,7 @@ silently could not arm the tap would leave the operator believing egress was con
 Those two must not share a failure mode, and the projection must respect the no-unpoliced-window property
 (decision 022), the policy is live before the guest's traffic path is.
 
-**Decision.** `agent run --allow IP[/CIDR][:PORT][/PROTO]` (repeatable, `requires` `--net`) projects
+**Decision.** `kee run --allow IP[/CIDR][:PORT][/PROTO]` (repeatable, `requires` `--net`) projects
 the `EgressPolicy` onto the CLI, completing the network half decision 025 pulled forward observe-only.
 Each value parses into one validated allow-rule (`parse_allow`, right-to-left so the numeric CIDR
 prefix and the `/tcp`|`/udp` suffix can't be confused); the rules fold into a deny-by-default policy
@@ -30,5 +30,5 @@ the enforcement check keys on the network axis alone, so a poisoned syscall/CPU 
 observation to a gap without blocking a policed run.
 
 **Scope.** This closes the network projection of the CLI-completeness work; the config-file layer,
-`agent doctor`, and the JSON schema version remain. `--allow` is `run`-only, where `--net` lives (the
+`kee doctor`, and the JSON schema version remain. `--allow` is `run`-only, where `--net` lives (the
 interactive `shell` has no network face).

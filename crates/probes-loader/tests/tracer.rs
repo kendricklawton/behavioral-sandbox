@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::{cgroup_id_of_self, check_support, object_path, Syscall, SyscallTracer};
+use kee_probes_loader::{cgroup_id_of_self, check_support, object_path, Syscall, SyscallTracer};
 
 /// Why this host can't load the probe (a skip reason), or `None` when it can, so each test prints
 /// *why* it skipped. Same gate the counter tests use.

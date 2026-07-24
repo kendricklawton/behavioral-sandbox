@@ -1,4 +1,4 @@
-# agent: engineering disciplines
+# kvm-ebpf-engine: engineering disciplines
 
 **A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
@@ -45,7 +45,7 @@ crates/
                  typed error, never a panic/hang/leak.
   channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
                  shared by the driver and the guest agent. See decision 002 (an ADR under `docs/adr/`).
-  guest-agent/   the in-guest agent (`agent-guest`): runs one command per connection and streams
+  guest-agent/   the in-guest agent (`kee-guest`): runs one command per connection and streams
                  stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at
                  Phase 3. Exec/IO convenience only, never the security boundary.
   probes/        the eBPF programs (`#![no_std]`, built for `bpfel-unknown-none` via
@@ -56,8 +56,9 @@ crates/
                  so the two sides can't drift.
   probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
                  maps, stream events into the audit log.
-  cli/           one binary, `agent`: the CLI (`run`, `shell`, `doctor`; the audit record on
-                 `--trace`/`--record`/`--record-summary`/`--watch`) plus `agent serve`, the driver
+  cli/           one entrypoint, the `kee` CLI (also installed as `kvm-ebpf-engine`): (`run`,
+                 `shell`, `doctor`; the audit record on
+                 `--trace`/`--record`/`--record-summary`/`--watch`) plus `kee serve`, the driver
                  daemon (the versioned newline-JSON wire API over a unix socket, decision 030).
 docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): running the engine
                  (`cli*.md`), the embedder contract (`embedding.md`), the eBPF half (`probes.md`),
@@ -91,7 +92,7 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   narrowed: nothing untestable is claimed, aarch64 returns only with hardware + a privileged CI
   lane behind it); host kernel
   **≥ 5.15** (a security-maintained LTS floor, untrusted code on an unpatched kernel is a
-  threat-model hole; `agent doctor` enforces it, decision 032). The eBPF programs build for their
+  threat-model hole; `kee doctor` enforces it, decision 032). The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
   build · unit tests · docs · `deny`; the eBPF object build joins at Phase 8) and runs everywhere.
@@ -102,8 +103,8 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   tests skip themselves into a hollow green (a skipped test is a pass to cargo). Never gate
   the everyday loop on a privileged runner.
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
-  `agent run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`AGENT_*`) >
-  file (`.agent.toml`, the nearest one walking up from the cwd) > defaults** (decision 027).
+  `kee run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`KEE_*`) >
+  file (`.kee.toml`, the nearest one walking up from the cwd) > defaults** (decision 027).
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
 - **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
   show, in the fewest sentences that carry it; it never restates what the next lines visibly do.
@@ -116,7 +117,7 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
   are a separate call, not covered here.
 - **Git is human-driven.** The user makes every commit and push; the **coding agent** (Claude,
-  Gemini, Codex, as opposed to `agent`, this project) never runs `git commit` / `git push` (or
+  Gemini, Codex, as opposed to `kee`/kvm-ebpf-engine, this project) never runs `git commit` / `git push` (or
   any other CI-triggering action). The coding agent's job ends at: changes made, demo working,
   roadmap box checked in the working tree, and, **only when asked**, a commit message drafted
   (Conventional Commits per the next bullet; never an AI co-author/attribution trailer).

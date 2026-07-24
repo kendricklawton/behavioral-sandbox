@@ -3,11 +3,11 @@
 # engine drives. The KVM boundary cannot come from the image: run it with the host's /dev/kvm.
 #
 #   cargo xtask dist
-#   docker build -f Containerfile --build-arg DIST=dist/agent-<ver>-x86_64-linux -t agent:<ver> .
+#   docker build -f Containerfile --build-arg DIST=dist/kee-<ver>-x86_64-linux -t kee:<ver> .
 #
-#   docker run --rm agent:<ver>                                # doctor: what this host can do
-#   docker run --rm --device /dev/kvm agent:<ver> run --unjailed -- echo hi
-#   docker run --rm --device /dev/kvm --cap-add NET_ADMIN agent:<ver> run --unjailed --net ...
+#   docker run --rm kee:<ver>                                # doctor: what this host can do
+#   docker run --rm --device /dev/kvm kee:<ver> run --unjailed -- echo hi
+#   docker run --rm --device /dev/kvm --cap-add NET_ADMIN kee:<ver> run --unjailed --net ...
 #
 # The jailed default and eBPF observation need more of the host (real root in the user namespace,
 # CAP_BPF/CAP_PERFMON, cgroup v2 delegation); a hardened deployment runs those on the host or in a
@@ -33,10 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fspr
     && rm -rf /var/lib/apt/lists/*
 COPY --from=firecracker /usr/local/bin/firecracker /usr/local/bin/jailer /usr/local/bin/
 ARG DIST
-COPY ${DIST}/ /opt/agent/
-ENV AGENT_KERNEL=/opt/agent/share/agent/vmlinux \
-    AGENT_ROOTFS=/opt/agent/share/agent/rootfs-agent.ext4 \
-    AGENT_PROBES_OBJECT=/opt/agent/share/agent/probes \
-    PATH=/opt/agent/bin:/usr/local/bin:/usr/bin:/bin
-ENTRYPOINT ["/opt/agent/bin/agent"]
+COPY ${DIST}/ /opt/kee/
+ENV KEE_KERNEL=/opt/kee/share/kee/vmlinux \
+    KEE_ROOTFS=/opt/kee/share/kee/rootfs-kee.ext4 \
+    KEE_PROBES_OBJECT=/opt/kee/share/kee/probes \
+    PATH=/opt/kee/bin:/usr/local/bin:/usr/bin:/bin
+ENTRYPOINT ["/opt/kee/bin/kee"]
 CMD ["doctor"]

@@ -3,7 +3,7 @@
 //! `Pool`, and the restore-beats-cold-boot payoff.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p agent-vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p kee-vmm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -13,10 +13,10 @@ mod common;
 use std::num::NonZeroU8;
 use std::time::Duration;
 
-use agent_vmm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
+use kee_vmm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
 
 use common::{
-    agent_rootfs_config, cgroup_of, config, have_jailer_privileges, have_net_admin,
+    cgroup_of, config, have_jailer_privileges, have_net_admin, kee_rootfs_config,
     prewarmed_python_snapshot, TmpDir,
 };
 
@@ -92,7 +92,7 @@ fn restores_a_snapshot_onto_a_fresh_vmm() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn prewarmed_snapshot_restores_and_runs_code() {
     // Snapshot a prewarmed agent VM (runtime loaded), throw the source away, restore a clone off the
     // shared read-only base, and run Python on it, the exec channel survives the snapshot (Firecracker
@@ -107,7 +107,7 @@ fn prewarmed_snapshot_restores_and_runs_code() {
     );
 
     let restored =
-        Vm::restore(&snap, &agent_rootfs_config()).expect("prewarmed restore should resume");
+        Vm::restore(&snap, &kee_rootfs_config()).expect("prewarmed restore should resume");
     let restore_latency = restored.boot_latency();
     let argv = ["python3", "-c", "print(2 + 2)"].map(String::from);
     let out = restored
@@ -134,7 +134,7 @@ fn prewarmed_snapshot_restores_and_runs_code() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
     // Restore several clones from one prewarmed snapshot and keep them all alive at once. Each shares
     // the read-only base (memory-sharing) but is an independent VM, its own vsock socket (bound relative to
@@ -146,7 +146,7 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
 
     let clones: Vec<_> = (0..N)
         .map(|i| {
-            Vm::restore(&snap, &agent_rootfs_config())
+            Vm::restore(&snap, &kee_rootfs_config())
                 .unwrap_or_else(|e| panic!("clone {i} should restore concurrently: {e}"))
         })
         .collect();
@@ -178,7 +178,7 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_clones_do_not_bleed_state_under_load() {
     // No state bleed between clones restored from one snapshot, under concurrent load. Each clone
     // shares the read-only base (memory-sharing) but owns its in-RAM overlay and its guest RAM, so a
@@ -192,7 +192,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
 
     let clones: Vec<_> = (0..N)
         .map(|i| {
-            Vm::restore(&snap, &agent_rootfs_config())
+            Vm::restore(&snap, &kee_rootfs_config())
                 .unwrap_or_else(|e| panic!("clone {i} should restore: {e}"))
         })
         .collect();
@@ -241,7 +241,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_networked_clones_coexist_each_in_its_own_netns() {
     // The netns model (ADR 014) retires the one-live-networked-clone limit. On v1.9
     // (no `network_overrides`) every clone must present the snapshot's baked-in tap name, which in a
@@ -256,7 +256,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
 
     // Source: networked + vsock + prewarmed. Snapshot it, then drop it, under the netns model neither the
     // tap name nor the /30 is a shared reservation, so the source's lifetime doesn't gate the clones'.
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.enable_network = true;
     let source = Vm::boot(cfg.clone()).expect("networked agent microVM should boot");
     let source_guest_ip = source.ipv4().expect("source ipv4").guest;
@@ -355,7 +355,7 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
     let bundle = TmpDir::new("snap-jailed");
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.jail = Some(Jail::default());
 
     // The VMM behind `pid` runs as the dropped jail uid, the confinement actually holding.
@@ -424,7 +424,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
         );
         return;
     }
-    let mut src_cfg = agent_rootfs_config();
+    let mut src_cfg = kee_rootfs_config();
     src_cfg.vcpus = NonZeroU8::new(2).expect("2 is nonzero");
     let source = Vm::boot(src_cfg).expect("2-vCPU agent microVM should boot");
     let bundle = TmpDir::new("snap-cpu-cap");
@@ -439,7 +439,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     source.shutdown().expect("source shutdown");
 
     // Restore with the *default* (1-vCPU) config: the cap must follow the snapshot, not this.
-    let mut cfg = agent_rootfs_config();
+    let mut cfg = kee_rootfs_config();
     cfg.jail = Some(Jail::default());
     assert_eq!(cfg.vcpus.get(), 1, "the restoring config declares 1 vCPU");
     let clone = Vm::restore(&snap, &cfg).expect("jailed restore of the 2-vCPU snapshot");
@@ -484,7 +484,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     // ADR 009, entropy + clocks. Every clone wakes from the same memory image, so if the
     // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical, the
@@ -496,7 +496,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
     let draw = |label: &str| {
-        let clone = Vm::restore(&snap, &agent_rootfs_config())
+        let clone = Vm::restore(&snap, &kee_rootfs_config())
             .unwrap_or_else(|e| panic!("clone {label} should restore: {e}"));
         let out = clone
             .exec(
@@ -546,19 +546,19 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     // The prewarmed Pool. Prefill keeps clones exec-ready so `take` is a pop (µs) plus a fast
     // health probe, not a cold boot. A clone that died while pooled is a typed GuestUnavailable
     // from the probe, so `take` discards it and serves the next (or restores inline when dry)
     // instead of surfacing an infra failure, the retry semantics the deferral promised.
-    use agent_vmm::Pool;
+    use kee_vmm::Pool;
 
     let bundle = TmpDir::new("snap-pool");
     let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
 
-    let mut pool = Pool::new(snap, agent_rootfs_config(), 2)
-        .expect("pool should prefill two prewarmed clones");
+    let mut pool =
+        Pool::new(snap, kee_rootfs_config(), 2).expect("pool should prefill two prewarmed clones");
     assert_eq!(pool.ready(), 2, "prefill should hit the target");
 
     // Fast path: take a ready clone and run code on it. The take is a pop + probe, so it must come
@@ -639,7 +639,7 @@ fn pool_over_a_no_vsock_snapshot_keeps_its_stock() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
     // The prewarm payoff asserted, not eyeballed: from "restore a prewarmed Python snapshot" to
     // "the code's output is back on the host" in well under the source's cold-boot latency. The
@@ -651,7 +651,7 @@ fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
 
     let t0 = std::time::Instant::now();
     let restored =
-        Vm::restore(&snap, &agent_rootfs_config()).expect("prewarmed restore should resume");
+        Vm::restore(&snap, &kee_rootfs_config()).expect("prewarmed restore should resume");
     let argv = ["python3", "-c", "print(6 * 7)"].map(String::from);
     let out = restored
         .exec(&argv, &[])

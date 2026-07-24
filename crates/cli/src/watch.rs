@@ -1,8 +1,8 @@
-//! The live view (`agent run --watch`): a full-screen terminal UI over one running sandbox,
+//! The live view (`kee run --watch`): a full-screen terminal UI over one running sandbox,
 //! its network flows and denials, its resources, the VMM's host-syscall footprint, and a running
 //! timeline of what changed. Drawn on **stderr** (stdout stays reserved for the run's result, the
 //! pipe-clean convention), redrawn from non-destructive [`LiveSnapshot`] polls, so watching never
-//! disturbs the record that [`collect`](agent_probes_loader::SandboxProbes::collect) finalizes.
+//! disturbs the record that [`collect`](kee_probes_loader::SandboxProbes::collect) finalizes.
 //!
 //! The guest command runs on a worker thread the whole time; this view is a *reader*. `q`/`Esc`
 //! closes the view (the run continues headless), it never cancels the run.
@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use agent_probes_loader::LiveSnapshot;
-use agent_vmm::VmmError;
+use kee_probes_loader::LiveSnapshot;
+use kee_vmm::VmmError;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -25,7 +25,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::trace::{human_bytes, human_duration, proto_name, syscall_name};
-use agent_cli::audit::RunProbes;
+use kee_cli::audit::RunProbes;
 
 /// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.
@@ -159,7 +159,7 @@ fn install_view_signal_restore(
     };
     let handle = signals.handle();
     let thread = std::thread::Builder::new()
-        .name("agent-watch-signals".into())
+        .name("kee-watch-signals".into())
         .spawn(move || {
             if let Some(sig) = signals.forever().next() {
                 let _ = disable_raw_mode();
@@ -362,7 +362,7 @@ fn draw_header(f: &mut Frame, area: Rect, meta: &WatchMeta, elapsed: Duration, f
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines).block(titled("agent watch · hardware-isolated run")),
+        Paragraph::new(lines).block(titled("kee watch · hardware-isolated run")),
         area,
     );
 }
@@ -502,7 +502,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, timeline: &Timeline) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_probes_loader::{
+    use kee_probes_loader::{
         FlowCounts, FlowKey, NetSection, NetStats, SyscallFootprint, DETAIL_CAP,
     };
 
@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn timeline_emits_new_notable_syscalls_once() {
-        use agent_probes_loader::{Syscall, SyscallEvent};
+        use kee_probes_loader::{Syscall, SyscallEvent};
         let mk = |detail: &[u8]| {
             let mut d = [0u8; DETAIL_CAP];
             d[..detail.len()].copy_from_slice(detail);
@@ -565,7 +565,7 @@ mod tests {
                 tid: 1,
                 syscall: Syscall::Openat as u32,
                 detail_len: detail.len() as u32,
-                comm: [0; agent_probes_loader::COMM_CAP],
+                comm: [0; kee_probes_loader::COMM_CAP],
                 detail: d,
             }
         };

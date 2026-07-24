@@ -330,7 +330,7 @@ pub(crate) fn arm_sentinel(dirs: &[PathBuf]) -> Option<Child> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_test_support::ScratchDir;
+    use kee_test_support::ScratchDir;
 
     /// The core crash-safety mechanism, without a VM or privileges: the sentinel acts on pipe EOF.
     /// A plain directory stands in for the cgroup, `echo 1 > cgroup.kill` creates the file there

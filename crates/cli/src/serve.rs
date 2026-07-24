@@ -1,13 +1,13 @@
-//! `agent`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
-//! [wire API](agent_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
-//! socket**, so a local client drives microVMs without linking the `agent-vmm` library itself. This
+//! `kee`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
+//! [wire API](kee_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
+//! socket**, so a local client drives microVMs without linking the `kee-vmm` library itself. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
 //! use, **still engine, not platform**, no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
 //! **Shape.** One connection is one sandbox **session** (the VM *is* the session, ADR 016),
 //! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`agent_protocol`] crate (ADR 030);
+//! is the versioned newline-JSON contract in the shared [`kee_protocol`] crate (ADR 030);
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
@@ -50,18 +50,18 @@ use std::sync::{Arc, Mutex};
 
 use std::num::{NonZeroU32, NonZeroU8};
 
-use agent_cli::audit::Observability;
-use agent_cli::policy::Policy;
-use agent_vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
+use kee_cli::audit::Observability;
+use kee_cli::policy::Policy;
+use kee_vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::Metrics;
 
 // The operational-failure exit code (a bad socket path, a bind failure) is the CLI's own
-// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `agent` binary.
+// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `kee` binary.
 use crate::EXIT_OPERATIONAL;
 
-/// `agent serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
-/// is the shared global flag on the `agent` CLI, so it is not repeated here.
+/// `kee serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
+/// is the shared global flag on the `kee` CLI, so it is not repeated here.
 #[derive(clap::Args)]
 pub struct ServeArgs {
     /// The unix socket to listen on. Its directory's permissions are the access control (the daemon
@@ -81,7 +81,7 @@ pub struct ServeArgs {
     /// Refuse to boot a session's VMM when the cpu/memory cgroup caps can't be applied, instead of
     /// the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing on a
     /// multi-tenant host; needs the jailer (so not with `--unjailed`) and delegated cgroup v2
-    /// controllers. Also settable via `AGENT_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
+    /// controllers. Also settable via `KEE_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
     #[arg(long)]
     require_limits: bool,
     /// Serve a Prometheus metrics endpoint at this address (e.g. `127.0.0.1:9920`) for the hoster to
@@ -90,7 +90,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "ADDR")]
     metrics: Option<SocketAddr>,
     /// Emit stderr logs as JSON lines (for a log shipper) instead of human-readable text. Also
-    /// enabled by `AGENT_LOG_FORMAT=json`.
+    /// enabled by `KEE_LOG_FORMAT=json`.
     #[arg(long)]
     log_json: bool,
     /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
@@ -129,13 +129,13 @@ pub struct ServeArgs {
 /// optional pre-warmed pool, and a monotonic source of snapshot-bundle directories.
 // `pub(crate)` (not private) because the `session` module is a crate-root sibling of `serve` (both
 // flat under `src/`), so it reaches the daemon context through crate visibility, not the ancestor
-// visibility a submodule would have. Still crate-internal, this is the `agent` binary, not a library.
+// visibility a submodule would have. Still crate-internal, this is the `kee` binary, not a library.
 pub(crate) struct Server {
     /// The env-layered base config; a session's `open` folds its resource knobs on top.
     pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     pub(crate) jailed: bool,
-    /// The operator's per-run policy (decision 041), read from the daemon's `.agent.toml` at startup.
+    /// The operator's per-run policy (decision 041), read from the daemon's `.kee.toml` at startup.
     /// This is the enforcing copy: a client controls neither that file nor this process's
     /// environment, so the ceilings here bound what any `open` may ask for.
     pub(crate) policy: Policy,
@@ -143,7 +143,7 @@ pub(crate) struct Server {
     pub(crate) observ: Observability,
     /// The host record-signing key (decision 034): the `trace` reply signs the finalized record with
     /// it so a client detects post-hoc alteration. Host-side; the guest never sees it.
-    pub(crate) signing_key: agent_probes_loader::HostKey,
+    pub(crate) signing_key: kee_probes_loader::HostKey,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
     /// pool could not be built. Behind a `Mutex`: `take`/`refill` need `&mut`, and sessions run on
     /// many threads.
@@ -175,21 +175,21 @@ impl Server {
     }
 }
 
-/// Run the daemon (`agent serve`): the `--log` filter comes from the CLI's shared global flag, the
+/// Run the daemon (`kee serve`): the `--log` filter comes from the CLI's shared global flag, the
 /// rest of the knobs from [`ServeArgs`]. Its own tracing init (info default, optional JSON) and its
-/// own config (flags + environment, no `.agent.toml`), so the CLI dispatches this **before** its
+/// own config (flags + environment, no `.kee.toml`), so the CLI dispatches this **before** its
 /// project-file/tracing setup ([`crate::main`]).
 pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     let log_json = args.log_json
-        || std::env::var("AGENT_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+        || std::env::var("KEE_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     init_tracing(log.as_deref(), log_json);
 
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
-    // on top). The daemon has no `.agent.toml` cwd discovery, that's a CLI-in-a-project convenience;
+    // on top). The daemon has no `.kee.toml` cwd discovery, that's a CLI-in-a-project convenience;
     // a daemon's config is its own flags + environment. Computed up front so the signal handler and
     // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
     let mut base = BootConfig::from_env();
-    // Flag layer over `AGENT_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
+    // Flag layer over `KEE_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
     // hardening posture, so an absent flag leaves an env-set `true` intact (it never forces `false`).
     if args.require_limits {
         base.require_limits = true;
@@ -199,11 +199,11 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an
     // unjailed daemon could never satisfy it and would accept connections only to refuse every
     // session with `LimitsUnavailable`. Reject it at startup (covers the flag and
-    // `AGENT_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
+    // `KEE_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
     if base.require_limits && !jailed {
         tracing::error!(
             "require_limits needs the jailer, but this daemon is --unjailed; an unjailed VMM has no \
-             cgroup to cap. Drop --unjailed (and AGENT_REQUIRE_LIMITS) or don't require limits."
+             cgroup to cap. Drop --unjailed (and KEE_REQUIRE_LIMITS) or don't require limits."
         );
         return ExitCode::from(EXIT_OPERATIONAL);
     }
@@ -257,15 +257,15 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         }
     }
     // Snapshot bundles are guest-memory-sized, so they live under the engine's own scratch knob
-    // (`AGENT_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
+    // (`KEE_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
     // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
     // large artifact (boot scratch, prewarm, snapshots) follows.
     let snapshot_base = snapshots_dir(&base.scratch_dir);
     // Load (or generate on first use) the host record-signing key, so the `trace` reply carries a
     // signed envelope (decision 034). Fail-closed like the metrics bind: refuse to start rather than
-    // serve records that claim to be verifiable but aren't signed. The daemon has no `.agent.toml`
-    // layer (env + flags only), so the path resolves from `AGENT_SIGNING_KEY` or the default.
-    let signing_key = match agent_probes_loader::HostKey::load_or_generate(
+    // serve records that claim to be verifiable but aren't signed. The daemon has no `.kee.toml`
+    // layer (env + flags only), so the path resolves from `KEE_SIGNING_KEY` or the default.
+    let signing_key = match kee_probes_loader::HostKey::load_or_generate(
         &crate::config::signing_key_path(None),
     ) {
         Ok(k) => k,
@@ -275,7 +275,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         }
     };
     let pool = build_optional_pool(args.prewarm, &base, jailed);
-    // The daemon takes policy from its flags, not from a discovered `.agent.toml`: a daemon must not
+    // The daemon takes policy from its flags, not from a discovered `.kee.toml`: a daemon must not
     // read a security control out of whatever directory it happened to be started in. Jail and
     // networking are already daemon-wide and client-immutable (`--unjailed` above), so only the
     // ceilings need to travel to the session boundary.
@@ -309,7 +309,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         jailed,
         prewarmed = server.pool.is_some(),
         metrics = args.metrics.as_ref().map(tracing::field::display),
-        "agent listening"
+        "kee listening"
     );
 
     // Accept forever, one thread per connection. A daemon runs until its supervisor stops it; the
@@ -331,12 +331,12 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
     let registry = Arc::clone(&server.metrics);
     let sampled = Arc::clone(server);
     let spawned = std::thread::Builder::new()
-        .name("agent-metrics".into())
+        .name("kee-metrics".into())
         .spawn(move || {
             crate::metrics::serve(listener, registry, move || {
                 // `try_lock`, never a blocking acquire (16-C): the scrape must not stall behind a
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
-                // this scrape, `agent_pool_ready` is momentarily absent, the same absent-not-zero
+                // this scrape, `kee_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
                 // visibility surface freezing under the load it exists to report on.
                 sampled
@@ -364,7 +364,7 @@ fn spawn_session(stream: UnixStream, server: Arc<Server>) {
         return;
     };
     let spawned = std::thread::Builder::new()
-        .name("agent-session".into())
+        .name("kee-session".into())
         .spawn(move || {
             // The ticket lives exactly as long as the session: its `Drop` releases the slot
             // however `serve` ends (clean close, client hang-up, or a panic unwinding).
@@ -414,7 +414,7 @@ impl Drop for SessionTicket {
 }
 
 /// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed fatal
-/// [`agent_protocol::Response::Error`] (the client's `open` reads it as the reply), then the
+/// [`kee_protocol::Response::Error`] (the client's `open` reads it as the reply), then the
 /// connection drops. The write is timeout-bounded so a stalled client can't park the accept loop,
 /// and best-effort, the refusal itself must never take the daemon down.
 fn refuse_at_capacity(stream: UnixStream, server: &Server) {
@@ -424,7 +424,7 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     );
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     let mut stream = stream;
-    let refusal = agent_protocol::Response::Error {
+    let refusal = kee_protocol::Response::Error {
         message: format!(
             "at capacity: {} session(s) live, the daemon's --max-sessions ceiling; retry later \
              or raise the ceiling",
@@ -432,17 +432,17 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
         ),
         fatal: true,
     };
-    let _ = agent_protocol::write_message(&mut stream, &refusal);
+    let _ = kee_protocol::write_message(&mut stream, &refusal);
 }
 
 /// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
 fn prewarm_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("agent-prewarm-{}", std::process::id()))
+    scratch.join(format!("kee-prewarm-{}", std::process::id()))
 }
 
 /// This daemon's session-snapshot bundle dir (holds each session's `snap-N`), under the scratch knob.
 fn snapshots_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("agent-snapshots-{}", std::process::id()))
+    scratch.join(format!("kee-snapshots-{}", std::process::id()))
 }
 
 /// The effective uid this process runs as, so the startup sweep only reclaims bundle dirs *it* owns
@@ -453,14 +453,14 @@ fn own_euid() -> Option<u32> {
     uid.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// Reclaim this-user `agent-prewarm-<pid>` / `agent-snapshots-<pid>` bundle dirs left by **dead**
+/// Reclaim this-user `kee-prewarm-<pid>` / `kee-snapshots-<pid>` bundle dirs left by **dead**
 /// prior daemons: their guest-memory-sized files are pure leak once the daemon that owned them is
 /// gone (SIGKILL/OOM skips the signal-handler cleanup). Best-effort, per-entry: a dir we can't stat
 /// or remove is logged and skipped. Skips our own pid and any live pid (a concurrently-running
 /// daemon of the same user). A dead daemon's pid is genuinely absent from `/proc` (it's not our
 /// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
 /// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
-/// ([`agent_vmm::sweep_orphans`]), logging what it reclaimed. The complement of
+/// ([`kee_vmm::sweep_orphans`]), logging what it reclaimed. The complement of
 /// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
 fn sweep_orphaned_vms(scratch: &Path) {
@@ -487,8 +487,8 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         let Some(pid) = name
-            .strip_prefix("agent-prewarm-")
-            .or_else(|| name.strip_prefix("agent-snapshots-"))
+            .strip_prefix("kee-prewarm-")
+            .or_else(|| name.strip_prefix("kee-snapshots-"))
         else {
             continue; // not a bundle dir this daemon mints
         };
@@ -507,12 +507,12 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
         match std::fs::remove_dir_all(entry.path()) {
             Ok(()) => tracing::info!(
                 dir = %entry.path().display(),
-                "swept a stale agent bundle dir from a dead daemon"
+                "swept a stale kee bundle dir from a dead daemon"
             ),
             Err(e) => tracing::warn!(
                 dir = %entry.path().display(),
                 error = %e,
-                "could not sweep a stale agent bundle dir"
+                "could not sweep a stale kee bundle dir"
             ),
         }
     }
@@ -524,7 +524,7 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
 /// VMs; the next start clears the stale socket and the startup sweep reclaims the leaked bundle dirs).
 fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
     let spawned = std::thread::Builder::new()
-        .name("agent-signals".into())
+        .name("kee-signals".into())
         .spawn(move || {
             let mut signals = match signal_hook::iterator::Signals::new([
                 signal_hook::consts::SIGTERM,
@@ -586,7 +586,7 @@ fn build_optional_pool(
 /// daemon's confinement posture. The clones carry the default profile, which is why only a
 /// bare-default `open` is pool-eligible (`crate::session::boot_session_vm`).
 fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, VmmError> {
-    // Snapshot into a per-daemon dir under the engine's scratch knob (`AGENT_SCRATCH_DIR`), the same
+    // Snapshot into a per-daemon dir under the engine's scratch knob (`KEE_SCRATCH_DIR`), the same
     // routing as the session bundles: guest-memory-sized files belong where the operator pointed
     // scratch, never a hardcoded `$TMPDIR`. On a **successful** build the pool's clones reference this
     // bundle, so it must live until shutdown (the signal handler / startup sweep reclaim it); on any
@@ -647,7 +647,7 @@ fn build_pool_from(
 }
 
 /// Bind the listener at `socket`, clearing a **stale** socket file first but refusing to clobber a
-/// **live** daemon. If the path exists, a successful connect means another `agent` is already
+/// **live** daemon. If the path exists, a successful connect means another `kee` is already
 /// listening (a typed refusal); a refused connect means the file is leftover from a dead daemon, so
 /// remove it and bind. The parent directory must already exist (the hoster's to create, with the
 /// permissions that gate access).
@@ -655,7 +655,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
             return Err(format!(
-                "another agent is already listening on {}",
+                "another kee daemon is already listening on {}",
                 socket.display()
             ));
         }
@@ -743,7 +743,7 @@ impl Drop for StagedPath {
     }
 }
 
-/// stderr logging, filter from `--log` else `AGENT_LOG` else `info`. `info` (not the CLI's `warn`):
+/// stderr logging, filter from `--log` else `KEE_LOG` else `info`. `info` (not the CLI's `warn`):
 /// a daemon's per-session boot/close lines are its operational trace. `json` switches the *encoding*
 /// of the same structured events, one JSON object per line, fields intact, for a log shipper, the
 /// events themselves are identical either way. `try_init` + a fallback so a bad filter or a
@@ -751,7 +751,7 @@ impl Drop for StagedPath {
 fn init_tracing(flag: Option<&str>, json: bool) {
     let filter = flag
         .map(str::to_string)
-        .or_else(|| std::env::var("AGENT_LOG").ok())
+        .or_else(|| std::env::var("KEE_LOG").ok())
         .unwrap_or_else(|| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -777,11 +777,11 @@ mod tests {
     /// [`SessionTicket`] never touches a sandbox, so the cap is provable host-safe.
     fn test_server(max_sessions: usize) -> Arc<Server> {
         Arc::new(Server {
-            base: agent_vmm::BootConfig::default(),
+            base: kee_vmm::BootConfig::default(),
             jailed: false,
             policy: Policy::default(),
             observ: Observability::load(),
-            signing_key: agent_probes_loader::HostKey::from_seed([7u8; 32]),
+            signing_key: kee_probes_loader::HostKey::from_seed([7u8; 32]),
             pool: None,
             snapshot_base: std::env::temp_dir(),
             snapshot_seq: AtomicU64::new(0),
@@ -834,7 +834,7 @@ mod tests {
         // The leak `StagedPath` closes: a panic between staging the temp socket (or a pool's
         // bundle dir) and publishing it must not strand the path. Both file and dir flavors, and
         // the disarm: a published path must survive the guard's drop.
-        let base = std::env::temp_dir().join(format!("agent-staged-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("kee-staged-{}", std::process::id()));
         std::fs::create_dir_all(&base).expect("mkdir");
 
         let file = base.join("sock.tmp");
@@ -868,13 +868,13 @@ mod tests {
         let started = Instant::now();
         refuse_at_capacity(daemon_end, &server);
         let mut reader = std::io::BufReader::new(client);
-        let reply = agent_protocol::read_message::<agent_protocol::Response>(&mut reader)
+        let reply = kee_protocol::read_message::<kee_protocol::Response>(&mut reader)
             .expect("the refusal parses")
             .expect("the refusal is a message, not EOF");
         assert!(
             matches!(
                 &reply,
-                agent_protocol::Response::Error { message, fatal: true }
+                kee_protocol::Response::Error { message, fatal: true }
                     if message.contains("at capacity")
             ),
             "expected the typed at-capacity refusal, got {reply:?}"

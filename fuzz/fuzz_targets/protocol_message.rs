@@ -6,7 +6,7 @@
 
 #![no_main]
 
-use agent_protocol::fuzz::{read_requests, read_responses};
+use kee_protocol::fuzz::{read_requests, read_responses};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

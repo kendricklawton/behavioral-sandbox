@@ -22,7 +22,7 @@ an outer `SHA256SUMS` over the tarball and an inner per-file manifest, verified 
 - **Pin and verify the Firecracker/jailer binary by sha256.** A pinned hash lives alongside the
   kernel and rootfs pins in `xtask/src/artifacts.rs` (the sha256 is the contract; the URL is
   replaceable). `install.sh` verifies a fetched-or-operator-provided binary against it, and
-  `agent doctor` gains a check on the installed binary's hash. That check is **advisory**: an operator
+  `kee doctor` gains a check on the installed binary's hash. That check is **advisory**: an operator
   may legitimately run a locally-built or distro-packaged Firecracker, so a mismatch **warns** rather
   than refuses; the pinned hash is the supported, verified default, not a hard gate (the same posture
   decision 038 takes for host hardening).
@@ -49,7 +49,7 @@ an outer `SHA256SUMS` over the tarball and an inner per-file manifest, verified 
 
 **Consequences and notes.**
 - **Two boxes, tracked.** The Firecracker-binary pin (`xtask/src/artifacts.rs` + `install.sh` +
-  `agent doctor`) and the `SHA256SUMS` signing (`xtask/src/dist.rs` + `install.sh`) are their own
+  `kee doctor`) and the `SHA256SUMS` signing (`xtask/src/dist.rs` + `install.sh`) are their own
   roadmap boxes, so this decision's implementation is queued, not buried in prose.
 - **One reader page.** Provenance was spread across decisions 007, 033, 034, and 035 plus
   `docs/cli-install.md`. `docs/supply-chain.md` consolidates "what is pinned, what is verified, how to

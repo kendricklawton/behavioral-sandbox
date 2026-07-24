@@ -1,31 +1,31 @@
-# Using the `agent serve` daemon
+# Using the `kee serve` daemon
 
-`agent serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
-lifecycle over a **unix socket**, so a local client drives microVMs without linking the `agent-vmm`
+`kee serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
+lifecycle over a **unix socket**, so a local client drives microVMs without linking the `kee-vmm`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
 use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
 the hoster's, above the engine, and are a recorded non-goal).
 
 > **Status.** The wire API is **versioned** (every message carries a `schema` field) but not yet
 > **frozen**: a later milestone freezes and formally specs it as the SDK contract (see the
-> [roadmap](https://github.com/k-henry-org/agent/blob/main/ROADMAP.md)). Until then the shape may
+> [roadmap](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/ROADMAP.md)). Until then the shape may
 > still change, which is why every message is schema-stamped and a mismatch is rejected up front.
 
 ## Run it
 
 ```console
-agent serve --socket /run/agent/agent.sock              # jailed by default (needs root + the jailer)
-agent serve --socket ./agent.sock --unjailed            # dev host that can't jail
-agent serve --socket ./agent.sock --prewarm 4           # a pre-warmed pool of 4 clones for fast `open`
+kee serve --socket /run/kee/kee.sock                  # jailed by default (needs root + the jailer)
+kee serve --socket ./kee.sock --unjailed              # dev host that can't jail
+kee serve --socket ./kee.sock --prewarm 4             # a pre-warmed pool of 4 clones for fast `open`
 ```
 
-Logs go to **stderr** (`--log` / `AGENT_LOG`, default `info`); the socket carries only the protocol.
-The guest kernel/rootfs come from the environment (`AGENT_KERNEL` / `AGENT_ROOTFS` / `AGENT_MARKER`),
-the same `AGENT_*` layer the CLI reads, a daemon has no `.agent.toml` cwd discovery.
+Logs go to **stderr** (`--log` / `KEE_LOG`, default `info`); the socket carries only the protocol.
+The guest kernel/rootfs come from the environment (`KEE_KERNEL` / `KEE_ROOTFS` / `KEE_MARKER`),
+the same `KEE_*` layer the CLI reads, a daemon has no `.kee.toml` cwd discovery.
 
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
 jail posture is fixed when the daemon launches, so a caller can never weaken it. The same holds for
-`--require-limits` (also `AGENT_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
+`--require-limits` (also `KEE_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
 can't be applied is refused rather than booted uncapped (ADR 010's fail-open is the default), so a
 hoster can make the resource envelope load-bearing on a shared host. Both are hoster postures, not
 per-session wire fields; the prewarm source clears `require_limits` (it must be unjailed to snapshot,
@@ -75,7 +75,7 @@ malformed or oversize line is an error the daemon reports or drops, never a pani
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
 working directory, and closing the connection tears the sandbox down.
 
-The shared wire contract lives in the `agent-protocol` crate (serde-only, no `agent-vmm`), so the
+The shared wire contract lives in the `kee-protocol` crate (serde-only, no `kee-vmm`), so the
 daemon, the [reference client](#the-reference-client), and the future polyglot SDKs all speak exactly
 the same shapes.
 
@@ -100,11 +100,11 @@ the same shapes.
 | Response | Meaning |
 |---|---|
 | `{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}` | The sandbox booted; `pooled` says whether it came from the pre-warmed pool. |
-| `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `agent run --json`; a non-zero `exit_code` is a *result*, not an error). |
+| `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `kee run --json`; a non-zero `exit_code` is a *result*, not an error). |
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
-| `{"schema":1,"reply":"snapshotted","dir":"/tmp/agent-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
-| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope** (decision 034): `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `agent verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
+| `{"schema":1,"reply":"snapshotted","dir":"/tmp/kee-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope** (decision 034): `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `kee verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
 | `{"schema":1,"reply":"error","message":"…","fatal":false}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. |
@@ -116,7 +116,7 @@ $ printf '%s\n' \
     '{"schema":1,"op":"open"}' \
     '{"schema":1,"op":"exec","argv":["echo","hi"]}' \
     '{"schema":1,"op":"close"}' \
-  | socat - UNIX-CONNECT:./agent.sock
+  | socat - UNIX-CONNECT:./kee.sock
 {"schema":1,"reply":"opened","boot_ms":118,"pooled":false}
 {"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}
 {"schema":1,"reply":"closed"}
@@ -130,13 +130,13 @@ engine (engine, not platform).
 ### Structured logs
 
 Operational logs are structured `tracing` events on **stderr**, human-readable text by default,
-or one JSON object per line with `--log-json` (or `AGENT_LOG_FORMAT=json`) for a log shipper. The
+or one JSON object per line with `--log-json` (or `KEE_LOG_FORMAT=json`) for a log shipper. The
 events and their fields (`vmm_pid`, `boot_ms`, `pooled`, …) are identical in both encodings; the flag
-changes only the framing. The filter is `--log` / `AGENT_LOG` (default `info`, the per-session
+changes only the framing. The filter is `--log` / `KEE_LOG` (default `info`, the per-session
 open/close lines are the daemon's operational trace).
 
 ```console
-agent serve --socket ./agent.sock --log-json --log info 2>> /var/log/agent.jsonl
+kee serve --socket ./kee.sock --log-json --log info 2>> /var/log/kee.jsonl
 ```
 
 ### Metrics (Prometheus)
@@ -144,7 +144,7 @@ agent serve --socket ./agent.sock --log-json --log info 2>> /var/log/agent.jsonl
 `--metrics ADDR` serves the Prometheus text-exposition format at `GET /metrics`:
 
 ```console
-agent serve --socket ./agent.sock --metrics 127.0.0.1:9920
+kee serve --socket ./kee.sock --metrics 127.0.0.1:9920
 curl -s http://127.0.0.1:9920/metrics
 ```
 
@@ -156,38 +156,38 @@ convention of base units: **seconds**, never milliseconds.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `agent_build_info{version=…}` | gauge | Build metadata (value always 1). |
-| `agent_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
-| `agent_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
-| `agent_sessions_active` | gauge | Sessions currently open (one live microVM each). |
-| `agent_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
-| `agent_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
-| `agent_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
-| `agent_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
-| `agent_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
-| `agent_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
+| `kee_build_info{version=…}` | gauge | Build metadata (value always 1). |
+| `kee_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
+| `kee_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
+| `kee_sessions_active` | gauge | Sessions currently open (one live microVM each). |
+| `kee_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
+| `kee_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
+| `kee_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
+| `kee_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
+| `kee_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
+| `kee_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
 
 A minimal scrape config:
 
 ```yaml
 scrape_configs:
-  - job_name: agent
+  - job_name: kee
     static_configs:
       - targets: ["127.0.0.1:9920"]
 ```
 
 ## The reference client
 
-`agent-client` is the **reference Rust client**: a `Client` type that drives the whole session
+`kee-client` is the **reference Rust client**: a `Client` type that drives the whole session
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
-`agent-protocol` and a JSON value **only, never `agent-vmm`**, which is the point: it proves a
+`kee-protocol` and a JSON value **only, never `kee-vmm`**, which is the point: it proves a
 caller drives the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
 The polyglot SDKs (Go/Python/Node/C#, planned) are this client's method set hardened per language.
 
 ```rust,ignore
-use agent_client::{Client, OpenOptions};
+use kee_client::{Client, OpenOptions};
 
-let mut client = Client::connect("/run/agent/agent.sock")?;
+let mut client = Client::connect("/run/kee/kee.sock")?;
 client.open(OpenOptions::default())?;               // boot the session's sandbox
 let run = client.exec(&["echo".into(), "hi".into()], "")?;
 assert_eq!(run.stdout, "hi\n");
@@ -199,7 +199,7 @@ client.close()?;                                    // tear the sandbox down
 ## Non-goals: where a PaaS would begin
 
 The daemon is the engine's *programmatic interface*, and it stops exactly where a platform would
-start. These are the features a hoster builds **above** `agent`, deliberately absent from the wire
+start. These are the features a hoster builds **above** `kee`, deliberately absent from the wire
 and the daemon, and PRs adding them are wrong by design (engine, not platform):
 
 - **No tenancy or identity.** No message carries a tenant, account, or user. One connection drives
@@ -212,7 +212,7 @@ and the daemon, and PRs adding them are wrong by design (engine, not platform):
 - **No billing or quotas.** The daemon *measures* (the [metrics endpoint](#metrics-prometheus),
   host-observed) but never *charges* or *caps by account*. Turning numbers into a bill or a per-tenant
   limit is the hoster's.
-- **No fleet scheduling.** One `agent` drives sandboxes on its one host. Bin-packing across hosts,
+- **No fleet scheduling.** One `kee` drives sandboxes on its one host. Bin-packing across hosts,
   queues, and autoscaling are the hoster's scheduler; the daemon has no notion of another host.
 - **No public/HTTP platform API.** The surface is a *local* unix socket speaking newline-JSON. A
   daemon that grew a multi-tenant identity model or a public HTTP surface would be a **hoster**, not

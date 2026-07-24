@@ -2,16 +2,16 @@
 //! run, contained on every axis, and the containment **shown in the host-observed audit record**,
 //! plus the proof that the guest can neither see nor disable the probes doing the observing.
 //!
-//! `#[ignore]`d: each boots a real microVM (needs `/dev/kvm` + the agent rootfs) and attaches all
+//! `#[ignore]`d: each boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches all
 //! three host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
-//! object). Run via `cargo xtask ci-privileged`. Uses `agent-vmm` as a **dev-dependency only**, so
+//! object). Run via `cargo xtask ci-privileged`. Uses `kee-vmm` as a **dev-dependency only**, so
 //! the loader library stays independent of the driver: the two tracks bridge by plain values.
 //!
 //! These fuse constituents that already pass individually, deny-by-default egress with an
 //! allow-listed exception (`net_enforce.rs`), a fork storm that creates no host threads (hardware
 //! isolation), and the faithful record (`audit_record.rs`), into **one hostile guest**, and add the
 //! part those pieces don't: the record is the evidence. Full VM/jail escape and the cgroup
-//! cpu/mem/pid caps are proven under real root by the `agent-vmm` confinement suite (a mem-hog /
+//! cpu/mem/pid caps are proven under real root by the `kee-vmm` confinement suite (a mem-hog /
 //! fork-bomb bounded by `memory.max`/`cpu.max`); this suite runs on the probe-capability path and
 //! consolidates the *observed and recorded* dimensions of containment.
 #![allow(clippy::panic)]
@@ -19,12 +19,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use agent_probes_loader::{
+use kee_probes_loader::{
     check_support, object_path, AxisGap, EgressPolicy, Protocol, SandboxProbes, SharedMeter,
     SharedTracer, Timing,
 };
-use agent_test_support::{have_real_root, process_threads, LimitCgroup};
-use agent_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use kee_test_support::{have_real_root, process_threads, LimitCgroup};
+use kee_vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 /// IP protocol number for UDP, for the raw flow/denial-key comparisons the loader doesn't re-export
 /// a const for.
@@ -56,11 +56,8 @@ fn skip_reason() -> Option<String> {
     if !Path::new("/dev/kvm").exists() {
         return Some("/dev/kvm not present".into());
     }
-    if !workspace_root()
-        .join("artifacts/rootfs-agent.ext4")
-        .is_file()
-    {
-        return Some("agent rootfs not built (run `cargo xtask build-rootfs`)".into());
+    if !workspace_root().join("artifacts/rootfs-kee.ext4").is_file() {
+        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
     }
     None
 }
@@ -72,10 +69,10 @@ fn skip_reason() -> Option<String> {
 fn networked_agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("AGENT_KERNEL").is_none() {
+    if std::env::var_os("KEE_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    cfg.rootfs = root.join("artifacts/rootfs-agent.ext4");
+    cfg.rootfs = root.join("artifacts/rootfs-kee.ext4");
     cfg.userspace_marker = GUEST_READY_MARKER.to_string();
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     cfg.read_only_root = true;
@@ -85,7 +82,7 @@ fn networked_agent_config() -> BootConfig {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     // The consolidated adversarial suite as one hostile guest: it tries to **exfiltrate**
     // (reach a blocked endpoint) and to **DoS** the host (a fork storm), and every attempt is both
@@ -126,7 +123,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
 
     // Attack 1, exfiltrate. The guest sends UDP to its host end on both the one allowed port and a
     // blocked one. No listener is needed (the verdict is at the tap, before delivery); Python is in
-    // the agent rootfs, so this is deterministic. The `for` body is 4-space-indented via a leading
+    // the guest rootfs, so this is deterministic. The `for` body is 4-space-indented via a leading
     // `\x20` so Rust's `\`-continuation can't strip Python's indentation.
     let exfil = format!(
         "import socket, time\n\
@@ -249,7 +246,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_guest_cannot_see_or_disable_the_host_side_probes() {
     // The guest can neither see nor disable the host-side observation. It runs its **own**
     // kernel inside the microVM; the eBPF probes live in the **host** kernel, and the tap monitor
@@ -349,7 +346,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
 }
 
 #[test]
-#[ignore = "needs /dev/kvm + real root + delegated cgroups + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the agent rootfs (run via `cargo xtask ci-privileged` as root)"]
+#[ignore = "needs /dev/kvm + real root + delegated cgroups + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged` as root)"]
 fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     // One hostile guest attacks on every exhaustion axis at once, and the engine's two
     // enforcement mechanisms bound all of them: the **cgroup** caps compute + memory (a memory hog

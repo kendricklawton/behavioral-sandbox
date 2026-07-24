@@ -6,7 +6,7 @@
 
 #![no_main]
 
-use agent_probes_common::{parse_ipv4_5tuple, SyscallEvent};
+use kee_probes_common::{parse_ipv4_5tuple, SyscallEvent};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

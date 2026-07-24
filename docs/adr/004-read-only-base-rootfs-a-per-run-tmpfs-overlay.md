@@ -41,10 +41,10 @@ rather than bound a runaway write. `/overlay` is **baked into the image** becaus
 when `overlay-init` runs, you can't `mkdir` a mountpoint on a read-only `/`.
 
 **Consequences and notes.**
-- **Additive, not a flip.** `read_only_root` defaults `false` and is **not** an `AGENT_*` env key, it's
+- **Additive, not a flip.** `read_only_root` defaults `false` and is **not** an `KEE_*` env key, it's
   set in code where the agent image is chosen as a bundle (the test's `agent_rootfs_config`), so the
   multi-env footprint doesn't grow. The stock (Ubuntu) config still copies + boots read-write. Making
-  the agent rootfs the read-only default is still the separate flip this file's decision 003 reserved.
+  the guest rootfs the read-only default is still the separate flip this file's decision 003 reserved.
 - **Snapshot/restore:** the tmpfs upper lives in guest RAM, so it is captured by a memory
   snapshot, and a restore requires the same read-only base present at the same host path.
 - **A read-only rootfs must ship `/sbin/overlay-init` + a `/overlay` mountpoint** (both baked by

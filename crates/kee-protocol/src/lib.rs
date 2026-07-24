@@ -4,8 +4,8 @@
 //! trusts the other's bytes.
 //!
 //! **This is the SDK contract seed (ADR 030).** It is the one artifact the daemon
-//! ([`agent`](../agent_cli/index.html)), the reference client (`agent-client`), and the eventual
-//! polyglot SDKs all share, so it lives in its own **`agent-vmm`-free** crate: the wire is the
+//! ([`agent`](../kee_cli/index.html)), the reference client (`kee-client`), and the eventual
+//! polyglot SDKs all share, so it lives in its own **`kee-vmm`-free** crate: the wire is the
 //! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
 //! linking the engine. Freezing and formally speccing it comes with the polyglot SDKs (separate
 //! repos); until then the shape may still change,
@@ -21,7 +21,7 @@
 //! [`MAX_MESSAGE_BYTES`] and returns a typed [`ProtocolError`], never a panic.
 //!
 //! **Text, not binary.** `stdin`, `put`/`get` `content`, and the returned `stdout`/`stderr` are
-//! **UTF-8 strings**, lossy on the way out exactly like `agent run --json` (so the daemon and the CLI
+//! **UTF-8 strings**, lossy on the way out exactly like `kee run --json` (so the daemon and the CLI
 //! render a run identically). Bulk or binary I/O is the block-device path
 //! (`BootConfig::input_dir`/`output_dir`), an embedding-API concern, never this per-message line.
 //!
@@ -51,7 +51,7 @@ pub const WIRE_SCHEMA: u32 = 1;
 /// Upper bound on one protocol line, before decoding, the guardrail-5 allocation cap so a peer that
 /// never sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an
 /// unbounded read. Generous: a per-message `stdin`/`content` string plus its JSON envelope fits,
-/// while the exec channel still enforces the real `agent_vmm::MAX_PAYLOAD` on the bytes that reach
+/// while the exec channel still enforces the real `kee_vmm::MAX_PAYLOAD` on the bytes that reach
 /// the guest, so this is a DoS bound, not the input-size contract.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -77,7 +77,7 @@ pub enum Request {
     /// Open the connection's sandbox, the first message of a session (the VM *is* the session,
     /// ADR 016). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
     /// is the daemon's launch-time choice, never a client's, so a caller can't downgrade the jail.
-    /// Any omitted field keeps the conservative `agent_vmm::Limits` default.
+    /// Any omitted field keeps the conservative `kee_vmm::Limits` default.
     Open {
         /// Guest vCPUs (1..=32); omitted keeps the default 1.
         #[serde(default)]
@@ -156,7 +156,7 @@ pub enum Response {
         pooled: bool,
     },
     /// A command finished. `exit_code` is the guest command's own code (non-zero is a *result*, not
-    /// an error); `stdout`/`stderr` are lossy UTF-8 like `agent run --json`.
+    /// an error); `stdout`/`stderr` are lossy UTF-8 like `kee run --json`.
     Result {
         /// The guest command's exit code (`128 + signal` on signal death).
         exit_code: i32,
@@ -425,7 +425,7 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
 
 /// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
 /// bytes to the daemon's untrusted-client parse path (the hand-rolled line reader + schema gate,
-/// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`agent serve`)
+/// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`kee serve`)
 /// reads exactly these bytes off its socket from any client, so a panic, hang, or unbounded
 /// allocation on any input is the bug being hunted (guardrail 5). Not built by default; the harness
 /// lives in `fuzz/` (excluded from the workspace). The in-gate, dependency-light counterpart is
@@ -437,7 +437,7 @@ pub mod fuzz {
     use crate::{read_message, Request, Response};
 
     /// Read a stream of `Request`s from `data` (the daemon's view of a client's bytes), the
-    /// highest-value target: `agent serve` decodes exactly this off its socket. Drains to EOF so a
+    /// highest-value target: `kee serve` decodes exactly this off its socket. Drains to EOF so a
     /// lying length, a blank-line flood, or a mid-line truncation are all exercised.
     pub fn read_requests(data: &[u8]) {
         let mut cur = Cursor::new(data);
@@ -525,7 +525,7 @@ mod tests {
                 present: true,
             },
             Response::Snapshotted {
-                dir: "/var/lib/agent/snap-1".into(),
+                dir: "/var/lib/kee/snap-1".into(),
             },
             Response::Trace {
                 record: serde_json::json!({"schema": 1, "timing": {}}),

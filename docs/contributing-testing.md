@@ -65,15 +65,15 @@ The per-phase exit-gate demos (a real sandbox, one probe end to end) are listed 
 A bare-metal or nested-virt host with `/dev/kvm`, real root, and the eBPF caps runs every layer. This
 is the order to exercise the whole engine end to end; each step links to its detail.
 
-1. **Check the host.** `cargo xtask setup` (build-time) and `agent doctor` (runtime) report exactly
+1. **Check the host.** `cargo xtask setup` (build-time) and `kee doctor` (runtime) report exactly
    what is missing; `doctor` exits non-zero on a missing hard requirement.
    ([Supported platforms](./cli-install.md#supported-platforms).)
 2. **Stand it up.** `cargo xtask self-host` does the whole build: the guest kernel + rootfs + eBPF
-   object, installs the `agent` binary, and boots one proof sandbox.
+   object, installs the `kee` binary, and boots one proof sandbox.
    ([Self-host in one command](./cli-install.md#self-host-in-one-command).)
 3. **Run one sandbox, confined.** With real root you exercise the jailed default (not `--unjailed`):
-   `agent run -- python3 -c 'print(2 ** 100)'`. Add `--net` / `--trace` / `--record` / `--watch` to
-   see the host-observed record. ([Using the agent CLI](./cli.md).)
+   `kee run -- python3 -c 'print(2 ** 100)'`. Add `--net` / `--trace` / `--record` / `--watch` to
+   see the host-observed record. ([Using the kee CLI](./cli.md).)
 4. **The privileged integration suite.** `cargo xtask ci-privileged` boots real microVMs, execs, runs
    tap networking, attaches probes, and asserts the observed record: the half the host-safe gate
    cannot reach. It self-checks its prerequisites and prints the fix if an artifact is missing, and
@@ -82,8 +82,8 @@ is the order to exercise the whole engine end to end; each step links to its det
    cargo, so running anyway would print a hollow green.
 5. **The live demos.** One probe end to end each: `trace-sandbox`, `watch-sandbox`, `enforce-sandbox`,
    `meter-sandbox`. ([Host-side observability, *Try it*](./probes.md#try-it).)
-6. **The daemon.** `agent serve --socket ./agent.sock`, then drive it with the reference client or `socat`.
-   ([Using the `agent` daemon](./daemon.md).)
+6. **The daemon.** `kee serve --socket ./kee.sock`, then drive it with the reference client or `socat`.
+   ([Using the `kee serve` daemon](./daemon.md).)
 7. **The embedding API.** The reference integration
    [`crates/probes-loader/examples/reference_integration.rs`](../crates/probes-loader/examples/reference_integration.rs)
    composes the whole lifecycle (open, attach, exec, collect, close) in one small program.

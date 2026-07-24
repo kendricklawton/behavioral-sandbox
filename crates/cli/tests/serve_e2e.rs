@@ -8,13 +8,13 @@
 //!    (parsed with `serde_json::Value`, no access to the daemon's Rust types), the proof the wire is
 //!    hand-debuggable and every message carries its `schema`.
 //! 2. [`the_reference_client_drives_a_full_session`] drives the same daemon through the **reference
-//!    client** ([`agent_client::Client`]), the proof a caller needs only the wire contract
-//!    (the client links no `agent-vmm`).
+//!    client** ([`kee_client::Client`]), the proof a caller needs only the wire contract
+//!    (the client links no `kee-vmm`).
 //! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agent --prewarm 1` and asserts a bare
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the agent
-//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p agent-cli -- --ignored`. Unjailed
+//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p kee-cli -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use agent_client::{Client, OpenOptions};
+use kee_client::{Client, OpenOptions};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -39,11 +39,8 @@ fn skip_reason() -> Option<String> {
     if !std::path::Path::new("/dev/kvm").exists() {
         return Some("/dev/kvm not present".into());
     }
-    if !workspace_root()
-        .join("artifacts/rootfs-agent.ext4")
-        .is_file()
-    {
-        return Some("agent rootfs not built (run `cargo xtask build-rootfs`)".into());
+    if !workspace_root().join("artifacts/rootfs-kee.ext4").is_file() {
+        return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
     }
     None
 }
@@ -94,7 +91,7 @@ fn scrape_metrics(port: u16) -> String {
     response
 }
 
-/// Launch `agent` on a private socket, pointed at the workspace's agent rootfs. `prewarm` becomes
+/// Launch `agent` on a private socket, pointed at the workspace's guest rootfs. `prewarm` becomes
 /// `--prewarm N` when set (the pool path); `metrics_port` becomes `--metrics 127.0.0.1:PORT`.
 /// Returns once the socket is connectable.
 fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, PathBuf) {
@@ -104,9 +101,9 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
     }
-    let socket = dir.join("agent.sock");
+    let socket = dir.join("kee.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_kee"));
     cmd.arg("serve")
         .arg("--unjailed")
         .arg("--socket")
@@ -117,19 +114,19 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     if let Some(port) = metrics_port {
         cmd.arg("--metrics").arg(format!("127.0.0.1:{port}"));
     }
-    cmd.env("AGENT_ROOTFS", root.join("artifacts/rootfs-agent.ext4"))
-        // The agent rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("AGENT_MARKER", agent_vmm::GUEST_READY_MARKER)
+    cmd.env("KEE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
+        // The guest rootfs signals readiness with its own marker, not a getty `login:`.
+        .env("KEE_MARKER", kee_vmm::GUEST_READY_MARKER)
         // Keep the daemon's generated record-signing key inside the test's socket dir.
-        .env("AGENT_SIGNING_KEY", dir.join("signing.key"))
-        .env("AGENT_LOG", "warn")
+        .env("KEE_SIGNING_KEY", dir.join("signing.key"))
+        .env("KEE_LOG", "warn")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    if std::env::var_os("AGENT_KERNEL").is_none() {
-        cmd.env("AGENT_KERNEL", root.join("artifacts/vmlinux"));
+    if std::env::var_os("KEE_KERNEL").is_none() {
+        cmd.env("KEE_KERNEL", root.join("artifacts/vmlinux"));
     }
-    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn agent: {e}"));
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn kee: {e}"));
     let daemon = Daemon { child, dir };
 
     // Wait for the daemon to bind and start accepting. A prewarmed daemon boots a source + clones
@@ -142,7 +139,7 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("agent never began accepting on {}", socket.display());
+    panic!("kee never began accepting on {}", socket.display());
 }
 
 /// A tiny **raw-JSON** client over the daemon's newline protocol: send a request line, read one
@@ -155,8 +152,7 @@ struct RawClient {
 
 impl RawClient {
     fn connect(socket: &PathBuf) -> Self {
-        let stream =
-            UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect to agent: {e}"));
+        let stream = UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect to kee: {e}"));
         if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(45))) {
             panic!("set read timeout: {e}");
         }
@@ -195,7 +191,7 @@ impl RawClient {
 }
 
 #[test]
-#[ignore = "spawns agent; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns kee; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping agent_serves_the_full_wire_api_over_a_unix_socket: {why}");
@@ -308,11 +304,11 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     // the shape check). Envelope-level field order doesn't matter to `verify`; the signed bytes are
     // the embedded record string, which survives the reply's serde round-trip (decision 034).
     let envelope = serde_json::to_string(&traced["record"]).expect("re-serialize envelope");
-    let signer = agent_probes_loader::TrustedKey::from_hex(
+    let signer = kee_probes_loader::TrustedKey::from_hex(
         traced["record"]["key_id"].as_str().expect("key_id string"),
     )
     .expect("key_id parses as an ed25519 public key");
-    agent_probes_loader::verify(&envelope, &[signer])
+    kee_probes_loader::verify(&envelope, &[signer])
         .expect("the daemon's signed record verifies against the key it names");
     let inner: serde_json::Value =
         serde_json::from_str(traced["record"]["record"].as_str().expect("record string"))
@@ -337,7 +333,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let traced2 = client.recv();
     assert_eq!(
         traced2["record"]["prev"].as_str(),
-        Some(agent_probes_loader::record_hash(&first_record).as_str()),
+        Some(kee_probes_loader::record_hash(&first_record).as_str()),
         "the second trace commits to the first record's hash: {traced2}"
     );
 
@@ -409,37 +405,34 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let scraped = loop {
         let body = scrape_metrics(metrics_port);
-        if body.contains("agent_sessions_active 0") || Instant::now() >= deadline {
+        if body.contains("kee_sessions_active 0") || Instant::now() >= deadline {
             break body;
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
-        scraped.contains("agent_sessions_opened_total{pooled=\"false\"} 2"),
+        scraped.contains("kee_sessions_opened_total{pooled=\"false\"} 2"),
         "{scraped}"
     );
-    assert!(scraped.contains("agent_sessions_active 0"), "{scraped}");
+    assert!(scraped.contains("kee_sessions_active 0"), "{scraped}");
     assert!(
-        scraped.contains("agent_requests_total{verb=\"put\"} 1"),
-        "{scraped}"
-    );
-    assert!(
-        scraped.contains("agent_requests_total{verb=\"snapshot\"} 1"),
+        scraped.contains("kee_requests_total{verb=\"put\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("agent_request_errors_total{kind=\"guest\"} 1"),
+        scraped.contains("kee_requests_total{verb=\"snapshot\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("agent_protocol_errors_total 1"),
+        scraped.contains("kee_request_errors_total{kind=\"guest\"} 1"),
         "{scraped}"
     );
-    assert!(scraped.contains("agent_boot_seconds_count 2"), "{scraped}");
+    assert!(scraped.contains("kee_protocol_errors_total 1"), "{scraped}");
+    assert!(scraped.contains("kee_boot_seconds_count 2"), "{scraped}");
 }
 
 #[test]
-#[ignore = "spawns agent; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns kee; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_reference_client_drives_a_full_session() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_reference_client_drives_a_full_session: {why}");
@@ -512,7 +505,7 @@ fn the_reference_client_drives_a_full_session() {
 }
 
 #[test]
-#[ignore = "spawns agent --prewarm; needs /dev/kvm + the agent rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns kee --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_prewarmed_open_is_served_from_the_pool() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_prewarmed_open_is_served_from_the_pool: {why}");

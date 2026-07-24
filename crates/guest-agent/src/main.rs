@@ -1,4 +1,4 @@
-//! The `agent-guest` binary: listen for connections and [`serve`](agent_guest::serve) one command
+//! The `kee-guest` binary: listen for connections and [`serve`](kee_guest::serve) one command
 //! each.
 //!
 //! **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`), the in-VM
@@ -7,7 +7,7 @@
 //! with no VM. `serve` is transport-agnostic (any `Read`+`Write`); only the listener differs.
 //!
 //! `tracing` goes to stderr. The agent writes exactly one line to **stdout**, the readiness
-//! sentinel ([`GUEST_READY_MARKER`](agent_channel::GUEST_READY_MARKER)) emitted once its vsock
+//! sentinel ([`GUEST_READY_MARKER`](kee_channel::GUEST_READY_MARKER)) emitted once its vsock
 //! listener is bound, because the guest's stdout is the serial console the host scans to learn the
 //! agent is up. One connection = one command, so the loop just accepts, serves, logs, and continues;
 //! every connection serves from the same working directory ([`session_dir`]), so repeated execs
@@ -41,9 +41,9 @@ fn main() -> ExitCode {
 
     let spec = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("AGENT_GUEST_LISTEN").ok());
+        .or_else(|| std::env::var("KEE_GUEST_LISTEN").ok());
     let Some(spec) = spec else {
-        eprintln!("usage: agent-guest <vsock:<port>|unix:<path>>   (or set AGENT_GUEST_LISTEN)");
+        eprintln!("usage: kee-guest <vsock:<port>|unix:<path>>   (or set KEE_GUEST_LISTEN)");
         return ExitCode::from(EXIT_OPERATIONAL);
     };
 
@@ -82,7 +82,7 @@ fn run_vsock(port: u32) -> Result<(), String> {
     for conn in listener.incoming() {
         match conn {
             // Refuse a connection we can't bound, the no-hang guarantee depends on the deadline
-            // (see `agent_guest::serve`). `VsockStream`'s setters return `nix::Error`.
+            // (see `kee_guest::serve`). `VsockStream`'s setters return `nix::Error`.
             Ok(stream) => match stream
                 .set_read_timeout(Some(IO_TIMEOUT))
                 .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
@@ -134,20 +134,20 @@ fn session_dir() -> std::path::PathBuf {
 /// `serve_session` emits its own `exec` span with the command + exit; only failures need a line
 /// here.
 fn serve_one<S: std::io::Read + std::io::Write + Send>(stream: S) {
-    if let Err(e) = agent_guest::serve_session(stream, &session_dir()) {
+    if let Err(e) = kee_guest::serve_session(stream, &session_dir()) {
         tracing::warn!("connection failed: {e}");
     }
 }
 
 /// Print the readiness sentinel to stdout (the serial console) and flush, so the host's console scan
-/// fires exactly once the vsock listener is accepting. See [`agent_channel::GUEST_READY_MARKER`].
+/// fires exactly once the vsock listener is accepting. See [`kee_channel::GUEST_READY_MARKER`].
 /// `writeln!` (not `println!`) so a closed console is ignored, never a panic.
 fn announce_ready(port: u32) {
     let mut out = std::io::stdout();
     let _ = writeln!(
         out,
         "{} {VSOCK_SCHEME}:{port}",
-        agent_channel::GUEST_READY_MARKER
+        kee_channel::GUEST_READY_MARKER
     );
     let _ = out.flush();
 }
@@ -175,11 +175,11 @@ fn parse_listen(spec: &str) -> Result<Listen<'_>, String> {
     }
 }
 
-/// stderr logging, filter from `AGENT_LOG` else `info`. `info` (not the CLI's `warn`) is deliberate:
+/// stderr logging, filter from `KEE_LOG` else `info`. `info` (not the CLI's `warn`) is deliberate:
 /// the agent's per-command `exec` span is the guest's operational trace, captured off the serial
 /// console. `try_init` + an explicit fallback so a bad filter or a double-init never panics the run.
 fn init_tracing() {
-    let filter = std::env::var("AGENT_LOG").unwrap_or_else(|_| "info".to_string());
+    let filter = std::env::var("KEE_LOG").unwrap_or_else(|_| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()

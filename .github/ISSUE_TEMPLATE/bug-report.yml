@@ -8,7 +8,7 @@ body:
         Thanks for the report. One check first: if this is a **suspected vulnerability** (an
         isolation escape, a way to tamper with the audit log, a host-path panic from guest input),
         please use the private
-        [security-advisory form](https://github.com/k-henry-org/agent/security/advisories/new)
+        [security-advisory form](https://github.com/k-henry-org/kvm-ebpf-engine/security/advisories/new)
         instead of a public issue.
 
   - type: textarea
@@ -24,10 +24,10 @@ body:
     attributes:
       label: How to reproduce it
       description: >-
-        The exact command line (`agent run …` / `agent shell …` / `agent serve` + client verbs) or the
+        The exact command line (`kee run …` / `kee shell …` / `kee serve` + client verbs) or the
         embedding code, plus the workload that triggers it. The smaller the repro, the faster the fix.
       placeholder: |
-        agent run --net -- python3 -c '...'
+        kee run --net -- python3 -c '...'
       render: shell
     validations:
       required: true
@@ -35,7 +35,7 @@ body:
   - type: textarea
     id: doctor
     attributes:
-      label: "`agent doctor` output"
+      label: "`kee doctor` output"
       description: >-
         Paste the full output — it captures KVM, Firecracker, jailer, cgroup, and eBPF readiness in
         one shot, which answers most environment questions up front.
@@ -58,7 +58,7 @@ body:
       options:
         - CLI, jailed (the default)
         - CLI, --unjailed
-        - agent serve (daemon)
+        - kee serve (daemon)
         - embedded (the vmm library API)
       multiple: true
     validations:

@@ -1,17 +1,17 @@
-//! The `agent` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
+//! The `kee` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
 //! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
 //! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch`, see [`audit`]).
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
-//! or the `--json` structured result / audit log), so `agent run … 2>/dev/null` stays
+//! or the `--json` structured result / audit log), so `kee run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
-//! flags > env (`AGENT_LOG`) > default. Both subcommands run
+//! flags > env (`KEE_LOG`) > default. Both subcommands run
 //! **jailed by default** (ADR 012) with `--unjailed` as the explicit opt-out, and both point
-//! at the env-layered artifacts (`AGENT_ROOTFS`/`AGENT_KERNEL`/`AGENT_MARKER`, exec needs the
-//! agent rootfs from `cargo xtask build-rootfs`).
+//! at the env-layered artifacts (`KEE_ROOTFS`/`KEE_KERNEL`/`KEE_MARKER`, exec needs the
+//! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
-use agent_cli::audit;
+use kee_cli::audit;
 mod config;
 mod doctor;
 mod metrics;
@@ -29,13 +29,13 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use agent_cli::policy::Requested;
-use agent_cli::MAX_VCPUS;
-use agent_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
-use agent_vmm::{
+use clap::{Parser, Subcommand};
+use kee_cli::policy::Requested;
+use kee_cli::MAX_VCPUS;
+use kee_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
+use kee_vmm::{
     sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD,
 };
-use clap::{Parser, Subcommand};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
 /// command's own exit code): conventional "2", named so the intent is legible at the
@@ -43,7 +43,7 @@ use clap::{Parser, Subcommand};
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The version of the `--json` **run-result** contract (exit code, streams, artifacts, metrics,
-/// limits). Distinct from the audit record's `agent_probes_loader::AUDIT_SCHEMA_VERSION`: two
+/// limits). Distinct from the audit record's `kee_probes_loader::AUDIT_SCHEMA_VERSION`: two
 /// surfaces, two independent versions. Same policy, additive within a version, a rename/removal
 /// bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
@@ -51,7 +51,7 @@ const RUN_RESULT_SCHEMA: u32 = 1;
 /// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error
 /// (and its `kind()` buckets, pinned by embedders) is never minted for faults that are the CLI's
 /// own: a bad flag combination, a refused artifact path, a local file write. `Engine` passes the
-/// driver's error through untouched (`?` converts via `From`); both print as `agent: <reason>` and
+/// driver's error through untouched (`?` converts via `From`); both print as `kee: <reason>` and
 /// exit 2, the taxonomy is for honesty, not for different handling.
 #[derive(Debug)]
 enum CliError {
@@ -78,9 +78,9 @@ impl From<VmmError> for CliError {
 
 #[derive(Parser)]
 #[command(
-    name = "agent",
+    name = "kee",
     // The crate version, which is the in-development working number until the first tag
-    // (`RELEASES.md`): `agent --version` exists so an installed binary can be told from a stale one,
+    // (`RELEASES.md`): `kee --version` exists so an installed binary can be told from a stale one,
     // which is a different question from "which release is this".
     version,
     about = "Run untrusted code in a Firecracker microVM, with a host-observed audit trail.",
@@ -88,17 +88,17 @@ impl From<VmmError> for CliError {
     // then the two run forms differ only by whether this host can jail (ADR 012).
     after_help = "\
 Getting started:
-  agent doctor                          check what this host can do
-  sudo -E agent run -- echo hello       run a command in a sandbox (jailed, the default)
-  agent run --unjailed -- echo hello    same, without the jailer (needs no root)
-  agent run --trace -- <cmd>            run it and print the audit trail
+  kee doctor                          check what this host can do
+  sudo -E kee run -- echo hello       run a command in a sandbox (jailed, the default)
+  kee run --unjailed -- echo hello    same, without the jailer (needs no root)
+  kee run --trace -- <cmd>            run it and print the audit trail
 
-Config layers, highest first: flags, AGENT_* env, .agent.toml, defaults."
+Config layers, highest first: flags, KEE_* env, .kee.toml, defaults."
 )]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
-    /// Log filter for stderr (overrides `AGENT_LOG`), e.g. `info`, `debug`.
+    /// Log filter for stderr (overrides `KEE_LOG`), e.g. `info`, `debug`.
     #[arg(long, global = true, value_name = "FILTER")]
     log: Option<String>,
 }
@@ -106,7 +106,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     // Each variant's doc comment is user-facing help, so the first line is a one-line summary (what
-    // `agent --help` lists) and the detail follows after a blank line (what `agent <cmd> --help`
+    // `kee --help` lists) and the detail follows after a blank line (what `kee <cmd> --help`
     // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
     /// Run one command in a microVM.
     ///
@@ -117,11 +117,11 @@ enum Cmd {
     // the whole `Cmd` enum isn't sized to it (the `clippy::large_enum_variant` this would trip).
     #[command(after_help = "\
 Examples:
-  agent run -- echo hello
-  agent run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
-  agent run --put main.rs --get a.out -- rustc main.rs -o a.out
-  agent run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
-  agent run --record run.json -- ./untrusted && agent verify run.json
+  kee run -- echo hello
+  kee run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
+  kee run --put main.rs --get a.out -- rustc main.rs -o a.out
+  kee run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
+  kee run --record run.json -- ./untrusted && kee verify run.json
 
 Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
@@ -134,7 +134,7 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     ///
     /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
     /// will work, degrade, or refuse before the first sandbox, and names a first command that works
-    /// on this host. Exits non-zero when a hard prerequisite is missing, so `agent doctor && agent
+    /// on this host. Exits non-zero when a hard prerequisite is missing, so `kee doctor && kee
     /// run …` gates correctly.
     Doctor(doctor::DoctorArgs),
     /// Verify a signed audit record.
@@ -168,8 +168,8 @@ struct RunArgs {
     /// Refuse the boot if the cgroup caps can't be applied.
     ///
     /// Instead of the default warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with
-    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `AGENT_REQUIRE_LIMITS`
-    /// or `.agent.toml`.
+    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `KEE_REQUIRE_LIMITS`
+    /// or `.kee.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
     /// Guest vCPUs, 1..=32 [default: 1].
@@ -237,7 +237,7 @@ struct RunArgs {
     /// Write the run's deterministic audit record to a file.
     ///
     /// Attaches the host-side probes and writes one line of JSON, the machine surface, for later
-    /// inspection or `agent verify`.
+    /// inspection or `kee verify`.
     #[arg(
         long,
         value_name = "FILE",
@@ -291,20 +291,20 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The daemon owns its own logging (info default, optional JSON) and reads no `.agent.toml`
+    // The daemon owns its own logging (info default, optional JSON) and reads no `.kee.toml`
     // (its config is flags + environment), so `serve` dispatches *before* the CLI's project-file
     // discovery and tracing init below, which are the run/shell/doctor conveniences. It still
     // receives the shared global `--log` filter.
     if let Cmd::Serve(args) = cli.cmd {
         return serve::serve(*args, cli.log);
     }
-    // The `.agent.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
+    // The `.kee.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
     // failure here, before any boot (config typos must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let file = match config::AgentToml::discover(&cwd) {
         Ok(f) => f,
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "agent: {e}");
+            let _ = writeln!(std::io::stderr(), "kee: {e}");
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
@@ -314,14 +314,14 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
-            let _ = writeln!(std::io::stderr(), "agent: {e}");
+            let _ = writeln!(std::io::stderr(), "kee: {e}");
             // An infra-bucket failure means the host couldn't stand the microVM up, so point at the
             // tool that explains the host. Keyed on the `kind()` bucket rather than on variants, so
             // the hint can't drift as `VmmError` (which is `#[non_exhaustive]`) grows.
             if matches!(&e, CliError::Engine(err) if err.kind() == ErrorKind::Infra) {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "agent: the host may not be ready, run `agent doctor`"
+                    "kee: the host may not be ready, run `kee doctor`"
                 );
             }
             ExitCode::from(EXIT_OPERATIONAL)
@@ -350,7 +350,7 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
     }
 }
 
-/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `agent`
+/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `kee`
 /// run left: a `Ctrl-C`/SIGKILL of a boot subcommand skips `Drop`, so the lifetime sentinel reaps
 /// the VM process but the scratch dir and netns are out of its scope (ADR 011). Run once before a
 /// boot subcommand as the boot-time GC the engine owes its host (ADR 013). Best-effort and
@@ -369,16 +369,16 @@ fn sweep_vm_residue(file: Option<&config::AgentToml>) {
 }
 
 /// The env+file-layered base config, `env > file > defaults`, over which each subcommand applies
-/// its flags. Composes a single lookup that prefers the real environment, then the `.agent.toml`
+/// its flags. Composes a single lookup that prefers the real environment, then the `.kee.toml`
 /// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
-/// stay one vocabulary keyed by the `AGENT_*` names.
+/// stay one vocabulary keyed by the `KEE_*` names.
 fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
     BootConfig::from_env_with(|key| {
         std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
     })
 }
 
-/// `agent run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
+/// `kee run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
 /// `--record-summary`/`--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed
 /// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
 /// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
@@ -423,7 +423,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         None
     } else {
         let policy = build_egress(&args.allow)?;
-        if let Err(e) = agent_probes_loader::check_support() {
+        if let Err(e) = kee_probes_loader::check_support() {
             return Err(CliError::Cli(format!(
                 "--allow requested egress enforcement, but this host can't load the eBPF probes: {e}"
             )));
@@ -444,7 +444,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
-        // it panics on a closed pipe (`agent run … | head -0`), and a no-panic host path
+        // it panics on a closed pipe (`kee run … | head -0`), and a no-panic host path
         // includes the shell pipeline case.
         let _ = writeln!(
             std::io::stdout(),
@@ -457,7 +457,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             .map_err(CliError::from);
     }
 
-    // The audit surface, when a flag asked for it (a plain `agent run` pays nothing): load the shared
+    // The audit surface, when a flag asked for it (a plain `kee run` pays nothing): load the shared
     // probes and bind them to this sandbox by the plain values it exposes, the launch sequence the
     // probes-loader documents, composed here in the caller. `--allow` enforces (arming the tap before
     // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
@@ -516,7 +516,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         if !done.load(Ordering::Acquire) {
             let _ = writeln!(
                 std::io::stderr(),
-                "agent: live view closed; waiting for the command to finish"
+                "kee: live view closed; waiting for the command to finish"
             );
         }
         let (sandbox, result) = worker
@@ -603,7 +603,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             // off-host. The signing key is host-side (the guest never sees it), loaded/generated at
             // the config-resolved path.
             let key_path = config::signing_key_path(file);
-            let key = agent_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+            let key = kee_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
                 VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
             })?;
             std::fs::write(path, key.sign_record(&record) + "\n")
@@ -621,7 +621,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
 }
 
-/// `agent shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
+/// `kee shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
@@ -634,20 +634,20 @@ fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, 
     let mut err_out = std::io::stderr();
     let _ = writeln!(
         err_out,
-        "agent shell: microVM up in {} ms; one command per line, files persist across lines, \
+        "kee shell: microVM up in {} ms; one command per line, files persist across lines, \
          `exit` (or EOF) to quit",
         sandbox.boot_latency().as_millis()
     );
     let stdin = std::io::stdin();
     loop {
-        let _ = write!(err_out, "agent> ");
+        let _ = write!(err_out, "kee> ");
         let _ = err_out.flush();
         let mut line = String::new();
         match stdin.read_line(&mut line) {
             Ok(0) => break, // EOF
             Ok(_) => {}
             Err(e) => {
-                let _ = writeln!(err_out, "agent: read stdin: {e}");
+                let _ = writeln!(err_out, "kee: read stdin: {e}");
                 break;
             }
         }
@@ -671,10 +671,10 @@ fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, 
             // line; the session survives it. Infra/transport means the VM itself is gone, end the
             // session with the typed error.
             Err(e) if e.kind() == ErrorKind::Guest => {
-                let _ = writeln!(err_out, "agent: {e}");
+                let _ = writeln!(err_out, "kee: {e}");
             }
             Err(e) => {
-                let _ = writeln!(err_out, "agent: session lost: {e}");
+                let _ = writeln!(err_out, "kee: session lost: {e}");
                 let _ = sandbox.shutdown();
                 return Err(e.into());
             }
@@ -927,10 +927,10 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
     Ok(cur)
 }
 
-/// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `agent run`
+/// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `kee run`
 /// shouldn't block waiting for EOF). The read is **bounded at one frame + 1 byte**: the exec request
 /// is a single frame, so anything past the channel's cap is rejected as a typed `PayloadTooLarge`
-/// regardless, reading it all first would let `cat 10GB.bin | agent run …` balloon host RAM before
+/// regardless, reading it all first would let `cat 10GB.bin | kee run …` balloon host RAM before
 /// the same error. The `+ 1` still overshoots the cap by a byte so the oversize case is caught rather
 /// than silently truncated to exactly the cap. Bulk data belongs on the block-device path anyway.
 fn piped_stdin() -> Vec<u8> {
@@ -947,7 +947,7 @@ fn piped_stdin() -> Vec<u8> {
 }
 
 /// Initialize stderr logging from the filter [`config::resolve_log`] already resolved
-/// (`flag > AGENT_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
+/// (`flag > KEE_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
 /// environment: the precedence is single-sourced in `resolve_log`, this only applies the result.
 /// An invalid filter falls back to `warn` rather than failing the run.
 fn init_tracing(filter: Option<&str>) {
@@ -967,8 +967,8 @@ mod tests {
         build_egress, limits_with, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus,
         write_artifacts_in, AllowRule, Artifact, MAX_VCPUS,
     };
-    use agent_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
-    use agent_test_support::ScratchDir;
+    use kee_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
+    use kee_test_support::ScratchDir;
     use std::net::Ipv4Addr;
     use std::num::{NonZeroU32, NonZeroU8};
 
@@ -1104,7 +1104,7 @@ mod tests {
     fn limits_fold_overrides_onto_conservative_defaults() {
         // An unset flag keeps the default; a set one wins. The other knobs are untouched by this
         // helper (run layers wall/output-cap separately).
-        let d = agent_vmm::Limits::default();
+        let d = kee_vmm::Limits::default();
         let none = limits_with(None, None);
         assert_eq!(none.vcpus, d.vcpus);
         assert_eq!(none.mem_mib, d.mem_mib);

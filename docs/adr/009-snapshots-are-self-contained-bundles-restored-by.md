@@ -36,7 +36,7 @@ contract without a shared mutable backing file.
   late. Staging-then-unlink is the workaround that keeps the bundle portable.
 - **Reference a read-only shared base instead of copying the disk.** The right long-term shape for
   memory-sharing (many clones over one base), but it needs the source booted `read_only_root`, which needs the
-  agent rootfs, which needs vsock to reach its readiness marker, and a vsock/NIC snapshot can't yet
+  guest rootfs, which needs vsock to reach its readiness marker, and a vsock/NIC snapshot can't yet
   recreate its host endpoints on restore. So the read-write, private-copy path lands first;
   read-only-base pre-warmed snapshots come later.
 

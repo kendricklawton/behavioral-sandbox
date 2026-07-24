@@ -61,4 +61,4 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" --draft --title "${GITHUB_REF_NAME}" \
             --notes "Pre-release checkpoint. Verify: sha256sum -c SHA256SUMS. Install: see install.sh." \
-            dist/agent-*-x86_64-linux.tar.gz dist/SHA256SUMS
+            dist/kee-*-x86_64-linux.tar.gz dist/SHA256SUMS

@@ -4,7 +4,7 @@
 # the sandbox is deny-by-default, and the host record proves the job couldn't phone home even if a
 # test tried. Run it with:
 #
-#   agent run --put project.tar --put ci-job.sh --get report.txt \
+#   kee run --put project.tar --put ci-job.sh --get report.txt \
 #       --record-summary ci.json -- /bin/sh ci-job.sh
 #
 # python3 is baked into the guest rootfs, so this needs nothing installed at run time.

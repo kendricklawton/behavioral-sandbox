@@ -9,7 +9,7 @@ fetched-not-pinned, the last input a self-hoster could not reproduce from a mirr
 reproducible, offline-verifiable build closes that gap.
 
 **Decision.** Standing the engine up is one command, `cargo xtask self-host`: it obtains the pinned
-guest kernel + rootfs, builds the guest image and the eBPF probe object, installs the `agent`
+guest kernel + rootfs, builds the guest image and the eBPF probe object, installs the `kee`
 binary into a prefix (`~/.local/bin` by default), and, on a KVM host, boots one sandbox
 to prove it end to end (`--no-run` prints the proof command instead). It is orchestration over the
 already-tested `xtask` steps, not a second code path.
@@ -18,14 +18,14 @@ The **vendoring** half closes the item decision 007 deferred: `cargo xtask vendo
 sha-pinned upstream input, the Firecracker CI kernel + rootfs, the Alpine minirootfs, the static
 `apk` tool, **and** the resolved `.apk` package closure (the piece decision 007 flagged as
 "fetched-not-pinned"), into a local mirror, sha-verified, with a `vendor-manifest.txt` recording
-each file's hash. Setting `AGENT_VENDOR_DIR` to that dir takes every build path offline in one move:
+each file's hash. Setting `KEE_VENDOR_DIR` to that dir takes every build path offline in one move:
 `fetch_one` restores the binary artifacts from the mirror instead of `curl`ing them, and the rootfs
 build installs the packages from the vendored apk cache (`apk.static --cache-dir … --no-network`)
 instead of the Alpine CDN. So a fresh host builds with the FC S3 bucket and the Alpine CDN both dark.
 
 Mechanics that matter:
 - **The vendor-aware seam is `fetch_one`, not the call sites.** `fetch_one` branches on
-  `AGENT_VENDOR_DIR` (restore-from-mirror vs `download_one`); `build-rootfs`, `fetch-artifacts`, and
+  `KEE_VENDOR_DIR` (restore-from-mirror vs `download_one`); `build-rootfs`, `fetch-artifacts`, and
   `self-host` all route through it, so offline mode is one env var with zero call-site churn.
 - **The `.apk` closure is pinned at vendor time, not in the tree.** `apk` branch repos delete old
   revisions on every bump (decision 007), so there is no stable per-package URL to hash-pin in

@@ -1,19 +1,19 @@
-//! `agent doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
-//! checks ([`agent_vmm::doctor`]) plus the eBPF-observability capability row (owned by the probe
-//! loader, out of `agent-vmm`), so a fresh host reads exactly what will work, degrade, or refuse
+//! `kee doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
+//! checks ([`kee_vmm::doctor`]) plus the eBPF-observability capability row (owned by the probe
+//! loader, out of `kee-vmm`), so a fresh host reads exactly what will work, degrade, or refuse
 //! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
 //! truth for "ready", two entry points.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-use agent_vmm::doctor::{self, Check, CheckStatus};
-use agent_vmm::BootConfig;
+use kee_vmm::doctor::{self, Check, CheckStatus};
+use kee_vmm::BootConfig;
 
 /// Whether to emit ANSI colour on a stream.
 ///
 /// Gated on the stream actually being a terminal, because this report is a **stdout result** and
-/// stdout stays pipe-clean: escape sequences must never reach `agent doctor | …` or a file. On top of
+/// stdout stays pipe-clean: escape sequences must never reach `kee doctor | …` or a file. On top of
 /// that, `NO_COLOR` (any value, per the informal standard) and `TERM=dumb` both turn it off.
 fn colour_enabled(is_tty: bool, no_color: bool, term: Option<&str>) -> bool {
     is_tty && !no_color && term != Some("dumb")
@@ -45,7 +45,7 @@ impl Paint {
     }
 }
 
-/// Flags for `agent doctor`.
+/// Flags for `kee doctor`.
 #[derive(clap::Args)]
 pub struct DoctorArgs {
     /// Also print what each missing item means at runtime.
@@ -60,12 +60,12 @@ pub struct DoctorArgs {
 /// Print the readiness report for `config` (resolved `flags`-free, i.e. `env > file > defaults`, so
 /// the artifact paths checked are the ones a run would boot). Returns the process exit code: success
 /// when the engine can boot *something* (every hard prerequisite met), a failure code when a hard
-/// requirement is missing, so `agent doctor && agent run …` gates correctly.
+/// requirement is missing, so `kee doctor && kee run …` gates correctly.
 #[must_use]
 pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     let mut out = std::io::stdout();
     let paint = Paint::for_stream(out.is_terminal());
-    let _ = writeln!(out, "{}\n", paint.wrap("1", "agent doctor: host readiness"));
+    let _ = writeln!(out, "{}\n", paint.wrap("1", "kee doctor: host readiness"));
 
     let mut checks = doctor::checks(config);
     checks.push(ebpf_check());
@@ -93,7 +93,7 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     } else if checks.iter().any(|c| !matches!(c.status, CheckStatus::Ok)) {
         let _ = writeln!(
             out,
-            "  What a missing item means at runtime: `agent doctor --explain`"
+            "  What a missing item means at runtime: `kee doctor --explain`"
         );
     }
 
@@ -106,13 +106,13 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
         // Name a first command that works *here*: the jailed default needs real root plus the
         // jailer, so suggesting it unconditionally would hand a fresh operator a failing command.
         if doctor::jailed_run_available() {
-            let _ = writeln!(out, "\nTry it:\n  agent run -- echo hello");
+            let _ = writeln!(out, "\nTry it:\n  kee run -- echo hello");
         } else {
             let _ = writeln!(
                 out,
                 "\nTry it (the default jails the VMM, which needs real root):\
-                 \n  sudo -E agent run -- echo hello       # jailed, the supported posture\
-                 \n  agent run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+                 \n  sudo -E kee run -- echo hello       # jailed, the supported posture\
+                 \n  kee run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
             );
         }
         ExitCode::SUCCESS
@@ -127,8 +127,8 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
             "{}",
             err_paint.wrap(
                 "1;31",
-                "agent: not ready, a hard prerequisite above is missing (see the FAIL rows above, \
-                 each names its fix), then re-run `agent doctor`"
+                "kee: not ready, a hard prerequisite above is missing (see the FAIL rows above, \
+                 each names its fix), then re-run `kee doctor`"
             )
         );
         ExitCode::from(2)
@@ -158,7 +158,7 @@ fn tally(checks: &[Check], paint: Paint) -> String {
 /// `CAP_PERFMON` + kernel BTF). A degradation, not hard: without it, `--trace`/`--watch` still run
 /// (recording a coverage gap) and only `--allow` *enforcement* refuses.
 fn ebpf_check() -> Check {
-    match agent_probes_loader::check_support() {
+    match kee_probes_loader::check_support() {
         Ok(()) => Check {
             label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
             status: CheckStatus::Ok,

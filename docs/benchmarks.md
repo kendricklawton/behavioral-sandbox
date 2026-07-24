@@ -2,7 +2,7 @@
 
 *Measured, not marketed.* Every performance claim this engine makes is backed by a benchmark you can
 re-run, reported with percentiles, against an honest baseline. This page is the results report; the
-numbers below come from the benchmark suite in [`xtask`](https://github.com/k-henry-org/agent/tree/main/xtask), re-run with `cargo xtask bench-all`.
+numbers below come from the benchmark suite in [`xtask`](https://github.com/k-henry-org/kvm-ebpf-engine/tree/main/xtask), re-run with `cargo xtask bench-all`.
 
 ## Methodology
 
@@ -24,12 +24,12 @@ numbers below come from the benchmark suite in [`xtask`](https://github.com/k-he
   cargo xtask bench-warm --runs 100  # or a single bench at a sharper n for publication-grade tails
   ```
 
-  The KVM benches need `/dev/kvm` + the built agent rootfs; the eBPF benches need
+  The KVM benches need `/dev/kvm` + the built kee rootfs; the eBPF benches need
   `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes` (not KVM). `bench-all` records the host it ran
   on and skips any section it can't run, with the reason, so a report says exactly what it measured.
 
 The numbers on this page were measured on: **Linux 7.0.11, Intel i5-10310U (8 vCPUs @ 1.70 GHz),
-15 GiB RAM**, agent rootfs 132 MiB, guest 256 MiB / 1 vCPU. Your hardware will differ; re-run the
+15 GiB RAM**, kee rootfs 132 MiB, guest 256 MiB / 1 vCPU. Your hardware will differ; re-run the
 suite to get numbers for your host.
 
 ## Start latency: cold boot vs snapshot restore vs pool take
