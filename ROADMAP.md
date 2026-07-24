@@ -2520,6 +2520,35 @@ second pass surfaced by reading the pinned upstream (aya) source directly, alrea
       netlink path only; the TCX link is left with the program so its own drop closes the fd and
       detaches netns-independently. The 6.6 threshold mirrors aya's and must be re-checked on any aya
       bump. non-`api:`.
+
+**Hoster admission surface (P20.29a-P20.29c).** Found auditing what a fleet hoster needs to admit
+correctly against the daemon (decision 042): the session-count ceiling and a free-text refusal are too
+coarse for a resource-aware, scale-out dispatcher, and the host must defend itself under a zero-trust
+assumption (even a buggy control plane can flood a node). Engine self-defense and legible signals only;
+tenancy, rate-limiting, and scheduling stay the hoster's (guardrail 4). Two change the daemon wire, so
+they land before the P21 spec freeze.
+
+- [x] **P20.29a** **Typed at-capacity refusal** (decision 042): the daemon's over-ceiling refusal was
+      a free-text `Response::Error`, so a dispatcher could only tell "full, fail over" from "terminal"
+      by string-matching. It is now a distinct `Response::AtCapacity { retry_after_ms }` reply
+      (`crates/protocol/src/lib.rs`), produced by `refuse_at_capacity` and the resource gate, surfaced
+      by the reference client as `ClientError::AtCapacity`. Additive on decision 030's wire (no
+      `WIRE_SCHEMA` bump; an old client reads it as a typed `ProtocolError`, never a panic).
+      `feat(api):`.
+- [x] **P20.29b** **Committed-resource telemetry** (decision 042): the metrics endpoint now exports
+      `ebpf_kvm_engine_committed_mem_mib`/`_committed_vcpus` against `_capacity_mem_mib`/`_capacity_vcpus`
+      (`crates/cli/src/metrics.rs`, sampled live per scrape like `pool_ready`), so a load-aware
+      dispatcher routes on real memory/vCPU headroom instead of probe-and-fail. A metrics-endpoint
+      surface, not a wire verb (the session-scoped protocol makes a `status` verb a poor fit).
+      non-`api:`.
+- [x] **P20.29c** **Resource-aware admission** (decisions 041/042): `--max-sessions` bounds session
+      *count*, but an `open` may ask for arbitrary `vcpus`/`mem_mib`, so a host could sit under the
+      count ceiling yet be memory-overcommitted and OOM at boot. New `ebpf-kvm-engine serve`
+      `--max-committed-mem-mib`/`--max-committed-vcpus` bound the summed committed load via a
+      `ResourceReservation` RAII guard charged after `open_limits` and released on teardown
+      (`crates/cli/src/serve.rs`, `crates/cli/src/session.rs`), refusing with `AtCapacity` before boot.
+      Distinct from decision 041's per-`open` ceilings (which bound one request); the count ticket stays
+      a coarse backstop. non-`api:`.
 - [ ] **P20.30** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
       microVM boots, runs code, is enforced + recorded, self-hostable, and documented. Cut after the
       rename (P20.4), so the first stable name is the real one.

@@ -46,6 +46,13 @@ pub enum ClientError {
         /// Whether the session ended (the sandbox is gone).
         fatal: bool,
     },
+    /// The daemon refused because it is **at capacity** (an [`AtCapacity`](Response::AtCapacity)
+    /// reply): backpressure, distinct from a request fault, so a dispatcher fails over to another host
+    /// rather than treating it as terminal (decision 042). Always session-ending.
+    AtCapacity {
+        /// The daemon's suggested backoff before retrying, milliseconds. A hint only.
+        retry_after_ms: u64,
+    },
     /// The daemon sent a well-formed reply, but not the one this call awaited (a protocol desync).
     Unexpected(Response),
     /// The daemon closed the connection without replying.
@@ -58,6 +65,9 @@ impl std::fmt::Display for ClientError {
             ClientError::Protocol(e) => write!(f, "{e}"),
             ClientError::Remote { message, fatal } => {
                 write!(f, "agent error (fatal={fatal}): {message}")
+            }
+            ClientError::AtCapacity { retry_after_ms } => {
+                write!(f, "agent at capacity (retry after {retry_after_ms}ms)")
             }
             ClientError::Unexpected(resp) => write!(f, "unexpected reply from agent: {resp:?}"),
             ClientError::Closed => write!(f, "agent closed the connection without replying"),
@@ -299,13 +309,17 @@ impl Client {
         write_message(&mut self.writer, req).map_err(ClientError::Protocol)
     }
 
-    /// Read one response line, mapping a clean EOF to [`ClientError::Closed`] and a remote
-    /// [`Error`](Response::Error) to [`ClientError::Remote`], so callers only match the replies they
-    /// expect.
+    /// Read one response line, mapping a clean EOF to [`ClientError::Closed`], a remote
+    /// [`Error`](Response::Error) to [`ClientError::Remote`], and an
+    /// [`AtCapacity`](Response::AtCapacity) refusal to [`ClientError::AtCapacity`], so callers only
+    /// match the replies they expect and see backpressure as its own class (decision 042).
     fn recv(&mut self) -> Result<Response, ClientError> {
         match read_message::<Response>(&mut self.reader)? {
             None => Err(ClientError::Closed),
             Some(Response::Error { message, fatal }) => Err(ClientError::Remote { message, fatal }),
+            Some(Response::AtCapacity { retry_after_ms }) => {
+                Err(ClientError::AtCapacity { retry_after_ms })
+            }
             Some(resp) => Ok(resp),
         }
     }

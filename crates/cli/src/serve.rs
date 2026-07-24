@@ -29,10 +29,12 @@
 //! private scrape network), never a public interface.
 //!
 //! **Bounded concurrency.** Every session is a full microVM (guest RAM, a tap, a cgroup), so the
-//! daemon bounds its own core resource: at the `--max-sessions` ceiling a new connection gets a
-//! typed "at capacity" refusal *before* any VM is booted, instead of walking the host into
-//! OOM/KVM/fd exhaustion. The ceiling is the hoster's knob (`0` = unlimited); admission control is
-//! engine self-protection, not tenancy (still no auth, no scheduling, no queueing).
+//! daemon bounds its own core resource: at the `--max-sessions` ceiling (or an aggregate
+//! `--max-committed-mem-mib`/`--max-committed-vcpus` ceiling, decision 042) a new connection gets the
+//! distinct `at_capacity` reply *before* any VM is booted, instead of walking the host into
+//! OOM/KVM/fd exhaustion, a backpressure signal a fleet dispatcher fails over on. The ceilings are the
+//! hoster's knobs (`0` = unlimited); admission control is engine self-protection, not tenancy (still
+//! no auth, no scheduling, no queueing).
 //!
 //! **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
 //! ends, tearing the microVM down; and losing the whole daemon process (SIGKILL, OOM) can't leak a
@@ -95,8 +97,9 @@ pub struct ServeArgs {
     log_json: bool,
     /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
     /// cgroup), so the daemon bounds its own core resource: at the ceiling a new connection is
-    /// refused with a typed "at capacity" error *before* any VM boots, rather than exhausting the
-    /// host. Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
+    /// refused with the distinct `at_capacity` reply *before* any VM boots, rather than exhausting the
+    /// host. For a memory-heterogeneous fleet add `--max-committed-mem-mib`/`--max-committed-vcpus`
+    /// (decision 042). Size it to the host (sessions × guest memory must fit in RAM); `0` = unlimited.
     #[arg(long, value_name = "N", default_value_t = 16)]
     max_sessions: usize,
     /// Drop a session after this many seconds with **no progress** on the connection, whether the
@@ -121,6 +124,18 @@ pub struct ServeArgs {
     /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for.
     #[arg(long, value_name = "BYTES")]
     max_output_cap: Option<usize>,
+    /// Aggregate ceiling on the **summed guest memory** (MiB) across all live sessions, the resource
+    /// counterpart to `--max-sessions` (decision 042): a session whose `open` would push committed
+    /// memory past this is refused with `at_capacity`, *before* booting, so a memory-heterogeneous
+    /// fleet can't overcommit the host into OOM. Distinct from `--max-mem-mib`, which bounds one
+    /// request. `0` (the default) is unlimited: the count ceiling alone applies.
+    #[arg(long, value_name = "MIB", default_value_t = 0)]
+    max_committed_mem_mib: u64,
+    /// Aggregate ceiling on the **summed vCPUs** committed across all live sessions (decision 042).
+    /// Past it a session's `open` is refused with `at_capacity` before booting. Set it to your CPU
+    /// oversubscription budget (e.g. physical cores × a ratio). `0` (the default) is unlimited.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    max_committed_vcpus: u64,
 }
 
 /// The daemon's shared context, handed by `Arc` to every session thread: the env-layered base config
@@ -164,6 +179,19 @@ pub(crate) struct Server {
     /// Live sessions right now, the counter the admission check compares against the ceiling.
     /// Incremented by a successful [`SessionTicket::acquire`], decremented by the ticket's `Drop`.
     pub(crate) active_sessions: AtomicUsize,
+    /// Summed guest memory (MiB) committed across live sessions, charged by a [`ResourceReservation`]
+    /// once an `open`'s `Limits` are known and released on its `Drop` (decision 042). The resource
+    /// counterpart to [`active_sessions`](Self::active_sessions).
+    pub(crate) committed_mem_mib: AtomicU64,
+    /// Summed vCPUs committed across live sessions; charged and released like
+    /// [`committed_mem_mib`](Self::committed_mem_mib).
+    pub(crate) committed_vcpus: AtomicU64,
+    /// Aggregate ceiling on [`committed_mem_mib`](Self::committed_mem_mib) (`0` = unlimited), from
+    /// `--max-committed-mem-mib`.
+    pub(crate) max_committed_mem_mib: u64,
+    /// Aggregate ceiling on [`committed_vcpus`](Self::committed_vcpus) (`0` = unlimited), from
+    /// `--max-committed-vcpus`.
+    pub(crate) max_committed_vcpus: u64,
 }
 
 impl Server {
@@ -301,6 +329,10 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         idle_timeout: (args.idle_timeout > 0)
             .then(|| std::time::Duration::from_secs(args.idle_timeout)),
         active_sessions: AtomicUsize::new(0),
+        committed_mem_mib: AtomicU64::new(0),
+        committed_vcpus: AtomicU64::new(0),
+        max_committed_mem_mib: args.max_committed_mem_mib,
+        max_committed_vcpus: args.max_committed_vcpus,
     });
     if let Some(metrics_listener) = metrics_listener {
         spawn_metrics(metrics_listener, &server);
@@ -339,12 +371,19 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
                 // this scrape, `ebpf_kvm_engine_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
-                // visibility surface freezing under the load it exists to report on.
-                sampled
-                    .pool
-                    .as_ref()
-                    .and_then(|p| p.try_lock().ok())
-                    .map(|pool| u64::try_from(pool.ready()).unwrap_or(u64::MAX))
+                // visibility surface freezing under the load it exists to report on. The committed
+                // gauges (decision 042) read the live admission atomics, always available.
+                crate::metrics::CapacitySample {
+                    pool_ready: sampled
+                        .pool
+                        .as_ref()
+                        .and_then(|p| p.try_lock().ok())
+                        .map(|pool| u64::try_from(pool.ready()).unwrap_or(u64::MAX)),
+                    committed_mem_mib: sampled.committed_mem_mib.load(Ordering::Relaxed),
+                    committed_vcpus: sampled.committed_vcpus.load(Ordering::Relaxed),
+                    max_committed_mem_mib: sampled.max_committed_mem_mib,
+                    max_committed_vcpus: sampled.max_committed_vcpus,
+                }
             })
         });
     if let Err(e) = spawned {
@@ -414,10 +453,85 @@ impl Drop for SessionTicket {
     }
 }
 
-/// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed fatal
-/// [`protocol::Response::Error`] (the client's `open` reads it as the reply), then the
-/// connection drops. The write is timeout-bounded so a stalled client can't park the accept loop,
-/// and best-effort, the refusal itself must never take the daemon down.
+/// A committed-resource reservation (guest memory + vCPUs) held for a session's lifetime: the
+/// aggregate counterpart to [`SessionTicket`]'s count. Acquired once an `open`'s resources are known
+/// (after `open_limits`) and released on `Drop`, so a memory-heterogeneous fleet can't be admitted
+/// past the host's real capacity even while under the session-count ceiling (decision 042).
+pub(crate) struct ResourceReservation<'a> {
+    server: &'a Server,
+    mem_mib: u64,
+    vcpus: u64,
+}
+
+impl<'a> ResourceReservation<'a> {
+    /// Reserve `mem_mib` + `vcpus` against the daemon's aggregate ceilings, or `None` if either would
+    /// be exceeded (a `0` ceiling is unlimited). Both dimensions commit together: if the vCPU charge
+    /// would exceed its ceiling after the memory charge succeeded, the memory charge is rolled back,
+    /// so a partial reservation never lingers.
+    pub(crate) fn try_acquire(server: &'a Server, mem_mib: u64, vcpus: u64) -> Option<Self> {
+        if !charge(
+            &server.committed_mem_mib,
+            server.max_committed_mem_mib,
+            mem_mib,
+        ) {
+            return None;
+        }
+        if !charge(&server.committed_vcpus, server.max_committed_vcpus, vcpus) {
+            server
+                .committed_mem_mib
+                .fetch_sub(mem_mib, Ordering::Relaxed);
+            return None;
+        }
+        Some(Self {
+            server,
+            mem_mib,
+            vcpus,
+        })
+    }
+}
+
+impl Drop for ResourceReservation<'_> {
+    fn drop(&mut self) {
+        self.server
+            .committed_mem_mib
+            .fetch_sub(self.mem_mib, Ordering::Relaxed);
+        self.server
+            .committed_vcpus
+            .fetch_sub(self.vcpus, Ordering::Relaxed);
+    }
+}
+
+/// Add `amount` to `current` while keeping it `<= ceiling`, via a lock-free CAS loop so racing
+/// admissions can't over-commit past the ceiling (a `0` ceiling is unlimited). Returns whether the
+/// charge was applied.
+fn charge(current: &AtomicU64, ceiling: u64, amount: u64) -> bool {
+    if ceiling == 0 {
+        current.fetch_add(amount, Ordering::Relaxed);
+        return true;
+    }
+    let mut now = current.load(Ordering::Relaxed);
+    loop {
+        if now.saturating_add(amount) > ceiling {
+            return false;
+        }
+        match current.compare_exchange_weak(now, now + amount, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return true,
+            Err(actual) => now = actual,
+        }
+    }
+}
+
+/// Backoff hint sent with an [`protocol::Response::AtCapacity`] refusal. A hint only: the daemon
+/// cannot know when a slot frees, and a fleet dispatcher typically fails over to another host rather
+/// than waiting, so this is a modest "come back shortly" value, not a promise (decision 042).
+pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
+
+/// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed
+/// [`protocol::Response::AtCapacity`] (the client's `open` reads it as the reply, a distinct
+/// backpressure signal a dispatcher fails over on, decision 042), then the connection drops. The
+/// write is timeout-bounded so a stalled client can't park the accept loop, and best-effort, the
+/// refusal itself must never take the daemon down.
 fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     tracing::warn!(
         max_sessions = server.max_sessions,
@@ -425,13 +539,8 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     );
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     let mut stream = stream;
-    let refusal = protocol::Response::Error {
-        message: format!(
-            "at capacity: {} session(s) live, the daemon's --max-sessions ceiling; retry later \
-             or raise the ceiling",
-            server.max_sessions
-        ),
-        fatal: true,
+    let refusal = protocol::Response::AtCapacity {
+        retry_after_ms: AT_CAPACITY_RETRY_MS,
     };
     let _ = protocol::write_message(&mut stream, &refusal);
 }
@@ -775,8 +884,19 @@ mod tests {
     use super::*;
 
     /// A minimal daemon state for admission tests: no pool, no VM, degraded probes. Holding a
-    /// [`SessionTicket`] never touches a sandbox, so the cap is provable host-safe.
+    /// [`SessionTicket`] or a [`ResourceReservation`] never touches a sandbox, so the caps are
+    /// provable host-safe.
     fn test_server(max_sessions: usize) -> Arc<Server> {
+        build_test_server(max_sessions, 0, 0)
+    }
+
+    /// [`test_server`] with the aggregate resource ceilings set (unlimited session count, so only the
+    /// resource dimension gates), for the [`ResourceReservation`] tests.
+    fn build_test_server(
+        max_sessions: usize,
+        max_committed_mem_mib: u64,
+        max_committed_vcpus: u64,
+    ) -> Arc<Server> {
         Arc::new(Server {
             base: vmm::BootConfig::default(),
             jailed: false,
@@ -790,6 +910,10 @@ mod tests {
             max_sessions,
             idle_timeout: None,
             active_sessions: AtomicUsize::new(0),
+            committed_mem_mib: AtomicU64::new(0),
+            committed_vcpus: AtomicU64::new(0),
+            max_committed_mem_mib,
+            max_committed_vcpus,
         })
     }
 
@@ -812,6 +936,51 @@ mod tests {
             SessionTicket::acquire(&server).is_none(),
             "the ceiling must hold again after the readmission"
         );
+    }
+
+    #[test]
+    fn the_aggregate_memory_ceiling_admits_until_full_and_a_freed_reservation_readmits() {
+        // Resource-aware admission bounds summed committed memory, not session count: with a 1024 MiB
+        // aggregate ceiling, two 512 MiB sessions fit, a third (of any size) is refused, and freeing
+        // one readmits. Reservations touch no sandbox, so this is host-safe like the count test.
+        let server = build_test_server(0, 1024, 0);
+        let first =
+            ResourceReservation::try_acquire(&server, 512, 1).expect("first 512 MiB admitted");
+        let _second =
+            ResourceReservation::try_acquire(&server, 512, 1).expect("second 512 MiB admitted");
+        assert!(
+            ResourceReservation::try_acquire(&server, 1, 1).is_none(),
+            "a third session must be refused once committed memory is at the ceiling"
+        );
+        drop(first);
+        let _readmitted = ResourceReservation::try_acquire(&server, 512, 1)
+            .expect("freeing 512 MiB must readmit a 512 MiB session");
+        assert_eq!(server.committed_mem_mib.load(Ordering::Relaxed), 1024);
+    }
+
+    #[test]
+    fn a_vcpu_charge_over_its_ceiling_rolls_back_the_memory_charge() {
+        // Both dimensions commit together: if the vCPU charge exceeds its ceiling after the memory
+        // charge succeeded, the memory charge is rolled back, so a refused session leaves no residue.
+        let server = build_test_server(0, 4096, 2);
+        assert!(
+            ResourceReservation::try_acquire(&server, 512, 4).is_none(),
+            "4 vCPUs must be refused under a 2-vCPU aggregate ceiling"
+        );
+        assert_eq!(
+            server.committed_mem_mib.load(Ordering::Relaxed),
+            0,
+            "the memory charge must be rolled back when the vCPU charge is refused"
+        );
+    }
+
+    #[test]
+    fn a_zero_ceiling_is_unlimited() {
+        // The default (`0`) means the aggregate gate is off: any reservation succeeds and only the
+        // count ticket applies.
+        let server = build_test_server(0, 0, 0);
+        let _r = ResourceReservation::try_acquire(&server, 1_000_000, 999)
+            .expect("a 0 ceiling admits any size");
     }
 
     #[test]
@@ -862,9 +1031,10 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_connection_gets_the_typed_at_capacity_error_in_bounded_time() {
-        // The refused client's experience: a typed fatal error naming the cap, delivered within
-        // the refusal's 1s write bound even though the daemon commits no VM resources to it.
+    fn a_refused_connection_gets_the_typed_at_capacity_reply_in_bounded_time() {
+        // The refused client's experience: a distinct typed `AtCapacity` reply (backpressure a
+        // dispatcher fails over on, decision 042), delivered within the refusal's 1s write bound even
+        // though the daemon commits no VM resources to it.
         let server = test_server(1);
         let (client, daemon_end) = UnixStream::pair().expect("socketpair");
         let started = Instant::now();
@@ -874,11 +1044,7 @@ mod tests {
             .expect("the refusal parses")
             .expect("the refusal is a message, not EOF");
         assert!(
-            matches!(
-                &reply,
-                protocol::Response::Error { message, fatal: true }
-                    if message.contains("at capacity")
-            ),
+            matches!(&reply, protocol::Response::AtCapacity { retry_after_ms } if *retry_after_ms > 0),
             "expected the typed at-capacity refusal, got {reply:?}"
         );
         assert!(

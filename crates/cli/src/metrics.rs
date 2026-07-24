@@ -232,11 +232,12 @@ impl Metrics {
         self.guest_command_seconds.observe(wall);
     }
 
-    /// Render the whole registry in the Prometheus text exposition format (version 0.0.4).
-    /// `pool_ready` is the warm pool's current stock, or `None` when the daemon runs without a pool
-    /// (the family is then absent, absent, not zero, so "no pool" and "empty pool" stay
-    /// distinguishable to an alert).
-    pub fn render(&self, pool_ready: Option<u64>) -> String {
+    /// Render the whole registry in the Prometheus text exposition format (version 0.0.4). `cap` is a
+    /// fresh per-scrape snapshot of live capacity (warm-pool stock, committed resources, and the
+    /// aggregate ceilings): `pool_ready` is `None` when the daemon runs without a pool (the family is
+    /// then absent, not zero, so "no pool" and "empty pool" stay distinguishable to an alert), and the
+    /// committed/capacity gauges (decision 042) let a fleet dispatcher route on real headroom.
+    pub fn render(&self, cap: &CapacitySample) -> String {
         let mut out = String::with_capacity(2048);
 
         family(
@@ -364,7 +365,7 @@ impl Metrics {
         self.guest_command_seconds
             .render(&mut out, "ebpf_kvm_engine_guest_command_seconds");
 
-        if let Some(ready) = pool_ready {
+        if let Some(ready) = cap.pool_ready {
             family(
                 &mut out,
                 "ebpf_kvm_engine_pool_ready",
@@ -374,7 +375,89 @@ impl Metrics {
             sample(&mut out, "ebpf_kvm_engine_pool_ready", "", ready);
         }
 
+        // Resource-aware admission headroom (decision 042): committed vs the aggregate ceiling, so a
+        // fleet dispatcher routes on real memory/vCPU headroom, not just session count. A `0` ceiling
+        // means unlimited, rendered as `0` (an operator reads it as "count-only admission").
+        family(
+            &mut out,
+            "ebpf_kvm_engine_committed_mem_mib",
+            "Guest memory (MiB) committed across live sessions.",
+            "gauge",
+        );
+        sample(
+            &mut out,
+            "ebpf_kvm_engine_committed_mem_mib",
+            "",
+            cap.committed_mem_mib,
+        );
+        family(
+            &mut out,
+            "ebpf_kvm_engine_committed_vcpus",
+            "vCPUs committed across live sessions.",
+            "gauge",
+        );
+        sample(
+            &mut out,
+            "ebpf_kvm_engine_committed_vcpus",
+            "",
+            cap.committed_vcpus,
+        );
+        family(
+            &mut out,
+            "ebpf_kvm_engine_capacity_mem_mib",
+            "Aggregate committed-memory ceiling (--max-committed-mem-mib; 0 = unlimited).",
+            "gauge",
+        );
+        sample(
+            &mut out,
+            "ebpf_kvm_engine_capacity_mem_mib",
+            "",
+            cap.max_committed_mem_mib,
+        );
+        family(
+            &mut out,
+            "ebpf_kvm_engine_capacity_vcpus",
+            "Aggregate committed-vCPU ceiling (--max-committed-vcpus; 0 = unlimited).",
+            "gauge",
+        );
+        sample(
+            &mut out,
+            "ebpf_kvm_engine_capacity_vcpus",
+            "",
+            cap.max_committed_vcpus,
+        );
+
         out
+    }
+}
+
+/// A per-scrape snapshot of the daemon's live capacity, gathered fresh each scrape (like the pool
+/// stock already is) so the gauges are current: warm-pool stock, committed guest memory/vCPUs, and
+/// the aggregate ceilings they run against (decision 042).
+#[derive(Default, Clone, Copy)]
+pub struct CapacitySample {
+    /// Warm clones ready in the pool, or `None` for a daemon with no pool (keeps "no pool" and
+    /// "empty pool" distinguishable).
+    pub pool_ready: Option<u64>,
+    /// Guest memory (MiB) committed across live sessions.
+    pub committed_mem_mib: u64,
+    /// vCPUs committed across live sessions.
+    pub committed_vcpus: u64,
+    /// The aggregate committed-memory ceiling (`0` = unlimited).
+    pub max_committed_mem_mib: u64,
+    /// The aggregate committed-vCPU ceiling (`0` = unlimited).
+    pub max_committed_vcpus: u64,
+}
+
+impl CapacitySample {
+    /// A pool-only sample (committed gauges zero, ceilings unlimited), for tests and callers that
+    /// track no committed resources.
+    #[cfg(test)]
+    fn pool(pool_ready: Option<u64>) -> Self {
+        Self {
+            pool_ready,
+            ..Self::default()
+        }
     }
 }
 
@@ -401,9 +484,9 @@ fn sample(out: &mut String, name: &str, labels: &str, value: impl std::fmt::Disp
 }
 
 /// Serve the metrics endpoint forever: accept, answer one bounded `GET /metrics`, close. Sequential
-/// by design (see the module doc); `pool_ready` is sampled per scrape so the gauge is live. Never
-/// returns except by the process ending; every per-connection failure is logged and skipped.
-pub fn serve(listener: TcpListener, metrics: Arc<Metrics>, pool_ready: impl Fn() -> Option<u64>) {
+/// by design (see the module doc); `sample` is called per scrape so the capacity gauges are live.
+/// Never returns except by the process ending; every per-connection failure is logged and skipped.
+pub fn serve(listener: TcpListener, metrics: Arc<Metrics>, sample: impl Fn() -> CapacitySample) {
     for conn in listener.incoming() {
         let stream = match conn {
             Ok(s) => s,
@@ -412,7 +495,7 @@ pub fn serve(listener: TcpListener, metrics: Arc<Metrics>, pool_ready: impl Fn()
                 continue;
             }
         };
-        if let Err(e) = answer_scrape(stream, &metrics, &pool_ready) {
+        if let Err(e) = answer_scrape(stream, &metrics, &sample) {
             tracing::debug!(error = %e, "metrics scrape failed");
         }
     }
@@ -423,7 +506,7 @@ pub fn serve(listener: TcpListener, metrics: Arc<Metrics>, pool_ready: impl Fn()
 fn answer_scrape(
     mut stream: TcpStream,
     metrics: &Metrics,
-    pool_ready: &impl Fn() -> Option<u64>,
+    sample: &impl Fn() -> CapacitySample,
 ) -> std::io::Result<()> {
     stream.set_write_timeout(Some(SCRAPE_TIMEOUT))?;
     // Bound the *whole* request head by one absolute deadline, not each read: `SO_RCVTIMEO` is
@@ -435,7 +518,7 @@ fn answer_scrape(
         (
             "200 OK",
             "text/plain; version=0.0.4; charset=utf-8",
-            metrics.render(pool_ready()),
+            metrics.render(&sample()),
         )
     } else {
         (
@@ -513,7 +596,7 @@ mod tests {
         m.session_opened(false, Duration::from_millis(3));
         m.session_opened(false, Duration::from_millis(30));
         m.session_opened(true, Duration::from_secs(7));
-        let text = m.render(None);
+        let text = m.render(&CapacitySample::pool(None));
 
         // Cumulative: the 3ms one is in every bucket from 0.005 up; the 30ms joins at 0.05; the
         // 7s one appears only at le="10" and +Inf.
@@ -575,7 +658,7 @@ mod tests {
         m.request_failed(false);
         m.protocol_error();
 
-        let text = m.render(Some(2));
+        let text = m.render(&CapacitySample::pool(Some(2)));
         for name in [
             "ebpf_kvm_engine_build_info",
             "ebpf_kvm_engine_sessions_opened_total",
@@ -633,10 +716,33 @@ mod tests {
     #[test]
     fn without_a_pool_the_pool_family_is_absent_not_zero() {
         // "No pool" and "empty pool" must stay distinguishable to an alert.
-        let none = Metrics::default().render(None);
+        let none = Metrics::default().render(&CapacitySample::pool(None));
         assert!(!none.contains("ebpf_kvm_engine_pool_ready"), "{none}");
-        let empty = Metrics::default().render(Some(0));
+        let empty = Metrics::default().render(&CapacitySample::pool(Some(0)));
         assert!(empty.contains("ebpf_kvm_engine_pool_ready 0"), "{empty}");
+    }
+
+    #[test]
+    fn the_committed_resource_gauges_reflect_the_capacity_sample() {
+        // The admission headroom a dispatcher routes on (decision 042): committed vs the aggregate
+        // ceiling, both dimensions, always present (unlike the pool family).
+        let text = Metrics::default().render(&CapacitySample {
+            pool_ready: None,
+            committed_mem_mib: 768,
+            committed_vcpus: 3,
+            max_committed_mem_mib: 2048,
+            max_committed_vcpus: 8,
+        });
+        assert!(
+            text.contains("ebpf_kvm_engine_committed_mem_mib 768"),
+            "{text}"
+        );
+        assert!(text.contains("ebpf_kvm_engine_committed_vcpus 3"), "{text}");
+        assert!(
+            text.contains("ebpf_kvm_engine_capacity_mem_mib 2048"),
+            "{text}"
+        );
+        assert!(text.contains("ebpf_kvm_engine_capacity_vcpus 8"), "{text}");
     }
 
     #[test]
@@ -644,7 +750,9 @@ mod tests {
         // An unpaired decrement is a bug, but the scraped value must never wrap to u64::MAX.
         let m = Metrics::default();
         m.session_closed();
-        assert!(m.render(None).contains("ebpf_kvm_engine_sessions_active 0"));
+        assert!(m
+            .render(&CapacitySample::pool(None))
+            .contains("ebpf_kvm_engine_sessions_active 0"));
     }
 
     #[test]
@@ -701,7 +809,7 @@ mod tests {
             state ^= state >> 27;
             state.wrapping_mul(0x2545_F491_4F6C_DD1D)
         };
-        let mut prev = samples(&m.render(None));
+        let mut prev = samples(&m.render(&CapacitySample::pool(None)));
         let mut compared = 0usize;
         for _ in 0..500 {
             match next() % 8 {
@@ -719,7 +827,7 @@ mod tests {
                 6 => m.guest_command(Duration::from_millis(next() % 10_000)),
                 _ => {} // a render-only step: sampling must not perturb anything either
             }
-            let now = samples(&m.render(Some(next() % 4)));
+            let now = samples(&m.render(&CapacitySample::pool(Some(next() % 4))));
             for (name, value) in &prev {
                 let current = now
                     .get(name)
@@ -757,7 +865,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         let addr = listener.local_addr().expect("local addr");
         let served = Arc::clone(&metrics);
-        std::thread::spawn(move || serve(listener, served, || Some(1)));
+        std::thread::spawn(move || serve(listener, served, || CapacitySample::pool(Some(1))));
 
         let scrape = |request: &str| -> String {
             let mut stream = TcpStream::connect(addr).expect("connect");

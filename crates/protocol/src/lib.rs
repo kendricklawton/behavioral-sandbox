@@ -217,6 +217,15 @@ pub enum Response {
         /// another request.
         fatal: bool,
     },
+    /// The daemon refused because it is **at capacity**: the `--max-sessions` count ceiling or an
+    /// aggregate resource ceiling (decision 042) is full. Distinct from [`Error`](Self::Error) so a
+    /// fleet dispatcher can branch on backpressure ("full, try another host") without string-matching
+    /// a message; it is always session-ending. `retry_after_ms` is a backoff hint, not a promise (the
+    /// daemon cannot know when a slot frees).
+    AtCapacity {
+        /// Suggested backoff before retrying, in milliseconds. A hint only.
+        retry_after_ms: u64,
+    },
 }
 
 /// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile
@@ -537,6 +546,9 @@ mod tests {
             Response::Error {
                 message: "no such binary".into(),
                 fatal: false,
+            },
+            Response::AtCapacity {
+                retry_after_ms: 1000,
             },
         ] {
             let mut wire = Vec::new();

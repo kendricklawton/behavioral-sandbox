@@ -38,10 +38,14 @@ against a permissive ambient umask; the directory remains the designed gate.)
 
 **Bounded sessions with `--max-sessions N` (default 16).** Every session is a full microVM (guest
 RAM, a tap, a cgroup), so the daemon bounds its own core resource: at the ceiling a new connection
-gets a typed, fatal `"at capacity"` error as its `open` reply, *before* any VM boots, instead of a
-connect-loop walking the host into memory/KVM/fd exhaustion. Size it to the host (sessions × guest
-memory must fit in RAM); `0` means unlimited. This is engine self-protection, not tenancy: no
-queueing, no auth, no scheduling.
+gets a distinct, session-ending `at_capacity` reply to its `open`, *before* any VM boots, instead of a
+connect-loop walking the host into memory/KVM/fd exhaustion. `at_capacity` is its own reply (not an
+`error`), so a fleet dispatcher fails over to another host on backpressure without string-matching
+(decision 042). Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
+Because a session's `open` may ask for a custom size, `--max-sessions` alone can't bound a
+memory-heterogeneous fleet; add `--max-committed-mem-mib` / `--max-committed-vcpus` to bound the
+*summed* committed memory / vCPUs across live sessions (also refused with `at_capacity` before boot).
+This is engine self-protection, not tenancy: no queueing, no auth, no scheduling.
 
 **Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
 guarantee: a session with no request from its client for this long is dropped, freeing its microVM
@@ -108,6 +112,7 @@ the same shapes.
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
 | `{"schema":1,"reply":"error","message":"…","fatal":false}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. |
+| `{"schema":1,"reply":"at_capacity","retry_after_ms":1000}` | The daemon is **at capacity** (the `--max-sessions` count or an aggregate resource ceiling is full) and refused the `open` before booting anything. A distinct backpressure signal (not an `error`) a dispatcher fails over on; `retry_after_ms` is a backoff hint (decision 042). Always session-ending. |
 
 Drive it by hand:
 
@@ -166,6 +171,8 @@ convention of base units: **seconds**, never milliseconds.
 | `ebpf_kvm_engine_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
 | `ebpf_kvm_engine_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
 | `ebpf_kvm_engine_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
+| `ebpf_kvm_engine_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions (decision 042). |
+| `ebpf_kvm_engine_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
 
 A minimal scrape config:
 

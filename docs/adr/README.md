@@ -47,3 +47,4 @@ phase), so each stands on its own as the roadmap evolves. The overview and repo 
 - [039. API stability: a semver and deprecation policy, written now, in force at v0.1.0](./039-api-stability-semver-and-deprecation-policy.md) *(2026-07-22)*
 - [040. Supply-chain provenance: pin the Firecracker binary, sign the release manifest](./040-supply-chain-provenance-pinning-and-release-signing.md) *(2026-07-22)*
 - [041. Operator policy: defaults clamp, explicit asks are refused](./041-operator-policy-defaults-clamp-explicit-asks-refuse.md) *(2026-07-22)*
+- [042. Hoster admission: a typed capacity refusal, resource-aware admission, committed-resource telemetry](./042-hoster-admission-typed-capacity-refusal-resource-aware.md) *(2026-07-24)*

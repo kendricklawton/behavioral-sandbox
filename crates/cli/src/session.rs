@@ -34,7 +34,7 @@ use protocol::{read_message, write_message, ProtocolError, Request, Response};
 use vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::{Metrics, Verb};
-use crate::serve::Server;
+use crate::serve::{ResourceReservation, Server, AT_CAPACITY_RETRY_MS};
 
 /// The no-op command `put`/`get` run: the engine injects files and returns artifacts only *around an
 /// exec*, so a bare file write/read rides a command that does nothing but carry them. `true` exits 0
@@ -85,6 +85,33 @@ pub fn serve(stream: UnixStream, server: &Server) {
         Err(message) => {
             server.metrics.open_failed();
             let _ = write_response(&mut writer, &fatal(message));
+            return;
+        }
+    };
+
+    // Resource-aware admission (decision 042): the count ticket (acquired at accept) bounds *how many*
+    // sessions; this reservation bounds *how much* they commit, so a memory-heterogeneous fleet can't
+    // overcommit the host into OOM while still under `--max-sessions`. Charged before boot from the
+    // resolved `Limits`, held for the session, released on teardown by `Drop`. A refusal is the
+    // distinct `at_capacity` reply a dispatcher fails over on, not a boot failure.
+    let _reservation = match ResourceReservation::try_acquire(
+        server,
+        u64::from(limits.mem_mib.get()),
+        u64::from(limits.vcpus.get()),
+    ) {
+        Some(reservation) => reservation,
+        None => {
+            tracing::warn!(
+                mem_mib = limits.mem_mib.get(),
+                vcpus = limits.vcpus.get(),
+                "refusing an open: at an aggregate resource ceiling"
+            );
+            let _ = write_response(
+                &mut writer,
+                &Response::AtCapacity {
+                    retry_after_ms: AT_CAPACITY_RETRY_MS,
+                },
+            );
             return;
         }
     };

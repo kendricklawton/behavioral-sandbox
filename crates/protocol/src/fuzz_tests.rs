@@ -102,7 +102,7 @@ fn rand_request(rng: &mut Rng) -> Request {
 }
 
 fn rand_response(rng: &mut Rng) -> Response {
-    match rng.below(8) {
+    match rng.below(9) {
         0 => Response::Opened {
             boot_ms: rng.next_u64(),
             pooled: rng.below(2) == 0,
@@ -128,6 +128,9 @@ fn rand_response(rng: &mut Rng) -> Response {
         6 => Response::Error {
             message: rand_string(rng),
             fatal: rng.below(2) == 0,
+        },
+        7 => Response::AtCapacity {
+            retry_after_ms: rng.next_u64(),
         },
         _ => Response::Put {
             path: rand_string(rng),
