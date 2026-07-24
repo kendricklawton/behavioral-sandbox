@@ -62,13 +62,20 @@ fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
     args.extend_from_slice(selector);
     args.extend_from_slice(&["--target", GUEST_TARGET]);
     cargo(&args)?;
-    let bin = workspace_root()
-        .join("target")
-        .join(GUEST_TARGET)
-        .join(subpath);
+    let bin = guest_target_dir().join(GUEST_TARGET).join(subpath);
     verify_static(&bin, label)?;
     println!("\n✓ {label} built (static): {}", bin.display());
     Ok(bin)
+}
+
+/// Where cargo actually placed the build: `CARGO_TARGET_DIR` when set, else the workspace's default
+/// `target/`. `build_guest_musl` must resolve the built binary from the *same* directory `cargo`
+/// wrote it to; hardcoding `target/` made `verify_static` (and the returned path staged into the
+/// rootfs) read an absent or stale binary whenever `CARGO_TARGET_DIR` pointed elsewhere, exactly the
+/// privileged gate, which sets it to keep a root build from poisoning `./target`.
+fn guest_target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map_or_else(|| workspace_root().join("target"), PathBuf::from)
 }
 
 /// Fail with a clear fix if the guest musl target isn't installed, cargo would otherwise error more

@@ -508,7 +508,10 @@ pub(crate) fn remove_cgroup(dir: &Path) {
 /// of a hypervisor-level exploit that tries to fork *host* processes. Firecracker itself holds only a
 /// handful of tasks (an API + VMM thread and one per vCPU), so 1024 is enormous headroom that never
 /// trips a legitimate boot while still capping a runaway.
-const VMM_PIDS_MAX: u64 = 1024;
+///
+/// Public so the privileged readback test asserts the live cgroup carries *this* value, not a
+/// hand-copied literal that could drift (the same reason [`crate::FDS_PER_VM`] is public).
+pub const VMM_PIDS_MAX: u64 = 1024;
 
 /// The cgroup v2 controllers the root delegates in `cgroup.subtree_control` (a systemd host delegates
 /// cpu/memory/pids out of the box). Each is gated independently: the jailer sets a limit by enabling

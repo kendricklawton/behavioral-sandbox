@@ -1215,6 +1215,14 @@ fn attach_classifiers(
             )));
         }
     }
+    // aya's `SchedClassifier::attach` picks its link kind by host kernel: a TCX bpf_link (which owns
+    // an fd) on >= 6.6, the classic netlink clsact filter (no held fd) below that. The two demand
+    // opposite teardown, so detect which one we got. This 6.6 threshold mirrors aya's own and must
+    // be re-checked on every aya bump; if it drifts from aya's, we either leak an fd (forgetting a
+    // TCX link) or detach in the wrong netns (dropping a netlink link), so it is load-bearing.
+    let tcx_link = aya::util::KernelVersion::current()
+        .map(|v| v >= aya::util::KernelVersion::new(6, 6, 0))
+        .unwrap_or(false);
     for (program, attach_type) in [
         (CLS_INGRESS, TcAttachType::Ingress),
         (CLS_EGRESS, TcAttachType::Egress),
@@ -1231,18 +1239,22 @@ fn attach_classifiers(
                 "attach `{program}` to {interface} ({attach_type:?}): {e}"
             ))
         })?;
-        if forget_links {
-            // Netns-attached: the in-kernel `tc` filter is reclaimed by the sandbox's **netns
-            // teardown** (the documented model), so take the link out of the program and forget it.
-            // Otherwise aya's `Ebpf` drop would issue the netlink filter-delete in the *dropping
-            // thread's* netns (the pre-6.6 path), where this ifindex may name an unrelated device,
-            // detaching someone else's filter. Forgetting leaks no fd: the classic clsact filter is
-            // in-kernel bookkeeping the qdisc/netns teardown clears, not a held descriptor.
+        if forget_links && !tcx_link {
+            // Netns-attached, pre-6.6 netlink clsact only: the in-kernel `tc` filter is reclaimed by
+            // the sandbox's **netns teardown** (the documented model), so take the link out of the
+            // program and forget it. Otherwise aya's `Ebpf` drop would issue the netlink
+            // filter-delete in the *dropping thread's* netns, where this ifindex may name an
+            // unrelated device, detaching someone else's filter. Forgetting leaks no fd here: the
+            // clsact filter is in-kernel bookkeeping the netns teardown clears, not a held fd.
             let link = cls.take_link(link_id).map_err(|e| {
                 ProbeError::Attach(format!("take `{program}` link on {interface}: {e}"))
             })?;
             std::mem::forget(link);
         }
+        // On the TCX path (>= 6.6) the link *owns an fd*, and its drop detaches via the bpf_link,
+        // which is netns-independent (no wrong-netns hazard). So leave it with the program: dropping
+        // the monitor both closes the fd and detaches cleanly. Forgetting it here would leak that fd
+        // (one per classifier, per run), walking a long-lived daemon toward EMFILE.
     }
     Ok(())
 }

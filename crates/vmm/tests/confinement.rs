@@ -15,10 +15,13 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use agent_vmm::{sweep_orphans, BootConfig, Vm};
+use agent_vmm::{sweep_orphans, BootConfig, Vm, VMM_PIDS_MAX};
 
 use agent_test_support::{process_threads, LimitCgroup};
-use common::{agent_rootfs_config, cgroup_of, config, have_jailer_privileges, have_net_admin};
+use common::{
+    agent_rootfs_config, cgroup_of, config, have_jailer_privileges, have_net_admin,
+    jailed_agent_config,
+};
 
 /// The env var that turns `helper_boot_and_park` from a no-op into the crash-test victim. Without
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
@@ -465,6 +468,52 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
     let echo = ["echo", "alive"].map(String::from);
     let out = vm.exec(&echo, b"").expect("post-hog exec should run");
     assert_eq!(out.stdout, b"alive\n");
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
+fn pids_max_is_applied_live_to_the_running_vms_cgroup() {
+    // The `pids.max` defense-in-depth cap (ADR 010): the driver asks the jailer to set it, and the
+    // wire-shape unit tests in `jail.rs` assert the `--cgroup pids.max=<N>` *argument* is built. What
+    // nothing checked until now is that the cap actually *took*, that the value is live on the
+    // running VM's cgroup, not merely requested. A jailer that dropped the arg, a mis-derived cgroup
+    // path, or a kernel that rejected the write would all pass the arg-string tests and still leave
+    // the guest uncapped. So boot a real jailed VM and read the value back off its cgroup.
+    if !have_jailer_privileges() {
+        eprintln!("skipping pids_max_is_applied_live_to_the_running_vms_cgroup: needs real root");
+        return;
+    }
+    // The driver sets `pids.max` only when the `pids` controller is delegated to the cgroup root (it
+    // can't enable a controller the root won't delegate). Without it the driver *correctly* fails
+    // open and applies no cap, so there is nothing to read back: skip, don't fail. Mirrors the
+    // driver's own `read_delegated` prerequisite.
+    let subtree =
+        std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control").unwrap_or_default();
+    if !subtree.split_whitespace().any(|c| c == "pids") {
+        eprintln!(
+            "skipping pids_max_is_applied_live_to_the_running_vms_cgroup: pids controller not \
+             delegated to the cgroup root (driver fails open, no cap to observe)"
+        );
+        return;
+    }
+
+    let vm = Vm::boot(jailed_agent_config()).expect("jailed microVM should boot");
+    // The VMM lives in the jailer-created, limits-bearing cgroup (the same lifetime cgroup the
+    // crash-leak test tracks). With pids delegated and jailer privileges, enrollment cannot be
+    // degraded, so a missing cgroup is itself the regression, not a skip.
+    let cgroup = cgroup_of(vm.vmm_pid())
+        .expect("a jailed VMM must live in its own limits-bearing cgroup, not the root");
+    let pids_max = std::fs::read_to_string(cgroup.join("pids.max"))
+        .unwrap_or_else(|e| panic!("read pids.max off {}: {e}", cgroup.display()));
+
+    assert_eq!(
+        pids_max.trim(),
+        VMM_PIDS_MAX.to_string(),
+        "the jailer must apply the driver's pids.max cap live to the VM cgroup; read back `{}` from {}",
+        pids_max.trim(),
+        cgroup.display()
+    );
     vm.shutdown().expect("shutdown should succeed");
 }
 

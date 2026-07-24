@@ -33,7 +33,7 @@ use std::time::Duration;
 use agent_channel::ChannelError;
 
 pub use agent_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
-pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID};
+pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
 pub use net::GuestLink;
 pub use pool::Pool;

@@ -61,7 +61,7 @@ Four properties every phase must protect:
 
 - **`v0.1.0` is the finish line**, the first real release, cut only once **every phase below is
   green** (a microVM boots, runs code, is enforced + recorded, self-hostable, documented; the tag
-  is P20.22).
+  is P20.30).
 - **The vNext tracks (Phases 21–22) are post-`v0.1.0`** and do **not** gate that tag. The **polyglot
   SDKs** extend the engine outward (more callers) and the **Wasmtime sibling** extends it sideways
   (a second isolation boundary). Both presuppose the frozen wire API of Phase 16;
@@ -2191,10 +2191,13 @@ first commit, so no box tracks a non-task).
       it can't be capped), the jailed clones that run sessions enforce it. Host-safe unit tests cover
       the pure refusal decision, the unjailed-posture guard, and the env/file precedence; docs in
       `docs/cli.md` + `docs/daemon.md`.)*
-- [ ] **P19.9b** The **`pids.max` privileged readback** pending since P15.7. A privileged test reads
-      the value back off the running VM's cgroup (today only the jailer arg string is asserted, the
-      wire-shape unit tests in `crates/vmm/src/jail.rs`), closing the "written but never observed
-      live" gap the annotation left open.
+- [x] **P19.9b** The **`pids.max` privileged readback** pending since P15.7. A privileged test
+      (`pids_max_is_applied_live_to_the_running_vms_cgroup` in `crates/vmm/tests/confinement.rs`)
+      boots a jailed VM and reads `pids.max` back off the running VM's cgroup, asserting it equals the
+      driver's `VMM_PIDS_MAX` (now `pub` for the readback, like `FDS_PER_VM`); it skips when the pids
+      controller isn't delegated (the driver's own fail-open prerequisite). Closes the "written but
+      never observed live" gap the earlier annotation left open, where only the jailer arg string was
+      asserted (the wire-shape unit tests in `crates/vmm/src/jail.rs`).
 - [ ] **P19.9c** The **IO-throttle proof** pending since P15.7. A privileged test that the per-drive
       virtio-blk rate limiter (`RateLimiter::default_guest_io`, `crates/vmm/src/firecracker.rs`)
       actually throttles sustained guest writes, plus the boot-latency-is-unchanged confirmation the
@@ -2275,11 +2278,11 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       Dedicated `quickstart.md`/`non-goals.md` pages were tried and then folded back to match the
       wasmtime shape, no extra pages the model doesn't carry. `mdbook build` is clean and every
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
-      (GitHub Pages deploy) is left to launch (P20.23). Docs only, non-`api:`.)*
+      (GitHub Pages deploy) is left to launch (P20.31). Docs only, non-`api:`.)*
 - [ ] **P20.4** (human-led) **The real name.** Retire the working name "agent" (decision 035): the
       user picks the name, then one sweep renames the repo, the binary, the crate names, the `AGENT_*`
       env prefix and `.agent.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
-      **before** the launch announcement (P20.23) or any registry/SDK freeze (Phases 21–22) can cement
+      **before** the launch announcement (P20.31) or any registry/SDK freeze (Phases 21–22) can cement
       the working name publicly, so the rename stays a quiet sweep, not a breaking rebrand.
 - [x] **P20.5** A **reference integration**: a small host application embedding the engine end to end.
       *(**Done.** `crates/probes-loader/examples/reference_integration.rs`: the smallest complete host
@@ -2448,10 +2451,69 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       reader-facing statement decision 032 keeps in sync with itself, and `Vendoring` is decision
       033's, and it backs the operator-facing `self-host --offline` path rather than the contributor
       one. Docs only, non-`api:`.)*
-- [ ] **P20.22** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
+
+**Interaction hardening (P20.22-P20.29).** Gaps found reviewing how the driver actually talks to
+Firecracker and how the probes actually observe: not new capability, but the unstated edges of the
+two boundaries the whole engine rests on. Three are Firecracker-side, four are eBPF-side; each gates
+the tag, since a serious evaluator reads exactly these seams. P20.29 is a real bug (an fd leak) a
+second pass surfaced by reading the pinned upstream (aya) source directly, already fixed.
+
+- [ ] **P20.22** **Snapshot CPU-portability constraint** (Firecracker): `/machine-config` never sets
+      `cpu_template` (`crates/vmm/src/firecracker.rs`), so a snapshot bakes in the producing host's
+      CPUID and a restore on a different CPU model can fault the guest (an illegal instruction on a
+      feature the new host lacks). Safe today (the pool restores same-host), but the bundle is
+      advertised as portable, so the constraint must be stated where restore is described
+      (`crates/vmm/src/snapshot.rs`, `docs/threat-model.md`), with a decision on whether to offer an
+      opt-in `cpu_template` for cross-host portability. Docs-only is non-`api:`; a `Limits`/config knob
+      would be `feat(api):`. See Firecracker's `snapshot-support.md`.
+- [ ] **P20.23** **Consume Firecracker's logger/metrics FIFO** (Firecracker): the driver reads the
+      serial console and API replies but never configures `/logger` or `/metrics`, so device-level
+      events (virtio-blk/net stalls, seccomp trips, API faults, the panic path) are invisible. Wire the
+      FIFO into the driver's diagnostics; it is the most direct lever on the intermittent post-boot
+      wedge (a device stall the console cannot show), which has no box of its own today. non-`api:`.
+- [ ] **P20.24** **Bound the one unbounded step, `connect`** (Firecracker): `firecracker.rs` and
+      `exec.rs` both document `UnixStream::connect` as the single step without a deadline, so a VMM
+      whose API/vsock thread is wedged with a full listen backlog can hang the connect itself while
+      every later step is bounded. Give connect its own deadline (non-blocking connect + poll, staying
+      `unsafe`-free) so a wedged VMM is a typed timeout on every path, closing the last accepted hang
+      gap and a candidate cause of the wedge. non-`api:`.
+- [ ] **P20.25** **Label the syscall axis's scope** (eBPF): the `sys_enter_*` tracepoints observe the
+      **VMM's host** footprint, never the guest's in-VM syscalls (a microVM services its own syscalls
+      in-guest, so they never trap to a host tracepoint). Stated in `docs/threat-model.md`, but the
+      record surface it feeds (`crates/probes-loader/src/record.rs`, and the CLI render) does not label
+      it, so a consumer can over-trust it. Carry "host footprint, not guest" with the data itself.
+      non-`api:` (a label, not a shape change).
+- [ ] **P20.26** **Prove egress fails safe without eBPF** (eBPF): deny-by-default egress does not rest
+      on the tc program loading, the per-VM netns carries a connected-prefix route and **no default
+      route** (`crates/vmm/src/net.rs`), so a host lacking `CAP_BPF`/BTF reaches nothing off-link
+      (fail-safe, not fail-open). State this where enforcement is described and add a test that a
+      sandbox with the tc programs absent still cannot route past its link, turning an implicit
+      property into a proven one. Privileged. non-`api:`.
+- [ ] **P20.27** **Surface the observation-start window** (eBPF): the shared probes observe a sandbox
+      from cgroup-registration onward, not the pre-boot window
+      (`crates/probes-loader/src/observer.rs`), a deliberate trade for the flat-overhead shared model
+      (decision 024). The record does not note the window, so a reader cannot tell "nothing happened
+      pre-boot" from "not watched pre-boot"; annotate it in the `AxisGap` vocabulary the record already
+      carries. non-`api:`.
+- [ ] **P20.28** **Test honest-truncation on the ring-buffer axis** (eBPF): a full observability map
+      already flips the record to `truncated` and counts drops, and enforcement never reads those maps
+      (a full flow table still drops the packet), both proven for flows/denials. The one axis without a
+      churn test is the 256 KiB `EVENTS` ring buffer and its `EVENT_DROPS` counter: add a privileged
+      test that a syscall-spamming target overflows it, the record reads truncated with a non-zero drop
+      count, and the network/resource axes stay intact. Privileged.
+- [x] **P20.29** **Fix the tc-link fd leak on host kernels >= 6.6** (eBPF): reading the pinned aya
+      0.13.1 source found `attach_classifiers` (`crates/probes-loader/src/lib.rs`) forgetting its
+      `SchedClassifier` link unconditionally. On a host kernel >= 6.6 aya attaches via a **TCX
+      bpf_link that owns an fd** (below 6.6 it is a netlink clsact filter with no held fd), so the
+      forget leaked two fds per sandbox on every modern host, unbounded in the long-lived daemon and
+      uncaught by the fd-budget test (which never attaches probes). The forget is now gated to the
+      netlink path only; the TCX link is left with the program so its own drop closes the fd and
+      detaches netns-independently. The 6.6 threshold mirrors aya's and must be re-checked on any aya
+      bump. non-`api:`.
+- [ ] **P20.30** (human git step) **Tag `v0.1.0`, the finish line** (§0.6): every phase above green, a
       microVM boots, runs code, is enforced + recorded, self-hostable, and documented. Cut after the
       rename (P20.4), so the first stable name is the real one.
-- [ ] **P20.23** The **launch announcement**: what it is, the threat model, and how to self-host it,
+- [ ] **P20.31** The **launch announcement**: what it is, the threat model, and how to self-host it,
       plus the docs-site deploy (GitHub Pages, deferred from P20.3). After the tag and the rename, so
       the announcement points at a released, correctly-named engine.
 - **Exit gate:** a stranger can `git clone`, self-host the engine, run untrusted code in a microVM,
@@ -2462,7 +2524,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
 
 ## Post-v0.1.0, vNext tracks
 
-> These land **after** the `v0.1.0` finish line (P20.22) and **do not gate that tag** (§0.6). They
+> These land **after** the `v0.1.0` finish line (P20.29) and **do not gate that tag** (§0.6). They
 > extend the engine **outward** (more callers) and **sideways** (a second isolation boundary)
 >, without pulling tenancy/billing/scheduling into scope, and without diluting the
 > core properties. Both depend on Phase 16's daemon + wire API.

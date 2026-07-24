@@ -546,6 +546,9 @@ fn ci() -> Result<()> {
     // The prose-drift lint runs early: it is sub-second, and a broken decision citation or a
     // comment pointing at a renamed file should surface before the slow compile steps.
     drift::check(workspace_root())?;
+    // The pinned stable toolchain and the declared MSRV floor are kept in step by hand (ADR 037);
+    // catch a bump that moved only one before the compile, not after a downstream MSRV surprise.
+    toolchain_msrv_agree(workspace_root())?;
     cargo(&[
         "clippy",
         "--workspace",
@@ -576,6 +579,74 @@ fn ci() -> Result<()> {
     build_probes()?;
     println!("\n✓ all checks passed");
     Ok(())
+}
+
+/// Assert the pinned stable toolchain (`rust-toolchain.toml`'s `channel`) and the declared MSRV
+/// floor (`[workspace.package] rust-version` in the root `Cargo.toml`) agree at `major.minor`. They
+/// are kept in step by hand (ADR 037), so a bump touching only one silently makes the gate build at
+/// a compiler that differs from the floor it advertises, and a downstream pinning our MSRV would
+/// then build against a Rust we never test. A named channel (`stable`/`nightly`) carries no version
+/// to compare, so the numeric check is skipped there; today's pin is numeric.
+fn toolchain_msrv_agree(root: &Path) -> Result<()> {
+    let toolchain = std::fs::read_to_string(root.join("rust-toolchain.toml"))
+        .context("reading rust-toolchain.toml")?;
+    let cargo =
+        std::fs::read_to_string(root.join("Cargo.toml")).context("reading the root Cargo.toml")?;
+    let channel =
+        toml_string_value(&toolchain, "channel").context("no `channel` in rust-toolchain.toml")?;
+    let msrv = toml_string_value(&cargo, "rust-version")
+        .context("no `rust-version` in the root Cargo.toml")?;
+    let Some(chan) = major_minor(&channel) else {
+        // A named channel, not a version pin: nothing numeric to hold the floor against.
+        println!(
+            "· toolchain/MSRV: channel `{channel}` is not version-pinned; agreement not checked"
+        );
+        return Ok(());
+    };
+    let Some(floor) = major_minor(&msrv) else {
+        bail!("Cargo.toml rust-version `{msrv}` is not a `MAJOR.MINOR` version");
+    };
+    if chan != floor {
+        bail!(
+            "toolchain/MSRV drift: rust-toolchain.toml pins `{channel}` but Cargo.toml \
+             rust-version is `{msrv}`; keep them in step (major.minor must match, ADR 037)"
+        );
+    }
+    println!(
+        "· toolchain/MSRV: rust-toolchain.toml and Cargo.toml agree at {}.{}",
+        floor.0, floor.1
+    );
+    Ok(())
+}
+
+/// The first `key = "value"` assignment's value (quotes stripped), scanning trimmed, non-comment
+/// lines. A tiny hand parser: xtask has no TOML dependency, and each key we read is the sole such
+/// string assignment in its file (`channel` in `[toolchain]`, `rust-version` in
+/// `[workspace.package]`).
+fn toml_string_value(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix(key) else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        return Some(rest.trim().trim_matches('"').to_string());
+    }
+    None
+}
+
+/// `(major, minor)` parsed from a `MAJOR.MINOR[.PATCH]` version, or `None` when the string is not
+/// numeric (a named channel such as `stable`).
+fn major_minor(v: &str) -> Option<(u32, u32)> {
+    let mut parts = v.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
 }
 
 /// The fast inner loop: does it format, lint, and compile. **Deliberately runs no tests**, which is
@@ -1114,6 +1185,34 @@ fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toml_string_value_reads_the_key_and_skips_comments() {
+        let toolchain = "# Floating `channel = \"stable\"` only holds if current.\n[toolchain]\nchannel = \"1.97.0\"\ncomponents = [\"rustfmt\"]\n";
+        assert_eq!(
+            toml_string_value(toolchain, "channel").as_deref(),
+            Some("1.97.0"),
+            "the assignment wins over the same text inside a `#` comment"
+        );
+        let cargo = "[workspace.package]\nedition = \"2021\"\nrust-version = \"1.97\"\n";
+        assert_eq!(
+            toml_string_value(cargo, "rust-version").as_deref(),
+            Some("1.97")
+        );
+        assert_eq!(toml_string_value(cargo, "channel"), None, "absent key");
+    }
+
+    #[test]
+    fn major_minor_parses_versions_and_rejects_named_channels() {
+        assert_eq!(major_minor("1.97.0"), Some((1, 97)), "patch is ignored");
+        assert_eq!(major_minor("1.97"), Some((1, 97)));
+        assert_eq!(
+            major_minor("stable"),
+            None,
+            "a named channel has no version"
+        );
+        assert_eq!(major_minor("nightly-2026-01-01"), None);
+    }
 
     #[test]
     fn effective_uid_parses_the_second_uid_field_and_rejects_drift() {

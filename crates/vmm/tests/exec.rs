@@ -282,8 +282,14 @@ fn runs_a_static_native_binary_and_captures_its_artifact() {
     // exec it, and capture the file it writes via the output device, showing the engine runs
     // *any* Linux binary handed in at runtime, not just the baked-in interpreters. (Contrast the
     // Wasmtime sibling, which needs code recompiled to wasm32.)
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let bin = root.join("target/x86_64-unknown-linux-musl/release/examples/writefile");
+    // Resolve the built example from `CARGO_TARGET_DIR` when set (the privileged gate sets it so a
+    // root build doesn't poison `./target`), else the workspace's default `target/`, the same
+    // directory `cargo xtask build-guest-example` wrote it to.
+    let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+        PathBuf::from,
+    );
+    let bin = target.join("x86_64-unknown-linux-musl/release/examples/writefile");
     assert!(
         bin.is_file(),
         "missing static example at {} — run `cargo xtask build-guest-example` (ci-privileged does)",
