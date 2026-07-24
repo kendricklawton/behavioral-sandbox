@@ -1,6 +1,6 @@
 //! The host side of the guest-agent exec channel: dial Firecracker's vsock Unix socket, speak its
 //! `CONNECT <port>` handshake, and drive one bounded exec (output cap, guest budget, host wall
-//! deadline) over the `kee-channel` protocol. Every bound exists so a hostile guest is a typed
+//! deadline) over the `eke-channel` protocol. Every bound exists so a hostile guest is a typed
 //! error, never a host hang or leak.
 
 use std::io::{Read, Write};
@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
-use kee_channel::{ChannelError, ClientConnection, Response};
+use eke_channel::{ChannelError, ClientConnection, Response};
 
 use crate::{Artifact, ExecMetrics, RunResult, VmmError};
 
@@ -364,8 +364,8 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
 mod tests {
     use super::*;
     use crate::vm::VSOCK_UDS;
-    use kee_channel::KEE_VSOCK_PORT;
-    use kee_test_support::ScratchDir;
+    use eke_channel::EKE_VSOCK_PORT;
+    use eke_test_support::ScratchDir;
     use std::path::PathBuf;
 
     /// Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake, then
@@ -387,7 +387,7 @@ mod tests {
                 }
             }
             stream.write_all(b"OK 10000\n").expect("write ack");
-            let _ = kee_guest::serve(stream);
+            let _ = eke_guest::serve(stream);
         });
         (dir, uds, handle)
     }
@@ -398,7 +398,7 @@ mod tests {
         // Firecracker vsock UDS is faked).
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-echo");
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
             &["echo".into(), "hi".into()],
@@ -425,7 +425,7 @@ mod tests {
     fn exec_over_fake_vsock_feeds_stdin() {
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-stdin");
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
             &["cat".into()],
@@ -451,7 +451,7 @@ mod tests {
         // back. Exercises PutFile + working-dir cwd + artifact return end to end against the agent.
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-files");
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
             &[
@@ -542,7 +542,7 @@ mod tests {
         // speaks the channel protocol directly and returns a `File` whose path climbs out of the
         // working tree. The public API must reject it as a `GuestProtocol` fault (bucket `Guest`) rather
         // than pass the escaping path up in `RunResult.files` for an embedder to write to disk.
-        use kee_channel::ServerConnection;
+        use eke_channel::ServerConnection;
         let (client, server) = UnixStream::pair().expect("socketpair");
         let hostile = std::thread::spawn(move || {
             let mut srv = ServerConnection::accept(server).expect("accept");
@@ -645,7 +645,7 @@ mod tests {
                         }
                     }
                     stream.write_all(b"OK 10000\n").expect("write ack");
-                    let _ = kee_guest::serve(stream);
+                    let _ = eke_guest::serve(stream);
                 }
             });
         });
@@ -653,7 +653,7 @@ mod tests {
         let (result, err) = tracing::subscriber::with_default(sink.subscriber(), || {
             // Happy path: the env value and the file content must reach the command in-guest.
             let mut conn =
-                connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+                connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
             let result = run_exec(
                 &mut conn,
                 &[
@@ -670,7 +670,7 @@ mod tests {
             .expect("exec");
             // Failure path: an escaping path is rejected; the error may name the path, not the data.
             let mut conn =
-                connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+                connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
             let err = run_exec(
                 &mut conn,
                 &["true".into()],
@@ -719,7 +719,7 @@ mod tests {
         // agent (which reports the spawn failure), not via a hand-crafted `Error` response.
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-crash");
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
             &["definitely-not-a-real-binary-zzz".into()],
@@ -746,7 +746,7 @@ mod tests {
         // `run_exec`; the guest-agent-layer version lives in crates/guest-agent/tests/exec.rs.
         let (_dir, uds, server) = fake_vsock_agent("agent-vsock-signal");
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
             &["sh".into(), "-c".into(), "kill -9 $$".into()],
@@ -766,14 +766,14 @@ mod tests {
     }
 
     /// A fake vsock peer that answers `CONNECT`, does the channel handshake, then hands the
-    /// [`ServerConnection`](kee_channel::ServerConnection) to `handler`, so a test can craft the
+    /// [`ServerConnection`](eke_channel::ServerConnection) to `handler`, so a test can craft the
     /// exact response stream (unlike `fake_vsock_agent`, which runs the real agent).
     fn fake_vsock_server<F>(
         tag: &str,
         handler: F,
     ) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>)
     where
-        F: FnOnce(kee_channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
+        F: FnOnce(eke_channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
     {
         use std::os::unix::net::UnixListener;
         let dir = ScratchDir::created(tag);
@@ -789,7 +789,7 @@ mod tests {
                 }
             }
             stream.write_all(b"OK 10000\n").expect("write ack");
-            let conn = kee_channel::ServerConnection::accept(stream).expect("server handshake");
+            let conn = eke_channel::ServerConnection::accept(stream).expect("server handshake");
             handler(conn);
         });
         (dir, uds, handle)
@@ -804,7 +804,7 @@ mod tests {
             let _ = conn.send_response(&Response::Error("no such binary".into()));
         });
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
             &["nope".into()],
@@ -835,7 +835,7 @@ mod tests {
             drop(conn); // no response frames, the host's next read sees a clean EOF
         });
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
             &["echo".into(), "hi".into()],
@@ -869,7 +869,7 @@ mod tests {
             {}
         });
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
             &["flood".into()],
@@ -902,7 +902,7 @@ mod tests {
             let _ = conn.send_response(&Response::TimedOut { elapsed_ms: 1000 });
         });
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
             &["sleep".into()],
@@ -937,7 +937,7 @@ mod tests {
             {}
         });
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
             &["flood".into()],
@@ -973,7 +973,7 @@ mod tests {
         // Idle (200 ms) > dribble interval (50 ms), so the socket idle timeout can't fire; wall
         // (150 ms) is the thing under test. All sub-second so the suite stays fast.
         let mut conn =
-            connect_agent_at(&uds, KEE_VSOCK_PORT, Duration::from_millis(200)).expect("connect");
+            connect_agent_at(&uds, EKE_VSOCK_PORT, Duration::from_millis(200)).expect("connect");
         let started = std::time::Instant::now();
         let err = run_exec(
             &mut conn,
@@ -1034,7 +1034,7 @@ mod tests {
         let (_d, uds, server) = fake_connect_target("agent-ack-refuse", |mut s| {
             let _ = s.write_all(b"NOPE\n");
         });
-        let err = vsock_connect(&uds, KEE_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        let err = vsock_connect(&uds, EKE_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
         // "Nothing listening on the guest port" is the retryable GuestUnavailable, not broken infra.
         assert!(
             matches!(err, VmmError::GuestUnavailable(ref m) if m.contains("refused")),
@@ -1046,7 +1046,7 @@ mod tests {
     #[test]
     fn connect_ack_peer_close_is_typed_error() {
         let (_d, uds, server) = fake_connect_target("agent-ack-close", drop);
-        let err = vsock_connect(&uds, KEE_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        let err = vsock_connect(&uds, EKE_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
         // The canonical agent-not-up signal: typed retryable, so a pool can discard-and-retry.
         assert!(
             matches!(err, VmmError::GuestUnavailable(ref m) if m.contains("closed")),
@@ -1061,7 +1061,7 @@ mod tests {
             let _ = s.write_all(&[b'x'; 100]); // 100 bytes, no newline
             std::thread::sleep(Duration::from_millis(200)); // keep the stream open past the read
         });
-        let err = vsock_connect(&uds, KEE_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
+        let err = vsock_connect(&uds, EKE_VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
         assert!(
             matches!(err, VmmError::Vmm(m) if m.contains("too long")),
             "wrong error"
@@ -1075,7 +1075,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(300)); // never send; outlive the client deadline
             drop(s);
         });
-        let err = vsock_connect(&uds, KEE_VSOCK_PORT, Duration::from_millis(100)).unwrap_err();
+        let err = vsock_connect(&uds, EKE_VSOCK_PORT, Duration::from_millis(100)).unwrap_err();
         assert!(matches!(err, VmmError::Timeout(_)), "got {err:?}");
         server.join().expect("server");
     }

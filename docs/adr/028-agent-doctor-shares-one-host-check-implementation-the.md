@@ -13,13 +13,13 @@ a stable meaning only once something depends on it is far cheaper to shape now t
 
 **Decision.** The host readiness check ships as an engine subcommand, `kee doctor`, so an operator on
 a fresh host reads what will work, degrade, or refuse before the first sandbox. The **one implementation**
-lives in `kee-vmm::doctor` (a structured `Vec<Check>` with an `Ok`/`Warn`/`Fail` status plus the
+lives in `eke-vmm::doctor` (a structured `Vec<Check>` with an `Ok`/`Warn`/`Fail` status plus the
 degradation matrix), where the engine-runtime prerequisites are its domain; both `kee doctor` and
 `cargo xtask setup` render it, so the dev-box check and the operator's can't drift. The status split
 mirrors the engine's own error discipline: the isolation boundary (`/dev/kvm`) and the boot artifacts are
-**hard** (`Fail` gives a non-zero exit, so `kee doctor && kee run …` gates), while the jailer,
+**hard** (`Fail` gives a non-zero exit, so `kee doctor && eke run …` gates), while the jailer,
 resource caps, and networking/bulk-I/O tools **fail open** (`Warn` with a named consequence). The
-eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of `kee-vmm`
+eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of `eke-vmm`
 (decisions 021/023); each entry point appends it. `xtask setup` keeps its dev-only rows (bpf-linker,
 nightly, readelf) local, since an operator running the shipped engine doesn't need them.
 
@@ -30,7 +30,7 @@ changes are *additive only* (a new field a consumer can ignore); renaming or rem
 a value's meaning, **bumps** the integer. This lands before anything external parses the bytes, so the
 wire API and the SDK freeze harden a stable contract rather than a moving one.
 
-**Consequences.** The single `kee-vmm::doctor` source means one place to keep correct, and any new
+**Consequences.** The single `eke-vmm::doctor` source means one place to keep correct, and any new
 prerequisite must declare itself hard or fail-open, forcing the isolation-vs-convenience call to be made
 explicitly rather than by omission. The fail-open rows are the residual risk: a host missing the jailer,
 resource caps, or networking tools still runs, degraded, and the operator carries the consequence named in

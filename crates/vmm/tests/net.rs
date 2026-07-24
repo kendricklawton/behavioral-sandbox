@@ -2,7 +2,7 @@
 //! addressing/reachability, per-VM isolation, and allowed-vs-blocked endpoints.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` + `CAP_NET_ADMIN` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p kee-vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p eke-vmm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -11,9 +11,9 @@ mod common;
 
 use std::process::Command;
 
-use kee_vmm::Vm;
+use eke_vmm::Vm;
 
-use common::{have_net_admin, kee_rootfs_config};
+use common::{have_net_admin, eke_rootfs_config};
 
 /// Run `ip netns exec <netns> <args...>` and return the completed output (for host-side checks that
 /// must happen *inside* the VM's network namespace, where its tap lives).
@@ -37,7 +37,7 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
 
@@ -101,7 +101,7 @@ fn addresses_the_guest_and_routes_host_to_guest() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let host_ip = vm.ipv4().expect("ipv4 when networked").host.to_string();
@@ -195,7 +195,7 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let host_ip6 = vm.ipv6().expect("ipv6 when networked").host.to_string();
@@ -300,10 +300,10 @@ fn two_networked_vms_run_in_isolated_netns() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg_a = kee_rootfs_config();
+    let mut cfg_a = eke_rootfs_config();
     cfg_a.enable_network = true;
     let vm_a = Vm::boot(cfg_a).expect("VM A with a NIC should boot to readiness");
-    let mut cfg_b = kee_rootfs_config();
+    let mut cfg_b = eke_rootfs_config();
     cfg_b.enable_network = true;
     let vm_b = Vm::boot(cfg_b).expect("VM B with a NIC should boot to readiness");
 
@@ -372,7 +372,7 @@ fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
     }
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.enable_network = true;
     let vm = Vm::boot(cfg).expect("agent microVM with a NIC should boot to readiness");
     let netns = vm.netns().expect("netns when networked").to_string();

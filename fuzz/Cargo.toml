@@ -4,7 +4,7 @@
 # `cargo build` or `cargo xtask ci`. Its own `[workspace]` table below detaches it; run it with
 # `cargo xtask fuzz` (or `cargo fuzz run <target>`). See `docs/contributing-fuzzing.md`.
 [package]
-name = "kee-fuzz"
+name = "eke-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -15,25 +15,25 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.kee-channel]
-path = "../crates/channel"
+[dependencies.eke-channel]
+path = "../crates/eke-channel"
 features = ["fuzzing"]
 
 # The signed-record envelope surface (`verify`/`verify_chain`/`TrustedKey::from_hex`); the public
 # API is exactly the fuzz surface, so no feature flag is needed.
-[dependencies.kee-probes-loader]
-path = "../crates/probes-loader"
+[dependencies.eke-probes-loader]
+path = "../crates/eke-probes-loader"
 
 # The daemon's untrusted-client wire (`read_message` over the newline-JSON contract). The `fuzzing`
 # feature exposes the internal line reader + schema gate behind module `fuzz`.
-[dependencies.kee-protocol]
-path = "../crates/kee-protocol"
+[dependencies.eke-protocol]
+path = "../crates/eke-protocol"
 features = ["fuzzing"]
 
 # The shared eBPF-boundary parsers (`SyscallEvent::from_bytes`, `parse_ipv4_5tuple`). `std` gives the
 # host-side formatting helpers; the parse surface itself is public, so no feature flag is needed.
-[dependencies.kee-probes-common]
-path = "../crates/probes-common"
+[dependencies.eke-probes-common]
+path = "../crates/eke-probes-common"
 features = ["std"]
 
 # A separate one-crate workspace: detaches this crate from the repo's workspace so the everyday

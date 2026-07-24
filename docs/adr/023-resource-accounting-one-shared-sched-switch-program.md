@@ -53,7 +53,7 @@ IO ride the kernel's native cgroup v2 counters.**
 - **Not the pinned public API.** The surface is on `probes-loader` (`ResourceMeter`, `CgroupStats`,
   `ResourceSummary`, `cgroup_dir_of_pid`), not `vmm`'s `Sandbox`, so this is **not** an `api:` change.
   Folding the `ResourceSummary` into the persisted per-run audit record (fused with the network denials
-  and the syscall trace) is a later convergence, kept out of `kee-vmm` so the driver stays
+  and the syscall trace) is a later convergence, kept out of `eke-vmm` so the driver stays
   independent of the eBPF loader (they bridge only by plain values).
 - **Best-effort accuracy.** The `CPU_NS` accumulate is per-CPU-serialized by the scheduler hook but not
   atomic across CPUs, so a heavily-parallel cgroup can undercount by a hair, fine for a metering

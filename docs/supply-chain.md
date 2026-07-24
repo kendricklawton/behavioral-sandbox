@@ -49,5 +49,5 @@ process defined at the tag.
 
 - `cargo xtask vendor` to snapshot every pinned input, then `cargo xtask vendor --verify` to re-check
   the mirror offline.
-- Point `KEE_VENDOR_DIR` at the mirror and the whole build runs with the upstream CDNs dark; see the
+- Point `EKE_VENDOR_DIR` at the mirror and the whole build runs with the upstream CDNs dark; see the
   Self-host and Vendoring sections of [Installation](./cli-install.md).

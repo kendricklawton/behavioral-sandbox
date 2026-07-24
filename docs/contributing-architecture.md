@@ -24,7 +24,7 @@ boundaries:
   lifecycle API. No `unsafe` on the host path; a hostile guest is a typed error.
 - `crates/channel`, the **host↔guest wire protocol**: dependency-free length-prefixed framing over
   `Read`/`Write`, shared by the driver and the guest agent (see decision 002).
-- `crates/guest-agent`, the **in-guest agent** (`kee-guest`): runs one command per connection and
+- `crates/guest-agent`, the **in-guest agent** (`eke-guest`): runs one command per connection and
   streams stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs by the build.
   Exec/IO convenience only, never the security boundary.
 - `crates/probes`, the **eBPF programs** (`#![no_std]`, built for `bpfel-unknown-none` via

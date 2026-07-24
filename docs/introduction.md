@@ -50,7 +50,7 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Reading this book
 
-- **[Using the kee CLI](./cli.md)**, how to run the engine: [install the
+- **[Using the eke CLI](./cli.md)**, how to run the engine: [install the
   prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
   untrusted code with `kee run` and hold interactive sessions with `kee shell`. Start here.
 - **[Using the engine API](./embedding.md)**, the embedder's contract: the `Sandbox` lifecycle,

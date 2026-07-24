@@ -1,4 +1,4 @@
-//! `kee-vmm`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
+//! `eke-vmm`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
 //! [`Sandbox`] lifecycle API.
 //!
 //! The host path is `unsafe`-free; a hostile or crashing guest is a typed [`VmmError`], never a
@@ -30,20 +30,20 @@ mod vm;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
 
-use kee_channel::ChannelError;
+use eke_channel::ChannelError;
 
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
-pub use kee_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
+pub use eke_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use lifetime::KillHandle;
 pub use net::GuestLink;
 pub use pool::Pool;
 pub use sweep::{sweep_orphans, SweepReport};
-pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, KEE_VSOCK_PORT};
+pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, EKE_VSOCK_PORT};
 
 #[cfg(test)]
 mod tests {
     use super::{ErrorKind, VmmError};
-    use kee_channel::ChannelError;
+    use eke_channel::ChannelError;
     use std::time::Duration;
 
     #[test]
@@ -177,7 +177,7 @@ pub enum VmmError {
     /// load-bearing. A host-configuration fault, not the guest's, so it buckets [`Infra`](ErrorKind::Infra):
     /// fix the delegation (or drop the jail-less boot) and retry.
     LimitsUnavailable(String),
-    /// A **jailed** boot was asked for, but the scratch dir (`KEE_SCRATCH_DIR`) is on a `nodev`
+    /// A **jailed** boot was asked for, but the scratch dir (`EKE_SCRATCH_DIR`) is on a `nodev`
     /// mount, so the `/dev/kvm` device node the jailer mknods inside its chroot is inert and
     /// Firecracker cannot open KVM. Caught **before** the spawn, so the boot fails with this typed
     /// pointer at the fix instead of a raw Firecracker "creating KVM object: Permission denied" deep
@@ -211,7 +211,7 @@ impl std::fmt::Display for VmmError {
             VmmError::ScratchDirNodev(dir) => write!(
                 f,
                 "scratch dir {} is on a nodev mount: the jailer's chroot /dev/kvm can't be opened \
-                 there, so a jailed boot fails; set KEE_SCRATCH_DIR to a path off a nodev mount",
+                 there, so a jailed boot fails; set EKE_SCRATCH_DIR to a path off a nodev mount",
                 dir.display()
             ),
         }

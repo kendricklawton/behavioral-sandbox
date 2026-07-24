@@ -1,7 +1,7 @@
 # Summary
 
 - [Introduction](./introduction.md)
-- [Using the kee CLI](./cli.md)
+- [Using the eke CLI](./cli.md)
   - [Installation](./cli-install.md)
 - [Using the `kee serve` daemon](./daemon.md)
 - [Using the engine API](./embedding.md)
@@ -47,10 +47,10 @@
     - [024. The audit record converges: a shared syscall tracer, a single post-boot attach, and deterministic JSON](./adr/024-the-audit-record-converges-a-shared-syscall-tracer-a.md)
     - [025. The observability face: the CLI carries the audit surface on flags, the live view draws on stderr](./adr/025-the-observability-face-the-cli-carries-the-audit.md)
     - [026. `--allow` projects the egress policy: enforcement is a typed refusal, never a degradation](./adr/026-allow-projects-the-egress-policy-enforcement-is-a.md)
-    - [027. The `.kee.toml` config file layer: nearest-up-from-cwd, env-mirrored keys, typos are errors](./adr/027-the-agent-toml-config-file-layer-nearest-up-from-cwd.md)
+    - [027. The `.eke.toml` config file layer: nearest-up-from-cwd, env-mirrored keys, typos are errors](./adr/027-the-agent-toml-config-file-layer-nearest-up-from-cwd.md)
     - [028. `kee doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them](./adr/028-agent-doctor-shares-one-host-check-implementation-the.md)
     - [029. The whole security boundary: what's trusted, what the adversary is, and what's assumed sound](./adr/029-the-whole-security-boundary-what-s-trusted-what-the.md)
-    - [030. The wire API is versioned newline-JSON in a shared `kee-protocol` crate, not gRPC](./adr/030-the-wire-api-is-versioned-newline-json-in-a-shared.md)
+    - [030. The wire API is versioned newline-JSON in a shared `eke-protocol` crate, not gRPC](./adr/030-the-wire-api-is-versioned-newline-json-in-a-shared.md)
     - [031. The AI-scope boundary: the model is always the caller, never an engine component](./adr/031-the-ai-scope-boundary-the-model-is-always-the-caller.md)
     - [032. Supported platforms: two architectures, a security-maintained host-kernel floor, and pinned upstream versions](./adr/032-supported-platforms-two-architectures-a-security.md)
     - [033. Single-command self-host + a vendored offline mirror of every pinned input](./adr/033-single-command-self-host-a-vendored-offline-mirror-of.md)

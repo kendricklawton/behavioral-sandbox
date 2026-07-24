@@ -38,7 +38,7 @@ impl GuestBin {
     /// human label, the only things that differ between the two builds.
     fn spec(&self) -> (&'static [&'static str], &'static str, &'static str) {
         match self {
-            GuestBin::Agent => (&["--bin", "kee-guest"], "release/kee-guest", "guest agent"),
+            GuestBin::Agent => (&["--bin", "eke-guest"], "release/eke-guest", "guest agent"),
             GuestBin::Example => (
                 &["--example", "writefile"],
                 "release/examples/writefile",
@@ -54,7 +54,7 @@ impl GuestBin {
 fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
     ensure_guest_target()?;
     let (selector, subpath, label) = kind.spec();
-    let mut args = vec!["build", "--release", "--locked", "-p", "kee-guest"];
+    let mut args = vec!["build", "--release", "--locked", "-p", "eke-guest"];
     args.extend_from_slice(selector);
     args.extend_from_slice(&["--target", GUEST_TARGET]);
     cargo(&args)?;

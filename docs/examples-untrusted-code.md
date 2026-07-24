@@ -4,8 +4,8 @@ Run a script or a binary you don't trust inside a microVM, feed it input, and re
 result back. Every command here is `kee run`, jailed by default; add `--unjailed` on a dev box
 without real root and the `jailer` binary (the guest still sits behind the KVM boundary).
 
-The defaults point at the kee rootfs the build leaves in `artifacts/`, so no environment setup
-is needed; a rootfs elsewhere is one `KEE_ROOTFS=/path/to/rootfs-kee.ext4` away.
+The defaults point at the eke rootfs the build leaves in `artifacts/`, so no environment setup
+is needed; a rootfs elsewhere is one `EKE_ROOTFS=/path/to/rootfs-kee.ext4` away.
 
 ## A script, with stdin
 
@@ -69,5 +69,5 @@ $ cargo run -q -p kee-cli -- run --put ./mytool -- /bin/sh -c 'chmod +x mytool &
 ## Holding a session open
 
 `kee shell` keeps one sandbox open across many commands, each sharing the guest's filesystem, so
-state accumulates (install a package on one line, use it on the next). See [Using the kee
+state accumulates (install a package on one line, use it on the next). See [Using the eke
 CLI](./cli.md#kee-shell).

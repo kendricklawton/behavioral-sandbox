@@ -5,28 +5,28 @@
 #   curl -fsSL https://raw.githubusercontent.com/k-henry-org/kvm-ebpf-engine/main/install.sh | sh
 #
 # Also works from a local package (offline / pre-release testing):
-#   KEE_DIST_TARBALL=dist/kee-<ver>-x86_64-linux.tar.gz sh install.sh
+#   EKE_DIST_TARBALL=dist/eke-<ver>-x86_64-linux.tar.gz sh install.sh
 # and from inside an extracted tarball (the copy packed next to bin/kee):
 #   sh ./install.sh
 #
 # Knobs (env):
-#   KEE_REPO            GitHub repo to fetch from        (default k-henry-org/kvm-ebpf-engine)
-#   KEE_VERSION         release version, no leading v    (default: the latest release)
-#   KEE_DIST_TARBALL    local tarball, skips the network
-#   KEE_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
-#   KEE_DATA_DIR        where the artifacts go           (default $XDG_DATA_HOME/kee or
+#   EKE_REPO            GitHub repo to fetch from        (default k-henry-org/kvm-ebpf-engine)
+#   EKE_VERSION         release version, no leading v    (default: the latest release)
+#   EKE_DIST_TARBALL    local tarball, skips the network
+#   EKE_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
+#   EKE_DATA_DIR        where the artifacts go           (default $XDG_DATA_HOME/kee or
 #                                                           ~/.local/share/kee)
-#   KEE_NO_TOML=1       don't write ~/.kee.toml
+#   EKE_NO_TOML=1       don't write ~/.eke.toml
 #
 # The sha256 is the contract at both layers: the tarball against SHA256SUMS (when available), and
 # every extracted file against the package's MANIFEST.sha256. Nothing installs unverified.
 set -eu
 
-REPO="${KEE_REPO:-k-henry-org/kvm-ebpf-engine}"
-PREFIX="${KEE_INSTALL_PREFIX:-$HOME/.local/bin}"
-DATA="${KEE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kee}"
-VERSION="${KEE_VERSION:-}"
-TARBALL="${KEE_DIST_TARBALL:-}"
+REPO="${EKE_REPO:-k-henry-org/kvm-ebpf-engine}"
+PREFIX="${EKE_INSTALL_PREFIX:-$HOME/.local/bin}"
+DATA="${EKE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/kee}"
+VERSION="${EKE_VERSION:-}"
+TARBALL="${EKE_DIST_TARBALL:-}"
 
 say()  { printf '%s\n' "$*"; }
 fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
@@ -55,7 +55,7 @@ else
         if [ -z "$VERSION" ]; then
             VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
                 | sed -n 's/^ *"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)
-            [ -n "$VERSION" ] || fail "could not resolve the latest release of $REPO (private repo, or no release yet?) — set KEE_VERSION or KEE_DIST_TARBALL"
+            [ -n "$VERSION" ] || fail "could not resolve the latest release of $REPO (private repo, or no release yet?) — set EKE_VERSION or EKE_DIST_TARBALL"
         fi
         ASSET="kee-$VERSION-x86_64-linux.tar.gz"
         BASE="https://github.com/$REPO/releases/download/v$VERSION"
@@ -68,7 +68,7 @@ else
         say "sha256 verified against SHA256SUMS"
         TARBALL="$TMP/$ASSET"
     else
-        [ -f "$TARBALL" ] || fail "KEE_DIST_TARBALL not found: $TARBALL"
+        [ -f "$TARBALL" ] || fail "EKE_DIST_TARBALL not found: $TARBALL"
         SUMS=$(dirname -- "$TARBALL")/SHA256SUMS
         if [ -f "$SUMS" ]; then
             ( cd "$(dirname -- "$TARBALL")" && grep "  $(basename -- "$TARBALL")\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
@@ -99,14 +99,14 @@ for f in vmlinux rootfs-kee.ext4 probes; do
 done
 
 # A starter config, written only if none exists (the engine's own nearest-up-from-cwd discovery
-# finds ~/.kee.toml for anything under $HOME). Never overwrites: your config is yours.
-if [ -z "${KEE_NO_TOML:-}" ] && [ ! -e "$HOME/.kee.toml" ]; then
-    cat > "$HOME/.kee.toml" <<EOF
-# Written by install.sh; the engine reads the nearest .kee.toml walking up from the cwd.
+# finds ~/.eke.toml for anything under $HOME). Never overwrites: your config is yours.
+if [ -z "${EKE_NO_TOML:-}" ] && [ ! -e "$HOME/.eke.toml" ]; then
+    cat > "$HOME/.eke.toml" <<EOF
+# Written by install.sh; the engine reads the nearest .eke.toml walking up from the cwd.
 kernel = "$DATA/vmlinux"
 rootfs = "$DATA/rootfs-kee.ext4"
 EOF
-    say "wrote $HOME/.kee.toml (kernel + rootfs paths)"
+    say "wrote $HOME/.eke.toml (kernel + rootfs paths)"
 fi
 
 say ""
@@ -118,13 +118,13 @@ esac
 # The engine finds the eBPF object under the default data dir on its own, so only a *relocated*
 # install still needs the override spelled out.
 if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/kee" ]; then
-    say "  - non-default data dir, so observability needs: export KEE_PROBES_OBJECT=\"$DATA/probes\""
+    say "  - non-default data dir, so observability needs: export EKE_PROBES_OBJECT=\"$DATA/probes\""
 fi
 say "  - Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH, from"
 say "      https://github.com/firecracker-microvm/firecracker/releases (or use the container image,"
 say "      which bundles a pinned one)"
 say "  - check the host; it prints the exact run command for this host:"
-say "      kee doctor"
+say "      eke doctor"
 say "  - then run something (the default jails the VMM, which needs real root):"
-say "      sudo -E kee run -- echo hello       # jailed, the supported posture"
-say "      kee run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+say "      sudo -E eke run -- echo hello       # jailed, the supported posture"
+say "      eke run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"

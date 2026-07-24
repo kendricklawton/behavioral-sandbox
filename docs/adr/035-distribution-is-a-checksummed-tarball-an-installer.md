@@ -23,7 +23,7 @@ nothing that freezes the name:
   installs itself. It verifies at both layers before touching the system: the tarball against
   `SHA256SUMS`, then every extracted file against `MANIFEST.sha256`; nothing installs unverified.
   Layout: the binary into `~/.local/bin` (the `self-host` precedent), artifacts into
-  `$XDG_DATA_HOME/kee` (default `~/.local/share/kee`), and a starter `~/.kee.toml`
+  `$XDG_DATA_HOME/kee` (default `~/.local/share/kee`), and a starter `~/.eke.toml`
   (kernel/rootfs paths) written **only if none exists**, the nearest-up-from-cwd discovery
   (decision 027) makes it apply anywhere under `$HOME`. Firecracker stays the host's to install
   (decision 001: the engine drives it, it doesn't bundle it), except:
@@ -50,6 +50,6 @@ nothing that freezes the name:
   filesystem is closed and rebuilt, not patched in place.
 
 **Consequences.** `dist/` is gitignored, assembled per package. The installer's every knob is an
-`KEE_*` env (repo, version, tarball, prefix, data dir), so the rename sweep is a defaults change.
-Verification is testable offline end to end (`KEE_DIST_TARBALL` mode), which is also how the
+`EKE_*` env (repo, version, tarball, prefix, data dir), so the rename sweep is a defaults change.
+Verification is testable offline end to end (`EKE_DIST_TARBALL` mode), which is also how the
 exit proof runs: package, install into a fresh `$HOME`, boot a sandbox from the installed layout.

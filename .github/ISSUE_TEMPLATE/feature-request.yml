@@ -37,7 +37,7 @@ body:
       label: Which surface does it touch?
       options:
         - CLI (kee run / shell / doctor)
-        - kee serve (daemon) + wire API
+        - eke serve (daemon) + wire API
         - engine API (the vmm library)
         - probes / audit record
         - benchmarks / docs / tooling

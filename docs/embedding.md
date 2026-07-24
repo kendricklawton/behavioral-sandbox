@@ -1,7 +1,7 @@
 # Using the engine API
 
 The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
-the `kee-vmm` library promises when you pin it and build on it, stated once, against the real
+the `eke-vmm` library promises when you pin it and build on it, stated once, against the real
 API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
 The second half draws the line this project refuses to cross, what the engine deliberately is
 **not**, because a runtime that quietly grows platform features stops being embeddable.
@@ -30,7 +30,7 @@ namespaces, a cgroup). An unset `jail` becomes `Jail::default()`; the opt-out fo
 jail (no real root, no `jailer` binary) is the *differently named constructor*
 `Sandbox::open_unjailed`, so an unconfined sandbox is greppable in your source and can never happen
 by a forgotten flag (012). Artifacts (kernel, rootfs, `firecracker`) layer from the environment
-(`KEE_KERNEL`, `KEE_ROOTFS`, …) under explicit `BootConfig` fields.
+(`EKE_KERNEL`, `EKE_ROOTFS`, …) under explicit `BootConfig` fields.
 
 ### Exec: synchronous, bounded, faithful
 
@@ -133,7 +133,7 @@ It composes the driver and the loader the way a downstream host application woul
 `--output-cap`, `--json` (the structured result as one JSON object on stdout, stderr carries the
 logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `kee shell` holds one sandbox
 open as an interactive stateful session. If you're writing an SDK, start from the daemon's
-[reference client](./daemon.md#the-reference-client) (`kee-client`), it drives the same
+[reference client](./daemon.md#the-reference-client) (`eke-client`), it drives the same
 lifecycle over the wire API with nothing of the engine linked, which is exactly the surface a
 non-Rust SDK has.
 

@@ -15,7 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use kee_channel::KEE_VSOCK_PORT;
+use eke_channel::EKE_VSOCK_PORT;
 
 use crate::console::{last_lines, Console};
 use crate::drives::{build_input_image, build_output_image, OutputDevice};
@@ -686,7 +686,7 @@ impl Spawned {
         // (bounded by the deadline), so `restore` hands back a VM that's actually ready to `exec`,
         // never one mid-resume (this is restore's analogue of boot's userspace-marker wait).
         if let Some(uds) = self.vsock_uds.clone() {
-            self.await_kee_ready(&uds, deadline)?;
+            self.await_eke_ready(&uds, deadline)?;
         }
         // No in-guest re-addressing on restore: under the netns model (ADR 014) each clone owns a
         // private network namespace, so the snapshot's baked-in `eth0` address/MAC/routes are
@@ -703,10 +703,10 @@ impl Spawned {
     /// Poll the guest agent's vsock port until a connect + handshake succeeds, so a restored VM is
     /// exec-ready when it's handed back. The probe connection is dropped immediately (the agent serves
     /// one connection then loops back to accept, so a connect-and-close just cycles it).
-    fn await_kee_ready(&mut self, uds: &Path, deadline: Instant) -> Result<(), VmmError> {
+    fn await_eke_ready(&mut self, uds: &Path, deadline: Instant) -> Result<(), VmmError> {
         let mut backoff = PollBackoff::new();
         loop {
-            match connect_agent_at(uds, KEE_VSOCK_PORT, Duration::from_millis(200)) {
+            match connect_agent_at(uds, EKE_VSOCK_PORT, Duration::from_millis(200)) {
                 Ok(_probe) => return Ok(()),
                 Err(e) => {
                     if let Some(status) = self.exited()? {
@@ -892,7 +892,7 @@ impl Spawned {
             if let Some(v6) = tap.v6 {
                 boot_args = format!(
                     "{boot_args} {}={}/{}",
-                    kee_channel::GUEST_IP6_CMDLINE_KEY,
+                    eke_channel::GUEST_IP6_CMDLINE_KEY,
                     v6.guest,
                     v6.prefix_len,
                 );
@@ -1444,7 +1444,7 @@ fn spawn_fc(
 
 /// Linux caps `sockaddr_un.sun_path` at 108 bytes including the trailing NUL. Firecracker binds the
 /// API and vsock sockets *inside* the scratch dir, so a long scratch base (a relocated
-/// `KEE_SCRATCH_DIR`, or the jailer's deep chroot path) can overflow it, and the `bind()` then
+/// `EKE_SCRATCH_DIR`, or the jailer's deep chroot path) can overflow it, and the `bind()` then
 /// fails deep inside Firecracker, surfacing to us as a cryptic "socket never appeared" boot timeout.
 const SUN_PATH_MAX: usize = 108;
 
@@ -1455,7 +1455,7 @@ pub(crate) fn check_sun_path(socket: &Path) -> Result<(), VmmError> {
     if len + 1 > SUN_PATH_MAX {
         return Err(VmmError::Vmm(format!(
             "unix socket path {} is too long ({len} bytes; the kernel's limit is {}); \
-             use a shorter scratch dir via KEE_SCRATCH_DIR",
+             use a shorter scratch dir via EKE_SCRATCH_DIR",
             socket.display(),
             SUN_PATH_MAX - 1
         )));
@@ -1493,7 +1493,7 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
                 return Ok(workdir);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            // A missing/unwritable scratch base is the operator's to fix (e.g. `KEE_SCRATCH_DIR`
+            // A missing/unwritable scratch base is the operator's to fix (e.g. `EKE_SCRATCH_DIR`
             // points nowhere): name it in the error rather than failing cryptically deep in boot.
             Err(e) => {
                 return Err(VmmError::Vmm(format!(
@@ -1646,7 +1646,7 @@ mod version_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kee_test_support::ScratchDir;
+    use eke_test_support::ScratchDir;
 
     #[test]
     fn poll_backoff_starts_tight_and_caps() {
@@ -1851,6 +1851,6 @@ mod tests {
         let long = PathBuf::from(format!("/{}/fc.sock", "x".repeat(SUN_PATH_MAX)));
         let err = check_sun_path(&long).unwrap_err().to_string();
         assert!(err.contains("too long"), "explains the limit: {err}");
-        assert!(err.contains("KEE_SCRATCH_DIR"), "names the fix: {err}");
+        assert!(err.contains("EKE_SCRATCH_DIR"), "names the fix: {err}");
     }
 }

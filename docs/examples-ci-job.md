@@ -7,7 +7,7 @@ and the host record proves it couldn't reach out even if a test tried.
 
 The job script is [`ci-job.sh`](https://github.com/k-henry-org/kvm-ebpf-engine/blob/main/docs/examples/ci-job.sh):
 it unpacks the submitted sources, runs their `unittest` suite (python3 is baked into the guest
-rootfs), and leaves a `report.txt`. The defaults point at the kee rootfs in `artifacts/`; add
+rootfs), and leaves a `report.txt`. The defaults point at the eke rootfs in `artifacts/`; add
 `--unjailed` on a dev box without real root.
 
 ## A project to test
@@ -50,7 +50,7 @@ because `test_sneaky` raised, its `urlopen` never connected. The report is back 
 the record shows why it failed the way it did:
 
 ```console
-$ kee verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
+$ eke verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
 verified
 $ jq -r .record ci.json | jq '{network, timing}'   # unwrap the signed envelope, then project
 {

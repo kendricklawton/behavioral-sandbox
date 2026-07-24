@@ -1,5 +1,5 @@
 [package]
-name = "kee-cli"
+name = "eke-cli"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -7,36 +7,36 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The kvm-ebpf-engine CLI (`kee`): drive the Firecracker + aya code-execution sandbox."
+description = "The kvm-ebpf-engine CLI (`eke`): drive the Firecracker + aya code-execution sandbox."
 
-# One entrypoint, two names: `kvm-ebpf-engine` is the canonical command and `kee` its short alias,
-# built from the same `src/main.rs`. The driver daemon is the `kee serve` subcommand (`src/serve.rs`,
+# One entrypoint, two names: `eke` is the canonical command and `kvm-ebpf-engine` its alias,
+# built from the same `src/main.rs`. The driver daemon is the `eke serve` subcommand (`src/serve.rs`,
 # with its `session`/`metrics` modules), not a separate binary.
 [[bin]]
-name = "kvm-ebpf-engine"
+name = "eke"
 path = "src/main.rs"
 
 [[bin]]
-name = "kee"
+name = "kvm-ebpf-engine"
 path = "src/main.rs"
 
 [dependencies]
 # The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
 # tracks: it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
-kee-probes-loader = { path = "../probes-loader" }
-kee-vmm = { path = "../vmm" }
-# The `kee` daemon's wire protocol: the versioned newline-JSON contract it shares with the
+eke-probes-loader = { path = "../eke-probes-loader" }
+eke-vmm = { path = "../vmm" }
+# The `eke` daemon's wire protocol: the versioned newline-JSON contract it shares with the
 # reference client and the polyglot SDKs (ADR 030). A serde-only leaf, no engine internals.
-kee-protocol = { path = "../kee-protocol" }
+eke-protocol = { path = "../eke-protocol" }
 clap = { workspace = true }
 # `kee run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
-# `.kee.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
+# `.eke.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
 # denied so a config typo is a typed error, not a silent no-op.
 serde = { workspace = true }
-# `kee run --json`: the structured run result is one JSON object on stdout.
+# `eke run --json`: the structured run result is one JSON object on stdout.
 serde_json = { workspace = true }
-# `kee`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
+# `eke`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
 # Already in the dependency tree transitively (crossterm), so no new crate enters the tree.
 signal-hook = "0.3"
 toml = { workspace = true }
@@ -45,12 +45,12 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # The reference client for the versioned wire API (ADR 030, docs/daemon.md), used by the
-# daemon's e2e demo to prove a caller drives `kee` over the wire alone. A dev-dep so the daemon
-# crate can spawn `kee` (it owns the artifacts)
-# while the client itself stays free of `kee-vmm`.
-kee-client = { path = "../kee-client" }
+# daemon's e2e demo to prove a caller drives `eke` over the wire alone. A dev-dep so the daemon
+# crate can spawn `eke` (it owns the artifacts)
+# while the client itself stays free of `eke-vmm`.
+eke-client = { path = "../eke-client" }
 # The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).
-kee-test-support = { path = "../test-support" }
+eke-test-support = { path = "../eke-test-support" }
 
 [lints]
 workspace = true

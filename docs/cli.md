@@ -25,14 +25,14 @@ the KVM hardware boundary, only the VMM process itself runs unconfined.
 One sandbox, one command, everything as flags:
 
 ```console
-kee run [FLAGS] -- <cmd> [args…]
+eke run [FLAGS] -- <cmd> [args…]
 ```
 
 | Flag | What it does |
 |------|--------------|
 | `--demo-boot` | Just boot a microVM and read its console, no command. |
 | `--unjailed` | Run the VMM without the jailer (see above). Default is confined. |
-| `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `KEE_REQUIRE_LIMITS` / `.kee.toml`. |
+| `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `EKE_REQUIRE_LIMITS` / `.eke.toml`. |
 | `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the engine never logs them. |
 | `--put FILE` | Inject a host file into the run's working directory (repeatable; guest name = basename). |
 | `--get PATH` | Fetch a file from the run's working directory afterwards (repeatable; written under the current directory at the same relative path). Deny-by-default: only what you asked for is written. |
@@ -47,7 +47,7 @@ kee run [FLAGS] -- <cmd> [args…]
 | `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope (decision 034) so alteration is detectable; check it with [`kee verify`](#kee-verify). |
 | `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record (what it reached, what egress was denied, its resource envelope, any coverage gap) shaped for an agent's observe→act loop. |
 | `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues (after the command finishes, the view stays up until closed). |
-| `--log FILTER` | Log filter for stderr (overrides `KEE_LOG`), e.g. `info`, `debug`. |
+| `--log FILTER` | Log filter for stderr (overrides `EKE_LOG`), e.g. `info`, `debug`. |
 
 Piped stdin is forwarded to the guest command. Bulk data belongs on the block-device paths
 instead (`input_dir`/`output_dir` in the [engine API](./embedding.md)), the exec request is a
@@ -63,7 +63,7 @@ operational failure of the engine itself (no KVM, a missing artifact, a boot tim
 channel).
 
 ```console
-$ echo 'hi' | kee run --json -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
+$ echo 'hi' | eke run --json -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
 {"schema":1,"exit_code":0,"stdout":"HI\n", …, "metrics":{…},"limits":{…}}
 ```
 
@@ -82,7 +82,7 @@ Check this host's readiness *before* the first sandbox: `kee doctor` prints one 
 prerequisite, KVM, the jailer + real-root, `firecracker` v1.9, iproute2/e2fsprogs, cgroup
 delegation, the kernel version, the boot artifacts, and the eBPF capabilities, each marked `ok`,
 `warn` (a fail-open degradation, with the consequence named), or `FAIL` (a hard miss: no boot
-without it). It exits non-zero when a hard prerequisite is missing, so `kee doctor && kee run …`
+without it). It exits non-zero when a hard prerequisite is missing, so `kee doctor && eke run …`
 gates cleanly. A footer tallies the rows; `kee doctor --explain` adds the full
 fails-open-vs-hard-error matrix behind it, kept off the default report so the rows stay scannable
 (each non-`ok` row already names its own fix). (`cargo xtask setup` renders the same checks for a dev
@@ -100,19 +100,19 @@ mismatch. The input is treated as untrusted (that is the point of verifying) and
 over 16 MiB is rejected as "not a signed record" without being read in, a real envelope is kilobytes.
 
 ```console
-kee verify run.json                      # trusts this host's own signing key
-kee verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
+eke verify run.json                      # trusts this host's own signing key
+eke verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
 ```
 
 The trust root is the host signing key (decision 029: trust the host, not the guest). This detects
 post-hoc alteration; it does **not** prove a *compromised* producing host didn't sign a lie. Key
-custody and rotation are the hoster's: the key path resolves from `KEE_SIGNING_KEY` (or
-`signing_key` in `.kee.toml`, else a data-dir default), generated on first use; a record's `key_id`
+custody and rotation are the hoster's: the key path resolves from `EKE_SIGNING_KEY` (or
+`signing_key` in `.eke.toml`, else a data-dir default), generated on first use; a record's `key_id`
 names the key that signed it.
 
 **Key rotation.** `kee verify` trusts a *set* of keys, so rotating the host key doesn't invalidate
-records already signed. Keep the retired public keys (their `key_id`s) listed in `KEE_TRUSTED_KEYS`
-(comma-separated) or `trusted_keys` in `.kee.toml`, and `kee verify` trusts that set together with
+records already signed. Keep the retired public keys (their `key_id`s) listed in `EKE_TRUSTED_KEYS`
+(comma-separated) or `trusted_keys` in `.eke.toml`, and `kee verify` trusts that set together with
 the current signing key and any `--key` given, so old and new records both verify.
 
 **Session hash-chain.** A one-shot `kee run --record` writes a single, unchained record. Within a
@@ -124,25 +124,25 @@ anchor (the append-only limitation).
 
 ## Configuration
 
-Configuration layers **flags > environment (`KEE_*`) > file (`.kee.toml`) > defaults**, one
-value, four sources, highest wins. The **file** layer is the nearest `.kee.toml` walking up from
+Configuration layers **flags > environment (`EKE_*`) > file (`.eke.toml`) > defaults**, one
+value, four sources, highest wins. The **file** layer is the nearest `.eke.toml` walking up from
 the current directory (the `.gitignore` convention), so a project pins its engine config beside its
-code; its keys mirror the environment names 1:1 (minus the `KEE_` prefix, lowercased), and an
+code; its keys mirror the environment names 1:1 (minus the `EKE_` prefix, lowercased), and an
 unknown key is a typed error, never a silent no-op.
 
-| Variable | `.kee.toml` key | What it points at | Default |
+| Variable | `.eke.toml` key | What it points at | Default |
 |----------|-------------------|-------------------|---------|
-| `KEE_FIRECRACKER` | `firecracker` | the `firecracker` binary | `firecracker` (PATH) |
-| `KEE_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
-| `KEE_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-kee.ext4` (the guest rootfs image) |
-| `KEE_MARKER` | `marker` | the console line that means "userspace is up" | `KEE-GUEST-READY` (the guest rootfs image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
-| `KEE_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
-| `KEE_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
-| `KEE_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
-| `KEE_PROBES_OBJECT` | — | the built eBPF object (env only, no `.kee.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |
+| `EKE_FIRECRACKER` | `firecracker` | the `firecracker` binary | `firecracker` (PATH) |
+| `EKE_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
+| `EKE_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-kee.ext4` (the guest rootfs image) |
+| `EKE_MARKER` | `marker` | the console line that means "userspace is up" | `KEE-GUEST-READY` (the guest rootfs image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
+| `EKE_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
+| `EKE_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
+| `EKE_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
+| `EKE_PROBES_OBJECT` | — | the built eBPF object (env only, no `.eke.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |
 
 ```toml
-# .kee.toml — pinned beside a project's code
+# .eke.toml — pinned beside a project's code
 kernel = "/srv/kee/vmlinux"
 rootfs = "/srv/kee/rootfs-kee.ext4"
 marker = "KEE-GUEST-READY"
@@ -151,8 +151,8 @@ log = "info"
 
 ## Operator policy
 
-A second group of `.kee.toml` keys sets the **host's** posture rather than a per-run knob. These
-have **no `KEE_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling
+A second group of `.eke.toml` keys sets the **host's** posture rather than a per-run knob. These
+have **no `EKE_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling
 whose bounded party can override it is not a ceiling ([decision
 041](./adr/041-operator-policy-defaults-clamp-explicit-asks-refuse.md)).
 
@@ -195,7 +195,7 @@ record, observed from *outside* the guest, where the code can't forge or disable
 
 ```console
 # Watch it live, read the trail after, keep the machine record + the model-legible summary:
-kee run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
+eke run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
 ```
 
 Four faces, one record:
@@ -239,7 +239,7 @@ destination with a repeatable `--allow` (which requires `--net`):
 
 ```console
 # Allow DNS to one resolver and HTTPS to a subnet; everything else is dropped at the tap and recorded.
-kee run --unjailed --net \
+eke run --unjailed --net \
     --allow 1.1.1.1:53/udp --allow 10.0.0.0/8:443/tcp --record run.json -- ...
 ```
 
@@ -271,7 +271,7 @@ few orthogonal verbs, or named below as deliberately out of scope. The map:
 | Verify a signed record | `kee verify <record>` |
 | Structured run result | `--json` |
 | Host readiness | `kee doctor` |
-| Config layering | flags > env (`KEE_*`) > `.kee.toml` > defaults |
+| Config layering | flags > env (`EKE_*`) > `.eke.toml` > defaults |
 
 **Deliberately not in the CLI, daemon-scoped, embedding-API, or platform, by design** (their absence
 is intent, not omission):

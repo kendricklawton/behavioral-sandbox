@@ -45,7 +45,7 @@ crates/
                  typed error, never a panic/hang/leak.
   channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
                  shared by the driver and the guest agent. See decision 002 (an ADR under `docs/adr/`).
-  guest-agent/   the in-guest agent (`kee-guest`): runs one command per connection and streams
+  guest-agent/   the in-guest agent (`eke-guest`): runs one command per connection and streams
                  stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at
                  Phase 3. Exec/IO convenience only, never the security boundary.
   probes/        the eBPF programs (`#![no_std]`, built for `bpfel-unknown-none` via
@@ -103,8 +103,8 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   tests skip themselves into a hollow green (a skipped test is a pass to cargo). Never gate
   the everyday loop on a privileged runner.
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
-  `kee run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`KEE_*`) >
-  file (`.kee.toml`, the nearest one walking up from the cwd) > defaults** (decision 027).
+  `kee run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`EKE_*`) >
+  file (`.eke.toml`, the nearest one walking up from the cwd) > defaults** (decision 027).
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
 - **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
   show, in the fewest sentences that carry it; it never restates what the next lines visibly do.

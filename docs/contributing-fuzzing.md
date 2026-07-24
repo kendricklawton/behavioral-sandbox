@@ -15,7 +15,7 @@ must, for *any* input, return a value or a typed `ChannelError`, and never panic
 or allocate past `MAX_PAYLOAD`. The guest-side `Request` decoder is fuzzed too as defense in depth
 (the host is trusted, but the in-guest agent should be just as unpanicky).
 
-The **daemon's client wire** (`crates/kee-protocol`, `read_message`). `kee serve` decodes these
+The **daemon's client wire** (`crates/eke-protocol`, `read_message`). `kee serve` decodes these
 bytes off its unix socket from *any* client: the outermost untrusted-input boundary the engine
 exposes, and higher-value than the channel decoder, which only ever sees a guest already contained
 inside a VM. The hand-rolled line reader (bounded at `MAX_MESSAGE_BYTES`) and the schema gate that
@@ -47,10 +47,10 @@ thousands of inputs at the decoders each run: arbitrary bytes, well-framed frame
 frame. Fixed seeds make any failure reproduce exactly, so it never flakes. This is the continuous
 guard. The other three surfaces carry the same discipline, each a deterministic in-gate property
 test: the envelope verifier in `crates/probes-loader` (byte flips, truncations, splices of a valid
-envelope), the daemon wire in `crates/kee-protocol` (random bytes with injected newlines,
+envelope), the daemon wire in `crates/eke-protocol` (random bytes with injected newlines,
 encode/decode round-trips, truncations, and the over-cap line bound), and the eBPF-boundary parsers
 in `crates/probes-common` (arbitrary-length buffers at `from_bytes` and `parse_ipv4_5tuple` plus the
-string accessors). `kee-protocol` uses `serde_json` (already a dependency) to build valid seeds;
+string accessors). `eke-protocol` uses `serde_json` (already a dependency) to build valid seeds;
 `probes-common` stays zero-dependency with an inline PRNG.
 
 **Deep, scheduled + on demand (`fuzz/`, nightly + libFuzzer).** A `cargo fuzz` harness for long,
@@ -59,7 +59,7 @@ coverage-guided runs that explore far more of the input space than the in-gate p
 **excluded from the workspace** with its own `[workspace]` table, so nightly and libFuzzer never touch
 the everyday stable gate. It reaches the internal decoders through each crate's off-by-default
 `fuzzing` feature (`kee_channel::fuzz`, `kee_protocol::fuzz`) or the already-public parse surface
-(`kee-probes-loader`, `kee-probes-common`), without changing any default build or the wire
+(`eke-probes-loader`, `kee-probes-common`), without changing any default build or the wire
 contract. Each target is seeded from a committed `fuzz/seeds/<target>/` corpus of valid inputs (a
 signed envelope, real protocol messages, a well-formed frame), so a fresh run starts *past* the
 first-byte reject and spends its budget in the decode logic instead of rediscovering message shape;
@@ -88,9 +88,9 @@ minimized input reaches a genuinely new path, promote it into the committed `fuz
 The in-gate tier needs nothing extra:
 
 ```console
-cargo test -p kee-channel                # includes the fuzz_tests property suite
-cargo test -p kee-probes-loader --lib    # includes the envelope mutation test
-cargo test -p kee-protocol               # includes the daemon-wire property suite
+cargo test -p eke-channel                # includes the fuzz_tests property suite
+cargo test -p eke-probes-loader --lib    # includes the envelope mutation test
+cargo test -p eke-protocol               # includes the daemon-wire property suite
 cargo test -p kee-probes-common          # includes the eBPF-boundary parser property test
 ```
 

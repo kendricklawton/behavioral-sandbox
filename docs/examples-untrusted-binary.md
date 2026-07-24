@@ -5,7 +5,7 @@ build artifact from a fork. Run it in a microVM and let the **host** tell you wh
 `execve`, `openat`, and `connect` it made, observed from outside the guest where the binary can't
 hide them. This is the malware-sandbox use case, minus the trust.
 
-The defaults point at the kee rootfs in `artifacts/`; add `--unjailed` on a dev box without
+The defaults point at the eke rootfs in `artifacts/`; add `--unjailed` on a dev box without
 real root.
 
 ## A stand-in for the unknown binary

@@ -46,7 +46,7 @@ byte-stable (fixed key order; every array already sorted by its builder), float-
 integer nanoseconds), and renders addresses/protocols/syscalls by name. A later phase pretty-prints it
 for people and exports it; this is the machine surface underneath.
 
-**Not the pinned public API.** All of this is on `probes-loader`; `kee-vmm`'s `Sandbox`/`RunResult`
+**Not the pinned public API.** All of this is on `probes-loader`; `eke-vmm`'s `Sandbox`/`RunResult`
 are untouched, **not** an `api:` change. The privileged end-to-end test drives the real launch sequence
 (load shared probes → boot → `attach` → run → `collect` → JSON) and asserts the guest's network touch
 shows up *exactly*, while its in-guest file read correctly does **not** appear in the host-syscall axis

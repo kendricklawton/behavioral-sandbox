@@ -1,5 +1,5 @@
 //! Shared library for the `kee` binary: the CLI (`src/main.rs`, `run`/`shell`/…) and the
-//! `kee serve` daemon (`src/serve.rs`) are both thin hosts of the same `kee-vmm` public API, and
+//! `kee serve` daemon (`src/serve.rs`) are both thin hosts of the same `eke-vmm` public API, and
 //! both compose the driver track with the host-side eBPF track the same way; that composition, the
 //! [`audit`] module's [`Observability`](audit::Observability)/[`RunProbes`](audit::RunProbes), lives
 //! here so it is single-sourced, not duplicated between the CLI path and the daemon's session path.

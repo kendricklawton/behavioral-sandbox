@@ -1,14 +1,14 @@
 //! `kee doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
-//! checks ([`kee_vmm::doctor`]) plus the eBPF-observability capability row (owned by the probe
-//! loader, out of `kee-vmm`), so a fresh host reads exactly what will work, degrade, or refuse
+//! checks ([`eke_vmm::doctor`]) plus the eBPF-observability capability row (owned by the probe
+//! loader, out of `eke-vmm`), so a fresh host reads exactly what will work, degrade, or refuse
 //! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
 //! truth for "ready", two entry points.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-use kee_vmm::doctor::{self, Check, CheckStatus};
-use kee_vmm::BootConfig;
+use eke_vmm::doctor::{self, Check, CheckStatus};
+use eke_vmm::BootConfig;
 
 /// Whether to emit ANSI colour on a stream.
 ///
@@ -60,7 +60,7 @@ pub struct DoctorArgs {
 /// Print the readiness report for `config` (resolved `flags`-free, i.e. `env > file > defaults`, so
 /// the artifact paths checked are the ones a run would boot). Returns the process exit code: success
 /// when the engine can boot *something* (every hard prerequisite met), a failure code when a hard
-/// requirement is missing, so `kee doctor && kee run …` gates correctly.
+/// requirement is missing, so `kee doctor && eke run …` gates correctly.
 #[must_use]
 pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     let mut out = std::io::stdout();
@@ -106,13 +106,13 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
         // Name a first command that works *here*: the jailed default needs real root plus the
         // jailer, so suggesting it unconditionally would hand a fresh operator a failing command.
         if doctor::jailed_run_available() {
-            let _ = writeln!(out, "\nTry it:\n  kee run -- echo hello");
+            let _ = writeln!(out, "\nTry it:\n  eke run -- echo hello");
         } else {
             let _ = writeln!(
                 out,
                 "\nTry it (the default jails the VMM, which needs real root):\
-                 \n  sudo -E kee run -- echo hello       # jailed, the supported posture\
-                 \n  kee run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+                 \n  sudo -E eke run -- echo hello       # jailed, the supported posture\
+                 \n  eke run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
             );
         }
         ExitCode::SUCCESS
@@ -158,7 +158,7 @@ fn tally(checks: &[Check], paint: Paint) -> String {
 /// `CAP_PERFMON` + kernel BTF). A degradation, not hard: without it, `--trace`/`--watch` still run
 /// (recording a coverage gap) and only `--allow` *enforcement* refuses.
 fn ebpf_check() -> Check {
-    match kee_probes_loader::check_support() {
+    match eke_probes_loader::check_support() {
         Ok(()) => Check {
             label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
             status: CheckStatus::Ok,

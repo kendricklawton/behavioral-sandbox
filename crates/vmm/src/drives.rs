@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 /// The filesystem labels the driver stamps on the data devices so the guest mounts them by label,
 /// not by enumeration-order `/dev/vdX` (a boot may attach input, output, both, or neither). Defined
-/// in `kee-channel`, the one host↔guest contract both the driver and the rootfs build consume.
-use kee_channel::{INPUT_LABEL, OUTPUT_LABEL};
+/// in `eke-channel`, the one host↔guest contract both the driver and the rootfs build consume.
+use eke_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
 use crate::paths::path_str;
 use crate::VmmError;
@@ -462,7 +462,7 @@ fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kee_test_support::ScratchDir;
+    use eke_test_support::ScratchDir;
 
     #[test]
     fn sanitize_symlinks_drops_escapes_including_chained_intermediate_links() {

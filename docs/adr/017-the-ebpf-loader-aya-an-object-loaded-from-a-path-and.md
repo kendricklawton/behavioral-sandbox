@@ -19,7 +19,7 @@ kernel residue.
   `ProbeError`, the eBPF analogue of `VmmError` (no panic on the host path).
 - **The object is a runtime-loaded build artifact, found by path.** `cargo xtask build-probes` builds
   it (separate nightly target); the loader reads the bytes at runtime from a path
-  (`KEE_PROBES_OBJECT` override, else the `build-probes` output). It is **not** linked into the
+  (`EKE_PROBES_OBJECT` override, else the `build-probes` output). It is **not** linked into the
   loader binary (`include_bytes`) nor built by a `build.rs`, so the host workspace stays on stable and
   the CI gate stays runnable everywhere; the object is deployed alongside the guest kernel/rootfs.
 - **Links drop with the loader; nothing is pinned.** The aya `Ebpf` owns the program, map, and

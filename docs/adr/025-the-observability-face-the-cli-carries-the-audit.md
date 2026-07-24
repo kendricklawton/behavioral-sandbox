@@ -18,7 +18,7 @@ envelope that `kee verify` checks), and `--watch` (a live full-screen view, on
 there is a tap to observe (deny-by-default unchanged: no allowance means nothing past the host /30).
 Any of the three audit flags triggers the same launch sequence decision 024 defined, load the
 shared tracer + meter, boot, `SandboxProbes::attach` by plain values, exec, `collect` while the
-sandbox is alive, composed **in the CLI**, never in `kee-vmm` (decisions 021/023 hold: the two
+sandbox is alive, composed **in the CLI**, never in `eke-vmm` (decisions 021/023 hold: the two
 tracks still bridge only by `vmm_pid`/`netns`/`tap_name`).
 
 **Stream discipline decides where each face lives.** The house rule is "stderr carries diagnostics,

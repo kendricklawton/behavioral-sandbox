@@ -5,7 +5,7 @@
 //! boot artifacts. `install.sh` (repo root, also packed into the tarball) consumes the result.
 //!
 //! Every step reuses the tested building blocks the individual `xtask` commands use, so this is
-//! orchestration, not a second build path. Vendor-aware like `self-host`: with `KEE_VENDOR_DIR`
+//! orchestration, not a second build path. Vendor-aware like `self-host`: with `EKE_VENDOR_DIR`
 //! set the whole assembly runs offline.
 
 use std::path::{Path, PathBuf};
@@ -14,10 +14,10 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::artifacts::sha256_of;
-use crate::{build_probes, cargo, kee_rootfs_path, kernel_path, workspace_root};
+use crate::{build_probes, cargo, eke_rootfs_path, kernel_path, workspace_root};
 
 /// The packaged eBPF object's name inside `share/kee/` (the loader finds it via
-/// `KEE_PROBES_OBJECT`, which `install.sh` and the container image point here).
+/// `EKE_PROBES_OBJECT`, which `install.sh` and the container image point here).
 const PROBES_NAME: &str = "probes";
 
 /// `cargo xtask dist [--version V]`: build binary + artifacts, stage, checksum, tar.
@@ -83,7 +83,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
 
     copy_mode(&bin, &stage.join("bin/kee"), 0o755)?;
     copy_mode(&kernel, &share.join("vmlinux"), 0o644)?;
-    copy_mode(&kee_rootfs_path(), &share.join("rootfs-kee.ext4"), 0o644)?;
+    copy_mode(&eke_rootfs_path(), &share.join("rootfs-eke.ext4"), 0o644)?;
     copy_mode(&object, &share.join(PROBES_NAME), 0o644)?;
     copy_mode(
         &workspace_root().join("install.sh"),
@@ -112,7 +112,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         stage.display()
     );
     println!(
-        "  or from the tarball:     KEE_DIST_TARBALL={} sh install.sh",
+        "  or from the tarball:     EKE_DIST_TARBALL={} sh install.sh",
         tarball.display()
     );
     println!(

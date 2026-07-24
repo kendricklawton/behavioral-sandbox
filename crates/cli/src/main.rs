@@ -5,13 +5,13 @@
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
 //! or the `--json` structured result / audit log), so `kee run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
-//! flags > env (`KEE_LOG`) > default. Both subcommands run
+//! flags > env (`EKE_LOG`) > default. Both subcommands run
 //! **jailed by default** (ADR 012) with `--unjailed` as the explicit opt-out, and both point
-//! at the env-layered artifacts (`KEE_ROOTFS`/`KEE_KERNEL`/`KEE_MARKER`, exec needs the
+//! at the env-layered artifacts (`EKE_ROOTFS`/`EKE_KERNEL`/`EKE_MARKER`, exec needs the
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
-use kee_cli::audit;
+use eke_cli::audit;
 mod config;
 mod doctor;
 mod metrics;
@@ -30,10 +30,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use kee_cli::policy::Requested;
-use kee_cli::MAX_VCPUS;
-use kee_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
-use kee_vmm::{
+use eke_cli::policy::Requested;
+use eke_cli::MAX_VCPUS;
+use eke_probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
+use eke_vmm::{
     sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD,
 };
 
@@ -43,7 +43,7 @@ use kee_vmm::{
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The version of the `--json` **run-result** contract (exit code, streams, artifacts, metrics,
-/// limits). Distinct from the audit record's `kee_probes_loader::AUDIT_SCHEMA_VERSION`: two
+/// limits). Distinct from the audit record's `eke_probes_loader::AUDIT_SCHEMA_VERSION`: two
 /// surfaces, two independent versions. Same policy, additive within a version, a rename/removal
 /// bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
@@ -78,7 +78,7 @@ impl From<VmmError> for CliError {
 
 #[derive(Parser)]
 #[command(
-    name = "kee",
+    name = "eke",
     // The crate version, which is the in-development working number until the first tag
     // (`RELEASES.md`): `kee --version` exists so an installed binary can be told from a stale one,
     // which is a different question from "which release is this".
@@ -88,17 +88,17 @@ impl From<VmmError> for CliError {
     // then the two run forms differ only by whether this host can jail (ADR 012).
     after_help = "\
 Getting started:
-  kee doctor                          check what this host can do
-  sudo -E kee run -- echo hello       run a command in a sandbox (jailed, the default)
-  kee run --unjailed -- echo hello    same, without the jailer (needs no root)
-  kee run --trace -- <cmd>            run it and print the audit trail
+  eke doctor                          check what this host can do
+  sudo -E eke run -- echo hello       run a command in a sandbox (jailed, the default)
+  eke run --unjailed -- echo hello    same, without the jailer (needs no root)
+  eke run --trace -- <cmd>            run it and print the audit trail
 
-Config layers, highest first: flags, KEE_* env, .kee.toml, defaults."
+Config layers, highest first: flags, EKE_* env, .eke.toml, defaults."
 )]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
-    /// Log filter for stderr (overrides `KEE_LOG`), e.g. `info`, `debug`.
+    /// Log filter for stderr (overrides `EKE_LOG`), e.g. `info`, `debug`.
     #[arg(long, global = true, value_name = "FILTER")]
     log: Option<String>,
 }
@@ -117,11 +117,11 @@ enum Cmd {
     // the whole `Cmd` enum isn't sized to it (the `clippy::large_enum_variant` this would trip).
     #[command(after_help = "\
 Examples:
-  kee run -- echo hello
-  kee run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
-  kee run --put main.rs --get a.out -- rustc main.rs -o a.out
-  kee run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
-  kee run --record run.json -- ./untrusted && kee verify run.json
+  eke run -- echo hello
+  eke run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
+  eke run --put main.rs --get a.out -- rustc main.rs -o a.out
+  eke run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
+  eke run --record run.json -- ./untrusted && eke verify run.json
 
 Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
@@ -134,7 +134,7 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     ///
     /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
     /// will work, degrade, or refuse before the first sandbox, and names a first command that works
-    /// on this host. Exits non-zero when a hard prerequisite is missing, so `kee doctor && kee
+    /// on this host. Exits non-zero when a hard prerequisite is missing, so `kee doctor && eke
     /// run …` gates correctly.
     Doctor(doctor::DoctorArgs),
     /// Verify a signed audit record.
@@ -168,8 +168,8 @@ struct RunArgs {
     /// Refuse the boot if the cgroup caps can't be applied.
     ///
     /// Instead of the default warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with
-    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `KEE_REQUIRE_LIMITS`
-    /// or `.kee.toml`.
+    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `EKE_REQUIRE_LIMITS`
+    /// or `.eke.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
     /// Guest vCPUs, 1..=32 [default: 1].
@@ -291,14 +291,14 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The daemon owns its own logging (info default, optional JSON) and reads no `.kee.toml`
+    // The daemon owns its own logging (info default, optional JSON) and reads no `.eke.toml`
     // (its config is flags + environment), so `serve` dispatches *before* the CLI's project-file
     // discovery and tracing init below, which are the run/shell/doctor conveniences. It still
     // receives the shared global `--log` filter.
     if let Cmd::Serve(args) = cli.cmd {
         return serve::serve(*args, cli.log);
     }
-    // The `.kee.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
+    // The `.eke.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
     // failure here, before any boot (config typos must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let file = match config::AgentToml::discover(&cwd) {
@@ -369,9 +369,9 @@ fn sweep_vm_residue(file: Option<&config::AgentToml>) {
 }
 
 /// The env+file-layered base config, `env > file > defaults`, over which each subcommand applies
-/// its flags. Composes a single lookup that prefers the real environment, then the `.kee.toml`
+/// its flags. Composes a single lookup that prefers the real environment, then the `.eke.toml`
 /// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
-/// stay one vocabulary keyed by the `KEE_*` names.
+/// stay one vocabulary keyed by the `EKE_*` names.
 fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
     BootConfig::from_env_with(|key| {
         std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
@@ -423,7 +423,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         None
     } else {
         let policy = build_egress(&args.allow)?;
-        if let Err(e) = kee_probes_loader::check_support() {
+        if let Err(e) = eke_probes_loader::check_support() {
             return Err(CliError::Cli(format!(
                 "--allow requested egress enforcement, but this host can't load the eBPF probes: {e}"
             )));
@@ -603,7 +603,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             // off-host. The signing key is host-side (the guest never sees it), loaded/generated at
             // the config-resolved path.
             let key_path = config::signing_key_path(file);
-            let key = kee_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+            let key = eke_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
                 VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
             })?;
             std::fs::write(path, key.sign_record(&record) + "\n")
@@ -930,7 +930,7 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
 /// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `kee run`
 /// shouldn't block waiting for EOF). The read is **bounded at one frame + 1 byte**: the exec request
 /// is a single frame, so anything past the channel's cap is rejected as a typed `PayloadTooLarge`
-/// regardless, reading it all first would let `cat 10GB.bin | kee run …` balloon host RAM before
+/// regardless, reading it all first would let `cat 10GB.bin | eke run …` balloon host RAM before
 /// the same error. The `+ 1` still overshoots the cap by a byte so the oversize case is caught rather
 /// than silently truncated to exactly the cap. Bulk data belongs on the block-device path anyway.
 fn piped_stdin() -> Vec<u8> {
@@ -947,7 +947,7 @@ fn piped_stdin() -> Vec<u8> {
 }
 
 /// Initialize stderr logging from the filter [`config::resolve_log`] already resolved
-/// (`flag > KEE_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
+/// (`flag > EKE_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
 /// environment: the precedence is single-sourced in `resolve_log`, this only applies the result.
 /// An invalid filter falls back to `warn` rather than failing the run.
 fn init_tracing(filter: Option<&str>) {
@@ -967,8 +967,8 @@ mod tests {
         build_egress, limits_with, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus,
         write_artifacts_in, AllowRule, Artifact, MAX_VCPUS,
     };
-    use kee_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
-    use kee_test_support::ScratchDir;
+    use eke_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
+    use eke_test_support::ScratchDir;
     use std::net::Ipv4Addr;
     use std::num::{NonZeroU32, NonZeroU8};
 
@@ -1104,7 +1104,7 @@ mod tests {
     fn limits_fold_overrides_onto_conservative_defaults() {
         // An unset flag keeps the default; a set one wins. The other knobs are untouched by this
         // helper (run layers wall/output-cap separately).
-        let d = kee_vmm::Limits::default();
+        let d = eke_vmm::Limits::default();
         let none = limits_with(None, None);
         assert_eq!(none.vcpus, d.vcpus);
         assert_eq!(none.mem_mib, d.mem_mib);

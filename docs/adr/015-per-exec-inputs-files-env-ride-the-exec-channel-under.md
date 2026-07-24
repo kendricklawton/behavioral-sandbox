@@ -45,7 +45,7 @@ probably don't log it" is not a contract an SDK can be built on.
   sites the engine owns was taken to cover the promise as stated). A dependency-audit prompt noted
   that `fill(0)` is dead-store-eligible, so under `--release` the wipe may be elided *entirely*, not
   merely left incomplete: the buffer is dropped on the next line, so the optimizer can prove the
-  store is unobservable and delete it. That undercuts even the best-effort claim, so `kee-channel`
+  store is unobservable and delete it. That undercuts even the best-effort claim, so `eke-channel`
   now depends on `zeroize` and the two sites call `payload.zeroize()`, a volatile store the optimizer
   cannot elide. The two doors this was once deferred behind are weighed and settled: `zeroize` is
   `no_std` with zero transitive deps, so pulling it into the guest's static binary is negligible (the

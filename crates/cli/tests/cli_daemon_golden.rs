@@ -1,12 +1,12 @@
 //! CLI/daemon parity golden (the wire API, ADR 030): the **CLI** (`kee run --json`) and the
 //! **daemon wire API** (`agent`, driven
-//! through the reference [`kee_client::Client`]) render the *same* command **identically**, same
-//! exit code, same stdout, same stderr. The two faces are thin hosts of one `kee-vmm` lifecycle, so
+//! through the reference [`eke_client::Client`]) render the *same* command **identically**, same
+//! exit code, same stdout, same stderr. The two faces are thin hosts of one `eke-vmm` lifecycle, so
 //! a run must never depend on which door it came through; this pins that invariant against drift (a
 //! stream captured differently, an exit code mapped differently, a default limit that diverged).
 //!
 //! It compares only what is a *run result* on both faces: a command that **runs** and returns a
-//! [`RunResult`](kee_vmm), exit code (zero or not), stdout, stderr. A guest fault that never
+//! [`RunResult`](eke_vmm), exit code (zero or not), stdout, stderr. A guest fault that never
 //! produces a result (an unspawnable binary) is deliberately *out* of scope: the CLI renders it as an
 //! operational error (exit 2, a stderr diagnostic), the daemon as a non-fatal `error` reply, two
 //! faithful renderings of a non-result, not a golden mismatch.
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use kee_client::{Client, OpenOptions};
+use eke_client::{Client, OpenOptions};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -106,12 +106,12 @@ impl Drop for Daemon {
 /// The env the two faces share: the same rootfs, kernel, and readiness marker, so any difference in
 /// the result is the *rendering*, not the inputs.
 fn shared_env(cmd: &mut Command, root: &std::path::Path) {
-    cmd.env("KEE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
+    cmd.env("EKE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("KEE_MARKER", kee_vmm::GUEST_READY_MARKER)
-        .env("KEE_LOG", "warn");
-    if std::env::var_os("KEE_KERNEL").is_none() {
-        cmd.env("KEE_KERNEL", root.join("artifacts/vmlinux"));
+        .env("EKE_MARKER", eke_vmm::GUEST_READY_MARKER)
+        .env("EKE_LOG", "warn");
+    if std::env::var_os("EKE_KERNEL").is_none() {
+        cmd.env("EKE_KERNEL", root.join("artifacts/vmlinux"));
     }
 }
 
@@ -160,16 +160,16 @@ fn run_via_cli(argv: &[String], stdin: &str) -> RunOutcome {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
-    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("spawn kee run: {e}"));
+    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("spawn eke run: {e}"));
     child
         .stdin
         .take()
         .unwrap_or_else(|| panic!("kee run has no stdin handle"))
         .write_all(stdin.as_bytes())
-        .unwrap_or_else(|e| panic!("feed stdin to kee run: {e}"));
+        .unwrap_or_else(|e| panic!("feed stdin to eke run: {e}"));
     let out = child
         .wait_with_output()
-        .unwrap_or_else(|e| panic!("wait for kee run: {e}"));
+        .unwrap_or_else(|e| panic!("wait for eke run: {e}"));
 
     let body = String::from_utf8_lossy(&out.stdout);
     let json: serde_json::Value = serde_json::from_str(body.trim())
@@ -203,7 +203,7 @@ fn run_via_daemon(client: &mut Client, argv: &[String], stdin: &str) -> RunOutco
 }
 
 #[test]
-#[ignore = "spawns kee + kee; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns eke + kee; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_cli_and_the_daemon_render_a_run_identically() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_cli_and_the_daemon_render_a_run_identically: {why}");

@@ -27,7 +27,7 @@ body:
         The exact command line (`kee run …` / `kee shell …` / `kee serve` + client verbs) or the
         embedding code, plus the workload that triggers it. The smaller the repro, the faster the fix.
       placeholder: |
-        kee run --net -- python3 -c '...'
+        eke run --net -- python3 -c '...'
       render: shell
     validations:
       required: true
@@ -58,7 +58,7 @@ body:
       options:
         - CLI, jailed (the default)
         - CLI, --unjailed
-        - kee serve (daemon)
+        - eke serve (daemon)
         - embedded (the vmm library API)
       multiple: true
     validations:

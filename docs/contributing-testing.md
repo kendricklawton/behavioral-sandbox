@@ -73,7 +73,7 @@ is the order to exercise the whole engine end to end; each step links to its det
    ([Self-host in one command](./cli-install.md#self-host-in-one-command).)
 3. **Run one sandbox, confined.** With real root you exercise the jailed default (not `--unjailed`):
    `kee run -- python3 -c 'print(2 ** 100)'`. Add `--net` / `--trace` / `--record` / `--watch` to
-   see the host-observed record. ([Using the kee CLI](./cli.md).)
+   see the host-observed record. ([Using the eke CLI](./cli.md).)
 4. **The privileged integration suite.** `cargo xtask ci-privileged` boots real microVMs, execs, runs
    tap networking, attaches probes, and asserts the observed record: the half the host-safe gate
    cannot reach. It self-checks its prerequisites and prints the fix if an artifact is missing, and

@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use kee_probes_loader::{check_support, object_path};
-use kee_test_support::ScratchDir;
+use eke_probes_loader::{check_support, object_path};
+use eke_test_support::ScratchDir;
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -61,10 +61,10 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     let signing_key = scratch.path().join("signing.key");
     let out = Command::new(env!("CARGO_BIN_EXE_kee"))
         .current_dir(&root)
-        .env("KEE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
-        .env("KEE_MARKER", "KEE-GUEST-READY")
+        .env("EKE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
+        .env("EKE_MARKER", "KEE-GUEST-READY")
         // Keep the generated host signing key inside the scratch dir, not the real default path.
-        .env("KEE_SIGNING_KEY", &signing_key)
+        .env("EKE_SIGNING_KEY", &signing_key)
         .args(["run", "--unjailed", "--net", "--trace", "--record"])
         .arg(&record_path)
         .arg("--record-summary")
@@ -76,7 +76,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
             "open('/etc/hostname').read(); print('p14-audit-demo')",
         ])
         .output()
-        .expect("run the kee binary");
+        .expect("run the eke binary");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -130,14 +130,14 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     );
 
     // The P19.3 demo: `kee verify` accepts the untouched record, and rejects it after one flipped
-    // byte, trusting the same host key that signed it (resolved from KEE_SIGNING_KEY).
+    // byte, trusting the same host key that signed it (resolved from EKE_SIGNING_KEY).
     let verify_ok = Command::new(env!("CARGO_BIN_EXE_kee"))
         .current_dir(&root)
-        .env("KEE_SIGNING_KEY", &signing_key)
+        .env("EKE_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&record_path)
         .output()
-        .expect("run kee verify");
+        .expect("run eke verify");
     assert!(
         verify_ok.status.success(),
         "an untouched record verifies: {}",
@@ -160,11 +160,11 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     .expect("write tampered record");
     let verify_bad = Command::new(env!("CARGO_BIN_EXE_kee"))
         .current_dir(&root)
-        .env("KEE_SIGNING_KEY", &signing_key)
+        .env("EKE_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&tampered_path)
         .output()
-        .expect("run kee verify on tampered");
+        .expect("run eke verify on tampered");
     // Pin the rejection to the *right reason*: exit 1 is the typed verification failure (exit 2
     // would be an operational error like an unreadable file, which must not pass as "rejected"),
     // and the message names the signature.
@@ -236,8 +236,8 @@ print('p14-9b-egress')
 ";
     let out = Command::new(env!("CARGO_BIN_EXE_kee"))
         .current_dir(&root)
-        .env("KEE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
-        .env("KEE_MARKER", "KEE-GUEST-READY")
+        .env("EKE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
+        .env("EKE_MARKER", "KEE-GUEST-READY")
         .args([
             "run",
             "--unjailed",
@@ -249,7 +249,7 @@ print('p14-9b-egress')
         .arg(&record_path)
         .args(["--", "python3", "-c", workload])
         .output()
-        .expect("run the kee binary");
+        .expect("run the eke binary");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
@@ -299,9 +299,9 @@ print('p14-9b-egress')
 fn artifact_env() -> [(String, std::path::PathBuf); 2] {
     let root = workspace_root();
     [
-        ("KEE_KERNEL".to_string(), root.join("artifacts/vmlinux")),
+        ("EKE_KERNEL".to_string(), root.join("artifacts/vmlinux")),
         (
-            "KEE_ROOTFS".to_string(),
+            "EKE_ROOTFS".to_string(),
             root.join("artifacts/rootfs-kee.ext4"),
         ),
     ]
@@ -322,7 +322,7 @@ fn doctor_passes_then_one_run_drives_every_projection_at_once() {
         .envs(env.iter().cloned())
         .arg("doctor")
         .output()
-        .expect("run kee doctor");
+        .expect("run eke doctor");
     assert!(
         doc.status.success(),
         "kee doctor should report ready on the privileged host: {}",
@@ -366,7 +366,7 @@ print('p14-9f-complete')
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn kee run");
+        .expect("spawn eke run");
     use std::io::Write as _;
     child
         .stdin
@@ -374,7 +374,7 @@ print('p14-9f-complete')
         .expect("stdin pipe")
         .write_all(b"STDIN")
         .expect("feed stdin");
-    let out = child.wait_with_output().expect("await kee run");
+    let out = child.wait_with_output().expect("await eke run");
     assert!(
         out.status.success(),
         "the everything-run failed ({}): {}",
@@ -437,8 +437,8 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     // record.
     let out = Command::new(env!("CARGO_BIN_EXE_kee"))
         .current_dir(&root)
-        .env("KEE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
-        .env("KEE_MARKER", "KEE-GUEST-READY")
+        .env("EKE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
+        .env("EKE_MARKER", "KEE-GUEST-READY")
         .args([
             "run",
             "--unjailed",
@@ -456,7 +456,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
-        "the contained kee run failed ({}): {}",
+        "the contained eke run failed ({}): {}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );

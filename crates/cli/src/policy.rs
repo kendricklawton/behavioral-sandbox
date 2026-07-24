@@ -5,7 +5,7 @@
 //! `docs/security.md`, "the caller harming the caller" is not a security bug): they own the config
 //! file and the environment, so policy there is a house default that keeps honest runs consistent,
 //! not a boundary. The boundary is `kee serve`: its clients arrive over a socket
-//! and control neither the daemon's environment nor its `.kee.toml`, so the same policy applied to
+//! and control neither the daemon's environment nor its `.eke.toml`, so the same policy applied to
 //! a client's `open` is real enforcement. That asymmetry is deliberate, and it is why the resolution
 //! below lives in one shared place instead of in flag parsing.
 //!
@@ -21,7 +21,7 @@ use std::fmt;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
 
-use kee_vmm::Limits;
+use eke_vmm::Limits;
 
 /// What a caller asked for. `None` means "unspecified", which takes the operator default (else the
 /// engine's conservative [`Limits`] default).
@@ -39,7 +39,7 @@ pub struct Requested {
 
 /// The operator's policy for this host: defaults, ceilings, and postures.
 ///
-/// Every field is optional/false by default, so an absent `.kee.toml` leaves the engine's existing
+/// Every field is optional/false by default, so an absent `.eke.toml` leaves the engine's existing
 /// behavior exactly as it was.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
@@ -75,7 +75,7 @@ pub struct Policy {
 pub enum PolicyError {
     /// A resource request exceeded its ceiling.
     Ceiling {
-        /// The knob's name as an operator writes it in `.kee.toml`.
+        /// The knob's name as an operator writes it in `.eke.toml`.
         knob: &'static str,
         /// What the caller asked for.
         asked: u64,
@@ -98,15 +98,15 @@ impl fmt::Display for PolicyError {
             } => write!(
                 f,
                 "{knob} {asked} exceeds this host's limit of {ceiling} (operator policy: \
-                 `max_{knob}` in .kee.toml)"
+                 `max_{knob}` in .eke.toml)"
             ),
             Self::JailRequired => f.write_str(
                 "this host requires the jail: `--unjailed` is refused (operator policy: \
-                 `require_jail` in .kee.toml)",
+                 `require_jail` in .eke.toml)",
             ),
             Self::NetForbidden => f.write_str(
                 "this host does not permit guest networking: `--net` is refused (operator policy: \
-                 `allow_net = false` in .kee.toml)",
+                 `allow_net = false` in .eke.toml)",
             ),
         }
     }

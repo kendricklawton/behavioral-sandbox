@@ -114,7 +114,7 @@ other could not).
 |---|---|---|
 | Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the supported floor | rolling, comfortably above the floor |
 | `/dev/kvm` | `0660 root:kvm`, so you must join the group | `0666`, usually usable already |
-| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default fails until you set `KEE_SCRATCH_DIR` |
+| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default fails until you set `EKE_SCRATCH_DIR` |
 | `e2fsprogs` | 24.04 ships **1.47.0**, below the 1.47.1 floor where `mke2fs` honours `SOURCE_DATE_EPOCH`, so `cargo xtask build-rootfs --verify` fails (normal builds are fine) | current, above the floor |
 | AppArmor | **enabled by default**, and can deny the jailer in ways that look like an engine bug | not installed by default |
 | Build toolchain | `build-essential` | `base-devel` |
@@ -125,10 +125,10 @@ Test the `/tmp` question rather than trusting the table, since it depends on you
 findmnt -no OPTIONS -T /tmp | tr , '\n' | grep nodev   # prints nodev if you are affected
 ```
 
-If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.kee.toml`:
+If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.eke.toml`:
 
 ```toml
-scratch_dir = "/home/you/kee-scratch"
+scratch_dir = "/home/you/eke-scratch"
 ```
 
 `kee doctor` flags every one of these against your actual host, so treat it as the authority and
@@ -140,7 +140,7 @@ Every release ships one tarball per platform plus `SHA256SUMS`, assembled by `ca
 the `kee` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file
 `MANIFEST.sha256` inside. `install.sh` verifies both layers before touching anything, then installs
 the binary to `~/.local/bin`, the artifacts to `~/.local/share/kee`, and writes a starter
-`~/.kee.toml` (kernel/rootfs paths) if you don't have one:
+`~/.eke.toml` (kernel/rootfs paths) if you don't have one:
 
 ```console
 curl -fsSL https://raw.githubusercontent.com/k-henry-org/kvm-ebpf-engine/main/install.sh | sh
@@ -149,15 +149,15 @@ curl -fsSL https://raw.githubusercontent.com/k-henry-org/kvm-ebpf-engine/main/in
 Offline, or straight from a package you built or downloaded by hand:
 
 ```console
-cargo xtask dist                                            # assemble dist/kee-<ver>-x86_64-linux.tar.gz
-KEE_DIST_TARBALL=dist/kee-<ver>-x86_64-linux.tar.gz sh install.sh
+cargo xtask dist                                            # assemble dist/eke-<ver>-x86_64-linux.tar.gz
+EKE_DIST_TARBALL=dist/eke-<ver>-x86_64-linux.tar.gz sh install.sh
 ```
 
-Knobs (env): `KEE_INSTALL_PREFIX` (binary dir), `KEE_DATA_DIR` (artifact dir), `KEE_VERSION`
-(a specific release), `KEE_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
+Knobs (env): `EKE_INSTALL_PREFIX` (binary dir), `EKE_DATA_DIR` (artifact dir), `EKE_VERSION`
+(a specific release), `EKE_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
 prerequisite (the engine drives it, it doesn't bundle it). eBPF observability needs no configuration:
 the engine finds the installed `probes` object under the data dir on its own, so
-`KEE_PROBES_OBJECT` is only needed if you relocated the install with `KEE_DATA_DIR`.
+`EKE_PROBES_OBJECT` is only needed if you relocated the install with `EKE_DATA_DIR`.
 
 ## Your first run
 
@@ -168,8 +168,8 @@ The one thing worth knowing before you do: a run is **jailed by default**, and t
 root (it creates device nodes in the chroot). So on a normal user account the first command is either
 
 ```console
-sudo -E kee run -- echo hello       # jailed, the supported posture
-kee run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
+sudo -E eke run -- echo hello       # jailed, the supported posture
+eke run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
 ```
 
 There is deliberately no silent fallback between the two: dropping the jail is something you ask for,
@@ -183,7 +183,7 @@ rebuilt filesystem) but never the KVM boundary, which is always the host's:
 
 ```console
 cargo xtask dist
-docker build -f Containerfile --build-arg DIST=dist/kee-<ver>-x86_64-linux -t kee:<ver> .
+docker build -f Containerfile --build-arg DIST=dist/eke-<ver>-x86_64-linux -t kee:<ver> .
 docker run --rm kee:<ver>                                            # doctor: what this host can do
 docker run --rm --device /dev/kvm kee:<ver> run --unjailed -- echo hi
 ```
@@ -211,7 +211,7 @@ To build **offline**, no Firecracker S3 bucket, no Alpine CDN, point it at a ven
 
 ```console
 cargo xtask vendor                                  # snapshot every pinned input into ./vendor
-KEE_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
+EKE_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
 ```
 
 ## Supported platforms
@@ -253,7 +253,7 @@ tracks their supported set.
   reopens it.
 - One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
   systemd default on Arch, and some Ubuntu setups), the jailed default fails because the jailer's
-  chroot `/dev/kvm` there is inert, point `KEE_SCRATCH_DIR` at a non-`nodev` path. `kee doctor`
+  chroot `/dev/kvm` there is inert, point `EKE_SCRATCH_DIR` at a non-`nodev` path. `kee doctor`
   flags this, and reports your own host's arch, kernel, and Firecracker version. See
   [Distro differences](#distro-differences-that-bite) for how to test it and the rest of the
   per-distro list.
@@ -269,7 +269,7 @@ tracks their supported set.
   mitigation, not the isolation boundary, [decision 010](./adr/010-per-run-resource-policy-one-limits-struct-of.md)).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
 - **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
-  `/dev/kvm` is inert, so the jailed default fails to open KVM; set `KEE_SCRATCH_DIR` to a
+  `/dev/kvm` is inert, so the jailed default fails to open KVM; set `EKE_SCRATCH_DIR` to a
   non-`nodev` path (e.g. under `$HOME`), or use `--unjailed`. `kee doctor` flags this.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
@@ -284,7 +284,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
   for CO-RE eBPF, most modern distros ship it.
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on
-  `PATH` or named via `KEE_FIRECRACKER`.
+  `PATH` or named via `EKE_FIRECRACKER`.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
   rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
   loopback, no `sudo`). A missing tool is a clear typed error. The **reproducible** rootfs build
@@ -322,8 +322,8 @@ substitutes. A jailed run therefore looks like this, with `-E` to keep your envi
 explicit scratch dir if `/tmp` is `nodev`:
 
 ```console
-mkdir -p ~/kee-scratch
-sudo -E env KEE_SCRATCH_DIR="$HOME/kee-scratch" "$(command -v kee)" run -- echo hello
+mkdir -p ~/eke-scratch
+sudo -E env EKE_SCRATCH_DIR="$HOME/eke-scratch" "$(command -v kee)" run -- echo hello
 ```
 
 ## Compiling from source
@@ -335,7 +335,7 @@ To drive the individual steps instead, or to work on the engine itself, consult
 [Building](./contributing-building.md), which owns the build toolchain (the Rust version policy, the
 probes crate's pinned nightly and `bpf-linker`), the artifact commands, and the two test gates.
 
-Once you have a binary, head to [Using the kee CLI](./cli.md) to run something.
+Once you have a binary, head to [Using the eke CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 
@@ -351,11 +351,11 @@ cargo xtask vendor --dir /srv/mirror  # populate a mirror elsewhere
 cargo xtask vendor --verify           # re-check an existing mirror against its manifest (offline)
 ```
 
-Then set `KEE_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
+Then set `EKE_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
 
 ```console
-KEE_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
-KEE_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
+EKE_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
+EKE_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
 ```
 
 The mirror is **not** committed (it holds downloaded images, like `artifacts/`); it is a self-hoster's

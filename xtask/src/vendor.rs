@@ -5,7 +5,7 @@
 //! the boot kernel + rootfs (Firecracker CI), the Alpine minirootfs, the static `apk` tool, **and**
 //! the resolved `.apk` package closure are all fetched once, sha-verified, and written under the
 //! vendor dir alongside a [`MANIFEST_NAME`] recording each file's hash. Afterwards, setting
-//! `KEE_VENDOR_DIR` to that dir takes every build path offline: [`fetch_one`](crate::artifacts)
+//! `EKE_VENDOR_DIR` to that dir takes every build path offline: [`fetch_one`](crate::artifacts)
 //! restores the binary artifacts from the mirror, and the rootfs build installs the packages from the
 //! vendored apk cache (`--no-network`) instead of the CDN.
 //!
@@ -32,7 +32,7 @@ pub(crate) fn default_vendor_dir() -> PathBuf {
 
 /// `cargo xtask vendor [--dir DIR]`: download every sha-pinned upstream input into `DIR`, populate
 /// the apk cache with the resolved package closure, and write the sha manifest. Always fetches from
-/// **upstream** (it is what fills the mirror), regardless of any `KEE_VENDOR_DIR` already set.
+/// **upstream** (it is what fills the mirror), regardless of any `EKE_VENDOR_DIR` already set.
 pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
     let dir = dir.unwrap_or_else(default_vendor_dir);
     std::fs::create_dir_all(&dir)
@@ -65,7 +65,7 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("write {}", dir.join(MANIFEST_NAME).display()))?;
 
     println!(
-        "\n✓ vendored {count} files + manifest in {}\n  build offline with: KEE_VENDOR_DIR={} \
+        "\n✓ vendored {count} files + manifest in {}\n  build offline with: EKE_VENDOR_DIR={} \
          cargo xtask self-host",
         dir.display(),
         dir.display()

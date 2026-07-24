@@ -1,4 +1,4 @@
-# 030. The wire API is versioned newline-JSON in a shared `kee-protocol` crate, not gRPC *(2026-07-17)*
+# 030. The wire API is versioned newline-JSON in a shared `eke-protocol` crate, not gRPC *(2026-07-17)*
 
 **Context.** `kee` exposes the engine over a wire API, and that wire is a contract downstream
 depends on: the language SDKs (separate repos) freeze against it, so its shape is a long-lived
@@ -23,12 +23,12 @@ half-understood. The stamp is the seam the SDKs freeze against. (It is distinct 
 record's own `schema`, the CLI's `--json` run-result `schema`, and decision 034's signed-envelope
 `schema`: independent surfaces, independently versioned.)
 
-**Why a shared `kee-protocol` crate (serde-only, no `kee-vmm`).** The wire is the contract, not
+**Why a shared `eke-protocol` crate (serde-only, no `eke-vmm`).** The wire is the contract, not
 shared Rust internals. Putting the `Request`/`Response`/`Envelope` shapes and the bounded line codec
-in their own **engine-free** crate means the daemon and the **reference client** (`kee-client`)
+in their own **engine-free** crate means the daemon and the **reference client** (`eke-client`)
 share one source of truth, while a non-Rust SDK reimplements the same JSON shapes with only a JSON
 library, the proof a caller needs nothing of the engine but the wire. The reference client depends on
-`kee-protocol` and a JSON value **only, never `kee-vmm`**; if it ever linked the engine, that
+`eke-protocol` and a JSON value **only, never `eke-vmm`**; if it ever linked the engine, that
 proof would be void.
 
 **Verb semantics (faithful to the engine, no new machinery).** `put`/`get` write/read a
@@ -46,5 +46,5 @@ default profile); any custom resource knob cold-boots.
 **Scope, unchanged.** Still engine, not platform: no auth (socket-directory permissions are the
 hoster's access control), no tenancy, no billing, no scheduler. The daemon shares nothing with the
 `kee` CLI bin beyond the crate's small shared library (the `audit` composition both bins reuse); the
-pinned `kee-vmm` API (`Sandbox`/`Limits`/`RunResult`/`VmmError`/`channel`) is untouched, the daemon
+pinned `eke-vmm` API (`Sandbox`/`Limits`/`RunResult`/`VmmError`/`channel`) is untouched, the daemon
 only *consumes* it.

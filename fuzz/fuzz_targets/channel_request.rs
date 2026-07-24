@@ -4,5 +4,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    kee_channel::fuzz::decode_request(data);
+    eke_channel::fuzz::decode_request(data);
 });

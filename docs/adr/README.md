@@ -32,10 +32,10 @@ phase), so each stands on its own as the roadmap evolves. The overview and repo 
 - [024. The audit record converges: a shared syscall tracer, a single post-boot attach, and deterministic JSON](./024-the-audit-record-converges-a-shared-syscall-tracer-a.md) *(2026-07-17)*
 - [025. The observability face: the CLI carries the audit surface on flags, the live view draws on stderr](./025-the-observability-face-the-cli-carries-the-audit.md) *(2026-07-17)*
 - [026. `--allow` projects the egress policy: enforcement is a typed refusal, never a degradation](./026-allow-projects-the-egress-policy-enforcement-is-a.md) *(2026-07-17)*
-- [027. The `.kee.toml` config file layer: nearest-up-from-cwd, env-mirrored keys, typos are errors](./027-the-agent-toml-config-file-layer-nearest-up-from-cwd.md) *(2026-07-17)*
+- [027. The `.eke.toml` config file layer: nearest-up-from-cwd, env-mirrored keys, typos are errors](./027-the-agent-toml-config-file-layer-nearest-up-from-cwd.md) *(2026-07-17)*
 - [028. `kee doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them](./028-agent-doctor-shares-one-host-check-implementation-the.md) *(2026-07-17)*
 - [029. The whole security boundary: what's trusted, what the adversary is, and what's assumed sound](./029-the-whole-security-boundary-what-s-trusted-what-the.md) *(2026-07-17)*
-- [030. The wire API is versioned newline-JSON in a shared `kee-protocol` crate, not gRPC](./030-the-wire-api-is-versioned-newline-json-in-a-shared.md) *(2026-07-17)*
+- [030. The wire API is versioned newline-JSON in a shared `eke-protocol` crate, not gRPC](./030-the-wire-api-is-versioned-newline-json-in-a-shared.md) *(2026-07-17)*
 - [031. The AI-scope boundary: the model is always the caller, never an engine component](./031-the-ai-scope-boundary-the-model-is-always-the-caller.md) *(2026-07-17)*
 - [032. Supported platforms: two architectures, a security-maintained host-kernel floor, and pinned upstream versions](./032-supported-platforms-two-architectures-a-security.md) *(2026-07-17)*
 - [033. Single-command self-host + a vendored offline mirror of every pinned input](./033-single-command-self-host-a-vendored-offline-mirror-of.md) *(2026-07-17)*

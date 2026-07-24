@@ -8,13 +8,13 @@
 //!    (parsed with `serde_json::Value`, no access to the daemon's Rust types), the proof the wire is
 //!    hand-debuggable and every message carries its `schema`.
 //! 2. [`the_reference_client_drives_a_full_session`] drives the same daemon through the **reference
-//!    client** ([`kee_client::Client`]), the proof a caller needs only the wire contract
-//!    (the client links no `kee-vmm`).
+//!    client** ([`eke_client::Client`]), the proof a caller needs only the wire contract
+//!    (the client links no `eke-vmm`).
 //! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agent --prewarm 1` and asserts a bare
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the agent
-//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p kee-cli -- --ignored`. Unjailed
+//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p eke-cli -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use kee_client::{Client, OpenOptions};
+use eke_client::{Client, OpenOptions};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -39,7 +39,7 @@ fn skip_reason() -> Option<String> {
     if !std::path::Path::new("/dev/kvm").exists() {
         return Some("/dev/kvm not present".into());
     }
-    if !workspace_root().join("artifacts/rootfs-kee.ext4").is_file() {
+    if !workspace_root().join("artifacts/rootfs-eke.ext4").is_file() {
         return Some("guest rootfs not built (run `cargo xtask build-rootfs`)".into());
     }
     None
@@ -114,17 +114,17 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     if let Some(port) = metrics_port {
         cmd.arg("--metrics").arg(format!("127.0.0.1:{port}"));
     }
-    cmd.env("KEE_ROOTFS", root.join("artifacts/rootfs-kee.ext4"))
+    cmd.env("EKE_ROOTFS", root.join("artifacts/rootfs-eke.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("KEE_MARKER", kee_vmm::GUEST_READY_MARKER)
+        .env("EKE_MARKER", eke_vmm::GUEST_READY_MARKER)
         // Keep the daemon's generated record-signing key inside the test's socket dir.
-        .env("KEE_SIGNING_KEY", dir.join("signing.key"))
-        .env("KEE_LOG", "warn")
+        .env("EKE_SIGNING_KEY", dir.join("signing.key"))
+        .env("EKE_LOG", "warn")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    if std::env::var_os("KEE_KERNEL").is_none() {
-        cmd.env("KEE_KERNEL", root.join("artifacts/vmlinux"));
+    if std::env::var_os("EKE_KERNEL").is_none() {
+        cmd.env("EKE_KERNEL", root.join("artifacts/vmlinux"));
     }
     let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn kee: {e}"));
     let daemon = Daemon { child, dir };
@@ -304,11 +304,11 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     // the shape check). Envelope-level field order doesn't matter to `verify`; the signed bytes are
     // the embedded record string, which survives the reply's serde round-trip (decision 034).
     let envelope = serde_json::to_string(&traced["record"]).expect("re-serialize envelope");
-    let signer = kee_probes_loader::TrustedKey::from_hex(
+    let signer = eke_probes_loader::TrustedKey::from_hex(
         traced["record"]["key_id"].as_str().expect("key_id string"),
     )
     .expect("key_id parses as an ed25519 public key");
-    kee_probes_loader::verify(&envelope, &[signer])
+    eke_probes_loader::verify(&envelope, &[signer])
         .expect("the daemon's signed record verifies against the key it names");
     let inner: serde_json::Value =
         serde_json::from_str(traced["record"]["record"].as_str().expect("record string"))
@@ -333,7 +333,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let traced2 = client.recv();
     assert_eq!(
         traced2["record"]["prev"].as_str(),
-        Some(kee_probes_loader::record_hash(&first_record).as_str()),
+        Some(eke_probes_loader::record_hash(&first_record).as_str()),
         "the second trace commits to the first record's hash: {traced2}"
     );
 
@@ -405,30 +405,30 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let scraped = loop {
         let body = scrape_metrics(metrics_port);
-        if body.contains("kee_sessions_active 0") || Instant::now() >= deadline {
+        if body.contains("eke_sessions_active 0") || Instant::now() >= deadline {
             break body;
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
-        scraped.contains("kee_sessions_opened_total{pooled=\"false\"} 2"),
+        scraped.contains("eke_sessions_opened_total{pooled=\"false\"} 2"),
         "{scraped}"
     );
-    assert!(scraped.contains("kee_sessions_active 0"), "{scraped}");
+    assert!(scraped.contains("eke_sessions_active 0"), "{scraped}");
     assert!(
-        scraped.contains("kee_requests_total{verb=\"put\"} 1"),
-        "{scraped}"
-    );
-    assert!(
-        scraped.contains("kee_requests_total{verb=\"snapshot\"} 1"),
+        scraped.contains("eke_requests_total{verb=\"put\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("kee_request_errors_total{kind=\"guest\"} 1"),
+        scraped.contains("eke_requests_total{verb=\"snapshot\"} 1"),
         "{scraped}"
     );
-    assert!(scraped.contains("kee_protocol_errors_total 1"), "{scraped}");
-    assert!(scraped.contains("kee_boot_seconds_count 2"), "{scraped}");
+    assert!(
+        scraped.contains("eke_request_errors_total{kind=\"guest\"} 1"),
+        "{scraped}"
+    );
+    assert!(scraped.contains("eke_protocol_errors_total 1"), "{scraped}");
+    assert!(scraped.contains("eke_boot_seconds_count 2"), "{scraped}");
 }
 
 #[test]
@@ -505,7 +505,7 @@ fn the_reference_client_drives_a_full_session() {
 }
 
 #[test]
-#[ignore = "spawns kee --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns eke --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_prewarmed_open_is_served_from_the_pool() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_prewarmed_open_is_served_from_the_pool: {why}");

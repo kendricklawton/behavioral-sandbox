@@ -10,11 +10,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kee_vmm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID};
+use eke_vmm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID};
 
 /// The shared scratch-dir guard (removed on drop). `new` reserves the path without creating it, the
 /// semantics these integration tests rely on (a snapshot bundle / output dir the driver creates).
-pub use kee_test_support::ScratchDir as TmpDir;
+pub use eke_test_support::ScratchDir as TmpDir;
 
 /// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep, mirrors the input test's
 /// host-side hash of the injected payload). A free helper (not a `#[test]` fn), so it uses explicit
@@ -46,15 +46,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A boot config pointed at the workspace's fetched artifacts (absolute, so it's cwd-independent).
-/// Explicit `KEE_KERNEL`/`KEE_ROOTFS` overrides still win, they're the documented escape
+/// Explicit `EKE_KERNEL`/`EKE_ROOTFS` overrides still win, they're the documented escape
 /// hatch for hosts without the pinned artifacts (e.g. non-x86_64).
 pub fn config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("KEE_KERNEL").is_none() {
+    if std::env::var_os("EKE_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    if std::env::var_os("KEE_ROOTFS").is_none() {
+    if std::env::var_os("EKE_ROOTFS").is_none() {
         cfg.rootfs = root.join("artifacts/rootfs.ext4");
     }
     // The Ubuntu CI rootfs is the exception to the agent-marker default: its readiness line is
@@ -65,15 +65,15 @@ pub fn config() -> BootConfig {
 }
 
 /// A boot config pointed at the **guest rootfs** (`cargo xtask build-rootfs`): readiness is the
-/// agent's post-bind marker, and vsock is on. Deliberately not `KEE_ROOTFS`-overridable, the
+/// agent's post-bind marker, and vsock is on. Deliberately not `EKE_ROOTFS`-overridable, the
 /// in-VM exec tests are about *that* image specifically.
-pub fn kee_rootfs_config() -> BootConfig {
+pub fn eke_rootfs_config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("KEE_KERNEL").is_none() {
+    if std::env::var_os("EKE_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    cfg.rootfs = root.join("artifacts/rootfs-kee.ext4");
+    cfg.rootfs = root.join("artifacts/rootfs-eke.ext4");
     cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     // Read-only shared base + a per-run tmpfs overlay: `/` is writable in-guest but the base
     // file is never mutated. This is what makes the agent's `/tmp` working dir usable, so the exec
@@ -90,7 +90,7 @@ pub fn kee_rootfs_config() -> BootConfig {
 /// which is enough to reach the agent's readiness marker and serve an exec. Needs real root (see
 /// [`have_jailer_privileges`]).
 pub fn jailed_agent_config() -> BootConfig {
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.read_only_root = false;
     cfg.jail = Some(Jail::default());
     cfg
@@ -98,10 +98,10 @@ pub fn jailed_agent_config() -> BootConfig {
 
 /// The guest rootfs booted **under the jailer** on the **shared-base path**: `read_only_root` (the shared
 /// base bind-mounted into the chroot, guest tmpfs overlay) plus the vsock exec channel. This is the
-/// jailed counterpart of [`kee_rootfs_config`], which it inherits `read_only_root = true` from, only
+/// jailed counterpart of [`eke_rootfs_config`], which it inherits `read_only_root = true` from, only
 /// adding the jail. Needs real root (see [`have_jailer_privileges`]).
 pub fn jailed_overlay_config() -> BootConfig {
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.jail = Some(Jail::default());
     cfg
 }
@@ -111,8 +111,8 @@ pub fn jailed_overlay_config() -> BootConfig {
 /// latency alongside the bundle so callers can compare it to restore.
 // A free helper (not a `#[test]` fn), so it uses explicit `panic!` rather than `.expect()`, which the
 // workspace lints only re-allow inside test functions.
-pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (kee_vmm::Snapshot, Duration) {
-    let source = match Vm::boot(kee_rootfs_config()) {
+pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (eke_vmm::Snapshot, Duration) {
+    let source = match Vm::boot(eke_rootfs_config()) {
         Ok(vm) => vm,
         Err(e) => panic!("agent microVM should boot: {e}"),
     };
@@ -153,7 +153,7 @@ pub fn cgroup_of(pid: u32) -> Option<PathBuf> {
 /// audited `CapEff` parse (which reads only the low 64 bits, so a wider future field can't read a
 /// capable host as incapable and silently skip these tests).
 pub fn have_net_admin() -> bool {
-    kee_test_support::have_cap(kee_test_support::CAP_NET_ADMIN)
+    eke_test_support::have_cap(eke_test_support::CAP_NET_ADMIN)
 }
 
 /// Whether this process can run the **jailer**: effective uid 0 **in the initial user namespace**.
@@ -167,5 +167,5 @@ pub fn have_jailer_privileges() -> bool {
     let init_userns = std::fs::read_to_string("/proc/self/uid_map")
         .ok()
         .is_some_and(|m| m.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"]);
-    kee_test_support::have_real_root() && init_userns
+    eke_test_support::have_real_root() && init_userns
 }

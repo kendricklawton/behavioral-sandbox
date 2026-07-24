@@ -31,7 +31,7 @@ actually hold it.
   the sweep (a self-refilling janitor daemon is platform work, not the library); (2) run *one sweep
   per identity*, since it reclaims only the calling euid's residue (the direct, correct consequence of
   the anti-weaponization rule, a root sweep covering a user driver's dirs would *be* the hole);
-  (3) *harden the scratch base* (point `KEE_SCRATCH_DIR` at an engine-user-owned dir so no decoy can be
+  (3) *harden the scratch base* (point `EKE_SCRATCH_DIR` at an engine-user-owned dir so no decoy can be
   planted at all); (4) *divide the finite `10.200/16` pool* across tenants (quota/fairness is carving a
   shared resource, the definition of the PaaS layer above the engine). ***(Obligation 4 was retired by
   decision 014: every VM reuses one fixed /30 inside its own netns, so there is no address pool to

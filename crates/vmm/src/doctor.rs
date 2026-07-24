@@ -115,22 +115,22 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         ),
         // The boot artifacts, hard: nothing boots without a kernel + rootfs at the configured paths.
         Check::new(
-            "guest kernel present (KEE_KERNEL)",
+            "guest kernel present (EKE_KERNEL)",
             config.kernel.is_file(),
             false,
-            "no kernel to boot: `cargo xtask fetch-artifacts`, or point KEE_KERNEL at one",
+            "no kernel to boot: `cargo xtask fetch-artifacts`, or point EKE_KERNEL at one",
         ),
         Check::new(
-            "guest rootfs present (KEE_ROOTFS)",
+            "guest rootfs present (EKE_ROOTFS)",
             config.rootfs.is_file(),
             false,
-            "no rootfs to boot: build one (`cargo xtask build-rootfs`) or set KEE_ROOTFS",
+            "no rootfs to boot: build one (`cargo xtask build-rootfs`) or set EKE_ROOTFS",
         ),
         Check::new(
             &format!("firecracker on PATH ({fc})"),
             command_on_path(&fc),
             false,
-            "no VMM to launch: install Firecracker v1.9, or set KEE_FIRECRACKER",
+            "no VMM to launch: install Firecracker v1.9, or set EKE_FIRECRACKER",
         ),
         // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
@@ -166,7 +166,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             !scratch_is_nodev(&config.scratch_dir).unwrap_or(false),
             true,
             "jailed boot (the default) fails: the scratch filesystem is mounted `nodev`, so the \
-             jailer's chroot /dev/kvm cannot be opened; point KEE_SCRATCH_DIR at a non-nodev path \
+             jailer's chroot /dev/kvm cannot be opened; point EKE_SCRATCH_DIR at a non-nodev path \
              (e.g. under $HOME), or use `--unjailed`",
         ),
         // Networking + bulk-I/O tooling, fails open: only the runs that use them need them.
@@ -200,7 +200,7 @@ pub fn matrix() -> Vec<&'static str> {
         "  firecracker not v1.9         -> boots continue; API bodies may not match (ADR 001)",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (ADR 010)",
-        "  scratch dir is nodev         -> jailed /dev/kvm can't open; point KEE_SCRATCH_DIR off nodev",
+        "  scratch dir is nodev         -> jailed /dev/kvm can't open; point EKE_SCRATCH_DIR off nodev",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
         "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
@@ -414,7 +414,7 @@ mod tests {
         );
         // A scratch dir under $HOME is not nodev, the recommended fix.
         assert_eq!(
-            mount_nodev_in(mi, Path::new("/home/k/.kee-scratch")),
+            mount_nodev_in(mi, Path::new("/home/k/.eke-scratch")),
             Some(false)
         );
         // Longest-prefix wins: `/tmp` (nodev), not the `/` root it also sits under.

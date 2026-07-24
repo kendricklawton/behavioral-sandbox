@@ -50,7 +50,7 @@ the sandbox's netns while the rest of the loader stays in the host netns.
 - **The two tracks stay decoupled by plain values.** The loader takes a **netns name** and an
   **interface name** (`String`s), which the driver hands over via `Sandbox::netns`/`Sandbox::tap_name`
   (added here, additive `api:`); `probes-loader` gains no dependency on `vmm`. The end-to-end test uses
-  `kee-vmm` as a **dev-dependency** only.
+  `eke-vmm` as a **dev-dependency** only.
 - **`nix` is MIT** (already in the license allow-list) and pulled with default features off, `sched`
   only. First `nix`/`setns` use in the tree.
 - The userspace export surface (`flows` per 5-tuple, `totals` as the per-VM `NetStats` rollup) feeds

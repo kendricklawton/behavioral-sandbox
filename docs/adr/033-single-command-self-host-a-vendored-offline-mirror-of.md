@@ -18,14 +18,14 @@ The **vendoring** half closes the item decision 007 deferred: `cargo xtask vendo
 sha-pinned upstream input, the Firecracker CI kernel + rootfs, the Alpine minirootfs, the static
 `apk` tool, **and** the resolved `.apk` package closure (the piece decision 007 flagged as
 "fetched-not-pinned"), into a local mirror, sha-verified, with a `vendor-manifest.txt` recording
-each file's hash. Setting `KEE_VENDOR_DIR` to that dir takes every build path offline in one move:
+each file's hash. Setting `EKE_VENDOR_DIR` to that dir takes every build path offline in one move:
 `fetch_one` restores the binary artifacts from the mirror instead of `curl`ing them, and the rootfs
 build installs the packages from the vendored apk cache (`apk.static --cache-dir … --no-network`)
 instead of the Alpine CDN. So a fresh host builds with the FC S3 bucket and the Alpine CDN both dark.
 
 Mechanics that matter:
 - **The vendor-aware seam is `fetch_one`, not the call sites.** `fetch_one` branches on
-  `KEE_VENDOR_DIR` (restore-from-mirror vs `download_one`); `build-rootfs`, `fetch-artifacts`, and
+  `EKE_VENDOR_DIR` (restore-from-mirror vs `download_one`); `build-rootfs`, `fetch-artifacts`, and
   `self-host` all route through it, so offline mode is one env var with zero call-site churn.
 - **The `.apk` closure is pinned at vendor time, not in the tree.** `apk` branch repos delete old
   revisions on every bump (decision 007), so there is no stable per-package URL to hash-pin in

@@ -35,7 +35,7 @@ missing before the first sandbox.
 ```console
 git clone https://github.com/k-henry-org/kvm-ebpf-engine && cd kvm-ebpf-engine
 cargo xtask self-host                                   # build + install kee, boot a proof sandbox
-kee run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
+eke run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
 ```
 
 `--unjailed` is the explicit opt-out from the default jailer for a dev box without real root; the
@@ -49,7 +49,7 @@ The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook, `mdbook serve docs`, o
 Markdown in place):
 
 - **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
-- **[Using the kee CLI](docs/cli.md)**, how to run the engine:
+- **[Using the eke CLI](docs/cli.md)**, how to run the engine:
   [installation](docs/cli-install.md), building the guest artifacts, `kee run`, `kee shell`.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract: the `Sandbox`
   lifecycle, budgets, typed errors, snapshots/pool, and the engine's deliberate non-goals.
@@ -81,7 +81,7 @@ record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `kee
 
 **Pre-1.0 and unstable, expect breaking changes.** Until the first stable release, nothing here
 carries a compatibility guarantee: the `Sandbox`/`vmm` API, the `kee serve` wire protocol (and its
-`kee-protocol` crate), the audit-log/record format, and the crate names can all change without
+`eke-protocol` crate), the audit-log/record format, and the crate names can all change without
 notice. If you build on it, pin to a specific git rev. A first stable release is planned but **not yet scheduled**, and there is a long road of breaking
 work before it. The project is developed by a small group: **only project collaborators commit code**
 (the repo is not open to outside pull requests yet, see [CONTRIBUTING](CONTRIBUTING.md)).
@@ -112,7 +112,7 @@ isolation *plus* out-of-guest observability and enforcement, is the whole idea.
 |------|------|
 | `crates/vmm` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
 | `crates/channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
-| `crates/guest-agent` | The in-guest agent (`kee-guest`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, never the trust boundary. |
+| `crates/guest-agent` | The in-guest agent (`eke-guest`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, never the trust boundary. |
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |

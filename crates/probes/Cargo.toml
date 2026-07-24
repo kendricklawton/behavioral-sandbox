@@ -4,7 +4,7 @@
 # (`.cargo/config.toml`). The host workspace stays on stable and never compiles this crate; its object
 # is built separately by `cargo xtask build-probes`.
 [package]
-name = "kee-probes"
+name = "eke-probes"
 version = "0.1.0"
 edition = "2021"
 # Excluded from the workspace (builds for `bpfel-unknown-none`, not the host triple), so its package
@@ -23,7 +23,7 @@ aya-ebpf = "0.1"
 
 # The wire record written into the ring buffer (`SyscallEvent`), shared with the userspace reader so
 # the two sides can't drift. `no_std`, no default features: the BPF side never wants `std`.
-kee-probes-common = { path = "../probes-common", default-features = false }
+eke-probes-common = { path = "../eke-probes-common", default-features = false }
 
 # One object per program set, linked by `bpf-linker` for `bpfel-unknown-none`: the syscall
 # tracepoints, the tc flow/egress programs, and the accounting probe ride together (splitting into

@@ -12,7 +12,7 @@ the in-guest agent that carries exec/IO must stay convenience, never the thing t
 
 **Decision.** The guest rootfs is **built, not fetched**: `cargo xtask build-rootfs` extracts a
 **sha256-pinned Alpine minirootfs** (a real musl + busybox userland), bakes the static guest agent
-in at `/usr/local/bin/kee-guest`, installs a minimal init, and assembles an ext4 image
+in at `/usr/local/bin/eke-guest`, installs a minimal init, and assembles an ext4 image
 (`artifacts/rootfs-kee.ext4`) with **`mke2fs -d`**, populating the filesystem from a staging dir
 with **no root and no loopback mount**. A *distinct* output from the pinned Ubuntu boot rootfs, so
 the `ci-privileged` hash-guard and the `login:` boot test are untouched. Two hard-to-reverse pieces
@@ -20,7 +20,7 @@ ride along:
 
 - **Init model: busybox `init` is PID 1**, with a custom `/etc/inittab` (replacing Alpine's OpenRC)
   that mounts `devtmpfs`/`proc`/`sysfs` in `sysinit` and `respawn`s the agent on vsock port 1024
-  (`KEE_VSOCK_PORT`) attached to `ttyS0`. The agent is deliberately **not** PID 1: it has no
+  (`EKE_VSOCK_PORT`) attached to `ttyS0`. The agent is deliberately **not** PID 1: it has no
   orphan-reaping loop (a killed command's grandchildren reparent to PID 1, busybox reaps them; the
   `forbid(unsafe_code)` agent would leak zombies), and a PID-1 crash panics the kernel, which must
   never be the fate of the respawnable exec surface.

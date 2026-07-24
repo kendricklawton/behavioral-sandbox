@@ -1,5 +1,5 @@
 [package]
-name = "kee-vmm"
+name = "eke-vmm"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -17,16 +17,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 # The host↔guest exec channel: the driver speaks the shared protocol over Firecracker's vsock.
-kee-channel = { path = "../channel" }
+eke-channel = { path = "../eke-channel" }
 
 [dev-dependencies]
 # The round-trip channel test runs the real guest agent behind a fake vsock socket, no VM needed.
-kee-guest = { path = "../guest-agent" }
+eke-guest-agent = { path = "../eke-guest-agent" }
 # The secret-hygiene leak test captures everything both sides log during an exec and greps it.
 tracing-subscriber = { workspace = true }
 # Cross-crate test helpers (the cgroup-cap harness, host-capability probes), shared with the loader's
 # privileged tests so they aren't copy-pasted. Dev-only, never shipped.
-kee-test-support = { path = "../test-support" }
+eke-test-support = { path = "../eke-test-support" }
 
 [lints]
 workspace = true

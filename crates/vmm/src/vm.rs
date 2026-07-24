@@ -20,7 +20,7 @@ use std::process::Child;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
-use kee_channel::ClientConnection;
+use eke_channel::ClientConnection;
 
 use crate::console::Console;
 use crate::drives::{collect_output_image, OutputDevice};
@@ -45,12 +45,12 @@ use crate::{Limits, RunResult, VmmError};
 const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
 
 /// Substring that marks the guest reached userspace. The default is the **guest rootfs's** ready
-/// sentinel, printed by `kee-guest` once its vsock listener accepts: that image is what the
+/// sentinel, printed by `eke-guest` once its vsock listener accepts: that image is what the
 /// engine builds, what `Sandbox` needs (exec requires the in-guest agent), and what every product
 /// path boots, so the default must match it, a caller pointing at it must not need to also know a
 /// marker. The exception is the pinned Ubuntu CI rootfs (raw boot tests only), whose readiness is
-/// its getty prompt: those callers set `login:` explicitly (or via `KEE_MARKER`).
-const DEFAULT_USERSPACE_MARKER: &str = kee_channel::GUEST_READY_MARKER;
+/// its getty prompt: those callers set `login:` explicitly (or via `EKE_MARKER`).
+const DEFAULT_USERSPACE_MARKER: &str = eke_channel::GUEST_READY_MARKER;
 
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
 pub(crate) static VM_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -62,10 +62,10 @@ pub(crate) const FC_STDERR: &str = "fc.stderr";
 /// the exec channel; overridable per-VM via [`BootConfig::guest_cid`].
 pub const DEFAULT_GUEST_CID: u32 = 3;
 
-/// The vsock port the in-guest agent listens on for exec connections, defined in `kee-channel`
+/// The vsock port the in-guest agent listens on for exec connections, defined in `eke-channel`
 /// (it's a host↔guest contract value: the rootfs build writes it into the guest's init line, and
 /// the host dials it through Firecracker's vsock unix socket). Re-exported here for callers.
-pub use kee_channel::KEE_VSOCK_PORT;
+pub use eke_channel::EKE_VSOCK_PORT;
 
 /// The vsock unix socket Firecracker creates in the scratch dir; the host connects here and speaks
 /// the `CONNECT <port>` handshake to reach a guest port.
@@ -83,7 +83,7 @@ pub(crate) const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
-/// baseline, [`from_env`](BootConfig::from_env) layers the `KEE_*` overrides on top, and
+/// baseline, [`from_env`](BootConfig::from_env) layers the `EKE_*` overrides on top, and
 /// [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget onto the resource knobs.
 /// `#[non_exhaustive]`: construct via [`from_env`](BootConfig::from_env) /
 /// [`default`](BootConfig::default) and mutate fields, new features add knobs (tap, jailer,
@@ -134,14 +134,14 @@ pub struct BootConfig {
     /// A host directory to inject as **bulk read-only input**: the driver builds an ext4 from
     /// it and attaches it as a second block device (`/dev/vdb`, `O_RDONLY`); the guest rootfs mounts
     /// it at `/input`, so a command reads it as `/input/...`. This is the whole-working-dir /
-    /// large-file path, the vsock channel's [`Request::PutFile`](kee_channel::Request::PutFile) carries only small per-frame files.
+    /// large-file path, the vsock channel's [`Request::PutFile`](eke_channel::Request::PutFile) carries only small per-frame files.
     /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
     pub input_dir: Option<PathBuf>,
     /// A host directory to receive **bulk output**: the driver attaches a blank, **writable**
     /// ext4 as a third block device (`/dev/vd?`, labelled `kee-output`); the guest rootfs mounts it
     /// read-write at `/output`, so a command's files under `/output/...` are pulled back here by
     /// [`RunningVm::collect_outputs`]. This is the whole-working-dir / large-file counterpart to the
-    /// vsock channel's per-frame [`Response::File`](kee_channel::Response::File) artifacts. `None` (the default) attaches no output
+    /// vsock channel's per-frame [`Response::File`](eke_channel::Response::File) artifacts. `None` (the default) attaches no output
     /// device. Readback needs `e2fsck` + `debugfs` (e2fsprogs) on the host; the directory is created
     /// if missing and receives the guest's `/output` tree (host-escaping symlinks are dropped).
     pub output_dir: Option<PathBuf>,
@@ -170,11 +170,11 @@ pub struct BootConfig {
     /// a run the host can't cap is a typed [`VmmError::LimitsUnavailable`], not a silently-uncapped
     /// one. A host posture, not a per-run quantity (so it lives here, not on [`Limits`]) and not
     /// client-settable over the wire (the daemon fixes it, like the jail). Layered
-    /// `flag > env (KEE_REQUIRE_LIMITS) > file > default` at the CLI.
+    /// `flag > env (EKE_REQUIRE_LIMITS) > file > default` at the CLI.
     pub require_limits: bool,
-    /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/kee-<pid>-<n>`), holding the
+    /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/eke-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
-    /// (overridable via `KEE_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
+    /// (overridable via `EKE_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
     /// often `tmpfs` (host RAM), so a read-write boot's full-rootfs copy is charged to RAM, on a
     /// small box that alone can exhaust memory (or `ENOSPC` a small tmpfs) and fail the boot. Point
     /// this at real disk to bound RAM use, or prefer [`read_only_root`](BootConfig::read_only_root),
@@ -184,8 +184,8 @@ pub struct BootConfig {
 }
 
 impl BootConfig {
-    /// Layer the environment overrides, `KEE_FIRECRACKER`, `KEE_KERNEL`, `KEE_ROOTFS`,
-    /// `KEE_MARKER`, `KEE_SCRATCH_DIR`, `KEE_REQUIRE_LIMITS`, onto [`BootConfig::default`]. The
+    /// Layer the environment overrides, `EKE_FIRECRACKER`, `EKE_KERNEL`, `EKE_ROOTFS`,
+    /// `EKE_MARKER`, `EKE_SCRATCH_DIR`, `EKE_REQUIRE_LIMITS`, onto [`BootConfig::default`]. The
     /// resource *quantities* (`vcpus`, `mem_mib`, `boot_timeout`) have no env key; they come from
     /// [`Limits`] via [`with_limits`](BootConfig::with_limits). `require_limits` is a host **posture**,
     /// not a quantity, so it does take an env key here.
@@ -194,30 +194,30 @@ impl BootConfig {
     }
 
     /// The composable core of [`from_env`](BootConfig::from_env): every override comes through
-    /// `lookup`, keyed by the `KEE_*` env name. Two uses: precedence is unit-testable without
+    /// `lookup`, keyed by the `EKE_*` env name. Two uses: precedence is unit-testable without
     /// mutating the process environment (which races under the parallel runner and is `unsafe` from
     /// edition 2024); and a caller can **layer another source under the environment** by returning
-    /// the real env var if set, else its own value, e.g. the CLI's `.kee.toml` file layer resolves
+    /// the real env var if set, else its own value, e.g. the CLI's `.eke.toml` file layer resolves
     /// `env > file > defaults` by composing `std::env::var_os(key).or_else(|| file.get(key))`.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
         let mut cfg = Self::default();
-        if let Some(v) = lookup("KEE_FIRECRACKER") {
+        if let Some(v) = lookup("EKE_FIRECRACKER") {
             cfg.firecracker = PathBuf::from(v);
         }
-        if let Some(v) = lookup("KEE_KERNEL") {
+        if let Some(v) = lookup("EKE_KERNEL") {
             cfg.kernel = PathBuf::from(v);
         }
-        if let Some(v) = lookup("KEE_ROOTFS") {
+        if let Some(v) = lookup("EKE_ROOTFS") {
             cfg.rootfs = PathBuf::from(v);
         }
         // Strict UTF-8 like `env::var`: a non-UTF-8 marker can't be searched for anyway.
-        if let Some(v) = lookup("KEE_MARKER").and_then(|v| v.into_string().ok()) {
+        if let Some(v) = lookup("EKE_MARKER").and_then(|v| v.into_string().ok()) {
             cfg.userspace_marker = v;
         }
-        if let Some(v) = lookup("KEE_SCRATCH_DIR") {
+        if let Some(v) = lookup("EKE_SCRATCH_DIR") {
             cfg.scratch_dir = PathBuf::from(v);
         }
-        if let Some(v) = lookup("KEE_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
+        if let Some(v) = lookup("EKE_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
             cfg.require_limits = v;
         }
         cfg
@@ -237,9 +237,9 @@ impl BootConfig {
     }
 }
 
-/// Parse an `KEE_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
+/// Parse an `EKE_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
 /// value is `None` (the caller keeps the default) rather than a silent `false`, so a typo'd
-/// `KEE_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
+/// `EKE_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
 fn parse_env_bool(v: &std::ffi::OsStr) -> Option<bool> {
     match v.to_str()?.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -604,7 +604,7 @@ impl RunningVm {
     /// specifically [`VmmError::GuestUnavailable`], so the pool can discard it and serve another.
     /// Deliberately short-deadlined: an idle, healthy agent accepts immediately.
     pub(crate) fn probe_agent(&self) -> Result<(), VmmError> {
-        connect_agent_at(self.require_vsock()?, KEE_VSOCK_PORT, PROBE_TIMEOUT).map(|_| ())
+        connect_agent_at(self.require_vsock()?, EKE_VSOCK_PORT, PROBE_TIMEOUT).map(|_| ())
     }
 
     /// The Firecracker vsock socket, or a typed error naming the fix if the VM was booted without a
@@ -679,7 +679,7 @@ impl RunningVm {
         // silent guest can't park us.
         let budget = self.exec_wall;
         let wall = budget.saturating_add(EXEC_KILL_SLACK);
-        let mut conn = connect_agent_at(uds, KEE_VSOCK_PORT, wall)?;
+        let mut conn = connect_agent_at(uds, EKE_VSOCK_PORT, wall)?;
         run_exec(
             &mut conn,
             argv,
@@ -894,7 +894,7 @@ pub(crate) fn reclaim_scratch_after_tap_failure(workdir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kee_test_support::ScratchDir;
+    use eke_test_support::ScratchDir;
 
     #[test]
     fn reclaim_scratch_removes_the_dir_when_there_is_no_netns() {
@@ -975,14 +975,14 @@ mod tests {
 
     #[test]
     fn require_limits_reads_from_the_environment() {
-        // `from_env_with` layers `KEE_REQUIRE_LIMITS` (a posture, not a resource quantity) onto the
+        // `from_env_with` layers `EKE_REQUIRE_LIMITS` (a posture, not a resource quantity) onto the
         // default `false`, tolerant of spelling/case; an unrecognized value keeps the default.
-        let on = BootConfig::from_env_with(|k| (k == "KEE_REQUIRE_LIMITS").then(|| "TRUE".into()));
+        let on = BootConfig::from_env_with(|k| (k == "EKE_REQUIRE_LIMITS").then(|| "TRUE".into()));
         assert!(on.require_limits);
-        let off = BootConfig::from_env_with(|k| (k == "KEE_REQUIRE_LIMITS").then(|| "0".into()));
+        let off = BootConfig::from_env_with(|k| (k == "EKE_REQUIRE_LIMITS").then(|| "0".into()));
         assert!(!off.require_limits);
         let typo =
-            BootConfig::from_env_with(|k| (k == "KEE_REQUIRE_LIMITS").then(|| "ture".into()));
+            BootConfig::from_env_with(|k| (k == "EKE_REQUIRE_LIMITS").then(|| "ture".into()));
         assert!(
             !typo.require_limits,
             "an unrecognized value keeps the default"
@@ -1004,8 +1004,8 @@ mod tests {
     fn from_env_layers_overrides_onto_defaults() {
         // Injected lookup, not `set_var`: no process-global mutation, no parallel-test race.
         let cfg = BootConfig::from_env_with(|key| match key {
-            "KEE_KERNEL" => Some("/elsewhere/vmlinux".into()),
-            "KEE_MARKER" => Some("guest-ready".into()),
+            "EKE_KERNEL" => Some("/elsewhere/vmlinux".into()),
+            "EKE_MARKER" => Some("guest-ready".into()),
             _ => None,
         });
         assert_eq!(cfg.kernel, PathBuf::from("/elsewhere/vmlinux"));
@@ -1019,7 +1019,7 @@ mod tests {
     fn scratch_dir_defaults_to_tmp_and_honors_the_env_override() {
         assert_eq!(BootConfig::default().scratch_dir, PathBuf::from("/tmp"));
         let cfg = BootConfig::from_env_with(|k| {
-            (k == "KEE_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
+            (k == "EKE_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
         });
         assert_eq!(cfg.scratch_dir, PathBuf::from("/mnt/disk/scratch"));
     }

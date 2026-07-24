@@ -455,7 +455,7 @@ Give the microVM a network with per-VM isolation, the classic tap/bridge setup.
       v4 /30 (`net.rs`), and the guest end `fd00:200::2/64` reaches the guest via a new
       `kee_guest_ip6=<addr>/<plen>` kernel-cmdline token (`ip=`/`CONFIG_IP_PNP` is v4-only): a
       `/sbin/net-up` sysinit step reads it from `/proc/cmdline` and assigns it, best-effort (`ip` then
-      `ifconfig`). The token key is single-sourced in `kee-channel` so the driver's writer and the
+      `ifconfig`). The token key is single-sourced in `eke-channel` so the driver's writer and the
       guest's reader can't drift. Deny-by-default holds by construction: only the connected /64 route
       is added, never a v6 default route, the v6 twin of the /30. Teardown is unchanged (`ip netns del`
       cascades both). `RunningVm::host_ip6()`/`guest_ip6()` expose the ends. Host-verified: net address
@@ -1078,7 +1078,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       clap-validated, values never logged), `--put <file>` injects host files, `--get <path>`
       requests artifacts and writes them under the cwd (absolute/`..` names refused), and
       `--wall` / `--output-cap` surface the P7.3 knobs; jailed by default with `--unjailed` as
-      the loud opt-out, and exec still needs the guest rootfs (`KEE_ROOTFS`/`KEE_MARKER`).
+      the loud opt-out, and exec still needs the guest rootfs (`EKE_ROOTFS`/`EKE_MARKER`).
       `kee shell` replaces its "not implemented" stub with an interactive **stateful session** on
       one held-open sandbox: one `sh -c` exec per line, prompt and diagnostics on stderr, command
       output on stdout, files persisting across lines (P7.2; shell *process* state like `cd` does
@@ -1152,10 +1152,10 @@ The eBPF foundation: build, load, and read a map from a trivial program.
       built object carries the `tracepoint` program section, the `maps` section (`EXECVE_COUNT`), and
       the relocation linking them.)*
 - [x] **P8.3** Loader attaches it, reads the map, prints counts.
-      *(Landed: `kee-probes-loader`'s `ExecveCounter::{load, count}` (aya, userspace, sync) loads
+      *(Landed: `eke-probes-loader`'s `ExecveCounter::{load, count}` (aya, userspace, sync) loads
       the object, attaches the tracepoint, and sums the per-CPU slots; a typed `ProbeError` (the
       loader's `VmmError`) on every failure. The object is a runtime-loaded build artifact found by
-      path (`KEE_PROBES_OBJECT`, else the `build-probes` output), not `include_bytes`/`build.rs`, so
+      path (`EKE_PROBES_OBJECT`, else the `build-probes` output), not `include_bytes`/`build.rs`, so
       the host workspace stays on stable (decision 017). Demo: `examples/count_execve.rs` prints the
       total and its delta. Test: `execve_counter_counts_host_execve_events` (privileged) spawns N
       processes and asserts the count rose by ≥ N.)*
@@ -1208,7 +1208,7 @@ The eBPF foundation: build, load, and read a map from a trivial program.
       the per-CPU total rose by ≥ N and the per-PID map covered them; `counter_drops_without_pinned_residue`
       covers P8.4. Both self-skip via the cap-aware `check_support`.)*
 - **Exit gate:** a Rust eBPF program loads and reports.
-  *(Passed: the demo is `kee-probes-loader`'s `count_execve` example (loads, attaches, reports the
+  *(Passed: the demo is `eke-probes-loader`'s `count_execve` example (loads, attaches, reports the
   host execve total + per-PID breakdown) and the privileged `counter` tests; documented in
   [`docs/probes.md`](docs/probes.md), the host-observability counterpart to `docs/embedding.md`, covering program types,
   maps, the verifier, CO-RE/BTF, the no-pin lifetime, caps, and the hardware-isolation limit. Phase 8
@@ -1319,7 +1319,7 @@ Watch every packet a microVM sends/receives, at its tap device, in the kernel.
       *(Landed: the `#[ignore]`d `guest_traffic_shows_up_in_the_per_vm_counters` boots a networked agent
       microVM, attaches the monitor to its netns tap, has the guest fire UDP at its host end
       (`10.200.0.1:9999`), and asserts that flow's ingress packets and the per-VM ingress total are both
-      nonzero. Uses `kee-vmm` as a dev-dependency only, so the loader library stays decoupled.)*
+      nonzero. Uses `eke-vmm` as a dev-dependency only, so the loader library stays decoupled.)*
 - **Exit gate:** live per-microVM network visibility.
   *(Demo: `cargo xtask watch-sandbox` boots a real networked sandbox (jailed as root, else the unjailed
   opt-out), attaches a `tc` monitor to its tap inside its netns, drives guest traffic in rounds, and
@@ -1384,7 +1384,7 @@ Turn observation into control, deny-by-default egress, allow-listed, enforced at
       (`net_enforce.rs`) boots a networked sandbox, `enforce_in_netns` with an allow-list of exactly one
       endpoint (host end UDP 9999), and has the guest send to that port and a blocked one (8888). Asserts
       the blocked port appears in `denials` (dropped at the tap) and the allowed port never does, and that
-      the allowed flow shows in the counters (sent and let through). `kee-vmm` a dev-dependency only.)*
+      the allowed flow shows in the counters (sent and let through). `eke-vmm` a dev-dependency only.)*
 - **Exit gate:** kernel-enforced per-sandbox egress.
   *(Demo: `cargo xtask enforce-sandbox` boots a real networked sandbox, arms a deny-by-default egress
   policy allowing only its host end on UDP 9999, has the guest send to that endpoint and a blocked one,
@@ -1424,7 +1424,7 @@ Per-sandbox CPU/mem/IO accounting from the kernel, the metering primitive (engin
       kernel's cgroup v2 memory/IO, assembled by `ResourceMeter::summary_for_pid(vmm_pid)`. It is the
       per-run summary a caller ships with the run; folding it into the *persisted* per-run audit record
       (fused with the network denials and syscall trace) is Phase 13's convergence, kept out of
-      `kee-vmm` so the driver stays independent of the eBPF loader. Decision 023.)*
+      `eke-vmm` so the driver stays independent of the eBPF loader. Decision 023.)*
 - [x] **P12.4** Bounded overhead; sane under many concurrent sandboxes.
       *(Landed by design + measurement: **one** program attached to the global `sched_switch`, metering a
       *set* (`METER_TARGETS`), so the per-switch cost is a single hash lookup regardless of how many
@@ -1440,7 +1440,7 @@ Per-sandbox CPU/mem/IO accounting from the kernel, the metering primitive (engin
       `sched_switch` fires, so a pegged vCPU's whole window lands only once the guest idles and the vCPU
       thread blocks). Asserts the busy run charged far more host CPU (≥ half the wall window, > 3× idle)
       and that the CPU map holds **exactly one** entry, this sandbox's cgroup, carrying the charge: the
-      exclusivity is the attribution proof. `kee-vmm` a dev-dependency only.)*
+      exclusivity is the attribution proof. `eke-vmm` a dev-dependency only.)*
 - **Exit gate:** per-sandbox resource metrics from eBPF (the engine *measures*, the hoster *bills*).
   *(Demo: `cargo xtask meter-sandbox` boots a real sandbox (jailed as root, else the unjailed opt-out),
   meters its cgroup, and shows an idle guest charging near-zero host CPU while a CPU-heavy guest charges
@@ -1457,13 +1457,13 @@ Per-sandbox CPU/mem/IO accounting from the kernel, the metering primitive (engin
 Attach the eBPF programs to a sandbox at launch and produce a per-run **audit trail**.
 
 - [x] **P13.1** On `Sandbox::open`, attach syscall + network + accounting probes bound to that VM.
-      *(Landed: `kee-probes-loader`'s new `observer` module, `ArmedProbes::arm()` (pre-boot: load the
+      *(Landed: `eke-probes-loader`'s new `observer` module, `ArmedProbes::arm()` (pre-boot: load the
       syscall tracer host-wide, clear the baseline) → `bind(vmm_pid, netns, tap, egress, meter)`
       (post-boot: scope the tracer to the VMM's cgroup and fold the boot window, attach a per-VM
       `TapMonitor` in the netns, enforcing when a policy is given, and register the cgroup as a target
       on a shared `ResourceMeter`). Two-phase because the tracer must attach before boot but the tap/meter
       need the netns/cgroup that only exist after; "on `Sandbox::open`" is the caller's arm→open→bind
-      sequence, kept **out of `kee-vmm`** (bridged only by the plain values `Sandbox` exposes:
+      sequence, kept **out of `eke-vmm`** (bridged only by the plain values `Sandbox` exposes:
       `vmm_pid`/`netns`/`tap_name`), decisions 021/023/024. The meter is **shared** (one `sched_switch`
       program metering a set), not per-VM, so it stays O(1) per switch; the bundle holds a target ticket
       and `remove_target`s on drop. Every axis is fail-open (a missing cap/BTF/object → a recorded
@@ -1475,7 +1475,7 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       and notable **host-side** syscalls (the VMM's footprint, not in-guest syscalls; see Phase 9).
       The record's core is network + resources + denials, the signals host eBPF observes strongly
       across the hardware boundary.
-      *(Landed: `kee-probes-loader`'s new `record` module, `RunRecord { network: Option<NetSection>,
+      *(Landed: `eke-probes-loader`'s new `record` module, `RunRecord { network: Option<NetSection>,
       resources: ResourceSummary, host_syscalls: SyscallFootprint, timing: Timing, coverage: Vec<AxisGap> }`,
       assembled by `SandboxProbes::collect(timing)` from the three probes (timing supplied as plain
       `Duration`s the caller lifts from `Sandbox::boot_latency` + `RunResult::metrics.wall`, so the record
@@ -1524,7 +1524,7 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
       and the deterministic JSON shows the flow. The guest's in-guest file read correctly does **not**
       appear in the host-syscall axis (a microVM services its own syscalls, Phase 9, the isolation working,
       not a gap): the host observes the guest's network strongly and the VMM's host footprint, never the
-      guest's syscalls. `kee-vmm` a dev-dependency only.)*
+      guest's syscalls. `eke-vmm` a dev-dependency only.)*
 - **Exit gate:** every run yields a tamper-resistant, host-observed audit trail (microVM + eBPF
   observability as one system).
   *(Met: `SandboxProbes::attach` binds the three host-side probes to a launched sandbox and
@@ -1634,14 +1634,14 @@ interacting flags on `run`.
       `allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial` boots a real
       networked sandbox, allows the fixed host end `10.200.0.1` on one UDP port, and asserts the
       allowed flow **and** the denial for the blocked port land in the `--record` JSON. Decision 026.)*
-- [x] **P14.9c** The `.kee.toml` file layer: **flags > env (`KEE_*`) > file > defaults**
-      becomes real. Discovery and precedence are a `(decision)` (proposed: nearest `.kee.toml`
+- [x] **P14.9c** The `.eke.toml` file layer: **flags > env (`EKE_*`) > file > defaults**
+      becomes real. Discovery and precedence are a `(decision)` (proposed: nearest `.eke.toml`
       up from the cwd, keys mirroring the env names 1:1 so the three layers stay one vocabulary);
       unknown keys are a typed error (config typos must not silently no-op). Precedence proven by
       unit tests per layer pair.
-      *(Landed: `kee-cli`'s new `config` module, the nearest `.kee.toml` walking up from the cwd,
+      *(Landed: `kee-cli`'s new `config` module, the nearest `.eke.toml` walking up from the cwd,
       `serde(deny_unknown_fields)` so a typo is a typed error naming the valid keys (not a silent
-      no-op), keys mirroring the `KEE_*` names 1:1. The layering reuses the engine, not a
+      no-op), keys mirroring the `EKE_*` names 1:1. The layering reuses the engine, not a
       reimplementation: `BootConfig::from_env_with` is made public and the CLI composes
       `env.or(file)` into its lookup, resolving `env > file > defaults` with zero duplication of the
       engine's env-key logic or pinned defaults; the fieldless `log` value gets a parallel
@@ -1653,11 +1653,11 @@ interacting flags on `run`.
       `xtask setup`). An operator on a fresh host runs `kee doctor` *before* the first sandbox
       and reads exactly what will work, degrade, or refuse. `xtask setup` delegates to it (one
       implementation, two entry points).
-      *(Landed: the shared implementation is `kee-vmm::doctor`, a structured `Vec<Check>` with an
+      *(Landed: the shared implementation is `eke-vmm::doctor`, a structured `Vec<Check>` with an
       `Ok`/`Warn`/`Fail` status + the degradation matrix, the engine-runtime prerequisites in the
       engine's own crate. `kee doctor` renders it + the eBPF-capability row (from the probe loader,
-      out of `kee-vmm`, decisions 021/023) and exits non-zero on any hard `Fail` so
-      `kee doctor && kee run …` gates; `xtask setup` renders the **same** checks + its dev-only
+      out of `eke-vmm`, decisions 021/023) and exits non-zero on any hard `Fail` so
+      `kee doctor && eke run …` gates; `xtask setup` renders the **same** checks + its dev-only
       toolchain rows (bpf-linker/nightly/readelf). The status split mirrors the engine's error
       discipline: `/dev/kvm` + artifacts are hard, the jailer/caps/tools fail open with a named
       consequence. Host-safe unit tests cover the status classification, `can_boot`, and the check
@@ -1689,7 +1689,7 @@ interacting flags on `run`.
   daemon-scoped; config layers all four levels; a fresh host self-diagnoses with `kee doctor`;
   and the JSON the CLI emits is a versioned contract.
   *(Met: the capability↔flag map in `docs/cli.md` accounts for every library capability, projected
-  as a flag/verb, or named daemon-scoped/platform; `flags > env > .kee.toml > defaults` layers all
+  as a flag/verb, or named daemon-scoped/platform; `flags > env > .eke.toml > defaults` layers all
   four levels; `kee doctor` self-diagnoses a fresh host (and gates via its exit code); both `--json`
   and the audit record carry a versioned `schema`. Decisions 027, 028.)*
 
@@ -1709,7 +1709,7 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
       the fused `RunRecord`'s denial trail) and **DoS**es the host with a 50-process fork storm (which
       creates zero host threads, hardware isolation), while the allow-listed exception and a clean
       coverage set show in the *same* record and the VM stays exec-responsive afterward. The cgroup
-      cpu/mem/pid caps under real hostile load are the `kee-vmm` confinement suite's real-root
+      cpu/mem/pid caps under real hostile load are the `eke-vmm` confinement suite's real-root
       mem-hog/fork-bomb (P6.8) and full VM/jail escape is P6.6; this consolidates the observed-and-
       recorded dimensions on the probe-capability path, adding the part those pieces lack, the record
       as the evidence.)*
@@ -1811,7 +1811,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
 
 - [x] **P16.1** `kee`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
       *(The `kee serve` subcommand in the `kee-cli` crate (`src/serve.rs`), a thin host of the same
-      `kee-vmm` public API, engine, not platform (no auth/tenancy/billing). One connection is one
+      `eke-vmm` public API, engine, not platform (no auth/tenancy/billing). One connection is one
       sandbox **session** (the VM is the session, decision 016), served on its own thread
       (synchronous, no async runtime): `open` boots it, `exec`* run commands sharing one working dir,
       `close` (or a hung-up connection) tears it down. The wire is a **provisional** newline-JSON
@@ -1832,19 +1832,19 @@ A local daemon others drive over a socket: still engine, not PaaS.
       and the peer is a local trusted-ish client, so hand-debuggability (`socat`) and "any language +
       a JSON lib + a socket" beat a compact wire. Every message carries a leading `schema` field,
       rejected on mismatch **before the body is trusted**, the seam Phase 21 freezes against (distinct
-      from the audit-record and `--json` schemas). Lives in a new **`kee-protocol`** crate
-      (serde-only, **no `kee-vmm`**): the shared `Request`/`Response`/`Envelope` shapes + a bounded,
+      from the audit-record and `--json` schemas). Lives in a new **`eke-protocol`** crate
+      (serde-only, **no `eke-vmm`**): the shared `Request`/`Response`/`Envelope` shapes + a bounded,
       typed line codec (guardrail 5, host-safe unit-tested, round-trips, schema-gate, blank-line/EOF,
       over-cap). The full verb set landed on the daemon (`session.rs`, now on `RunningVm` so a pooled
       clone and a cold boot serve identically): `put`/`get` ride the engine's only file seam (a no-op
       exec that injects/returns a file); `snapshot` is a typed refusal for a jailed session (faithful
       to `Sandbox::snapshot`), returning the bundle's daemon-host dir; `trace` builds the `RunRecord`
       **non-destructively** from a live probe snapshot (fail-open, repeatable mid-session). Non-`api:`,
-     the pinned `kee-vmm` surface is untouched; the daemon only consumes it.)*
+     the pinned `eke-vmm` surface is untouched; the daemon only consumes it.)*
 - [x] **P16.3** Pre-warmed-pool management lives in the daemon (fast `exec`).
       *(`kee --prewarm N`: at startup the daemon boots one **unjailed** prewarm source (a jailed
       disk can't be snapshotted), snapshots it, and restores `N` clones under the daemon's confinement
-      posture into an `kee-vmm::Pool` behind a `Mutex` (sessions are thread-per-connection). A
+      posture into an `eke-vmm::Pool` behind a `Mutex` (sessions are thread-per-connection). A
       **bare-default** `open` pops a warm clone, `opened{pooled:true}`, since the clones carry the
       default profile; any custom knob (or a pool that's empty/poisoned/dry) cold-boots. The pool tops
       up on session close, off the hot path (the moment the `Pool` doc reserves for restore cost).
@@ -1853,9 +1853,9 @@ A local daemon others drive over a socket: still engine, not PaaS.
 - [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `kee` over the
       wire API, the seed the **polyglot SDKs (Phase 21)** harden into Go/Python/Node/C#. (The full
       SDK set is post-`v0.1.0`.)
-      *(New **`kee-client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
-      `snapshot`/`trace`/`close`) with typed errors, no panics. Depends on `kee-protocol` + a JSON
-      value **only, never `kee-vmm`**, that dependency set *is* the proof a caller needs nothing of
+      *(New **`eke-client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
+      `snapshot`/`trace`/`close`) with typed errors, no panics. Depends on `eke-protocol` + a JSON
+      value **only, never `eke-vmm`**, that dependency set *is* the proof a caller needs nothing of
       the engine but the wire. Demoed by `tests/agent_e2e.rs`, now three angles: the full versioned
       API hand-driven as raw JSON (the wire is socat-debuggable, every message schema-stamped, a
       wrong schema is a fatal error), the **same daemon driven through the reference client**, and a
@@ -1863,7 +1863,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       the versioned API + pool + client. `#[ignore]`d/privileged. Non-`api:`.)*
 - [x] **P16.5** Structured logs + a metrics endpoint (Prometheus), for the *hoster* to scrape.
       *(Logs: the daemon's `tracing` events (already structured, `vmm_pid`/`boot_ms`/`pooled`) gain a
-      machine encoding, `--log-json` / `KEE_LOG_FORMAT=json` (one JSON object per line for a log
+      machine encoding, `--log-json` / `EKE_LOG_FORMAT=json` (one JSON object per line for a log
       shipper; same events, different framing) via `tracing-subscriber`'s `json` feature. Metrics:
       `kee --metrics ADDR` serves the Prometheus **text-exposition** format at `GET /metrics` from
       a **hand-rolled**, bounded HTTP/1.1 responder on one thread (`cli/src/metrics.rs`), no async
@@ -1882,7 +1882,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       it just drove. Non-`api:`.)*
 - [x] **P16.6** Explicitly document the non-goals again at the API layer (no tenancy/auth/billing).
       *(Restated where the programmatic interface actually lives: a **crate-level non-goals paragraph**
-      on `kee-protocol` (the wire is the SDK contract, so the API surface is the code itself),
+      on `eke-protocol` (the wire is the SDK contract, so the API surface is the code itself),
       the protocol carries no tenant/credential/quota/price/host-to-schedule field, and that absence
       is a design commitment (guardrail 4), a schema bump adds a verb never a tenancy field. Plus a
       dedicated **"Non-goals: where a PaaS would begin"** section in `docs/daemon.md` (no
@@ -1892,7 +1892,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
 - [x] **P16.7** Golden: the CLI and the daemon API produce identical run results.
       *(`tests/cli_daemon_golden.rs`: the same command through both faces, `kee run --json` and
       `kee` driven by the reference client, must render an **identical** `(exit_code, stdout,
-      stderr)`, since both are thin hosts of one `kee-vmm` lifecycle; the two agree with each other
+      stderr)`, since both are thin hosts of one `eke-vmm` lifecycle; the two agree with each other
       **and** with the expected literal, so a shared bug can't pass by matching itself. Cases: a plain
       success, a command that runs and exits non-zero writing both streams (a faithful result, not an
       error, on both), and a stdin passthrough. A guest fault that yields no result (an unspawnable
@@ -2029,11 +2029,11 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
 - [x] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
       **Phase 21 SDKs** expose it as part of the SDK contract, an agent driving `kee` from any
       language reads the same model-legible observation the CLI writes, not a CLI-only convenience.
-      *(New `trace_summary` verb in `kee-protocol`, parallel to `trace`: `Request::TraceSummary` →
+      *(New `trace_summary` verb in `eke-protocol`, parallel to `trace`: `Request::TraceSummary` →
       `Response::TraceSummary { summary }` (the projection JSON carried opaquely, so the protocol crate
       stays free of the probes-loader types), sampled **live** and non-destructively like `trace`,
       fail-open. The daemon handler projects the same live record via `to_summary_json`; the reference
-      `kee-client` gains `trace_summary()`; the `Verb` metrics enum + `agent_e2e` (raw-JSON *and*
+      `eke-client` gains `trace_summary()`; the `Verb` metrics enum + `agent_e2e` (raw-JSON *and*
       client paths) + `docs/daemon.md` verb/response tables all extended. Additive under `WIRE_SCHEMA`
       (a new verb, old messages unchanged); the pinned `vmm`/`channel` surfaces are untouched, so
       non-`api:`.)*
@@ -2088,14 +2088,14 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
       compromised producing host, and leaves key custody/rotation (via `key_id`) to the hoster.)*
 - [x] **P19.2** **Sign the finalized record.** The loader signs the canonical (deterministic-JSON,
       P13.4) `RunRecord` bytes with a host key loaded at startup (generated on first run; path via the
-      layered config, `KEE_*` > file > default). The guest never sees the key (it's host-side, like
+      layered config, `EKE_*` > file > default). The guest never sees the key (it's host-side, like
       the eBPF). `--record` / the `kee` `trace` verb carry a `signature` + `key_id` envelope
       alongside the record; the JSON surface gains that envelope (a `schema` bump, versioned per P14.9e).
-      *(**Done** (decision 034). `kee-probes-loader`'s `signing` module signs the canonical bytes
+      *(**Done** (decision 034). `eke-probes-loader`'s `signing` module signs the canonical bytes
       with an `ed25519` `HostKey` (seed from `/dev/urandom`, persisted `0600`) into a schema-2 envelope
       `{schema,key_id,signature,record}`; the record rides as an embedded string so its bytes survive
-      the wire's serde round-trip. `--record` (path via `KEE_SIGNING_KEY` > `signing_key` in
-      `.kee.toml` > data-dir default) and the daemon's `trace` reply both sign; the daemon loads the
+      the wire's serde round-trip. `--record` (path via `EKE_SIGNING_KEY` > `signing_key` in
+      `.eke.toml` > data-dir default) and the daemon's `trace` reply both sign; the daemon loads the
       key at startup and fails closed if it can't. `api:` (new `vmm`-sibling `probes-loader` surface).)*
 - [x] **P19.3** **`kee verify <record>`** (plus a `kee` verb and a library entry point):
       re-canonicalize the record, check the signature against the trusted public key(s), exit non-zero
@@ -2128,7 +2128,7 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
       *set* of trusted keys, so rotating the host key doesn't invalidate already-signed records.
       *(**Done**. Records already name their signer (`key_id` = public-key hex) and `verify` already
       takes a `&[TrustedKey]` set; this adds the operational half: `kee verify` trusts the **union**
-      of `--key` flags, a configured set (`KEE_TRUSTED_KEYS` / `trusted_keys` in `.kee.toml`), and
+      of `--key` flags, a configured set (`EKE_TRUSTED_KEYS` / `trusted_keys` in `.eke.toml`), and
       the current signing key, deduped by `key_id`, so a retired key kept in the set still verifies its
       old records. A host-safe rotation unit test signs with an old + new key and confirms both verify
       against the set while an outsider is rejected; a config test covers the `trusted_keys` list.
@@ -2186,7 +2186,7 @@ first commit, so no box tracks a non-task).
       an undelegated cpu/memory cgroup from the fail-open empty-args into a typed
       `VmmError::LimitsUnavailable` (`api:`, bucketed `Infra` in `kind()`). Keyed on cpu **and** memory,
       the caps that bound the envelope; `pids.max` stays best-effort (its absence can't breach the
-      envelope). Layered `flag (--require-limits, run/shell/serve) > env (KEE_REQUIRE_LIMITS) > file
+      envelope). Layered `flag (--require-limits, run/shell/serve) > env (EKE_REQUIRE_LIMITS) > file
       (require_limits) > default false`; the prewarm source clears it (must be unjailed to snapshot, so
       it can't be capped), the jailed clones that run sessions enforce it. Host-safe unit tests cover
       the pure refusal decision, the unjailed-posture guard, and the env/file precedence; docs in
@@ -2210,7 +2210,7 @@ first commit, so no box tracks a non-task).
       pin) is deferred *in that decision* to `v0.1.0`, when external embedders make it worth the
       maintenance, so the window is a scheduled decision, not a silent gap.
 - [x] **P19.9e** The **nodev-scratch pre-boot check**, a typed error instead of a cryptic one
-      (surfaced by a first local self-host run). A jailed boot whose `KEE_SCRATCH_DIR` sits on a
+      (surfaced by a first local self-host run). A jailed boot whose `EKE_SCRATCH_DIR` sits on a
       `nodev` mount would otherwise fail deep in boot with a raw Firecracker "creating KVM object:
       Permission denied" (the jailer's chroot `/dev/kvm` node is inert). `Vm::boot`/`Vm::restore` now
       refuse it up front with `VmmError::ScratchDirNodev` naming the fix, reusing the doctor's tested
@@ -2234,7 +2234,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       (`--no-run` prints the proof command instead). `cargo xtask vendor` snapshots all four
       sha-pinned inputs **plus the resolved `.apk` closure** (the fetched-not-pinned piece decision
       007 deferred) into a gitignored mirror with a sha `vendor-manifest.txt`; `--verify` re-checks it
-      offline. `KEE_VENDOR_DIR` is the one seam: `fetch_one` restores binary artifacts from the
+      offline. `EKE_VENDOR_DIR` is the one seam: `fetch_one` restores binary artifacts from the
       mirror and the rootfs build installs packages from the vendored apk cache
       (`apk.static --cache-dir … --no-network`), so the whole build runs with the FC S3 bucket and the
       Alpine CDN dark. Vendor-aware via `fetch_one` (zero call-site churn); manifest parse/round-trip
@@ -2256,7 +2256,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       package without the audit half is not the product); vendor-aware, x86_64 only. `install.sh`
       (repo root, also packed into the tarball) is the `curl | sh` face: verifies tarball +
       manifest, installs to `~/.local/bin` + `~/.local/share/kee`, writes a starter
-      `~/.kee.toml` only if absent; `KEE_DIST_TARBALL` runs it offline. The `Containerfile`
+      `~/.eke.toml` only if absent; `EKE_DIST_TARBALL` runs it offline. The `Containerfile`
       builds a runtime image from the dist stage bundling the sha-pinned Firecracker (the one
       bundling exception; KVM always the host's, `--device /dev/kvm`). `release.yml` packages on a
       pushed tag into a **draft** release, publishing stays human. Proven end to end on the dev
@@ -2280,18 +2280,18 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
       (GitHub Pages deploy) is left to launch (P20.31). Docs only, non-`api:`.)*
 - [x] **P20.4** (human-led) **The real name.** Retire the working name "agent" (decision 035): the
-      user picks the name, then one sweep renames the repo, the binary, the crate names, the `KEE_*`
-      env prefix and `.kee.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
+      user picks the name, then one sweep renames the repo, the binary, the crate names, the `EKE_*`
+      env prefix and `.eke.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
       **before** the launch announcement (P20.31) or any registry/SDK freeze (Phases 21–22) can cement
       the working name publicly, so the rename stays a quiet sweep, not a breaking rebrand.
       *(**Done.** The name is **kvm-ebpf-engine**, CLI **`kee`**. One sweep: crates
-      `agent-*` → `kee-*` (an `api:` change, `kee-vmm` is the embed API); the CLI is `kee` with the
-      full `kvm-ebpf-engine` as a second binary from the same entrypoint; `AGENT_*` → `KEE_*` and
-      `.agent.toml` → `.kee.toml`; the Prometheus namespace `agent_*` → `kee_*`; the data dir
+      `agent-*` → `kee-*` (an `api:` change, `eke-vmm` is the embed API); the CLI is `kee` with the
+      full `kvm-ebpf-engine` as a second binary from the same entrypoint; `AGENT_*` → `EKE_*` and
+      `.agent.toml` → `.eke.toml`; the Prometheus namespace `agent_*` → `kee_*`; the data dir
       (`~/.local/share/kee`), packaged rootfs (`rootfs-kee.ext4`), tarball (`kee-<ver>`), image tag,
       disk labels (`kee-input`/`kee-output`), and per-VM scratch prefix (`kee-<pid>-<n>`); the docs,
       README, AGENTS.md, ADRs, and workflows. The **guest agent** stays a guest agent (crate
-      `kee-guest`, but the domain noun is unchanged) and the coding-agent/`AGENTS.md` vocabulary is
+      `eke-guest`, but the domain noun is unchanged) and the coding-agent/`AGENTS.md` vocabulary is
       untouched. Host gate green including the eBPF object build. `api:` (crate rename + config
       surface).)*
 - [x] **P20.5** A **reference integration**: a small host application embedding the engine end to end.
@@ -2383,7 +2383,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       *(**Done.** Four gaps a fresh operator hit. (1) The eBPF object now resolves with **no**
       configuration: `object_path` falls back to the installed copy under the data dir
       (`crates/probes-loader/src/lib.rs`, precedence unit-tested via a pure `pick_object_path`), so
-      the `KEE_PROBES_OBJECT` export is gone from the happy path; a developer's freshly built object
+      the `EKE_PROBES_OBJECT` export is gone from the happy path; a developer's freshly built object
       still wins. (2) `install.sh` no longer ends by suggesting a command that fails: it names the
       jailed-needs-root reality with both working forms, and points at the actual Firecracker release
       URL instead of "install it". (3) `kee doctor` prints the exact run command **for this host**
@@ -2410,7 +2410,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       updated to pass `CARGO_TARGET_DIR="$PWD/target-privileged"`. Turning a warning into a refusal
       means every documented invocation is part of the change, not just the code.) (2) `kee --version` exists (the crate version, the in-development working number
       per `RELEASES.md`), so a stale installed binary is tellable from a fresh one. (3)
-      `cargo xtask self-host` writes `~/.kee.toml` with absolute artifact paths like `install.sh`
+      `cargo xtask self-host` writes `~/.eke.toml` with absolute artifact paths like `install.sh`
       does, so the installed binary stops being usable only from inside the source tree; while
       wiring it, `install_binaries` was found resolving `./target/release` while ignoring
       `CARGO_TARGET_DIR` (the build honours it), which could silently install a **stale** binary,
@@ -2421,7 +2421,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       warm, so it was redesigned around the measurement to drop tests, landing at ~3s.
       non-`api:` (xtask + an additive CLI flag).)*
 - [x] **P20.18** `(decision)` **Operator policy**: the host's defaults, ceilings, and postures.
-      *(**Done** as decision 041. The config surface had the split backwards: `.kee.toml` covered
+      *(**Done** as decision 041. The config surface had the split backwards: `.eke.toml` covered
       where artifacts live, while every *containment* knob was caller-controlled with a
       compiled-in default, and the wire `open` let a socket client ask for 32 vCPUs on someone else's
       host. Adding keys alone would not have fixed it, since flags > env > file makes any file value
@@ -2432,7 +2432,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       forced after the first implementation refused every bare run whose engine-default wall (30s)
       exceeded a `max_wall_secs = 10`. Enforced where it counts: the daemon bounds a client at
       `open_limits` (`crates/cli/src/session.rs`) with ceilings from explicit `kee serve` flags, never
-      a cwd-discovered file; the CLI applies the same resolver from `.kee.toml` as a guardrail, since
+      a cwd-discovered file; the CLI applies the same resolver from `.eke.toml` as a guardrail, since
       a local caller is already trusted. non-`api:` (the pinned engine API does not move; an embedder
       *is* the operator).)*
 - [ ] **P20.19** **Egress allow-list ceiling**: bound `--allow` to operator-approved CIDRs, so a

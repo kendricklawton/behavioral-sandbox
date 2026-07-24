@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use kee_probes_loader::{verify, verify_chain, HostKey, TrustedKey};
+use eke_probes_loader::{verify, verify_chain, HostKey, TrustedKey};
 use libfuzzer_sys::fuzz_target;
 
 /// A fixed trusted set (the unit tests' deterministic key) so per-iteration cost stays low and a

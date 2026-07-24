@@ -3,7 +3,7 @@
 //! `Pool`, and the restore-beats-cold-boot payoff.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p kee-vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p eke-vmm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -13,10 +13,10 @@ mod common;
 use std::num::NonZeroU8;
 use std::time::Duration;
 
-use kee_vmm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
+use eke_vmm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
 
 use common::{
-    cgroup_of, config, have_jailer_privileges, have_net_admin, kee_rootfs_config,
+    cgroup_of, config, have_jailer_privileges, have_net_admin, eke_rootfs_config,
     prewarmed_python_snapshot, TmpDir,
 };
 
@@ -107,7 +107,7 @@ fn prewarmed_snapshot_restores_and_runs_code() {
     );
 
     let restored =
-        Vm::restore(&snap, &kee_rootfs_config()).expect("prewarmed restore should resume");
+        Vm::restore(&snap, &eke_rootfs_config()).expect("prewarmed restore should resume");
     let restore_latency = restored.boot_latency();
     let argv = ["python3", "-c", "print(2 + 2)"].map(String::from);
     let out = restored
@@ -146,7 +146,7 @@ fn restores_concurrent_clones_from_one_prewarmed_snapshot() {
 
     let clones: Vec<_> = (0..N)
         .map(|i| {
-            Vm::restore(&snap, &kee_rootfs_config())
+            Vm::restore(&snap, &eke_rootfs_config())
                 .unwrap_or_else(|e| panic!("clone {i} should restore concurrently: {e}"))
         })
         .collect();
@@ -192,7 +192,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
 
     let clones: Vec<_> = (0..N)
         .map(|i| {
-            Vm::restore(&snap, &kee_rootfs_config())
+            Vm::restore(&snap, &eke_rootfs_config())
                 .unwrap_or_else(|e| panic!("clone {i} should restore: {e}"))
         })
         .collect();
@@ -256,7 +256,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
 
     // Source: networked + vsock + prewarmed. Snapshot it, then drop it, under the netns model neither the
     // tap name nor the /30 is a shared reservation, so the source's lifetime doesn't gate the clones'.
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.enable_network = true;
     let source = Vm::boot(cfg.clone()).expect("networked agent microVM should boot");
     let source_guest_ip = source.ipv4().expect("source ipv4").guest;
@@ -355,7 +355,7 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
     let bundle = TmpDir::new("snap-jailed");
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.jail = Some(Jail::default());
 
     // The VMM behind `pid` runs as the dropped jail uid, the confinement actually holding.
@@ -424,7 +424,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
         );
         return;
     }
-    let mut src_cfg = kee_rootfs_config();
+    let mut src_cfg = eke_rootfs_config();
     src_cfg.vcpus = NonZeroU8::new(2).expect("2 is nonzero");
     let source = Vm::boot(src_cfg).expect("2-vCPU agent microVM should boot");
     let bundle = TmpDir::new("snap-cpu-cap");
@@ -439,7 +439,7 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     source.shutdown().expect("source shutdown");
 
     // Restore with the *default* (1-vCPU) config: the cap must follow the snapshot, not this.
-    let mut cfg = kee_rootfs_config();
+    let mut cfg = eke_rootfs_config();
     cfg.jail = Some(Jail::default());
     assert_eq!(cfg.vcpus.get(), 1, "the restoring config declares 1 vCPU");
     let clone = Vm::restore(&snap, &cfg).expect("jailed restore of the 2-vCPU snapshot");
@@ -496,7 +496,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 
     let draw = |label: &str| {
-        let clone = Vm::restore(&snap, &kee_rootfs_config())
+        let clone = Vm::restore(&snap, &eke_rootfs_config())
             .unwrap_or_else(|e| panic!("clone {label} should restore: {e}"));
         let out = clone
             .exec(
@@ -552,13 +552,13 @@ fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     // health probe, not a cold boot. A clone that died while pooled is a typed GuestUnavailable
     // from the probe, so `take` discards it and serves the next (or restores inline when dry)
     // instead of surfacing an infra failure, the retry semantics the deferral promised.
-    use kee_vmm::Pool;
+    use eke_vmm::Pool;
 
     let bundle = TmpDir::new("snap-pool");
     let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);
 
     let mut pool =
-        Pool::new(snap, kee_rootfs_config(), 2).expect("pool should prefill two prewarmed clones");
+        Pool::new(snap, eke_rootfs_config(), 2).expect("pool should prefill two prewarmed clones");
     assert_eq!(pool.ready(), 2, "prefill should hit the target");
 
     // Fast path: take a ready clone and run code on it. The take is a pop + probe, so it must come
@@ -651,7 +651,7 @@ fn prewarmed_restore_returns_output_in_far_under_cold_boot() {
 
     let t0 = std::time::Instant::now();
     let restored =
-        Vm::restore(&snap, &kee_rootfs_config()).expect("prewarmed restore should resume");
+        Vm::restore(&snap, &eke_rootfs_config()).expect("prewarmed restore should resume");
     let argv = ["python3", "-c", "print(6 * 7)"].map(String::from);
     let out = restored
         .exec(&argv, &[])

@@ -537,6 +537,94 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
 
 [[package]]
+name = "eke-channel"
+version = "0.1.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "eke-cli"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "eke-client",
+ "eke-probes-loader",
+ "eke-protocol",
+ "eke-test-support",
+ "eke-vmm",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "eke-client"
+version = "0.1.0"
+dependencies = [
+ "eke-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "eke-guest-agent"
+version = "0.1.0"
+dependencies = [
+ "eke-channel",
+ "tracing",
+ "tracing-subscriber",
+ "vsock",
+]
+
+[[package]]
+name = "eke-probes-common"
+version = "0.1.0"
+
+[[package]]
+name = "eke-probes-loader"
+version = "0.1.0"
+dependencies = [
+ "aya",
+ "ed25519-dalek",
+ "eke-probes-common",
+ "eke-test-support",
+ "eke-vmm",
+ "nix 0.31.3",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
+name = "eke-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "eke-test-support"
+version = "0.1.0"
+
+[[package]]
+name = "eke-vmm"
+version = "0.1.0"
+dependencies = [
+ "eke-channel",
+ "eke-guest-agent",
+ "eke-test-support",
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -816,94 +904,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
  "thiserror 2.0.19",
-]
-
-[[package]]
-name = "kee-channel"
-version = "0.1.0"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "kee-cli"
-version = "0.1.0"
-dependencies = [
- "clap",
- "kee-client",
- "kee-probes-loader",
- "kee-protocol",
- "kee-test-support",
- "kee-vmm",
- "ratatui",
- "serde",
- "serde_json",
- "signal-hook",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "kee-client"
-version = "0.1.0"
-dependencies = [
- "kee-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "kee-guest"
-version = "0.1.0"
-dependencies = [
- "kee-channel",
- "tracing",
- "tracing-subscriber",
- "vsock",
-]
-
-[[package]]
-name = "kee-probes-common"
-version = "0.1.0"
-
-[[package]]
-name = "kee-probes-loader"
-version = "0.1.0"
-dependencies = [
- "aya",
- "ed25519-dalek",
- "kee-probes-common",
- "kee-test-support",
- "kee-vmm",
- "nix 0.31.3",
- "serde_json",
- "sha2",
- "zeroize",
-]
-
-[[package]]
-name = "kee-protocol"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "kee-test-support"
-version = "0.1.0"
-
-[[package]]
-name = "kee-vmm"
-version = "0.1.0"
-dependencies = [
- "kee-channel",
- "kee-guest",
- "kee-test-support",
- "serde",
- "serde_json",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2301,9 +2301,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "kee-channel",
- "kee-probes-loader",
- "kee-vmm",
+ "eke-channel",
+ "eke-probes-loader",
+ "eke-vmm",
 ]
 
 [[package]]

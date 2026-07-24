@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use kee_probes_loader::{verify, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
+use eke_probes_loader::{verify, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
 
 use crate::config;
 use crate::CliError;
@@ -72,7 +72,7 @@ fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
 }
 
 /// The trusted key **set**: the union of explicit `--key` values, the configured trusted keys
-/// (`KEE_TRUSTED_KEYS` / `.kee.toml`, for rotation), and the host's own current signing key.
+/// (`EKE_TRUSTED_KEYS` / `.eke.toml`, for rotation), and the host's own current signing key.
 /// Trusting a set is what lets a record signed *before* a key rotation still verify (decision 034):
 /// keep the old public key in the set and it stays valid. Everything reduces to `key_id` hex, so the
 /// sources dedup cleanly.
@@ -99,7 +99,7 @@ fn trusted_keys(
     hexes.dedup();
     if hexes.is_empty() {
         return Err(CliError::Cli(format!(
-            "no trusted key: pass --key <hex>, set KEE_TRUSTED_KEYS, or provide a signing key at {}",
+            "no trusted key: pass --key <hex>, set EKE_TRUSTED_KEYS, or provide a signing key at {}",
             key_path.display()
         )));
     }

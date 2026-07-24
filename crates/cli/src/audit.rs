@@ -1,5 +1,5 @@
 //! The CLI's audit face: compose the two tracks the way the engine intends, boot the sandbox
-//! (`kee-vmm`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
+//! (`eke-vmm`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
 //! (`vmm_pid`/`netns`/`tap_name`) and fuse their output into the per-run [`RunRecord`].
 //!
 //! This is the caller-side launch sequence the loader's ADR log promises (ADRs 021/024):
@@ -12,11 +12,11 @@
 //! *policy* (`--allow`) is the exception: it is a security control, so a run that asked to enforce
 //! one and couldn't arm the tap is a typed refusal, never a silent unenforced run.
 
-use kee_probes_loader::{
+use eke_probes_loader::{
     AxisGap, EgressPolicy, LiveSnapshot, ResourceSummary, RunRecord, SandboxProbes, SharedMeter,
     SharedTracer, SyscallFootprint, Timing,
 };
-use kee_vmm::VmmError;
+use eke_vmm::VmmError;
 
 /// The host-wide shared probes, loaded **once** per process (one `sched_switch` meter, one set of
 /// `sys_enter_*` tracepoints, the bounded-overhead shared model) and handed to every run's
