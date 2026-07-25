@@ -125,15 +125,18 @@ Test the `/tmp` question rather than trusting the table, since it depends on you
 findmnt -no OPTIONS -T /tmp | tr , '\n' | grep nodev   # prints nodev if you are affected
 ```
 
-If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.ebpf-kvm-engine.toml`:
+If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.ebpf-kvm-engine.toml`.
+Keep the path **short**: a jailed boot nests this dir name twice inside its API socket path, which the
+kernel caps at ~108 bytes (`ebpf-kvm-engine doctor` and the boot error flag an over-long one), so a
+short dir like `~/.ekvm` beats a long one:
 
 ```toml
-scratch_dir = "/home/you/ebpf-kvm-engine-scratch"
+scratch_dir = "/home/you/.ekvm"
 ```
 
-The packaged `install.sh` and `cargo xtask self-host` **write this line for you** when they detect a
-`nodev` `/tmp`, so a guided install already boots jailed; the manual form above is for a from-source
-run, or a config you wrote yourself.
+The packaged `install.sh` and `cargo xtask self-host` **write this line for you** (as `~/.ekvm`) when
+they detect a `nodev` `/tmp`, so a guided install already boots jailed; the manual form above is for a
+from-source run, or a config you wrote yourself.
 
 `ebpf-kvm-engine doctor` flags every one of these against your actual host, so treat it as the authority and
 this table as orientation.
@@ -148,7 +151,7 @@ the binary to `~/.local/bin`, the artifacts to `~/.local/share/ebpf-kvm-engine`,
 `nodev`, so the jailed default boots) if you don't have one:
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/k-henry-org/ebpf-kvm-engine/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/packsixfour/ebpf-kvm-engine/main/install.sh | sh
 ```
 
 Offline, or straight from a package you built or downloaded by hand:
@@ -332,9 +335,12 @@ substitutes. A jailed run therefore looks like this, with `-E` to keep your envi
 explicit scratch dir if `/tmp` is `nodev`:
 
 ```console
-mkdir -p ~/ebpf-kvm-engine-scratch
-sudo -E env EBPF_KVM_ENGINE_SCRATCH_DIR="$HOME/ebpf-kvm-engine-scratch" "$(command -v ebpf-kvm-engine)" run -- echo hello
+mkdir -p ~/.ekvm
+sudo -E env EBPF_KVM_ENGINE_SCRATCH_DIR="$HOME/.ekvm" "$(command -v ebpf-kvm-engine)" run -- echo hello
 ```
+
+(The short dir name is deliberate: a jailed boot nests the per-VM dir name twice inside its API
+socket path, which the kernel caps at ~108 bytes.)
 
 ## Compiling from source
 

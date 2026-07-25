@@ -138,7 +138,7 @@ pub struct BootConfig {
     /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
     pub input_dir: Option<PathBuf>,
     /// A host directory to receive **bulk output**: the driver attaches a blank, **writable**
-    /// ext4 as a third block device (`/dev/vd?`, labelled `ebpf-kvm-engine-output`); the guest rootfs mounts it
+    /// ext4 as a third block device (`/dev/vd?`, labelled `ekvm-output`); the guest rootfs mounts it
     /// read-write at `/output`, so a command's files under `/output/...` are pulled back here by
     /// [`RunningVm::collect_outputs`]. This is the whole-working-dir / large-file counterpart to the
     /// vsock channel's per-frame [`Response::File`](channel::Response::File) artifacts. `None` (the default) attaches no output

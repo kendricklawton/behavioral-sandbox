@@ -32,7 +32,7 @@ edition = "2021"
 rust-version = "1.97"
 license = "Apache-2.0"
 authors = ["K Henry LLC <founder@khenry.dev>"]
-repository = "https://github.com/k-henry-org/ebpf-kvm-engine"
+repository = "https://github.com/packsixfour/ebpf-kvm-engine"
 
 # Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON
 # over a unix socket (serde), the CLI parses with clap, logs with tracing.

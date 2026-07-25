@@ -215,7 +215,7 @@ fn netns_exists(name: &str) -> bool {
 
 /// How many per-VM scratch dirs under `base` belong to driver `pid`.
 fn scratch_dirs_of(base: &Path, pid: u32) -> usize {
-    let prefix = format!("agent-{pid}-");
+    let prefix = format!("ekvm-{pid}-");
     std::fs::read_dir(base)
         .map(|rd| {
             rd.flatten()

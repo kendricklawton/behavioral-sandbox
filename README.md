@@ -1,6 +1,6 @@
 # ebpf-kvm-engine
 
-[![CI](https://github.com/k-henry-org/ebpf-kvm-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/k-henry-org/ebpf-kvm-engine/actions/workflows/ci.yml)
+[![CI](https://github.com/packsixfour/ebpf-kvm-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/packsixfour/ebpf-kvm-engine/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **A self-hostable engine for running untrusted code in a hardware-isolated microVM, with a
@@ -33,7 +33,7 @@ that; `cargo xtask setup` (or `ebpf-kvm-engine doctor` once built) then reports 
 missing before the first sandbox.
 
 ```console
-git clone https://github.com/k-henry-org/ebpf-kvm-engine && cd ebpf-kvm-engine
+git clone https://github.com/packsixfour/ebpf-kvm-engine && cd ebpf-kvm-engine
 cargo xtask self-host                                   # build + install ebpf-kvm-engine, boot a proof sandbox
 ebpf-kvm-engine run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
 ```

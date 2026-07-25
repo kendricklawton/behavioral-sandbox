@@ -283,7 +283,7 @@ binary, so adding a runtime is a packaging step, not an engine change.
 - [x] **P3.5** Pull artifacts back out at **working-dir / large-file** scale (the per-file channel
       path landed in P2.5; here it's the block-device / bulk mechanism).
       *(New `BootConfig.output_dir` (decision 006): the driver attaches a blank **writable** ext4 as a
-      third block device (labelled `ebpf-kvm-engine-output`, `lazy_itable_init=0` so it stays sparse); the guest
+      third block device (labelled `ekvm-output`, `lazy_itable_init=0` so it stays sparse); the guest
       mounts it read-write `-o sync` at `/output`. `RunningVm::collect_outputs` (consumes the VM) stops
       the VMM, then reads the image back **rootless**, `e2fsck -fy` to recover the journal, `debugfs
       rdump` to extract, **after** the VMM has exited (a live `e2fsck` would race Firecracker). The
@@ -2417,11 +2417,40 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       gap under the "every command the tooling prints works on the host" bar P20.16 set. `cargo xtask
       self-host` reuses the doctor's tested detector (`scratch_is_nodev`, promoted `pub` in
       `crates/vmm/src/doctor.rs`); `install.sh` uses the `findmnt` form the docs already teach, since it
-      runs before any engine binary is guaranteed usable. Both write `scratch_dir` under the per-user
-      data dir (`~/.local/share/ebpf-kvm-engine/scratch`) only when `/tmp` is `nodev` **and** that
-      replacement is not, since pinning one `nodev` dir over another fixes nothing (`doctor` still flags
-      it). `doctor` already warned; this makes the install *prevent* the failure instead of the operator
-      hitting and diagnosing it. non-`api:` (a diagnostic helper widened, not the pinned surface).)*
+      runs before any engine binary is guaranteed usable. Both write a **short** `scratch_dir`
+      (`~/.ekvm`) only when `/tmp` is `nodev` **and** that replacement is not, since pinning one `nodev`
+      dir over another fixes nothing (`doctor` still flags it). Short, not the data dir, because the
+      jailer's socket path is length-bounded (P20.16b). `doctor` already warned; this makes the install
+      *prevent* the failure instead of the operator hitting and diagnosing it. non-`api:` (a diagnostic
+      helper widened, not the pinned surface).)*
+- [x] **P20.16b** **`fix`: the jailer's API socket path fits `sun_path` again** (a de-brand regression
+      the first privileged run on Arch surfaced).
+      *(**Done.** `create_workdir` named every per-VM scratch/jail dir `ebpf-kvm-engine-<pid>-<seq>`, and
+      the jailer embeds that name **twice** in the API socket path
+      (`<scratch>/<name>/firecracker/<name>/root/run/firecracker.socket`); the rename from the old
+      3-char acronym to the 15-char spelled-out name pushed that path past the kernel's `sun_path` limit
+      (~108 bytes), so `boots_under_the_jailer` / `jailed_overlay_*` failed with a typed "socket path too
+      long" error that `check_sun_path` correctly raised, not a cryptic bind failure. Shortened the
+      internal dir prefix to `ekvm-` via a single-sourced `VM_DIR_PREFIX` const shared by `create_workdir`
+      and the sweep's `owner_pid` (mint and match can't drift), and corrected the too-long scratch
+      *defaults* this had exposed: the `ci-privileged.sh` wrapper (`/var/tmp/ekvm`) and the guided
+      install's `scratch_dir` (`~/.ekvm`, P20.16a). A unit test pins that the prefix plus both shipped
+      defaults leave room for the doubled socket path even at the widest pid; a much longer `$HOME` can
+      still exceed it, by design, and `check_sun_path` refuses with the fix. non-`api:` (an internal dir
+      name, unchanged public surface).)*
+- [x] **P20.16c** **`fix`: the bulk-I/O device labels fit ext4's 16-byte limit again** (the second
+      de-brand regression the same privileged run surfaced, one layer past P20.16b).
+      *(**Done.** The de-brand grew `channel::INPUT_LABEL`/`OUTPUT_LABEL` to `ebpf-kvm-engine-input`
+      (21 bytes) and `-output` (22), past ext4's 16-byte volume-label field. `mke2fs -L` **silently
+      truncates** (exit 0, a stderr warning `run_host_tool` only surfaces on failure), and both labels
+      truncated to the *same* `ebpf-kvm-engine-`, so the guest's `findfs LABEL=…` matched nothing and
+      every bulk mount (`/input`, `/output`) silently vanished: all four bulk-I/O exec tests failed with
+      empty mounts while plain execs stayed green. Shortened to `ekvm-input`/`ekvm-output` (the P20.16b
+      `ekvm` prefix); the single-sourcing in `crates/channel` did its job (the host's `mke2fs -L` and the
+      guest's baked `mount-drives` both follow), and a new `channel` test pins both labels ≤ 16 bytes
+      **and distinct**, so neither the truncation nor the collision can regress. Needs a rootfs rebuild
+      to take effect (`ci-privileged`/`build-rootfs` does it as a matter of course). non-`api:` (an
+      internal host↔guest label; the pinned wire surface is untouched).)*
 - [x] **P20.17** **Contributor loop**: the papercuts that cost the most time per day.
       *(**Done.** (1) `ci-privileged` now **refuses** to run as root without `CARGO_TARGET_DIR`
       instead of warning: the redirect must be on the outer `cargo` to keep `./target` clean at all,

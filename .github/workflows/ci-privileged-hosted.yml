@@ -75,9 +75,11 @@ jobs:
             || { echo "::error::no BTF (/sys/kernel/btf/vmlinux); CO-RE eBPF cannot load here"; exit 1; }
 
       - name: Scratch dir off any nodev mount (the jailer's chroot /dev/kvm lives under it)
+        # Short by design, matching ci-privileged.sh's default: the jailer nests the per-VM dir name
+        # twice in the API socket path, which must fit sun_path (~108 bytes).
         run: |
-          sudo mkdir -p /ebpf-kvm-engine-scratch && sudo chmod 1777 /ebpf-kvm-engine-scratch
-          echo "EBPF_KVM_ENGINE_SCRATCH_DIR=/ebpf-kvm-engine-scratch" >> "$GITHUB_ENV"
+          sudo mkdir -p /var/tmp/ekvm && sudo chmod 1777 /var/tmp/ekvm
+          echo "EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ekvm" >> "$GITHUB_ENV"
 
       - name: Install host tools (firecracker + jailer + net/fs)
         run: |

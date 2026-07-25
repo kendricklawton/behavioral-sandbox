@@ -90,9 +90,14 @@ pub const VSOCK_PORT: u32 = 1024;
 /// than by enumeration order. Like the vsock port above, these are a host↔guest contract: the driver
 /// (which builds the images) and the rootfs build (whose `mount-drives` mounts them) share the one
 /// definition, so a drifted copy can't leave the guest silently skipping a mount.
-pub const INPUT_LABEL: &str = "ebpf-kvm-engine-input";
+///
+/// **Both labels must fit ext4's 16-byte volume-label field.** `mke2fs -L` silently *truncates* a
+/// longer one (exit 0, a warning on stderr nobody reads), so the on-disk label stops matching this
+/// constant and the guest's `findfs` finds nothing: every bulk mount silently vanishes. A test below
+/// pins the limit, and that the two stay distinct even so.
+pub const INPUT_LABEL: &str = "ekvm-input";
 /// See [`INPUT_LABEL`]. The output device is writable; the guest mounts it read-write at `/output`.
-pub const OUTPUT_LABEL: &str = "ebpf-kvm-engine-output";
+pub const OUTPUT_LABEL: &str = "ekvm-output";
 
 /// The kernel-cmdline token key the driver uses to hand the guest its static IPv6 address, as
 /// `guest_ip6=<addr>/<plen>`. The kernel `ip=`/`CONFIG_IP_PNP` param configures the guest's v4
@@ -777,6 +782,18 @@ mod tests {
         let mut buf = Vec::new();
         write_handshake(&mut buf).unwrap();
         read_handshake(&mut buf.as_slice()).unwrap();
+    }
+
+    #[test]
+    fn bulk_device_labels_fit_ext4_and_stay_distinct() {
+        // ext4's volume label is 16 bytes; `mke2fs -L` silently truncates past it (exit 0), so a
+        // longer constant here means the on-disk label never matches and the guest's mount-by-label
+        // silently skips every bulk device. Regression guard: the de-brand once grew both labels
+        // past the limit, and their truncations *collided* into one identical 16-byte prefix.
+        const EXT4_LABEL_MAX: usize = 16;
+        assert!(INPUT_LABEL.len() <= EXT4_LABEL_MAX, "{INPUT_LABEL}");
+        assert!(OUTPUT_LABEL.len() <= EXT4_LABEL_MAX, "{OUTPUT_LABEL}");
+        assert_ne!(INPUT_LABEL, OUTPUT_LABEL);
     }
 
     #[test]

@@ -37,7 +37,7 @@ dependencies alike.
 ## Getting a source tree ready
 
 ```console
-git clone https://github.com/k-henry-org/ebpf-kvm-engine && cd ebpf-kvm-engine
+git clone https://github.com/packsixfour/ebpf-kvm-engine && cd ebpf-kvm-engine
 cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
 cargo build                  # the workspace: driver, loader, CLI, guest agent
 ```
@@ -100,7 +100,7 @@ The wrapper collapses the three env concerns that a `sudo` run otherwise stacks 
 
 ```console
 sudo -E env "PATH=$PATH" CARGO_TARGET_DIR="$PWD/target-privileged" \
-     EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ebpf-kvm-engine-scratch cargo xtask ci-privileged
+     EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged
 ```
 
 - **`CARGO_TARGET_DIR`**: `sudo cargo …` builds as **root**, so without it this run leaves root-owned

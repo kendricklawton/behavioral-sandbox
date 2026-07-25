@@ -34,7 +34,9 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target-privileged}"
-export EBPF_KVM_ENGINE_SCRATCH_DIR="${EBPF_KVM_ENGINE_SCRATCH_DIR:-/var/tmp/ebpf-kvm-engine-scratch}"
+# Short by design: the jailer nests this dir name twice in the API socket path, which must fit
+# sun_path (~108 bytes), so /var/tmp/ekvm, not a long /var/tmp/ebpf-kvm-engine-scratch.
+export EBPF_KVM_ENGINE_SCRATCH_DIR="${EBPF_KVM_ENGINE_SCRATCH_DIR:-/var/tmp/ekvm}"
 mkdir -p "$EBPF_KVM_ENGINE_SCRATCH_DIR"
 
 exec cargo xtask ci-privileged "$@"

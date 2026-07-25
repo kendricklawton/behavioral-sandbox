@@ -932,7 +932,7 @@ impl Spawned {
             )?;
         }
         // Bulk writable output: attach the blank image read-write. The guest mounts it by
-        // label (`ebpf-kvm-engine-output`), so the `/dev/vdX` letter this lands on doesn't matter, a boot may
+        // label (`ekvm-output`), so the `/dev/vdX` letter this lands on doesn't matter, a boot may
         // attach input, output, both, or neither. Durability of the guest's writes is the guest's
         // `-o sync` mount plus a clean unmount on shutdown; `collect_outputs` reads it after the VMM
         // exits (never while it holds the file open, see `RunningVm::collect_outputs`).
@@ -1463,10 +1463,18 @@ pub(crate) fn check_sun_path(socket: &Path) -> Result<(), VmmError> {
     Ok(())
 }
 
+/// The per-VM scratch/jail dir name prefix. Deliberately **short**, not the crate name: the jailer
+/// embeds this dir name **twice** in the API socket path
+/// (`<scratch>/<name>/firecracker/<name>/root/run/firecracker.socket`), which must fit `sun_path`
+/// (~108 bytes, [`SUN_PATH_MAX`]); a long prefix plus a real scratch dir overflows it (spelling the
+/// project name out here is what first blew the limit). Single-sourced with the sweep's `owner_pid`,
+/// which parses it back to find residue, so mint and match can't drift.
+pub(crate) const VM_DIR_PREFIX: &str = "ekvm";
+
 /// Create the per-VM scratch dir. Two constraints shape it:
-/// - **Short path** (`/tmp/agent-<pid>-<n>`): the API socket lives here and
-///   `sockaddr_un.sun_path` caps at ~108 bytes, so a deep `TMPDIR`-based path would make
-///   Firecracker's `bind()` fail with EINVAL.
+/// - **Short path** (`<scratch>/ekvm-<pid>-<n>`, [`VM_DIR_PREFIX`]): the API socket lives here and
+///   `sockaddr_un.sun_path` caps at ~108 bytes, so a deep or long-named path would make
+///   Firecracker's `bind()` fail with EINVAL (`check_sun_path` refuses first, with the fix).
 /// - **Fail-if-exists, mode `0700`**: `/tmp` is world-writable and PIDs recycle, so a
 ///   pre-existing path (squatted by another user, or stale from a killed run) must never be
 ///   silently adopted, the rootfs copy and socket go here. A collision just advances to the
@@ -1475,7 +1483,8 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
     use std::os::unix::fs::DirBuilderExt;
     for _ in 0..1024 {
         let workdir = base.join(format!(
-            "ebpf-kvm-engine-{}-{}",
+            "{}-{}-{}",
+            VM_DIR_PREFIX,
             std::process::id(),
             VM_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -1505,8 +1514,9 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
         }
     }
     Err(VmmError::Vmm(format!(
-        "no fresh scratch dir under {} after 1024 attempts (stale agent-* dirs?)",
-        base.display()
+        "no fresh scratch dir under {} after 1024 attempts (stale {}-* dirs?)",
+        base.display(),
+        VM_DIR_PREFIX
     )))
 }
 
@@ -1855,5 +1865,29 @@ mod tests {
             err.contains("EBPF_KVM_ENGINE_SCRATCH_DIR"),
             "names the fix: {err}"
         );
+    }
+
+    #[test]
+    fn the_default_scratch_dirs_leave_room_for_the_jailer_socket_path() {
+        // Regression guard for the sun_path overflow the de-brand introduced: the jailer nests the
+        // per-VM dir name **twice** (`<scratch>/<name>/firecracker/<name>/root/run/firecracker.socket`),
+        // so a long VM_DIR_PREFIX plus a real scratch dir overflows `sun_path`. Pin that the prefix and
+        // the shipped scratch defaults (the ci-privileged wrapper's and the guided install's) fit, even
+        // at the widest pid and a long-lived daemon's high sequence. A much longer $HOME can still
+        // exceed it, by design: `check_sun_path` then refuses with the fix.
+        let name = format!("{VM_DIR_PREFIX}-{}-{}", u32::MAX, 99_999);
+        for scratch in ["/var/tmp/ekvm", "/home/operator/.ekvm"] {
+            let socket = Path::new(scratch)
+                .join(&name)
+                .join("firecracker")
+                .join(&name)
+                .join("root/run/firecracker.socket");
+            assert!(
+                check_sun_path(&socket).is_ok(),
+                "default scratch {scratch} overflows sun_path: {} bytes for {}",
+                socket.as_os_str().len(),
+                socket.display()
+            );
+        }
     }
 }

@@ -11,7 +11,7 @@ VMM and could corrupt the image. Second, the guest controls the image's contents
 targets, so extraction has to treat an output symlink as hostile.
 
 **Decision.** When `BootConfig.output_dir` is set, the driver attaches a **blank, writable** ext4 as
-a third block device (labelled `ebpf-kvm-engine-output`, `is_read_only: false`); the guest mounts it read-write
+a third block device (labelled `ekvm-output`, `is_read_only: false`); the guest mounts it read-write
 at `/output`, so a command's files under `/output/...` are the bulk-output surface. `RunningVm::`
 `collect_outputs` (consumes the VM) then reads that image back into the host directory. It is the
 whole-working-dir / large-file counterpart to the vsock channel's per-frame `Response::File`

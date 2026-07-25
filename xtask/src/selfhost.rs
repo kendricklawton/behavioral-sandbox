@@ -129,17 +129,14 @@ fn write_starter_config() -> Result<()> {
 }
 
 /// The non-`nodev` scratch dir to pin for a jailed boot, or `None` when the default `/tmp` base is
-/// already fine (or no better home exists). `$XDG_DATA_HOME/ebpf-kvm-engine/scratch` (default
-/// `~/.local/share/...`), the same per-user data root `install.sh` uses; skipped when that path is
-/// *also* `nodev`, since pinning one nodev dir over another fixes nothing (`doctor` still flags it).
+/// already fine (or `$HOME` is also `nodev`, since pinning one nodev dir over another fixes nothing).
+/// `~/.ekvm`, deliberately **short**: the jailer nests the per-VM dir name twice in the API socket
+/// path, which must fit `sun_path` (~108 bytes), so a deep dir under the data dir would overflow it.
 fn starter_scratch_dir(home: &Path) -> Option<PathBuf> {
     if !vmm::doctor::scratch_is_nodev(Path::new("/tmp")).unwrap_or(false) {
         return None;
     }
-    let scratch = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share"))
-        .join("ebpf-kvm-engine/scratch");
+    let scratch = home.join(".ekvm");
     if vmm::doctor::scratch_is_nodev(&scratch).unwrap_or(false) {
         println!(
             "  note: /tmp is nodev and so is {}; set EBPF_KVM_ENGINE_SCRATCH_DIR to a non-nodev path",

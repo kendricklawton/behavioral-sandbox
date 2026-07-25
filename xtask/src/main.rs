@@ -727,7 +727,7 @@ fn ci_privileged() -> Result<()> {
              the jailed-boot tests fail deep in the run.\n  Point it off nodev (e.g. /var/tmp) — or \
              use ./ci-privileged.sh, which sets all three env concerns:\n    \
              sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" \
-             EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ebpf-kvm-engine-scratch cargo xtask ci-privileged",
+             EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged",
             scratch.display()
         );
     }

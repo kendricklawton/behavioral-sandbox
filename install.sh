@@ -2,7 +2,7 @@
 # Install the ebpf-kvm-engine sandbox engine from a release package (decision 035).
 #
 # Canonical use (once releases are public):
-#   curl -fsSL https://raw.githubusercontent.com/k-henry-org/ebpf-kvm-engine/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/packsixfour/ebpf-kvm-engine/main/install.sh | sh
 #
 # Also works from a local package (offline / pre-release testing):
 #   EBPF_KVM_ENGINE_DIST_TARBALL=dist/ebpf-kvm-engine-<ver>-x86_64-linux.tar.gz sh install.sh
@@ -10,7 +10,7 @@
 #   sh ./install.sh
 #
 # Knobs (env):
-#   EBPF_KVM_ENGINE_REPO            GitHub repo to fetch from        (default k-henry-org/ebpf-kvm-engine)
+#   EBPF_KVM_ENGINE_REPO            GitHub repo to fetch from        (default packsixfour/ebpf-kvm-engine)
 #   EBPF_KVM_ENGINE_VERSION         release version, no leading v    (default: the latest release)
 #   EBPF_KVM_ENGINE_DIST_TARBALL    local tarball, skips the network
 #   EBPF_KVM_ENGINE_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
@@ -22,7 +22,7 @@
 # every extracted file against the package's MANIFEST.sha256. Nothing installs unverified.
 set -eu
 
-REPO="${EBPF_KVM_ENGINE_REPO:-k-henry-org/ebpf-kvm-engine}"
+REPO="${EBPF_KVM_ENGINE_REPO:-packsixfour/ebpf-kvm-engine}"
 PREFIX="${EBPF_KVM_ENGINE_INSTALL_PREFIX:-$HOME/.local/bin}"
 DATA="${EBPF_KVM_ENGINE_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ebpf-kvm-engine}"
 VERSION="${EBPF_KVM_ENGINE_VERSION:-}"
@@ -116,10 +116,12 @@ if [ -z "${EBPF_KVM_ENGINE_NO_TOML:-}" ] && [ ! -e "$HOME/.ebpf-kvm-engine.toml"
     # The jailed default (real root) mknods /dev/kvm inside a chroot under the scratch dir; on a host
     # whose default base (/tmp) is `nodev` (every systemd default) those nodes are inert and the boot
     # fails ScratchDirNodev. Pin scratch_dir off nodev so the first `sudo ebpf-kvm-engine run` works
-    # (P20.16a); skipped when $DATA is also nodev, which pinning wouldn't fix.
+    # (P20.16a); skipped when $HOME is also nodev, which pinning wouldn't fix. Kept short (~/.ekvm, not
+    # a deep dir under the data dir): the jailer nests the per-VM dir name twice in the API socket
+    # path, which must fit sun_path (~108 bytes).
     SCRATCH=""
-    if is_nodev /tmp && ! is_nodev "$DATA"; then
-        SCRATCH="$DATA/scratch"
+    if is_nodev /tmp && ! is_nodev "$HOME"; then
+        SCRATCH="$HOME/.ekvm"
         mkdir -p "$SCRATCH"
     fi
     {

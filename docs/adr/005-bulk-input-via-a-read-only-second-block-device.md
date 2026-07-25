@@ -45,8 +45,8 @@ the *guest's* filesystem, never the host's, no traversal escape.
 - **`/dev/vdb` naming was order-dependent.** ~~Fine for a single input device; if a later change adds a
   third (writable output) drive, prefer mounting by filesystem label/UUID.~~ **Resolved when the
   writable output drive landed:** the guest now mounts both data devices by filesystem **label**
-  (`ebpf-kvm-engine-input`/`ebpf-kvm-engine-output`, stamped with `mke2fs -L`, resolved with `findfs`), so the `/dev/vdX`
+  (`ekvm-input`/`ekvm-output`, stamped with `mke2fs -L`, resolved with `findfs`), so the `/dev/vdX`
   letter, which shifts when output is present but input isn't, no longer matters. The input image
-  gained an `ebpf-kvm-engine-input` label and the `sysinit` line became `/sbin/mount-drives`.
+  gained an `ekvm-input` label and the `sysinit` line became `/sbin/mount-drives`.
 - **The image is sized generously** from the input's byte total + a `-N` inode count (many tiny files
   exhaust inodes, not bytes); an input past a 2 GiB ceiling is a typed error, not a giant image.

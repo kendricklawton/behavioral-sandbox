@@ -417,10 +417,7 @@ mod tests {
             Some(true)
         );
         // A scratch dir under $HOME is not nodev, the recommended fix.
-        assert_eq!(
-            mount_nodev_in(mi, Path::new("/home/k/.ebpf-kvm-engine-scratch")),
-            Some(false)
-        );
+        assert_eq!(mount_nodev_in(mi, Path::new("/home/k/.ekvm")), Some(false));
         // Longest-prefix wins: `/tmp` (nodev), not the `/` root it also sits under.
         assert_eq!(mount_nodev_in(mi, Path::new("/tmp")), Some(true));
         // An `nodev`-free path falls through to the non-nodev root.

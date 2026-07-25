@@ -215,10 +215,10 @@ fn boots_under_the_jailer() {
     vm.shutdown().expect("jailed shutdown should succeed");
 
     // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup, no
-    // `agent-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
+    // `ekvm-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
     // via `from_env`, so `EBPF_KVM_ENGINE_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
     // not zero leaks.
-    let prefix = format!("agent-{}-", std::process::id());
+    let prefix = format!("ekvm-{}-", std::process::id());
     let scratch_root = vmm::BootConfig::from_env().scratch_dir;
     let scratch_leaks = std::fs::read_dir(&scratch_root)
         .expect("scan the scratch root for leaks")
@@ -399,11 +399,11 @@ fn path_is_mounted(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Per-VM network namespaces this process owns that are currently present (`/run/netns/agent-<pid>-*`),
+/// Per-VM network namespaces this process owns that are currently present (`/run/netns/ekvm-<pid>-*`),
 /// for the leak assertion below. Under the netns model the tap lives inside the netns, so a leaked
 /// *netns*, not a host `fc*` interface, is the network residue to check for.
 fn agent_netns() -> std::collections::BTreeSet<String> {
-    let prefix = format!("agent-{}-", std::process::id());
+    let prefix = format!("ekvm-{}-", std::process::id());
     std::fs::read_dir("/run/netns")
         .map(|rd| {
             rd.flatten()
@@ -462,9 +462,9 @@ fn repeated_boots_leave_no_leaks() {
             .unwrap_or_else(|e| panic!("shutdown {i} failed: {e}"));
     }
 
-    // This process's per-VM scratch dirs (`agent-<pid>-<n>` under the configured scratch root)
+    // This process's per-VM scratch dirs (`ekvm-<pid>-<n>` under the configured scratch root)
     // must all be gone; an unreadable root is a failure, not zero leaks.
-    let prefix = format!("agent-{}-", std::process::id());
+    let prefix = format!("ekvm-{}-", std::process::id());
     let scratch_root = vmm::BootConfig::from_env().scratch_dir;
     let leftovers = std::fs::read_dir(&scratch_root)
         .expect("scan the scratch root for leaks")
