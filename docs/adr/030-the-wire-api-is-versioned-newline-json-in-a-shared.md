@@ -1,7 +1,7 @@
 # 030. The wire API is versioned newline-JSON in a shared `protocol` crate, not gRPC *(2026-07-17)*
 
 **Context.** `ekvm` exposes the engine over a wire API, and that wire is a contract downstream
-depends on: the language SDKs (separate repos) freeze against it, so its shape is a long-lived
+callers depend on: callers in any language freeze against it, so its shape is a long-lived
 commitment, not an implementation detail. Two forces set that shape. First, the peer is a **local,
 trusted-ish client** the hoster runs, not the untrusted guest, so hand-debuggability (`socat`/`nc` by
 hand) and "any language with a JSON library and a unix socket can drive it" outweigh a compact wire.
@@ -11,7 +11,7 @@ and a `tokio` stack into that posture for no gain here. The one adversarial conc
 is guardrail 5: even a trusted-ish peer's input is bounded, so every decode has a message-size cap and
 returns a typed error, never a panic/hang/unbounded allocation.
 
-**Decision.** `ekvm`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
+**Decision.** `ekvm`'s wire API, the contract callers freeze against, is **newline-delimited JSON
 over a unix socket**, and every message (request *and* response) carries a leading `schema` field.
 The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 `trace_summary`)\* → `close`. It is **not gRPC**.
@@ -19,14 +19,14 @@ The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` |
 **Why a `schema` field now, when the shape isn't frozen.** Precisely *because* it isn't frozen yet:
 stamping `schema: 1` on every message and rejecting a mismatch **up front, before the body is
 trusted**, means a client built against a future revision fails loudly instead of being
-half-understood. The stamp is the seam the SDKs freeze against. (It is distinct from the audit
+half-understood. The stamp is the seam callers freeze against. (It is distinct from the audit
 record's own `schema`, the CLI's `--json` run-result `schema`, and decision 034's signed-envelope
 `schema`: independent surfaces, independently versioned.)
 
 **Why a shared `protocol` crate (serde-only, no `vmm`).** The wire is the contract, not
 shared Rust internals. Putting the `Request`/`Response`/`Envelope` shapes and the bounded line codec
 in their own **engine-free** crate means the daemon and the **reference client** (`client`)
-share one source of truth, while a non-Rust SDK reimplements the same JSON shapes with only a JSON
+share one source of truth, while a non-Rust caller reimplements the same JSON shapes with only a JSON
 library, the proof a caller needs nothing of the engine but the wire. The reference client depends on
 `protocol` and a JSON value **only, never `vmm`**; if it ever linked the engine, that
 proof would be void.

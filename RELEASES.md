@@ -32,8 +32,6 @@ deliberately not a curated changelog, which would only churn every `v0.0.x`. Ins
   so the reasoning outlives the diff.
 - The git log, one imperative subject per logical change; changes to the pinned public API carry a
   leading `api:` marker so downstream pin bumps are auditable from the log alone.
-- [`ROADMAP.md`](ROADMAP.md), while it exists, the staged plan whose checkboxes track the remaining
-  work toward the tag.
 
 Curated release notes start accumulating in this file with `v0.1.0`.
 

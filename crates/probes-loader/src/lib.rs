@@ -968,6 +968,37 @@ impl Ipv4Cidr {
             prefix_len: 32,
         }
     }
+
+    /// The network address of this CIDR.
+    #[must_use]
+    pub fn network(&self) -> Ipv4Addr {
+        self.network
+    }
+
+    /// The prefix length (0..=32) of this CIDR.
+    #[must_use]
+    pub fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
+
+    /// Whether `self` contains `other` (i.e. `other` is equal to or narrower than `self`).
+    #[must_use]
+    pub fn contains(&self, other: &Self) -> bool {
+        if other.prefix_len < self.prefix_len {
+            return false;
+        }
+        if self.prefix_len == 0 {
+            return true;
+        }
+        let mask = u32::MAX << (32 - self.prefix_len);
+        (u32::from(self.network) & mask) == (u32::from(other.network) & mask)
+    }
+}
+
+impl std::fmt::Display for Ipv4Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.network, self.prefix_len)
+    }
 }
 
 /// A validated IPv6 **CIDR**, the v6 twin of [`Ipv4Cidr`]: prefix length guaranteed `0..=128` by
@@ -1000,6 +1031,39 @@ impl Ipv6Cidr {
             network: addr,
             prefix_len: 128,
         }
+    }
+
+    /// The network address of this CIDR.
+    #[must_use]
+    pub fn network(&self) -> Ipv6Addr {
+        self.network
+    }
+
+    /// The prefix length (0..=128) of this CIDR.
+    #[must_use]
+    pub fn prefix_len(&self) -> u8 {
+        self.prefix_len
+    }
+
+    /// Whether `self` contains `other` (i.e. `other` is equal to or narrower than `self`).
+    #[must_use]
+    pub fn contains(&self, other: &Self) -> bool {
+        if other.prefix_len < self.prefix_len {
+            return false;
+        }
+        if self.prefix_len == 0 {
+            return true;
+        }
+        let self_u128 = u128::from(self.network);
+        let other_u128 = u128::from(other.network);
+        let mask = u128::MAX << (128 - self.prefix_len);
+        (self_u128 & mask) == (other_u128 & mask)
+    }
+}
+
+impl std::fmt::Display for Ipv6Cidr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.network, self.prefix_len)
     }
 }
 
@@ -1070,6 +1134,24 @@ impl EgressPolicy {
     #[must_use]
     pub fn is_deny_all(&self) -> bool {
         self.rules.is_empty() && self.rules6.is_empty()
+    }
+
+    /// Reconstruct the requested IPv4 CIDRs contained in this policy's rules.
+    #[must_use]
+    pub fn cidrs_v4(&self) -> Vec<Ipv4Cidr> {
+        self.rules
+            .iter()
+            .filter_map(|r| Ipv4Cidr::new(Ipv4Addr::from(r.addr), r.prefix_len).ok())
+            .collect()
+    }
+
+    /// Reconstruct the requested IPv6 CIDRs contained in this policy's rules.
+    #[must_use]
+    pub fn cidrs_v6(&self) -> Vec<Ipv6Cidr> {
+        self.rules6
+            .iter()
+            .filter_map(|r| Ipv6Cidr::new(Ipv6Addr::from(r.addr), r.prefix_len).ok())
+            .collect()
     }
 }
 

@@ -317,8 +317,17 @@ impl Default for BootConfig {
             enable_network: false,
             jail: None,
             require_limits: false,
-            scratch_dir: PathBuf::from("/tmp"),
+            scratch_dir: default_scratch_dir(),
         }
+    }
+}
+
+fn default_scratch_dir() -> PathBuf {
+    let tmp = Path::new("/tmp");
+    if crate::doctor::scratch_is_nodev(tmp).unwrap_or(false) {
+        PathBuf::from("/var/tmp")
+    } else {
+        tmp.to_path_buf()
     }
 }
 
@@ -1028,8 +1037,12 @@ mod tests {
     }
 
     #[test]
-    fn scratch_dir_defaults_to_tmp_and_honors_the_env_override() {
-        assert_eq!(BootConfig::default().scratch_dir, PathBuf::from("/tmp"));
+    fn scratch_dir_defaults_to_non_nodev_base_and_honors_the_env_override() {
+        let default_scratch = BootConfig::default().scratch_dir;
+        assert!(
+            default_scratch == std::path::Path::new("/tmp")
+                || default_scratch == std::path::Path::new("/var/tmp")
+        );
         let cfg = BootConfig::from_env_with(|k| {
             (k == "EKVM_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
         });

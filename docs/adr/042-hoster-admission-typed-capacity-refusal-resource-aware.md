@@ -37,7 +37,7 @@ are not (guardrail 4). This decision adds only the former.
 
 **Alternatives considered.**
 - **A `kind`/`code` field on `Response::Error`.** Rejected: it conflates backpressure with failure,
-  widens the error shape the SDKs pin, and forces a dispatcher to destructure an error and risk
+  widens the error shape callers pin, and forces a dispatcher to destructure an error and risk
   mis-bucketing an unknown kind as terminal.
 - **A `status` wire verb for the capacity read.** Rejected: the protocol is session-scoped (the first
   message must be `open`, decision 030), so a query verb either breaks that invariant or special-cases
@@ -50,8 +50,8 @@ are not (guardrail 4). This decision adds only the former.
 
 **Consequences and notes.**
 - **Additive wire, no schema bump.** An old client that receives `reply:"at_capacity"` fails as a
-  typed `ProtocolError`, never a panic (decision 030's decode gate). It lands **before** the Phase 21
-  SDK freeze precisely because it changes the shape of an existing observable path (the refusal); doing
+  typed `ProtocolError`, never a panic (decision 030's decode gate). It lands **before** the wire
+  spec freeze precisely because it changes the shape of an existing observable path (the refusal); doing
   it after would be a break, not an addition.
 - **Charging `mem_mib` per VM is a conservative upper bound.** Pooled clones share the read-only base
   file copy-on-write, but guest working RAM is per-VM, so the charge is safe (slightly conservative);

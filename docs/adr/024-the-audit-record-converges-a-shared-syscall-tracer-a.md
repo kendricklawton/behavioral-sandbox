@@ -1,7 +1,7 @@
 # 024. The audit record converges: a shared syscall tracer, a single post-boot attach, and deterministic JSON *(2026-07-17)*
 
 **Context.** The audit record is the engine's deliverable: a host-observed account of what a run did,
-and its format is a contract the language SDKs parse. Closing it well answers four standing
+and its format is a contract callers parse. Closing it well answers four standing
 requirements at once, the probes detach and the record finalizes when a sandbox closes, the surface is
 structured JSON, the per-run overhead stays bounded even under concurrency, and the whole path is
 proven end to end.
@@ -40,7 +40,7 @@ net, detach only, no record, and is a no-op after `collect`. So a bundle always 
 clean whether it is finalized or dropped.
 
 **Deterministic JSON.** `RunRecord::to_json` is hand-rolled, dependency-free, and compact, the same
-reasoning as the hand-framed wire (decision 002): the audit-log format is a contract the language SDKs
+reasoning as the hand-framed wire (decision 002): the audit-log format is a contract callers
 parse, so the exact bytes are pinned here (a golden test), not left to a derive's field order. It is
 byte-stable (fixed key order; every array already sorted by its builder), float-free (durations are
 integer nanoseconds), and renders addresses/protocols/syscalls by name. A later phase pretty-prints it
@@ -88,4 +88,4 @@ zero CPU always means a quiet sandbox, never a dropped read.
 nothing per-VM left to pre-attach, its `arm()` → `bind()` reconciliation is gone. It extends the
 shared-probe treatment the CPU meter already used, closing the O(sandboxes)-per-event shape decision
 023 rejected for `sched_switch`. And the hand-rolled JSON follows the hand-framed wire of decision 002,
-an SDK-parsed contract whose exact bytes are pinned, not derived.
+a machine-parsed contract whose exact bytes are pinned, not derived.

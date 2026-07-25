@@ -14,10 +14,11 @@ engine's job is to contain what the model's code does and hand back the record. 
 tenancy/billing/scheduling or a model into this repo, or moves the security boundary into the guest,
 the design is wrong.
 
-The **language SDKs** (Go/Python/Node/C#) and the **Wasmtime sibling** are separate repos built on
-this engine's frozen wire API + audit-log format, thin clients / a sibling, never in this
+The **Wasmtime sibling** is a separate repo built on
+this engine's frozen wire API + audit-log format, a sibling, never in this
 repo. The Wasmtime variant is a *sibling, not a backend*, so *isolation is hardware* holds here
-without exception. (They're a forward map in `ROADMAP.md` Phases 21–22; their code lives elsewhere.)
+without exception; its code lives elsewhere.
+
 
 **Why this exists.** A self-hostable, embeddable engine for running untrusted code with hardware
 isolation and a trustworthy, host-observed audit log isn't something you can pull off the shelf. This
@@ -64,7 +65,7 @@ docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): ru
                  (`cli*.md`), the embedder contract (`embedding.md`), the eBPF half (`probes.md`),
                  the contributing chapters (incl. `contributing-architecture.md`, the architecture
                  overview + repo layout), and `docs/adr/`, the decision log as one ADR per decision.
-                 Root keeps only the standard meta files (README/CONTRIBUTING/SECURITY/…) plus ROADMAP.md.
+                 Root keeps only the standard meta files (README/CONTRIBUTING/SECURITY/…).
 xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF build at P8),
                  `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
                  and the rootfs/kernel build. Never shipped.
@@ -119,13 +120,13 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
 - **Git is human-driven.** The user makes every commit and push; the **coding agent** (Claude,
   Gemini, Codex, as opposed to `ekvm`/ekvm, this project) never runs `git commit` / `git push` (or
   any other CI-triggering action). The coding agent's job ends at: changes made, demo working,
-  roadmap box checked in the working tree, and, **only when asked**, a commit message drafted
-  (Conventional Commits per the next bullet; never an AI co-author/attribution trailer).
+  and, **only when asked**, a commit message drafted (Conventional Commits per the next bullet; never
+  an AI co-author/attribution trailer).
 - **Commit messages follow Conventional Commits.** `type(scope)?: subject` with the standard types
   (`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`, `ci`, `build`). The subject stays
   imperative and describes **what was done** ("fix: bound session reads by a deadline", not "fixed
-  timeouts"), and never references phase IDs (the roadmap can change). A mixed change takes its
-  most significant type (`fix` over `refactor` over `test`) rather than splitting hairs.
+  timeouts"). A mixed change takes its most significant type (`fix` over `refactor` over `test`)
+  rather than splitting hairs.
 - **Public-API changes carry the `api` scope.** The engine is embedded downstream at the `vmm`
   library's public API, pinned by git rev, so a change to that API (`Sandbox`, `Limits`,
   `RunResult`, `VmmError` including its variants *or* the `kind()` bucket mapping, or the `channel`
@@ -134,15 +135,10 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   don't use the scope. This is about legibility, not a new process: still one imperative subject,
   still human-committed.
 
-## Build order (roadmap)
+## Build order
 
-The phase-by-phase plan is the single source of truth in **`ROADMAP.md`** (its **checkboxes are
-the state**). Work it per its §0.5 loop: first unchecked box in ID order, one item per
-iteration, and the box checked **together with the work** so they land in one commit. The
-**user** makes that commit. A phase isn't left until its **Exit gate** passes, *a working demo.*
-Work postponed out of a box becomes its **own new box** (or an explicit won't-do) in the same
-commit, never a bare-prose deferral the first-unchecked-box loop can't see (§0.5).
-Don't duplicate phase status here, update the roadmap. Hard-to-reverse
+Development proceeds iteratively with every capability proven running end to end. Hard-to-reverse
 choices land as `(decision)` **ADRs** under `docs/adr/` (one `NNN-*.md` file per decision, indexed
-by `docs/adr/README.md`), keyed by their own sequential number and date (never a phase ID, so each
-ADR stands on its own as the roadmap evolves).
+by `docs/adr/README.md`), keyed by their own sequential number and date (so each
+ADR stands on its own).
+

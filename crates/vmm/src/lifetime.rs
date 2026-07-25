@@ -444,4 +444,44 @@ mod tests {
         std::fs::remove_dir_all(&cg).expect("remove fake cgroup");
         handle.kill().expect("post-teardown kill is a no-op Ok");
     }
+
+    /// On a degraded host (cgroup v2 unavailable/unwritable or sentinel unarmable), VmLifetime
+    /// degrades to Drop-only teardown and KillHandle falls back to signaling the VMM pid directly.
+    #[test]
+    fn degraded_host_drop_only_teardown_and_pid_fallback_kill() {
+        let mut dummy = Command::new("sleep")
+            .arg("60")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn dummy process");
+        let pid = dummy.id();
+
+        let mut lt = VmLifetime {
+            own_cgroup: None,
+            watched: Arc::from([]),
+            sentinel: None,
+            torn_down: Arc::new(AtomicBool::new(false)),
+            pid,
+        };
+
+        assert!(!lt.sentinel_armed(), "degraded host has no armed sentinel");
+
+        let handle = lt.kill_handle();
+        handle
+            .kill()
+            .expect("pid fallback kill succeeds on degraded host");
+
+        let status = dummy.wait().expect("wait for killed dummy process");
+        assert!(
+            !status.success(),
+            "dummy process was killed by pid fallback"
+        );
+
+        lt.teardown();
+        assert!(
+            lt.sentinel.is_none(),
+            "teardown on degraded lifetime completes cleanly"
+        );
+    }
 }

@@ -7,11 +7,7 @@ approach. The operating manual, read every session by humans and coding agents a
 
 ## How the work is organized
 
-Work is organized into sequentially-gated phases in
-[`ROADMAP.md`](https://github.com/packsixfour/ekvm/blob/main/ROADMAP.md), the **single source
-of truth for progress** (its checkboxes are the state). Work the first unchecked box in ID order,
-one item per iteration; a phase isn't left until its **Exit gate** passes (a working demo). Items
-tagged `(decision)` record the hard-to-reverse choice as a dated, numbered
+Work is organized into design decisions recorded as dated, numbered
 [ADR under `docs/adr/`](./adr/README.md), so the reasoning outlives the diff.
 
 ## The invariants (never trade these away)

@@ -1027,9 +1027,15 @@ impl Spawned {
                     "firecracker exited before boot ({status})"
                 )));
             }
-            if std::os::unix::net::UnixStream::connect(self.api.socket()).is_ok() {
+            if crate::firecracker::connect_with_timeout(
+                self.api.socket(),
+                std::time::Duration::from_millis(50),
+            )
+            .is_ok()
+            {
                 return Ok(());
             }
+
             if Instant::now() >= deadline {
                 return Err(VmmError::Timeout(
                     "firecracker API socket never became ready".into(),

@@ -28,7 +28,7 @@ Both machine JSON surfaces carry a leading integer `schema` field: the `--json` 
 **versioned independently**, two contracts, two versions. The compatibility policy is: within a version,
 changes are *additive only* (a new field a consumer can ignore); renaming or removing a field, or changing
 a value's meaning, **bumps** the integer. This lands before anything external parses the bytes, so the
-wire API and the SDK freeze harden a stable contract rather than a moving one.
+wire API and caller contracts harden a stable surface rather than a moving one.
 
 **Consequences.** The single `vmm::doctor` source means one place to keep correct, and any new
 prerequisite must declare itself hard or fail-open, forcing the isolation-vs-convenience call to be made

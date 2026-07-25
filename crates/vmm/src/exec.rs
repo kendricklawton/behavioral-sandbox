@@ -284,12 +284,10 @@ fn artifact_path_is_safe(path: &str) -> bool {
 /// `CONNECT <port>\n`, expect `OK <host_port>\n`. Returns the stream positioned right after the
 /// ack, with read/write deadlines set.
 fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream, VmmError> {
-    // `connect` is the one step without a deadline (std has no `UnixStream::connect_timeout`), but
-    // the peer is Firecracker's own vsock socket, created pre-`InstanceStart` and accepting
-    // promptly, so it returns or refuses at once; every step after this is deadline-bounded.
+    // `connect_with_timeout` bounds the connection step with a deadline.
     // ECONNREFUSED means the socket file exists but nothing accepts: a dead VMM's stale socket (a
     // pooled clone that crashed), the retryable/discard signal, not broken infra.
-    let mut stream = UnixStream::connect(uds).map_err(|e| {
+    let mut stream = crate::firecracker::connect_with_timeout(uds, timeout).map_err(|e| {
         let detail = format!("connect vsock socket {}: {e}", uds.display());
         if e.kind() == std::io::ErrorKind::ConnectionRefused {
             VmmError::GuestUnavailable(detail)
@@ -297,6 +295,7 @@ fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream,
             VmmError::Vmm(detail)
         }
     })?;
+
     stream
         .set_read_timeout(Some(timeout))
         .and_then(|()| stream.set_write_timeout(Some(timeout)))

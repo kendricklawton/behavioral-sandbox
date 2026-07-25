@@ -405,6 +405,10 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     host_policy
         .check_net(args.net)
         .map_err(|e| CliError::Cli(e.to_string()))?;
+    host_policy
+        .check_record(args.record.is_some() || args.record_summary.is_some())
+        .map_err(|e| CliError::Cli(e.to_string()))?;
+
     // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
     if args.watch && !std::io::stderr().is_terminal() {
         return Err(CliError::Cli(
@@ -428,6 +432,12 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         }
         Some(policy)
     };
+    if let Some(ref pol) = egress {
+        host_policy
+            .check_egress(pol)
+            .map_err(|e| CliError::Cli(e.to_string()))?;
+    }
+
     // Read the local `--put` files *before* the (jailed-by-default) boot: a bad path is a cheap stat
     // failure, so validate it up front rather than paying a full boot + teardown only to fail on it.
     let files_in = read_put_files(&args.put)?;

@@ -17,9 +17,11 @@
 //! key has no `BootConfig` field (it drives `tracing`), so the CLI reads it from here directly.
 
 use std::ffi::OsString;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Path, PathBuf};
 
+use probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 use vmm::VmmError;
 
@@ -81,6 +83,14 @@ pub struct AgentToml {
     require_jail: Option<bool>,
     /// Whether a caller may attach a guest NIC at all; unset permits it.
     allow_net: Option<bool>,
+    /// Refuse a run without an audit record on this host.
+    require_record: Option<bool>,
+    /// Directory where audit records are saved by default.
+    records_dir: Option<PathBuf>,
+    /// Operator ceiling on allowed IPv4 egress CIDRs.
+    max_egress_v4: Option<Vec<String>>,
+    /// Operator ceiling on allowed IPv6 egress CIDRs.
+    max_egress_v6: Option<Vec<String>>,
 }
 
 impl AgentToml {
@@ -159,6 +169,21 @@ impl AgentToml {
     /// of these keys, yields the default policy, which changes nothing.
     #[must_use]
     pub fn policy(&self) -> Policy {
+        let max_egress_v4 = self
+            .max_egress_v4
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|s| parse_v4_cidr(s))
+            .collect();
+        let max_egress_v6 = self
+            .max_egress_v6
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|s| parse_v6_cidr(s))
+            .collect();
+
         Policy {
             vcpus: self.vcpus,
             mem_mib: self.mem_mib,
@@ -170,6 +195,38 @@ impl AgentToml {
             max_output_cap: self.max_output_cap,
             require_jail: self.require_jail.unwrap_or(false),
             allow_net: self.allow_net,
+            require_record: self.require_record.unwrap_or(false),
+            records_dir: self.records_dir.clone(),
+            max_egress_v4,
+            max_egress_v6,
+        }
+    }
+}
+
+fn parse_v4_cidr(s: &str) -> Option<Ipv4Cidr> {
+    match s.split_once('/') {
+        Some((ip, prefix)) => {
+            let ip: Ipv4Addr = ip.parse().ok()?;
+            let prefix: u8 = prefix.parse().ok()?;
+            Ipv4Cidr::new(ip, prefix).ok()
+        }
+        None => {
+            let ip: Ipv4Addr = s.parse().ok()?;
+            Some(Ipv4Cidr::host(ip))
+        }
+    }
+}
+
+fn parse_v6_cidr(s: &str) -> Option<Ipv6Cidr> {
+    match s.split_once('/') {
+        Some((ip, prefix)) => {
+            let ip: Ipv6Addr = ip.parse().ok()?;
+            let prefix: u8 = prefix.parse().ok()?;
+            Ipv6Cidr::new(ip, prefix).ok()
+        }
+        None => {
+            let ip: Ipv6Addr = s.parse().ok()?;
+            Some(Ipv6Cidr::host(ip))
         }
     }
 }

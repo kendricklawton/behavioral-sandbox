@@ -8,7 +8,7 @@ outlives the run (or into build-time state), which collides directly with a long
 (pre-warmed/pooled) VM where a later run must never inherit an earlier one's credentials. And
 whatever carries secrets must *state* what the engine does with them: logs, error renderings, and the
 serial console are host-observable surfaces an embedder will ship into its own telemetry, so "we
-probably don't log it" is not a contract an SDK can be built on.
+probably don't log it" is not a contract a caller can be built on.
 
 **Decision.**
 - **Env is a per-exec field on `Request::Exec`** (wire protocol **v2**), applied by the guest agent
@@ -55,7 +55,7 @@ probably don't log it" is not a contract an SDK can be built on.
   caller-buffer copies remain out of the engine's reach, so the wipe is still best-effort *in scope*,
   now elision-proof *within* that scope.
 
-The public API is embedder-driven: every SDK-shaped caller passes files + env, and the engine's
+The public API is embedder-driven: every caller passes files + env, and the engine's
 observable surfaces are precisely where a hoster's log pipeline would exfiltrate a leaked value.
 Making non-leakage a *tested contract*, a sentinel grepped out of every surface, with a positive
 control proving the console capture is real, is what lets a downstream pin this crate and pass

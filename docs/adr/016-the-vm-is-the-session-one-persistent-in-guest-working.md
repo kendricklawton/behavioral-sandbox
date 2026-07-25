@@ -26,7 +26,7 @@ process = one VM = one tenant.
 
 Alternatives considered:
 - **Per-exec fresh dirs, state only via absolute guest paths.** Rejected: it makes the obvious
-  composition fail and forces every SDK to warn "your files vanish unless you `cd /somewhere`".
+  composition fail and forces callers to handle "your files vanish unless you `cd /somewhere`".
 - **A session id in the protocol** (per-session dirs, host-managed lifecycle). Rejected: it invents
   a second session concept inside the one the VM already provides, adds protocol surface, and its
   isolation between sessions would be agent-enforced, the agent is exec/IO convenience, never a

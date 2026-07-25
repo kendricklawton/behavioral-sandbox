@@ -3,6 +3,11 @@
 //! (device + vCPU state, guest memory, root disk); [`Vm::restore`] rebuilds a VM from one on a fresh
 //! VMM. The [`Snapshot`] type itself stays in `vm.rs` with the other public surface; this module
 //! holds only the orchestration, the way `spawn.rs` holds the boot sequence.
+//!
+//! **CPU Portability:** Firecracker snapshots preserve the producing host's CPUID features (`cpu_template`
+//! is unset by default). Restoring a snapshot on a different CPU model or host lacking produced CPUID
+//! features can fault the guest with an illegal instruction. Cross-host restore requires identical CPU
+//! models or a matching CPU template.
 
 use std::path::Path;
 

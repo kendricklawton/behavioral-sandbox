@@ -78,6 +78,9 @@ Assumptions), or physical/side-channel attacks.
 | State bleed between clones | Each restored clone has its own in-RAM overlay and guest RAM; the shared base is read-only | `snapshot.rs` |
 | Secret disclosure | Injected `--env` values and file contents are never logged or written to the serial console | driver + CLI secret-handling tests |
 
+**Note on Snapshot CPU Portability:** Firecracker snapshots preserve the producing host's vCPU CPUID state (`cpu_template` is unset by default). Cross-host snapshot restore requires matching CPU models or an explicit CPU template to avoid guest illegal instruction faults.
+
+
 The **consolidated** proof is that these hold *together*, against one hostile guest doing its worst
 on every axis at once: it exfiltrates (denied and recorded), floods the network (dropped at volume),
 exhausts memory and forks a storm (bounded by the cgroup, zero host threads), and hunts for the

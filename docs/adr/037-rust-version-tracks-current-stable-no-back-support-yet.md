@@ -18,7 +18,7 @@ together, never incidental drift, and never a promise to compile on an older rel
 (`crates/probes`) is nightly by construction and sits outside this entirely.
 
 A support window (a Wasmtime-style "last three stable", its floor tested by its own CI lane and
-decoupled from the build pin) is **revisited at `v0.1.0`**, when the SDKs and external embedders that
+decoupled from the build pin) is **revisited at `v0.1.0`**, when external embedders that
 make a window worth its maintenance actually exist. Recorded here so the deferral is a decision, not a
 silent gap.
 

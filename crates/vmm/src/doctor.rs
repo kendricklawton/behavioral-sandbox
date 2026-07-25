@@ -93,7 +93,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             &format!("architecture is {} (x86_64)", std::env::consts::ARCH),
             SUPPORTED_ARCHES.contains(&std::env::consts::ARCH),
             false,
-            "unsupported architecture: the engine is built and tested only for x86_64 (ADR 032)",
+            "unsupported architecture: the engine is built and tested only for x86_64",
         ),
         Check::new(
             &format!(
@@ -103,8 +103,8 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             kernel_at_least(MIN_KERNEL.0, MIN_KERNEL.1),
             false,
             "unsupported kernel: below the security-maintained LTS floor the engine requires for \
-             running untrusted code (ADR 032); it also provides cgroup.kill for crash-safe \
-             teardown (ADR 011)",
+             running untrusted code; it also provides cgroup.kill for crash-safe \
+             teardown",
         ),
         // The hardware isolation boundary, never a degradation.
         Check::new(
@@ -140,13 +140,13 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         ),
         // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
-            "firecracker is the pinned v1.9 (ADR 001)",
+            "firecracker is the pinned v1.9",
             firecracker_version(&fc) == Some((1, 9)),
             true,
             "boots continue with a warning; API request bodies may not match another version",
         ),
         Check::new(
-            "firecracker binary sha256 matches pinned release (ADR 040)",
+            "firecracker binary sha256 matches pinned release",
             firecracker_hash_matches(&fc),
             true,
             "custom or unpinned Firecracker binary on host; verify binary provenance out of band",
@@ -155,19 +155,19 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "real root (euid 0: the jailer mknod's device nodes)",
             geteuid() == Some(0),
             true,
-            "jailed boot (the default) fails; `--unjailed` still runs behind the KVM boundary",
+            "jailed chroot boot requires root (sudo); `--unjailed` mode runs unconfined using hardware KVM isolation",
         ),
         Check::new(
             "jailer on PATH",
             command_on_path("jailer"),
             true,
-            "jailed boot (the default) fails; `--unjailed` still runs behind the KVM boundary",
+            "jailed boot requires jailer binary; `--unjailed` mode runs unconfined using hardware KVM isolation",
         ),
         Check::new(
             "cgroup v2 cpu+memory delegated (jailer resource caps)",
             cgroup_controllers_delegated(),
             true,
-            "jailed VMs run WITHOUT cpu/memory caps (ADR 010): a fail-open DoS mitigation",
+            "jailed VMs run WITHOUT cpu/memory caps: a fail-open DoS mitigation",
         ),
         // The jailer mknods /dev/kvm inside its chroot (under the scratch dir), and a `nodev` mount
         // makes that node inert, so an owned-and-readable /dev/kvm still fails to open. The default
@@ -177,9 +177,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "scratch dir is not nodev (the jailer's /dev/kvm lives there)",
             !scratch_is_nodev(&config.scratch_dir).unwrap_or(false),
             true,
-            "jailed boot (the default) fails: the scratch filesystem is mounted `nodev`, so the \
-             jailer's chroot /dev/kvm cannot be opened; point EKVM_SCRATCH_DIR at a non-nodev path \
-             (e.g. under $HOME), or use `--unjailed`",
+            "jailed boot fails: scratch filesystem is mounted `nodev`; use default `/var/tmp` or `--unjailed`",
         ),
         // Networking + bulk-I/O tooling, fails open: only the runs that use them need them.
         Check::new(
@@ -209,7 +207,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             &format!(
                 "exposed: {}; co-resident guests can probe unmitigated CPU side channels; do not \
-                 boot with mitigations=off, and keep microcode current (ADR 038)",
+                 boot with mitigations=off, and keep microcode current",
                 exposed.join(", ")
             ),
         ),
@@ -217,15 +215,15 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "SMT off (cross-thread side channels)",
             !sys_toggle_at(Path::new(SYS_SMT_ACTIVE)),
             true,
-            "sibling hyperthreads share micro-architectural state: for mutually-distrusting \
-             tenants, disable SMT or use core scheduling (ADR 038)",
+            "sibling hyperthreads share micro-architectural state: multi-tenant recommendation; \
+             for mutually-distrusting tenants, disable SMT or use core scheduling",
         ),
         Check::new(
             "KSM off (cross-VM page merging)",
             !sys_toggle_at(Path::new(SYS_KSM_RUN)),
             true,
             "kernel same-page merging across guests is a timing side channel the engine does not \
-             need: cross-clone memory sharing already comes from the snapshot COW (ADR 009)",
+             need: cross-clone memory sharing already comes from the snapshot COW",
         ),
     ]
 }
@@ -236,16 +234,16 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
 pub fn matrix() -> Vec<&'static str> {
     vec![
         "fails open (a warning, still runs):",
-        "  firecracker not v1.9         -> boots continue; API bodies may not match (ADR 001)",
-        "  firecracker sha256 unpinned  -> boots continue; verify custom binary out of band (ADR 040)",
+        "  firecracker not v1.9         -> boots continue; API bodies may not match",
+        "  firecracker sha256 unpinned  -> boots continue; verify custom binary out of band",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
-        "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (ADR 010)",
+        "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps",
         "  scratch dir is nodev         -> jailed /dev/kvm can't open; point EKVM_SCRATCH_DIR off nodev",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
-        "  SMT / KSM / CPU vulns        -> advisory hardening baseline (ADR 038): docs/host-hardening.md",
+        "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/host-hardening.md",
         "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
-        "  unsupported arch / kernel    -> off the supported platform: refused (ADR 032)",
+        "  unsupported arch / kernel    -> off the supported platform: refused",
         "  /dev/kvm missing/unwritable  -> every boot fails: NoKvm (isolation is hardware)",
         "  kernel or rootfs missing     -> nothing to boot: fetch/build the artifacts first",
         "  firecracker missing          -> no VMM to launch: a typed Vmm error",

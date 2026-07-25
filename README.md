@@ -67,8 +67,7 @@ Markdown in place):
 
 ## Status
 
-**Early, under active development, nothing here is production yet.** The staged plan and live
-progress are in [`ROADMAP.md`](ROADMAP.md); its checkboxes are the state. So far: a microVM boots
+**Early, under active development, nothing here is production yet.** So far: a microVM boots
 to userspace and runs real Python, Node, and static binaries from a purpose-built rootfs with
 captured stdout/stderr/exit; gets a per-VM deny-by-default network; snapshots and restores from a
 pre-warmed pool in milliseconds; runs confined under the jailer (chroot, dropped privileges,
@@ -128,16 +127,15 @@ claims. **Out of scope, by design:** multi-tenant auth, billing, fleet schedulin
 dashboard, that's whatever *hosts* the engine. The lifecycle
 contract and the full non-goals list live in [docs/embedding.md](docs/embedding.md).
 
-**Adjacent (separate repos, post-`v0.1.0`):** language SDKs (Go · Python · Node · C#) that drive
-the engine's wire API, and a Wasmtime-based *software-isolation* sibling built to compare both
-boundaries. Each is its own repo built on this engine's frozen wire API, thin clients / a sibling,
-never part of its trust boundary, and never traded against the hardware-isolation guarantee. See
-[`ROADMAP.md`](ROADMAP.md) Phases 21–22.
+**Adjacent (separate repos):** a Wasmtime-based *software-isolation* sibling built to compare both
+boundaries. It is its own repo built on this engine's frozen wire API, a sibling, never part of
+its trust boundary, and never traded against the hardware-isolation guarantee.
 
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
 [documentation](docs/contributing.md). The operating manual for agents is [`AGENTS.md`](AGENTS.md); each hard-to-reverse choice is recorded as one ADR under [`docs/adr/`](docs/adr/README.md).
+
 
 ## License
 

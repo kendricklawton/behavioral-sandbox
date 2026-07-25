@@ -91,6 +91,26 @@ impl ApiClient {
         self.send("PATCH", path, body, API_TIMEOUT)
     }
 
+    /// Configure Firecracker's `/logger` endpoint.
+    #[allow(dead_code)]
+    pub(crate) fn set_logger(&self, log_fifo: PathBuf, level: &str) -> Result<(), VmmError> {
+        self.put(
+            "/logger",
+            &LoggerConfig {
+                log_fifo,
+                level: level.to_string(),
+                show_level: true,
+                show_log_origin: true,
+            },
+        )
+    }
+
+    /// Configure Firecracker's `/metrics` endpoint.
+    #[allow(dead_code)]
+    pub(crate) fn set_metrics(&self, metrics_fifo: PathBuf) -> Result<(), VmmError> {
+        self.put("/metrics", &MetricsConfig { metrics_fifo })
+    }
+
     /// Serialize `body`, send `method path`, and expect a `2xx`; a `4xx` fault becomes a typed error.
     fn send<B: Serialize>(
         &self,
@@ -118,12 +138,8 @@ impl ApiClient {
         timeout: Duration,
     ) -> Result<(u16, Vec<u8>), VmmError> {
         let ctx = || format!("api {method} {path}");
-        // `connect` itself has no deadline (std offers none for a unix socket): the one unbounded
-        // step. In practice the VMM's listen backlog absorbs a connect while it's briefly busy, so a
-        // hang here needs the backlog *full* (a VMM whose API thread is wedged, e.g. a snapshot write
-        // to dead storage) plus enough queued requests to fill it, the same accepted gap the vsock
-        // dial documents (`exec.rs`). The deadline below bounds every step after connect.
-        let stream = UnixStream::connect(&self.socket).map_err(|e| io_err(&ctx(), &e))?;
+        // `connect_with_timeout` bounds the connection step so a wedged VMM API thread is a typed timeout.
+        let stream = connect_with_timeout(&self.socket, timeout).map_err(|e| io_err(&ctx(), &e))?;
         // `timeout` bounds the **whole** response, not each read. A per-read `SO_RCVTIMEO` is reset by
         // every byte that arrives, so a compromised VMM (the jail's stated threat) dripping one byte
         // just inside the timeout would hold this call open indefinitely. The write is one small
@@ -721,4 +737,32 @@ mod tests {
         assert_eq!(json["mem_backend"]["backend_path"], "/b/snapshot.mem");
         assert_eq!(json["resume_vm"], true);
     }
+}
+
+/// Connect to a Unix domain socket with a deadline/timeout, so a wedged socket listener doesn't block.
+pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = path.to_owned();
+    std::thread::spawn(move || {
+        let _ = tx.send(UnixStream::connect(path));
+    });
+    rx.recv_timeout(timeout)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "unix connect timed out"))?
+}
+
+/// Configures Firecracker's `/logger` API endpoint.
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct LoggerConfig {
+    pub log_fifo: PathBuf,
+    pub level: String,
+    pub show_level: bool,
+    pub show_log_origin: bool,
+}
+
+/// Configures Firecracker's `/metrics` API endpoint.
+#[allow(dead_code)]
+#[derive(Debug, Serialize, Clone)]
+pub(crate) struct MetricsConfig {
+    pub metrics_fifo: PathBuf,
 }

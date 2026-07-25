@@ -6,9 +6,7 @@ library. It is a thin host of the same public API the [CLI](./cli.md) and [embed
 use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
 the hoster's, above the engine, and are a recorded non-goal).
 
-> **Status.** The wire API is **versioned** (every message carries a `schema` field) but not yet
-> **frozen**: a later milestone freezes and formally specs it as the SDK contract (see the
-> [roadmap](https://github.com/packsixfour/ekvm/blob/main/ROADMAP.md)). Until then the shape may
+> **Status.** The wire API is **versioned** (every message carries a `schema` field). Until then the shape may
 > still change, which is why every message is schema-stamped and a mismatch is rejected up front.
 
 ## Run it

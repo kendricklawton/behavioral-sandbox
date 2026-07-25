@@ -19,8 +19,10 @@
 
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroU8};
+use std::path::PathBuf;
 use std::time::Duration;
 
+use probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr};
 use vmm::Limits;
 
 /// What a caller asked for. `None` means "unspecified", which takes the operator default (else the
@@ -41,7 +43,7 @@ pub struct Requested {
 ///
 /// Every field is optional/false by default, so an absent `.ekvm.toml` leaves the engine's existing
 /// behavior exactly as it was.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Policy {
     /// House default vCPUs when a caller does not ask.
     pub vcpus: Option<NonZeroU8>,
@@ -67,6 +69,16 @@ pub struct Policy {
     /// Whether a caller may attach a NIC at all. `false` refuses `--net` outright; it does not change
     /// the deny-by-default egress policy a NIC still gets (decision 008).
     pub allow_net: Option<bool>,
+
+    /// Refuse a run without an audit record on this host.
+    pub require_record: bool,
+    /// Directory where required audit records are stored by default.
+    pub records_dir: Option<PathBuf>,
+
+    /// Operator ceiling on allowed IPv4 egress CIDRs. Empty means no restriction.
+    pub max_egress_v4: Vec<Ipv4Cidr>,
+    /// Operator ceiling on allowed IPv6 egress CIDRs. Empty means no restriction.
+    pub max_egress_v6: Vec<Ipv6Cidr>,
 }
 
 /// A run refused because it asked past the operator's policy. Carries the knob, what was asked, and
@@ -86,6 +98,13 @@ pub enum PolicyError {
     JailRequired,
     /// `--net` was asked for on a host that forbids guest NICs.
     NetForbidden,
+    /// `--record` was omitted on a host that requires an audit record.
+    RecordRequired,
+    /// An `--allow` egress CIDR rule extends beyond the operator's approved range.
+    EgressNotAllowed {
+        /// The requested CIDR string that was outside the operator's ceiling.
+        asked: String,
+    },
 }
 
 impl fmt::Display for PolicyError {
@@ -107,6 +126,15 @@ impl fmt::Display for PolicyError {
             Self::NetForbidden => f.write_str(
                 "this host does not permit guest networking: `--net` is refused (operator policy: \
                  `allow_net = false` in .ekvm.toml)",
+            ),
+            Self::RecordRequired => f.write_str(
+                "this host requires an audit record: omitting --record is refused (operator policy: \
+                 `require_record = true` in .ekvm.toml)",
+            ),
+            Self::EgressNotAllowed { asked } => write!(
+                f,
+                "requested egress CIDR {asked} extends beyond this host's operator ceiling \
+                 (operator policy: `max_egress_v4`/`max_egress_v6` in .ekvm.toml)"
             ),
         }
     }
@@ -199,6 +227,51 @@ impl Policy {
     pub fn check_net(&self, net: bool) -> Result<(), PolicyError> {
         if net && self.allow_net == Some(false) {
             return Err(PolicyError::NetForbidden);
+        }
+        Ok(())
+    }
+
+    /// Refuse an egress policy whose requested CIDR rules extend beyond the operator's approved CIDR ceilings.
+    ///
+    /// # Errors
+    /// [`PolicyError::EgressNotAllowed`] when a requested CIDR is not contained within the operator's allowed list.
+    pub fn check_egress(&self, egress: &EgressPolicy) -> Result<(), PolicyError> {
+        if !self.max_egress_v4.is_empty() {
+            for asked in egress.cidrs_v4() {
+                if !self
+                    .max_egress_v4
+                    .iter()
+                    .any(|allowed| allowed.contains(&asked))
+                {
+                    return Err(PolicyError::EgressNotAllowed {
+                        asked: asked.to_string(),
+                    });
+                }
+            }
+        }
+        if !self.max_egress_v6.is_empty() {
+            for asked in egress.cidrs_v6() {
+                if !self
+                    .max_egress_v6
+                    .iter()
+                    .any(|allowed| allowed.contains(&asked))
+                {
+                    return Err(PolicyError::EgressNotAllowed {
+                        asked: asked.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse a run without an audit record on a host that requires recording.
+    ///
+    /// # Errors
+    /// [`PolicyError::RecordRequired`] when recording is omitted under `require_record = true`.
+    pub fn check_record(&self, recording: bool) -> Result<(), PolicyError> {
+        if !recording && self.require_record {
+            return Err(PolicyError::RecordRequired);
         }
         Ok(())
     }
@@ -454,5 +527,51 @@ mod tests {
             denied.check_net(false).is_ok(),
             "a run that wants no NIC is unaffected"
         );
+    }
+
+    #[test]
+    fn egress_ceiling_permits_narrowing_and_refuses_widening() {
+        use std::net::Ipv4Addr;
+
+        let ceiling = Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).unwrap();
+        let policy = Policy {
+            max_egress_v4: vec![ceiling],
+            ..Policy::default()
+        };
+
+        // Narrowing (host inside 10.0.0.0/8) is allowed
+        let allowed_rule =
+            EgressPolicy::deny_all().allow_host(Ipv4Addr::new(10, 1, 2, 3), Some(443), None);
+        assert!(
+            policy.check_egress(&allowed_rule).is_ok(),
+            "narrowed host inside 10.0.0.0/8 is permitted"
+        );
+
+        // Widening (asking for 192.168.1.1) is refused
+        let widened_rule =
+            EgressPolicy::deny_all().allow_host(Ipv4Addr::new(192, 168, 1, 1), None, None);
+        assert!(
+            matches!(
+                policy.check_egress(&widened_rule),
+                Err(PolicyError::EgressNotAllowed { .. })
+            ),
+            "asking outside 10.0.0.0/8 is refused"
+        );
+    }
+
+    #[test]
+    fn record_posture_refuses_unrecorded_runs() {
+        let off = Policy::default();
+        assert!(
+            off.check_record(false).is_ok(),
+            "default permits unrecorded runs"
+        );
+
+        let on = Policy {
+            require_record: true,
+            ..Policy::default()
+        };
+        assert_eq!(on.check_record(false), Err(PolicyError::RecordRequired));
+        assert!(on.check_record(true).is_ok(), "recorded runs are permitted");
     }
 }

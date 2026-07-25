@@ -302,6 +302,12 @@ pub struct SyscallFootprint {
 }
 
 impl SyscallFootprint {
+    /// Human label for this axis's scope, clarifying that it records the host VMM footprint rather than in-guest execution.
+    #[must_use]
+    pub fn scope_label(&self) -> &'static str {
+        "VMM host footprint, not guest"
+    }
+
     /// Fold a sequence of events into a footprint, keeping only those in `cgroup_id`. The convenience
     /// form of [`SyscallFold`] for callers (and the tests) that already have the events in hand.
     #[must_use]
@@ -508,6 +514,19 @@ mod tests {
     }
 
     const CG: u64 = 0x42;
+
+    #[test]
+    fn ring_buffer_overflow_honest_truncation() {
+        let footprint = SyscallFootprint {
+            total: 100,
+            notable_truncated: true,
+            overflow_events: 36,
+            ..Default::default()
+        };
+        assert!(footprint.notable_truncated);
+        assert_eq!(footprint.overflow_events, 36);
+        assert_eq!(footprint.total, 100);
+    }
 
     #[test]
     fn footprint_counts_by_kind_including_unknown() {

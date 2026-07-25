@@ -5,8 +5,9 @@
 # is built separately by `cargo xtask build-probes`.
 [package]
 name = "probes"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
+
 # Excluded from the workspace (builds for `bpfel-unknown-none`, not the host triple), so its package
 # fields are spelled literally rather than inherited from `[workspace.package]`.
 rust-version = "1.97"

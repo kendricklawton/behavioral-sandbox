@@ -41,8 +41,8 @@ the existing markers are the only signal and everything is disposable (decision 
   cross-language conformance suite genuinely belong post-tag, but the *written policy* is what an
   evaluator reads *before* adopting, and withholding it until after the tag is a self-inflicted "no
   stated stability promise" gap. Writing it now, in force later, costs nothing and closes that gap;
-  the Phase 21 box is reworded from "write a semver policy" to "apply and enforce this one across the
-  SDKs and the wire spec."
+  the policy is reworded from "write a semver policy" to "apply and enforce this one across the
+  wire spec."
 - **Start enforcing semver now (tag `v0.0.x` with promises).** Rejected. Pre-rename and pre-`v0.1.0`,
   every tag is a disposable checkpoint (decision 035, `RELEASES.md`), and the public identifiers still
   churn once at the rename (the working name is not final). A stability promise made before the name

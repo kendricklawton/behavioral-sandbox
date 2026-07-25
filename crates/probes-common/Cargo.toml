@@ -7,7 +7,7 @@
 # parser everywhere (`#![cfg_attr(not(test), no_std)]` lets its own tests use `std`).
 [package]
 name = "probes-common"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
