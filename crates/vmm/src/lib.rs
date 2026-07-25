@@ -587,6 +587,19 @@ impl Sandbox {
         self.vm.netns()
     }
 
+    /// Whether the VM-lifetime sentinel is armed for this sandbox. See [`RunningVm::sentinel_armed`].
+    #[must_use]
+    pub fn sentinel_armed(&self) -> bool {
+        self.vm.sentinel_armed()
+    }
+
+    /// Whether this sandbox fell back to Drop-only cleanup (sentinel could not be armed). See
+    /// [`RunningVm::sentinel_degraded`].
+    #[must_use]
+    pub fn sentinel_degraded(&self) -> bool {
+        self.vm.sentinel_degraded()
+    }
+
     /// Boot-to-userspace latency of this sandbox's microVM.
     #[must_use]
     pub fn boot_latency(&self) -> Duration {

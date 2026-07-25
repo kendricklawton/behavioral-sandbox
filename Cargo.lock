@@ -2087,6 +2087,7 @@ dependencies = [
  "guest-agent",
  "serde",
  "serde_json",
+ "sha2",
  "test-support",
  "tracing",
  "tracing-subscriber",

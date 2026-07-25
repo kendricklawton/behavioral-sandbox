@@ -424,16 +424,58 @@ fn is_firecracker(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// One full soak cycle: boot the agent rootfs (networked when `net`), run one guest command, and
+/// tear down. Returns the VMM pid for the orphan scan.
+fn boot_exec_shutdown(net: bool) -> u32 {
+    let mut cfg = guest_rootfs_config();
+    cfg.enable_network = net;
+    let vm = Vm::boot(cfg).unwrap_or_else(|e| panic!("soak boot failed: {e}"));
+    let pid = vm.vmm_pid();
+    let out = vm
+        .exec(&["echo".into(), "soak".into()], b"")
+        .unwrap_or_else(|e| panic!("soak exec failed: {e}"));
+    if out.exit_code != 0 {
+        panic!("soak exec exited {}", out.exit_code);
+    }
+    vm.shutdown()
+        .unwrap_or_else(|e| panic!("soak shutdown failed: {e}"));
+    pid
+}
+
+/// Measured soak cycles: `EBPF_KVM_ENGINE_SOAK_CYCLES` for a real endurance run, else a default
+/// sized so the serial privileged gate stays fast (~2-3 min at agent-boot speed). Floored at 2 so
+/// the test never proves less than the two-cycle version it replaced.
+fn soak_cycles() -> usize {
+    std::env::var("EBPF_KVM_ENGINE_SOAK_CYCLES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(24)
+        .max(2)
+}
+
+/// Every `CHURN_EVERY`-th soak cycle boots 3 VMs concurrently instead of 1: teardown must hold up
+/// under churn, not just single-file. 8 keeps the default soak (~30 VMs) inside the serial
+/// privileged gate's wall-time budget.
+const CHURN_EVERY: usize = 8;
+
 #[test]
-#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + artifacts (run via `cargo xtask ci-privileged`)"]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn repeated_boots_leave_no_leaks() {
-    // After two boot/teardown cycles, nothing this test spawned may survive: no per-VM scratch dir,
-    // no orphaned firecracker VMM process, and (with CAP_NET_ADMIN) no per-VM netns. The netns is the
-    // one resource outside the scratch dir, so it's reclaimed separately from `remove_dir_all`;
-    // without the capability, networking is off and this still covers the scratch-dir + process paths.
+    // The endurance form of the no-leak claim: after N boot/exec/teardown cycles under periodic
+    // concurrent churn, nothing this test spawned may survive, no per-VM scratch dir, no orphaned
+    // firecracker VMM process, and (with CAP_NET_ADMIN) no per-VM netns. The netns is the one
+    // resource outside the scratch dir, so it's reclaimed separately from `remove_dir_all`;
+    // without the capability, networking is off and the soak still covers the other axes.
     let net = have_net_admin();
+    let cycles = soak_cycles();
+    let prefix = format!("ekvm-{}-", std::process::id());
+    let scratch_root = vmm::BootConfig::from_env().scratch_dir;
     let netns_before = agent_netns();
     let mut vmm_pids = Vec::new();
+
+    // One warm-up cycle before the baselines: the first contact with the agent/vsock path does
+    // one-time lazy init that would otherwise read as a "leak" of the first measured cycle.
+    vmm_pids.push(boot_exec_shutdown(net));
 
     // Process-local baselines: teardown must hand back not just the on-host artifacts scanned
     // below but this process's own fds and threads, or a long-lived embedder walks into
@@ -450,27 +492,73 @@ fn repeated_boots_leave_no_leaks() {
         "at least this thread; /proc read failed?"
     );
 
-    // Two full cycles back to back; the second only works if the first was fully reclaimed.
-    for i in 0..2 {
-        let mut cfg = config();
-        cfg.enable_network = net;
-        let vm = Vm::boot(cfg).unwrap_or_else(|e| panic!("boot {i} failed: {e}"));
-        vmm_pids.push(vm.vmm_pid());
-        // `shutdown` consumes the VM, so its `Drop` (kill + reap + reclaim) has run by the time it
-        // returns, the leak checks below therefore observe the fully-torn-down state.
-        vm.shutdown()
-            .unwrap_or_else(|e| panic!("shutdown {i} failed: {e}"));
+    // This process's per-VM scratch dirs (`ekvm-<pid>-<n>` under the configured scratch root);
+    // an unreadable root is a failure, not zero leaks.
+    let scratch_leftovers = |scratch_root: &Path, prefix: &str| -> usize {
+        std::fs::read_dir(scratch_root)
+            .expect("scan the scratch root for leaks")
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            .count()
+    };
+
+    for i in 1..=cycles {
+        if i % CHURN_EVERY == 0 {
+            // A churn burst: 3 concurrent full cycles, joined before any measurement so the
+            // checkpoint observes a quiesced process.
+            let handles: Vec<_> = (0..3)
+                .map(|_| std::thread::spawn(move || boot_exec_shutdown(net)))
+                .collect();
+            for h in handles {
+                vmm_pids.push(h.join().expect("a churn cycle panicked"));
+            }
+            // Checkpoint after every burst: a slow leak fails here with a cycle number instead of
+            // as a mush at the end. (If the exact fd/thread equalities ever prove flaky mid-run,
+            // demote just those two to the final assertions; the on-host axes stay.)
+            assert_eq!(
+                scratch_leftovers(&scratch_root, &prefix),
+                0,
+                "scratch dirs leaked by cycle {i}"
+            );
+            let orphans: Vec<_> = vmm_pids
+                .iter()
+                .copied()
+                .filter(|&p| is_firecracker(p))
+                .collect();
+            assert!(
+                orphans.is_empty(),
+                "orphaned VMMs by cycle {i}: {orphans:?}"
+            );
+            if net {
+                let leaked: Vec<_> = agent_netns().difference(&netns_before).cloned().collect();
+                assert!(leaked.is_empty(), "netns leaked by cycle {i}: {leaked:?}");
+            }
+            assert_eq!(open_fds(), fds_before, "fds off baseline by cycle {i}");
+            assert_eq!(
+                process_threads(),
+                threads_before,
+                "threads off baseline by cycle {i}"
+            );
+        } else {
+            vmm_pids.push(boot_exec_shutdown(net));
+        }
     }
 
-    // This process's per-VM scratch dirs (`ekvm-<pid>-<n>` under the configured scratch root)
-    // must all be gone; an unreadable root is a failure, not zero leaks.
-    let prefix = format!("ekvm-{}-", std::process::id());
-    let scratch_root = vmm::BootConfig::from_env().scratch_dir;
-    let leftovers = std::fs::read_dir(&scratch_root)
-        .expect("scan the scratch root for leaks")
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with(&prefix))
-        .count();
+    // The measured leak-rate, reported before the assertions so a failing run still prints its
+    // numbers (the io_throttle reporting convention).
+    let vms = vmm_pids.len();
+    let fds_after = open_fds();
+    let threads_after = process_threads();
+    let leftovers = scratch_leftovers(&scratch_root, &prefix);
+    let netns_left = agent_netns().difference(&netns_before).count();
+    eprintln!(
+        "soak: {vms} VMs over {cycles} cycles: fd rate {:+.4}/VM ({fds_before} -> {fds_after}), \
+         thread rate {:+.4}/VM ({threads_before} -> {threads_after}), scratch dirs left \
+         {leftovers}, netns left {netns_left}",
+        (fds_after as f64 - fds_before as f64) / vms as f64,
+        (threads_after as f64 - threads_before as f64) / vms as f64,
+    );
+
     assert_eq!(leftovers, 0, "per-VM scratch dirs should be cleaned up");
 
     // Every firecracker VMM we booted must have been killed and reaped, no orphaned process.
@@ -481,7 +569,7 @@ fn repeated_boots_leave_no_leaks() {
         .collect();
     assert!(orphans.is_empty(), "orphaned firecracker VMMs: {orphans:?}");
 
-    // No per-VM netns survived the cycles either (only asserted when networking was enabled).
+    // No per-VM netns survived the soak either (only asserted when networking was enabled).
     if net {
         let leaked: Vec<_> = agent_netns().difference(&netns_before).cloned().collect();
         assert!(
@@ -493,14 +581,12 @@ fn repeated_boots_leave_no_leaks() {
     // And the process-local axes return to baseline: N runs must not accrete fds (console pipes,
     // API sockets) or threads (console readers) this process never hands back.
     assert_eq!(
-        open_fds(),
-        fds_before,
-        "fds must return to baseline after repeated boot/teardown cycles"
+        fds_after, fds_before,
+        "fds must return to baseline after the soak"
     );
     assert_eq!(
-        process_threads(),
-        threads_before,
-        "threads must return to baseline after repeated boot/teardown cycles"
+        threads_after, threads_before,
+        "threads must return to baseline after the soak"
     );
 }
 

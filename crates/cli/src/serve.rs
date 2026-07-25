@@ -258,11 +258,6 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // Reclaim bundle dirs a *crashed* prior daemon (SIGKILL/OOM, no handler) leaked, before this one
     // adds its own. Best-effort, this-user, dead-pid only.
     sweep_stale_agent_bundles(&base.scratch_dir);
-    // Also reclaim the per-VM residue (scratch dirs + their network namespaces) a crashed *driver*
-    // leaves: the lifetime sentinel reaps the VM processes, but dirs and netns are out of its scope
-    // (ADR 011), so without this they accumulate across restarts. This is the boot-time GC the engine
-    // owes its host (ADR 013); safe alongside live sessions (per-dir liveness + euid ownership).
-    sweep_orphaned_vms(&base.scratch_dir);
     // Bind the metrics endpoint *before* any session can be served, so a scrape target asked for
     // explicitly either works or the daemon refuses to start, an operational surface the hoster
     // requested must not silently be absent (the same posture as `--allow`'s enforcement refusal).
@@ -334,6 +329,11 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         max_committed_mem_mib: args.max_committed_mem_mib,
         max_committed_vcpus: args.max_committed_vcpus,
     });
+
+    // Reclaim the per-VM residue (scratch dirs + network namespaces) a crashed *driver* left
+    // behind before serving sessions, recording what was reclaimed into metrics.
+    sweep_orphaned_vms(&server.base.scratch_dir, Some(&server.metrics));
+
     if let Some(metrics_listener) = metrics_listener {
         spawn_metrics(metrics_listener, &server);
     }
@@ -573,14 +573,20 @@ fn own_euid() -> Option<u32> {
 /// ([`vmm::sweep_orphans`]), logging what it reclaimed. The complement of
 /// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
-fn sweep_orphaned_vms(scratch: &Path) {
+fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
     match sweep_orphans(scratch) {
-        Ok(r) if r.dirs_reclaimed + r.netns_reclaimed > 0 => tracing::info!(
-            dirs = r.dirs_reclaimed,
-            netns = r.netns_reclaimed,
-            "swept crashed-driver VM residue at startup"
-        ),
-        Ok(_) => {}
+        Ok(r) => {
+            if let Some(m) = metrics {
+                m.record_sweep(&r);
+            }
+            if r.dirs_reclaimed + r.netns_reclaimed > 0 {
+                tracing::info!(
+                    dirs = r.dirs_reclaimed,
+                    netns = r.netns_reclaimed,
+                    "swept crashed-driver VM residue at startup"
+                );
+            }
+        }
         Err(e) => tracing::warn!(error = %e, "orphan sweep failed at startup"),
     }
 }

@@ -165,6 +165,8 @@ convention of base units: **seconds**, never milliseconds.
 | `ebpf_kvm_engine_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
 | `ebpf_kvm_engine_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
 | `ebpf_kvm_engine_sessions_active` | gauge | Sessions currently open (one live microVM each). |
+| `ebpf_kvm_engine_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
+| `ebpf_kvm_engine_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
 | `ebpf_kvm_engine_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
 | `ebpf_kvm_engine_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
 | `ebpf_kvm_engine_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |

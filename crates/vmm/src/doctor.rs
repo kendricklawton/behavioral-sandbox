@@ -12,6 +12,11 @@
 //! ADR 032) are hard, while the jailer, resource caps, and networking tools fail open with a named
 //! consequence.
 //!
+//! The host-hardening posture rows (ADR 038) reuse [`Warn`](CheckStatus::Warn) for a second kind
+//! of advice: not a capability the engine loses, but a side-channel exposure the layer *beneath*
+//! the engine carries when mutually-distrusting tenants share the hardware. Advisory by design, a
+//! single-tenant dev box tripping them is fine (`docs/host-hardening.md` is the baseline).
+//!
 //! The eBPF-observability capability check (`CAP_BPF`/`CAP_PERFMON` + kernel BTF) lives in the probe
 //! loader, out of this crate (ADRs 021/023); each entry point appends it. This module is
 //! `unsafe`-free std-only detection, nothing here boots a VM.
@@ -81,6 +86,7 @@ impl Check {
 #[must_use]
 pub fn checks(config: &BootConfig) -> Vec<Check> {
     let fc = config.firecracker.to_string_lossy();
+    let exposed = vulnerable_entries(Path::new(SYS_CPU_VULNERABILITIES));
     vec![
         // The supported platform, hard: off it, the engine is not certified to isolate (ADR 032).
         Check::new(
@@ -140,6 +146,12 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "boots continue with a warning; API request bodies may not match another version",
         ),
         Check::new(
+            "firecracker binary sha256 matches pinned release (ADR 040)",
+            firecracker_hash_matches(&fc),
+            true,
+            "custom or unpinned Firecracker binary on host; verify binary provenance out of band",
+        ),
+        Check::new(
             "real root (euid 0: the jailer mknod's device nodes)",
             geteuid() == Some(0),
             true,
@@ -188,6 +200,33 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "bulk `output_dir` readback fails; per-frame `--get` artifacts are unaffected",
         ),
+        // Host hardening (ADR 038), advisory: micro-architectural side channels between
+        // co-resident guests live in the layer beneath the engine, so doctor advises the
+        // multi-tenant baseline (`docs/host-hardening.md`) and never refuses.
+        Check::new(
+            "CPU vulnerability mitigations in effect",
+            exposed.is_empty(),
+            true,
+            &format!(
+                "exposed: {}; co-resident guests can probe unmitigated CPU side channels; do not \
+                 boot with mitigations=off, and keep microcode current (ADR 038)",
+                exposed.join(", ")
+            ),
+        ),
+        Check::new(
+            "SMT off (cross-thread side channels)",
+            !sys_toggle_at(Path::new(SYS_SMT_ACTIVE)),
+            true,
+            "sibling hyperthreads share micro-architectural state: for mutually-distrusting \
+             tenants, disable SMT or use core scheduling (ADR 038)",
+        ),
+        Check::new(
+            "KSM off (cross-VM page merging)",
+            !sys_toggle_at(Path::new(SYS_KSM_RUN)),
+            true,
+            "kernel same-page merging across guests is a timing side channel the engine does not \
+             need: cross-clone memory sharing already comes from the snapshot COW (ADR 009)",
+        ),
     ]
 }
 
@@ -198,10 +237,12 @@ pub fn matrix() -> Vec<&'static str> {
     vec![
         "fails open (a warning, still runs):",
         "  firecracker not v1.9         -> boots continue; API bodies may not match (ADR 001)",
+        "  firecracker sha256 unpinned  -> boots continue; verify custom binary out of band (ADR 040)",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps (ADR 010)",
         "  scratch dir is nodev         -> jailed /dev/kvm can't open; point EBPF_KVM_ENGINE_SCRATCH_DIR off nodev",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
+        "  SMT / KSM / CPU vulns        -> advisory hardening baseline (ADR 038): docs/host-hardening.md",
         "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
         "  unsupported arch / kernel    -> off the supported platform: refused (ADR 032)",
@@ -265,6 +306,46 @@ fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     crate::spawn::fc_version_of(&text)
 }
 
+/// Known pinned Firecracker sha256 hashes (v1.9.0 and v1.9.1 release binaries, ADR 040).
+const PINNED_FIRECRACKER_SHA256: &[&str] = &[
+    "c8c2496f8786da12b7bbfbc5060af3573c22baa2e5f79ff6ee084993642bbe01", // v1.9.0
+    "809789cd7567b77b20edec9b301953338c2023c37ea63db82d46cb61773ad511", // v1.9.1
+];
+
+fn resolve_binary_path(bin: &str) -> Option<PathBuf> {
+    let p = Path::new(bin);
+    if p.components().count() > 1 {
+        return p.is_file().then(|| p.to_path_buf());
+    }
+    std::env::var_os("PATH").and_then(|path| {
+        std::env::split_paths(&path)
+            .map(|dir| dir.join(bin))
+            .find(|p| p.is_file())
+    })
+}
+
+fn firecracker_hash_matches(fc: &str) -> bool {
+    let Some(path) = resolve_binary_path(fc) else {
+        return false;
+    };
+    file_sha256(&path).is_some_and(|hash| PINNED_FIRECRACKER_SHA256.contains(&hash.as_str()))
+}
+
+fn file_sha256(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = std::io::Read::read(&mut file, &mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
+}
+
 /// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.
 fn kernel_at_least(major: u64, minor: u64) -> bool {
     std::fs::read_to_string("/proc/sys/kernel/osrelease")
@@ -279,6 +360,44 @@ fn kernel_at_least(major: u64, minor: u64) -> bool {
             ))
         })
         .is_some_and(|v| v >= (major, minor))
+}
+
+/// The sysfs facts behind the host-hardening advisory rows (ADR 038): the per-vulnerability
+/// mitigation files, whether SMT is active, and whether KSM is merging.
+const SYS_CPU_VULNERABILITIES: &str = "/sys/devices/system/cpu/vulnerabilities";
+const SYS_SMT_ACTIVE: &str = "/sys/devices/system/cpu/smt/active";
+const SYS_KSM_RUN: &str = "/sys/kernel/mm/ksm/run";
+
+/// The entries under `dir` (one file per CPU vulnerability) whose content reports `Vulnerable`,
+/// sorted so the advisory note is stable. A missing or unreadable dir reads as no exposure: an
+/// absent fact never raises a guessed warning (the [`scratch_is_nodev`] posture).
+fn vulnerable_entries(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter(|e| {
+            std::fs::read_to_string(e.path())
+                .is_ok_and(|s| s.trim_start().starts_with("Vulnerable"))
+        })
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Whether the one-line `/sys` toggle at `path` reads as on. Missing or unreadable reads as off,
+/// never a guessed warning.
+fn sys_toggle_at(path: &Path) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|s| sys_toggle_on(&s))
+}
+
+/// The pure parse behind [`sys_toggle_at`]: nonzero covers both SMT's `active` (`0`/`1`) and KSM's
+/// `run` (`0` off, `1` merging, `2` unmerging with the machinery still enabled).
+fn sys_toggle_on(content: &str) -> bool {
+    let t = content.trim();
+    !t.is_empty() && t != "0"
 }
 
 /// Whether cgroup v2 `cpu`+`memory` are delegated at the root (a systemd host does this by default),
@@ -468,5 +587,50 @@ mod tests {
             checks.iter().any(|c| c.label.contains("LTS floor")),
             "the host-kernel LTS floor is a stated check"
         );
+        // The host-hardening posture (ADR 038) and Firecracker pin (ADR 040) are present and advisory:
+        // whatever this host's state, those rows never read Fail.
+        for needle in ["CPU vulnerability", "SMT", "KSM", "binary sha256"] {
+            let row = checks
+                .iter()
+                .find(|c| c.label.contains(needle))
+                .expect("an advisory row");
+            assert_ne!(
+                row.status,
+                CheckStatus::Fail,
+                "advisory, never hard: {}",
+                row.label
+            );
+        }
+    }
+
+    #[test]
+    fn vulnerable_entries_reports_only_files_that_say_vulnerable() {
+        let dir = test_support::ScratchDir::created("vulns");
+        let write = |name: &str, content: &str| {
+            std::fs::write(dir.path().join(name), content).expect("write fixture");
+        };
+        write("meltdown", "Mitigation: PTI\n");
+        write("l1tf", "Not affected\n");
+        write(
+            "mds",
+            "Vulnerable: Clear CPU buffers attempted, no microcode\n",
+        );
+        write("retbleed", "Vulnerable\n");
+        assert_eq!(vulnerable_entries(dir.path()), vec!["mds", "retbleed"]);
+    }
+
+    #[test]
+    fn a_missing_hardening_fact_reads_as_ok_not_a_guessed_warning() {
+        let ghost = Path::new("/definitely/not/a/real/sysfs/dir/xyzzy");
+        assert!(vulnerable_entries(ghost).is_empty());
+        assert!(!sys_toggle_at(ghost));
+    }
+
+    #[test]
+    fn a_sys_toggle_reads_nonzero_as_on() {
+        assert!(sys_toggle_on("1\n"));
+        assert!(sys_toggle_on("2\n"), "KSM run=2 still has KSM enabled");
+        assert!(!sys_toggle_on("0\n"));
+        assert!(!sys_toggle_on(""));
     }
 }

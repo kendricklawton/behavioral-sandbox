@@ -26,6 +26,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use vmm::SweepReport;
+
 /// Upper bound on one scrape request's head (request line + headers). A scrape is a bare `GET`; far
 /// past this is not a scraper.
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
@@ -167,6 +169,11 @@ pub struct Metrics {
     open_failures: AtomicU64,
     /// Sessions currently open (gauge).
     active: AtomicU64,
+    /// Active sessions whose VM-lifetime sentinel could not be armed (gauge).
+    sentinel_degraded: AtomicU64,
+    /// Orphaned per-VM scratch dirs and network namespaces reclaimed by sweeps (counters).
+    sweep_dirs_reclaimed: AtomicU64,
+    sweep_netns_reclaimed: AtomicU64,
     /// Requests served, one slot per [`Verb`].
     requests: [AtomicU64; Verb::ALL.len()],
     /// Requests answered with an error, split by the fault taxonomy: `guest` (per-request, the
@@ -183,11 +190,14 @@ pub struct Metrics {
 
 impl Metrics {
     /// A session's sandbox came up (pooled or cold) and the session is now live.
-    pub fn session_opened(&self, pooled: bool, boot: Duration) {
+    pub fn session_opened(&self, pooled: bool, boot: Duration, sentinel_degraded: bool) {
         if pooled {
             self.opened_pooled.fetch_add(1, Ordering::Relaxed);
         } else {
             self.opened_cold.fetch_add(1, Ordering::Relaxed);
+        }
+        if sentinel_degraded {
+            self.sentinel_degraded.fetch_add(1, Ordering::Relaxed);
         }
         self.active.fetch_add(1, Ordering::Relaxed);
         self.boot_seconds.observe(boot);
@@ -200,12 +210,29 @@ impl Metrics {
 
     /// A live session ended (any path: `close`, EOF, a fatal fault). Paired with
     /// [`session_opened`](Self::session_opened) at the one teardown seam, so the gauge can't drift.
-    pub fn session_closed(&self) {
+    pub fn session_closed(&self, sentinel_degraded: bool) {
+        if sentinel_degraded {
+            let _ =
+                self.sentinel_degraded
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
+        }
         // Saturating: an unpaired decrement is a bug, but a wrapped gauge lying "18 quintillion
         // active" to the scraper would be worse than clamping at zero.
         let _ = self
             .active
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_sub(1));
+    }
+
+    /// Record an orphan sweep report: increment counters for reclaimed dirs and netns.
+    pub fn record_sweep(&self, report: &SweepReport) {
+        if report.dirs_reclaimed > 0 {
+            self.sweep_dirs_reclaimed
+                .fetch_add(report.dirs_reclaimed as u64, Ordering::Relaxed);
+        }
+        if report.netns_reclaimed > 0 {
+            self.sweep_netns_reclaimed
+                .fetch_add(report.netns_reclaimed as u64, Ordering::Relaxed);
+        }
     }
 
     /// One request of `verb` was served (counted whether it succeeds or errors).
@@ -296,6 +323,38 @@ impl Metrics {
             "ebpf_kvm_engine_sessions_active",
             "",
             self.active.load(Ordering::Relaxed),
+        );
+
+        family(
+            &mut out,
+            "ebpf_kvm_engine_sentinel_degraded",
+            "Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup).",
+            "gauge",
+        );
+        sample(
+            &mut out,
+            "ebpf_kvm_engine_sentinel_degraded",
+            "",
+            self.sentinel_degraded.load(Ordering::Relaxed),
+        );
+
+        family(
+            &mut out,
+            "ebpf_kvm_engine_sweep_reclaimed_total",
+            "Orphaned VM resources reclaimed by orphan sweeps, by resource type.",
+            "counter",
+        );
+        sample(
+            &mut out,
+            "ebpf_kvm_engine_sweep_reclaimed_total",
+            "{resource=\"dirs\"}",
+            self.sweep_dirs_reclaimed.load(Ordering::Relaxed),
+        );
+        sample(
+            &mut out,
+            "ebpf_kvm_engine_sweep_reclaimed_total",
+            "{resource=\"netns\"}",
+            self.sweep_netns_reclaimed.load(Ordering::Relaxed),
         );
 
         family(
@@ -593,9 +652,9 @@ mod tests {
     fn histograms_render_cumulative_buckets_in_seconds() {
         let m = Metrics::default();
         // 3 ms, 30 ms, and 7 s: one lands in le=0.005, one in le=0.05, one only under +Inf.
-        m.session_opened(false, Duration::from_millis(3));
-        m.session_opened(false, Duration::from_millis(30));
-        m.session_opened(true, Duration::from_secs(7));
+        m.session_opened(false, Duration::from_millis(3), false);
+        m.session_opened(false, Duration::from_millis(30), false);
+        m.session_opened(true, Duration::from_secs(7), false);
         let text = m.render(&CapacitySample::pool(None));
 
         // Cumulative: the 3ms one is in every bucket from 0.005 up; the 30ms joins at 0.05; the
@@ -647,9 +706,9 @@ mod tests {
     #[test]
     fn every_family_carries_help_and_type_and_the_gauge_pairs() {
         let m = Metrics::default();
-        m.session_opened(false, Duration::from_millis(100));
-        m.session_opened(false, Duration::from_millis(100));
-        m.session_closed();
+        m.session_opened(false, Duration::from_millis(100), false);
+        m.session_opened(false, Duration::from_millis(100), true);
+        m.session_closed(true);
         m.open_failed();
         m.request(Verb::Exec);
         m.request(Verb::Trace);
@@ -752,7 +811,7 @@ mod tests {
     fn the_gauge_clamps_at_zero_instead_of_wrapping() {
         // An unpaired decrement is a bug, but the scraped value must never wrap to u64::MAX.
         let m = Metrics::default();
-        m.session_closed();
+        m.session_closed(false);
         assert!(m
             .render(&CapacitySample::pool(None))
             .contains("ebpf_kvm_engine_sessions_active 0"));
@@ -816,9 +875,13 @@ mod tests {
         let mut compared = 0usize;
         for _ in 0..500 {
             match next() % 8 {
-                0 => m.session_opened(next() % 2 == 0, Duration::from_millis(next() % 3_000)),
+                0 => m.session_opened(
+                    next() % 2 == 0,
+                    Duration::from_millis(next() % 3_000),
+                    next() % 2 == 0,
+                ),
                 1 => m.open_failed(),
-                2 => m.session_closed(),
+                2 => m.session_closed(next() % 2 == 0),
                 3 => m.request(match next() % 4 {
                     0 => Verb::Exec,
                     1 => Verb::Put,
@@ -864,7 +927,7 @@ mod tests {
     #[test]
     fn the_endpoint_serves_the_exposition_text_over_http() {
         let metrics = Arc::new(Metrics::default());
-        metrics.session_opened(true, Duration::from_millis(4));
+        metrics.session_opened(true, Duration::from_millis(4), false);
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
         let addr = listener.local_addr().expect("local addr");
         let served = Arc::clone(&metrics);

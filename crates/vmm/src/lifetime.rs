@@ -220,6 +220,12 @@ impl VmLifetime {
         self.watched.iter().any(|w| w == dir)
     }
 
+    /// Whether the VM-lifetime sentinel is armed. `false` means sentinel creation failed
+    /// (e.g. cgroup v2 unavailable), so teardown is Drop-only.
+    pub(crate) fn sentinel_armed(&self) -> bool {
+        self.sentinel.is_some()
+    }
+
     /// The embedder's force-kill handle for this VM.
     pub(crate) fn kill_handle(&self) -> KillHandle {
         KillHandle {

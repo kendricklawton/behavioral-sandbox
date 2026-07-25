@@ -79,10 +79,11 @@ and `--mem` work the same as on `run`.
 ## `ebpf-kvm-engine doctor`
 
 Check this host's readiness *before* the first sandbox: `ebpf-kvm-engine doctor` prints one line per
-prerequisite, KVM, the jailer + real-root, `firecracker` v1.9, iproute2/e2fsprogs, cgroup
-delegation, the kernel version, the boot artifacts, and the eBPF capabilities, each marked `ok`,
-`warn` (a fail-open degradation, with the consequence named), or `FAIL` (a hard miss: no boot
-without it). It exits non-zero when a hard prerequisite is missing, so `ebpf-kvm-engine doctor && ebpf-kvm-engine run …`
+prerequisite, KVM, the jailer + real-root, `firecracker` v1.9 + pinned sha256 (decision 040), iproute2/e2fsprogs, cgroup
+delegation, the kernel version, the boot artifacts, the eBPF capabilities, and the host-hardening
+posture (SMT, KSM, CPU-vulnerability mitigations: advisory rows for a multi-tenant host, decision
+038), each marked `ok`, `warn` (a fail-open degradation or an advisory, with the consequence
+named), or `FAIL` (a hard miss: no boot without it). It exits non-zero when a hard prerequisite is missing, so `ebpf-kvm-engine doctor && ebpf-kvm-engine run …`
 gates cleanly. A footer tallies the rows; `ebpf-kvm-engine doctor --explain` adds the full
 fails-open-vs-hard-error matrix behind it, kept off the default report so the rows stay scannable
 (each non-`ok` row already names its own fix). (`cargo xtask setup` renders the same checks for a dev

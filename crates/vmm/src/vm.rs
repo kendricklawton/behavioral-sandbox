@@ -583,6 +583,18 @@ impl RunningVm {
         self.tap.as_ref().map(|t| t.netns.as_str())
     }
 
+    /// Whether the VM-lifetime sentinel is armed for this VM.
+    #[must_use]
+    pub fn sentinel_armed(&self) -> bool {
+        self.lifetime.sentinel_armed()
+    }
+
+    /// Whether this VM fell back to Drop-only cleanup (sentinel could not be armed).
+    #[must_use]
+    pub fn sentinel_degraded(&self) -> bool {
+        !self.sentinel_armed()
+    }
+
     /// Connect to the in-guest agent over vsock and complete the channel handshake, returning a
     /// protocol-ready [`ClientConnection`]. This is the host side of the exec path (`exec` builds
     /// `exec` on top): it dials Firecracker's vsock socket, speaks the `CONNECT <port>` handshake,

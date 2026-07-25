@@ -150,9 +150,20 @@ esac
 if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/ebpf-kvm-engine" ]; then
     say "  - non-default data dir, so observability needs: export EBPF_KVM_ENGINE_PROBES_OBJECT=\"$DATA/probes\""
 fi
-say "  - Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH, from"
-say "      https://github.com/firecracker-microvm/firecracker/releases (or use the container image,"
-say "      which bundles a pinned one)"
+FC_PIN1="c8c2496f8786da12b7bbfbc5060af3573c22baa2e5f79ff6ee084993642bbe01"
+FC_PIN2="809789cd7567b77b20edec9b301953338c2023c37ea63db82d46cb61773ad511"
+FC_BIN=$(command -v firecracker 2>/dev/null || true)
+if [ -n "$FC_BIN" ]; then
+    FC_HASH=$(sha256sum "$FC_BIN" 2>/dev/null | awk '{print $1}')
+    if [ "$FC_HASH" = "$FC_PIN1" ] || [ "$FC_HASH" = "$FC_PIN2" ]; then
+        say "  - Firecracker binary on PATH verified ($FC_BIN, sha256 ok)"
+    else
+        say "  - Firecracker binary on PATH ($FC_BIN, sha256 ${FC_HASH:-unknown}); pinned v1.9 release sha256 is $FC_PIN1"
+    fi
+else
+    say "  - Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH, from"
+    say "      https://github.com/firecracker-microvm/firecracker/releases/tag/v1.9.0 (sha256: $FC_PIN1)"
+fi
 say "  - check the host; it prints the exact run command for this host:"
 say "      ebpf-kvm-engine doctor"
 say "  - then run something (the default jails the VMM, which needs real root):"

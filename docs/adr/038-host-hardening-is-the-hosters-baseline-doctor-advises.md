@@ -66,4 +66,9 @@ case. The existing hard-floor rows (architecture, kernel LTS) stay hard; these n
   on making that host worth trusting.
 
 **As shipped.** `docs/host-hardening.md` (the reader-facing baseline checklist) and this decision
-ship as documentation; the machine-checkable advisory in `ebpf-kvm-engine doctor` is tracked as a roadmap box.
+shipped first as documentation; the machine-checkable advisory then landed on the shared check
+surface (`crates/vmm/src/doctor.rs`): three warn-only rows reading
+`/sys/devices/system/cpu/vulnerabilities/*` (any file reporting `Vulnerable` is named in the note),
+the SMT state (`/sys/devices/system/cpu/smt/active`), and the KSM state (`/sys/kernel/mm/ksm/run`),
+with a missing or unreadable fact reading as fine rather than a guessed warning. `can_boot` ignores
+warns, so the advisory changes no exit code by construction.

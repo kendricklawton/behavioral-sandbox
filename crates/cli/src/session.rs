@@ -145,7 +145,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     };
 
-    server.metrics.session_opened(pooled, boot);
+    server
+        .metrics
+        .session_opened(pooled, boot, vm.sentinel_degraded());
     tracing::info!(vmm_pid = vm.vmm_pid(), boot_ms, pooled, "session opened");
     if !send(&mut writer, &Response::Opened { boot_ms, pooled }) {
         end_session(server, vm, probes, pooled); // client gone before we could serve
@@ -474,7 +476,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
 /// target), and any bare `open` that meanwhile finds the pool dry cold-boots, correct, just not
 /// pooled.
 fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _pooled: bool) {
-    server.metrics.session_closed();
+    server.metrics.session_closed(vm.sentinel_degraded());
     drop(probes); // detach from the shared tracer/meter (its own `Drop`)
     if let Err(e) = vm.shutdown() {
         tracing::debug!(error = %e, "session VM shutdown reported an error");

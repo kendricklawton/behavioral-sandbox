@@ -2365,22 +2365,41 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       diagram and a "verify it yourself" containment runbook in `docs/threat-model.md`, and a
       scheduling-layer scope note in `docs/benchmarks.md`. Docs only, non-`api:`. The backing code is
       P20.10-P20.15.)*
-- [ ] **P20.10** **Host-hardening advisory in `ebpf-kvm-engine doctor`** (decision 038): read
+- [x] **P20.10** **Host-hardening advisory in `ebpf-kvm-engine doctor`** (decision 038): read
       `/sys/devices/system/cpu/vulnerabilities/*`, the SMT state, and the KSM state, and **warn** on an
       exposed host. Advisory, not a hard floor (a single-tenant dev box is fine); the arch/kernel rows
       stay hard. Reuses the shared host-check surface (`crates/vmm/src/doctor.rs`, decision 028).
-- [ ] **P20.11** **Soak the leak proof** (the fleet-scale half of the no-leak claim): extend the
+      *(**Done.** Three warn-only rows on the shared check surface: CPU-vulnerability mitigations
+      (any `Vulnerable` entry is named in the note), SMT active, and KSM enabled, each reading a
+      missing or unreadable `/sys` fact as fine rather than a guessed warning (the `scratch_is_nodev`
+      posture). `can_boot` ignores warns, so no exit code changes; both entry points (doctor, `cargo
+      xtask setup`) inherit the rows for free, and `--explain` gains the matrix line. Unit-tested via
+      pure seams (a fixture vulnerabilities dir, the toggle parse); `docs/host-hardening.md` and
+      decision 038 now speak in the present tense.)*
+- [x] **P20.11** **Soak the leak proof** (the fleet-scale half of the no-leak claim): extend the
       two-cycle `repeated_boots_leave_no_leaks` in `crates/vmm/tests/boot.rs` into an endurance loop of
       many start/exec/teardown cycles under churn, asserting fds/threads/netns/scratch return to
       baseline and reporting a leak-rate, so "no leak" is measured at scale, not at n=2. Privileged.
-- [ ] **P20.12** **Cleanup telemetry**: export the orphan-sweep's `SweepReport` (dirs/netns reclaimed,
+      *(**Done.** Extended `repeated_boots_leave_no_leaks` in `crates/vmm/tests/boot.rs` into an
+      endurance soak run (`soak_cycles()`, defaulting to 24, configurable via `EBPF_KVM_ENGINE_SOAK_CYCLES`).
+      Runs full boot/exec/shutdown cycles and inserts periodic concurrent churn bursts (3 parallel threads
+      every 8th cycle). Checks scratch dirs, orphaned VMM processes, per-VM netns, open fds, and process
+      threads at mid-run checkpoints and at completion, reporting a per-VM leak-rate to stderr.)*
+- [x] **P20.12** **Cleanup telemetry**: export the orphan-sweep's `SweepReport` (dirs/netns reclaimed,
       `crates/vmm/src/sweep.rs`) and a sentinel-degraded gauge (`crates/vmm/src/lifetime.rs`) through
       the metrics registry (`crates/cli/src/metrics.rs`), so an operator can alarm on reclamation and
       on hosts that fell back to Drop-only cleanup.
-- [ ] **P20.13** **Pin the Firecracker binary** (decision 040): a sha256 pin alongside the
+      *(**Done.** `RunningVm`/`Sandbox` now report `sentinel_armed()` and `sentinel_degraded()`
+      (`crates/vmm/src/lifetime.rs`), `Metrics` (`crates/cli/src/metrics.rs`) gains `sentinel_degraded`
+      gauge and `ebpf_kvm_engine_sweep_reclaimed_total{resource="dirs"|"netns"}` counters, and startup
+      sweeps report their `SweepReport` into the registry. `docs/daemon.md` table updated.)*
+- [x] **P20.13** **Pin the Firecracker binary** (decision 040): a sha256 pin alongside the
       kernel/rootfs pins (`xtask/src/artifacts.rs`), verified in `install.sh`, with an advisory
       `ebpf-kvm-engine doctor` check on the installed binary's hash. Firecracker is the boundary, so its binary is
       the one un-pinned input that actually matters.
+      *(**Done.** Exposed release `FIRECRACKER_SHA256` pins in `xtask/src/artifacts.rs`, added binary hash
+      verification to `install.sh`, and implemented advisory `ebpf-kvm-engine doctor` check for Firecracker's binary
+      sha256 hash in `crates/vmm/src/doctor.rs`. Unit-tested and `docs/cli.md` updated.)*
 - [ ] **P20.14** **Sign the release manifest** (decision 040): sign `SHA256SUMS` with the host
       `ed25519` signing core (decision 034) in `xtask/src/dist.rs`, and verify it in `install.sh` when a
       trusted key is present, so provenance does not rest on release-host + TLS trust alone.
