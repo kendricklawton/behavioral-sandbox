@@ -1,4 +1,4 @@
-//! CLI/daemon parity golden (the wire API, ADR 030): the **CLI** (`ebpf-kvm-engine run --json`) and the
+//! CLI/daemon parity golden (the wire API, ADR 030): the **CLI** (`ekvm run --json`) and the
 //! **daemon wire API** (`agent`, driven
 //! through the reference [`client::Client`]) render the *same* command **identically**, same
 //! exit code, same stdout, same stderr. The two faces are thin hosts of one `vmm` lifecycle, so
@@ -109,15 +109,12 @@ impl Drop for Daemon {
 /// The env the two faces share: the same rootfs, kernel, and readiness marker, so any difference in
 /// the result is the *rendering*, not the inputs.
 fn shared_env(cmd: &mut Command, root: &std::path::Path) {
-    cmd.env(
-        "EBPF_KVM_ENGINE_ROOTFS",
-        root.join("artifacts/rootfs-guest.ext4"),
-    )
-    // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-    .env("EBPF_KVM_ENGINE_MARKER", vmm::GUEST_READY_MARKER)
-    .env("EBPF_KVM_ENGINE_LOG", "warn");
-    if std::env::var_os("EBPF_KVM_ENGINE_KERNEL").is_none() {
-        cmd.env("EBPF_KVM_ENGINE_KERNEL", root.join("artifacts/vmlinux"));
+    cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+        // The guest rootfs signals readiness with its own marker, not a getty `login:`.
+        .env("EKVM_MARKER", vmm::GUEST_READY_MARKER)
+        .env("EKVM_LOG", "warn");
+    if std::env::var_os("EKVM_KERNEL").is_none() {
+        cmd.env("EKVM_KERNEL", root.join("artifacts/vmlinux"));
     }
 }
 
@@ -129,9 +126,9 @@ fn launch_daemon() -> (Daemon, PathBuf) {
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
     }
-    let socket = dir.join("ebpf-kvm-engine.sock");
+    let socket = dir.join("ekvm.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ekvm"));
     cmd.arg("serve")
         .arg("--unjailed")
         .arg("--socket")
@@ -140,9 +137,7 @@ fn launch_daemon() -> (Daemon, PathBuf) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    let child = cmd
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn ebpf-kvm-engine: {e}"));
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn ekvm: {e}"));
     let daemon = Daemon { child, dir };
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -152,18 +147,15 @@ fn launch_daemon() -> (Daemon, PathBuf) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!(
-        "ebpf-kvm-engine never began accepting on {}",
-        socket.display()
-    );
+    panic!("ekvm never began accepting on {}", socket.display());
 }
 
-/// Run one command through the **CLI** face: `ebpf-kvm-engine run --unjailed --json -- <argv>`, feeding
+/// Run one command through the **CLI** face: `ekvm run --unjailed --json -- <argv>`, feeding
 /// `stdin`, and read the structured result off stdout (stderr carries only logs, so stdout is the one
 /// JSON object).
 fn run_via_cli(argv: &[String], stdin: &str) -> RunOutcome {
     let root = workspace_root();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ekvm"));
     cmd.arg("run").arg("--unjailed").arg("--json").arg("--");
     cmd.args(argv);
     shared_env(&mut cmd, &root);
@@ -173,21 +165,20 @@ fn run_via_cli(argv: &[String], stdin: &str) -> RunOutcome {
 
     let mut child = cmd
         .spawn()
-        .unwrap_or_else(|e| panic!("spawn ebpf-kvm-engine run: {e}"));
+        .unwrap_or_else(|e| panic!("spawn ekvm run: {e}"));
     child
         .stdin
         .take()
-        .unwrap_or_else(|| panic!("ebpf-kvm-engine run has no stdin handle"))
+        .unwrap_or_else(|| panic!("ekvm run has no stdin handle"))
         .write_all(stdin.as_bytes())
-        .unwrap_or_else(|e| panic!("feed stdin to ebpf-kvm-engine run: {e}"));
+        .unwrap_or_else(|e| panic!("feed stdin to ekvm run: {e}"));
     let out = child
         .wait_with_output()
-        .unwrap_or_else(|e| panic!("wait for ebpf-kvm-engine run: {e}"));
+        .unwrap_or_else(|e| panic!("wait for ekvm run: {e}"));
 
     let body = String::from_utf8_lossy(&out.stdout);
-    let json: serde_json::Value = serde_json::from_str(body.trim()).unwrap_or_else(|e| {
-        panic!("ebpf-kvm-engine --json result is one JSON object ({e}): {body:?}")
-    });
+    let json: serde_json::Value = serde_json::from_str(body.trim())
+        .unwrap_or_else(|e| panic!("ekvm --json result is one JSON object ({e}): {body:?}"));
     RunOutcome {
         exit_code: json["exit_code"]
             .as_i64()
@@ -217,7 +208,7 @@ fn run_via_daemon(client: &mut Client, argv: &[String], stdin: &str) -> RunOutco
 }
 
 #[test]
-#[ignore = "spawns ebpf-kvm-engine + ebpf-kvm-engine; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns ekvm + ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_cli_and_the_daemon_render_a_run_identically() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_cli_and_the_daemon_render_a_run_identically: {why}");

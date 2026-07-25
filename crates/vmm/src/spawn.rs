@@ -1444,7 +1444,7 @@ fn spawn_fc(
 
 /// Linux caps `sockaddr_un.sun_path` at 108 bytes including the trailing NUL. Firecracker binds the
 /// API and vsock sockets *inside* the scratch dir, so a long scratch base (a relocated
-/// `EBPF_KVM_ENGINE_SCRATCH_DIR`, or the jailer's deep chroot path) can overflow it, and the `bind()` then
+/// `EKVM_SCRATCH_DIR`, or the jailer's deep chroot path) can overflow it, and the `bind()` then
 /// fails deep inside Firecracker, surfacing to us as a cryptic "socket never appeared" boot timeout.
 const SUN_PATH_MAX: usize = 108;
 
@@ -1455,7 +1455,7 @@ pub(crate) fn check_sun_path(socket: &Path) -> Result<(), VmmError> {
     if len + 1 > SUN_PATH_MAX {
         return Err(VmmError::Vmm(format!(
             "unix socket path {} is too long ({len} bytes; the kernel's limit is {}); \
-             use a shorter scratch dir via EBPF_KVM_ENGINE_SCRATCH_DIR",
+             use a shorter scratch dir via EKVM_SCRATCH_DIR",
             socket.display(),
             SUN_PATH_MAX - 1
         )));
@@ -1502,7 +1502,7 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
                 return Ok(workdir);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            // A missing/unwritable scratch base is the operator's to fix (e.g. `EBPF_KVM_ENGINE_SCRATCH_DIR`
+            // A missing/unwritable scratch base is the operator's to fix (e.g. `EKVM_SCRATCH_DIR`
             // points nowhere): name it in the error rather than failing cryptically deep in boot.
             Err(e) => {
                 return Err(VmmError::Vmm(format!(
@@ -1861,10 +1861,7 @@ mod tests {
         let long = PathBuf::from(format!("/{}/fc.sock", "x".repeat(SUN_PATH_MAX)));
         let err = check_sun_path(&long).unwrap_err().to_string();
         assert!(err.contains("too long"), "explains the limit: {err}");
-        assert!(
-            err.contains("EBPF_KVM_ENGINE_SCRATCH_DIR"),
-            "names the fix: {err}"
-        );
+        assert!(err.contains("EKVM_SCRATCH_DIR"), "names the fix: {err}");
     }
 
     #[test]

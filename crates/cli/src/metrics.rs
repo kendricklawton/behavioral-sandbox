@@ -12,7 +12,7 @@
 //!
 //! **Prometheus conventions, followed.** Base units (**seconds**, never milliseconds), `_total`
 //! suffixes on counters, `# HELP`/`# TYPE` for every family, cumulative histogram buckets with an
-//! explicit `+Inf` plus `_sum`/`_count`, an `ebpf_kvm_engine_build_info` gauge carrying the version as a
+//! explicit `+Inf` plus `_sum`/`_count`, an `ekvm_build_info` gauge carrying the version as a
 //! label, and deliberately **low label cardinality** (fixed `pooled`/`verb`/`kind` sets, nothing
 //! per-session or per-client, which would grow without bound).
 //!
@@ -269,104 +269,104 @@ impl Metrics {
 
         family(
             &mut out,
-            "ebpf_kvm_engine_build_info",
+            "ekvm_build_info",
             "Build metadata; the value is always 1.",
             "gauge",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_build_info",
+            "ekvm_build_info",
             concat!("{version=\"", env!("CARGO_PKG_VERSION"), "\"}"),
             1,
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_sessions_opened_total",
+            "ekvm_sessions_opened_total",
             "Sessions opened, by whether the warm pool served the boot.",
             "counter",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_sessions_opened_total",
+            "ekvm_sessions_opened_total",
             "{pooled=\"true\"}",
             self.opened_pooled.load(Ordering::Relaxed),
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_sessions_opened_total",
+            "ekvm_sessions_opened_total",
             "{pooled=\"false\"}",
             self.opened_cold.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_session_open_failures_total",
+            "ekvm_session_open_failures_total",
             "Session opens that failed to produce a sandbox.",
             "counter",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_session_open_failures_total",
+            "ekvm_session_open_failures_total",
             "",
             self.open_failures.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_sessions_active",
+            "ekvm_sessions_active",
             "Sessions currently open (one live microVM each).",
             "gauge",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_sessions_active",
+            "ekvm_sessions_active",
             "",
             self.active.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_sentinel_degraded",
+            "ekvm_sentinel_degraded",
             "Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup).",
             "gauge",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_sentinel_degraded",
+            "ekvm_sentinel_degraded",
             "",
             self.sentinel_degraded.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_sweep_reclaimed_total",
+            "ekvm_sweep_reclaimed_total",
             "Orphaned VM resources reclaimed by orphan sweeps, by resource type.",
             "counter",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_sweep_reclaimed_total",
+            "ekvm_sweep_reclaimed_total",
             "{resource=\"dirs\"}",
             self.sweep_dirs_reclaimed.load(Ordering::Relaxed),
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_sweep_reclaimed_total",
+            "ekvm_sweep_reclaimed_total",
             "{resource=\"netns\"}",
             self.sweep_netns_reclaimed.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_requests_total",
+            "ekvm_requests_total",
             "Requests served after open, by wire verb.",
             "counter",
         );
         for verb in Verb::ALL {
             sample(
                 &mut out,
-                "ebpf_kvm_engine_requests_total",
+                "ekvm_requests_total",
                 &format!("{{verb=\"{}\"}}", verb.name()),
                 self.requests[verb.index()].load(Ordering::Relaxed),
             );
@@ -374,64 +374,63 @@ impl Metrics {
 
         family(
             &mut out,
-            "ebpf_kvm_engine_request_errors_total",
+            "ekvm_request_errors_total",
             "Requests answered with an error, by fault kind (guest faults are per-request; infra \
              faults end the session).",
             "counter",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_request_errors_total",
+            "ekvm_request_errors_total",
             "{kind=\"guest\"}",
             self.errors_guest.load(Ordering::Relaxed),
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_request_errors_total",
+            "ekvm_request_errors_total",
             "{kind=\"infra\"}",
             self.errors_infra.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_protocol_errors_total",
+            "ekvm_protocol_errors_total",
             "Wire lines that failed to decode (malformed, oversize, wrong schema).",
             "counter",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_protocol_errors_total",
+            "ekvm_protocol_errors_total",
             "",
             self.protocol_errors.load(Ordering::Relaxed),
         );
 
         family(
             &mut out,
-            "ebpf_kvm_engine_boot_seconds",
+            "ekvm_boot_seconds",
             "Boot-to-serving latency of session sandboxes (warm pops and cold boots alike; split \
-             them via ebpf_kvm_engine_sessions_opened_total's pooled label).",
+             them via ekvm_sessions_opened_total's pooled label).",
             "histogram",
         );
-        self.boot_seconds
-            .render(&mut out, "ebpf_kvm_engine_boot_seconds");
+        self.boot_seconds.render(&mut out, "ekvm_boot_seconds");
 
         family(
             &mut out,
-            "ebpf_kvm_engine_guest_command_seconds",
+            "ekvm_guest_command_seconds",
             "Host-observed wall time of guest commands (exec, and the no-op runs carrying put/get).",
             "histogram",
         );
         self.guest_command_seconds
-            .render(&mut out, "ebpf_kvm_engine_guest_command_seconds");
+            .render(&mut out, "ekvm_guest_command_seconds");
 
         if let Some(ready) = cap.pool_ready {
             family(
                 &mut out,
-                "ebpf_kvm_engine_pool_ready",
+                "ekvm_pool_ready",
                 "Warm clones currently ready in the pre-warmed pool (absent when no pool).",
                 "gauge",
             );
-            sample(&mut out, "ebpf_kvm_engine_pool_ready", "", ready);
+            sample(&mut out, "ekvm_pool_ready", "", ready);
         }
 
         // Resource-aware admission headroom (decision 042): committed vs the aggregate ceiling, so a
@@ -439,52 +438,42 @@ impl Metrics {
         // means unlimited, rendered as `0` (an operator reads it as "count-only admission").
         family(
             &mut out,
-            "ebpf_kvm_engine_committed_mem_mib",
+            "ekvm_committed_mem_mib",
             "Guest memory (MiB) committed across live sessions.",
             "gauge",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_committed_mem_mib",
+            "ekvm_committed_mem_mib",
             "",
             cap.committed_mem_mib,
         );
         family(
             &mut out,
-            "ebpf_kvm_engine_committed_vcpus",
+            "ekvm_committed_vcpus",
             "vCPUs committed across live sessions.",
             "gauge",
         );
-        sample(
-            &mut out,
-            "ebpf_kvm_engine_committed_vcpus",
-            "",
-            cap.committed_vcpus,
-        );
+        sample(&mut out, "ekvm_committed_vcpus", "", cap.committed_vcpus);
         family(
             &mut out,
-            "ebpf_kvm_engine_capacity_mem_mib",
+            "ekvm_capacity_mem_mib",
             "Aggregate committed-memory ceiling (--max-committed-mem-mib; 0 = unlimited).",
             "gauge",
         );
         sample(
             &mut out,
-            "ebpf_kvm_engine_capacity_mem_mib",
+            "ekvm_capacity_mem_mib",
             "",
             cap.max_committed_mem_mib,
         );
         family(
             &mut out,
-            "ebpf_kvm_engine_capacity_vcpus",
+            "ekvm_capacity_vcpus",
             "Aggregate committed-vCPU ceiling (--max-committed-vcpus; 0 = unlimited).",
             "gauge",
         );
-        sample(
-            &mut out,
-            "ebpf_kvm_engine_capacity_vcpus",
-            "",
-            cap.max_committed_vcpus,
-        );
+        sample(&mut out, "ekvm_capacity_vcpus", "", cap.max_committed_vcpus);
 
         out
     }
@@ -660,45 +649,39 @@ mod tests {
         // Cumulative: the 3ms one is in every bucket from 0.005 up; the 30ms joins at 0.05; the
         // 7s one appears only at le="10" and +Inf.
         assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"0.005\"} 1"),
+            text.contains("ekvm_boot_seconds_bucket{le=\"0.005\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"0.025\"} 1"),
+            text.contains("ekvm_boot_seconds_bucket{le=\"0.025\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"0.05\"} 2"),
+            text.contains("ekvm_boot_seconds_bucket{le=\"0.05\"} 2"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"5\"} 2"),
+            text.contains("ekvm_boot_seconds_bucket{le=\"5\"} 2"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"10\"} 3"),
+            text.contains("ekvm_boot_seconds_bucket{le=\"10\"} 3"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_bucket{le=\"+Inf\"} 3"),
+            text.contains("ekvm_boot_seconds_bucket{le=\"+Inf\"} 3"),
             "{text}"
         );
-        assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_count 3"),
-            "{text}"
-        );
+        assert!(text.contains("ekvm_boot_seconds_count 3"), "{text}");
         // Sum in seconds: 0.003 + 0.030 + 7 = 7.033.
-        assert!(
-            text.contains("ebpf_kvm_engine_boot_seconds_sum 7.033000"),
-            "{text}"
-        );
+        assert!(text.contains("ekvm_boot_seconds_sum 7.033000"), "{text}");
         // The pooled/cold split rode along.
         assert!(
-            text.contains("ebpf_kvm_engine_sessions_opened_total{pooled=\"true\"} 1"),
+            text.contains("ekvm_sessions_opened_total{pooled=\"true\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_sessions_opened_total{pooled=\"false\"} 2"),
+            text.contains("ekvm_sessions_opened_total{pooled=\"false\"} 2"),
             "{text}"
         );
     }
@@ -719,16 +702,16 @@ mod tests {
 
         let text = m.render(&CapacitySample::pool(Some(2)));
         for name in [
-            "ebpf_kvm_engine_build_info",
-            "ebpf_kvm_engine_sessions_opened_total",
-            "ebpf_kvm_engine_session_open_failures_total",
-            "ebpf_kvm_engine_sessions_active",
-            "ebpf_kvm_engine_requests_total",
-            "ebpf_kvm_engine_request_errors_total",
-            "ebpf_kvm_engine_protocol_errors_total",
-            "ebpf_kvm_engine_boot_seconds",
-            "ebpf_kvm_engine_guest_command_seconds",
-            "ebpf_kvm_engine_pool_ready",
+            "ekvm_build_info",
+            "ekvm_sessions_opened_total",
+            "ekvm_session_open_failures_total",
+            "ekvm_sessions_active",
+            "ekvm_requests_total",
+            "ekvm_request_errors_total",
+            "ekvm_protocol_errors_total",
+            "ekvm_boot_seconds",
+            "ekvm_guest_command_seconds",
+            "ekvm_pool_ready",
         ] {
             assert!(
                 text.contains(&format!("# HELP {name} ")),
@@ -740,38 +723,35 @@ mod tests {
             );
         }
         assert!(
-            text.contains("ebpf_kvm_engine_sessions_active 1"),
+            text.contains("ekvm_sessions_active 1"),
             "opened twice, closed once: {text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_session_open_failures_total 1"),
+            text.contains("ekvm_session_open_failures_total 1"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_requests_total{verb=\"exec\"} 1"),
+            text.contains("ekvm_requests_total{verb=\"exec\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_requests_total{verb=\"trace\"} 1"),
+            text.contains("ekvm_requests_total{verb=\"trace\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_requests_total{verb=\"put\"} 0"),
+            text.contains("ekvm_requests_total{verb=\"put\"} 0"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_request_errors_total{kind=\"guest\"} 1"),
+            text.contains("ekvm_request_errors_total{kind=\"guest\"} 1"),
             "{text}"
         );
         assert!(
-            text.contains("ebpf_kvm_engine_request_errors_total{kind=\"infra\"} 1"),
+            text.contains("ekvm_request_errors_total{kind=\"infra\"} 1"),
             "{text}"
         );
-        assert!(
-            text.contains("ebpf_kvm_engine_protocol_errors_total 1"),
-            "{text}"
-        );
-        assert!(text.contains("ebpf_kvm_engine_pool_ready 2"), "{text}");
+        assert!(text.contains("ekvm_protocol_errors_total 1"), "{text}");
+        assert!(text.contains("ekvm_pool_ready 2"), "{text}");
         assert!(text.contains(concat!("{version=\"", env!("CARGO_PKG_VERSION"), "\"} 1")));
     }
 
@@ -779,9 +759,9 @@ mod tests {
     fn without_a_pool_the_pool_family_is_absent_not_zero() {
         // "No pool" and "empty pool" must stay distinguishable to an alert.
         let none = Metrics::default().render(&CapacitySample::pool(None));
-        assert!(!none.contains("ebpf_kvm_engine_pool_ready"), "{none}");
+        assert!(!none.contains("ekvm_pool_ready"), "{none}");
         let empty = Metrics::default().render(&CapacitySample::pool(Some(0)));
-        assert!(empty.contains("ebpf_kvm_engine_pool_ready 0"), "{empty}");
+        assert!(empty.contains("ekvm_pool_ready 0"), "{empty}");
     }
 
     #[test]
@@ -795,16 +775,10 @@ mod tests {
             max_committed_mem_mib: 2048,
             max_committed_vcpus: 8,
         });
-        assert!(
-            text.contains("ebpf_kvm_engine_committed_mem_mib 768"),
-            "{text}"
-        );
-        assert!(text.contains("ebpf_kvm_engine_committed_vcpus 3"), "{text}");
-        assert!(
-            text.contains("ebpf_kvm_engine_capacity_mem_mib 2048"),
-            "{text}"
-        );
-        assert!(text.contains("ebpf_kvm_engine_capacity_vcpus 8"), "{text}");
+        assert!(text.contains("ekvm_committed_mem_mib 768"), "{text}");
+        assert!(text.contains("ekvm_committed_vcpus 3"), "{text}");
+        assert!(text.contains("ekvm_capacity_mem_mib 2048"), "{text}");
+        assert!(text.contains("ekvm_capacity_vcpus 8"), "{text}");
     }
 
     #[test]
@@ -814,7 +788,7 @@ mod tests {
         m.session_closed(false);
         assert!(m
             .render(&CapacitySample::pool(None))
-            .contains("ebpf_kvm_engine_sessions_active 0"));
+            .contains("ekvm_sessions_active 0"));
     }
 
     #[test]
@@ -948,10 +922,10 @@ mod tests {
         assert!(ok.starts_with("HTTP/1.1 200 OK\r\n"), "{ok}");
         assert!(ok.contains("text/plain; version=0.0.4"), "{ok}");
         assert!(
-            ok.contains("ebpf_kvm_engine_sessions_opened_total{pooled=\"true\"} 1"),
+            ok.contains("ekvm_sessions_opened_total{pooled=\"true\"} 1"),
             "{ok}"
         );
-        assert!(ok.contains("ebpf_kvm_engine_pool_ready 1"), "{ok}");
+        assert!(ok.contains("ekvm_pool_ready 1"), "{ok}");
 
         let missing = scrape("GET /other HTTP/1.1\r\nHost: t\r\n\r\n");
         assert!(

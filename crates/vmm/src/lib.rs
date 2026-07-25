@@ -177,7 +177,7 @@ pub enum VmmError {
     /// load-bearing. A host-configuration fault, not the guest's, so it buckets [`Infra`](ErrorKind::Infra):
     /// fix the delegation (or drop the jail-less boot) and retry.
     LimitsUnavailable(String),
-    /// A **jailed** boot was asked for, but the scratch dir (`EBPF_KVM_ENGINE_SCRATCH_DIR`) is on a `nodev`
+    /// A **jailed** boot was asked for, but the scratch dir (`EKVM_SCRATCH_DIR`) is on a `nodev`
     /// mount, so the `/dev/kvm` device node the jailer mknods inside its chroot is inert and
     /// Firecracker cannot open KVM. Caught **before** the spawn, so the boot fails with this typed
     /// pointer at the fix instead of a raw Firecracker "creating KVM object: Permission denied" deep
@@ -211,7 +211,7 @@ impl std::fmt::Display for VmmError {
             VmmError::ScratchDirNodev(dir) => write!(
                 f,
                 "scratch dir {} is on a nodev mount: the jailer's chroot /dev/kvm can't be opened \
-                 there, so a jailed boot fails; set EBPF_KVM_ENGINE_SCRATCH_DIR to a path off a nodev mount",
+                 there, so a jailed boot fails; set EKVM_SCRATCH_DIR to a path off a nodev mount",
                 dir.display()
             ),
         }

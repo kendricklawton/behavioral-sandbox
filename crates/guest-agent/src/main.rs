@@ -43,11 +43,9 @@ fn main() -> ExitCode {
 
     let spec = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("EBPF_KVM_ENGINE_GUEST_LISTEN").ok());
+        .or_else(|| std::env::var("EKVM_GUEST_LISTEN").ok());
     let Some(spec) = spec else {
-        eprintln!(
-            "usage: guest-agent <vsock:<port>|unix:<path>>   (or set EBPF_KVM_ENGINE_GUEST_LISTEN)"
-        );
+        eprintln!("usage: guest-agent <vsock:<port>|unix:<path>>   (or set EKVM_GUEST_LISTEN)");
         return ExitCode::from(EXIT_OPERATIONAL);
     };
 
@@ -175,11 +173,11 @@ fn parse_listen(spec: &str) -> Result<Listen<'_>, String> {
     }
 }
 
-/// stderr logging, filter from `EBPF_KVM_ENGINE_LOG` else `info`. `info` (not the CLI's `warn`) is deliberate:
+/// stderr logging, filter from `EKVM_LOG` else `info`. `info` (not the CLI's `warn`) is deliberate:
 /// the agent's per-command `exec` span is the guest's operational trace, captured off the serial
 /// console. `try_init` + an explicit fallback so a bad filter or a double-init never panics the run.
 fn init_tracing() {
-    let filter = std::env::var("EBPF_KVM_ENGINE_LOG").unwrap_or_else(|_| "info".to_string());
+    let filter = std::env::var("EKVM_LOG").unwrap_or_else(|_| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()

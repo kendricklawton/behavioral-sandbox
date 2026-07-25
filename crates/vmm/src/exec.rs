@@ -127,7 +127,7 @@ pub(crate) fn run_exec<S: Read + Write>(
     bounds: ExecBounds,
 ) -> Result<RunResult, VmmError> {
     // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
-    // operator's stderr), keyed by argv so `ebpf-kvm-engine run` failures are diagnosable host-side. The env
+    // operator's stderr), keyed by argv so `ekvm run` failures are diagnosable host-side. The env
     // *count* only, never a value, and not even the key list, per the secret-hygiene contract.
     let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _span = span.enter();

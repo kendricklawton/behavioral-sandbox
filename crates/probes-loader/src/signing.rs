@@ -273,8 +273,8 @@ impl TrustedKey {
     }
 }
 
-/// The engine's per-host data directory: `$XDG_DATA_HOME/ebpf-kvm-engine` (falling back to
-/// `$HOME/.local/share/ebpf-kvm-engine`, then `/var/lib/ebpf-kvm-engine`). This is where an installed deployment keeps
+/// The engine's per-host data directory: `$XDG_DATA_HOME/ekvm` (falling back to
+/// `$HOME/.local/share/ekvm`, then `/var/lib/ekvm`). This is where an installed deployment keeps
 /// host **state** and runtime artifacts, and is the directory `install.sh` writes into.
 pub(crate) fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
@@ -282,12 +282,12 @@ pub(crate) fn data_dir() -> PathBuf {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
         .unwrap_or_else(|| PathBuf::from("/var/lib"));
-    base.join("ebpf-kvm-engine")
+    base.join("ekvm")
 }
 
-/// The default host-key path when neither a flag, `EBPF_KVM_ENGINE_SIGNING_KEY`, nor a config file sets one:
-/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/ebpf-kvm-engine`, else
-/// `$HOME/.local/share/ebpf-kvm-engine`, else `/var/lib/ebpf-kvm-engine`). A signing key is host **state**, so it lives
+/// The default host-key path when neither a flag, `EKVM_SIGNING_KEY`, nor a config file sets one:
+/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/ekvm`, else
+/// `$HOME/.local/share/ekvm`, else `/var/lib/ekvm`). A signing key is host **state**, so it lives
 /// under a data dir, not a config dir.
 #[must_use]
 pub fn default_key_path() -> PathBuf {

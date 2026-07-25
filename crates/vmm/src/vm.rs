@@ -49,7 +49,7 @@ const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.t
 /// engine builds, what `Sandbox` needs (exec requires the in-guest agent), and what every product
 /// path boots, so the default must match it, a caller pointing at it must not need to also know a
 /// marker. The exception is the pinned Ubuntu CI rootfs (raw boot tests only), whose readiness is
-/// its getty prompt: those callers set `login:` explicitly (or via `EBPF_KVM_ENGINE_MARKER`).
+/// its getty prompt: those callers set `login:` explicitly (or via `EKVM_MARKER`).
 const DEFAULT_USERSPACE_MARKER: &str = channel::GUEST_READY_MARKER;
 
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
@@ -83,7 +83,7 @@ pub(crate) const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
-/// baseline, [`from_env`](BootConfig::from_env) layers the `EBPF_KVM_ENGINE_*` overrides on top, and
+/// baseline, [`from_env`](BootConfig::from_env) layers the `EKVM_*` overrides on top, and
 /// [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget onto the resource knobs.
 /// `#[non_exhaustive]`: construct via [`from_env`](BootConfig::from_env) /
 /// [`default`](BootConfig::default) and mutate fields, new features add knobs (tap, jailer,
@@ -170,11 +170,11 @@ pub struct BootConfig {
     /// a run the host can't cap is a typed [`VmmError::LimitsUnavailable`], not a silently-uncapped
     /// one. A host posture, not a per-run quantity (so it lives here, not on [`Limits`]) and not
     /// client-settable over the wire (the daemon fixes it, like the jail). Layered
-    /// `flag > env (EBPF_KVM_ENGINE_REQUIRE_LIMITS) > file > default` at the CLI.
+    /// `flag > env (EKVM_REQUIRE_LIMITS) > file > default` at the CLI.
     pub require_limits: bool,
-    /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/ebpf-kvm-engine-<pid>-<n>`), holding the
+    /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/ekvm-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
-    /// (overridable via `EBPF_KVM_ENGINE_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
+    /// (overridable via `EKVM_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
     /// often `tmpfs` (host RAM), so a read-write boot's full-rootfs copy is charged to RAM, on a
     /// small box that alone can exhaust memory (or `ENOSPC` a small tmpfs) and fail the boot. Point
     /// this at real disk to bound RAM use, or prefer [`read_only_root`](BootConfig::read_only_root),
@@ -184,8 +184,8 @@ pub struct BootConfig {
 }
 
 impl BootConfig {
-    /// Layer the environment overrides, `EBPF_KVM_ENGINE_FIRECRACKER`, `EBPF_KVM_ENGINE_KERNEL`, `EBPF_KVM_ENGINE_ROOTFS`,
-    /// `EBPF_KVM_ENGINE_MARKER`, `EBPF_KVM_ENGINE_SCRATCH_DIR`, `EBPF_KVM_ENGINE_REQUIRE_LIMITS`, onto [`BootConfig::default`]. The
+    /// Layer the environment overrides, `EKVM_FIRECRACKER`, `EKVM_KERNEL`, `EKVM_ROOTFS`,
+    /// `EKVM_MARKER`, `EKVM_SCRATCH_DIR`, `EKVM_REQUIRE_LIMITS`, onto [`BootConfig::default`]. The
     /// resource *quantities* (`vcpus`, `mem_mib`, `boot_timeout`) have no env key; they come from
     /// [`Limits`] via [`with_limits`](BootConfig::with_limits). `require_limits` is a host **posture**,
     /// not a quantity, so it does take an env key here.
@@ -194,30 +194,30 @@ impl BootConfig {
     }
 
     /// The composable core of [`from_env`](BootConfig::from_env): every override comes through
-    /// `lookup`, keyed by the `EBPF_KVM_ENGINE_*` env name. Two uses: precedence is unit-testable without
+    /// `lookup`, keyed by the `EKVM_*` env name. Two uses: precedence is unit-testable without
     /// mutating the process environment (which races under the parallel runner and is `unsafe` from
     /// edition 2024); and a caller can **layer another source under the environment** by returning
-    /// the real env var if set, else its own value, e.g. the CLI's `.ebpf-kvm-engine.toml` file layer resolves
+    /// the real env var if set, else its own value, e.g. the CLI's `.ekvm.toml` file layer resolves
     /// `env > file > defaults` by composing `std::env::var_os(key).or_else(|| file.get(key))`.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
         let mut cfg = Self::default();
-        if let Some(v) = lookup("EBPF_KVM_ENGINE_FIRECRACKER") {
+        if let Some(v) = lookup("EKVM_FIRECRACKER") {
             cfg.firecracker = PathBuf::from(v);
         }
-        if let Some(v) = lookup("EBPF_KVM_ENGINE_KERNEL") {
+        if let Some(v) = lookup("EKVM_KERNEL") {
             cfg.kernel = PathBuf::from(v);
         }
-        if let Some(v) = lookup("EBPF_KVM_ENGINE_ROOTFS") {
+        if let Some(v) = lookup("EKVM_ROOTFS") {
             cfg.rootfs = PathBuf::from(v);
         }
         // Strict UTF-8 like `env::var`: a non-UTF-8 marker can't be searched for anyway.
-        if let Some(v) = lookup("EBPF_KVM_ENGINE_MARKER").and_then(|v| v.into_string().ok()) {
+        if let Some(v) = lookup("EKVM_MARKER").and_then(|v| v.into_string().ok()) {
             cfg.userspace_marker = v;
         }
-        if let Some(v) = lookup("EBPF_KVM_ENGINE_SCRATCH_DIR") {
+        if let Some(v) = lookup("EKVM_SCRATCH_DIR") {
             cfg.scratch_dir = PathBuf::from(v);
         }
-        if let Some(v) = lookup("EBPF_KVM_ENGINE_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
+        if let Some(v) = lookup("EKVM_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
             cfg.require_limits = v;
         }
         cfg
@@ -237,9 +237,9 @@ impl BootConfig {
     }
 }
 
-/// Parse an `EBPF_KVM_ENGINE_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
+/// Parse an `EKVM_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
 /// value is `None` (the caller keeps the default) rather than a silent `false`, so a typo'd
-/// `EBPF_KVM_ENGINE_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
+/// `EKVM_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
 fn parse_env_bool(v: &std::ffi::OsStr) -> Option<bool> {
     match v.to_str()?.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -987,19 +987,14 @@ mod tests {
 
     #[test]
     fn require_limits_reads_from_the_environment() {
-        // `from_env_with` layers `EBPF_KVM_ENGINE_REQUIRE_LIMITS` (a posture, not a resource quantity) onto the
+        // `from_env_with` layers `EKVM_REQUIRE_LIMITS` (a posture, not a resource quantity) onto the
         // default `false`, tolerant of spelling/case; an unrecognized value keeps the default.
-        let on = BootConfig::from_env_with(|k| {
-            (k == "EBPF_KVM_ENGINE_REQUIRE_LIMITS").then(|| "TRUE".into())
-        });
+        let on = BootConfig::from_env_with(|k| (k == "EKVM_REQUIRE_LIMITS").then(|| "TRUE".into()));
         assert!(on.require_limits);
-        let off = BootConfig::from_env_with(|k| {
-            (k == "EBPF_KVM_ENGINE_REQUIRE_LIMITS").then(|| "0".into())
-        });
+        let off = BootConfig::from_env_with(|k| (k == "EKVM_REQUIRE_LIMITS").then(|| "0".into()));
         assert!(!off.require_limits);
-        let typo = BootConfig::from_env_with(|k| {
-            (k == "EBPF_KVM_ENGINE_REQUIRE_LIMITS").then(|| "ture".into())
-        });
+        let typo =
+            BootConfig::from_env_with(|k| (k == "EKVM_REQUIRE_LIMITS").then(|| "ture".into()));
         assert!(
             !typo.require_limits,
             "an unrecognized value keeps the default"
@@ -1021,8 +1016,8 @@ mod tests {
     fn from_env_layers_overrides_onto_defaults() {
         // Injected lookup, not `set_var`: no process-global mutation, no parallel-test race.
         let cfg = BootConfig::from_env_with(|key| match key {
-            "EBPF_KVM_ENGINE_KERNEL" => Some("/elsewhere/vmlinux".into()),
-            "EBPF_KVM_ENGINE_MARKER" => Some("guest-ready".into()),
+            "EKVM_KERNEL" => Some("/elsewhere/vmlinux".into()),
+            "EKVM_MARKER" => Some("guest-ready".into()),
             _ => None,
         });
         assert_eq!(cfg.kernel, PathBuf::from("/elsewhere/vmlinux"));
@@ -1036,7 +1031,7 @@ mod tests {
     fn scratch_dir_defaults_to_tmp_and_honors_the_env_override() {
         assert_eq!(BootConfig::default().scratch_dir, PathBuf::from("/tmp"));
         let cfg = BootConfig::from_env_with(|k| {
-            (k == "EBPF_KVM_ENGINE_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
+            (k == "EKVM_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
         });
         assert_eq!(cfg.scratch_dir, PathBuf::from("/mnt/disk/scratch"));
     }

@@ -1,11 +1,11 @@
 # Running untrusted code
 
 Run a script or a binary you don't trust inside a microVM, feed it input, and read a structured
-result back. Every command here is `ebpf-kvm-engine run`, jailed by default; add `--unjailed` on a dev box
+result back. Every command here is `ekvm run`, jailed by default; add `--unjailed` on a dev box
 without real root and the `jailer` binary (the guest still sits behind the KVM boundary).
 
-The defaults point at the ebpf-kvm-engine rootfs the build leaves in `artifacts/`, so no environment setup
-is needed; a rootfs elsewhere is one `EBPF_KVM_ENGINE_ROOTFS=/path/to/rootfs-guest.ext4` away.
+The defaults point at the eKVM rootfs the build leaves in `artifacts/`, so no environment setup
+is needed; a rootfs elsewhere is one `EKVM_ROOTFS=/path/to/rootfs-guest.ext4` away.
 
 ## A script, with stdin
 
@@ -22,7 +22,7 @@ HELLO
 
 `--json` replaces the raw relay with one JSON object on stdout: the exit code, the (lossy-UTF-8)
 streams, any returned artifacts, and host-measured metrics. A crash *inside* the guest is a result,
-not an error (death by signal comes back as `128 + signal`); exit code `2` from `ebpf-kvm-engine run` itself
+not an error (death by signal comes back as `128 + signal`); exit code `2` from `ekvm run` itself
 means the engine failed to stand the run up.
 
 ```console
@@ -68,6 +68,6 @@ $ cargo run -q -p cli -- run --put ./mytool -- /bin/sh -c 'chmod +x mytool && ./
 
 ## Holding a session open
 
-`ebpf-kvm-engine shell` keeps one sandbox open across many commands, each sharing the guest's filesystem, so
-state accumulates (install a package on one line, use it on the next). See [Using the ebpf-kvm-engine
-CLI](./cli.md#ebpf-kvm-engine-shell).
+`ekvm shell` keeps one sandbox open across many commands, each sharing the guest's filesystem, so
+state accumulates (install a package on one line, use it on the next). See [Using the eKVM
+CLI](./cli.md#ekvm-shell).

@@ -13,7 +13,7 @@ record. The model is always the *caller*, never part of the engine (see
 nothing in the host path runs inference or holds a key, which is exactly why this demo is
 CI-reproducible.
 
-Needs `/dev/kvm`, the ebpf-kvm-engine rootfs (`cargo xtask build-rootfs`), the built probe object
+Needs `/dev/kvm`, the eKVM rootfs (`cargo xtask build-rootfs`), the built probe object
 (`cargo xtask build-probes`), and `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN`, run as root or grant the
 caps.
 
@@ -40,7 +40,7 @@ transcript reports *both* tools as `sent`. The ground truth lives only in the ho
 Allow the one tool, deny the rest (deny-by-default), and capture both faces of the record:
 
 ```console
-ebpf-kvm-engine run --unjailed --net \
+ekvm run --unjailed --net \
     --allow 10.200.0.1:9000/udp \
     --record record.json \
     --record-summary summary.json \
@@ -83,18 +83,18 @@ forge it.
 
 The full record (`record.json`) carries the same facts with the forensic detail, the per-flow byte
 and packet counts, the dropped-packet count on the denial, the VMM's host-syscall footprint. It is
-signed with the host key, so `ebpf-kvm-engine verify record.json` catches any tampering *after* the run, not
+signed with the host key, so `ekvm verify record.json` catches any tampering *after* the run, not
 just the guest's (decision 034). The
 summary is a **view** of it (no new observation; [decision 031](./adr/031-the-ai-scope-boundary-the-model-is-always-the-caller.md)),
 measurably smaller so it fits back into an agent's context. See
-[Using the ebpf-kvm-engine CLI](./cli.md#watching-a-run-from-the-host) for all four faces of the one record.
+[Using the eKVM CLI](./cli.md#watching-a-run-from-the-host) for all four faces of the one record.
 
 ## Over the wire, too
 
-An agent driving the daemon reads the same projection, not a CLI-only convenience: `ebpf-kvm-engine` serves it
+An agent driving the daemon reads the same projection, not a CLI-only convenience: `ekvm` serves it
 as the `trace_summary` verb (alongside `trace` for the full record), so a supervisor written in any
 language gets the identical model-legible observation over the socket. See
-[Using the ebpf-kvm-engine daemon](./daemon.md). (Daemon sessions are observe-only, the `--allow`
+[Using the eKVM daemon](./daemon.md). (Daemon sessions are observe-only, the `--allow`
 *enforcement* that blocks the forbidden tool is the CLI/embedding path; the daemon serves the
 *observation* of any session bound to the probes.)
 

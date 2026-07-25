@@ -1,13 +1,13 @@
-//! The `ebpf-kvm-engine` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
+//! The `ekvm` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
 //! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
 //! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch`, see [`audit`]).
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
-//! or the `--json` structured result / audit log), so `ebpf-kvm-engine run … 2>/dev/null` stays
+//! or the `--json` structured result / audit log), so `ekvm run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
-//! flags > env (`EBPF_KVM_ENGINE_LOG`) > default. Both subcommands run
+//! flags > env (`EKVM_LOG`) > default. Both subcommands run
 //! **jailed by default** (ADR 012) with `--unjailed` as the explicit opt-out, and both point
-//! at the env-layered artifacts (`EBPF_KVM_ENGINE_ROOTFS`/`EBPF_KVM_ENGINE_KERNEL`/`EBPF_KVM_ENGINE_MARKER`, exec needs the
+//! at the env-layered artifacts (`EKVM_ROOTFS`/`EKVM_KERNEL`/`EKVM_MARKER`, exec needs the
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
@@ -49,7 +49,7 @@ const RUN_RESULT_SCHEMA: u32 = 1;
 /// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error
 /// (and its `kind()` buckets, pinned by embedders) is never minted for faults that are the CLI's
 /// own: a bad flag combination, a refused artifact path, a local file write. `Engine` passes the
-/// driver's error through untouched (`?` converts via `From`); both print as `ebpf-kvm-engine: <reason>` and
+/// driver's error through untouched (`?` converts via `From`); both print as `ekvm: <reason>` and
 /// exit 2, the taxonomy is for honesty, not for different handling.
 #[derive(Debug)]
 enum CliError {
@@ -76,9 +76,9 @@ impl From<VmmError> for CliError {
 
 #[derive(Parser)]
 #[command(
-    name = "ebpf-kvm-engine",
+    name = "ekvm",
     // The crate version, which is the in-development working number until the first tag
-    // (`RELEASES.md`): `ebpf-kvm-engine --version` exists so an installed binary can be told from a stale one,
+    // (`RELEASES.md`): `ekvm --version` exists so an installed binary can be told from a stale one,
     // which is a different question from "which release is this".
     version,
     about = "Run untrusted code in a Firecracker microVM, with a host-observed audit trail.",
@@ -86,17 +86,17 @@ impl From<VmmError> for CliError {
     // then the two run forms differ only by whether this host can jail (ADR 012).
     after_help = "\
 Getting started:
-  ebpf-kvm-engine doctor                          check what this host can do
-  sudo -E ebpf-kvm-engine run -- echo hello       run a command in a sandbox (jailed, the default)
-  ebpf-kvm-engine run --unjailed -- echo hello    same, without the jailer (needs no root)
-  ebpf-kvm-engine run --trace -- <cmd>            run it and print the audit trail
+  ekvm doctor                          check what this host can do
+  sudo -E ekvm run -- echo hello       run a command in a sandbox (jailed, the default)
+  ekvm run --unjailed -- echo hello    same, without the jailer (needs no root)
+  ekvm run --trace -- <cmd>            run it and print the audit trail
 
-Config layers, highest first: flags, EBPF_KVM_ENGINE_* env, .ebpf-kvm-engine.toml, defaults."
+Config layers, highest first: flags, EKVM_* env, .ekvm.toml, defaults."
 )]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
-    /// Log filter for stderr (overrides `EBPF_KVM_ENGINE_LOG`), e.g. `info`, `debug`.
+    /// Log filter for stderr (overrides `EKVM_LOG`), e.g. `info`, `debug`.
     #[arg(long, global = true, value_name = "FILTER")]
     log: Option<String>,
 }
@@ -104,7 +104,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     // Each variant's doc comment is user-facing help, so the first line is a one-line summary (what
-    // `ebpf-kvm-engine --help` lists) and the detail follows after a blank line (what `ebpf-kvm-engine <cmd> --help`
+    // `ekvm --help` lists) and the detail follows after a blank line (what `ekvm <cmd> --help`
     // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
     /// Run one command in a microVM.
     ///
@@ -115,11 +115,11 @@ enum Cmd {
     // the whole `Cmd` enum isn't sized to it (the `clippy::large_enum_variant` this would trip).
     #[command(after_help = "\
 Examples:
-  ebpf-kvm-engine run -- echo hello
-  ebpf-kvm-engine run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
-  ebpf-kvm-engine run --put main.rs --get a.out -- rustc main.rs -o a.out
-  ebpf-kvm-engine run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
-  ebpf-kvm-engine run --record run.json -- ./untrusted && ebpf-kvm-engine verify run.json
+  ekvm run -- echo hello
+  ekvm run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
+  ekvm run --put main.rs --get a.out -- rustc main.rs -o a.out
+  ekvm run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
+  ekvm run --record run.json -- ./untrusted && ekvm verify run.json
 
 Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
@@ -132,7 +132,7 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     ///
     /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
     /// will work, degrade, or refuse before the first sandbox, and names a first command that works
-    /// on this host. Exits non-zero when a hard prerequisite is missing, so `ebpf-kvm-engine doctor && ebpf-kvm-engine
+    /// on this host. Exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm
     /// run …` gates correctly.
     Doctor(doctor::DoctorArgs),
     /// Verify a signed audit record.
@@ -166,8 +166,8 @@ struct RunArgs {
     /// Refuse the boot if the cgroup caps can't be applied.
     ///
     /// Instead of the default warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with
-    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `EBPF_KVM_ENGINE_REQUIRE_LIMITS`
-    /// or `.ebpf-kvm-engine.toml`.
+    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `EKVM_REQUIRE_LIMITS`
+    /// or `.ekvm.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
     /// Guest vCPUs, 1..=32 [default: 1].
@@ -235,7 +235,7 @@ struct RunArgs {
     /// Write the run's deterministic audit record to a file.
     ///
     /// Attaches the host-side probes and writes one line of JSON, the machine surface, for later
-    /// inspection or `ebpf-kvm-engine verify`.
+    /// inspection or `ekvm verify`.
     #[arg(
         long,
         value_name = "FILE",
@@ -289,20 +289,20 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The daemon owns its own logging (info default, optional JSON) and reads no `.ebpf-kvm-engine.toml`
+    // The daemon owns its own logging (info default, optional JSON) and reads no `.ekvm.toml`
     // (its config is flags + environment), so `serve` dispatches *before* the CLI's project-file
     // discovery and tracing init below, which are the run/shell/doctor conveniences. It still
     // receives the shared global `--log` filter.
     if let Cmd::Serve(args) = cli.cmd {
         return serve::serve(*args, cli.log);
     }
-    // The `.ebpf-kvm-engine.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
+    // The `.ekvm.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
     // failure here, before any boot (config typos must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let file = match config::AgentToml::discover(&cwd) {
         Ok(f) => f,
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "ebpf-kvm-engine: {e}");
+            let _ = writeln!(std::io::stderr(), "ekvm: {e}");
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
@@ -312,14 +312,14 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
-            let _ = writeln!(std::io::stderr(), "ebpf-kvm-engine: {e}");
+            let _ = writeln!(std::io::stderr(), "ekvm: {e}");
             // An infra-bucket failure means the host couldn't stand the microVM up, so point at the
             // tool that explains the host. Keyed on the `kind()` bucket rather than on variants, so
             // the hint can't drift as `VmmError` (which is `#[non_exhaustive]`) grows.
             if matches!(&e, CliError::Engine(err) if err.kind() == ErrorKind::Infra) {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "ebpf-kvm-engine: the host may not be ready, run `ebpf-kvm-engine doctor`"
+                    "ekvm: the host may not be ready, run `ekvm doctor`"
                 );
             }
             ExitCode::from(EXIT_OPERATIONAL)
@@ -348,7 +348,7 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
     }
 }
 
-/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `ebpf-kvm-engine`
+/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `ekvm`
 /// run left: a `Ctrl-C`/SIGKILL of a boot subcommand skips `Drop`, so the lifetime sentinel reaps
 /// the VM process but the scratch dir and netns are out of its scope (ADR 011). Run once before a
 /// boot subcommand as the boot-time GC the engine owes its host (ADR 013). Best-effort and
@@ -367,16 +367,16 @@ fn sweep_vm_residue(file: Option<&config::AgentToml>) {
 }
 
 /// The env+file-layered base config, `env > file > defaults`, over which each subcommand applies
-/// its flags. Composes a single lookup that prefers the real environment, then the `.ebpf-kvm-engine.toml`
+/// its flags. Composes a single lookup that prefers the real environment, then the `.ekvm.toml`
 /// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
-/// stay one vocabulary keyed by the `EBPF_KVM_ENGINE_*` names.
+/// stay one vocabulary keyed by the `EKVM_*` names.
 fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
     BootConfig::from_env_with(|key| {
         std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
     })
 }
 
-/// `ebpf-kvm-engine run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
+/// `ekvm run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
 /// `--record-summary`/`--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed
 /// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
 /// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
@@ -442,7 +442,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
-        // it panics on a closed pipe (`ebpf-kvm-engine run … | head -0`), and a no-panic host path
+        // it panics on a closed pipe (`ekvm run … | head -0`), and a no-panic host path
         // includes the shell pipeline case.
         let _ = writeln!(
             std::io::stdout(),
@@ -455,7 +455,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             .map_err(CliError::from);
     }
 
-    // The audit surface, when a flag asked for it (a plain `ebpf-kvm-engine run` pays nothing): load the shared
+    // The audit surface, when a flag asked for it (a plain `ekvm run` pays nothing): load the shared
     // probes and bind them to this sandbox by the plain values it exposes, the launch sequence the
     // probes-loader documents, composed here in the caller. `--allow` enforces (arming the tap before
     // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
@@ -514,7 +514,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         if !done.load(Ordering::Acquire) {
             let _ = writeln!(
                 std::io::stderr(),
-                "ebpf-kvm-engine: live view closed; waiting for the command to finish"
+                "ekvm: live view closed; waiting for the command to finish"
             );
         }
         let (sandbox, result) = worker
@@ -619,7 +619,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
 }
 
-/// `ebpf-kvm-engine shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
+/// `ekvm shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
@@ -632,20 +632,20 @@ fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, 
     let mut err_out = std::io::stderr();
     let _ = writeln!(
         err_out,
-        "ebpf-kvm-engine shell: microVM up in {} ms; one command per line, files persist across lines, \
+        "ekvm shell: microVM up in {} ms; one command per line, files persist across lines, \
          `exit` (or EOF) to quit",
         sandbox.boot_latency().as_millis()
     );
     let stdin = std::io::stdin();
     loop {
-        let _ = write!(err_out, "ebpf-kvm-engine> ");
+        let _ = write!(err_out, "ekvm> ");
         let _ = err_out.flush();
         let mut line = String::new();
         match stdin.read_line(&mut line) {
             Ok(0) => break, // EOF
             Ok(_) => {}
             Err(e) => {
-                let _ = writeln!(err_out, "ebpf-kvm-engine: read stdin: {e}");
+                let _ = writeln!(err_out, "ekvm: read stdin: {e}");
                 break;
             }
         }
@@ -669,10 +669,10 @@ fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, 
             // line; the session survives it. Infra/transport means the VM itself is gone, end the
             // session with the typed error.
             Err(e) if e.kind() == ErrorKind::Guest => {
-                let _ = writeln!(err_out, "ebpf-kvm-engine: {e}");
+                let _ = writeln!(err_out, "ekvm: {e}");
             }
             Err(e) => {
-                let _ = writeln!(err_out, "ebpf-kvm-engine: session lost: {e}");
+                let _ = writeln!(err_out, "ekvm: session lost: {e}");
                 let _ = sandbox.shutdown();
                 return Err(e.into());
             }
@@ -925,10 +925,10 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
     Ok(cur)
 }
 
-/// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `ebpf-kvm-engine run`
+/// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `ekvm run`
 /// shouldn't block waiting for EOF). The read is **bounded at one frame + 1 byte**: the exec request
 /// is a single frame, so anything past the channel's cap is rejected as a typed `PayloadTooLarge`
-/// regardless, reading it all first would let `cat 10GB.bin | ebpf-kvm-engine run …` balloon host RAM before
+/// regardless, reading it all first would let `cat 10GB.bin | ekvm run …` balloon host RAM before
 /// the same error. The `+ 1` still overshoots the cap by a byte so the oversize case is caught rather
 /// than silently truncated to exactly the cap. Bulk data belongs on the block-device path anyway.
 fn piped_stdin() -> Vec<u8> {
@@ -945,7 +945,7 @@ fn piped_stdin() -> Vec<u8> {
 }
 
 /// Initialize stderr logging from the filter [`config::resolve_log`] already resolved
-/// (`flag > EBPF_KVM_ENGINE_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
+/// (`flag > EKVM_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
 /// environment: the precedence is single-sourced in `resolve_log`, this only applies the result.
 /// An invalid filter falls back to `warn` rather than failing the run.
 fn init_tracing(filter: Option<&str>) {

@@ -1,13 +1,13 @@
 #!/bin/sh
 # One-line privileged gate (P20.17b). The manual invocation stacks three env concerns:
 #
-#   sudo -E env "PATH=$PATH" CARGO_TARGET_DIR=… EBPF_KVM_ENGINE_SCRATCH_DIR=… cargo xtask ci-privileged
+#   sudo -E env "PATH=$PATH" CARGO_TARGET_DIR=… EKVM_SCRATCH_DIR=… cargo xtask ci-privileged
 #
 # because `sudo` drops rustup's cargo from PATH, a root build must stay out of ./target, and /tmp is
 # `nodev` on a systemd host. This collapses them into `sudo -E ./ci-privileged.sh`.
 #
 #   - CARGO_TARGET_DIR keeps root-owned build artifacts out of ./target (they block later non-root builds)
-#   - EBPF_KVM_ENGINE_SCRATCH_DIR points scratch off a `nodev` /tmp so the jailed-boot tests can open /dev/kvm
+#   - EKVM_SCRATCH_DIR points scratch off a `nodev` /tmp so the jailed-boot tests can open /dev/kvm
 #   - PATH restores rustup's cargo, which sudo strips from a root shell
 #
 # xtask cannot do this itself: the outer `cargo run` that builds xtask writes to ./target as root
@@ -35,8 +35,8 @@ fi
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/target-privileged}"
 # Short by design: the jailer nests this dir name twice in the API socket path, which must fit
-# sun_path (~108 bytes), so /var/tmp/ekvm, not a long /var/tmp/ebpf-kvm-engine-scratch.
-export EBPF_KVM_ENGINE_SCRATCH_DIR="${EBPF_KVM_ENGINE_SCRATCH_DIR:-/var/tmp/ekvm}"
-mkdir -p "$EBPF_KVM_ENGINE_SCRATCH_DIR"
+# sun_path (~108 bytes), so /var/tmp/ekvm, not a long /var/tmp/ekvm-scratch.
+export EKVM_SCRATCH_DIR="${EKVM_SCRATCH_DIR:-/var/tmp/ekvm}"
+mkdir -p "$EKVM_SCRATCH_DIR"
 
 exec cargo xtask ci-privileged "$@"

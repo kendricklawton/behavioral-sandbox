@@ -1,4 +1,4 @@
-//! The live view (`ebpf-kvm-engine run --watch`): a full-screen terminal UI over one running sandbox,
+//! The live view (`ekvm run --watch`): a full-screen terminal UI over one running sandbox,
 //! its network flows and denials, its resources, the VMM's host-syscall footprint, and a running
 //! timeline of what changed. Drawn on **stderr** (stdout stays reserved for the run's result, the
 //! pipe-clean convention), redrawn from non-destructive [`LiveSnapshot`] polls, so watching never
@@ -159,7 +159,7 @@ fn install_view_signal_restore(
     };
     let handle = signals.handle();
     let thread = std::thread::Builder::new()
-        .name("ebpf-kvm-engine-watch-signals".into())
+        .name("ekvm-watch-signals".into())
         .spawn(move || {
             if let Some(sig) = signals.forever().next() {
                 let _ = disable_raw_mode();
@@ -362,7 +362,7 @@ fn draw_header(f: &mut Frame, area: Rect, meta: &WatchMeta, elapsed: Duration, f
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines).block(titled("ebpf-kvm-engine watch · hardware-isolated run")),
+        Paragraph::new(lines).block(titled("ekvm watch · hardware-isolated run")),
         area,
     );
 }

@@ -5,9 +5,9 @@ means executing an untrusted contributor's scripts with your secrets and your ne
 it in a microVM instead: the job builds and tests as usual, but it is denied the network by default,
 and the host record proves it couldn't reach out even if a test tried.
 
-The job script is [`ci-job.sh`](https://github.com/packsixfour/ebpf-kvm-engine/blob/main/docs/examples/ci-job.sh):
+The job script is [`ci-job.sh`](https://github.com/packsixfour/ekvm/blob/main/docs/examples/ci-job.sh):
 it unpacks the submitted sources, runs their `unittest` suite (python3 is baked into the guest
-rootfs), and leaves a `report.txt`. The defaults point at the ebpf-kvm-engine rootfs in `artifacts/`; add
+rootfs), and leaves a `report.txt`. The defaults point at the eKVM rootfs in `artifacts/`; add
 `--unjailed` on a dev box without real root.
 
 ## A project to test
@@ -45,12 +45,12 @@ FAILED (errors=1)
 status=fail
 ```
 
-`ebpf-kvm-engine run` returns the job's own exit code, so your CI still sees pass/fail: the suite failed
+`ekvm run` returns the job's own exit code, so your CI still sees pass/fail: the suite failed
 because `test_sneaky` raised, its `urlopen` never connected. The report is back on your host, and
 the record shows why it failed the way it did:
 
 ```console
-$ ebpf-kvm-engine verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
+$ ekvm verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
 verified
 $ jq -r .record ci.json | jq '{network, timing}'   # unwrap the signed envelope, then project
 {

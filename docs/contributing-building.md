@@ -37,7 +37,7 @@ dependencies alike.
 ## Getting a source tree ready
 
 ```console
-git clone https://github.com/packsixfour/ebpf-kvm-engine && cd ebpf-kvm-engine
+git clone https://github.com/packsixfour/ekvm && cd ekvm
 cargo xtask setup            # verify KVM, BTF, firecracker, bpf-linker, caps: reports what's missing
 cargo build                  # the workspace: driver, loader, CLI, guest agent
 ```
@@ -100,13 +100,13 @@ The wrapper collapses the three env concerns that a `sudo` run otherwise stacks 
 
 ```console
 sudo -E env "PATH=$PATH" CARGO_TARGET_DIR="$PWD/target-privileged" \
-     EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged
+     EKVM_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged
 ```
 
 - **`CARGO_TARGET_DIR`**: `sudo cargo …` builds as **root**, so without it this run leaves root-owned
   artifacts in `./target` that block your normal (non-root) `cargo build`; a throwaway
   `target-privileged/` (git-ignored, `rm -rf` it anytime) keeps `./target` clean.
-- **`EBPF_KVM_ENGINE_SCRATCH_DIR`**: `/tmp` is `nodev` on a systemd host, so the jailer's chroot
+- **`EKVM_SCRATCH_DIR`**: `/tmp` is `nodev` on a systemd host, so the jailer's chroot
   `/dev/kvm` can't be opened; pointing scratch off `nodev` lets the jailed-boot tests run.
 - **`PATH`**: `sudo` strips rustup's `cargo` from a root shell; the wrapper restores it (from your
   `$HOME/.cargo/bin`, falling back to `$SUDO_USER`'s).

@@ -65,6 +65,6 @@ are not (guardrail 4). This decision adds only the former.
 **As shipped.** `Response::AtCapacity` lives in `crates/protocol/src/lib.rs`, produced by
 `refuse_at_capacity` (the count path) and the resource gate in `crates/cli/src/session.rs`; the
 committed-resource atomics and the `ResourceReservation` guard sit on `Server` in
-`crates/cli/src/serve.rs`, with the aggregate ceilings from `ebpf-kvm-engine serve` flags; the gauges
+`crates/cli/src/serve.rs`, with the aggregate ceilings from `ekvm serve` flags; the gauges
 render in `crates/cli/src/metrics.rs`; the reference `client` surfaces the refusal as
 `ClientError::AtCapacity`.

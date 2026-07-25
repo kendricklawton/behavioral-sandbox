@@ -9,7 +9,7 @@
 //! - **`setup`**, checks the host can do KVM + eBPF and reports what's missing.
 //! - **`self-host`**, the single self-host command: obtain the pinned kernel + rootfs, build the
 //!   guest image + eBPF object, install `agent`, and (on a KVM host) boot one sandbox to
-//!   prove it. Offline when `EBPF_KVM_ENGINE_VENDOR_DIR` points at a `vendor` mirror.
+//!   prove it. Offline when `EKVM_VENDOR_DIR` points at a `vendor` mirror.
 //! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
 //!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
 //!   bucket or the Alpine CDN; `--verify` re-checks the mirror offline.
@@ -54,7 +54,7 @@
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
 //! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the untrusted-input decoders: the
-//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`ebpf-kvm-engine serve`'s socket,
+//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`ekvm serve`'s socket,
 //!   the outermost boundary), the signed-record envelope (attacker-relayed by design), and the
 //!   eBPF-boundary parsers. Nightly + `cargo install cargo-fuzz`; never part of `ci` (the in-gate
 //!   coverage is the crates' own dependency-light mutation tests).
@@ -109,7 +109,7 @@ enum Cmd {
     Setup,
     /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
     /// object, install the `agent` binary, and (on a KVM host) boot one sandbox to prove
-    /// it. Offline when `EBPF_KVM_ENGINE_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
+    /// it. Offline when `EKVM_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
     SelfHost {
         /// Where to install the `agent` binary (default `~/.local/bin`).
         #[arg(long, value_name = "DIR")]
@@ -138,7 +138,7 @@ enum Cmd {
     FetchArtifacts,
     /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
     /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`
-    /// (decision 035). Vendor-aware via `EBPF_KVM_ENGINE_VENDOR_DIR`; the eBPF toolchain is required (a
+    /// (decision 035). Vendor-aware via `EKVM_VENDOR_DIR`; the eBPF toolchain is required (a
     /// package without the audit half is not the product).
     Dist {
         /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
@@ -719,7 +719,7 @@ fn ci_privileged() -> Result<()> {
     // `ScratchDirNodev`, reading like an engine bug rather than the one-line host fix it is (P19.9e is
     // the engine's own boot-time refusal; this is the gate's up-front one). Same loud-up-front
     // discipline as the checks above, reusing the doctor's tested detector against the exact scratch
-    // dir the tests will resolve (`BootConfig::from_env`, so an `EBPF_KVM_ENGINE_SCRATCH_DIR` override clears it).
+    // dir the tests will resolve (`BootConfig::from_env`, so an `EKVM_SCRATCH_DIR` override clears it).
     let scratch = vmm::BootConfig::from_env().scratch_dir;
     if vmm::doctor::scratch_is_nodev(&scratch).unwrap_or(false) {
         bail!(
@@ -727,7 +727,7 @@ fn ci_privileged() -> Result<()> {
              the jailed-boot tests fail deep in the run.\n  Point it off nodev (e.g. /var/tmp) — or \
              use ./ci-privileged.sh, which sets all three env concerns:\n    \
              sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" \
-             EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged",
+             EKVM_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged",
             scratch.display()
         );
     }
@@ -809,7 +809,7 @@ fn ci_privileged() -> Result<()> {
 fn setup() -> Result<()> {
     println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `ebpf-kvm-engine doctor` renders (decision 028): one
+    // The runtime host checks are the *same* implementation `ekvm doctor` renders (decision 028): one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
@@ -826,7 +826,7 @@ fn setup() -> Result<()> {
 
     // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
     // verifying static links); an operator running the shipped engine does not, so they are not in
-    // the shared `ebpf-kvm-engine doctor` set.
+    // the shared `ekvm doctor` set.
     println!("\ndev toolchain (for building, not running):");
     check(
         "bpf-linker installed",
@@ -852,7 +852,7 @@ fn setup() -> Result<()> {
         matches!(rootfs::mke2fs_version(), Some(v) if v >= rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN),
     );
 
-    // The degradation matrix, the same fails-open-vs-hard split `ebpf-kvm-engine doctor` prints, from the one
+    // The degradation matrix, the same fails-open-vs-hard split `ekvm doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.
     println!("\nDegradation matrix: what a missing item above means at runtime:");
     for line in vmm::doctor::matrix() {
@@ -864,7 +864,9 @@ fn setup() -> Result<()> {
     // these are the calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
     println!("\nHardening: the hoster's responsibility (the engine can't decide these for you):");
-    println!("    scratch base: point EBPF_KVM_ENGINE_SCRATCH_DIR at a dir only the engine user owns (not the");
+    println!(
+        "    scratch base: point EKVM_SCRATCH_DIR at a dir only the engine user owns (not the"
+    );
     println!(
         "                  world-writable /tmp default), so no other local user can plant residue"
     );
@@ -1070,11 +1072,11 @@ fn require_kvm(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// The local vendor mirror, if the operator set `EBPF_KVM_ENGINE_VENDOR_DIR`: the offline source for every
+/// The local vendor mirror, if the operator set `EKVM_VENDOR_DIR`: the offline source for every
 /// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Firecracker S3
 /// bucket or the Alpine CDN. `None` means fetch from pinned upstream (the default).
 fn vendor_dir() -> Option<PathBuf> {
-    std::env::var_os("EBPF_KVM_ENGINE_VENDOR_DIR")
+    std::env::var_os("EKVM_VENDOR_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }

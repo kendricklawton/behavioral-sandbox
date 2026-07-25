@@ -93,14 +93,14 @@ Stand up the Firecracker + aya sandbox engine's workspace and gates; keep the gi
       `origin/main`.)*
 - [x] **P0.2** New workspace layout: `crates/vmm` (Firecracker driver), `crates/probes` (aya
       eBPF programs, `no_std`, excluded), `crates/probes-loader` (userspace loader), `crates/cli`
-      (`ebpf-kvm-engine`), `xtask`.
+      (`ekvm`), `xtask`.
 - [x] **P0.3** Rewrite `AGENTS.md` / `README.md` / `CONTRIBUTING.md` / `docs/contributing-architecture.md` to the
       sandbox-engine identity and the four core properties.
 - [x] **P0.4** Prerequisites pinned in `CONTRIBUTING.md` (KVM, BTF, `firecracker`+jailer, aya
       toolchain, caps); `cargo xtask setup` checks the host and reports what's missing.
 - [x] **P0.5** `cargo xtask ci` skeleton: fmt · clippy `-D warnings` · build · test · docs · deny
       (the eBPF crate builds for its own target, gated separately, see P8).
-- [x] **P0.6** Naming: keep the `ebpf-kvm-engine` umbrella (binary + repo); crates are
+- [x] **P0.6** Naming: keep the `ekvm` umbrella (binary + repo); crates are
       `vmm`/`probes`/`probes-loader`/`cli`.
 - [x] **P0.7** A home for the per-phase notes each phase feeds. *(No `CHANGELOG.md`
       in the pre-release `v0.0.x` line, the roadmap's checkboxes are the record; the changelog is
@@ -139,7 +139,7 @@ The "hello, KVM" moment: a program that boots a real Linux microVM and reads its
 - [x] **P1.10** Test: boot → see the login/init banner → shut down, repeatable.
       *(`crates/vmm/tests/boot.rs`, `#[ignore]`d; two cycles asserting no leaked scratch dirs.)*
 - **Exit gate:** a microVM boots to userspace from `cargo run` and shuts down clean.
-  *(Demo: `ebpf-kvm-engine run --demo-boot`, recorded in the box annotations above and decision 001.)*
+  *(Demo: `ekvm run --demo-boot`, recorded in the box annotations above and decision 001.)*
 
 ## Phase 2, Run code in the guest & get results back
 
@@ -214,7 +214,7 @@ Turn "a VM boots" into "I handed it a command and captured stdout + exit code."
       host-side mapping, distinct from the guest-agent-layer signal-death test). Added the
       previously-untested channel bucket: a guest that drops mid-exec →
       `VmmError::Channel` with `is_disconnect()`. All KVM-free, in the host gate.)*
-- **Exit gate:** `ebpf-kvm-engine`-driven `exec` in a microVM returns real output.
+- **Exit gate:** `ekvm`-driven `exec` in a microVM returns real output.
   *(Recorded in the box annotations above and decision 002. The exec **engine** is
   complete and tested against the real guest agent (only the Firecracker vsock UDS is faked) + a privileged vsock-device boot smoke
   test. The **"in a microVM" clause was provisional** here, the agent wasn't baked into the rootfs
@@ -296,7 +296,7 @@ binary, so adding a runtime is a packaging step, not an engine change.
       deps (`e2fsck`/`debugfs`, e2fsprogs; typed error + `setup` check). Proof:
       `collects_outputs_via_block_device` writes a **4 MiB** file (4× the 1 MiB channel frame cap) + a
       nested file + an escaping symlink into `/output`, pulls the tree back with a matching sha256, and
-      asserts the escaping symlink and `lost+found` are gone. `Sandbox`/`ebpf-kvm-engine run --output-dir`
+      asserts the escaping symlink and `lost+found` are gone. `Sandbox`/`ekvm run --output-dir`
       plumbing deferred, as `input_dir`'s was.)*
 - [x] **P3.6** Pin the rootfs build in `xtask` so it's one command + reproducible.
       *(`cargo xtask build-rootfs` is now **byte-for-byte deterministic** (decision 007): two builds
@@ -799,7 +799,7 @@ surface freezes.
       atomicity, per the tap ADR of the time; since retired by decision 014), so accumulated
       crashes clog the finite `10.200/16` pool until the
       allocator's bounded retry exhausts and **every networked boot on a healthy host fails**. Land a
-      library sweep (public on the engine surface; `ebpf-kvm-engine sweep` CLI wiring rides P7.4): enumerate
+      library sweep (public on the engine surface; `ekvm sweep` CLI wiring rides P7.4): enumerate
       `fc*` interfaces and per-VM scratch dirs, reclaim only those whose owning driver is **dead**
       (liveness keyed on the recorded pid via `/proc/<pid>` + comm, the same key the leak test uses),
      never a live sibling's resources (safe by ownership check, not locks). Caller-owned snapshot
@@ -1072,14 +1072,14 @@ Wrap the FC track into a clean, self-hostable engine API.
       `--wall` / `--output-cap`. Proven by `exec_budgets_are_per_sandbox_knobs`: a 2 s wall turns
       `sleep 30` into `ExecTimeout{2s}` promptly, a 4 KiB cap turns a `seq` flood into
       `OutputCap{4096}`, and a modest exec passes both.)*
-- [x] **P7.4** `ebpf-kvm-engine run <cmd>` / `ebpf-kvm-engine shell` CLI over the lifecycle.
-      *(`ebpf-kvm-engine run` now drives the whole public API from flags: piped **stdin** is forwarded (terminal
+- [x] **P7.4** `ekvm run <cmd>` / `ekvm shell` CLI over the lifecycle.
+      *(`ekvm run` now drives the whole public API from flags: piped **stdin** is forwarded (terminal
       stdin stays empty so an interactive run doesn't block), `--env KEY=VALUE` (repeatable,
       clap-validated, values never logged), `--put <file>` injects host files, `--get <path>`
       requests artifacts and writes them under the cwd (absolute/`..` names refused), and
       `--wall` / `--output-cap` surface the P7.3 knobs; jailed by default with `--unjailed` as
-      the loud opt-out, and exec still needs the guest rootfs (`EBPF_KVM_ENGINE_ROOTFS`/`EBPF_KVM_ENGINE_MARKER`).
-      `ebpf-kvm-engine shell` replaces its "not implemented" stub with an interactive **stateful session** on
+      the loud opt-out, and exec still needs the guest rootfs (`EKVM_ROOTFS`/`EKVM_MARKER`).
+      `ekvm shell` replaces its "not implemented" stub with an interactive **stateful session** on
       one held-open sandbox: one `sh -c` exec per line, prompt and diagnostics on stderr, command
       output on stdout, files persisting across lines (P7.2; shell *process* state like `cd` does
       not, each line is its own exec, stated in the help). A guest fault (timeout, cap,
@@ -1089,7 +1089,7 @@ Wrap the FC track into a clean, self-hostable engine API.
       *(`RunResult` gains the missing leg: a `metrics: ExecMetrics` field, host-measured, so a
       hostile guest can't lie about it, starting with `wall`, the request-to-terminal-frame time
       an embedder can bill on; `#[non_exhaustive]`, so cgroup cpu time and the audit log's
-      numbers land as fields, not breaks. `ebpf-kvm-engine run --json` emits the whole structured result as
+      numbers land as fields, not breaks. `ekvm run --json` emits the whole structured result as
       one JSON object on **stdout** (exit code, lossy stdout/stderr, artifact list with sizes,
       `boot_ms` + `exec_wall_ms`), making the "stdout carries a run's structured result" convention
       real; raw-relay stays the default.)*
@@ -1122,8 +1122,8 @@ Wrap the FC track into a clean, self-hostable engine API.
       probe exits non-zero. Two sessions are two VMs by construction (decision 016), so the
       isolation being pinned is KVM, not agent bookkeeping.)*
 - **Exit gate:** a clean `Sandbox` engine anyone can embed/self-host.
-  *(Passed: the lifecycle demo is the CLI (`ebpf-kvm-engine run` with stdin/files/env/knobs/`--json`,
-  `ebpf-kvm-engine shell` as a held-open session) and the tests/sandbox.rs suite (open jailed by default,
+  *(Passed: the lifecycle demo is the CLI (`ekvm run` with stdin/files/env/knobs/`--json`,
+  `ekvm shell` as a held-open session) and the tests/sandbox.rs suite (open jailed by default,
   inputs at the public API, sessions, budgets, snapshot, leak checks, concurrency, session isolation);
   documented in [`docs/embedding.md`](docs/embedding.md). Phase 7 is complete.)*
 
@@ -1155,7 +1155,7 @@ The eBPF foundation: build, load, and read a map from a trivial program.
       *(Landed: `probes-loader`'s `ExecveCounter::{load, count}` (aya, userspace, sync) loads
       the object, attaches the tracepoint, and sums the per-CPU slots; a typed `ProbeError` (the
       loader's `VmmError`) on every failure. The object is a runtime-loaded build artifact found by
-      path (`EBPF_KVM_ENGINE_PROBES_OBJECT`, else the `build-probes` output), not `include_bytes`/`build.rs`, so
+      path (`EKVM_PROBES_OBJECT`, else the `build-probes` output), not `include_bytes`/`build.rs`, so
       the host workspace stays on stable (decision 017). Demo: `examples/count_execve.rs` prints the
       total and its delta. Test: `execve_counter_counts_host_execve_events` (privileged) spawns N
       processes and asserts the count rose by ≥ N.)*
@@ -1532,14 +1532,14 @@ Attach the eBPF programs to a sandbox at launch and produce a per-run **audit tr
   (tap), CPU + memory/IO (shared meter + cgroup v2), and the VMM's host-syscall footprint (shared tracer),
   serialized to stable JSON, all from **outside** the guest, where the code can't see or subvert it. The
   privileged P13.6 test proves it end to end: the microVM and the eBPF observability as one system. The
-  live view + `ebpf-kvm-engine run --trace` are the Phase 14 face.)*
+  live view + `ekvm run --trace` are the Phase 14 face.)*
 
 ## Phase 14, Observability output (a face for it)
 
 Make what a run did *legible*, the payoff demo.
 
 - [x] **P14.1** A live TUI (ratatui) or structured stream: sandboxes, their syscalls, network, resources.
-      *(Landed: `ebpf-kvm-engine run --watch`, a ratatui full-screen live view over the running sandbox, drawn on
+      *(Landed: `ekvm run --watch`, a ratatui full-screen live view over the running sandbox, drawn on
       **stderr** so stdout stays the run's result (the pipe-clean rule extended to the screen; decision
       025). Panels: the sandbox (pid, boot, elapsed, state), its network, its resources, the VMM's
       host-syscall footprint. Fed by a new **non-destructive** `SandboxProbes::snapshot() ->
@@ -1555,7 +1555,7 @@ Make what a run did *legible*, the payoff demo.
       syscall becomes one timestamped entry (pure, host-safe-tested `Timeline::observe`); boot/finish
       are lifecycle entries. The CLI drives one sandbox per run, so the drill-down *is* the screen;
       many-sandbox rollup is the daemon's later.)*
-- [x] **P14.3** `ebpf-kvm-engine run --trace` prints the audit log after a run.
+- [x] **P14.3** `ekvm run --trace` prints the audit log after a run.
       *(Landed: `--trace` binds the probes at launch (the decision-028 sequence composed in the CLI,
       load shared tracer+meter, `attach` by plain values, `collect` while the sandbox is alive) and
       prints the human-readable trail on **stdout** after the guest's own output: timing, per-flow
@@ -1570,15 +1570,15 @@ Make what a run did *legible*, the payoff demo.
       byte-stable (the machine surface the SDKs will parse), composable with `--json`, `--trace`,
       and `--watch`.)*
 - [x] **P14.5** Test/demo: run something interesting, watch it live, read the trace after.
-      *(Landed: the demo is one command, `ebpf-kvm-engine run --unjailed --net --watch --trace --record
+      *(Landed: the demo is one command, `ekvm run --unjailed --net --watch --trace --record
       run.json -- python3 …` (docs/cli.md + docs/examples-observe-a-run.md, "The whole run, fused"),
       watch the flows/denials/resources/syscalls live, read the trail after, keep the JSON. Proven by
       the `#[ignore]`d CLI e2e `run_with_trace_and_record_yields_trail_and_json` (`ci-privileged`):
-      drives the **built `ebpf-kvm-engine` binary** on a real networked sandbox and asserts the guest output +
+      drives the **built `ekvm` binary** on a real networked sandbox and asserts the guest output +
       trail render on stdout, the record parses, and every axis binds (no coverage gap). Host-safe
       unit tests pin the trail's golden text and the timeline diffing.)*
 - **Exit gate:** a compelling live view of hardware-isolated runs; the demo you show people.
-  *(Met: one flag set on `ebpf-kvm-engine run` shows a hardware-isolated run live, its flows as the guest
+  *(Met: one flag set on `ekvm run` shows a hardware-isolated run live, its flows as the guest
   makes them, denials as policy drops them, resources, the VMM's footprint, a timeline, then leaves
   behind the human trail and the machine record, all host-observed from outside the guest.
   Decision 025.)*
@@ -1634,30 +1634,30 @@ interacting flags on `run`.
       `allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial` boots a real
       networked sandbox, allows the fixed host end `10.200.0.1` on one UDP port, and asserts the
       allowed flow **and** the denial for the blocked port land in the `--record` JSON. Decision 026.)*
-- [x] **P14.9c** The `.ebpf-kvm-engine.toml` file layer: **flags > env (`EBPF_KVM_ENGINE_*`) > file > defaults**
-      becomes real. Discovery and precedence are a `(decision)` (proposed: nearest `.ebpf-kvm-engine.toml`
+- [x] **P14.9c** The `.ekvm.toml` file layer: **flags > env (`EKVM_*`) > file > defaults**
+      becomes real. Discovery and precedence are a `(decision)` (proposed: nearest `.ekvm.toml`
       up from the cwd, keys mirroring the env names 1:1 so the three layers stay one vocabulary);
       unknown keys are a typed error (config typos must not silently no-op). Precedence proven by
       unit tests per layer pair.
-      *(Landed: `cli`'s new `config` module, the nearest `.ebpf-kvm-engine.toml` walking up from the cwd,
+      *(Landed: `cli`'s new `config` module, the nearest `.ekvm.toml` walking up from the cwd,
       `serde(deny_unknown_fields)` so a typo is a typed error naming the valid keys (not a silent
-      no-op), keys mirroring the `EBPF_KVM_ENGINE_*` names 1:1. The layering reuses the engine, not a
+      no-op), keys mirroring the `EKVM_*` names 1:1. The layering reuses the engine, not a
       reimplementation: `BootConfig::from_env_with` is made public and the CLI composes
       `env.or(file)` into its lookup, resolving `env > file > defaults` with zero duplication of the
       engine's env-key logic or pinned defaults; the fieldless `log` value gets a parallel
       `flag > env > file > default` resolver. Host-safe unit tests cover each layer pair (env>file,
       file>default), the deny-unknown-fields error, and nearest-up-from-cwd discovery. Decision 027.)*
-- [x] **P14.9d** `ebpf-kvm-engine doctor`: ship the host check as an engine subcommand, KVM, the jailer
+- [x] **P14.9d** `ekvm doctor`: ship the host check as an engine subcommand, KVM, the jailer
       binary + real-root, iproute2/e2fsprogs, kernel BTF + `CAP_BPF`/`CAP_PERFMON`, artifact
       presence, and the degrades-vs-hard-errors matrix (P6.9b's content, today locked in dev-only
-      `xtask setup`). An operator on a fresh host runs `ebpf-kvm-engine doctor` *before* the first sandbox
+      `xtask setup`). An operator on a fresh host runs `ekvm doctor` *before* the first sandbox
       and reads exactly what will work, degrade, or refuse. `xtask setup` delegates to it (one
       implementation, two entry points).
       *(Landed: the shared implementation is `vmm::doctor`, a structured `Vec<Check>` with an
       `Ok`/`Warn`/`Fail` status + the degradation matrix, the engine-runtime prerequisites in the
-      engine's own crate. `ebpf-kvm-engine doctor` renders it + the eBPF-capability row (from the probe loader,
+      engine's own crate. `ekvm doctor` renders it + the eBPF-capability row (from the probe loader,
       out of `vmm`, decisions 021/023) and exits non-zero on any hard `Fail` so
-      `ebpf-kvm-engine doctor && ebpf-kvm-engine run …` gates; `xtask setup` renders the **same** checks + its dev-only
+      `ekvm doctor && ekvm run …` gates; `xtask setup` renders the **same** checks + its dev-only
       toolchain rows (bpf-linker/nightly/readelf). The status split mirrors the engine's error
       discipline: `/dev/kvm` + artifacts are hard, the jailer/caps/tools fail open with a named
       consequence. Host-safe unit tests cover the status classification, `can_boot`, and the check
@@ -1673,24 +1673,24 @@ interacting flags on `run`.
       independently (two contracts). The compatibility policy, additive within a version, a
       rename/removal bumps it, is written in `docs/cli.md`. The audit-record golden test pins the
       new leading bytes. Decision 028.)*
-- [x] **P14.9f** Prove completeness end to end: on a fresh host, `ebpf-kvm-engine doctor` → one `ebpf-kvm-engine run`
+- [x] **P14.9f** Prove completeness end to end: on a fresh host, `ekvm doctor` → one `ekvm run`
       driving every projection at once (limits + `--net`/`--allow` + `--put`/`--get` + stdin +
       `--json`, with `--trace` if P14.3 has landed), and `docs/cli.md` rewritten to document the
       finished surface, including the capability↔flag map and the explicit "daemon-scoped, by
       design" list (snapshots, pool, wire API) so absence reads as intent, not omission.
       *(Landed: the `#[ignore]`d CLI e2e `doctor_passes_then_one_run_drives_every_projection_at_once`
-      (`ci-privileged`) runs `ebpf-kvm-engine doctor` (asserts ready, exit 0) then one `ebpf-kvm-engine run` folding
+      (`ci-privileged`) runs `ekvm doctor` (asserts ready, exit 0) then one `ekvm run` folding
       `--vcpus`/`--mem` + `--net`/`--allow` + `--put`/`--get` + piped stdin + `--json` through the
       built binary, asserting the schema-versioned result echoes the effective limits and the
       injected file + stdin round-trip back through `--get`. `docs/cli.md` gains the capability↔flag
       map and the explicit daemon-scoped/platform exclusions list (snapshots, pool, wire API,
       tenancy) so absence reads as intent.)*
 - **Exit gate:** every engine capability is reachable from the CLI or named as deliberately
-  daemon-scoped; config layers all four levels; a fresh host self-diagnoses with `ebpf-kvm-engine doctor`;
+  daemon-scoped; config layers all four levels; a fresh host self-diagnoses with `ekvm doctor`;
   and the JSON the CLI emits is a versioned contract.
   *(Met: the capability↔flag map in `docs/cli.md` accounts for every library capability, projected
-  as a flag/verb, or named daemon-scoped/platform; `flags > env > .ebpf-kvm-engine.toml > defaults` layers all
-  four levels; `ebpf-kvm-engine doctor` self-diagnoses a fresh host (and gates via its exit code); both `--json`
+  as a flag/verb, or named daemon-scoped/platform; `flags > env > .ekvm.toml > defaults` layers all
+  four levels; `ekvm doctor` self-diagnoses a fresh host (and gates via its exit code); both `--json`
   and the audit record carry a versioned `schema`. Decisions 027, 028.)*
 
 ## Phase 15, Hardening & the trust story (multi-tenant safety)
@@ -1809,8 +1809,8 @@ engine guarantees per-run containment; whose run is whose is the hoster's (decis
 
 A local daemon others drive over a socket: still engine, not PaaS.
 
-- [x] **P16.1** `ebpf-kvm-engine`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
-      *(The `ebpf-kvm-engine serve` subcommand in the `cli` crate (`src/serve.rs`), a thin host of the same
+- [x] **P16.1** `ekvm`: a long-lived daemon exposing the sandbox lifecycle over a unix socket.
+      *(The `ekvm serve` subcommand in the `cli` crate (`src/serve.rs`), a thin host of the same
       `vmm` public API, engine, not platform (no auth/tenancy/billing). One connection is one
       sandbox **session** (the VM is the session, decision 016), served on its own thread
       (synchronous, no async runtime): `open` boots it, `exec`* run commands sharing one working dir,
@@ -1842,7 +1842,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       **non-destructively** from a live probe snapshot (fail-open, repeatable mid-session). Non-`api:`,
      the pinned `vmm` surface is untouched; the daemon only consumes it.)*
 - [x] **P16.3** Pre-warmed-pool management lives in the daemon (fast `exec`).
-      *(`ebpf-kvm-engine --prewarm N`: at startup the daemon boots one **unjailed** prewarm source (a jailed
+      *(`ekvm --prewarm N`: at startup the daemon boots one **unjailed** prewarm source (a jailed
       disk can't be snapshotted), snapshots it, and restores `N` clones under the daemon's confinement
       posture into an `vmm::Pool` behind a `Mutex` (sessions are thread-per-connection). A
       **bare-default** `open` pops a warm clone, `opened{pooled:true}`, since the clones carry the
@@ -1850,7 +1850,7 @@ A local daemon others drive over a socket: still engine, not PaaS.
       up on session close, off the hot path (the moment the `Pool` doc reserves for restore cost).
       Fail-open: a host that can't build the pool (no KVM, no root) logs one warning and every session
       cold-boots. Non-`api:`.)*
-- [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `ebpf-kvm-engine` over the
+- [x] **P16.4** A **reference (Rust) client** proving a non-Rust caller can drive `ekvm` over the
       wire API, the seed the **polyglot SDKs (Phase 21)** harden into Go/Python/Node/C#. (The full
       SDK set is post-`v0.1.0`.)
       *(New **`client`** crate: a `Client` driving the whole session (`open`/`exec`/`put`/`get`/
@@ -1863,9 +1863,9 @@ A local daemon others drive over a socket: still engine, not PaaS.
       the versioned API + pool + client. `#[ignore]`d/privileged. Non-`api:`.)*
 - [x] **P16.5** Structured logs + a metrics endpoint (Prometheus), for the *hoster* to scrape.
       *(Logs: the daemon's `tracing` events (already structured, `vmm_pid`/`boot_ms`/`pooled`) gain a
-      machine encoding, `--log-json` / `EBPF_KVM_ENGINE_LOG_FORMAT=json` (one JSON object per line for a log
+      machine encoding, `--log-json` / `EKVM_LOG_FORMAT=json` (one JSON object per line for a log
       shipper; same events, different framing) via `tracing-subscriber`'s `json` feature. Metrics:
-      `ebpf-kvm-engine --metrics ADDR` serves the Prometheus **text-exposition** format at `GET /metrics` from
+      `ekvm --metrics ADDR` serves the Prometheus **text-exposition** format at `GET /metrics` from
       a **hand-rolled**, bounded HTTP/1.1 responder on one thread (`cli/src/metrics.rs`), no async
       stack or metrics crate for one GET route, same discipline as the driver's hand-rolled FC client;
       the request head is byte-capped + socket-timed so a hostile scraper is a dropped connection
@@ -1890,8 +1890,8 @@ A local daemon others drive over a socket: still engine, not PaaS.
       is a security boundary too), cross-linked to `embedding.md`'s embedding-side "Where the engine
       ends". Docs/comments only, non-`api:`.)*
 - [x] **P16.7** Golden: the CLI and the daemon API produce identical run results.
-      *(`tests/cli_daemon_golden.rs`: the same command through both faces, `ebpf-kvm-engine run --json` and
-      `ebpf-kvm-engine` driven by the reference client, must render an **identical** `(exit_code, stdout,
+      *(`tests/cli_daemon_golden.rs`: the same command through both faces, `ekvm run --json` and
+      `ekvm` driven by the reference client, must render an **identical** `(exit_code, stdout,
       stderr)`, since both are thin hosts of one `vmm` lifecycle; the two agree with each other
       **and** with the expected literal, so a shared bug can't pass by matching itself. Cases: a plain
       success, a command that runs and exits non-zero writing both streams (a faithful result, not an
@@ -2006,7 +2006,7 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       containment, no model or secrets in the host path. The AI-workload face of decisions 013 and 029,
      the model sits outside the trust boundary, where tenancy and scheduling already sit.)*
 - [x] **P18.2** A **model-legible projection of the audit record**, a third face alongside `--trace`
-      (human) and `--record` (machine JSON), surfaced as `ebpf-kvm-engine run --record-summary FILE` and a
+      (human) and `--record` (machine JSON), surfaced as `ekvm run --record-summary FILE` and a
       `RunRecord` method: a compact, semantically-labelled summary shaped to feed straight back into
       an agent's observe→act loop (what it read/wrote, which flows it opened, what egress was
       **denied**, its resource envelope, and any coverage gap). A **view of the existing `RunRecord`**,
@@ -2027,7 +2027,7 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
       fourth face. `Cmd::Run` boxed to keep the added flag under `clippy::large_enum_variant`.
       non-`api:` (probes-loader + CLI, not the pinned `vmm` surface).)*
 - [x] **P18.3** The projection joins the **wire API** (P16.2), so the daemon serves it and the
-      **Phase 21 SDKs** expose it as part of the SDK contract, an agent driving `ebpf-kvm-engine` from any
+      **Phase 21 SDKs** expose it as part of the SDK contract, an agent driving `ekvm` from any
       language reads the same model-legible observation the CLI writes, not a CLI-only convenience.
       *(New `trace_summary` verb in `protocol`, parallel to `trace`: `Request::TraceSummary` →
       `Response::TraceSummary { summary }` (the projection JSON carried opaquely, so the protocol crate
@@ -2059,7 +2059,7 @@ model (Phase 15) and the daemon + wire API (Phase 16) an agent drives it through
   (from the CLI and over the wire API) shows what it did and what was blocked, its size measured
   against the full record, **with no model anywhere in the host path.** **Met:** decision 031 fixes
   the AI-scope boundary (model is the caller); `RunRecord::to_summary_json` (P18.2) is the projection,
-  golden + size-bound tested; `ebpf-kvm-engine`'s `trace_summary` verb (P18.3) serves it over the wire; and the
+  golden + size-bound tested; `ekvm`'s `trace_summary` verb (P18.3) serves it over the wire; and the
   scripted-agent example + its privileged e2e (P18.4) prove containment with the record showing
   reached-vs-blocked, no model in the host path.
 
@@ -2088,32 +2088,32 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
       compromised producing host, and leaves key custody/rotation (via `key_id`) to the hoster.)*
 - [x] **P19.2** **Sign the finalized record.** The loader signs the canonical (deterministic-JSON,
       P13.4) `RunRecord` bytes with a host key loaded at startup (generated on first run; path via the
-      layered config, `EBPF_KVM_ENGINE_*` > file > default). The guest never sees the key (it's host-side, like
-      the eBPF). `--record` / the `ebpf-kvm-engine` `trace` verb carry a `signature` + `key_id` envelope
+      layered config, `EKVM_*` > file > default). The guest never sees the key (it's host-side, like
+      the eBPF). `--record` / the `ekvm` `trace` verb carry a `signature` + `key_id` envelope
       alongside the record; the JSON surface gains that envelope (a `schema` bump, versioned per P14.9e).
       *(**Done** (decision 034). `probes-loader`'s `signing` module signs the canonical bytes
       with an `ed25519` `HostKey` (seed from `/dev/urandom`, persisted `0600`) into a schema-2 envelope
       `{schema,key_id,signature,record}`; the record rides as an embedded string so its bytes survive
-      the wire's serde round-trip. `--record` (path via `EBPF_KVM_ENGINE_SIGNING_KEY` > `signing_key` in
-      `.ebpf-kvm-engine.toml` > data-dir default) and the daemon's `trace` reply both sign; the daemon loads the
+      the wire's serde round-trip. `--record` (path via `EKVM_SIGNING_KEY` > `signing_key` in
+      `.ekvm.toml` > data-dir default) and the daemon's `trace` reply both sign; the daemon loads the
       key at startup and fails closed if it can't. `api:` (new `vmm`-sibling `probes-loader` surface).)*
-- [x] **P19.3** **`ebpf-kvm-engine verify <record>`** (plus a `ebpf-kvm-engine` verb and a library entry point):
+- [x] **P19.3** **`ekvm verify <record>`** (plus a `ekvm` verb and a library entry point):
       re-canonicalize the record, check the signature against the trusted public key(s), exit non-zero
-      on mismatch. **Demo:** flip one byte of a `--record` file and `ebpf-kvm-engine verify` rejects it, while an
+      on mismatch. **Demo:** flip one byte of a `--record` file and `ekvm verify` rejects it, while an
       untouched record verifies clean.
       *(**Done**. `probes_loader::verify` re-reads the canonical bytes from the envelope and
       checks the signature against a trusted `TrustedKey` set (an unknown `key_id`, a bad signature, or
-      a malformed envelope all fail closed, `verify_strict`). `ebpf-kvm-engine verify <record>` trusts the host's
+      a malformed envelope all fail closed, `verify_strict`). `ekvm verify <record>` trusts the host's
       own key by default or `--key <hex>` out of band, exiting non-zero on mismatch; the privileged
       `trace_e2e` runs the flip-a-byte demo end to end. Host-safe unit tests cover sign/verify, tamper,
       and untrusted-key rejection.)*
 - [x] **P19.4** **Session hash-chain (append-only evidence).** Each record carries the prior record's
       hash, so a *sequence* (a `shell`/`serve` session's runs) is tamper-evident as a whole: a deleted,
       reordered, or inserted run is detectable, not just a single-record edit. Off by default for a
-      one-shot `ebpf-kvm-engine run`; on for a session.
+      one-shot `ekvm run`; on for a session.
       *(**Done** (decision 034). A chained envelope adds a `prev` field (the SHA-256 `record_hash` of
       the previous record) and signs `prev + "\n" + canonical`, so the link is covered by the
-      signature and can't be rewritten; an unchained record (one-shot `ebpf-kvm-engine run --record`) has no
+      signature and can't be rewritten; an unchained record (one-shot `ekvm run --record`) has no
       `prev` and stays byte-identical to before. `verify_chain` walks a sequence, rejecting a
       reordered/inserted/middle-deleted record (`ChainError::BrokenLink`) or a bad entry
       (`ChainError::Entry`); the daemon session threads the chain across its `trace` replies. Host-safe
@@ -2127,8 +2127,8 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
 - [x] **P19.5** **Key rotation + `key_id`.** Records name the key that signed them; `verify` accepts a
       *set* of trusted keys, so rotating the host key doesn't invalidate already-signed records.
       *(**Done**. Records already name their signer (`key_id` = public-key hex) and `verify` already
-      takes a `&[TrustedKey]` set; this adds the operational half: `ebpf-kvm-engine verify` trusts the **union**
-      of `--key` flags, a configured set (`EBPF_KVM_ENGINE_TRUSTED_KEYS` / `trusted_keys` in `.ebpf-kvm-engine.toml`), and
+      takes a `&[TrustedKey]` set; this adds the operational half: `ekvm verify` trusts the **union**
+      of `--key` flags, a configured set (`EKVM_TRUSTED_KEYS` / `trusted_keys` in `.ekvm.toml`), and
       the current signing key, deduped by `key_id`, so a retired key kept in the set still verifies its
       old records. A host-safe rotation unit test signs with an old + new key and confirms both verify
       against the set while an outsider is rejected; a config test covers the `trusted_keys` list.
@@ -2142,7 +2142,7 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
       and asset 3 now names the signature; `docs/security.md` gains a "Record integrity (host-signed)"
       section + a security-bug bullet (a tampered record that still verifies). The README, the
       introduction, `AGENTS.md`, and the CI-job/containment examples now point their "tamper-evident/
-      resistant" claims at decision 034 + `ebpf-kvm-engine verify`.)*
+      resistant" claims at decision 034 + `ekvm verify`.)*
 - [x] **P19.7** **Measured, not marketed.** Bench the signing overhead per record (one `ed25519` sign
       over already-canonical bytes, expected sub-millisecond, off the boot path) with the rest of the
       Phase 17 numbers, so the new step is measured like everything else.
@@ -2152,12 +2152,12 @@ JSON surface (P13.4) and the trust boundary already written down (decision 029);
       millisecond and off the boot/exec path; recorded in `docs/benchmarks.md`. A dev-profile opt-level
       override for the `dalek`/`sha2` crates keeps debug tests and benches from crawling. non-`api:`
       (xtask + docs).)*
-- **Exit gate:** a supervisor can `ebpf-kvm-engine verify` a record and trust it **without trusting the host
+- **Exit gate:** a supervisor can `ekvm verify` a record and trust it **without trusting the host
   that relayed it** to them, one flipped byte (or a dropped run in a session chain) is rejected and an
   intact record verifies; the headline "tamper-evident" is now literal, not guest-only. **Met:**
   decision 034 fixes the integrity model; the loader signs each finalized record with a host key the
   guest never sees (`ed25519` over decision 024's canonical bytes) for `--record` and the daemon's
-  `trace`; `ebpf-kvm-engine verify` (and the library `verify`) checks it against a trusted-key **set** (rotation,
+  `trace`; `ekvm verify` (and the library `verify`) checks it against a trusted-key **set** (rotation,
   P19.5), exiting non-zero on a flipped byte or an untrusted signer; the session hash-chain (P19.4,
   `verify_chain`) makes a dropped/reordered run in a sequence detectable; the boundary is written down
   in the threat model + security docs (P19.6) and the overhead is benchmarked (P19.7).
@@ -2186,7 +2186,7 @@ first commit, so no box tracks a non-task).
       an undelegated cpu/memory cgroup from the fail-open empty-args into a typed
       `VmmError::LimitsUnavailable` (`api:`, bucketed `Infra` in `kind()`). Keyed on cpu **and** memory,
       the caps that bound the envelope; `pids.max` stays best-effort (its absence can't breach the
-      envelope). Layered `flag (--require-limits, run/shell/serve) > env (EBPF_KVM_ENGINE_REQUIRE_LIMITS) > file
+      envelope). Layered `flag (--require-limits, run/shell/serve) > env (EKVM_REQUIRE_LIMITS) > file
       (require_limits) > default false`; the prewarm source clears it (must be unjailed to snapshot, so
       it can't be capped), the jailed clones that run sessions enforce it. Host-safe unit tests cover
       the pure refusal decision, the unjailed-posture guard, and the env/file precedence; docs in
@@ -2219,7 +2219,7 @@ first commit, so no box tracks a non-task).
       pin) is deferred *in that decision* to `v0.1.0`, when external embedders make it worth the
       maintenance, so the window is a scheduled decision, not a silent gap.
 - [x] **P19.9e** The **nodev-scratch pre-boot check**, a typed error instead of a cryptic one
-      (surfaced by a first local self-host run). A jailed boot whose `EBPF_KVM_ENGINE_SCRATCH_DIR` sits on a
+      (surfaced by a first local self-host run). A jailed boot whose `EKVM_SCRATCH_DIR` sits on a
       `nodev` mount would otherwise fail deep in boot with a raw Firecracker "creating KVM object:
       Permission denied" (the jailer's chroot `/dev/kvm` node is inert). `Vm::boot`/`Vm::restore` now
       refuse it up front with `VmmError::ScratchDirNodev` naming the fix, reusing the doctor's tested
@@ -2238,12 +2238,12 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       `.apk` closure (decision 007's note, P6.9d's recording), so a fresh host's setup no longer
       depends on the FC S3 bucket or the Alpine CDN staying alive.)*
       *(**Done** as decision 033. `cargo xtask self-host` is the single command: it obtains the pinned
-      kernel + rootfs, builds the guest image + eBPF object, installs `ebpf-kvm-engine`/`ebpf-kvm-engine` into a prefix
+      kernel + rootfs, builds the guest image + eBPF object, installs `ekvm`/`ekvm` into a prefix
       (`~/.local/bin` default, `--prefix DIR`), and on a KVM host boots one sandbox to prove it
       (`--no-run` prints the proof command instead). `cargo xtask vendor` snapshots all four
       sha-pinned inputs **plus the resolved `.apk` closure** (the fetched-not-pinned piece decision
       007 deferred) into a gitignored mirror with a sha `vendor-manifest.txt`; `--verify` re-checks it
-      offline. `EBPF_KVM_ENGINE_VENDOR_DIR` is the one seam: `fetch_one` restores binary artifacts from the
+      offline. `EKVM_VENDOR_DIR` is the one seam: `fetch_one` restores binary artifacts from the
       mirror and the rootfs build installs packages from the vendored apk cache
       (`apk.static --cache-dir … --no-network`), so the whole build runs with the FC S3 bucket and the
       Alpine CDN dark. Vendor-aware via `fetch_one` (zero call-site churn); manifest parse/round-trip
@@ -2260,12 +2260,12 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       are packaged by default and can be dropped, while inline `src/` unit tests cannot be split out
       without moving them.)*
       *(**Done** as decision 035. `cargo xtask dist` assembles the package: release binary +
-      kernel/rootfs/eBPF object staged as `bin/` + `share/ebpf-kvm-engine/`, a per-file `MANIFEST.sha256`
+      kernel/rootfs/eBPF object staged as `bin/` + `share/ekvm/`, a per-file `MANIFEST.sha256`
       inside, a deterministic tarball + `SHA256SUMS` outside; the eBPF object is required (a
       package without the audit half is not the product); vendor-aware, x86_64 only. `install.sh`
       (repo root, also packed into the tarball) is the `curl | sh` face: verifies tarball +
-      manifest, installs to `~/.local/bin` + `~/.local/share/ebpf-kvm-engine`, writes a starter
-      `~/.ebpf-kvm-engine.toml` only if absent; `EBPF_KVM_ENGINE_DIST_TARBALL` runs it offline. The `Containerfile`
+      manifest, installs to `~/.local/bin` + `~/.local/share/ekvm`, writes a starter
+      `~/.ekvm.toml` only if absent; `EKVM_DIST_TARBALL` runs it offline. The `Containerfile`
       builds a runtime image from the dist stage bundling the sha-pinned Firecracker (the one
       bundling exception; KVM always the host's, `--device /dev/kvm`). `release.yml` packages on a
       pushed tag into a **draft** release, publishing stays human. Proven end to end on the dev
@@ -2289,16 +2289,16 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       cross-page link resolves (the ci gate's prose-drift lint now enforces this). Publishing
       (GitHub Pages deploy) is left to launch (P20.31). Docs only, non-`api:`.)*
 - [x] **P20.4** (human-led) **The real name.** Retire the working name "agent" (decision 035): the
-      user picks the name, then one sweep renames the repo, the binary, the crate names, the `EBPF_KVM_ENGINE_*`
-      env prefix and `.ebpf-kvm-engine.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
+      user picks the name, then one sweep renames the repo, the binary, the crate names, the `EKVM_*`
+      env prefix and `.ekvm.toml`, the socket/data-dir defaults, the docs, and the workflows. Lands
       **before** the launch announcement (P20.31) or any registry/SDK freeze (Phases 21–22) can cement
       the working name publicly, so the rename stays a quiet sweep, not a breaking rebrand.
-      *(**Done.** The name is **ebpf-kvm-engine**, CLI **`ebpf-kvm-engine`**. One sweep: crates
-      `agent-*` → `ebpf-kvm-engine-*` (an `api:` change, `vmm` is the embed API); the CLI is `ebpf-kvm-engine` with the
-      full `ebpf-kvm-engine` as a second binary from the same entrypoint; `AGENT_*` → `EBPF_KVM_ENGINE_*` and
-      `.agent.toml` → `.ebpf-kvm-engine.toml`; the Prometheus namespace `agent_*` → `ebpf_kvm_engine_*`; the data dir
-      (`~/.local/share/ebpf-kvm-engine`), packaged rootfs (`rootfs-guest.ext4`), tarball (`ebpf-kvm-engine-<ver>`), image tag,
-      disk labels (`ebpf-kvm-engine-input`/`ebpf-kvm-engine-output`), and per-VM scratch prefix (`ebpf-kvm-engine-<pid>-<n>`); the docs,
+      *(**Done.** The name is **ekvm**, CLI **`ekvm`**. One sweep: crates
+      `agent-*` → `ekvm-*` (an `api:` change, `vmm` is the embed API); the CLI is `ekvm` with the
+      full `ekvm` as a second binary from the same entrypoint; `AGENT_*` → `EKVM_*` and
+      `.agent.toml` → `.ekvm.toml`; the Prometheus namespace `agent_*` → `ekvm_*`; the data dir
+      (`~/.local/share/ekvm`), packaged rootfs (`rootfs-guest.ext4`), tarball (`ekvm-<ver>`), image tag,
+      disk labels (`ekvm-input`/`ekvm-output`), and per-VM scratch prefix (`ekvm-<pid>-<n>`); the docs,
       README, AGENTS.md, ADRs, and workflows. The **guest agent** stays a guest agent (crate
       `guest-agent`, but the domain noun is unchanged) and the coding-agent/`AGENTS.md` vocabulary is
       untouched. Host gate green including the eBPF object build. `api:` (crate rename + config
@@ -2344,7 +2344,7 @@ Ship it as a thing others can run: packaged, documented, and self-hostable.
       kernel **≥ 5.15** (a maintained LTS, one `MIN_KERNEL` const) are **hard** (off them, refused),
       while cgroup-v2 caps (decision 010), the jailer, BTF/eBPF, and net/bulk tooling stay documented
       **degradations**; Firecracker stays pinned v1.9 and the baked-in guest kernel tracks Firecracker's
-      supported set (the P6.9d maintenance coupling, named for the guest kernel). `ebpf-kvm-engine doctor` gained
+      supported set (the P6.9d maintenance coupling, named for the guest kernel). `ekvm doctor` gained
       the two hard-floor rows (arch + kernel LTS) as the operator enforcement surface (it is not a
       brittle boot-time string-compare; version strings lie under distro backports). Reader-facing
       matrix in `docs/cli-install.md`; the doctor degradation-matrix footer updated. non-`api:` (an
@@ -2365,7 +2365,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       diagram and a "verify it yourself" containment runbook in `docs/threat-model.md`, and a
       scheduling-layer scope note in `docs/benchmarks.md`. Docs only, non-`api:`. The backing code is
       P20.10-P20.15.)*
-- [x] **P20.10** **Host-hardening advisory in `ebpf-kvm-engine doctor`** (decision 038): read
+- [x] **P20.10** **Host-hardening advisory in `ekvm doctor`** (decision 038): read
       `/sys/devices/system/cpu/vulnerabilities/*`, the SMT state, and the KSM state, and **warn** on an
       exposed host. Advisory, not a hard floor (a single-tenant dev box is fine); the arch/kernel rows
       stay hard. Reuses the shared host-check surface (`crates/vmm/src/doctor.rs`, decision 028).
@@ -2381,7 +2381,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       many start/exec/teardown cycles under churn, asserting fds/threads/netns/scratch return to
       baseline and reporting a leak-rate, so "no leak" is measured at scale, not at n=2. Privileged.
       *(**Done.** Extended `repeated_boots_leave_no_leaks` in `crates/vmm/tests/boot.rs` into an
-      endurance soak run (`soak_cycles()`, defaulting to 24, configurable via `EBPF_KVM_ENGINE_SOAK_CYCLES`).
+      endurance soak run (`soak_cycles()`, defaulting to 24, configurable via `EKVM_SOAK_CYCLES`).
       Runs full boot/exec/shutdown cycles and inserts periodic concurrent churn bursts (3 parallel threads
       every 8th cycle). Checks scratch dirs, orphaned VMM processes, per-VM netns, open fds, and process
       threads at mid-run checkpoints and at completion, reporting a per-VM leak-rate to stderr.)*
@@ -2391,20 +2391,20 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       on hosts that fell back to Drop-only cleanup.
       *(**Done.** `RunningVm`/`Sandbox` now report `sentinel_armed()` and `sentinel_degraded()`
       (`crates/vmm/src/lifetime.rs`), `Metrics` (`crates/cli/src/metrics.rs`) gains `sentinel_degraded`
-      gauge and `ebpf_kvm_engine_sweep_reclaimed_total{resource="dirs"|"netns"}` counters, and startup
+      gauge and `ekvm_sweep_reclaimed_total{resource="dirs"|"netns"}` counters, and startup
       sweeps report their `SweepReport` into the registry. `docs/daemon.md` table updated.)*
 - [x] **P20.13** **Pin the Firecracker binary** (decision 040): a sha256 pin alongside the
       kernel/rootfs pins (`xtask/src/artifacts.rs`), verified in `install.sh`, with an advisory
-      `ebpf-kvm-engine doctor` check on the installed binary's hash. Firecracker is the boundary, so its binary is
+      `ekvm doctor` check on the installed binary's hash. Firecracker is the boundary, so its binary is
       the one un-pinned input that actually matters.
       *(**Done.** Exposed release `FIRECRACKER_SHA256` pins in `xtask/src/artifacts.rs`, added binary hash
-      verification to `install.sh`, and implemented advisory `ebpf-kvm-engine doctor` check for Firecracker's binary
+      verification to `install.sh`, and implemented advisory `ekvm doctor` check for Firecracker's binary
       sha256 hash in `crates/vmm/src/doctor.rs`. Unit-tested and `docs/cli.md` updated.)*
 - [x] **P20.14** **Sign the release manifest** (decision 040): sign `SHA256SUMS` with the host
       `ed25519` signing core (decision 034) in `xtask/src/dist.rs`, and verify it in `install.sh` when a
       trusted key is present, so provenance does not rest on release-host + TLS trust alone.
       *(**Done.** `cargo xtask dist` signs `dist/SHA256SUMS` into `dist/SHA256SUMS.sig` using `probes_loader::HostKey`,
-      `install.sh` verifies `SHA256SUMS.sig` against `EBPF_KVM_ENGINE_PUBKEY` when provided via `ebpf-kvm-engine verify`.
+      `install.sh` verifies `SHA256SUMS.sig` against `EKVM_PUBKEY` when provided via `ekvm verify`.
       Unit-tested and `docs/supply-chain.md` updated.)*
 - [ ] **P20.15** **Fail-open degrade, tested**: prove bounded teardown on a host that lacks the sentinel
       guarantee (the cgroup-v2-unwritable Drop-only path, `crates/vmm/src/lifetime.rs`, decision 011),
@@ -2414,13 +2414,13 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       *(**Done.** Four gaps a fresh operator hit. (1) The eBPF object now resolves with **no**
       configuration: `object_path` falls back to the installed copy under the data dir
       (`crates/probes-loader/src/lib.rs`, precedence unit-tested via a pure `pick_object_path`), so
-      the `EBPF_KVM_ENGINE_PROBES_OBJECT` export is gone from the happy path; a developer's freshly built object
+      the `EKVM_PROBES_OBJECT` export is gone from the happy path; a developer's freshly built object
       still wins. (2) `install.sh` no longer ends by suggesting a command that fails: it names the
       jailed-needs-root reality with both working forms, and points at the actual Firecracker release
-      URL instead of "install it". (3) `ebpf-kvm-engine doctor` prints the exact run command **for this host**
+      URL instead of "install it". (3) `ekvm doctor` prints the exact run command **for this host**
       (`doctor::jailed_run_available()` single-sources the euid + jailer facts), and its not-ready
       message says to fix the FAIL rows and re-run. (4) An `Infra`-bucket failure now points back at
-      `ebpf-kvm-engine doctor`, keyed on the `kind()` bucket so it can't drift as `VmmError` grows.
+      `ekvm doctor`, keyed on the `kind()` bucket so it can't drift as `VmmError` grows.
       `docs/cli-install.md` gains a "Your first run" section. (5) `doctor` colours its status tags on
       a terminal, so the rows a reader must act on stop hiding in a long green list; gated on stdout
       being a TTY (the report is a stdout *result*, and a piped one stays byte-clean) plus `NO_COLOR`
@@ -2435,7 +2435,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
 - [x] **P20.16a** **A fresh operator's first *jailed* run works on a systemd host** (`nodev` `/tmp`,
       i.e. every Arch/Ubuntu default).
       *(**Done.** Both guided-install paths now pin `scratch_dir` when the default base needs it, so the
-      first `sudo ebpf-kvm-engine run` no longer fails `ScratchDirNodev` until a hand-edit, closing the last
+      first `sudo ekvm run` no longer fails `ScratchDirNodev` until a hand-edit, closing the last
       gap under the "every command the tooling prints works on the host" bar P20.16 set. `cargo xtask
       self-host` reuses the doctor's tested detector (`scratch_is_nodev`, promoted `pub` in
       `crates/vmm/src/doctor.rs`); `install.sh` uses the `findmnt` form the docs already teach, since it
@@ -2447,7 +2447,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       helper widened, not the pinned surface).)*
 - [x] **P20.16b** **`fix`: the jailer's API socket path fits `sun_path` again** (a de-brand regression
       the first privileged run on Arch surfaced).
-      *(**Done.** `create_workdir` named every per-VM scratch/jail dir `ebpf-kvm-engine-<pid>-<seq>`, and
+      *(**Done.** `create_workdir` named every per-VM scratch/jail dir `ekvm-<pid>-<seq>`, and
       the jailer embeds that name **twice** in the API socket path
       (`<scratch>/<name>/firecracker/<name>/root/run/firecracker.socket`); the rename from the old
       3-char acronym to the 15-char spelled-out name pushed that path past the kernel's `sun_path` limit
@@ -2462,10 +2462,10 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       name, unchanged public surface).)*
 - [x] **P20.16c** **`fix`: the bulk-I/O device labels fit ext4's 16-byte limit again** (the second
       de-brand regression the same privileged run surfaced, one layer past P20.16b).
-      *(**Done.** The de-brand grew `channel::INPUT_LABEL`/`OUTPUT_LABEL` to `ebpf-kvm-engine-input`
+      *(**Done.** The de-brand grew `channel::INPUT_LABEL`/`OUTPUT_LABEL` to `ekvm-input`
       (21 bytes) and `-output` (22), past ext4's 16-byte volume-label field. `mke2fs -L` **silently
       truncates** (exit 0, a stderr warning `run_host_tool` only surfaces on failure), and both labels
-      truncated to the *same* `ebpf-kvm-engine-`, so the guest's `findfs LABEL=…` matched nothing and
+      truncated to the *same* `ekvm-`, so the guest's `findfs LABEL=…` matched nothing and
       every bulk mount (`/input`, `/output`) silently vanished: all four bulk-I/O exec tests failed with
       empty mounts while plain execs stayed green. Shortened to `ekvm-input`/`ekvm-output` (the P20.16b
       `ekvm` prefix); the single-sourcing in `crates/channel` did its job (the host's `mke2fs -L` and the
@@ -2480,9 +2480,9 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       documented. (The refusal caught its first caller immediately: `ci-privileged-hosted.yml` and
       `docs/threat-model.md` both still invoked the gate as root without the override, so both were
       updated to pass `CARGO_TARGET_DIR="$PWD/target-privileged"`. Turning a warning into a refusal
-      means every documented invocation is part of the change, not just the code.) (2) `ebpf-kvm-engine --version` exists (the crate version, the in-development working number
+      means every documented invocation is part of the change, not just the code.) (2) `ekvm --version` exists (the crate version, the in-development working number
       per `RELEASES.md`), so a stale installed binary is tellable from a fresh one. (3)
-      `cargo xtask self-host` writes `~/.ebpf-kvm-engine.toml` with absolute artifact paths like `install.sh`
+      `cargo xtask self-host` writes `~/.ekvm.toml` with absolute artifact paths like `install.sh`
       does, so the installed binary stops being usable only from inside the source tree; while
       wiring it, `install_binaries` was found resolving `./target/release` while ignoring
       `CARGO_TARGET_DIR` (the build honours it), which could silently install a **stale** binary,
@@ -2499,12 +2499,12 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       the jailed-boot integration tests (`boots_under_the_jailer`, `jailed_overlay_*`) stop failing
       *deep in the run* with `ScratchDirNodev` panics that read like engine bugs. It reuses the doctor's
       tested detector (`scratch_is_nodev`, the same one `Vm::boot` refuses with, P19.9e) against the exact
-      dir the tests resolve (`vmm::BootConfig::from_env().scratch_dir`, so an `EBPF_KVM_ENGINE_SCRATCH_DIR`
+      dir the tests resolve (`vmm::BootConfig::from_env().scratch_dir`, so an `EKVM_SCRATCH_DIR`
       override clears it), and prints the `/var/tmp` fix, the same "loud refusal, never a confusing deep
       failure" discipline the other prerequisites already get. xtask only, non-`api:`.)*
 - [x] **P20.17b** **A one-line privileged gate** (contributor ergonomics).
       *(**Done.** The manual invocation stacked three env concerns, `sudo -E env "PATH=$PATH"
-      CARGO_TARGET_DIR=… EBPF_KVM_ENGINE_SCRATCH_DIR=… cargo xtask ci-privileged`, because `sudo` strips
+      CARGO_TARGET_DIR=… EKVM_SCRATCH_DIR=… cargo xtask ci-privileged`, because `sudo` strips
       rustup's `cargo` from `PATH`, a root build must stay out of `./target`, and `/tmp` is `nodev`.
       `xtask` can't collapse this itself: the outer `cargo run` that builds `xtask` writes to `./target`
       as root *before* any `xtask` code runs, which is exactly why it can only refuse. A committed
@@ -2523,7 +2523,7 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       `rustup target add x86_64-unknown-linux-musl` fix, alongside the existing Rust + eBPF toolchain
       entries. xtask + docs, non-`api:`.)*
 - [x] **P20.18** `(decision)` **Operator policy**: the host's defaults, ceilings, and postures.
-      *(**Done** as decision 041. The config surface had the split backwards: `.ebpf-kvm-engine.toml` covered
+      *(**Done** as decision 041. The config surface had the split backwards: `.ekvm.toml` covered
       where artifacts live, while every *containment* knob was caller-controlled with a
       compiled-in default, and the wire `open` let a socket client ask for 32 vCPUs on someone else's
       host. Adding keys alone would not have fixed it, since flags > env > file makes any file value
@@ -2533,8 +2533,8 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       is refused (decision 026); an unasked-for **default** above one is clamped, a distinction a test
       forced after the first implementation refused every bare run whose engine-default wall (30s)
       exceeded a `max_wall_secs = 10`. Enforced where it counts: the daemon bounds a client at
-      `open_limits` (`crates/cli/src/session.rs`) with ceilings from explicit `ebpf-kvm-engine serve` flags, never
-      a cwd-discovered file; the CLI applies the same resolver from `.ebpf-kvm-engine.toml` as a guardrail, since
+      `open_limits` (`crates/cli/src/session.rs`) with ceilings from explicit `ekvm serve` flags, never
+      a cwd-discovered file; the CLI applies the same resolver from `.ekvm.toml` as a guardrail, since
       a local caller is already trusted. non-`api:` (the pinned engine API does not move; an embedder
       *is* the operator).)*
 - [ ] **P20.19** **Egress allow-list ceiling**: bound `--allow` to operator-approved CIDRs, so a
@@ -2638,14 +2638,14 @@ they land before the P21 spec freeze.
       `WIRE_SCHEMA` bump; an old client reads it as a typed `ProtocolError`, never a panic).
       `feat(api):`.
 - [x] **P20.29b** **Committed-resource telemetry** (decision 042): the metrics endpoint now exports
-      `ebpf_kvm_engine_committed_mem_mib`/`_committed_vcpus` against `_capacity_mem_mib`/`_capacity_vcpus`
+      `ekvm_committed_mem_mib`/`_committed_vcpus` against `_capacity_mem_mib`/`_capacity_vcpus`
       (`crates/cli/src/metrics.rs`, sampled live per scrape like `pool_ready`), so a load-aware
       dispatcher routes on real memory/vCPU headroom instead of probe-and-fail. A metrics-endpoint
       surface, not a wire verb (the session-scoped protocol makes a `status` verb a poor fit).
       non-`api:`.
 - [x] **P20.29c** **Resource-aware admission** (decisions 041/042): `--max-sessions` bounds session
       *count*, but an `open` may ask for arbitrary `vcpus`/`mem_mib`, so a host could sit under the
-      count ceiling yet be memory-overcommitted and OOM at boot. New `ebpf-kvm-engine serve`
+      count ceiling yet be memory-overcommitted and OOM at boot. New `ekvm serve`
       `--max-committed-mem-mib`/`--max-committed-vcpus` bound the summed committed load via a
       `ResourceReservation` RAII guard charged after `open_limits` and released on teardown
       (`crates/cli/src/serve.rs`, `crates/cli/src/session.rs`), refusing with `AtCapacity` before boot.
@@ -2678,7 +2678,7 @@ they land before the P21 spec freeze.
 
 ## Phase 21, Polyglot SDKs (Go · Python · C# · Node.js)
 
-Thin, idiomatic clients so non-Rust callers can drive `ebpf-kvm-engine`, a client-SDK surface, still
+Thin, idiomatic clients so non-Rust callers can drive `ekvm`, a client-SDK surface, still
 **engine, not platform**.
 
 - [ ] **P21.1** `(decision)` Freeze + version the P16 wire API as a **language-agnostic spec** (the
@@ -2687,7 +2687,7 @@ Thin, idiomatic clients so non-Rust callers can drive `ebpf-kvm-engine`, a clien
       not inventing a new one.
 - [ ] **P21.2** A **cross-language conformance suite** (golden request/response + audit-log
       round-trips) every SDK must pass, the single source of SDK correctness, run in CI.
-- [ ] **P21.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `ebpf-kvm-engine`.
+- [ ] **P21.3** **Go** SDK (own repo): open/exec/put/get/snapshot/close/trace against `ekvm`.
 - [ ] **P21.4** **Python** SDK (own repo; sync + async).
 - [ ] **P21.5** **Node.js / TypeScript** SDK (own repo).
 - [ ] **P21.6** Every SDK is **its own repository** (out of this Rust workspace + host gate), pinned
@@ -2696,7 +2696,7 @@ Thin, idiomatic clients so non-Rust callers can drive `ebpf-kvm-engine`, a clien
 - [ ] **P21.7** Each SDK is a **thin protocol client**, no tenancy/auth/billing/scheduling; deny-by-
       default and the non-goals hold at the SDK layer too (note).
 - **Exit gate:** four languages run the same golden `exec` and read the same host-observed
-  audit log through `ebpf-kvm-engine`, against one stable polyglot wire API with a shared conformance suite.
+  audit log through `ekvm`, against one stable polyglot wire API with a shared conformance suite.
 
 ## Phase 22, The Wasmtime sibling (a second isolation boundary)
 

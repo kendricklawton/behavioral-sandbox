@@ -1,4 +1,4 @@
-//! End-to-end test of the CLI's audit face: `ebpf-kvm-engine run --net --trace --record` on a real
+//! End-to-end test of the CLI's audit face: `ekvm run --net --trace --record` on a real
 //! sandbox yields the guest's output, a human-readable audit trail, and a parseable, deterministic
 //! JSON record, the flag plumbing over the engine's convergence (whose *substance*, flows showing
 //! up exactly, every axis bound, is proven by the loader's own `audit_record` e2e).
@@ -6,7 +6,7 @@
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches the
 //! host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
 //! object). Run via `cargo xtask ci-privileged`. Drives the **built `agent` binary** (Cargo's
-//! `CARGO_BIN_EXE_ebpf-kvm-engine`), so what's tested is exactly what an operator runs.
+//! `CARGO_BIN_EXE_ekvm`), so what's tested is exactly what an operator runs.
 
 // A test binary: `expect`/`panic!` in non-`#[test]` helpers are the idiomatic assertions, which the
 // workspace's deny doesn't auto-exempt outside `#[test]` fns (same note as the vmm suites).
@@ -62,15 +62,12 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     // on every axis the CLI surfaces. Unjailed on purpose: the proof here is the audit face, and
     // the unjailed path doesn't depend on the /dev/kvm jail-uid ACL.
     let signing_key = scratch.path().join("signing.key");
-    let out = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
+    let out = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .current_dir(&root)
-        .env(
-            "EBPF_KVM_ENGINE_ROOTFS",
-            root.join("artifacts/rootfs-guest.ext4"),
-        )
-        .env("EBPF_KVM_ENGINE_MARKER", "GUEST-READY")
+        .env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+        .env("EKVM_MARKER", "GUEST-READY")
         // Keep the generated host signing key inside the scratch dir, not the real default path.
-        .env("EBPF_KVM_ENGINE_SIGNING_KEY", &signing_key)
+        .env("EKVM_SIGNING_KEY", &signing_key)
         .args(["run", "--unjailed", "--net", "--trace", "--record"])
         .arg(&record_path)
         .arg("--record-summary")
@@ -82,12 +79,12 @@ fn run_with_trace_and_record_yields_trail_and_json() {
             "open('/etc/hostname').read(); print('p14-audit-demo')",
         ])
         .output()
-        .expect("run the ebpf-kvm-engine binary");
+        .expect("run the ekvm binary");
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "ebpf-kvm-engine run failed ({}): stderr: {stderr}",
+        "ekvm run failed ({}): stderr: {stderr}",
         out.status
     );
 
@@ -135,15 +132,15 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         "every axis binds on a capable host: {json}"
     );
 
-    // The P19.3 demo: `ebpf-kvm-engine verify` accepts the untouched record, and rejects it after one flipped
-    // byte, trusting the same host key that signed it (resolved from EBPF_KVM_ENGINE_SIGNING_KEY).
-    let verify_ok = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
+    // The P19.3 demo: `ekvm verify` accepts the untouched record, and rejects it after one flipped
+    // byte, trusting the same host key that signed it (resolved from EKVM_SIGNING_KEY).
+    let verify_ok = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .current_dir(&root)
-        .env("EBPF_KVM_ENGINE_SIGNING_KEY", &signing_key)
+        .env("EKVM_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&record_path)
         .output()
-        .expect("run ebpf-kvm-engine verify");
+        .expect("run ekvm verify");
     assert!(
         verify_ok.status.success(),
         "an untouched record verifies: {}",
@@ -164,13 +161,13 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         serde_json::to_string(&tampered).expect("reserialize") + "\n",
     )
     .expect("write tampered record");
-    let verify_bad = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
+    let verify_bad = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .current_dir(&root)
-        .env("EBPF_KVM_ENGINE_SIGNING_KEY", &signing_key)
+        .env("EKVM_SIGNING_KEY", &signing_key)
         .args(["verify"])
         .arg(&tampered_path)
         .output()
-        .expect("run ebpf-kvm-engine verify on tampered");
+        .expect("run ekvm verify on tampered");
     // Pin the rejection to the *right reason*: exit 1 is the typed verification failure (exit 2
     // would be an operational error like an unreadable file, which must not pass as "rejected"),
     // and the message names the signature.
@@ -240,13 +237,10 @@ for _ in range(5):
         pass
 print('p14-9b-egress')
 ";
-    let out = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
+    let out = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .current_dir(&root)
-        .env(
-            "EBPF_KVM_ENGINE_ROOTFS",
-            root.join("artifacts/rootfs-guest.ext4"),
-        )
-        .env("EBPF_KVM_ENGINE_MARKER", "GUEST-READY")
+        .env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+        .env("EKVM_MARKER", "GUEST-READY")
         .args([
             "run",
             "--unjailed",
@@ -258,11 +252,11 @@ print('p14-9b-egress')
         .arg(&record_path)
         .args(["--", "python3", "-c", workload])
         .output()
-        .expect("run the ebpf-kvm-engine binary");
+        .expect("run the ekvm binary");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "ebpf-kvm-engine run --allow failed ({}): stderr: {stderr}",
+        "ekvm run --allow failed ({}): stderr: {stderr}",
         out.status
     );
     assert!(
@@ -308,12 +302,9 @@ print('p14-9b-egress')
 fn artifact_env() -> [(String, std::path::PathBuf); 2] {
     let root = workspace_root();
     [
+        ("EKVM_KERNEL".to_string(), root.join("artifacts/vmlinux")),
         (
-            "EBPF_KVM_ENGINE_KERNEL".to_string(),
-            root.join("artifacts/vmlinux"),
-        ),
-        (
-            "EBPF_KVM_ENGINE_ROOTFS".to_string(),
+            "EKVM_ROOTFS".to_string(),
             root.join("artifacts/rootfs-guest.ext4"),
         ),
     ]
@@ -329,20 +320,20 @@ fn doctor_passes_then_one_run_drives_every_projection_at_once() {
     let scratch = ScratchDir::created("trace-e2e");
     let env = artifact_env();
 
-    // 1) `ebpf-kvm-engine doctor` on a capable host reports ready (exit 0): the gate an operator runs first.
-    let doc = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
+    // 1) `ekvm doctor` on a capable host reports ready (exit 0): the gate an operator runs first.
+    let doc = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .envs(env.iter().cloned())
         .arg("doctor")
         .output()
-        .expect("run ebpf-kvm-engine doctor");
+        .expect("run ekvm doctor");
     assert!(
         doc.status.success(),
-        "ebpf-kvm-engine doctor should report ready on the privileged host: {}",
+        "ekvm doctor should report ready on the privileged host: {}",
         String::from_utf8_lossy(&doc.stdout)
     );
     assert!(String::from_utf8_lossy(&doc.stdout).contains("Ready"));
 
-    // 2) One `ebpf-kvm-engine run` exercising **every** projection at once: limits (--vcpus/--mem), the network
+    // 2) One `ekvm run` exercising **every** projection at once: limits (--vcpus/--mem), the network
     //    + egress policy (--net/--allow), file injection + retrieval (--put/--get), piped stdin, and
     //    the structured result (--json). The workload folds stdin + the injected file into a returned
     //    artifact and sends UDP to the allowed endpoint.
@@ -356,7 +347,7 @@ open('result.txt', 'w').write(data + '|' + put)
 socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b'x', ('10.200.0.1', 9999))
 print('p14-9f-complete')
 ";
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .current_dir(scratch.path()) // --get writes result.txt here
         .envs(env.iter().cloned())
         .args([
@@ -378,7 +369,7 @@ print('p14-9f-complete')
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .expect("spawn ebpf-kvm-engine run");
+        .expect("spawn ekvm run");
     use std::io::Write as _;
     child
         .stdin
@@ -386,7 +377,7 @@ print('p14-9f-complete')
         .expect("stdin pipe")
         .write_all(b"STDIN")
         .expect("feed stdin");
-    let out = child.wait_with_output().expect("await ebpf-kvm-engine run");
+    let out = child.wait_with_output().expect("await ekvm run");
     assert!(
         out.status.success(),
         "the everything-run failed ({}): {}",
@@ -447,13 +438,10 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     // Allow only the `search-index` tool (10.200.0.1:9000/udp); the `exfil-webhook` (:9100) is
     // deny-by-default. `--record` + `--record-summary` capture both faces of the one host-observed
     // record.
-    let out = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"))
+    let out = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .current_dir(&root)
-        .env(
-            "EBPF_KVM_ENGINE_ROOTFS",
-            root.join("artifacts/rootfs-guest.ext4"),
-        )
-        .env("EBPF_KVM_ENGINE_MARKER", "GUEST-READY")
+        .env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+        .env("EKVM_MARKER", "GUEST-READY")
         .args([
             "run",
             "--unjailed",
@@ -471,7 +459,7 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
-        "the contained ebpf-kvm-engine run failed ({}): {}",
+        "the contained ekvm run failed ({}): {}",
         out.status,
         String::from_utf8_lossy(&out.stderr)
     );

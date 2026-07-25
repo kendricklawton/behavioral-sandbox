@@ -1,4 +1,4 @@
-//! The human-readable audit trail (`ebpf-kvm-engine run --trace`): a pretty rendering of the per-run
+//! The human-readable audit trail (`ekvm run --trace`): a pretty rendering of the per-run
 //! [`RunRecord`] for people at a terminal. The **machine** surface is the record's deterministic
 //! JSON (`--record`, `RunRecord::to_json`); this rendering makes no stability promise beyond
 //! being deterministic for the same record, parse the JSON, read this.

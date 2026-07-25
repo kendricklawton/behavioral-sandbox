@@ -13,7 +13,7 @@ format.
 **Decision.** What a run did becomes *legible* at the CLI, on three composable `run` flags over one
 mechanism: `--trace` (the human-readable trail, on **stdout** after the run), `--record FILE` (the
 deterministic JSON record, the machine surface; decision 034 later wraps this file in a host-signed
-envelope that `ebpf-kvm-engine verify` checks), and `--watch` (a live full-screen view, on
+envelope that `ekvm verify` checks), and `--watch` (a live full-screen view, on
 **stderr**, while the command runs). A fourth flag, `--net`, boots the sandbox with its NIC so
 there is a tap to observe (deny-by-default unchanged: no allowance means nothing past the host /30).
 Any of the three audit flags triggers the same launch sequence decision 024 defined, load the

@@ -9,7 +9,7 @@ in the layer *beneath* the engine, the host and its scheduler, which is the host
 recommended baseline for that layer when you place **mutually-distrusting tenants on shared hardware**.
 
 It is advice, not an enforced control: the engine measures and observes, it does not reach into the
-CPU's micro-architecture. `ebpf-kvm-engine doctor` **advises** on the machine-checkable parts (it warns; it
+CPU's micro-architecture. `ekvm doctor` **advises** on the machine-checkable parts (it warns; it
 does not refuse), because a single-tenant dev box that trips these is perfectly fine. The rationale is
 [decision 038](./adr/038-host-hardening-is-the-hosters-baseline-doctor-advises.md).
 
@@ -29,7 +29,7 @@ does not refuse), because a single-tenant dev box that trips these is perfectly 
 - **Leave CPU-vulnerability mitigations on.** Do not boot the worker with `mitigations=off`, and keep
   the microcode current.
 - **Patch the host kernel.** The supported floor (`x86_64`, kernel >= 5.15) is enforced hard by
-  `ebpf-kvm-engine doctor` ([decision 032](./adr/032-supported-platforms-two-architectures-a-security.md));
+  `ekvm doctor` ([decision 032](./adr/032-supported-platforms-two-architectures-a-security.md));
   keeping it *patched* within that floor is your half of the contract, the same line
   [Security](./security.md#what-is-not-a-security-bug) already draws.
 
@@ -44,7 +44,7 @@ the same "engine, not platform" line the threat model draws for co-resident fair
 
 ## Where the engine helps
 
-- `ebpf-kvm-engine doctor` reports the hard floor (architecture, kernel LTS) and **advises** on the SMT,
+- `ekvm doctor` reports the hard floor (architecture, kernel LTS) and **advises** on the SMT,
   KSM, and CPU-vulnerability state of the host.
 - The audit record is host-signed
   ([decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md)), so what a run did

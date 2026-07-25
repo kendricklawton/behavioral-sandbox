@@ -15,7 +15,7 @@ must, for *any* input, return a value or a typed `ChannelError`, and never panic
 or allocate past `MAX_PAYLOAD`. The guest-side `Request` decoder is fuzzed too as defense in depth
 (the host is trusted, but the in-guest agent should be just as unpanicky).
 
-The **daemon's client wire** (`crates/protocol`, `read_message`). `ebpf-kvm-engine serve` decodes these
+The **daemon's client wire** (`crates/protocol`, `read_message`). `ekvm serve` decodes these
 bytes off its unix socket from *any* client: the outermost untrusted-input boundary the engine
 exposes, and higher-value than the channel decoder, which only ever sees a guest already contained
 inside a VM. The hand-rolled line reader (bounded at `MAX_MESSAGE_BYTES`) and the schema gate that

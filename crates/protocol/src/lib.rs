@@ -21,7 +21,7 @@
 //! [`MAX_MESSAGE_BYTES`] and returns a typed [`ProtocolError`], never a panic.
 //!
 //! **Text, not binary.** `stdin`, `put`/`get` `content`, and the returned `stdout`/`stderr` are
-//! **UTF-8 strings**, lossy on the way out exactly like `ebpf-kvm-engine run --json` (so the daemon and the CLI
+//! **UTF-8 strings**, lossy on the way out exactly like `ekvm run --json` (so the daemon and the CLI
 //! render a run identically). Bulk or binary I/O is the block-device path
 //! (`BootConfig::input_dir`/`output_dir`), an embedding-API concern, never this per-message line.
 //!
@@ -156,7 +156,7 @@ pub enum Response {
         pooled: bool,
     },
     /// A command finished. `exit_code` is the guest command's own code (non-zero is a *result*, not
-    /// an error); `stdout`/`stderr` are lossy UTF-8 like `ebpf-kvm-engine run --json`.
+    /// an error); `stdout`/`stderr` are lossy UTF-8 like `ekvm run --json`.
     Result {
         /// The guest command's exit code (`128 + signal` on signal death).
         exit_code: i32,
@@ -434,7 +434,7 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
 
 /// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
 /// bytes to the daemon's untrusted-client parse path (the hand-rolled line reader + schema gate,
-/// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`ebpf-kvm-engine serve`)
+/// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`ekvm serve`)
 /// reads exactly these bytes off its socket from any client, so a panic, hang, or unbounded
 /// allocation on any input is the bug being hunted (guardrail 5). Not built by default; the harness
 /// lives in `fuzz/` (excluded from the workspace). The in-gate, dependency-light counterpart is
@@ -446,7 +446,7 @@ pub mod fuzz {
     use crate::{read_message, Request, Response};
 
     /// Read a stream of `Request`s from `data` (the daemon's view of a client's bytes), the
-    /// highest-value target: `ebpf-kvm-engine serve` decodes exactly this off its socket. Drains to EOF so a
+    /// highest-value target: `ekvm serve` decodes exactly this off its socket. Drains to EOF so a
     /// lying length, a blank-line flood, or a mid-line truncation are all exercised.
     pub fn read_requests(data: &[u8]) {
         let mut cur = Cursor::new(data);
@@ -534,7 +534,7 @@ mod tests {
                 present: true,
             },
             Response::Snapshotted {
-                dir: "/var/lib/ebpf-kvm-engine/snap-1".into(),
+                dir: "/var/lib/ekvm/snap-1".into(),
             },
             Response::Trace {
                 record: serde_json::json!({"schema": 1, "timing": {}}),

@@ -36,8 +36,8 @@ body:
     attributes:
       label: Which surface does it touch?
       options:
-        - CLI (ebpf-kvm-engine run / shell / doctor)
-        - ebpf-kvm-engine serve (daemon) + wire API
+        - CLI (ekvm run / shell / doctor)
+        - ekvm serve (daemon) + wire API
         - engine API (the vmm library)
         - probes / audit record
         - benchmarks / docs / tooling

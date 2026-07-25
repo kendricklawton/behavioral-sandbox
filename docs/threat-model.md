@@ -97,7 +97,7 @@ sudo -E ./ci-privileged.sh
 ```
 
 The wrapper sets the three env concerns a `sudo` run otherwise stacks by hand (a throwaway
-`CARGO_TARGET_DIR`, a non-`nodev` `EBPF_KVM_ENGINE_SCRATCH_DIR`, and rustup's `cargo` back on `PATH`);
+`CARGO_TARGET_DIR`, a non-`nodev` `EKVM_SCRATCH_DIR`, and rustup's `cargo` back on `PATH`);
 the gate *refuses* to run as root without the target-directory override, so a root build cannot leave
 root-owned artifacts in `./target` that block your later non-root builds, and it pre-checks the scratch
 dir is not `nodev`. See [Building](./contributing-building.md#the-privileged-gate) for the expanded form.
@@ -127,7 +127,7 @@ The property above (the guest can neither forge nor evade the observation) is on
 otherwise assumes: a party that alters the record **after** it leaves the producing host, a
 compromised relay, an operator, or the transport a supervisor reads it over. To close that gap the
 loader **signs** each finalized record with a host key the guest never sees (an `ed25519` detached
-signature over the canonical record bytes, decision 034), and ships a verify path (`ebpf-kvm-engine verify`, the
+signature over the canonical record bytes, decision 034), and ships a verify path (`ekvm verify`, the
 library `verify`, and the daemon's signed `trace` reply).
 
 - **What the signature proves:** the record was not altered after the producing host signed it. A
@@ -150,7 +150,7 @@ library `verify`, and the daemon's signed `trace` reply).
   the signing key. A deliberate, documented limitation of append-only evidence, not a chain defect.
 
 See [decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md) for the full model
-and [`ebpf-kvm-engine verify`](./cli.md#ebpf-kvm-engine-verify) for the verify path.
+and [`ekvm verify`](./cli.md#ekvm-verify) for the verify path.
 
 ## Assumptions and residual risk
 

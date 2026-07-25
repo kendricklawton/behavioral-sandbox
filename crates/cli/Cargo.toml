@@ -7,13 +7,13 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The ebpf-kvm-engine CLI (`ebpf-kvm-engine`): drive the Firecracker + aya code-execution sandbox."
+description = "The eKVM CLI (`ekvm`): drive the Firecracker + aya code-execution sandbox."
 
-# One entrypoint: `ebpf-kvm-engine`, the canonical command, built from `src/main.rs`. The driver
-# daemon is the `ebpf-kvm-engine serve` subcommand (`src/serve.rs`, with its `session`/`metrics`
+# One entrypoint: `ekvm`, the canonical command, built from `src/main.rs`. The driver
+# daemon is the `ekvm serve` subcommand (`src/serve.rs`, with its `session`/`metrics`
 # modules), not a separate binary.
 [[bin]]
-name = "ebpf-kvm-engine"
+name = "ekvm"
 path = "src/main.rs"
 
 [dependencies]
@@ -21,18 +21,18 @@ path = "src/main.rs"
 # tracks: it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
 probes-loader = { path = "../probes-loader" }
 vmm = { path = "../vmm" }
-# The `ebpf-kvm-engine` daemon's wire protocol: the versioned newline-JSON contract it shares with the
+# The `ekvm` daemon's wire protocol: the versioned newline-JSON contract it shares with the
 # reference client and the polyglot SDKs (ADR 030). A serde-only leaf, no engine internals.
 protocol = { path = "../protocol" }
 clap = { workspace = true }
-# `ebpf-kvm-engine run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
+# `ekvm run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
-# `.ebpf-kvm-engine.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
+# `.ekvm.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
 # denied so a config typo is a typed error, not a silent no-op.
 serde = { workspace = true }
-# `ebpf-kvm-engine run --json`: the structured run result is one JSON object on stdout.
+# `ekvm run --json`: the structured run result is one JSON object on stdout.
 serde_json = { workspace = true }
-# `ebpf-kvm-engine`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
+# `ekvm`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
 # Already in the dependency tree transitively (crossterm), so no new crate enters the tree.
 signal-hook = "0.3"
 toml = { workspace = true }
@@ -41,8 +41,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # The reference client for the versioned wire API (ADR 030, docs/daemon.md), used by the
-# daemon's e2e demo to prove a caller drives `ebpf-kvm-engine` over the wire alone. A dev-dep so the daemon
-# crate can spawn `ebpf-kvm-engine` (it owns the artifacts)
+# daemon's e2e demo to prove a caller drives `ekvm` over the wire alone. A dev-dep so the daemon
+# crate can spawn `ekvm` (it owns the artifacts)
 # while the client itself stays free of `vmm`.
 client = { path = "../client" }
 # The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).

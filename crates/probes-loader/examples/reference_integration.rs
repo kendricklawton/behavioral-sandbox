@@ -41,7 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tracer = SharedTracer::load()?;
     let meter = SharedMeter::load()?;
 
-    // 2. Configure the run. `from_env` layers flags/env/`.ebpf-kvm-engine.toml`/defaults for the artifact
+    // 2. Configure the run. `from_env` layers flags/env/`.ekvm.toml`/defaults for the artifact
     //    paths; `Limits` is the per-run resource budget (ADR 010). Conservative defaults, with
     //    the whole-run wall-clock budget raised for this demo; `vcpus`/`mem_mib` are `NonZero` knobs
     //    on the same struct.

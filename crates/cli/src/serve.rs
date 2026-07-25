@@ -1,4 +1,4 @@
-//! `ebpf-kvm-engine`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
+//! `ekvm`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
 //! [wire API](protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
 //! socket**, so a local client drives microVMs without linking the `vmm` library itself. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
@@ -59,11 +59,11 @@ use vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GU
 use crate::metrics::Metrics;
 
 // The operational-failure exit code (a bad socket path, a bind failure) is the CLI's own
-// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `ebpf-kvm-engine` binary.
+// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `ekvm` binary.
 use crate::EXIT_OPERATIONAL;
 
-/// `ebpf-kvm-engine serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
-/// is the shared global flag on the `ebpf-kvm-engine` CLI, so it is not repeated here.
+/// `ekvm serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
+/// is the shared global flag on the `ekvm` CLI, so it is not repeated here.
 #[derive(clap::Args)]
 pub struct ServeArgs {
     /// The unix socket to listen on. Its directory's permissions are the access control (the daemon
@@ -83,7 +83,7 @@ pub struct ServeArgs {
     /// Refuse to boot a session's VMM when the cpu/memory cgroup caps can't be applied, instead of
     /// the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing on a
     /// multi-tenant host; needs the jailer (so not with `--unjailed`) and delegated cgroup v2
-    /// controllers. Also settable via `EBPF_KVM_ENGINE_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
+    /// controllers. Also settable via `EKVM_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
     #[arg(long)]
     require_limits: bool,
     /// Serve a Prometheus metrics endpoint at this address (e.g. `127.0.0.1:9920`) for the hoster to
@@ -92,7 +92,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "ADDR")]
     metrics: Option<SocketAddr>,
     /// Emit stderr logs as JSON lines (for a log shipper) instead of human-readable text. Also
-    /// enabled by `EBPF_KVM_ENGINE_LOG_FORMAT=json`.
+    /// enabled by `EKVM_LOG_FORMAT=json`.
     #[arg(long)]
     log_json: bool,
     /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
@@ -144,13 +144,13 @@ pub struct ServeArgs {
 /// optional pre-warmed pool, and a monotonic source of snapshot-bundle directories.
 // `pub(crate)` (not private) because the `session` module is a crate-root sibling of `serve` (both
 // flat under `src/`), so it reaches the daemon context through crate visibility, not the ancestor
-// visibility a submodule would have. Still crate-internal, this is the `ebpf-kvm-engine` binary, not a library.
+// visibility a submodule would have. Still crate-internal, this is the `ekvm` binary, not a library.
 pub(crate) struct Server {
     /// The env-layered base config; a session's `open` folds its resource knobs on top.
     pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     pub(crate) jailed: bool,
-    /// The operator's per-run policy (decision 041), read from the daemon's `.ebpf-kvm-engine.toml` at startup.
+    /// The operator's per-run policy (decision 041), read from the daemon's `.ekvm.toml` at startup.
     /// This is the enforcing copy: a client controls neither that file nor this process's
     /// environment, so the ceilings here bound what any `open` may ask for.
     pub(crate) policy: Policy,
@@ -203,22 +203,21 @@ impl Server {
     }
 }
 
-/// Run the daemon (`ebpf-kvm-engine serve`): the `--log` filter comes from the CLI's shared global flag, the
+/// Run the daemon (`ekvm serve`): the `--log` filter comes from the CLI's shared global flag, the
 /// rest of the knobs from [`ServeArgs`]. Its own tracing init (info default, optional JSON) and its
-/// own config (flags + environment, no `.ebpf-kvm-engine.toml`), so the CLI dispatches this **before** its
+/// own config (flags + environment, no `.ekvm.toml`), so the CLI dispatches this **before** its
 /// project-file/tracing setup ([`crate::main`]).
 pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     let log_json = args.log_json
-        || std::env::var("EBPF_KVM_ENGINE_LOG_FORMAT")
-            .is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+        || std::env::var("EKVM_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     init_tracing(log.as_deref(), log_json);
 
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
-    // on top). The daemon has no `.ebpf-kvm-engine.toml` cwd discovery, that's a CLI-in-a-project convenience;
+    // on top). The daemon has no `.ekvm.toml` cwd discovery, that's a CLI-in-a-project convenience;
     // a daemon's config is its own flags + environment. Computed up front so the signal handler and
     // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
     let mut base = BootConfig::from_env();
-    // Flag layer over `EBPF_KVM_ENGINE_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
+    // Flag layer over `EKVM_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
     // hardening posture, so an absent flag leaves an env-set `true` intact (it never forces `false`).
     if args.require_limits {
         base.require_limits = true;
@@ -228,11 +227,11 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an
     // unjailed daemon could never satisfy it and would accept connections only to refuse every
     // session with `LimitsUnavailable`. Reject it at startup (covers the flag and
-    // `EBPF_KVM_ENGINE_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
+    // `EKVM_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
     if base.require_limits && !jailed {
         tracing::error!(
             "require_limits needs the jailer, but this daemon is --unjailed; an unjailed VMM has no \
-             cgroup to cap. Drop --unjailed (and EBPF_KVM_ENGINE_REQUIRE_LIMITS) or don't require limits."
+             cgroup to cap. Drop --unjailed (and EKVM_REQUIRE_LIMITS) or don't require limits."
         );
         return ExitCode::from(EXIT_OPERATIONAL);
     }
@@ -281,14 +280,14 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         }
     }
     // Snapshot bundles are guest-memory-sized, so they live under the engine's own scratch knob
-    // (`EBPF_KVM_ENGINE_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
+    // (`EKVM_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
     // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
     // large artifact (boot scratch, prewarm, snapshots) follows.
     let snapshot_base = snapshots_dir(&base.scratch_dir);
     // Load (or generate on first use) the host record-signing key, so the `trace` reply carries a
     // signed envelope (decision 034). Fail-closed like the metrics bind: refuse to start rather than
-    // serve records that claim to be verifiable but aren't signed. The daemon has no `.ebpf-kvm-engine.toml`
-    // layer (env + flags only), so the path resolves from `EBPF_KVM_ENGINE_SIGNING_KEY` or the default.
+    // serve records that claim to be verifiable but aren't signed. The daemon has no `.ekvm.toml`
+    // layer (env + flags only), so the path resolves from `EKVM_SIGNING_KEY` or the default.
     let signing_key = match probes_loader::HostKey::load_or_generate(
         &crate::config::signing_key_path(None),
     ) {
@@ -299,7 +298,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         }
     };
     let pool = build_optional_pool(args.prewarm, &base, jailed);
-    // The daemon takes policy from its flags, not from a discovered `.ebpf-kvm-engine.toml`: a daemon must not
+    // The daemon takes policy from its flags, not from a discovered `.ekvm.toml`: a daemon must not
     // read a security control out of whatever directory it happened to be started in. Jail and
     // networking are already daemon-wide and client-immutable (`--unjailed` above), so only the
     // ceilings need to travel to the session boundary.
@@ -342,7 +341,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         jailed,
         prewarmed = server.pool.is_some(),
         metrics = args.metrics.as_ref().map(tracing::field::display),
-        "ebpf-kvm-engine listening"
+        "ekvm listening"
     );
 
     // Accept forever, one thread per connection. A daemon runs until its supervisor stops it; the
@@ -364,12 +363,12 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
     let registry = Arc::clone(&server.metrics);
     let sampled = Arc::clone(server);
     let spawned = std::thread::Builder::new()
-        .name("ebpf-kvm-engine-metrics".into())
+        .name("ekvm-metrics".into())
         .spawn(move || {
             crate::metrics::serve(listener, registry, move || {
                 // `try_lock`, never a blocking acquire (16-C): the scrape must not stall behind a
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
-                // this scrape, `ebpf_kvm_engine_pool_ready` is momentarily absent, the same absent-not-zero
+                // this scrape, `ekvm_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
                 // visibility surface freezing under the load it exists to report on. The committed
                 // gauges (decision 042) read the live admission atomics, always available.
@@ -404,7 +403,7 @@ fn spawn_session(stream: UnixStream, server: Arc<Server>) {
         return;
     };
     let spawned = std::thread::Builder::new()
-        .name("ebpf-kvm-engine-session".into())
+        .name("ekvm-session".into())
         .spawn(move || {
             // The ticket lives exactly as long as the session: its `Drop` releases the slot
             // however `serve` ends (clean close, client hang-up, or a panic unwinding).
@@ -547,12 +546,12 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
 
 /// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
 fn prewarm_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("ebpf-kvm-engine-prewarm-{}", std::process::id()))
+    scratch.join(format!("ekvm-prewarm-{}", std::process::id()))
 }
 
 /// This daemon's session-snapshot bundle dir (holds each session's `snap-N`), under the scratch knob.
 fn snapshots_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("ebpf-kvm-engine-snapshots-{}", std::process::id()))
+    scratch.join(format!("ekvm-snapshots-{}", std::process::id()))
 }
 
 /// The effective uid this process runs as, so the startup sweep only reclaims bundle dirs *it* owns
@@ -563,7 +562,7 @@ fn own_euid() -> Option<u32> {
     uid.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// Reclaim this-user `ebpf-kvm-engine-prewarm-<pid>` / `ebpf-kvm-engine-snapshots-<pid>` bundle dirs left by **dead**
+/// Reclaim this-user `ekvm-prewarm-<pid>` / `ekvm-snapshots-<pid>` bundle dirs left by **dead**
 /// prior daemons: their guest-memory-sized files are pure leak once the daemon that owned them is
 /// gone (SIGKILL/OOM skips the signal-handler cleanup). Best-effort, per-entry: a dir we can't stat
 /// or remove is logged and skipped. Skips our own pid and any live pid (a concurrently-running
@@ -603,8 +602,8 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         let Some(pid) = name
-            .strip_prefix("ebpf-kvm-engine-prewarm-")
-            .or_else(|| name.strip_prefix("ebpf-kvm-engine-snapshots-"))
+            .strip_prefix("ekvm-prewarm-")
+            .or_else(|| name.strip_prefix("ekvm-snapshots-"))
         else {
             continue; // not a bundle dir this daemon mints
         };
@@ -623,12 +622,12 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
         match std::fs::remove_dir_all(entry.path()) {
             Ok(()) => tracing::info!(
                 dir = %entry.path().display(),
-                "swept a stale ebpf-kvm-engine bundle dir from a dead daemon"
+                "swept a stale ekvm bundle dir from a dead daemon"
             ),
             Err(e) => tracing::warn!(
                 dir = %entry.path().display(),
                 error = %e,
-                "could not sweep a stale ebpf-kvm-engine bundle dir"
+                "could not sweep a stale ekvm bundle dir"
             ),
         }
     }
@@ -640,7 +639,7 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
 /// VMs; the next start clears the stale socket and the startup sweep reclaims the leaked bundle dirs).
 fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
     let spawned = std::thread::Builder::new()
-        .name("ebpf-kvm-engine-signals".into())
+        .name("ekvm-signals".into())
         .spawn(move || {
             let mut signals = match signal_hook::iterator::Signals::new([
                 signal_hook::consts::SIGTERM,
@@ -702,7 +701,7 @@ fn build_optional_pool(
 /// daemon's confinement posture. The clones carry the default profile, which is why only a
 /// bare-default `open` is pool-eligible (`crate::session::boot_session_vm`).
 fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, VmmError> {
-    // Snapshot into a per-daemon dir under the engine's scratch knob (`EBPF_KVM_ENGINE_SCRATCH_DIR`), the same
+    // Snapshot into a per-daemon dir under the engine's scratch knob (`EKVM_SCRATCH_DIR`), the same
     // routing as the session bundles: guest-memory-sized files belong where the operator pointed
     // scratch, never a hardcoded `$TMPDIR`. On a **successful** build the pool's clones reference this
     // bundle, so it must live until shutdown (the signal handler / startup sweep reclaim it); on any
@@ -763,7 +762,7 @@ fn build_pool_from(
 }
 
 /// Bind the listener at `socket`, clearing a **stale** socket file first but refusing to clobber a
-/// **live** daemon. If the path exists, a successful connect means another `ebpf-kvm-engine` is already
+/// **live** daemon. If the path exists, a successful connect means another `ekvm` is already
 /// listening (a typed refusal); a refused connect means the file is leftover from a dead daemon, so
 /// remove it and bind. The parent directory must already exist (the hoster's to create, with the
 /// permissions that gate access).
@@ -771,7 +770,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     if socket.exists() {
         if UnixStream::connect(socket).is_ok() {
             return Err(format!(
-                "another ebpf-kvm-engine daemon is already listening on {}",
+                "another ekvm daemon is already listening on {}",
                 socket.display()
             ));
         }
@@ -859,7 +858,7 @@ impl Drop for StagedPath {
     }
 }
 
-/// stderr logging, filter from `--log` else `EBPF_KVM_ENGINE_LOG` else `info`. `info` (not the CLI's `warn`):
+/// stderr logging, filter from `--log` else `EKVM_LOG` else `info`. `info` (not the CLI's `warn`):
 /// a daemon's per-session boot/close lines are its operational trace. `json` switches the *encoding*
 /// of the same structured events, one JSON object per line, fields intact, for a log shipper, the
 /// events themselves are identical either way. `try_init` + a fallback so a bad filter or a
@@ -867,7 +866,7 @@ impl Drop for StagedPath {
 fn init_tracing(flag: Option<&str>, json: bool) {
     let filter = flag
         .map(str::to_string)
-        .or_else(|| std::env::var("EBPF_KVM_ENGINE_LOG").ok())
+        .or_else(|| std::env::var("EKVM_LOG").ok())
         .unwrap_or_else(|| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -1010,8 +1009,7 @@ mod tests {
         // The leak `StagedPath` closes: a panic between staging the temp socket (or a pool's
         // bundle dir) and publishing it must not strand the path. Both file and dir flavors, and
         // the disarm: a published path must survive the guard's drop.
-        let base =
-            std::env::temp_dir().join(format!("ebpf-kvm-engine-staged-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("ekvm-staged-{}", std::process::id()));
         std::fs::create_dir_all(&base).expect("mkdir");
 
         let file = base.join("sock.tmp");

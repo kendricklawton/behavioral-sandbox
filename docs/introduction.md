@@ -1,6 +1,6 @@
 # Introduction
 
-**ebpf-kvm-engine** is a self-hostable engine for running untrusted code in hardware
+**ekvm** is a self-hostable engine for running untrusted code in hardware
 isolation, with a tamper-evident record of exactly what it did that you can trust without trusting
 the code. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
 **host-side eBPF** (**aya**) watches and enforces what it does, syscalls, its network, its
@@ -12,13 +12,13 @@ at once: strong isolation, and a trustworthy account of what the code actually d
 engine for exactly that, the code stays on your own infrastructure (air-gapped or regulated is
 fine), and the watching and the policy live in the host kernel, outside the guest, so the record
 can't be forged by the code it is recording. The finished record is also **host-signed**, so
-alteration after the run is detectable off-host (verify with `ebpf-kvm-engine verify`); see the [threat
+alteration after the run is detectable off-host (verify with `ekvm verify`); see the [threat
 model](./threat-model.md#record-integrity-beyond-the-guest) for exactly what that does and does not
 prove.
 
-The engine can be driven three ways: as the **`ebpf-kvm-engine` CLI** (one sandbox per command), as a
+The engine can be driven three ways: as the **`ekvm` CLI** (one sandbox per command), as a
 **Rust library** embedded in a larger application, or programmatically over a unix socket through
-the **`ebpf-kvm-engine` daemon** and its versioned wire API.
+the **`ekvm` daemon** and its versioned wire API.
 
 ## How it fits together
 
@@ -50,13 +50,13 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Reading this book
 
-- **[Using the ebpf-kvm-engine CLI](./cli.md)**, how to run the engine: [install the
+- **[Using the eKVM CLI](./cli.md)**, how to run the engine: [install the
   prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
-  untrusted code with `ebpf-kvm-engine run` and hold interactive sessions with `ebpf-kvm-engine shell`. Start here.
+  untrusted code with `ekvm run` and hold interactive sessions with `ekvm shell`. Start here.
 - **[Using the engine API](./embedding.md)**, the embedder's contract: the `Sandbox` lifecycle,
   sessions, budgets, typed errors, snapshots and the pre-warmed pool, and where the engine
   deliberately ends.
-- **[Using the `ebpf-kvm-engine serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
+- **[Using the `ekvm serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
   wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`), the pre-warmed pool for fast
   `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
 - **[Examples](./examples.md)**, worked, end-to-end walkthroughs: [running untrusted
@@ -77,12 +77,12 @@ full non-goals list is in [Using the engine API](./embedding.md).
 ## Status
 
 Early, under active development, nothing here is production yet. The staged plan and live
-progress live in [`ROADMAP.md`](https://github.com/packsixfour/ebpf-kvm-engine/blob/main/ROADMAP.md)
+progress live in [`ROADMAP.md`](https://github.com/packsixfour/ekvm/blob/main/ROADMAP.md)
 (its checkboxes are the state); hard-to-reverse choices are recorded as dated
 [decision records](./adr/README.md). Every
 completed phase ships a working demo, so each capability documented in this book is proven
 running end to end, not just asserted.
 
 The source for this book lives in the repository's
-[`docs/` directory](https://github.com/packsixfour/ebpf-kvm-engine/tree/main/docs) and contributions are
+[`docs/` directory](https://github.com/packsixfour/ekvm/tree/main/docs) and contributions are
 welcome, see [Contributing](./contributing.md).

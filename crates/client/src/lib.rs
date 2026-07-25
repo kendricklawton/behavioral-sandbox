@@ -15,7 +15,7 @@
 //!
 //! ```no_run
 //! use client::Client;
-//! let mut client = Client::connect("/run/ebpf-kvm-engine/ebpf-kvm-engine.sock")?;
+//! let mut client = Client::connect("/run/ekvm/ekvm.sock")?;
 //! client.open(Default::default())?;                 // boot the session's sandbox
 //! let run = client.exec(&["echo".into(), "hi".into()], "")?;
 //! assert_eq!(run.stdout, "hi\n");

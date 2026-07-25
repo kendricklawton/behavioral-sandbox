@@ -23,7 +23,7 @@ path, not the payload.
   toolchain), synchronous (no async runtime, matching the driver). Its public shape is a typed handle
   (`ExecveCounter::{load, count, counts_by_pid}`) returning a typed `ProbeError`, the eBPF analogue
   of the driver's `VmmError`. It reads the compiled object from a **path** (`cargo xtask build-probes`
-  output, or `EBPF_KVM_ENGINE_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
+  output, or `EKVM_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
   stable and `cargo xtask ci` runs everywhere (decision 017).
 
 ## eBPF program types
@@ -242,7 +242,7 @@ appears in the host-syscall axis (below). `SandboxProbes::collect` is finalize-o
 and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** live reading
 (`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far), what the
 CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
-(`ebpf-kvm-engine run --net --trace --record --watch`) is documented in [Using the ebpf-kvm-engine CLI](./cli.md); decision
+(`ekvm run --net --trace --record --watch`) is documented in [Using the eKVM CLI](./cli.md); decision
 025 covers where each surface lives.
 
 ## The hardware-isolation consequence (the honest limit)
@@ -272,7 +272,7 @@ sudo <the-printed-binary> --ignored --test-threads=1
 ```
 
 The per-axis demos each boot a real sandbox and show one probe end to end (all need
-`/dev/kvm` + the ebpf-kvm-engine rootfs + the built object, run as root or with the named caps):
+`/dev/kvm` + the eKVM rootfs + the built object, run as root or with the named caps):
 
 ```console
 cargo xtask trace-sandbox      # the sandbox's host syscall footprint, by cgroup

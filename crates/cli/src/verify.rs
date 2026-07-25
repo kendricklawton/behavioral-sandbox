@@ -1,4 +1,4 @@
-//! `ebpf-kvm-engine verify <record>`: check a signed audit record's `ed25519` signature (decision 034).
+//! `ekvm verify <record>`: check a signed audit record's `ed25519` signature (decision 034).
 //!
 //! Re-reads the canonical record bytes from the envelope and verifies them against a **trusted**
 //! public key: the host's own by default, or one (or more) `--key <hex>` supplied out of band, so a
@@ -15,10 +15,10 @@ use probes_loader::{verify, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
 use crate::config;
 use crate::CliError;
 
-/// `ebpf-kvm-engine verify` arguments.
+/// `ekvm verify` arguments.
 #[derive(clap::Args, Debug)]
 pub struct VerifyArgs {
-    /// The signed record file to check (as written by `ebpf-kvm-engine run --record`).
+    /// The signed record file to check (as written by `ekvm run --record`).
     #[arg(value_name = "RECORD")]
     record: PathBuf,
     /// A trusted public key as 64 hex chars (a record's `key_id`), repeatable. Default: the host's
@@ -72,7 +72,7 @@ fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
 }
 
 /// The trusted key **set**: the union of explicit `--key` values, the configured trusted keys
-/// (`EBPF_KVM_ENGINE_TRUSTED_KEYS` / `.ebpf-kvm-engine.toml`, for rotation), and the host's own current signing key.
+/// (`EKVM_TRUSTED_KEYS` / `.ekvm.toml`, for rotation), and the host's own current signing key.
 /// Trusting a set is what lets a record signed *before* a key rotation still verify (decision 034):
 /// keep the old public key in the set and it stays valid. Everything reduces to `key_id` hex, so the
 /// sources dedup cleanly.
@@ -99,7 +99,7 @@ fn trusted_keys(
     hexes.dedup();
     if hexes.is_empty() {
         return Err(CliError::Cli(format!(
-            "no trusted key: pass --key <hex>, set EBPF_KVM_ENGINE_TRUSTED_KEYS, or provide a signing key at {}",
+            "no trusted key: pass --key <hex>, set EKVM_TRUSTED_KEYS, or provide a signing key at {}",
             key_path.display()
         )));
     }

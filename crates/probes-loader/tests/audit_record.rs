@@ -67,7 +67,7 @@ fn skip_reason() -> Option<String> {
 fn networked_agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("EBPF_KVM_ENGINE_KERNEL").is_none() {
+    if std::env::var_os("EKVM_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
     cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");

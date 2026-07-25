@@ -127,7 +127,7 @@ pub use summary::SUMMARY_SCHEMA_VERSION;
 /// Env override for the compiled BPF object's location, for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
 /// output (see [`object_path`]).
-const OBJECT_ENV: &str = "EBPF_KVM_ENGINE_PROBES_OBJECT";
+const OBJECT_ENV: &str = "EKVM_PROBES_OBJECT";
 
 /// The tracepoint program's name (its ELF section symbol, set by `#[tracepoint] fn count_execve`).
 const PROGRAM: &str = "count_execve";
@@ -1288,7 +1288,7 @@ fn with_netns<T: Send>(
     })
 }
 
-/// Where the compiled BPF object lives, in precedence order: the `EBPF_KVM_ENGINE_PROBES_OBJECT` override, the
+/// Where the compiled BPF object lives, in precedence order: the `EKVM_PROBES_OBJECT` override, the
 /// `cargo xtask build-probes` output under the source tree
 /// (`crates/probes/target/bpfel-unknown-none/release/probes`), then the installed copy under the
 /// per-host data dir. The object is a *build artifact* (like the guest kernel/rootfs), built
@@ -2212,7 +2212,7 @@ mod tests {
             built
         );
         // The packaged case: no source tree on the host, so the installed copy is found with no
-        // EBPF_KVM_ENGINE_PROBES_OBJECT set. This is what makes an install work unconfigured.
+        // EKVM_PROBES_OBJECT set. This is what makes an install work unconfigured.
         assert_eq!(
             pick_object_path(None, None, Some(installed), built),
             installed

@@ -65,5 +65,5 @@ link targets, not the metadata `e2fsck`/`debugfs` parse.
   the filesystem holds), mirroring the channel path's 16 MiB. It becomes a `BootConfig` knob when the
   per-run resource policy lands.
 - **`Sandbox` plumbing is deferred** (as `input_dir` was): `output_dir`/`collect_outputs` live at the
-  `RunningVm` layer for now; a `Sandbox::collect_outputs` + `ebpf-kvm-engine run --output-dir` follow-up is
+  `RunningVm` layer for now; a `Sandbox::collect_outputs` + `ekvm run --output-dir` follow-up is
   noted in the roadmap.

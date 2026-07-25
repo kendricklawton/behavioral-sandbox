@@ -1,9 +1,9 @@
 # Examples
 
-Worked, end-to-end walkthroughs of using the engine. Where [Using the ebpf-kvm-engine CLI](./cli.md) is the
+Worked, end-to-end walkthroughs of using the engine. Where [Using the eKVM CLI](./cli.md) is the
 reference (every flag, the config layering), these are task-shaped: pick the thing you want to do
 and follow it through, output and all. They assume you've done [Installation](./cli-install.md) and
-built the ebpf-kvm-engine rootfs (`cargo xtask build-rootfs`).
+built the eKVM rootfs (`cargo xtask build-rootfs`).
 
 - **[Running untrusted code](./examples-untrusted-code.md)**, run an untrusted script or a static
   binary in a microVM, feed it stdin and files, and read a structured result back.

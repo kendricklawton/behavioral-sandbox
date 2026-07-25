@@ -25,11 +25,11 @@ use test_support::{process_threads, LimitCgroup};
 
 /// The env var that turns `helper_boot_and_park` from a no-op into the crash-test victim. Without
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
-const HELPER_ENV: &str = "EBPF_KVM_ENGINE_CONFINEMENT_HELPER";
+const HELPER_ENV: &str = "EKVM_CONFINEMENT_HELPER";
 
 /// The env var that turns `helper_boot_networked_and_park` into the sweep test's victim: a
 /// **networked** boot, so the crash leaves the residue that matters, a per-VM netns holding a tap.
-const HELPER_NET_ENV: &str = "EBPF_KVM_ENGINE_CONFINEMENT_HELPER_NET";
+const HELPER_NET_ENV: &str = "EKVM_CONFINEMENT_HELPER_NET";
 
 /// Whether `pid` is still a live `firecracker` process (same discipline as `boot.rs`: keyed on the
 /// specific pid via `comm`, so a reaped-then-recycled pid running something else reads as gone).

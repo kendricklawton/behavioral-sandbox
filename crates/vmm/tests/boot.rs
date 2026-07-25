@@ -216,7 +216,7 @@ fn boots_under_the_jailer() {
 
     // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup, no
     // `ekvm-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
-    // via `from_env`, so `EBPF_KVM_ENGINE_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
+    // via `from_env`, so `EKVM_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
     // not zero leaks.
     let prefix = format!("ekvm-{}-", std::process::id());
     let scratch_root = vmm::BootConfig::from_env().scratch_dir;
@@ -442,11 +442,11 @@ fn boot_exec_shutdown(net: bool) -> u32 {
     pid
 }
 
-/// Measured soak cycles: `EBPF_KVM_ENGINE_SOAK_CYCLES` for a real endurance run, else a default
+/// Measured soak cycles: `EKVM_SOAK_CYCLES` for a real endurance run, else a default
 /// sized so the serial privileged gate stays fast (~2-3 min at agent-boot speed). Floored at 2 so
 /// the test never proves less than the two-cycle version it replaced.
 fn soak_cycles() -> usize {
-    std::env::var("EBPF_KVM_ENGINE_SOAK_CYCLES")
+    std::env::var("EKVM_SOAK_CYCLES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(24)

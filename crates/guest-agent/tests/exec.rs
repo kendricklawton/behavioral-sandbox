@@ -127,7 +127,7 @@ fn env_reaches_the_command_but_never_the_agents_own_process() {
     // The two halves of the env contract in one run: the injected variable is visible to the
     // spawned command, and it is set via `Command::env` only, `serve` runs in *this* process here,
     // so if the agent ever `set_var`'d it, the assertion on our own environment would catch it.
-    let key = "EBPF_KVM_ENGINE_TEST_ENV_SCOPE";
+    let key = "EKVM_TEST_ENV_SCOPE";
     assert!(
         std::env::var_os(key).is_none(),
         "test precondition: {key} must not be set"

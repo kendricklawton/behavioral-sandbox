@@ -644,10 +644,7 @@ mod tests {
             Path::new("/tmp/agent-42-0/firecracker")
         ));
         // The root is shared, so a path on no more-specific mount inherits its propagation.
-        assert!(mount_is_shared(
-            MOUNTINFO,
-            Path::new("/var/lib/ebpf-kvm-engine")
-        ));
+        assert!(mount_is_shared(MOUNTINFO, Path::new("/var/lib/ekvm")));
     }
 
     #[test]

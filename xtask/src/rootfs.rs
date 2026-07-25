@@ -462,7 +462,7 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
 
     // The full runnable hint, printed from the contract constants so it can't drift from the code.
     println!(
-        "  exec inside a microVM with:\n  EBPF_KVM_ENGINE_ROOTFS={} EBPF_KVM_ENGINE_MARKER={} cargo run -p cli -- run -- echo hi",
+        "  exec inside a microVM with:\n  EKVM_ROOTFS={} EKVM_MARKER={} cargo run -p cli -- run -- echo hi",
         out.display(),
         channel::GUEST_READY_MARKER
     );
@@ -572,7 +572,7 @@ enum ApkSource<'a> {
 }
 
 /// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static`, no chroot, no
-/// root, no host `apk`. Vendor-aware: with `EBPF_KVM_ENGINE_VENDOR_DIR` set it installs offline from the
+/// root, no host `apk`. Vendor-aware: with `EKVM_VENDOR_DIR` set it installs offline from the
 /// vendored apk cache, otherwise it fetches from the pinned Alpine CDN. The `.apk` is a tarball; its
 /// `sbin/apk.static` is extracted to a scratch dir removed after the install (the packages land in
 /// `staging`, the tool is ephemeral).

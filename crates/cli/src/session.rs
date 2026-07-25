@@ -1,4 +1,4 @@
-//! One client connection = one sandbox **session**. Mirrors `ebpf-kvm-engine shell`'s lifecycle over the wire:
+//! One client connection = one sandbox **session**. Mirrors `ekvm shell`'s lifecycle over the wire:
 //! the first message opens the sandbox (jailed by default, the daemon's launch posture, never the
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
 //! session, ADR 016), until `close` (or a hung-up connection) tears it down.
@@ -502,7 +502,7 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
 /// eligibility. A non-`Open` first message is the caller's error too.
 ///
 /// This is the daemon's policy boundary, not a convenience: a client arrives over a socket and
-/// controls neither this process's environment nor its `.ebpf-kvm-engine.toml`, so bounding the request here
+/// controls neither this process's environment nor its `.ekvm.toml`, so bounding the request here
 /// is what makes an operator ceiling real (decision 041). Asking past a ceiling is refused, never
 /// quietly clamped.
 fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String> {
@@ -566,7 +566,7 @@ fn write_response(w: &mut UnixStream, resp: &Response) -> Result<(), ProtocolErr
     write_message(w, resp)
 }
 
-/// UTF-8-lossy rendering of captured bytes, matching `ebpf-kvm-engine run --json`.
+/// UTF-8-lossy rendering of captured bytes, matching `ekvm run --json`.
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }

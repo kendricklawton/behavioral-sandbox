@@ -1,4 +1,4 @@
-//! `ebpf-kvm-engine doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
+//! `ekvm doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
 //! checks ([`vmm::doctor`]) plus the eBPF-observability capability row (owned by the probe
 //! loader, out of `vmm`), so a fresh host reads exactly what will work, degrade, or refuse
 //! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
@@ -13,7 +13,7 @@ use vmm::BootConfig;
 /// Whether to emit ANSI colour on a stream.
 ///
 /// Gated on the stream actually being a terminal, because this report is a **stdout result** and
-/// stdout stays pipe-clean: escape sequences must never reach `ebpf-kvm-engine doctor | …` or a file. On top of
+/// stdout stays pipe-clean: escape sequences must never reach `ekvm doctor | …` or a file. On top of
 /// that, `NO_COLOR` (any value, per the informal standard) and `TERM=dumb` both turn it off.
 fn colour_enabled(is_tty: bool, no_color: bool, term: Option<&str>) -> bool {
     is_tty && !no_color && term != Some("dumb")
@@ -45,7 +45,7 @@ impl Paint {
     }
 }
 
-/// Flags for `ebpf-kvm-engine doctor`.
+/// Flags for `ekvm doctor`.
 #[derive(clap::Args)]
 pub struct DoctorArgs {
     /// Also print what each missing item means at runtime.
@@ -60,16 +60,12 @@ pub struct DoctorArgs {
 /// Print the readiness report for `config` (resolved `flags`-free, i.e. `env > file > defaults`, so
 /// the artifact paths checked are the ones a run would boot). Returns the process exit code: success
 /// when the engine can boot *something* (every hard prerequisite met), a failure code when a hard
-/// requirement is missing, so `ebpf-kvm-engine doctor && ebpf-kvm-engine run …` gates correctly.
+/// requirement is missing, so `ekvm doctor && ekvm run …` gates correctly.
 #[must_use]
 pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     let mut out = std::io::stdout();
     let paint = Paint::for_stream(out.is_terminal());
-    let _ = writeln!(
-        out,
-        "{}\n",
-        paint.wrap("1", "ebpf-kvm-engine doctor: host readiness")
-    );
+    let _ = writeln!(out, "{}\n", paint.wrap("1", "ekvm doctor: host readiness"));
 
     let mut checks = doctor::checks(config);
     checks.push(ebpf_check());
@@ -97,7 +93,7 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     } else if checks.iter().any(|c| !matches!(c.status, CheckStatus::Ok)) {
         let _ = writeln!(
             out,
-            "  What a missing item means at runtime: `ebpf-kvm-engine doctor --explain`"
+            "  What a missing item means at runtime: `ekvm doctor --explain`"
         );
     }
 
@@ -110,13 +106,13 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
         // Name a first command that works *here*: the jailed default needs real root plus the
         // jailer, so suggesting it unconditionally would hand a fresh operator a failing command.
         if doctor::jailed_run_available() {
-            let _ = writeln!(out, "\nTry it:\n  ebpf-kvm-engine run -- echo hello");
+            let _ = writeln!(out, "\nTry it:\n  ekvm run -- echo hello");
         } else {
             let _ = writeln!(
                 out,
                 "\nTry it (the default jails the VMM, which needs real root):\
-                 \n  sudo -E ebpf-kvm-engine run -- echo hello       # jailed, the supported posture\
-                 \n  ebpf-kvm-engine run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+                 \n  sudo -E ekvm run -- echo hello       # jailed, the supported posture\
+                 \n  ekvm run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
             );
         }
         ExitCode::SUCCESS
@@ -131,8 +127,8 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
             "{}",
             err_paint.wrap(
                 "1;31",
-                "ebpf-kvm-engine: not ready, a hard prerequisite above is missing (see the FAIL rows above, \
-                 each names its fix), then re-run `ebpf-kvm-engine doctor`"
+                "ekvm: not ready, a hard prerequisite above is missing (see the FAIL rows above, \
+                 each names its fix), then re-run `ekvm doctor`"
             )
         );
         ExitCode::from(2)

@@ -3,7 +3,7 @@
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
 install a packaged release (tarball / `install.sh` / container, decision 035). Pre-rename releases
 are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setup` (or
-`ebpf-kvm-engine doctor` once installed) tells you what your host is missing at every step.
+`ekvm doctor` once installed) tells you what your host is missing at every step.
 
 ## Preparing the host
 
@@ -101,7 +101,7 @@ Verifying that download against a pinned hash is tracked work, not yet done
 On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
 pinned-version check are exercised against, so prefer them.
 
-Now pick an install path below. Whichever you pick, running `ebpf-kvm-engine doctor` afterwards is how you
+Now pick an install path below. Whichever you pick, running `ekvm doctor` afterwards is how you
 confirm these four steps actually took.
 
 ### Distro differences that bite
@@ -125,9 +125,9 @@ Test the `/tmp` question rather than trusting the table, since it depends on you
 findmnt -no OPTIONS -T /tmp | tr , '\n' | grep nodev   # prints nodev if you are affected
 ```
 
-If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.ebpf-kvm-engine.toml`.
+If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.ekvm.toml`.
 Keep the path **short**: a jailed boot nests this dir name twice inside its API socket path, which the
-kernel caps at ~108 bytes (`ebpf-kvm-engine doctor` and the boot error flag an over-long one), so a
+kernel caps at ~108 bytes (`ekvm doctor` and the boot error flag an over-long one), so a
 short dir like `~/.ekvm` beats a long one:
 
 ```toml
@@ -138,51 +138,51 @@ The packaged `install.sh` and `cargo xtask self-host` **write this line for you*
 they detect a `nodev` `/tmp`, so a guided install already boots jailed; the manual form above is for a
 from-source run, or a config you wrote yourself.
 
-`ebpf-kvm-engine doctor` flags every one of these against your actual host, so treat it as the authority and
+`ekvm doctor` flags every one of these against your actual host, so treat it as the authority and
 this table as orientation.
 
 ## Install from a release package
 
 Every release ships one tarball per platform plus `SHA256SUMS`, assembled by `cargo xtask dist`:
-the `ebpf-kvm-engine` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file
+the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file
 `MANIFEST.sha256` inside. `install.sh` verifies both layers before touching anything, then installs
-the binary to `~/.local/bin`, the artifacts to `~/.local/share/ebpf-kvm-engine`, and writes a starter
-`~/.ebpf-kvm-engine.toml` (kernel/rootfs paths, plus a non-`nodev` `scratch_dir` when your `/tmp` is
+the binary to `~/.local/bin`, the artifacts to `~/.local/share/ekvm`, and writes a starter
+`~/.ekvm.toml` (kernel/rootfs paths, plus a non-`nodev` `scratch_dir` when your `/tmp` is
 `nodev`, so the jailed default boots) if you don't have one:
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/packsixfour/ebpf-kvm-engine/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh | sh
 ```
 
 Offline, or straight from a package you built or downloaded by hand:
 
 ```console
-cargo xtask dist                                            # assemble dist/ebpf-kvm-engine-<ver>-x86_64-linux.tar.gz
-EBPF_KVM_ENGINE_DIST_TARBALL=dist/ebpf-kvm-engine-<ver>-x86_64-linux.tar.gz sh install.sh
+cargo xtask dist                                            # assemble dist/ekvm-<ver>-x86_64-linux.tar.gz
+EKVM_DIST_TARBALL=dist/ekvm-<ver>-x86_64-linux.tar.gz sh install.sh
 ```
 
-Knobs (env): `EBPF_KVM_ENGINE_INSTALL_PREFIX` (binary dir), `EBPF_KVM_ENGINE_DATA_DIR` (artifact dir), `EBPF_KVM_ENGINE_VERSION`
-(a specific release), `EBPF_KVM_ENGINE_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
+Knobs (env): `EKVM_INSTALL_PREFIX` (binary dir), `EKVM_DATA_DIR` (artifact dir), `EKVM_VERSION`
+(a specific release), `EKVM_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
 prerequisite (the engine drives it, it doesn't bundle it). eBPF observability needs no configuration:
 the engine finds the installed `probes` object under the data dir on its own, so
-`EBPF_KVM_ENGINE_PROBES_OBJECT` is only needed if you relocated the install with `EBPF_KVM_ENGINE_DATA_DIR`.
+`EKVM_PROBES_OBJECT` is only needed if you relocated the install with `EKVM_DATA_DIR`.
 
 ## Your first run
 
-`ebpf-kvm-engine doctor` is the tool that explains the host: every row it flags names its own fix, and when the
+`ekvm doctor` is the tool that explains the host: every row it flags names its own fix, and when the
 host is ready it prints the exact run command **for this host**. Run it first.
 
 The one thing worth knowing before you do: a run is **jailed by default**, and the jailer needs real
 root (it creates device nodes in the chroot). So on a normal user account the first command is either
 
 ```console
-sudo -E ebpf-kvm-engine run -- echo hello       # jailed, the supported posture
-ebpf-kvm-engine run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
+sudo -E ekvm run -- echo hello       # jailed, the supported posture
+ekvm run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
 ```
 
 There is deliberately no silent fallback between the two: dropping the jail is something you ask for,
 never something the engine does quietly for you. If a run fails on a host-readiness cause, the error
-points you back at `ebpf-kvm-engine doctor`.
+points you back at `ekvm doctor`.
 
 ## Run it as a container
 
@@ -191,9 +191,9 @@ rebuilt filesystem) but never the KVM boundary, which is always the host's:
 
 ```console
 cargo xtask dist
-docker build -f Containerfile --build-arg DIST=dist/ebpf-kvm-engine-<ver>-x86_64-linux -t ebpf-kvm-engine:<ver> .
-docker run --rm ebpf-kvm-engine:<ver>                                            # doctor: what this host can do
-docker run --rm --device /dev/kvm ebpf-kvm-engine:<ver> run --unjailed -- echo hi
+docker build -f Containerfile --build-arg DIST=dist/ekvm-<ver>-x86_64-linux -t ekvm:<ver> .
+docker run --rm ekvm:<ver>                                            # doctor: what this host can do
+docker run --rm --device /dev/kvm ekvm:<ver> run --unjailed -- echo hi
 ```
 
 The jailed default and eBPF observation need more of the host (real root, CAP_BPF/CAP_PERFMON,
@@ -206,29 +206,29 @@ Once you have the [prerequisites](#prerequisites), the whole stand-up is a singl
 
 ```console
 cargo xtask self-host           # obtain the pinned kernel + rootfs, build the guest image + eBPF
-                                # object, install `ebpf-kvm-engine`, then boot one sandbox to prove it
+                                # object, install `ekvm`, then boot one sandbox to prove it
 ```
 
-It installs the `ebpf-kvm-engine` binary into `~/.local/bin` (override with `--prefix DIR`) and,
+It installs the `ekvm` binary into `~/.local/bin` (override with `--prefix DIR`) and,
 on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
 KVM box. `--no-run` skips the boot proof (build + install only). Like `install.sh`, it writes a starter
-`~/.ebpf-kvm-engine.toml` (absolute kernel/rootfs paths, and a non-`nodev` `scratch_dir` when your `/tmp`
-is `nodev`) unless one already exists; `EBPF_KVM_ENGINE_NO_TOML=1` skips it.
+`~/.ekvm.toml` (absolute kernel/rootfs paths, and a non-`nodev` `scratch_dir` when your `/tmp`
+is `nodev`) unless one already exists; `EKVM_NO_TOML=1` skips it.
 
 To build **offline**, no Firecracker S3 bucket, no Alpine CDN, point it at a vendored mirror first
 (see [Vendoring for offline builds](#vendoring-for-offline-builds)):
 
 ```console
 cargo xtask vendor                                  # snapshot every pinned input into ./vendor
-EBPF_KVM_ENGINE_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
+EKVM_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
 ```
 
 ## Supported platforms
 
 The engine runs untrusted code, so its platform floor is part of its security posture, not just a
 compatibility note: the parts the isolation-and-audit thesis rests on are **hard requirements**, the
-rest **degrade with a stated consequence**. `ebpf-kvm-engine doctor` reports exactly where your host sits and
+rest **degrade with a stated consequence**. `ekvm doctor` reports exactly where your host sits and
 exits non-zero if a hard requirement is missing.
 
 **Hard requirements** (off these, the host is not supported, [decision 032](./adr/032-supported-platforms-two-architectures-a-security.md)):
@@ -255,7 +255,7 @@ tracks their supported set.
   on **Arch Linux** (rolling) during development, both with **Firecracker v1.9**. Those two are the
   continuously-tested distros, and they bracket the tool-version spectrum (rolling-newest against
   LTS-oldest; Ubuntu's e2fsprogs and IPv6 defaults each caught a real issue Arch could not). Other
-  distros are supported per the checks above but not continuously exercised; `ebpf-kvm-engine doctor` names
+  distros are supported per the checks above but not continuously exercised; `ekvm doctor` names
   exactly what a given host is missing.
 - **`aarch64` is not supported at this time**: it was never privileged-tested (no arm64 KVM
   hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
@@ -265,7 +265,7 @@ tracks their supported set.
   systemd default on Arch, and some Ubuntu setups), the jailer's chroot `/dev/kvm` there is inert, so
   a raw jailed run fails until scratch points off `nodev`. The packaged install and `cargo xtask
   self-host` now pin a non-`nodev` `scratch_dir` for you; a from-source run sets
-  `EBPF_KVM_ENGINE_SCRATCH_DIR` itself. `ebpf-kvm-engine doctor` flags it either way, and reports your own host's
+  `EKVM_SCRATCH_DIR` itself. `ekvm doctor` flags it either way, and reports your own host's
   arch, kernel, and Firecracker version. See
   [Distro differences](#distro-differences-that-bite) for how to test it and the rest of the
   per-distro list.
@@ -282,8 +282,8 @@ tracks their supported set.
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
 - **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
   `/dev/kvm` is inert, so the jailed default fails to open KVM; the guided install pins a non-`nodev`
-  `scratch_dir` for you, else set `EBPF_KVM_ENGINE_SCRATCH_DIR` to a non-`nodev` path (e.g. under `$HOME`),
-  or use `--unjailed`. `ebpf-kvm-engine doctor` flags this.
+  `scratch_dir` for you, else set `EKVM_SCRATCH_DIR` to a non-`nodev` path (e.g. under `$HOME`),
+  or use `--unjailed`. `ekvm doctor` flags this.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
 ## Prerequisites
@@ -297,7 +297,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
   for CO-RE eBPF, most modern distros ship it.
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on
-  `PATH` or named via `EBPF_KVM_ENGINE_FIRECRACKER`.
+  `PATH` or named via `EKVM_FIRECRACKER`.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
   rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
   loopback, no `sudo`). A missing tool is a clear typed error. The **reproducible** rootfs build
@@ -313,7 +313,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
 
 How much of the engine you get depends on what the process is allowed to do, and this is the part
 that most often surprises a first-time operator. Nothing here degrades silently: a capability you
-lack either names itself in `ebpf-kvm-engine doctor` or produces a typed refusal.
+lack either names itself in `ekvm doctor` or produces a typed refusal.
 
 | What you want | What it needs | Without it |
 |---|---|---|
@@ -326,7 +326,7 @@ lack either names itself in `ebpf-kvm-engine doctor` or produces a typed refusal
 Root covers every row. To keep the eBPF half off root, grant the binary just those two capabilities:
 
 ```console
-sudo setcap cap_bpf,cap_perfmon+ep "$(command -v ebpf-kvm-engine)"
+sudo setcap cap_bpf,cap_perfmon+ep "$(command -v ekvm)"
 ```
 
 The jailer's requirement cannot be narrowed the same way: it needs **real root** (euid 0) because it
@@ -336,7 +336,7 @@ explicit scratch dir if `/tmp` is `nodev`:
 
 ```console
 mkdir -p ~/.ekvm
-sudo -E env EBPF_KVM_ENGINE_SCRATCH_DIR="$HOME/.ekvm" "$(command -v ebpf-kvm-engine)" run -- echo hello
+sudo -E env EKVM_SCRATCH_DIR="$HOME/.ekvm" "$(command -v ekvm)" run -- echo hello
 ```
 
 (The short dir name is deliberate: a jailed boot nests the per-VM dir name twice inside its API
@@ -351,7 +351,7 @@ To drive the individual steps instead, or to work on the engine itself, consult
 [Building](./contributing-building.md), which owns the build toolchain (the Rust version policy, the
 probes crate's pinned nightly and `bpf-linker`), the artifact commands, and the two test gates.
 
-Once you have a binary, head to [Using the ebpf-kvm-engine CLI](./cli.md) to run something.
+Once you have a binary, head to [Using the eKVM CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 
@@ -367,11 +367,11 @@ cargo xtask vendor --dir /srv/mirror  # populate a mirror elsewhere
 cargo xtask vendor --verify           # re-check an existing mirror against its manifest (offline)
 ```
 
-Then set `EBPF_KVM_ENGINE_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
+Then set `EKVM_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
 
 ```console
-EBPF_KVM_ENGINE_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
-EBPF_KVM_ENGINE_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
+EKVM_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
+EKVM_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
 ```
 
 The mirror is **not** committed (it holds downloaded images, like `artifacts/`); it is a self-hoster's

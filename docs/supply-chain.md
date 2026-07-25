@@ -37,7 +37,7 @@ roadmap work:
 - **Pinning the Firecracker binary.** Firecracker is the trust boundary, so an unverified boundary
   binary undercuts the isolation claim. The container image already bundles a sha-pinned Firecracker;
   the tarball and self-host paths will pin its sha256 alongside the kernel and rootfs, verify it in
-  `install.sh`, and have `ebpf-kvm-engine doctor` advise on the installed binary's hash (advisory, so a
+  `install.sh`, and have `ekvm doctor` advise on the installed binary's hash (advisory, so a
   locally-built Firecracker warns rather than refuses).
 - **Signing the release manifest.** The `SHA256SUMS` file will itself be signed, so a downloader
   verifies provenance against a published key rather than trusting the release host and its transport.
@@ -50,5 +50,5 @@ process defined at the tag.
 
 - `cargo xtask vendor` to snapshot every pinned input, then `cargo xtask vendor --verify` to re-check
   the mirror offline.
-- Point `EBPF_KVM_ENGINE_VENDOR_DIR` at the mirror and the whole build runs with the upstream CDNs dark; see the
+- Point `EKVM_VENDOR_DIR` at the mirror and the whole build runs with the upstream CDNs dark; see the
   Self-host and Vendoring sections of [Installation](./cli-install.md).

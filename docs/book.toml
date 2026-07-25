@@ -2,8 +2,10 @@
 authors = ["PackSixFour Devs"]
 multilingual = false
 src = "."
-title = "ebpf-kvm-engine"
+title = "eKVM"
 
 [output.html]
-git-repository-url = "https://github.com/packsixfour/ebpf-kvm-engine"
-edit-url-template = "https://github.com/packsixfour/ebpf-kvm-engine/edit/main/docs/{path}"
+git-repository-url = "https://github.com/packsixfour/ekvm"
+edit-url-template = "https://github.com/packsixfour/ekvm/edit/main/docs/{path}"
+site-url = "https://ekvm.dev/"
+

@@ -31,8 +31,8 @@ boundaries:
   `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting. CO-RE/BTF.
 - `crates/probes-loader`, the **userspace loader** (aya): attaches the probes to a specific
   sandbox, reads their maps, and streams events into the audit log.
-- `crates/cli`, the single `ebpf-kvm-engine` binary: the CLI (`run`, `shell`, `--trace`) plus the
-  `ebpf-kvm-engine serve` driver daemon.
+- `crates/cli`, the single `ekvm` binary: the CLI (`run`, `shell`, `--trace`) plus the
+  `ekvm serve` driver daemon.
 - `xtask`, dev orchestration; `cargo xtask ci` runs the host-safe gate and builds the eBPF
   object, `ci-privileged` runs the VM-boot + probe-attach integration tests, `setup` verifies the
   host, and the rootfs/kernel build lives here. Never shipped.

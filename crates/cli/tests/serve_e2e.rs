@@ -104,9 +104,9 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
     }
-    let socket = dir.join("ebpf-kvm-engine.sock");
+    let socket = dir.join("ekvm.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ebpf-kvm-engine"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ekvm"));
     cmd.arg("serve")
         .arg("--unjailed")
         .arg("--socket")
@@ -117,24 +117,19 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     if let Some(port) = metrics_port {
         cmd.arg("--metrics").arg(format!("127.0.0.1:{port}"));
     }
-    cmd.env(
-        "EBPF_KVM_ENGINE_ROOTFS",
-        root.join("artifacts/rootfs-guest.ext4"),
-    )
-    // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-    .env("EBPF_KVM_ENGINE_MARKER", vmm::GUEST_READY_MARKER)
-    // Keep the daemon's generated record-signing key inside the test's socket dir.
-    .env("EBPF_KVM_ENGINE_SIGNING_KEY", dir.join("signing.key"))
-    .env("EBPF_KVM_ENGINE_LOG", "warn")
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::inherit());
-    if std::env::var_os("EBPF_KVM_ENGINE_KERNEL").is_none() {
-        cmd.env("EBPF_KVM_ENGINE_KERNEL", root.join("artifacts/vmlinux"));
+    cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+        // The guest rootfs signals readiness with its own marker, not a getty `login:`.
+        .env("EKVM_MARKER", vmm::GUEST_READY_MARKER)
+        // Keep the daemon's generated record-signing key inside the test's socket dir.
+        .env("EKVM_SIGNING_KEY", dir.join("signing.key"))
+        .env("EKVM_LOG", "warn")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    if std::env::var_os("EKVM_KERNEL").is_none() {
+        cmd.env("EKVM_KERNEL", root.join("artifacts/vmlinux"));
     }
-    let child = cmd
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn ebpf-kvm-engine: {e}"));
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn ekvm: {e}"));
     let daemon = Daemon { child, dir };
 
     // Wait for the daemon to bind and start accepting. A prewarmed daemon boots a source + clones
@@ -147,10 +142,7 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!(
-        "ebpf-kvm-engine never began accepting on {}",
-        socket.display()
-    );
+    panic!("ekvm never began accepting on {}", socket.display());
 }
 
 /// A tiny **raw-JSON** client over the daemon's newline protocol: send a request line, read one
@@ -163,8 +155,7 @@ struct RawClient {
 
 impl RawClient {
     fn connect(socket: &PathBuf) -> Self {
-        let stream = UnixStream::connect(socket)
-            .unwrap_or_else(|e| panic!("connect to ebpf-kvm-engine: {e}"));
+        let stream = UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect to ekvm: {e}"));
         if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(45))) {
             panic!("set read timeout: {e}");
         }
@@ -203,7 +194,7 @@ impl RawClient {
 }
 
 #[test]
-#[ignore = "spawns ebpf-kvm-engine; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping agent_serves_the_full_wire_api_over_a_unix_socket: {why}");
@@ -417,43 +408,37 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let scraped = loop {
         let body = scrape_metrics(metrics_port);
-        if body.contains("ebpf_kvm_engine_sessions_active 0") || Instant::now() >= deadline {
+        if body.contains("ekvm_sessions_active 0") || Instant::now() >= deadline {
             break body;
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
-        scraped.contains("ebpf_kvm_engine_sessions_opened_total{pooled=\"false\"} 2"),
+        scraped.contains("ekvm_sessions_opened_total{pooled=\"false\"} 2"),
+        "{scraped}"
+    );
+    assert!(scraped.contains("ekvm_sessions_active 0"), "{scraped}");
+    assert!(
+        scraped.contains("ekvm_requests_total{verb=\"put\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("ebpf_kvm_engine_sessions_active 0"),
+        scraped.contains("ekvm_requests_total{verb=\"snapshot\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("ebpf_kvm_engine_requests_total{verb=\"put\"} 1"),
+        scraped.contains("ekvm_request_errors_total{kind=\"guest\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("ebpf_kvm_engine_requests_total{verb=\"snapshot\"} 1"),
+        scraped.contains("ekvm_protocol_errors_total 1"),
         "{scraped}"
     );
-    assert!(
-        scraped.contains("ebpf_kvm_engine_request_errors_total{kind=\"guest\"} 1"),
-        "{scraped}"
-    );
-    assert!(
-        scraped.contains("ebpf_kvm_engine_protocol_errors_total 1"),
-        "{scraped}"
-    );
-    assert!(
-        scraped.contains("ebpf_kvm_engine_boot_seconds_count 2"),
-        "{scraped}"
-    );
+    assert!(scraped.contains("ekvm_boot_seconds_count 2"), "{scraped}");
 }
 
 #[test]
-#[ignore = "spawns ebpf-kvm-engine; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_reference_client_drives_a_full_session() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_reference_client_drives_a_full_session: {why}");
@@ -526,7 +511,7 @@ fn the_reference_client_drives_a_full_session() {
 }
 
 #[test]
-#[ignore = "spawns ebpf-kvm-engine --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns ekvm --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_prewarmed_open_is_served_from_the_pool() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_prewarmed_open_is_served_from_the_pool: {why}");

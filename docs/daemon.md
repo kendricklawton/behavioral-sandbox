@@ -1,6 +1,6 @@
-# Using the `ebpf-kvm-engine serve` daemon
+# Using the `ekvm serve` daemon
 
-`ebpf-kvm-engine serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
+`ekvm serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
 lifecycle over a **unix socket**, so a local client drives microVMs without linking the `vmm`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
 use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
@@ -8,24 +8,24 @@ the hoster's, above the engine, and are a recorded non-goal).
 
 > **Status.** The wire API is **versioned** (every message carries a `schema` field) but not yet
 > **frozen**: a later milestone freezes and formally specs it as the SDK contract (see the
-> [roadmap](https://github.com/packsixfour/ebpf-kvm-engine/blob/main/ROADMAP.md)). Until then the shape may
+> [roadmap](https://github.com/packsixfour/ekvm/blob/main/ROADMAP.md)). Until then the shape may
 > still change, which is why every message is schema-stamped and a mismatch is rejected up front.
 
 ## Run it
 
 ```console
-ebpf-kvm-engine serve --socket /run/ebpf-kvm-engine/ebpf-kvm-engine.sock                  # jailed by default (needs root + the jailer)
-ebpf-kvm-engine serve --socket ./ebpf-kvm-engine.sock --unjailed              # dev host that can't jail
-ebpf-kvm-engine serve --socket ./ebpf-kvm-engine.sock --prewarm 4             # a pre-warmed pool of 4 clones for fast `open`
+ekvm serve --socket /run/ekvm/ekvm.sock                  # jailed by default (needs root + the jailer)
+ekvm serve --socket ./ekvm.sock --unjailed              # dev host that can't jail
+ekvm serve --socket ./ekvm.sock --prewarm 4             # a pre-warmed pool of 4 clones for fast `open`
 ```
 
-Logs go to **stderr** (`--log` / `EBPF_KVM_ENGINE_LOG`, default `info`); the socket carries only the protocol.
-The guest kernel/rootfs come from the environment (`EBPF_KVM_ENGINE_KERNEL` / `EBPF_KVM_ENGINE_ROOTFS` / `EBPF_KVM_ENGINE_MARKER`),
-the same `EBPF_KVM_ENGINE_*` layer the CLI reads, a daemon has no `.ebpf-kvm-engine.toml` cwd discovery.
+Logs go to **stderr** (`--log` / `EKVM_LOG`, default `info`); the socket carries only the protocol.
+The guest kernel/rootfs come from the environment (`EKVM_KERNEL` / `EKVM_ROOTFS` / `EKVM_MARKER`),
+the same `EKVM_*` layer the CLI reads, a daemon has no `.ekvm.toml` cwd discovery.
 
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
 jail posture is fixed when the daemon launches, so a caller can never weaken it. The same holds for
-`--require-limits` (also `EBPF_KVM_ENGINE_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
+`--require-limits` (also `EKVM_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
 can't be applied is refused rather than booted uncapped (ADR 010's fail-open is the default), so a
 hoster can make the resource envelope load-bearing on a shared host. Both are hoster postures, not
 per-session wire fields; the prewarm source clears `require_limits` (it must be unjailed to snapshot,
@@ -104,11 +104,11 @@ the same shapes.
 | Response | Meaning |
 |---|---|
 | `{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}` | The sandbox booted; `pooled` says whether it came from the pre-warmed pool. |
-| `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `ebpf-kvm-engine run --json`; a non-zero `exit_code` is a *result*, not an error). |
+| `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `ekvm run --json`; a non-zero `exit_code` is a *result*, not an error). |
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
-| `{"schema":1,"reply":"snapshotted","dir":"/tmp/ebpf-kvm-engine-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
-| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope** (decision 034): `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ebpf-kvm-engine verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
+| `{"schema":1,"reply":"snapshotted","dir":"/tmp/ekvm-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope** (decision 034): `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
 | `{"schema":1,"reply":"error","message":"…","fatal":false}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. |
@@ -121,7 +121,7 @@ $ printf '%s\n' \
     '{"schema":1,"op":"open"}' \
     '{"schema":1,"op":"exec","argv":["echo","hi"]}' \
     '{"schema":1,"op":"close"}' \
-  | socat - UNIX-CONNECT:./ebpf-kvm-engine.sock
+  | socat - UNIX-CONNECT:./ekvm.sock
 {"schema":1,"reply":"opened","boot_ms":118,"pooled":false}
 {"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}
 {"schema":1,"reply":"closed"}
@@ -135,13 +135,13 @@ engine (engine, not platform).
 ### Structured logs
 
 Operational logs are structured `tracing` events on **stderr**, human-readable text by default,
-or one JSON object per line with `--log-json` (or `EBPF_KVM_ENGINE_LOG_FORMAT=json`) for a log shipper. The
+or one JSON object per line with `--log-json` (or `EKVM_LOG_FORMAT=json`) for a log shipper. The
 events and their fields (`vmm_pid`, `boot_ms`, `pooled`, …) are identical in both encodings; the flag
-changes only the framing. The filter is `--log` / `EBPF_KVM_ENGINE_LOG` (default `info`, the per-session
+changes only the framing. The filter is `--log` / `EKVM_LOG` (default `info`, the per-session
 open/close lines are the daemon's operational trace).
 
 ```console
-ebpf-kvm-engine serve --socket ./ebpf-kvm-engine.sock --log-json --log info 2>> /var/log/ebpf-kvm-engine.jsonl
+ekvm serve --socket ./ekvm.sock --log-json --log info 2>> /var/log/ekvm.jsonl
 ```
 
 ### Metrics (Prometheus)
@@ -149,7 +149,7 @@ ebpf-kvm-engine serve --socket ./ebpf-kvm-engine.sock --log-json --log info 2>> 
 `--metrics ADDR` serves the Prometheus text-exposition format at `GET /metrics`:
 
 ```console
-ebpf-kvm-engine serve --socket ./ebpf-kvm-engine.sock --metrics 127.0.0.1:9920
+ekvm serve --socket ./ekvm.sock --metrics 127.0.0.1:9920
 curl -s http://127.0.0.1:9920/metrics
 ```
 
@@ -161,26 +161,26 @@ convention of base units: **seconds**, never milliseconds.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `ebpf_kvm_engine_build_info{version=…}` | gauge | Build metadata (value always 1). |
-| `ebpf_kvm_engine_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
-| `ebpf_kvm_engine_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
-| `ebpf_kvm_engine_sessions_active` | gauge | Sessions currently open (one live microVM each). |
-| `ebpf_kvm_engine_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
-| `ebpf_kvm_engine_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
-| `ebpf_kvm_engine_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
-| `ebpf_kvm_engine_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
-| `ebpf_kvm_engine_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
-| `ebpf_kvm_engine_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
-| `ebpf_kvm_engine_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
-| `ebpf_kvm_engine_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
-| `ebpf_kvm_engine_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions (decision 042). |
-| `ebpf_kvm_engine_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
+| `ekvm_build_info{version=…}` | gauge | Build metadata (value always 1). |
+| `ekvm_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
+| `ekvm_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
+| `ekvm_sessions_active` | gauge | Sessions currently open (one live microVM each). |
+| `ekvm_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
+| `ekvm_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
+| `ekvm_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
+| `ekvm_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
+| `ekvm_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
+| `ekvm_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
+| `ekvm_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
+| `ekvm_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
+| `ekvm_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions (decision 042). |
+| `ekvm_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
 
 A minimal scrape config:
 
 ```yaml
 scrape_configs:
-  - job_name: ebpf-kvm-engine
+  - job_name: ekvm
     static_configs:
       - targets: ["127.0.0.1:9920"]
 ```
@@ -196,7 +196,7 @@ The polyglot SDKs (Go/Python/Node/C#, planned) are this client's method set hard
 ```rust,ignore
 use client::{Client, OpenOptions};
 
-let mut client = Client::connect("/run/ebpf-kvm-engine/ebpf-kvm-engine.sock")?;
+let mut client = Client::connect("/run/ekvm/ekvm.sock")?;
 client.open(OpenOptions::default())?;               // boot the session's sandbox
 let run = client.exec(&["echo".into(), "hi".into()], "")?;
 assert_eq!(run.stdout, "hi\n");
@@ -208,7 +208,7 @@ client.close()?;                                    // tear the sandbox down
 ## Non-goals: where a PaaS would begin
 
 The daemon is the engine's *programmatic interface*, and it stops exactly where a platform would
-start. These are the features a hoster builds **above** `ebpf-kvm-engine`, deliberately absent from the wire
+start. These are the features a hoster builds **above** `ekvm`, deliberately absent from the wire
 and the daemon, and PRs adding them are wrong by design (engine, not platform):
 
 - **No tenancy or identity.** No message carries a tenant, account, or user. One connection drives
@@ -221,7 +221,7 @@ and the daemon, and PRs adding them are wrong by design (engine, not platform):
 - **No billing or quotas.** The daemon *measures* (the [metrics endpoint](#metrics-prometheus),
   host-observed) but never *charges* or *caps by account*. Turning numbers into a bill or a per-tenant
   limit is the hoster's.
-- **No fleet scheduling.** One `ebpf-kvm-engine` drives sandboxes on its one host. Bin-packing across hosts,
+- **No fleet scheduling.** One `ekvm` drives sandboxes on its one host. Bin-packing across hosts,
   queues, and autoscaling are the hoster's scheduler; the daemon has no notion of another host.
 - **No public/HTTP platform API.** The surface is a *local* unix socket speaking newline-JSON. A
   daemon that grew a multi-tenant identity model or a public HTTP surface would be a **hoster**, not

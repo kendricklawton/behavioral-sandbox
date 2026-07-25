@@ -1,4 +1,4 @@
-# 028. `ebpf-kvm-engine doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them *(2026-07-17)*
+# 028. `ekvm doctor` shares one host-check implementation; the JSON surfaces are versioned before anyone parses them *(2026-07-17)*
 
 **Context.** The engine's isolation rests on the host, so whether a given host can run a sandbox at all
 is a property an operator has to know *before* the first run, not discover mid-flight. That pulls in two
@@ -11,13 +11,13 @@ input alike. In parallel, the two machine-readable surfaces the engine emits, th
 and the audit record, are about to become a contract that external consumers parse; a contract that gains
 a stable meaning only once something depends on it is far cheaper to shape now than to migrate later.
 
-**Decision.** The host readiness check ships as an engine subcommand, `ebpf-kvm-engine doctor`, so an operator on
+**Decision.** The host readiness check ships as an engine subcommand, `ekvm doctor`, so an operator on
 a fresh host reads what will work, degrade, or refuse before the first sandbox. The **one implementation**
 lives in `vmm::doctor` (a structured `Vec<Check>` with an `Ok`/`Warn`/`Fail` status plus the
-degradation matrix), where the engine-runtime prerequisites are its domain; both `ebpf-kvm-engine doctor` and
+degradation matrix), where the engine-runtime prerequisites are its domain; both `ekvm doctor` and
 `cargo xtask setup` render it, so the dev-box check and the operator's can't drift. The status split
 mirrors the engine's own error discipline: the isolation boundary (`/dev/kvm`) and the boot artifacts are
-**hard** (`Fail` gives a non-zero exit, so `ebpf-kvm-engine doctor && ebpf-kvm-engine run …` gates), while the jailer,
+**hard** (`Fail` gives a non-zero exit, so `ekvm doctor && ekvm run …` gates), while the jailer,
 resource caps, and networking/bulk-I/O tools **fail open** (`Warn` with a named consequence). The
 eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of `vmm`
 (decisions 021/023); each entry point appends it. `xtask setup` keeps its dev-only rows (bpf-linker,

@@ -46,15 +46,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A boot config pointed at the workspace's fetched artifacts (absolute, so it's cwd-independent).
-/// Explicit `EBPF_KVM_ENGINE_KERNEL`/`EBPF_KVM_ENGINE_ROOTFS` overrides still win, they're the documented escape
+/// Explicit `EKVM_KERNEL`/`EKVM_ROOTFS` overrides still win, they're the documented escape
 /// hatch for hosts without the pinned artifacts (e.g. non-x86_64).
 pub fn config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("EBPF_KVM_ENGINE_KERNEL").is_none() {
+    if std::env::var_os("EKVM_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
-    if std::env::var_os("EBPF_KVM_ENGINE_ROOTFS").is_none() {
+    if std::env::var_os("EKVM_ROOTFS").is_none() {
         cfg.rootfs = root.join("artifacts/rootfs.ext4");
     }
     // The Ubuntu CI rootfs is the exception to the agent-marker default: its readiness line is
@@ -65,12 +65,12 @@ pub fn config() -> BootConfig {
 }
 
 /// A boot config pointed at the **guest rootfs** (`cargo xtask build-rootfs`): readiness is the
-/// agent's post-bind marker, and vsock is on. Deliberately not `EBPF_KVM_ENGINE_ROOTFS`-overridable, the
+/// agent's post-bind marker, and vsock is on. Deliberately not `EKVM_ROOTFS`-overridable, the
 /// in-VM exec tests are about *that* image specifically.
 pub fn guest_rootfs_config() -> BootConfig {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("EBPF_KVM_ENGINE_KERNEL").is_none() {
+    if std::env::var_os("EKVM_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
     cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");

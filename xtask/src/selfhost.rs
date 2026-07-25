@@ -1,9 +1,9 @@
 //! `cargo xtask self-host`, the one command a self-hoster runs to stand the engine up end to end:
 //! obtain the pinned guest kernel + rootfs, build the guest image and the eBPF probe object, install
-//! the `ebpf-kvm-engine` binary, and (on a KVM host) boot one sandbox to prove it works.
+//! the `ekvm` binary, and (on a KVM host) boot one sandbox to prove it works.
 //!
 //! Every step reuses the same tested building blocks the individual `xtask` commands do, so this is
-//! orchestration, not a second code path. **Vendor-aware:** with `EBPF_KVM_ENGINE_VENDOR_DIR` set, the fetch +
+//! orchestration, not a second code path. **Vendor-aware:** with `EKVM_VENDOR_DIR` set, the fetch +
 //! rootfs steps resolve from the local mirror (`cargo xtask vendor`), so the whole build runs offline,
 //! no Firecracker S3 bucket, no Alpine CDN.
 
@@ -17,7 +17,7 @@ use crate::{
 };
 
 /// The binaries a self-host installs: the CLI and the driver daemon, both from the `cli` crate.
-const BINARIES: &[&str] = &["ebpf-kvm-engine"];
+const BINARIES: &[&str] = &["ekvm"];
 
 /// `cargo xtask self-host [--prefix DIR] [--no-run]`: build the artifacts + binaries and prove one
 /// sandbox boots. `--prefix` is the install dir (default `~/.local/bin`); `--no-run` skips the boot
@@ -34,7 +34,7 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     );
 
     println!("== 1/5  obtain the pinned guest kernel ==");
-    // Only the guest kernel is needed to boot the ebpf-kvm-engine rootfs; the Ubuntu boot rootfs is the CI
+    // Only the guest kernel is needed to boot the ekvm rootfs; the Ubuntu boot rootfs is the CI
     // login test's artifact, not this, so don't drag it (and its size) into a self-host.
     let kernel = kernel_path();
     let fetched = crate::artifacts::artifacts()?
@@ -43,13 +43,13 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
         .context("no pinned guest kernel for this architecture")?;
     crate::artifacts::fetch_one(&fetched)?;
 
-    println!("\n== 2/5  build the guest rootfs (ebpf-kvm-engine baked in) ==");
+    println!("\n== 2/5  build the guest rootfs (ekvm baked in) ==");
     crate::rootfs::build_rootfs(false, false)?;
 
     println!("\n== 3/5  build the eBPF probe object (the audit half) ==");
     build_probes()?;
 
-    println!("\n== 4/5  build + install the ebpf-kvm-engine binary ==");
+    println!("\n== 4/5  build + install the ekvm binary ==");
     cargo(&["build", "--release", "--locked", "-p", "cli"])?;
     let prefix = resolve_prefix(prefix)?;
     let engine_bin = install_binaries(&prefix)?;
@@ -60,14 +60,14 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     prove(&engine_bin, no_run)?;
 
     println!(
-        "\n✓ self-host complete. Binary in {}; start the daemon with `ebpf-kvm-engine serve` (see \
-         `ebpf-kvm-engine serve --help`).",
+        "\n✓ self-host complete. Binary in {}; start the daemon with `ekvm serve` (see \
+         `ekvm serve --help`).",
         prefix.display()
     );
     Ok(())
 }
 
-/// Write `~/.ebpf-kvm-engine.toml` with **absolute** artifact paths, matching what `install.sh` does for a
+/// Write `~/.ekvm.toml` with **absolute** artifact paths, matching what `install.sh` does for a
 /// packaged install.
 ///
 /// Without it a self-hosted binary only works from inside the source tree: the artifact defaults are
@@ -75,27 +75,27 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
 /// fails with a missing kernel/rootfs one directory up. Config discovery walks up from the cwd, so
 /// this file covers any cwd **under `$HOME`**, not literally everywhere; from outside `$HOME` (say
 /// `/tmp`) pass the paths by env or flag. Never overwrites an existing file (your config is yours),
-/// and `EBPF_KVM_ENGINE_NO_TOML=1` skips it, the same escape hatch `install.sh` offers.
+/// and `EKVM_NO_TOML=1` skips it, the same escape hatch `install.sh` offers.
 ///
 /// On a host whose default scratch base (`/tmp`) is mounted `nodev` (every systemd default: Arch,
 /// Ubuntu), the jailer's chroot `/dev/kvm` there is inert and the jailed default fails
 /// `ScratchDirNodev`; so when the detector flags it, a `scratch_dir` on a non-`nodev` path is written
-/// too, so the first `sudo ebpf-kvm-engine run` works rather than needing a hand-edit (P20.16a).
+/// too, so the first `sudo ekvm run` works rather than needing a hand-edit (P20.16a).
 fn write_starter_config() -> Result<()> {
-    if std::env::var_os("EBPF_KVM_ENGINE_NO_TOML").is_some() {
+    if std::env::var_os("EKVM_NO_TOML").is_some() {
         return Ok(());
     }
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        println!("  (HOME unset: skipping the starter .ebpf-kvm-engine.toml)");
+        println!("  (HOME unset: skipping the starter .ekvm.toml)");
         return Ok(());
     };
-    let dest = home.join(".ebpf-kvm-engine.toml");
+    let dest = home.join(".ekvm.toml");
     if dest.exists() {
         println!("  {} exists, left alone", dest.display());
         return Ok(());
     }
     let mut body = format!(
-        "# Written by `cargo xtask self-host`; the engine reads the nearest .ebpf-kvm-engine.toml walking up\n\
+        "# Written by `cargo xtask self-host`; the engine reads the nearest .ekvm.toml walking up\n\
          # from the cwd, so this covers any working directory under $HOME. Absolute paths, so the\n\
          # installed binary no longer depends on being run from the source tree.\n\
          kernel = \"{}\"\n\
@@ -139,7 +139,7 @@ fn starter_scratch_dir(home: &Path) -> Option<PathBuf> {
     let scratch = home.join(".ekvm");
     if vmm::doctor::scratch_is_nodev(&scratch).unwrap_or(false) {
         println!(
-            "  note: /tmp is nodev and so is {}; set EBPF_KVM_ENGINE_SCRATCH_DIR to a non-nodev path",
+            "  note: /tmp is nodev and so is {}; set EKVM_SCRATCH_DIR to a non-nodev path",
             scratch.display()
         );
         return None;
@@ -162,7 +162,7 @@ fn resolve_prefix(prefix: Option<PathBuf>) -> Result<PathBuf> {
     Ok(prefix)
 }
 
-/// Copy each built release binary into `prefix` (executable), returning the installed `ebpf-kvm-engine` path
+/// Copy each built release binary into `prefix` (executable), returning the installed `ekvm` path
 /// for the boot proof. A missing build output is a clear error (the `cargo build` above should have
 /// produced it), not a silent skip.
 fn install_binaries(prefix: &Path) -> Result<PathBuf> {
@@ -186,14 +186,14 @@ fn install_binaries(prefix: &Path) -> Result<PathBuf> {
             .with_context(|| format!("install {} -> {}", src.display(), dest.display()))?;
         set_executable(&dest)?;
         println!("  installed {} -> {}", name, dest.display());
-        if *name == "ebpf-kvm-engine" {
+        if *name == "ekvm" {
             engine_bin = Some(dest);
         }
     }
-    engine_bin.context("the `ebpf-kvm-engine` binary was not among the installed set")
+    engine_bin.context("the `ekvm` binary was not among the installed set")
 }
 
-/// Boot one sandbox with the just-installed `ebpf-kvm-engine` to prove the whole stack runs, or, when there's
+/// Boot one sandbox with the just-installed `ekvm` to prove the whole stack runs, or, when there's
 /// no KVM (or `--no-run`), print the exact command so the proof is one copy-paste away. Runs
 /// `--unjailed` (the jailed default needs real root); production self-hosts run jailed, behind the
 /// same KVM boundary.
@@ -201,17 +201,11 @@ fn prove(engine_bin: &Path, no_run: bool) -> Result<()> {
     let kernel = kernel_path();
     let rootfs = guest_rootfs_path();
     let env = [
-        (
-            "EBPF_KVM_ENGINE_KERNEL",
-            kernel.to_string_lossy().into_owned(),
-        ),
-        (
-            "EBPF_KVM_ENGINE_ROOTFS",
-            rootfs.to_string_lossy().into_owned(),
-        ),
+        ("EKVM_KERNEL", kernel.to_string_lossy().into_owned()),
+        ("EKVM_ROOTFS", rootfs.to_string_lossy().into_owned()),
     ];
     let hint = format!(
-        "EBPF_KVM_ENGINE_KERNEL={} EBPF_KVM_ENGINE_ROOTFS={} {} run --unjailed -- echo self-host-ok",
+        "EKVM_KERNEL={} EKVM_ROOTFS={} {} run --unjailed -- echo self-host-ok",
         kernel.display(),
         rootfs.display(),
         engine_bin.display()

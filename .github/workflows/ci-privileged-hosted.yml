@@ -79,7 +79,7 @@ jobs:
         # twice in the API socket path, which must fit sun_path (~108 bytes).
         run: |
           sudo mkdir -p /var/tmp/ekvm && sudo chmod 1777 /var/tmp/ekvm
-          echo "EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ekvm" >> "$GITHUB_ENV"
+          echo "EKVM_SCRATCH_DIR=/var/tmp/ekvm" >> "$GITHUB_ENV"
 
       - name: Install host tools (firecracker + jailer + net/fs)
         run: |
@@ -127,7 +127,7 @@ jobs:
       - name: Host check (report; non-blocking)
         run: |
           sudo -E env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
-            "EBPF_KVM_ENGINE_SCRATCH_DIR=$EBPF_KVM_ENGINE_SCRATCH_DIR" cargo xtask setup || true
+            "EKVM_SCRATCH_DIR=$EKVM_SCRATCH_DIR" cargo xtask setup || true
 
       - name: Run the privileged gate (root, for the jailer + eBPF caps)
         # `CARGO_TARGET_DIR` is required, not a nicety: the gate refuses to run as root without it,
@@ -138,4 +138,4 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" "RUSTUP_HOME=$HOME/.rustup" "CARGO_HOME=$HOME/.cargo" \
             "CARGO_TARGET_DIR=$PWD/target-privileged" \
-            "EBPF_KVM_ENGINE_SCRATCH_DIR=$EBPF_KVM_ENGINE_SCRATCH_DIR" cargo xtask ci-privileged
+            "EKVM_SCRATCH_DIR=$EKVM_SCRATCH_DIR" cargo xtask ci-privileged

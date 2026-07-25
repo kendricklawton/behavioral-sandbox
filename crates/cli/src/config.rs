@@ -1,11 +1,11 @@
-//! The `.ebpf-kvm-engine.toml` **file layer** of the config precedence `flags > env (EBPF_KVM_ENGINE_*) > file >
+//! The `.ekvm.toml` **file layer** of the config precedence `flags > env (EKVM_*) > file >
 //! defaults`.
 //!
 //! The env layer already lives in [`vmm::BootConfig::from_env`], and the flags layer is the
 //! CLI's own arguments; this module inserts a file between env and defaults. **One vocabulary:** the
-//! file's keys mirror the `EBPF_KVM_ENGINE_*` env names 1:1 (minus the prefix, lowercased), so a value is
+//! file's keys mirror the `EKVM_*` env names 1:1 (minus the prefix, lowercased), so a value is
 //! spelled the same whether it comes from a flag, the environment, or the file. Discovery is the
-//! **nearest `.ebpf-kvm-engine.toml` walking up from the cwd** (like `.gitignore`/`.editorconfig`), so a
+//! **nearest `.ekvm.toml` walking up from the cwd** (like `.gitignore`/`.editorconfig`), so a
 //! project pins its engine config beside its code.
 //!
 //! **Typos are a typed error, never a silent no-op:** the file is parsed with
@@ -26,37 +26,37 @@ use vmm::VmmError;
 use cli::policy::Policy;
 
 /// The file name discovered up from the cwd.
-const FILE_NAME: &str = ".ebpf-kvm-engine.toml";
+const FILE_NAME: &str = ".ekvm.toml";
 
-/// A parsed `.ebpf-kvm-engine.toml`. Every field is optional (an absent key falls through to the env/default
-/// layer); every key mirrors an `EBPF_KVM_ENGINE_*` env name. Unknown keys are rejected so a typo can't
+/// A parsed `.ekvm.toml`. Every field is optional (an absent key falls through to the env/default
+/// layer); every key mirrors an `EKVM_*` env name. Unknown keys are rejected so a typo can't
 /// silently no-op.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentToml {
-    /// Mirrors `EBPF_KVM_ENGINE_FIRECRACKER`.
+    /// Mirrors `EKVM_FIRECRACKER`.
     firecracker: Option<PathBuf>,
-    /// Mirrors `EBPF_KVM_ENGINE_KERNEL`.
+    /// Mirrors `EKVM_KERNEL`.
     kernel: Option<PathBuf>,
-    /// Mirrors `EBPF_KVM_ENGINE_ROOTFS`.
+    /// Mirrors `EKVM_ROOTFS`.
     rootfs: Option<PathBuf>,
-    /// Mirrors `EBPF_KVM_ENGINE_MARKER`.
+    /// Mirrors `EKVM_MARKER`.
     marker: Option<String>,
-    /// Mirrors `EBPF_KVM_ENGINE_SCRATCH_DIR`.
+    /// Mirrors `EKVM_SCRATCH_DIR`.
     scratch_dir: Option<PathBuf>,
-    /// Mirrors `EBPF_KVM_ENGINE_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied, ADR 010).
+    /// Mirrors `EKVM_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied, ADR 010).
     require_limits: Option<bool>,
-    /// Mirrors `EBPF_KVM_ENGINE_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
+    /// Mirrors `EKVM_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
-    /// Mirrors `EBPF_KVM_ENGINE_SIGNING_KEY` (the host record-signing key path, decision 034). No `BootConfig`
+    /// Mirrors `EKVM_SIGNING_KEY` (the host record-signing key path, decision 034). No `BootConfig`
     /// field; the CLI reads it to sign `--record`.
     signing_key: Option<PathBuf>,
-    /// Mirrors `EBPF_KVM_ENGINE_TRUSTED_KEYS`: public keys (`key_id` hex) `ebpf-kvm-engine verify` trusts *in addition*
+    /// Mirrors `EKVM_TRUSTED_KEYS`: public keys (`key_id` hex) `ekvm verify` trusts *in addition*
     /// to the current signing key, so rotating the host key doesn't invalidate already-signed records
     /// (decision 034, key rotation). No `BootConfig` field.
     trusted_keys: Option<Vec<String>>,
 
-    // Operator policy (decision 041). These do **not** mirror `EBPF_KVM_ENGINE_*` env keys: they are the
+    // Operator policy (decision 041). These do **not** mirror `EKVM_*` env keys: they are the
     // host's posture, not a per-invocation knob, and the ceilings exist precisely to bound what a
     // caller may ask for, so routing them through the flags > env > file precedence would let the
     // caller they bound edit them. See `crate::policy` for where this binds and where it is only a
@@ -84,7 +84,7 @@ pub struct AgentToml {
 }
 
 impl AgentToml {
-    /// Discover and parse the nearest `.ebpf-kvm-engine.toml` walking up from `start`, or `None` if none
+    /// Discover and parse the nearest `.ekvm.toml` walking up from `start`, or `None` if none
     /// exists between `start` and the filesystem root.
     ///
     /// # Errors
@@ -102,7 +102,7 @@ impl AgentToml {
         Ok(None)
     }
 
-    /// Read + parse one `.ebpf-kvm-engine.toml`, naming the file in any error.
+    /// Read + parse one `.ekvm.toml`, naming the file in any error.
     fn parse_file(path: &Path) -> Result<Self, VmmError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| VmmError::Vmm(format!("read {}: {e}", path.display())))?;
@@ -115,20 +115,20 @@ impl AgentToml {
         toml::from_str(text).map_err(|e| e.message().to_string())
     }
 
-    /// The file's value for an `EBPF_KVM_ENGINE_*` env key, as an [`OsString`], or `None` if the key is unset
+    /// The file's value for an `EKVM_*` env key, as an [`OsString`], or `None` if the key is unset
     /// in the file, the shape [`from_env_with`](vmm::BootConfig::from_env_with) consumes, so
     /// the file slots in *under* the environment in one composed lookup.
     #[must_use]
     pub fn env_value(&self, key: &str) -> Option<OsString> {
         match key {
-            "EBPF_KVM_ENGINE_FIRECRACKER" => self.firecracker.clone().map(PathBuf::into_os_string),
-            "EBPF_KVM_ENGINE_KERNEL" => self.kernel.clone().map(PathBuf::into_os_string),
-            "EBPF_KVM_ENGINE_ROOTFS" => self.rootfs.clone().map(PathBuf::into_os_string),
-            "EBPF_KVM_ENGINE_MARKER" => self.marker.as_ref().map(OsString::from),
-            "EBPF_KVM_ENGINE_SCRATCH_DIR" => self.scratch_dir.clone().map(PathBuf::into_os_string),
+            "EKVM_FIRECRACKER" => self.firecracker.clone().map(PathBuf::into_os_string),
+            "EKVM_KERNEL" => self.kernel.clone().map(PathBuf::into_os_string),
+            "EKVM_ROOTFS" => self.rootfs.clone().map(PathBuf::into_os_string),
+            "EKVM_MARKER" => self.marker.as_ref().map(OsString::from),
+            "EKVM_SCRATCH_DIR" => self.scratch_dir.clone().map(PathBuf::into_os_string),
             // A bool rendered as the canonical token `from_env_with`'s `parse_env_bool` accepts, so
             // the file slots under the env in the same composed lookup as the string keys.
-            "EBPF_KVM_ENGINE_REQUIRE_LIMITS" => self
+            "EKVM_REQUIRE_LIMITS" => self
                 .require_limits
                 .map(|b| OsString::from(if b { "true" } else { "false" })),
             _ => None,
@@ -174,32 +174,32 @@ impl AgentToml {
     }
 }
 
-/// The operator policy for this process: the nearest `.ebpf-kvm-engine.toml`'s, or the permissive default when
+/// The operator policy for this process: the nearest `.ekvm.toml`'s, or the permissive default when
 /// there is no file. One call site so the CLI and the daemon can't drift on how policy is sourced.
 #[must_use]
 pub fn policy_of(file: Option<&AgentToml>) -> Policy {
     file.map(AgentToml::policy).unwrap_or_default()
 }
 
-/// Resolve the host record-signing key path with `env (EBPF_KVM_ENGINE_SIGNING_KEY) > file > default`
+/// Resolve the host record-signing key path with `env (EKVM_SIGNING_KEY) > file > default`
 /// (decision 034). Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
 /// The default is [`probes_loader::default_key_path`] (a data-dir path, generated on first use).
 #[must_use]
 pub fn signing_key_path(file: Option<&AgentToml>) -> PathBuf {
-    std::env::var_os("EBPF_KVM_ENGINE_SIGNING_KEY")
+    std::env::var_os("EKVM_SIGNING_KEY")
         .map(PathBuf::from)
         .or_else(|| file.and_then(AgentToml::signing_key).map(Path::to_path_buf))
         .unwrap_or_else(probes_loader::default_key_path)
 }
 
-/// The configured set of extra trusted public keys (`key_id` hex) for `ebpf-kvm-engine verify`, the **union**
-/// of `EBPF_KVM_ENGINE_TRUSTED_KEYS` (comma-separated) and the file's `trusted_keys` list. A set, not an
+/// The configured set of extra trusted public keys (`key_id` hex) for `ekvm verify`, the **union**
+/// of `EKVM_TRUSTED_KEYS` (comma-separated) and the file's `trusted_keys` list. A set, not an
 /// override: every configured key stays trusted so a record signed before a key rotation still
 /// verifies (decision 034). Parsing/validation is the caller's (`TrustedKey::from_hex`).
 #[must_use]
 pub fn trusted_key_hexes(file: Option<&AgentToml>) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(v) = std::env::var_os("EBPF_KVM_ENGINE_TRUSTED_KEYS") {
+    if let Some(v) = std::env::var_os("EKVM_TRUSTED_KEYS") {
         out.extend(
             v.to_string_lossy()
                 .split(',')
@@ -214,13 +214,13 @@ pub fn trusted_key_hexes(file: Option<&AgentToml>) -> Vec<String> {
     out
 }
 
-/// Resolve the stderr log filter with the full precedence `flag > env (EBPF_KVM_ENGINE_LOG) > file > default`.
+/// Resolve the stderr log filter with the full precedence `flag > env (EKVM_LOG) > file > default`.
 /// The `BootConfig` layers can't carry `log` (it has no field), so this mirrors that precedence for
 /// the one config value that drives `tracing` instead of the engine.
 #[must_use]
 pub fn resolve_log(flag: Option<&str>, file: Option<&AgentToml>) -> Option<String> {
     flag.map(str::to_string)
-        .or_else(|| std::env::var("EBPF_KVM_ENGINE_LOG").ok())
+        .or_else(|| std::env::var("EKVM_LOG").ok())
         .or_else(|| file.and_then(AgentToml::log).map(str::to_string))
 }
 
@@ -245,19 +245,16 @@ mod tests {
         )
         .expect("valid toml parses");
         assert_eq!(
-            toml.env_value("EBPF_KVM_ENGINE_KERNEL"),
+            toml.env_value("EKVM_KERNEL"),
             Some(OsString::from("/k/vmlinux"))
         );
         assert_eq!(
-            toml.env_value("EBPF_KVM_ENGINE_ROOTFS"),
+            toml.env_value("EKVM_ROOTFS"),
             Some(OsString::from("/r/root.ext4"))
         );
+        assert_eq!(toml.env_value("EKVM_MARKER"), Some(OsString::from("UP")));
         assert_eq!(
-            toml.env_value("EBPF_KVM_ENGINE_MARKER"),
-            Some(OsString::from("UP"))
-        );
-        assert_eq!(
-            toml.env_value("EBPF_KVM_ENGINE_FIRECRACKER"),
+            toml.env_value("EKVM_FIRECRACKER"),
             None,
             "unset key falls through"
         );
@@ -270,21 +267,21 @@ mod tests {
         // token, and `BootConfig::from_env_with` parses it back onto the posture (env > file > default).
         let on = AgentToml::parse("require_limits = true\n").expect("valid toml parses");
         assert_eq!(
-            on.env_value("EBPF_KVM_ENGINE_REQUIRE_LIMITS"),
+            on.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("true"))
         );
         assert!(vmm::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
 
         let off = AgentToml::parse("require_limits = false\n").expect("valid toml parses");
         assert_eq!(
-            off.env_value("EBPF_KVM_ENGINE_REQUIRE_LIMITS"),
+            off.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("false"))
         );
         assert!(!vmm::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
 
         // Unset in the file falls through to the default.
         let bare = AgentToml::parse("marker = \"UP\"\n").expect("valid toml parses");
-        assert_eq!(bare.env_value("EBPF_KVM_ENGINE_REQUIRE_LIMITS"), None);
+        assert_eq!(bare.env_value("EKVM_REQUIRE_LIMITS"), None);
     }
 
     #[test]
@@ -323,7 +320,7 @@ mod tests {
         // A fake environment that only sets the kernel.
         let env = |key: &str| -> Option<OsString> {
             match key {
-                "EBPF_KVM_ENGINE_KERNEL" => Some(OsString::from("/env/vmlinux")),
+                "EKVM_KERNEL" => Some(OsString::from("/env/vmlinux")),
                 _ => None,
             }
         };
@@ -331,46 +328,34 @@ mod tests {
         let composed = |key: &str| env(key).or_else(|| file.env_value(key));
         // kernel: env wins over the file.
         assert_eq!(
-            composed("EBPF_KVM_ENGINE_KERNEL"),
+            composed("EKVM_KERNEL"),
             Some(OsString::from("/env/vmlinux"))
         );
         // rootfs: only the file has it → file wins over the default.
-        assert_eq!(
-            composed("EBPF_KVM_ENGINE_ROOTFS"),
-            Some(OsString::from("/file/root"))
-        );
+        assert_eq!(composed("EKVM_ROOTFS"), Some(OsString::from("/file/root")));
         // marker: neither sets it → None, so the BootConfig default stands.
-        assert_eq!(composed("EBPF_KVM_ENGINE_MARKER"), None);
+        assert_eq!(composed("EKVM_MARKER"), None);
     }
 
     #[test]
     fn discover_walks_up_from_the_cwd_and_finds_the_nearest() {
         // A three-level temp tree with a file at the top; discovery from the leaf finds it.
-        let base = std::env::temp_dir().join(format!("ebpf-kvm-engine-cfg-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("ekvm-cfg-{}", std::process::id()));
         let leaf = base.join("a/b");
         std::fs::create_dir_all(&leaf).expect("mkdirs");
-        std::fs::write(
-            base.join(".ebpf-kvm-engine.toml"),
-            "marker = \"FROMFILE\"\n",
-        )
-        .expect("write");
+        std::fs::write(base.join(".ekvm.toml"), "marker = \"FROMFILE\"\n").expect("write");
         // A nearer file shadows the farther one.
-        std::fs::write(
-            base.join("a/.ebpf-kvm-engine.toml"),
-            "marker = \"NEARER\"\n",
-        )
-        .expect("write nearer");
+        std::fs::write(base.join("a/.ekvm.toml"), "marker = \"NEARER\"\n").expect("write nearer");
         let found = AgentToml::discover(&leaf)
             .expect("discover ok")
             .expect("a file exists");
         assert_eq!(found.log(), None);
         assert_eq!(
-            found.env_value("EBPF_KVM_ENGINE_MARKER"),
+            found.env_value("EKVM_MARKER"),
             Some(OsString::from("NEARER"))
         );
         // None above the tree.
-        let empty =
-            std::env::temp_dir().join(format!("ebpf-kvm-engine-cfg-empty-{}", std::process::id()));
+        let empty = std::env::temp_dir().join(format!("ekvm-cfg-empty-{}", std::process::id()));
         std::fs::create_dir_all(&empty).expect("mkdir empty");
         assert_eq!(AgentToml::discover(&empty).expect("ok"), None);
         let _ = std::fs::remove_dir_all(&base);

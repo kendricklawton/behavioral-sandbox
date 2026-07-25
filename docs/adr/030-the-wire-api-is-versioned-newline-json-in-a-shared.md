@@ -1,6 +1,6 @@
 # 030. The wire API is versioned newline-JSON in a shared `protocol` crate, not gRPC *(2026-07-17)*
 
-**Context.** `ebpf-kvm-engine` exposes the engine over a wire API, and that wire is a contract downstream
+**Context.** `ekvm` exposes the engine over a wire API, and that wire is a contract downstream
 depends on: the language SDKs (separate repos) freeze against it, so its shape is a long-lived
 commitment, not an implementation detail. Two forces set that shape. First, the peer is a **local,
 trusted-ish client** the hoster runs, not the untrusted guest, so hand-debuggability (`socat`/`nc` by
@@ -11,7 +11,7 @@ and a `tokio` stack into that posture for no gain here. The one adversarial conc
 is guardrail 5: even a trusted-ish peer's input is bounded, so every decode has a message-size cap and
 returns a typed error, never a panic/hang/unbounded allocation.
 
-**Decision.** `ebpf-kvm-engine`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
+**Decision.** `ekvm`'s wire API, the contract the SDKs freeze against, is **newline-delimited JSON
 over a unix socket**, and every message (request *and* response) carries a leading `schema` field.
 The full verb set is the sandbox lifecycle: `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 `trace_summary`)\* → `close`. It is **not gRPC**.
@@ -45,6 +45,6 @@ default profile); any custom resource knob cold-boots.
 
 **Scope, unchanged.** Still engine, not platform: no auth (socket-directory permissions are the
 hoster's access control), no tenancy, no billing, no scheduler. The daemon shares nothing with the
-`ebpf-kvm-engine` CLI bin beyond the crate's small shared library (the `audit` composition both bins reuse); the
+`ekvm` CLI bin beyond the crate's small shared library (the `audit` composition both bins reuse); the
 pinned `vmm` API (`Sandbox`/`Limits`/`RunResult`/`VmmError`/`channel`) is untouched, the daemon
 only *consumes* it.
