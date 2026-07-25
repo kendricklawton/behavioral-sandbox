@@ -2198,10 +2198,19 @@ first commit, so no box tracks a non-task).
       controller isn't delegated (the driver's own fail-open prerequisite). Closes the "written but
       never observed live" gap the earlier annotation left open, where only the jailer arg string was
       asserted (the wire-shape unit tests in `crates/vmm/src/jail.rs`).
-- [ ] **P19.9c** The **IO-throttle proof** pending since P15.7. A privileged test that the per-drive
-      virtio-blk rate limiter (`RateLimiter::default_guest_io`, `crates/vmm/src/firecracker.rs`)
-      actually throttles sustained guest writes, plus the boot-latency-is-unchanged confirmation the
-      annotation promised (a cold boot's reads fit the burst and must stay unthrottled).
+- [x] **P19.9c** The **IO-throttle proof** pending since P15.7.
+      *(**Done** as `crates/vmm/tests/io_throttle.rs`, a privileged test that the per-drive virtio-blk
+      rate limiter (`RateLimiter::default_guest_io`, `crates/vmm/src/firecracker.rs`) actually throttles
+      a sustained-thrashing guest, plus the boot-latency-is-unchanged half. Investigating it surfaced a
+      real constraint: a *single* write can never show the cap, since the only guest-writable virtio-blk
+      device is `/output` at 256 MiB (`OUTPUT_IMAGE_MIB`), exactly the steady bucket's size, so one write
+      fits it and never reaches the 1 GiB burst. The cap targets **sustained** thrashing, so the proof is
+      a continuous rewrite loop: once cumulative virtio traffic clears the burst, the stream pins to the
+      256 MiB/s cap. The test is self-calibrating (a short in-burst write measures this host's raw
+      `/output` speed in the same VM, so the assertion needs no absolute disk model) and skips honestly on
+      a disk too slow to distinguish the cap, never a flaky failure. Boot latency is asserted well under a
+      healthy ceiling: a cold boot's tens-of-MiB reads sit far inside the burst, so the limiter can't
+      touch them. non-`api:` (a test plus a comment refresh; no behavior change).)*
 - [x] **P19.9d** The **Rust-version policy**, recorded rather than left implicit. Decision 037 states
       it: the supported Rust is current stable, pinned via `rust-toolchain.toml` with `Cargo.toml`'s
       `rust-version` kept in step, and no back-support before `v0.1.0`. `RELEASES.md` carries the
@@ -2401,6 +2410,18 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       moved its 30-line fail-open matrix behind `--explain`, leaving a row tally and, when anything
       is not `ok`, a pointer to it. non-`api:` (the pinned surface does not move;
       `doctor::jailed_run_available` is an additive helper, `--explain` an additive flag).)*
+- [x] **P20.16a** **A fresh operator's first *jailed* run works on a systemd host** (`nodev` `/tmp`,
+      i.e. every Arch/Ubuntu default).
+      *(**Done.** Both guided-install paths now pin `scratch_dir` when the default base needs it, so the
+      first `sudo ebpf-kvm-engine run` no longer fails `ScratchDirNodev` until a hand-edit, closing the last
+      gap under the "every command the tooling prints works on the host" bar P20.16 set. `cargo xtask
+      self-host` reuses the doctor's tested detector (`scratch_is_nodev`, promoted `pub` in
+      `crates/vmm/src/doctor.rs`); `install.sh` uses the `findmnt` form the docs already teach, since it
+      runs before any engine binary is guaranteed usable. Both write `scratch_dir` under the per-user
+      data dir (`~/.local/share/ebpf-kvm-engine/scratch`) only when `/tmp` is `nodev` **and** that
+      replacement is not, since pinning one `nodev` dir over another fixes nothing (`doctor` still flags
+      it). `doctor` already warned; this makes the install *prevent* the failure instead of the operator
+      hitting and diagnosing it. non-`api:` (a diagnostic helper widened, not the pinned surface).)*
 - [x] **P20.17** **Contributor loop**: the papercuts that cost the most time per day.
       *(**Done.** (1) `ci-privileged` now **refuses** to run as root without `CARGO_TARGET_DIR`
       instead of warning: the redirect must be on the outer `cargo` to keep `./target` clean at all,
@@ -2420,6 +2441,36 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       the gate's 16s): the test step is ~16s of a ~17s run and everything else rounds to nothing
       warm, so it was redesigned around the measurement to drop tests, landing at ~3s.
       non-`api:` (xtask + an additive CLI flag).)*
+- [x] **P20.17a** **The privileged gate pre-checks the scratch dir for `nodev`** (a papercut a fresh
+      Arch self-host run surfaced).
+      *(**Done.** `cargo xtask ci-privileged` now refuses up front on a `nodev` scratch base, alongside
+      its existing `/dev/kvm` / real-root / `CARGO_TARGET_DIR` / BTF / artifact / eBPF-object checks, so
+      the jailed-boot integration tests (`boots_under_the_jailer`, `jailed_overlay_*`) stop failing
+      *deep in the run* with `ScratchDirNodev` panics that read like engine bugs. It reuses the doctor's
+      tested detector (`scratch_is_nodev`, the same one `Vm::boot` refuses with, P19.9e) against the exact
+      dir the tests resolve (`vmm::BootConfig::from_env().scratch_dir`, so an `EBPF_KVM_ENGINE_SCRATCH_DIR`
+      override clears it), and prints the `/var/tmp` fix, the same "loud refusal, never a confusing deep
+      failure" discipline the other prerequisites already get. xtask only, non-`api:`.)*
+- [x] **P20.17b** **A one-line privileged gate** (contributor ergonomics).
+      *(**Done.** The manual invocation stacked three env concerns, `sudo -E env "PATH=$PATH"
+      CARGO_TARGET_DIR=… EBPF_KVM_ENGINE_SCRATCH_DIR=… cargo xtask ci-privileged`, because `sudo` strips
+      rustup's `cargo` from `PATH`, a root build must stay out of `./target`, and `/tmp` is `nodev`.
+      `xtask` can't collapse this itself: the outer `cargo run` that builds `xtask` writes to `./target`
+      as root *before* any `xtask` code runs, which is exactly why it can only refuse. A committed
+      `ci-privileged.sh` sets all three (each honouring a value already exported, `PATH` resolved from
+      `$HOME/.cargo/bin` with a `$SUDO_USER` fallback) and execs the gate, so a contributor runs
+      `sudo -E ./ci-privileged.sh`; `docs/contributing-building.md`'s privileged-gate section leads with
+      it and keeps the expanded form as the explanation. non-`api:`.)*
+- [x] **P20.17c** **`cargo xtask setup` surfaces the guest musl target** (a fresh-clone papercut): the
+      static in-guest agent builds for `x86_64-unknown-linux-musl`, but `setup`'s dev-toolchain block
+      checked `bpf-linker`, nightly + `rust-src`, `readelf`, and `mke2fs`, **not** that target, so a
+      missing one first surfaced as a `build-rootfs`/`self-host` failure deep in the build instead of a
+      named row in the readiness report.
+      *(**Done.** `setup` now probes the target via a soft `guest_bins::guest_target_installed()`
+      (sharing `GUEST_TARGET` with the hard `ensure_guest_target` the build path enforces), and
+      `docs/contributing-building.md`'s prerequisites name it with the one-line
+      `rustup target add x86_64-unknown-linux-musl` fix, alongside the existing Rust + eBPF toolchain
+      entries. xtask + docs, non-`api:`.)*
 - [x] **P20.18** `(decision)` **Operator policy**: the host's defaults, ceilings, and postures.
       *(**Done** as decision 041. The config surface had the split backwards: `.ebpf-kvm-engine.toml` covered
       where artifacts live, while every *containment* knob was caller-controlled with a

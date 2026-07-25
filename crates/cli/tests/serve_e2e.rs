@@ -442,7 +442,10 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         scraped.contains("ebpf_kvm_engine_request_errors_total{kind=\"guest\"} 1"),
         "{scraped}"
     );
-    assert!(scraped.contains("protocol_errors_total 1"), "{scraped}");
+    assert!(
+        scraped.contains("ebpf_kvm_engine_protocol_errors_total 1"),
+        "{scraped}"
+    );
     assert!(
         scraped.contains("ebpf_kvm_engine_boot_seconds_count 2"),
         "{scraped}"

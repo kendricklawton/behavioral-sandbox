@@ -296,7 +296,11 @@ fn cgroup_controllers_delegated() -> bool {
 /// jailer's chroot `/dev/kvm` cannot be opened). `None` when it can't be determined (no readable
 /// `/proc/self/mountinfo`, or the path doesn't resolve), so the check reads "unknown" as "assume
 /// fine" rather than raising a false alarm.
-pub(crate) fn scratch_is_nodev(dir: &Path) -> Option<bool> {
+///
+/// Public so the guided install (`install.sh`, `cargo xtask self-host`) can pre-empt the failure by
+/// writing a non-`nodev` `scratch_dir` instead of the operator hitting it (P20.16a): a diagnostic
+/// helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.
+pub fn scratch_is_nodev(dir: &Path) -> Option<bool> {
     // The scratch dir may not exist yet; its nearest existing ancestor is on the same filesystem the
     // jailer's chroot will be created on (mkdir does not cross a mount), so that is what to classify.
     let target = nearest_existing(dir)?.canonicalize().ok()?;

@@ -114,7 +114,7 @@ other could not).
 |---|---|---|
 | Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the supported floor | rolling, comfortably above the floor |
 | `/dev/kvm` | `0660 root:kvm`, so you must join the group | `0666`, usually usable already |
-| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default fails until you set `EBPF_KVM_ENGINE_SCRATCH_DIR` |
+| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default needs a non-`nodev` `scratch_dir` (the guided install sets one; see below) |
 | `e2fsprogs` | 24.04 ships **1.47.0**, below the 1.47.1 floor where `mke2fs` honours `SOURCE_DATE_EPOCH`, so `cargo xtask build-rootfs --verify` fails (normal builds are fine) | current, above the floor |
 | AppArmor | **enabled by default**, and can deny the jailer in ways that look like an engine bug | not installed by default |
 | Build toolchain | `build-essential` | `base-devel` |
@@ -131,6 +131,10 @@ If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~
 scratch_dir = "/home/you/ebpf-kvm-engine-scratch"
 ```
 
+The packaged `install.sh` and `cargo xtask self-host` **write this line for you** when they detect a
+`nodev` `/tmp`, so a guided install already boots jailed; the manual form above is for a from-source
+run, or a config you wrote yourself.
+
 `ebpf-kvm-engine doctor` flags every one of these against your actual host, so treat it as the authority and
 this table as orientation.
 
@@ -140,7 +144,8 @@ Every release ships one tarball per platform plus `SHA256SUMS`, assembled by `ca
 the `ebpf-kvm-engine` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file
 `MANIFEST.sha256` inside. `install.sh` verifies both layers before touching anything, then installs
 the binary to `~/.local/bin`, the artifacts to `~/.local/share/ebpf-kvm-engine`, and writes a starter
-`~/.ebpf-kvm-engine.toml` (kernel/rootfs paths) if you don't have one:
+`~/.ebpf-kvm-engine.toml` (kernel/rootfs paths, plus a non-`nodev` `scratch_dir` when your `/tmp` is
+`nodev`, so the jailed default boots) if you don't have one:
 
 ```console
 curl -fsSL https://raw.githubusercontent.com/k-henry-org/ebpf-kvm-engine/main/install.sh | sh
@@ -204,7 +209,9 @@ cargo xtask self-host           # obtain the pinned kernel + rootfs, build the g
 It installs the `ebpf-kvm-engine` binary into `~/.local/bin` (override with `--prefix DIR`) and,
 on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
-KVM box. `--no-run` skips the boot proof (build + install only).
+KVM box. `--no-run` skips the boot proof (build + install only). Like `install.sh`, it writes a starter
+`~/.ebpf-kvm-engine.toml` (absolute kernel/rootfs paths, and a non-`nodev` `scratch_dir` when your `/tmp`
+is `nodev`) unless one already exists; `EBPF_KVM_ENGINE_NO_TOML=1` skips it.
 
 To build **offline**, no Firecracker S3 bucket, no Alpine CDN, point it at a vendored mirror first
 (see [Vendoring for offline builds](#vendoring-for-offline-builds)):
@@ -252,9 +259,11 @@ tracks their supported set.
   carried untested. A contribution that brings tested arm artifacts plus a privileged CI lane
   reopens it.
 - One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
-  systemd default on Arch, and some Ubuntu setups), the jailed default fails because the jailer's
-  chroot `/dev/kvm` there is inert, point `EBPF_KVM_ENGINE_SCRATCH_DIR` at a non-`nodev` path. `ebpf-kvm-engine doctor`
-  flags this, and reports your own host's arch, kernel, and Firecracker version. See
+  systemd default on Arch, and some Ubuntu setups), the jailer's chroot `/dev/kvm` there is inert, so
+  a raw jailed run fails until scratch points off `nodev`. The packaged install and `cargo xtask
+  self-host` now pin a non-`nodev` `scratch_dir` for you; a from-source run sets
+  `EBPF_KVM_ENGINE_SCRATCH_DIR` itself. `ebpf-kvm-engine doctor` flags it either way, and reports your own host's
+  arch, kernel, and Firecracker version. See
   [Distro differences](#distro-differences-that-bite) for how to test it and the rest of the
   per-distro list.
 - On distros that enable **AppArmor** by default (Ubuntu and Debian), a confinement profile can deny
@@ -269,8 +278,9 @@ tracks their supported set.
   mitigation, not the isolation boundary, [decision 010](./adr/010-per-run-resource-policy-one-limits-struct-of.md)).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
 - **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
-  `/dev/kvm` is inert, so the jailed default fails to open KVM; set `EBPF_KVM_ENGINE_SCRATCH_DIR` to a
-  non-`nodev` path (e.g. under `$HOME`), or use `--unjailed`. `ebpf-kvm-engine doctor` flags this.
+  `/dev/kvm` is inert, so the jailed default fails to open KVM; the guided install pins a non-`nodev`
+  `scratch_dir` for you, else set `EBPF_KVM_ENGINE_SCRATCH_DIR` to a non-`nodev` path (e.g. under `$HOME`),
+  or use `--unjailed`. `ebpf-kvm-engine doctor` flags this.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
 ## Prerequisites

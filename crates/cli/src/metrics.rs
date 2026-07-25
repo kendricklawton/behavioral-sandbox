@@ -335,13 +335,13 @@ impl Metrics {
 
         family(
             &mut out,
-            "protocol_errors_total",
+            "ebpf_kvm_engine_protocol_errors_total",
             "Wire lines that failed to decode (malformed, oversize, wrong schema).",
             "counter",
         );
         sample(
             &mut out,
-            "protocol_errors_total",
+            "ebpf_kvm_engine_protocol_errors_total",
             "",
             self.protocol_errors.load(Ordering::Relaxed),
         );
@@ -666,7 +666,7 @@ mod tests {
             "ebpf_kvm_engine_sessions_active",
             "ebpf_kvm_engine_requests_total",
             "ebpf_kvm_engine_request_errors_total",
-            "protocol_errors_total",
+            "ebpf_kvm_engine_protocol_errors_total",
             "ebpf_kvm_engine_boot_seconds",
             "ebpf_kvm_engine_guest_command_seconds",
             "ebpf_kvm_engine_pool_ready",
@@ -708,7 +708,10 @@ mod tests {
             text.contains("ebpf_kvm_engine_request_errors_total{kind=\"infra\"} 1"),
             "{text}"
         );
-        assert!(text.contains("protocol_errors_total 1"), "{text}");
+        assert!(
+            text.contains("ebpf_kvm_engine_protocol_errors_total 1"),
+            "{text}"
+        );
         assert!(text.contains("ebpf_kvm_engine_pool_ready 2"), "{text}");
         assert!(text.contains(concat!("{version=\"", env!("CARGO_PKG_VERSION"), "\"} 1")));
     }

@@ -714,6 +714,23 @@ fn ci_privileged() -> Result<()> {
              BTF, and a skipped test looks like a pass (need a CONFIG_DEBUG_INFO_BTF=y kernel)"
         );
     }
+    // The jailed-boot tests mknod /dev/kvm inside a chroot under the scratch dir; on a `nodev` mount
+    // (every systemd `/tmp` default) those nodes are inert and the tests fail *deep in the run* with
+    // `ScratchDirNodev`, reading like an engine bug rather than the one-line host fix it is (P19.9e is
+    // the engine's own boot-time refusal; this is the gate's up-front one). Same loud-up-front
+    // discipline as the checks above, reusing the doctor's tested detector against the exact scratch
+    // dir the tests will resolve (`BootConfig::from_env`, so an `EBPF_KVM_ENGINE_SCRATCH_DIR` override clears it).
+    let scratch = vmm::BootConfig::from_env().scratch_dir;
+    if vmm::doctor::scratch_is_nodev(&scratch).unwrap_or(false) {
+        bail!(
+            "scratch dir {} is on a `nodev` mount: the jailer's chroot /dev/kvm can't be opened, so \
+             the jailed-boot tests fail deep in the run.\n  Point it off nodev (e.g. /var/tmp) — or \
+             use ./ci-privileged.sh, which sets all three env concerns:\n    \
+             sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" \
+             EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ebpf-kvm-engine-scratch cargo xtask ci-privileged",
+            scratch.display()
+        );
+    }
     // This gate builds and verifies the static guest agent (below), and that verification is the
     // *only* thing standing between a silently-reintroduced dynamic dependency and a confusing
     // in-guest loader failure. `verify_static` soft-skips when `readelf` is absent (so ad-hoc
@@ -818,6 +835,13 @@ fn setup() -> Result<()> {
     check(
         "nightly toolchain + rust-src (eBPF object build: `cargo xtask build-probes`)",
         nightly_ebpf_ready(),
+    );
+    check(
+        &format!(
+            "guest musl target ({}): the static guest agent build (`cargo xtask build-rootfs`)",
+            guest_bins::GUEST_TARGET
+        ),
+        guest_bins::guest_target_installed(),
     );
     check(
         "readelf (binutils: static-link verification)",

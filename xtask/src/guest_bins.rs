@@ -10,7 +10,22 @@ use crate::{cargo, workspace_root};
 
 /// The musl target the guest agent is built for: a fully static binary that runs in the guest with
 /// no dynamic loader or libc to bake into the rootfs.
-const GUEST_TARGET: &str = "x86_64-unknown-linux-musl";
+pub(crate) const GUEST_TARGET: &str = "x86_64-unknown-linux-musl";
+
+/// Whether the guest musl target is installed: the soft form `cargo xtask setup` reports (the hard
+/// `ensure_guest_target` is what the build path enforces). A missing or failing `rustup` reads as
+/// "not installed", which is the actionable answer for a host-readiness check.
+pub(crate) fn guest_target_installed() -> bool {
+    Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .is_ok_and(|out| {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .any(|t| t == GUEST_TARGET)
+        })
+}
 
 /// Build the guest agent as a static binary for the guest and return its path. Kept out of the `ci`
 /// gate (it needs the musl target installed and produces an artifact the host doesn't run);

@@ -316,8 +316,9 @@ pub(crate) struct RateLimiter {
 const GUEST_IO_BANDWIDTH_BYTES_PER_S: u64 = 256 * 1024 * 1024;
 /// The one-time burst (bytes) that runs unthrottled before the steady-state cap engages: 1 GiB, past
 /// any rootfs the engine ships, so a cold boot's rootfs read fits inside the burst and runs
-/// unthrottled *by construction*; only *sustained* thrashing beyond the burst is throttled. (The
-/// measured confirmation that boot latency is unchanged is the pending privileged readback.)
+/// unthrottled *by construction*; only *sustained* thrashing beyond the burst is throttled. A
+/// privileged test proves both halves live (sustained rewrites pin to the cap, boot stays
+/// unthrottled): `crates/vmm/tests/io_throttle.rs`.
 const GUEST_IO_ONE_TIME_BURST_BYTES: u64 = 1024 * 1024 * 1024;
 
 impl RateLimiter {

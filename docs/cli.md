@@ -136,7 +136,7 @@ unknown key is a typed error, never a silent no-op.
 | `EBPF_KVM_ENGINE_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
 | `EBPF_KVM_ENGINE_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-guest.ext4` (the guest rootfs image) |
 | `EBPF_KVM_ENGINE_MARKER` | `marker` | the console line that means "userspace is up" | `GUEST-READY` (the guest rootfs image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
-| `EBPF_KVM_ENGINE_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts | `/tmp` |
+| `EBPF_KVM_ENGINE_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts; a jailed boot needs it off a `nodev` mount (the systemd `/tmp` default), which the guided install pins for you | `/tmp` |
 | `EBPF_KVM_ENGINE_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
 | `EBPF_KVM_ENGINE_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
 | `EBPF_KVM_ENGINE_PROBES_OBJECT` | — | the built eBPF object (env only, no `.ebpf-kvm-engine.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |

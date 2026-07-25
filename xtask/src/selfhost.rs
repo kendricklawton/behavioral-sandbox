@@ -76,6 +76,11 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
 /// this file covers any cwd **under `$HOME`**, not literally everywhere; from outside `$HOME` (say
 /// `/tmp`) pass the paths by env or flag. Never overwrites an existing file (your config is yours),
 /// and `EBPF_KVM_ENGINE_NO_TOML=1` skips it, the same escape hatch `install.sh` offers.
+///
+/// On a host whose default scratch base (`/tmp`) is mounted `nodev` (every systemd default: Arch,
+/// Ubuntu), the jailer's chroot `/dev/kvm` there is inert and the jailed default fails
+/// `ScratchDirNodev`; so when the detector flags it, a `scratch_dir` on a non-`nodev` path is written
+/// too, so the first `sudo ebpf-kvm-engine run` works rather than needing a hand-edit (P20.16a).
 fn write_starter_config() -> Result<()> {
     if std::env::var_os("EBPF_KVM_ENGINE_NO_TOML").is_some() {
         return Ok(());
@@ -89,7 +94,7 @@ fn write_starter_config() -> Result<()> {
         println!("  {} exists, left alone", dest.display());
         return Ok(());
     }
-    let body = format!(
+    let mut body = format!(
         "# Written by `cargo xtask self-host`; the engine reads the nearest .ebpf-kvm-engine.toml walking up\n\
          # from the cwd, so this covers any working directory under $HOME. Absolute paths, so the\n\
          # installed binary no longer depends on being run from the source tree.\n\
@@ -98,9 +103,51 @@ fn write_starter_config() -> Result<()> {
         kernel_path().display(),
         guest_rootfs_path().display()
     );
+    let scratch = starter_scratch_dir(&home);
+    let mut wrote_scratch = false;
+    if let Some(scratch) = &scratch {
+        std::fs::create_dir_all(scratch)
+            .with_context(|| format!("create scratch dir {}", scratch.display()))?;
+        body.push_str(&format!(
+            "# /tmp is mounted `nodev` on this host, so the jailer's chroot /dev/kvm there is inert; a\n\
+             # non-nodev scratch dir so the jailed default boots (the check in crates/vmm/src/doctor.rs).\n\
+             scratch_dir = \"{}\"\n",
+            scratch.display()
+        ));
+        wrote_scratch = true;
+    }
     std::fs::write(&dest, body).with_context(|| format!("write {}", dest.display()))?;
-    println!("  wrote {} (kernel + rootfs paths)", dest.display());
+    if wrote_scratch {
+        println!(
+            "  wrote {} (kernel + rootfs paths, and scratch_dir: /tmp is nodev here)",
+            dest.display()
+        );
+    } else {
+        println!("  wrote {} (kernel + rootfs paths)", dest.display());
+    }
     Ok(())
+}
+
+/// The non-`nodev` scratch dir to pin for a jailed boot, or `None` when the default `/tmp` base is
+/// already fine (or no better home exists). `$XDG_DATA_HOME/ebpf-kvm-engine/scratch` (default
+/// `~/.local/share/...`), the same per-user data root `install.sh` uses; skipped when that path is
+/// *also* `nodev`, since pinning one nodev dir over another fixes nothing (`doctor` still flags it).
+fn starter_scratch_dir(home: &Path) -> Option<PathBuf> {
+    if !vmm::doctor::scratch_is_nodev(Path::new("/tmp")).unwrap_or(false) {
+        return None;
+    }
+    let scratch = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"))
+        .join("ebpf-kvm-engine/scratch");
+    if vmm::doctor::scratch_is_nodev(&scratch).unwrap_or(false) {
+        println!(
+            "  note: /tmp is nodev and so is {}; set EBPF_KVM_ENGINE_SCRATCH_DIR to a non-nodev path",
+            scratch.display()
+        );
+        return None;
+    }
+    Some(scratch)
 }
 
 /// The install directory: `--prefix` if given, else `~/.local/bin`. Created if absent.

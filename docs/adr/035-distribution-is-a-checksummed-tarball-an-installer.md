@@ -24,8 +24,9 @@ nothing that freezes the name:
   `SHA256SUMS`, then every extracted file against `MANIFEST.sha256`; nothing installs unverified.
   Layout: the binary into `~/.local/bin` (the `self-host` precedent), artifacts into
   `$XDG_DATA_HOME/ebpf-kvm-engine` (default `~/.local/share/ebpf-kvm-engine`), and a starter `~/.ebpf-kvm-engine.toml`
-  (kernel/rootfs paths) written **only if none exists**, the nearest-up-from-cwd discovery
-  (decision 027) makes it apply anywhere under `$HOME`. Firecracker stays the host's to install
+  (kernel/rootfs paths, plus a non-`nodev` `scratch_dir` when `/tmp` is `nodev`, so a systemd host's
+  jailed default boots without a hand-edit) written **only if none exists**, the nearest-up-from-cwd
+  discovery (decision 027) makes it apply anywhere under `$HOME`. Firecracker stays the host's to install
   (decision 001: the engine drives it, it doesn't bundle it), except:
 - **A container image** (`Containerfile`), the one place bundling the pinned Firecracker v1.9 is
   right, because an image *is* a closed filesystem: a runtime-only image assembled `FROM` the dist

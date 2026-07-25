@@ -16,6 +16,12 @@ two more:
 
 - **Rust, stable** ([`rustup`](https://www.rust-lang.org/tools/install)). The pinned version lives in
   `rust-toolchain.toml`, so `rustup` selects it for you inside the repo.
+- **The guest musl target**, for the static in-guest agent that `cargo xtask build-rootfs` (and
+  `self-host`) bakes into the rootfs; `cargo xtask setup` probes it:
+
+  ```console
+  rustup target add x86_64-unknown-linux-musl
+  ```
 - **For the eBPF probes** (optional until you want the observability half): **`bpf-linker`** plus a
   **nightly** toolchain with **`rust-src`**, since `-Z build-std=core` needs the standard library
   source:
@@ -81,22 +87,36 @@ resolve; a rename or renumber fails the gate instead of silently orphaning the r
 
 Booting a microVM and loading/attaching eBPF need `/dev/kvm` and elevated caps, so the
 **integration tests** (VM boot, exec, tap networking, probe attach) are `#[ignore]`d and run as
-real root:
+real root. From the repo root:
 
 ```console
-sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged" cargo xtask ci-privileged
+sudo -E ./ci-privileged.sh
 ```
 
 on a machine that has them, your dev box, or a bare-metal/nested-virt CI runner (a stock cloud
 VM usually can't nest KVM). **Never gate the everyday loop on a privileged runner.**
 
-The `CARGO_TARGET_DIR` override matters: `sudo cargo …` builds as **root**, so without it this run
-leaves root-owned artifacts in `./target` that then block your normal (non-root) `cargo build`.
-Sending them to a throwaway `target-privileged/` (git-ignored, `rm -rf` it anytime) keeps the
-`./target` your user builds into clean. `-E` preserves your `PATH` and `rustup` so `cargo` resolves
-under `sudo`. **`ci-privileged` refuses to run as root without the override**, rather than warning
-after the fact: the redirect has to be on the outer `cargo` (the one that builds `xtask` itself) to
-keep `./target` clean at all, so it can only ever come from your invocation.
+The wrapper collapses the three env concerns that a `sudo` run otherwise stacks by hand:
+
+```console
+sudo -E env "PATH=$PATH" CARGO_TARGET_DIR="$PWD/target-privileged" \
+     EBPF_KVM_ENGINE_SCRATCH_DIR=/var/tmp/ebpf-kvm-engine-scratch cargo xtask ci-privileged
+```
+
+- **`CARGO_TARGET_DIR`**: `sudo cargo …` builds as **root**, so without it this run leaves root-owned
+  artifacts in `./target` that block your normal (non-root) `cargo build`; a throwaway
+  `target-privileged/` (git-ignored, `rm -rf` it anytime) keeps `./target` clean.
+- **`EBPF_KVM_ENGINE_SCRATCH_DIR`**: `/tmp` is `nodev` on a systemd host, so the jailer's chroot
+  `/dev/kvm` can't be opened; pointing scratch off `nodev` lets the jailed-boot tests run.
+- **`PATH`**: `sudo` strips rustup's `cargo` from a root shell; the wrapper restores it (from your
+  `$HOME/.cargo/bin`, falling back to `$SUDO_USER`'s).
+
+Each honours a value you already exported, so override any by setting it first (e.g. a different
+scratch path). **`ci-privileged` refuses to run as root without `CARGO_TARGET_DIR`, and pre-checks
+that the scratch dir is not `nodev`**, rather than warning after the fact or failing deep in a test:
+the `CARGO_TARGET_DIR` redirect has to be on the outer `cargo` (the one that builds `xtask` itself)
+to keep `./target` clean at all, which is exactly why `xtask` can only refuse and not set it, so the
+wrapper does.
 
 ## The book
 

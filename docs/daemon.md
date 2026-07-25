@@ -167,7 +167,7 @@ convention of base units: **seconds**, never milliseconds.
 | `ebpf_kvm_engine_sessions_active` | gauge | Sessions currently open (one live microVM each). |
 | `ebpf_kvm_engine_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
 | `ebpf_kvm_engine_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
-| `protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
+| `ebpf_kvm_engine_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
 | `ebpf_kvm_engine_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
 | `ebpf_kvm_engine_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
 | `ebpf_kvm_engine_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |

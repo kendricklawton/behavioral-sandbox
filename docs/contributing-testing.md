@@ -76,8 +76,9 @@ is the order to exercise the whole engine end to end; each step links to its det
    see the host-observed record. ([Using the ebpf-kvm-engine CLI](./cli.md).)
 4. **The privileged integration suite.** `cargo xtask ci-privileged` boots real microVMs, execs, runs
    tap networking, attaches probes, and asserts the observed record: the half the host-safe gate
-   cannot reach. It self-checks its prerequisites and prints the fix if an artifact is missing, and
-   it *refuses* to run without real root (run it under `sudo`), BTF, or the built eBPF object:
+   cannot reach. Run it with the `sudo -E ./ci-privileged.sh` wrapper, which sets the env it needs. It
+   self-checks its prerequisites and prints the fix if an artifact is missing, and it *refuses* to run
+   without real root (run it under `sudo`), a non-`nodev` scratch dir, BTF, or the built eBPF object:
    the capability-gated tests skip themselves on a short host, and a skipped test is a pass to
    cargo, so running anyway would print a hollow green.
 5. **The live demos.** One probe end to end each: `trace-sandbox`, `watch-sandbox`, `enforce-sandbox`,

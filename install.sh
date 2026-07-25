@@ -32,6 +32,18 @@ say()  { printf '%s\n' "$*"; }
 fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 
+# Whether the filesystem holding $1 is mounted `nodev` (device nodes there are inert, so the jailer's
+# chroot /dev/kvm can't be opened), mirroring the detector in crates/vmm/src/doctor.rs. Uses findmnt
+# (util-linux, present on every systemd host); a missing findmnt reads as "not nodev" so we never
+# guess wrong and pin a scratch dir the operator didn't ask for.
+is_nodev() {
+    command -v findmnt >/dev/null 2>&1 || return 1
+    case ",$(findmnt -no OPTIONS -T "$1" 2>/dev/null)," in
+        *,nodev,*) return 0 ;;
+        *)         return 1 ;;
+    esac
+}
+
 [ "$(uname -s)" = "Linux" ]  || fail "the engine is Linux-only (it needs KVM)"
 [ "$(uname -m)" = "x86_64" ] || fail "the supported architecture is x86_64; this host is $(uname -m)"
 need tar
@@ -101,12 +113,28 @@ done
 # A starter config, written only if none exists (the engine's own nearest-up-from-cwd discovery
 # finds ~/.ebpf-kvm-engine.toml for anything under $HOME). Never overwrites: your config is yours.
 if [ -z "${EBPF_KVM_ENGINE_NO_TOML:-}" ] && [ ! -e "$HOME/.ebpf-kvm-engine.toml" ]; then
-    cat > "$HOME/.ebpf-kvm-engine.toml" <<EOF
-# Written by install.sh; the engine reads the nearest .ebpf-kvm-engine.toml walking up from the cwd.
-kernel = "$DATA/vmlinux"
-rootfs = "$DATA/rootfs-guest.ext4"
-EOF
-    say "wrote $HOME/.ebpf-kvm-engine.toml (kernel + rootfs paths)"
+    # The jailed default (real root) mknods /dev/kvm inside a chroot under the scratch dir; on a host
+    # whose default base (/tmp) is `nodev` (every systemd default) those nodes are inert and the boot
+    # fails ScratchDirNodev. Pin scratch_dir off nodev so the first `sudo ebpf-kvm-engine run` works
+    # (P20.16a); skipped when $DATA is also nodev, which pinning wouldn't fix.
+    SCRATCH=""
+    if is_nodev /tmp && ! is_nodev "$DATA"; then
+        SCRATCH="$DATA/scratch"
+        mkdir -p "$SCRATCH"
+    fi
+    {
+        say '# Written by install.sh; the engine reads the nearest .ebpf-kvm-engine.toml walking up from the cwd.'
+        printf 'kernel = "%s"\n' "$DATA/vmlinux"
+        printf 'rootfs = "%s"\n' "$DATA/rootfs-guest.ext4"
+        if [ -n "$SCRATCH" ]; then
+            printf '# /tmp is nodev on this host; a non-nodev scratch dir so the jailed default boots.\nscratch_dir = "%s"\n' "$SCRATCH"
+        fi
+    } > "$HOME/.ebpf-kvm-engine.toml"
+    if [ -n "$SCRATCH" ]; then
+        say "wrote $HOME/.ebpf-kvm-engine.toml (kernel + rootfs paths, and scratch_dir: /tmp is nodev here)"
+    else
+        say "wrote $HOME/.ebpf-kvm-engine.toml (kernel + rootfs paths)"
+    fi
 fi
 
 say ""

@@ -10,9 +10,11 @@ reproducible, offline-verifiable build closes that gap.
 
 **Decision.** Standing the engine up is one command, `cargo xtask self-host`: it obtains the pinned
 guest kernel + rootfs, builds the guest image and the eBPF probe object, installs the `ebpf-kvm-engine`
-binary into a prefix (`~/.local/bin` by default), and, on a KVM host, boots one sandbox
-to prove it end to end (`--no-run` prints the proof command instead). It is orchestration over the
-already-tested `xtask` steps, not a second code path.
+binary into a prefix (`~/.local/bin` by default), writes a starter `~/.ebpf-kvm-engine.toml` unless one
+exists (absolute artifact paths, and a non-`nodev` `scratch_dir` when `/tmp` is `nodev`, matching
+`install.sh`, decision 035), and, on a KVM host, boots one sandbox to prove it end to end (`--no-run`
+prints the proof command instead). It is orchestration over the already-tested `xtask` steps, not a
+second code path.
 
 The **vendoring** half closes the item decision 007 deferred: `cargo xtask vendor` snapshots every
 sha-pinned upstream input, the Firecracker CI kernel + rootfs, the Alpine minirootfs, the static

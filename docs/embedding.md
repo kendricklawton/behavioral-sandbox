@@ -82,8 +82,8 @@ Every failure is a typed `VmmError`; `VmmError::kind()` maps it to a pinned, clo
 | Bucket | Meaning | Caller's move |
 |---|---|---|
 | `Infra` | the host couldn't stand the VM up (incl. "agent not up yet/anymore": `GuestUnavailable`) | retry, or fix the host |
-| `Transport` | the established exec channel broke mid-run | retire this VM, take another |
-| `Guest` | the run's fault: couldn't spawn, outran its budget, flooded output, went silent | surface to the user |
+| `Transport` | the established exec channel broke mid-run, or the guest went silent past its deadline (`ExecUnresponsive`) | retire this VM, take another |
+| `Guest` | the run's fault: couldn't spawn, outran its budget, flooded output | surface to the user |
 
 The mapping is a tested contract (the wildcard-free match won't compile past a new variant until
 it's deliberately bucketed).

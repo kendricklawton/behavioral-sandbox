@@ -90,15 +90,17 @@ The table above is only as trustworthy as your ability to re-run it. The contain
 proven by the integration suite, which you can run against your own host rather than take on faith.
 
 The suite is **privileged**: it boots real microVMs and attaches real probes, so it needs a host with
-`/dev/kvm`, real root, `CAP_BPF` + `CAP_PERFMON`, and kernel BTF. Run it with:
+`/dev/kvm`, real root, `CAP_BPF` + `CAP_PERFMON`, and kernel BTF. From the repo root:
 
 ```console
-sudo -E env CARGO_TARGET_DIR="$PWD/target-privileged" cargo xtask ci-privileged
+sudo -E ./ci-privileged.sh
 ```
 
-The target-directory override is required, not optional: the gate refuses to run as root without it,
-so a root build cannot leave root-owned artifacts in `./target` that block your later non-root
-builds.
+The wrapper sets the three env concerns a `sudo` run otherwise stacks by hand (a throwaway
+`CARGO_TARGET_DIR`, a non-`nodev` `EBPF_KVM_ENGINE_SCRATCH_DIR`, and rustup's `cargo` back on `PATH`);
+the gate *refuses* to run as root without the target-directory override, so a root build cannot leave
+root-owned artifacts in `./target` that block your later non-root builds, and it pre-checks the scratch
+dir is not `nodev`. See [Building](./contributing-building.md#the-privileged-gate) for the expanded form.
 
 This runs the VM-boot and probe-attach integration tests, including the containment suite. It
 **refuses** to run without root, BTF, or the eBPF object rather than skipping those tests into a
