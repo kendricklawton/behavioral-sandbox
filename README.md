@@ -1,4 +1,4 @@
-# ebpf-kvm-engine
+# eKVM
 
 [![CI](https://github.com/packsixfour/ebpf-kvm-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/packsixfour/ebpf-kvm-engine/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
@@ -6,7 +6,7 @@
 **A self-hostable engine for running untrusted code in a hardware-isolated microVM, with a
 host-observed record of exactly what it did.**
 
-## What is ebpf-kvm-engine?
+## What is eKVM?
 
 ebpf-kvm-engine runs untrusted code inside a **Firecracker** microVM, so the trust boundary is the CPU (KVM),
 not guest-side software. Around that microVM, **host-side eBPF** (via **aya**) watches and enforces
