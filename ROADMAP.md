@@ -2400,9 +2400,12 @@ code (P20.10-P20.16) gates the `v0.1.0` tag.
       *(**Done.** Exposed release `FIRECRACKER_SHA256` pins in `xtask/src/artifacts.rs`, added binary hash
       verification to `install.sh`, and implemented advisory `ebpf-kvm-engine doctor` check for Firecracker's binary
       sha256 hash in `crates/vmm/src/doctor.rs`. Unit-tested and `docs/cli.md` updated.)*
-- [ ] **P20.14** **Sign the release manifest** (decision 040): sign `SHA256SUMS` with the host
+- [x] **P20.14** **Sign the release manifest** (decision 040): sign `SHA256SUMS` with the host
       `ed25519` signing core (decision 034) in `xtask/src/dist.rs`, and verify it in `install.sh` when a
       trusted key is present, so provenance does not rest on release-host + TLS trust alone.
+      *(**Done.** `cargo xtask dist` signs `dist/SHA256SUMS` into `dist/SHA256SUMS.sig` using `probes_loader::HostKey`,
+      `install.sh` verifies `SHA256SUMS.sig` against `EBPF_KVM_ENGINE_PUBKEY` when provided via `ebpf-kvm-engine verify`.
+      Unit-tested and `docs/supply-chain.md` updated.)*
 - [ ] **P20.15** **Fail-open degrade, tested**: prove bounded teardown on a host that lacks the sentinel
       guarantee (the cgroup-v2-unwritable Drop-only path, `crates/vmm/src/lifetime.rs`, decision 011),
       so the documented degrade is exercised, not just asserted.

@@ -17,10 +17,11 @@ it**. The reasoning behind each piece lives in its decision record; this is the 
   the sha-pinned inputs into a local mirror with a manifest, and re-checks that mirror in **both**
   directions, missing files and stray unaudited files both fail (`xtask/src/vendor.rs`,
   [decision 033](./adr/033-single-command-self-host-a-vendored-offline-mirror-of.md)).
-- **The release tarball is deterministic and double-checksummed.** An outer `SHA256SUMS` covers the
-  tarball and an inner per-file manifest covers every staged file; `install.sh` verifies both and
-  installs nothing unverified (`xtask/src/dist.rs`,
-  [decision 035](./adr/035-distribution-is-a-checksummed-tarball-an-installer.md)).
+- **The release tarball is deterministic, checksummed, and signed.** An outer `SHA256SUMS` covers the
+  tarball, an inner per-file manifest covers every staged file, and `SHA256SUMS.sig` carries an `ed25519`
+  signature; `install.sh` verifies checksums and verifies the signature when a trusted key is supplied
+  (`xtask/src/dist.rs`, [decision 035](./adr/035-distribution-is-a-checksummed-tarball-an-installer.md),
+  [decision 040](./adr/040-supply-chain-provenance-pinning-and-release-signing.md)).
 - **The Rust dependency tree is gated.** `cargo deny` fails CI on an advisory, and the build is
   `--locked` against a pinned toolchain (see [Stability & releases](./stability.md)).
 - **The audit record is host-signed.** Separate from build provenance, each finalized record carries

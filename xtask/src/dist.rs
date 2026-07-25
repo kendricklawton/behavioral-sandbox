@@ -105,12 +105,18 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     tar_stage(&dist_dir, &name, &tarball)?;
     let tar_sha = sha256_of(&tarball)?;
     let sums = dist_dir.join("SHA256SUMS");
-    std::fs::write(&sums, format!("{tar_sha}  {name}.tar.gz\n"))
-        .with_context(|| format!("write {}", sums.display()))?;
+    let sums_text = format!("{tar_sha}  {name}.tar.gz\n");
+    std::fs::write(&sums, &sums_text).with_context(|| format!("write {}", sums.display()))?;
+
+    let key_id = sign_release_manifest(&dist_dir)?;
 
     println!("\n✓ dist assembled:");
     println!("    {}", tarball.display());
     println!("    {}  (sha256 {tar_sha})", sums.display());
+    println!(
+        "    {}.sig  (ed25519 signed, key_id {key_id})",
+        sums.display()
+    );
     println!(
         "  install it (any host):   sh {}/install.sh",
         stage.display()
@@ -217,4 +223,65 @@ fn tar_stage(dist_dir: &Path, name: &str, tarball: &Path) -> Result<()> {
     }
     println!("  packed {}", tarball.display());
     Ok(())
+}
+
+/// Sign `dist/SHA256SUMS` with an `ed25519` key, writing `dist/SHA256SUMS.sig` (decision 040).
+/// Uses `EBPF_KVM_ENGINE_SIGNING_KEY` if set, otherwise loads or generates a key in `dist_dir`.
+fn sign_release_manifest(dist_dir: &Path) -> Result<String> {
+    let sums_path = dist_dir.join("SHA256SUMS");
+    let content = std::fs::read_to_string(&sums_path)
+        .with_context(|| format!("read {}", sums_path.display()))?;
+
+    let host_key = if let Ok(custom) = std::env::var("EBPF_KVM_ENGINE_SIGNING_KEY") {
+        probes_loader::HostKey::open(Path::new(&custom))
+            .with_context(|| format!("load release signing key from {custom}"))?
+    } else {
+        let key_path = dist_dir.join("release-signing.ed25519");
+        probes_loader::HostKey::load_or_generate(&key_path).with_context(|| {
+            format!(
+                "load or generate release signing key at {}",
+                key_path.display()
+            )
+        })?
+    };
+
+    let envelope = host_key.sign_canonical(&content);
+    let sig_path = dist_dir.join("SHA256SUMS.sig");
+    std::fs::write(&sig_path, &envelope)
+        .with_context(|| format!("write {}", sig_path.display()))?;
+
+    Ok(host_key.key_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn test_sign_and_verify_release_manifest() {
+        let path = std::env::temp_dir().join(format!("dist_sign_test_{}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        let _guard = TempDir(path.clone());
+
+        let sums = path.join("SHA256SUMS");
+        let sample_manifest =
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef  test.tar.gz\n";
+        std::fs::write(&sums, sample_manifest).unwrap();
+
+        let key_id = sign_release_manifest(&path).unwrap();
+        let sig_path = path.join("SHA256SUMS.sig");
+        assert!(sig_path.is_file());
+
+        let envelope = std::fs::read_to_string(&sig_path).unwrap();
+        let trusted = vec![probes_loader::TrustedKey::from_hex(&key_id).unwrap()];
+        let verified_record = probes_loader::verify(&envelope, &trusted).unwrap();
+        assert_eq!(verified_record, sample_manifest);
+    }
 }

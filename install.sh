@@ -75,6 +75,7 @@ else
         say "downloading $ASSET from $REPO v$VERSION"
         curl -fsSL -o "$TMP/$ASSET" "$BASE/$ASSET"    || fail "download failed: $BASE/$ASSET"
         curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || fail "download failed: $BASE/SHA256SUMS"
+        curl -fsSL -o "$TMP/SHA256SUMS.sig" "$BASE/SHA256SUMS.sig" 2>/dev/null || true
         ( cd "$TMP" && grep "  $ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
             || fail "sha256 verification of $ASSET failed"
         say "sha256 verified against SHA256SUMS"
@@ -101,6 +102,28 @@ fi
 ( cd "$STAGE" && grep -v '  MANIFEST\.sha256$' MANIFEST.sha256 | sha256sum --quiet -c - ) \
     || fail "package manifest verification failed"
 say "package manifest verified ($(wc -l < "$STAGE/MANIFEST.sha256") files)"
+
+# Verify the release manifest ed25519 signature if SHA256SUMS.sig is present (decision 040).
+SUMS_SIG=""
+if [ -n "$TMP" ] && [ -f "$TMP/SHA256SUMS.sig" ]; then
+    SUMS_SIG="$TMP/SHA256SUMS.sig"
+elif [ -n "$TARBALL" ] && [ -f "$(dirname -- "$TARBALL")/SHA256SUMS.sig" ]; then
+    SUMS_SIG="$(dirname -- "$TARBALL")/SHA256SUMS.sig"
+fi
+
+if [ -n "$SUMS_SIG" ]; then
+    PUBKEY="${EBPF_KVM_ENGINE_PUBKEY:-${EBPF_KVM_ENGINE_TRUSTED_KEYS:-}}"
+    if [ -n "$PUBKEY" ]; then
+        "$STAGE/bin/ebpf-kvm-engine" verify "$SUMS_SIG" --key "$PUBKEY" >/dev/null \
+            || fail "ed25519 signature verification of SHA256SUMS.sig failed for key $PUBKEY"
+        say "ed25519 signature verified against trusted public key"
+    else
+        SIG_KEY=$(grep -o '"key_id":"[^"]*"' "$SUMS_SIG" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
+        if [ -n "$SIG_KEY" ]; then
+            say "note: SHA256SUMS is ed25519-signed (key_id ${SIG_KEY:0:16}...); set EBPF_KVM_ENGINE_PUBKEY to verify"
+        fi
+    fi
+fi
 
 mkdir -p "$PREFIX" "$DATA"
 install -m 0755 "$STAGE/bin/ebpf-kvm-engine" "$PREFIX/ebpf-kvm-engine"
