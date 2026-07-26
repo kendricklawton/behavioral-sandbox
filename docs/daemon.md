@@ -42,7 +42,11 @@ connect-loop walking the host into memory/KVM/fd exhaustion. `at_capacity` is it
 . Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
 Because a session's `open` may ask for a custom size, `--max-sessions` alone can't bound a
 memory-heterogeneous fleet; add `--max-committed-mem-mib` / `--max-committed-vcpus` to bound the
-*summed* committed memory / vCPUs across live sessions (also refused with `at_capacity` before boot).
+*summed* committed memory / vCPUs across live sessions **and pre-warmed pool clones** (a clone's
+RAM is real before any session exists, so the pool charges the ceiling too: a `--prewarm` the
+ceiling can't hold refuses to start, a refill only restores what current headroom affords, and a
+warm take hands its clone's charge over to the session's own reservation). Sessions past the
+ceiling are refused with `at_capacity` before boot.
 This is engine self-protection, not tenancy: no queueing, no auth, no scheduling.
 
 **Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
@@ -251,6 +255,7 @@ convention of base units: **seconds**, never milliseconds.
 | `ekvm_build_info{version=…}` | gauge | Build metadata (value always 1). |
 | `ekvm_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
 | `ekvm_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
+| `ekvm_open_refusals_total{reason=…}` | counter | `at_capacity` refusals, by which ceiling refused: `sessions` (`--max-sessions`) vs `resources` (`--max-committed-*`). A flat zero here plus flat opens means saturation, not calm. |
 | `ekvm_sessions_active` | gauge | Sessions currently open (one live microVM each). |
 | `ekvm_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
 | `ekvm_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
@@ -260,7 +265,7 @@ convention of base units: **seconds**, never milliseconds.
 | `ekvm_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
 | `ekvm_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
 | `ekvm_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
-| `ekvm_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions. |
+| `ekvm_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions and pre-warmed pool clones: the RAM actually spoken for. |
 | `ekvm_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
 
 A minimal scrape config:

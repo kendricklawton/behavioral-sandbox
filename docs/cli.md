@@ -161,6 +161,8 @@ whose bounded party can override it is not a ceiling.
 | `max_vcpus`, `max_mem_mib`, `max_wall_secs`, `max_output_cap` | ceiling | bounds what a caller may ask for |
 | `require_jail` | posture | withdraws the `--unjailed` opt-out on this host |
 | `allow_net` | posture | `false` refuses `--net` outright (a NIC still gets deny-by-default egress) |
+| `require_record` | posture | refuses any run that would leave no audit record (including `ekvm shell`, which cannot record) |
+| `records_dir` | default | every `run` writes its signed record there (`run-<secs>-<pid>.json`) unless `--record` names a path; satisfies `require_record` on its own |
 
 The two kinds compose differently, and the difference is whether a caller actually asked:
 

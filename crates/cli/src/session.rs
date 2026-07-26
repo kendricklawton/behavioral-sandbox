@@ -34,7 +34,10 @@ use protocol::{read_message, write_message, ProtocolError, Request, Response};
 use vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::{Metrics, Verb};
-use crate::serve::{ResourceReservation, Server, AT_CAPACITY_RETRY_MS};
+use crate::serve::{
+    pool_clone_limits, release_pool_clones, reserve_pool_clones, ResourceReservation, Server,
+    AT_CAPACITY_RETRY_MS,
+};
 
 /// The no-op command `put`/`get` run: the engine injects files and returns artifacts only *around an
 /// exec*, so a bare file write/read rides a command that does nothing but carry them. `true` exits 0
@@ -101,6 +104,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
     ) {
         Some(reservation) => reservation,
         None => {
+            server.metrics.open_refused(true);
             tracing::warn!(
                 mem_mib = limits.mem_mib.get(),
                 vcpus = limits.vcpus.get(),
@@ -406,7 +410,11 @@ fn boot_session_vm(
     limits: Limits,
     bare: bool,
 ) -> Result<(RunningVm, bool), VmmError> {
-    if bare {
+    // Pool-eligible only when the resolved limits equal the clones' actual profile, not merely
+    // when the request was bare: with operator defaults set, a bare open resolves to a different
+    // profile than the pooled clones hold, and handing one out would both under-serve the session
+    // and desynchronize the committed-resource accounting from the real footprint.
+    if bare && limits == pool_clone_limits() {
         if let Some(pool) = &server.pool {
             match pool.try_lock() {
                 Ok(mut p) => {
@@ -415,7 +423,14 @@ fn boot_session_vm(
                     // lock-free cold boot below.
                     if p.ready() > 0 {
                         match p.take() {
-                            Ok(vm) => return Ok((vm, true)),
+                            Ok(vm) => {
+                                // The clone's charge hands off to the session's own reservation
+                                // (already acquired), so the committed gauges keep matching the
+                                // RAM actually resident; the brief overlap between the two
+                                // charges is conservative, never an undercount.
+                                release_pool_clones(server, 1, &pool_clone_limits());
+                                return Ok((vm, true));
+                            }
                             Err(e) => tracing::warn!(
                                 error = %e,
                                 "pool take failed; cold-booting this session"
@@ -481,11 +496,39 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
     }
     if let Some(pool) = &server.pool {
         match pool.try_lock() {
-            Ok(mut p) => match p.refill() {
-                Ok(n) if n > 0 => tracing::debug!(restored = n, "pool refilled after session"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "pool refill failed"),
-            },
+            Ok(mut p) => {
+                // Reserve-then-restore, one clone at a time: each restored clone is paid for
+                // against the committed ceilings *before* it exists, so a refill can never push
+                // the daemon past a ceiling that live sessions' reservations are holding. No
+                // headroom means no refill this close; stock recovers on a later one.
+                let clone = pool_clone_limits();
+                let mut restored = 0usize;
+                loop {
+                    if reserve_pool_clones(server, 1, &clone) == 0 {
+                        tracing::debug!(
+                            restored,
+                            "no committed-resource headroom for a pool refill; deferring"
+                        );
+                        break;
+                    }
+                    match p.refill_up_to(1) {
+                        Ok(1) => restored += 1,
+                        Ok(_) => {
+                            // Already at target: the speculative reservation buys nothing.
+                            release_pool_clones(server, 1, &clone);
+                            break;
+                        }
+                        Err(e) => {
+                            release_pool_clones(server, 1, &clone);
+                            tracing::warn!(error = %e, "pool refill failed");
+                            break;
+                        }
+                    }
+                }
+                if restored > 0 {
+                    tracing::debug!(restored, "pool refilled after session");
+                }
+            }
             Err(TryLockError::WouldBlock) => {
                 tracing::debug!("pool busy; skipping refill on this close")
             }

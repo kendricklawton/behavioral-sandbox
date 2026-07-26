@@ -167,6 +167,11 @@ pub struct Metrics {
     opened_cold: AtomicU64,
     /// `open`s that failed to produce a sandbox (boot/restore failure, invalid limits).
     open_failures: AtomicU64,
+    /// Connections/opens refused with `at_capacity`, by which ceiling refused them: the session
+    /// count (`--max-sessions`) vs an aggregate resource ceiling (`--max-committed-*`). Without
+    /// this, a saturated daemon scrapes as healthy while bouncing every caller.
+    refused_sessions: AtomicU64,
+    refused_resources: AtomicU64,
     /// Sessions currently open (gauge).
     active: AtomicU64,
     /// Active sessions whose VM-lifetime sentinel could not be armed (gauge).
@@ -206,6 +211,16 @@ impl Metrics {
     /// An `open` that never produced a sandbox.
     pub fn open_failed(&self) {
         self.open_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A connection or `open` refused with `at_capacity`: `resource_ceiling` distinguishes an
+    /// aggregate committed-resource refusal from the session-count ceiling.
+    pub fn open_refused(&self, resource_ceiling: bool) {
+        if resource_ceiling {
+            self.refused_resources.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.refused_sessions.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// A live session ended (any path: `close`, EOF, a fatal fault). Paired with
@@ -310,6 +325,25 @@ impl Metrics {
             "ekvm_session_open_failures_total",
             "",
             self.open_failures.load(Ordering::Relaxed),
+        );
+
+        family(
+            &mut out,
+            "ekvm_open_refusals_total",
+            "Connections/opens refused with at_capacity, by which ceiling refused them.",
+            "counter",
+        );
+        sample(
+            &mut out,
+            "ekvm_open_refusals_total",
+            "{reason=\"sessions\"}",
+            self.refused_sessions.load(Ordering::Relaxed),
+        );
+        sample(
+            &mut out,
+            "ekvm_open_refusals_total",
+            "{reason=\"resources\"}",
+            self.refused_resources.load(Ordering::Relaxed),
         );
 
         family(
@@ -693,6 +727,9 @@ mod tests {
         m.session_opened(false, Duration::from_millis(100), true);
         m.session_closed(true);
         m.open_failed();
+        m.open_refused(false);
+        m.open_refused(true);
+        m.open_refused(true);
         m.request(Verb::Exec);
         m.request(Verb::Trace);
         m.guest_command(Duration::from_millis(7));
@@ -705,6 +742,7 @@ mod tests {
             "ekvm_build_info",
             "ekvm_sessions_opened_total",
             "ekvm_session_open_failures_total",
+            "ekvm_open_refusals_total",
             "ekvm_sessions_active",
             "ekvm_requests_total",
             "ekvm_request_errors_total",
@@ -728,6 +766,14 @@ mod tests {
         );
         assert!(
             text.contains("ekvm_session_open_failures_total 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ekvm_open_refusals_total{reason=\"sessions\"} 1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ekvm_open_refusals_total{reason=\"resources\"} 2"),
             "{text}"
         );
         assert!(

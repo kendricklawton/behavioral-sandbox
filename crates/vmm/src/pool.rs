@@ -146,8 +146,19 @@ impl Pool {
     /// # Errors
     /// The first [`Vm::restore`] failure; clones restored before it stay pooled.
     pub fn refill(&mut self) -> Result<usize, VmmError> {
+        self.refill_up_to(usize::MAX)
+    }
+
+    /// Like [`refill`](Self::refill), but restore at most `max_new` clones this call: for a caller
+    /// that accounts pool memory against a host-wide ceiling and can only pay for part of the
+    /// shortfall right now. The pool stays below target rather than overshooting the caller's
+    /// budget; a later call tops up the rest.
+    ///
+    /// # Errors
+    /// The first [`Vm::restore`] failure; clones restored before it stay pooled.
+    pub fn refill_up_to(&mut self, max_new: usize) -> Result<usize, VmmError> {
         let mut restored = 0;
-        while self.ready.len() < self.target {
+        while self.ready.len() < self.target && restored < max_new {
             self.ready.push(Vm::restore(&self.snapshot, &self.config)?);
             restored += 1;
         }

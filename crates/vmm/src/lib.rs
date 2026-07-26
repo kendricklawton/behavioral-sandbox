@@ -316,7 +316,7 @@ pub const FDS_PER_VM: usize = 8;
 /// wall) hands every default run more resource and is a **breaking change worth a changelog line and
 /// a public-API commit subject**, not a quiet bump. Lowering one, or adding a new field (the struct
 /// is `#[non_exhaustive]`), is safe.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Limits {
     /// Guest vCPUs. Typed [`NonZeroU8`]: a zero-vCPU guest is not a small budget but an

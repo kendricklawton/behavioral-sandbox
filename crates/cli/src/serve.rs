@@ -124,14 +124,17 @@ pub struct ServeArgs {
     /// Ceiling on the captured-output cap (bytes) a session's `open` may ask for.
     #[arg(long, value_name = "BYTES")]
     max_output_cap: Option<usize>,
-    /// Aggregate ceiling on the **summed guest memory** (MiB) across all live sessions, the resource
+    /// Aggregate ceiling on the **summed guest memory** (MiB) across all live sessions *and*
+    /// pre-warmed pool clones (their RAM is real before any session exists), the resource
     /// counterpart to `--max-sessions`: a session whose `open` would push committed
     /// memory past this is refused with `at_capacity`, *before* booting, so a memory-heterogeneous
-    /// fleet can't overcommit the host into OOM. Distinct from `--max-mem-mib`, which bounds one
+    /// fleet can't overcommit the host into OOM. A `--prewarm` that alone exceeds it refuses to
+    /// start. Distinct from `--max-mem-mib`, which bounds one
     /// request. `0` (the default) is unlimited: the count ceiling alone applies.
     #[arg(long, value_name = "MIB", default_value_t = 0)]
     max_committed_mem_mib: u64,
-    /// Aggregate ceiling on the **summed vCPUs** committed across all live sessions.
+    /// Aggregate ceiling on the **summed vCPUs** committed across all live sessions and
+    /// pre-warmed pool clones.
     /// Past it a session's `open` is refused with `at_capacity` before booting. Set it to your CPU
     /// oversubscription budget (e.g. physical cores × a ratio). `0` (the default) is unlimited.
     #[arg(long, value_name = "N", default_value_t = 0)]
@@ -298,6 +301,30 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         }
     };
     let pool = build_optional_pool(args.prewarm, &base, jailed);
+    // The pool's clones hold real guest RAM before any session exists, so they charge the
+    // committed ceilings from the start (the gauges then show true headroom, and admission can't
+    // overcommit the host by the pool's footprint). A --prewarm the ceiling can't even hold is a
+    // misconfiguration: refused here, loudly, not silently overcommitted.
+    let clone = pool_clone_limits();
+    let pool_ready = pool
+        .as_ref()
+        .map_or(0, |p| p.lock().map_or(0, |guard| guard.ready()));
+    let pool_mem = pool_ready as u64 * u64::from(clone.mem_mib.get());
+    let pool_vcpus = pool_ready as u64 * u64::from(clone.vcpus.get());
+    if (args.max_committed_mem_mib != 0 && pool_mem > args.max_committed_mem_mib)
+        || (args.max_committed_vcpus != 0 && pool_vcpus > args.max_committed_vcpus)
+    {
+        tracing::error!(
+            prewarm = pool_ready,
+            pool_mem_mib = pool_mem,
+            pool_vcpus,
+            max_committed_mem_mib = args.max_committed_mem_mib,
+            max_committed_vcpus = args.max_committed_vcpus,
+            "the pre-warmed pool alone exceeds a committed-resource ceiling; lower --prewarm or \
+             raise the ceiling"
+        );
+        return ExitCode::from(EXIT_OPERATIONAL);
+    }
     // The daemon takes policy from its flags, not from a discovered `.ekvm.toml`: a daemon must not
     // read a security control out of whatever directory it happened to be started in. Jail and
     // networking are already daemon-wide and client-immutable (`--unjailed` above), so only the
@@ -323,8 +350,8 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         idle_timeout: (args.idle_timeout > 0)
             .then(|| std::time::Duration::from_secs(args.idle_timeout)),
         active_sessions: AtomicUsize::new(0),
-        committed_mem_mib: AtomicU64::new(0),
-        committed_vcpus: AtomicU64::new(0),
+        committed_mem_mib: AtomicU64::new(pool_mem),
+        committed_vcpus: AtomicU64::new(pool_vcpus),
         max_committed_mem_mib: args.max_committed_mem_mib,
         max_committed_vcpus: args.max_committed_vcpus,
     });
@@ -521,6 +548,51 @@ fn charge(current: &AtomicU64, ceiling: u64, amount: u64) -> bool {
     }
 }
 
+/// The resource profile every pre-warmed clone holds: the engine default, single-sourced here so
+/// the pool builder, the admission charges, and the take-handoff release can never disagree about
+/// a clone's real footprint.
+pub(crate) fn pool_clone_limits() -> Limits {
+    Limits::default()
+}
+
+/// Reserve committed-resource headroom for up to `want` pool clones (per clone: mem then vcpus,
+/// the mem charge rolled back if the vcpu leg refuses, the same shape as
+/// [`ResourceReservation::try_acquire`]), returning how many were paid for. The refill that
+/// follows restores at most that many, so topping the pool up can never push the daemon past a
+/// ceiling that live sessions' reservations are holding.
+pub(crate) fn reserve_pool_clones(server: &Server, want: usize, clone: &Limits) -> usize {
+    let mem = u64::from(clone.mem_mib.get());
+    let vcpus = u64::from(clone.vcpus.get());
+    let mut reserved = 0;
+    while reserved < want {
+        if !charge(&server.committed_mem_mib, server.max_committed_mem_mib, mem) {
+            break;
+        }
+        if !charge(&server.committed_vcpus, server.max_committed_vcpus, vcpus) {
+            server.committed_mem_mib.fetch_sub(mem, Ordering::Relaxed);
+            break;
+        }
+        reserved += 1;
+    }
+    reserved
+}
+
+/// Release `n` clones' worth of committed resources: the exact inverse of
+/// [`reserve_pool_clones`], also used when a pooled clone hands off to a session (whose own
+/// reservation covers the VM from then on).
+pub(crate) fn release_pool_clones(server: &Server, n: usize, clone: &Limits) {
+    if n == 0 {
+        return;
+    }
+    let n = n as u64;
+    server
+        .committed_mem_mib
+        .fetch_sub(n * u64::from(clone.mem_mib.get()), Ordering::Relaxed);
+    server
+        .committed_vcpus
+        .fetch_sub(n * u64::from(clone.vcpus.get()), Ordering::Relaxed);
+}
+
 /// Backoff hint sent with an [`protocol::Response::AtCapacity`] refusal. A hint only: the daemon
 /// cannot know when a slot frees, and a fleet dispatcher typically fails over to another host rather
 /// than waiting, so this is a modest "come back shortly" value, not a promise.
@@ -532,6 +604,7 @@ pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
 /// write is timeout-bounded so a stalled client can't park the accept loop, and best-effort, the
 /// refusal itself must never take the daemon down.
 fn refuse_at_capacity(stream: UnixStream, server: &Server) {
+    server.metrics.open_refused(false);
     tracing::warn!(
         max_sessions = server.max_sessions,
         "refusing a connection: at the session ceiling"
@@ -734,7 +807,7 @@ fn build_pool_from(
     //    the source *must* be unjailed to be snapshotted, and an unjailed boot can't be capped, so a
     //    require_limits daemon would otherwise refuse to build its own pool. The enforcement lands on
     //    the jailed clones (step 3), which is where untrusted code actually runs.
-    let mut source_config = base.clone().with_limits(Limits::default());
+    let mut source_config = base.clone().with_limits(pool_clone_limits());
     source_config.require_limits = false;
     let source = Sandbox::open_unjailed(source_config)?;
 
@@ -749,7 +822,7 @@ fn build_pool_from(
 
     // 3. Restore `target` clones under the daemon's confinement posture (jailed by default). The
     //    clones inherit the snapshot's vsock, so sessions exec over it exactly like a cold boot.
-    let mut pool_config = base.clone().with_limits(Limits::default());
+    let mut pool_config = base.clone().with_limits(pool_clone_limits());
     pool_config.jail = if jailed {
         Some(pool_config.jail.unwrap_or_default())
     } else {
@@ -977,6 +1050,75 @@ mod tests {
             server.committed_mem_mib.load(Ordering::Relaxed),
             0,
             "the memory charge must be rolled back when the vCPU charge is refused"
+        );
+    }
+
+    #[test]
+    fn pool_clone_reservations_respect_the_ceiling_and_release_symmetrically() {
+        // The pool's clones charge the same committed atomics as sessions, so a refill can only
+        // restore what the ceiling affords, and releasing is the exact inverse.
+        let clone = pool_clone_limits();
+        let clone_mem = u64::from(clone.mem_mib.get());
+        // Room for exactly 2 clones (and no third).
+        let server = build_test_server(0, clone_mem * 2, 0);
+        assert_eq!(
+            reserve_pool_clones(&server, 5, &clone),
+            2,
+            "a want of 5 is capped at what the memory ceiling affords"
+        );
+        assert_eq!(
+            server.committed_mem_mib.load(Ordering::Relaxed),
+            clone_mem * 2
+        );
+        release_pool_clones(&server, 2, &clone);
+        assert_eq!(
+            server.committed_mem_mib.load(Ordering::Relaxed),
+            0,
+            "release is symmetric"
+        );
+        assert_eq!(server.committed_vcpus.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_pool_clone_vcpu_refusal_rolls_back_its_memory_charge() {
+        let clone = pool_clone_limits();
+        // Memory affords plenty; vCPUs afford exactly one clone.
+        let server = build_test_server(0, 0, u64::from(clone.vcpus.get()));
+        assert_eq!(reserve_pool_clones(&server, 3, &clone), 1);
+        release_pool_clones(&server, 1, &clone);
+        assert_eq!(
+            server.committed_mem_mib.load(Ordering::Relaxed),
+            0,
+            "the refused clone's memory leg must not linger"
+        );
+    }
+
+    #[test]
+    fn a_pooled_take_hands_its_charge_to_the_session_reservation() {
+        // Startup charges the pool; an open reserves its own footprint; the take releases one
+        // clone. Net committed equals one session's worth, exactly the RAM actually resident.
+        let clone = pool_clone_limits();
+        let clone_mem = u64::from(clone.mem_mib.get());
+        let clone_vcpus = u64::from(clone.vcpus.get());
+        let server = build_test_server(0, 0, 0);
+        // Two prewarmed clones charged at startup (what serve() initializes the atomics to).
+        server
+            .committed_mem_mib
+            .store(clone_mem * 2, Ordering::Relaxed);
+        server
+            .committed_vcpus
+            .store(clone_vcpus * 2, Ordering::Relaxed);
+        let _session = ResourceReservation::try_acquire(&server, clone_mem, clone_vcpus)
+            .expect("admits with no ceiling");
+        release_pool_clones(&server, 1, &clone);
+        assert_eq!(
+            server.committed_mem_mib.load(Ordering::Relaxed),
+            clone_mem * 2,
+            "one remaining clone + one live session = two clone-footprints committed"
+        );
+        assert_eq!(
+            server.committed_vcpus.load(Ordering::Relaxed),
+            clone_vcpus * 2
         );
     }
 

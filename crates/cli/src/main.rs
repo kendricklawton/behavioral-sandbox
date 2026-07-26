@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use ekvm::policy::{parse_allow, AllowRule, Requested};
+use ekvm::policy::{parse_allow, AllowRule, Policy, Requested};
 use ekvm::MAX_VCPUS;
 use probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
 use vmm::{sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
@@ -71,8 +71,25 @@ impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Cli(_) => None,
-            Self::Engine(e) => Some(e),
+            // Transparent wrapper: `Display` already prints `e`'s own message, so the chain must
+            // continue from `e`'s cause, or a chain-walking reporter prints the message twice.
+            Self::Engine(e) => e.source(),
         }
+    }
+}
+
+#[cfg(test)]
+mod cli_error_tests {
+    use super::*;
+
+    #[test]
+    fn engine_wrapper_is_transparent_not_a_duplicate_chain() {
+        let err = CliError::from(VmmError::Vmm("boot failed".into()));
+        // Display carries the engine message once ...
+        assert_eq!(err.to_string(), "vmm error: boot failed");
+        // ... so `source()` must not surface the same message again.
+        let dup = std::error::Error::source(&err).is_some_and(|s| s.to_string() == err.to_string());
+        assert!(!dup, "source() repeats what Display already printed");
     }
 }
 
@@ -133,6 +150,8 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     /// Open an interactive session in a microVM.
     /// One command per line. State persists on the session's filesystem until you exit; shell
     /// process state (a `cd`, a variable) does not, because each line is its own exec.
+    /// The operator policy (`.ekvm.toml` ceilings, `require_jail`, `require_record`) binds
+    /// exactly as it does for `run`.
     Shell(ShellArgs),
     /// Check whether this host can run the engine.
     /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
@@ -392,8 +411,15 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     host_policy
         .check_net(args.net)
         .map_err(|e| CliError::Cli(e.to_string()))?;
+    // The effective signed-record destination: an explicit `--record` wins; otherwise the
+    // operator's `records_dir` records every run there by default (which is also how a
+    // `require_record` host is satisfied without callers remembering a flag).
+    let record_path: Option<PathBuf> = args
+        .record
+        .clone()
+        .or_else(|| host_policy.records_dir.as_deref().map(default_record_path));
     host_policy
-        .check_record(args.record.is_some() || args.record_summary.is_some())
+        .check_record(record_path.is_some() || args.record_summary.is_some())
         .map_err(|e| CliError::Cli(e.to_string()))?;
 
     // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
@@ -458,7 +484,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
     // enforcement is a typed refusal (`attach`).
     let observing = args.trace
-        || args.record.is_some()
+        || record_path.is_some()
         || args.record_summary.is_some()
         || args.watch
         || egress.is_some();
@@ -592,17 +618,29 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
             // makes the two conflict; machine consumers take `--record`).
             let _ = writeln!(std::io::stdout(), "\n{}", trace::render(&record).trim_end());
         }
-        if let Some(path) = &args.record {
+        if let Some(path) = &record_path {
             // The machine surface, one line, byte-stable: the deterministic record wrapped in an
-            // `ed25519` signature envelope. so a consumer detects post-hoc alteration
+            // `ed25519` signature envelope, so a consumer detects post-hoc alteration
             // off-host. The signing key is host-side (the guest never sees it), loaded/generated at
             // the config-resolved path.
+            let source = if args.record.is_some() {
+                "--record"
+            } else {
+                // A defaulted destination is operator config, so materialize the directory; an
+                // explicit `--record` path's parent stays the caller's responsibility.
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir).map_err(|e| {
+                        VmmError::Artifact(format!("records_dir {}: {e}", dir.display()))
+                    })?;
+                }
+                "records_dir"
+            };
             let key_path = config::signing_key_path(file);
             let key = probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
                 VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
             })?;
             std::fs::write(path, key.sign_record(&record) + "\n")
-                .map_err(|e| VmmError::Artifact(format!("--record {}: {e}", path.display())))?;
+                .map_err(|e| VmmError::Artifact(format!("{source} {}: {e}", path.display())))?;
             tracing::info!(path = %path.display(), key_id = %key.key_id(), "wrote signed audit record");
         }
         if let Some(path) = &args.record_summary {
@@ -621,7 +659,8 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
 fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
-    let mut config = base_config(file).with_limits(limits_with(args.vcpus, args.mem));
+    let limits = shell_policy(&args, &config::policy_of(file))?;
+    let mut config = base_config(file).with_limits(limits);
     if args.require_limits {
         config.require_limits = true;
     }
@@ -709,19 +748,40 @@ fn build_egress(allows: &[AllowRule]) -> Result<EgressPolicy, CliError> {
     Ok(policy)
 }
 
-/// Fold the `--vcpus`/`--mem` overrides onto the default [`Limits`], the two resource knobs both
-/// `run` and `shell` project. An unset flag keeps the (deliberately conservative) default; a set one
-/// carries the already-validated [`NonZeroU8`]/[`NonZeroU32`] the parsers produced. `run` layers its
-/// own `--wall`/`--output-cap` on top of the result.
-fn limits_with(vcpus: Option<NonZeroU8>, mem_mib: Option<NonZeroU32>) -> Limits {
-    let mut limits = Limits::default();
-    if let Some(vcpus) = vcpus {
-        limits.vcpus = vcpus;
-    }
-    if let Some(mem_mib) = mem_mib {
-        limits.mem_mib = mem_mib;
-    }
-    limits
+/// The defaulted signed-record destination under the operator's `records_dir`:
+/// `run-<epoch-secs>-<pid>.json`, unique per run (one record write per process) and
+/// time-sortable by name, with no timestamp dependency.
+fn default_record_path(dir: &Path) -> PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    dir.join(format!("run-{secs}-{}.json", std::process::id()))
+}
+
+/// Resolve `ekvm shell`'s limits and posture against the operator policy: the same boundary
+/// `run_command` enforces, so switching subcommand cannot bypass a ceiling, `require_jail`, or
+/// `require_record`. Operator *defaults* apply too: an unset `--vcpus`/`--mem` takes the host's
+/// default profile, not the bare engine default. Shell has no `--net`, so the net/egress checks
+/// have nothing to check.
+fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliError> {
+    let limits = host_policy
+        .resolve(&Requested {
+            vcpus: args.vcpus,
+            mem_mib: args.mem,
+            wall_secs: None,
+            output_cap: None,
+        })
+        .map_err(|e| CliError::Cli(e.to_string()))?;
+    host_policy
+        .check_jail(args.unjailed)
+        .map_err(|e| CliError::Cli(e.to_string()))?;
+    // A shell session writes no audit record, so a record-requiring host refuses it outright
+    // rather than hosting an unauditable execution path.
+    host_policy
+        .check_record(false)
+        .map_err(|e| CliError::Cli(format!("{e} (an interactive shell writes no audit record)")))?;
+    Ok(limits)
 }
 
 /// Parse `--vcpus`: a whole number in `1..=32` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing
@@ -908,8 +968,8 @@ fn init_tracing(filter: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_egress, limits_with, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus,
-        write_artifacts_in, AllowRule, Artifact, MAX_VCPUS,
+        build_egress, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus, shell_policy,
+        write_artifacts_in, AllowRule, Artifact, Policy, ShellArgs, MAX_VCPUS,
     };
     use probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
     use std::net::Ipv4Addr;
@@ -1044,19 +1104,77 @@ mod tests {
         assert!(format!("{err}").contains(&MAX_POLICY_RULES.to_string()));
     }
 
+    fn shell_args(vcpus: Option<u8>, mem: Option<u32>, unjailed: bool) -> ShellArgs {
+        ShellArgs {
+            unjailed,
+            require_limits: false,
+            vcpus: vcpus.and_then(NonZeroU8::new),
+            mem: mem.and_then(NonZeroU32::new),
+        }
+    }
+
     #[test]
-    fn limits_fold_overrides_onto_conservative_defaults() {
-        // An unset flag keeps the default; a set one wins. The other knobs are untouched by this
-        // helper (run layers wall/output-cap separately).
-        let d = vmm::Limits::default();
-        let none = limits_with(None, None);
-        assert_eq!(none.vcpus, d.vcpus);
-        assert_eq!(none.mem_mib, d.mem_mib);
-        let both = limits_with(NonZeroU8::new(4), NonZeroU32::new(1024));
-        assert_eq!(both.vcpus.get(), 4);
-        assert_eq!(both.mem_mib.get(), 1024);
-        assert_eq!(both.wall, d.wall, "wall is not this helper's to touch");
-        assert_eq!(both.output_cap, d.output_cap);
+    fn default_record_path_lands_under_records_dir_with_a_unique_name() {
+        let dir = std::path::Path::new("/var/log/ekvm");
+        let path = super::default_record_path(dir);
+        assert!(path.starts_with(dir), "joins under the operator's dir");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with("run-") && name.ends_with(".json"),
+            "{name}"
+        );
+        assert!(
+            name.contains(&std::process::id().to_string()),
+            "pid makes the name unique per process: {name}"
+        );
+    }
+
+    #[test]
+    fn shell_enforces_the_same_operator_policy_as_run() {
+        // The bypass this closes: `require_jail`/ceilings must bind `shell` exactly as they bind
+        // `run`; switching subcommand is not an opt-out.
+        let policy = Policy {
+            max_mem_mib: NonZeroU32::new(512),
+            require_jail: true,
+            ..Policy::default()
+        };
+        let err = shell_policy(&shell_args(None, Some(65536), false), &policy)
+            .expect_err("an over-ceiling ask is refused");
+        assert!(
+            format!("{err}").contains("512"),
+            "refusal names the ceiling: {err}"
+        );
+        let err = shell_policy(&shell_args(None, None, true), &policy)
+            .expect_err("--unjailed is refused where the operator withdrew it");
+        assert!(
+            format!("{err}").contains("jail"),
+            "refusal names the jail: {err}"
+        );
+
+        // A record-requiring host refuses the unauditable interactive path outright.
+        let recording = Policy {
+            require_record: true,
+            ..Policy::default()
+        };
+        let err = shell_policy(&shell_args(None, None, false), &recording)
+            .expect_err("require_record refuses a shell");
+        assert!(format!("{err}").contains("audit record"), "{err}");
+    }
+
+    #[test]
+    fn shell_takes_operator_defaults_and_flag_overrides() {
+        let policy = Policy {
+            vcpus: NonZeroU8::new(2),
+            mem_mib: NonZeroU32::new(1024),
+            ..Policy::default()
+        };
+        let defaults = shell_policy(&shell_args(None, None, false), &policy).expect("resolves");
+        assert_eq!(defaults.vcpus.get(), 2, "unset flag takes the host default");
+        assert_eq!(defaults.mem_mib.get(), 1024);
+        let asked = shell_policy(&shell_args(Some(4), Some(2048), false), &policy)
+            .expect("an in-ceiling ask resolves");
+        assert_eq!(asked.vcpus.get(), 4, "a set flag wins over the default");
+        assert_eq!(asked.mem_mib.get(), 2048);
     }
 
     #[test]
