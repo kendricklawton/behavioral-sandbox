@@ -48,7 +48,7 @@ pub enum ClientError {
     },
     /// The daemon refused because it is **at capacity** (an [`AtCapacity`](Response::AtCapacity)
     /// reply): backpressure, distinct from a request fault, so a dispatcher fails over to another host
-    /// rather than treating it as terminal (decision 042). Always session-ending.
+    /// rather than treating it as terminal. Always session-ending.
     AtCapacity {
         /// The daemon's suggested backoff before retrying, milliseconds. A hint only.
         retry_after_ms: u64,
@@ -139,7 +139,6 @@ pub struct Client {
 impl Client {
     /// Connect to the daemon listening at `socket`. Does not open a session yet, call
     /// [`open`](Self::open) first.
-    ///
     /// # Errors
     /// The underlying connect error if the socket is absent or not accepting.
     pub fn connect(socket: impl AsRef<Path>) -> std::io::Result<Self> {
@@ -154,7 +153,6 @@ impl Client {
     /// Bound how long a call blocks waiting for a reply, so a wedged daemon can't hang the caller
     /// forever. `None` blocks indefinitely (the default). A boot can take seconds, so set this
     /// generously if you set it at all.
-    ///
     /// # Errors
     /// The underlying `setsockopt` error.
     pub fn set_read_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
@@ -165,7 +163,6 @@ impl Client {
     /// the caller forever: without it a large `put`/`exec` fills the socket buffer and blocks in
     /// `write_message` with no opt-out. `None` blocks indefinitely (the default). Set it generously
     /// (a big `put` is real bytes over the socket), like the read timeout.
-    ///
     /// # Errors
     /// The underlying `setsockopt` error.
     pub fn set_write_timeout(&mut self, timeout: Option<Duration>) -> std::io::Result<()> {
@@ -174,7 +171,6 @@ impl Client {
 
     /// Open the session's sandbox. Must be the first call; the daemon boots a microVM and reports
     /// its latency (and whether it came from the warm pool).
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault, a remote error (e.g. a boot failure), or an unexpected
     /// reply.
@@ -193,7 +189,6 @@ impl Client {
 
     /// Run one command in the open session, feeding `stdin`. Repeated calls share the session's
     /// working directory (the VM is the session).
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error (a command that couldn't spawn is a
     /// non-fatal [`Remote`](ClientError::Remote); the session survives it).
@@ -220,7 +215,6 @@ impl Client {
 
     /// Write `content` (UTF-8 text) to `path` in the session's working directory, so a later
     /// [`exec`](Self::exec) sees it.
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn put(&mut self, path: &str, content: &str) -> Result<(), ClientError> {
@@ -236,7 +230,6 @@ impl Client {
 
     /// Read `path` back from the session's working directory. `Ok(None)` is a missing file (not an
     /// error); `Ok(Some(content))` is its lossy-UTF-8 contents.
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn get(&mut self, path: &str) -> Result<Option<String>, ClientError> {
@@ -253,7 +246,6 @@ impl Client {
 
     /// Snapshot the session's VM, returning the **daemon-host** path of the bundle. A jailed session
     /// is a typed remote refusal (its disk is in the chroot).
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error (including the jailed refusal).
     pub fn snapshot(&mut self) -> Result<String, ClientError> {
@@ -266,7 +258,6 @@ impl Client {
 
     /// Fetch the session's host-observed audit record so far, as the `RunRecord` JSON object. Carried
     /// opaquely so this client stays free of the probes-loader types; parse it with `serde_json`.
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn trace(&mut self) -> Result<serde_json::Value, ClientError> {
@@ -280,7 +271,6 @@ impl Client {
     /// Fetch the session's model-legible **summary** so far, as the projection JSON object, the same
     /// compact face the CLI's `--record-summary` writes, shaped for an agent's observe→act loop.
     /// Carried opaquely like [`trace`](Self::trace); parse it with `serde_json`.
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn trace_summary(&mut self) -> Result<serde_json::Value, ClientError> {
@@ -293,7 +283,6 @@ impl Client {
 
     /// End the session: ask the daemon to tear the sandbox down and acknowledge. Dropping the client
     /// does the same teardown without the acknowledgement.
-    ///
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn close(&mut self) -> Result<(), ClientError> {
@@ -312,7 +301,7 @@ impl Client {
     /// Read one response line, mapping a clean EOF to [`ClientError::Closed`], a remote
     /// [`Error`](Response::Error) to [`ClientError::Remote`], and an
     /// [`AtCapacity`](Response::AtCapacity) refusal to [`ClientError::AtCapacity`], so callers only
-    /// match the replies they expect and see backpressure as its own class (decision 042).
+    /// match the replies they expect and see backpressure as its own class.
     fn recv(&mut self) -> Result<Response, ClientError> {
         match read_message::<Response>(&mut self.reader)? {
             None => Err(ClientError::Closed),

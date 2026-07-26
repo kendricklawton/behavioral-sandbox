@@ -172,7 +172,7 @@ bounded and independent of the sandbox count.
 
 ## Record signing overhead
 
-Signing the finalized record (decision 034) is one `ed25519` sign over the already-canonical bytes,
+Signing the finalized record. is one `ed25519` sign over the already-canonical bytes,
 run once at record finalization, **off the boot/exec path**. This bench is host-only (no KVM, no
 eBPF), so it always runs:
 

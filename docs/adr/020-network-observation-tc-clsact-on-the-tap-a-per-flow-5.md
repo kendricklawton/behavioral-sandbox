@@ -1,7 +1,7 @@
 # 020. Network observation: `tc`/clsact on the tap, a per-flow 5-tuple map, observe-only *(2026-07-16)*
 
 **Context.** The engine needs per-microVM network visibility: every packet a guest sends or receives,
-counted at the host. Unlike the syscall tracepoints (decision 018's honest limit), this is the guest's
+counted at the host. Unlike the syscall tracepoints., this is the guest's
 **own** traffic: a microVM's packets cross its tap on the host, so network is the strong cross-boundary
 signal that core property 1 leaves intact. Three shapes have to be chosen together (as decisions 017/018
 did for the loader and the syscall record), and each pulls in its own direction: the attach mechanism
@@ -27,7 +27,7 @@ its own netns, decision 014, so scoping is entangled with netns entry).
   `parse_ipv4_5tuple` (host-unit-tested) is mirrored in-kernel by `ctx.load` at those same offsets, so
   the two parsers can't drift.
 - **Scoping is by interface, and (later) by netns.** The first cut attaches by interface **name in the
-  current netns**. Because a sandbox's tap lives in its **own** netns (decision 014), binding to the
+  current netns**. Because a sandbox's tap lives in its **own** netns., binding to the
   specific `fc0` for one sandbox means entering that netns, deferred to a later step; the clean
   attach/detach on sandbox open/close follows.
 
@@ -51,8 +51,8 @@ its own netns, decision 014, so scoping is entangled with netns entry).
   `FlowKey6`/`FLOWS6` (parallel types and maps, not a widened key, so the v4 path is unchanged; ADR
   008). A VLAN-tagged or truncated frame is still skipped and counted as an unparsed-L3 coverage
   signal, never silently dropped.
-- **No leaked filter.** The classifier links are drop-owned (decision 017, nothing pinned), and a
-  sandbox's netns teardown (`ip netns del`, decision 014) cascades the tap, its clsact qdisc, and the
+- **No leaked filter.** The classifier links are drop-owned., and a
+  sandbox's netns teardown (`ip netns del`) cascades the tap, its clsact qdisc, and the
   filters away, so a torn-down sandbox leaves no dangling `tc` program even if the loader is gone.
 - **`FlowKey`/`FlowCounts` are an internal kernel↔loader contract**, not the frozen public wire API, so
   they can change without an `api:` marker (like `SyscallEvent`).

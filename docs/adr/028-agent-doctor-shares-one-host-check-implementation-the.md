@@ -20,7 +20,7 @@ mirrors the engine's own error discipline: the isolation boundary (`/dev/kvm`) a
 **hard** (`Fail` gives a non-zero exit, so `ekvm doctor && ekvm run …` gates), while the jailer,
 resource caps, and networking/bulk-I/O tools **fail open** (`Warn` with a named consequence). The
 eBPF-capability row (`CAP_BPF`/`CAP_PERFMON` + BTF) stays in the probe loader, out of `vmm`
-(decisions 021/023); each entry point appends it. `xtask setup` keeps its dev-only rows (bpf-linker,
+.; each entry point appends it. `xtask setup` keeps its dev-only rows (bpf-linker,
 nightly, readelf) local, since an operator running the shipped engine doesn't need them.
 
 Both machine JSON surfaces carry a leading integer `schema` field: the `--json` run result

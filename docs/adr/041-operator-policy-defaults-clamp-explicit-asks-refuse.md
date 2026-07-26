@@ -6,11 +6,11 @@ logging, and two postures (`require_limits`, the signing keys), while every **co
 caller-controlled with a default compiled into the binary: `--vcpus`, `--mem`, `--wall`,
 `--output-cap`, `--unjailed`, `--net`. An operator could not set the house profile, could not lower
 `MAX_VCPUS` (a `const`), and could not withdraw the `--unjailed` opt-out. The daemon made this
-concrete: the wire `open` carries client-supplied `vcpus`/`mem_mib` (decision 030), so a client on the
+concrete: the wire `open` carries client-supplied `vcpus`/`mem_mib`., so a client on the
 socket could ask for 32 vCPUs on someone else's host.
 
 Adding config keys alone would not have fixed it. The layering is **flags > env > file**
-(decision 027), so a file value is *a default the caller overrides*. That is exactly right for a
+., so a file value is *a default the caller overrides*. That is exactly right for a
 default and exactly wrong for a ceiling, whose entire purpose is to bound what the caller may ask for.
 A "ceiling" that the bounded party can edit is not a ceiling.
 
@@ -30,8 +30,8 @@ one shared resolver (`crates/cli/src/policy.rs`) that both entry points call.
     default above its own ceiling) likewise resolves to the ceiling, the operator's stronger
     statement.
 - **Postures** are monotone, a caller may tighten and never loosen: `require_jail` withdraws the
-  `--unjailed` opt-out (decision 012's escape hatch, closed), `allow_net = false` refuses `--net`
-  outright (it does not alter the deny-by-default egress a NIC still gets, decision 008).
+  `--unjailed` opt-out., `allow_net = false` refuses `--net`
+  outright (it does not alter the deny-by-default egress a NIC still gets).
 
 **Where it binds, and where it is only a guardrail.** This asymmetry is the point, and it is recorded
 rather than left implicit:

@@ -130,7 +130,7 @@ The property above (the guest can neither forge nor evade the observation) is on
 otherwise assumes: a party that alters the record **after** it leaves the producing host, a
 compromised relay, an operator, or the transport a supervisor reads it over. To close that gap the
 loader **signs** each finalized record with a host key the guest never sees (an `ed25519` detached
-signature over the canonical record bytes, decision 034), and ships a verify path (`ekvm verify`, the
+signature over the canonical record bytes), and ships a verify path (`ekvm verify`, the
 library `verify`, and the daemon's signed `trace` reply).
 
 - **What the signature proves:** the record was not altered after the producing host signed it. A

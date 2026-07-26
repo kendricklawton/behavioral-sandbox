@@ -1,7 +1,7 @@
 # Installation
 
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
-install a packaged release (tarball / `install.sh` / container, decision 035). Pre-rename releases
+install a packaged release (tarball / `install.sh` / container). Pre-rename releases
 are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setup` (or
 `ekvm doctor` once installed) tells you what your host is missing at every step.
 
@@ -96,7 +96,7 @@ firecracker --version
 ```
 
 Verifying that download against a pinned hash is tracked work, not yet done
-([decision 040](./adr/040-supply-chain-provenance-pinning-and-release-signing.md)).
+.).
 
 On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
 pinned-version check are exercised against, so prefer them.
@@ -231,12 +231,12 @@ compatibility note: the parts the isolation-and-audit thesis rests on are **hard
 rest **degrade with a stated consequence**. `ekvm doctor` reports exactly where your host sits and
 exits non-zero if a hard requirement is missing.
 
-**Hard requirements** (off these, the host is not supported, [decision 032](./adr/032-supported-platforms-two-architectures-a-security.md)):
+**Hard requirements** (off these, the host is not supported)):
 
 | | Requirement | Why |
 |---|---|---|
 | **OS** | Linux | KVM is the isolation boundary |
-| **Architecture** | `x86_64` | the one architecture with tested artifacts and a privileged CI lane; aarch64 support returns only with hardware to test it on (decision 032 as narrowed) |
+| **Architecture** | `x86_64` | the one architecture with tested artifacts and a privileged CI lane; aarch64 support returns only with hardware to test it on. |
 | **Host kernel** | **≥ 5.15** (a security-maintained LTS) | untrusted code on an unpatched kernel is a threat-model hole, KVM CVEs land here |
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
 | **Firecracker + jailer** | present on `PATH` | no VMM to launch (the jailer's absence degrades to `--unjailed`) |
@@ -278,7 +278,7 @@ tracks their supported set.
 - No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
   egress enforcement refuses** rather than running unenforced.
 - **cgroup v2** controllers not delegated → jailed VMs run without CPU/memory caps (a fail-open DoS
-  mitigation, not the isolation boundary, [decision 010](./adr/010-per-run-resource-policy-one-limits-struct-of.md)).
+  mitigation, not the isolation boundary)).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
 - **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
   `/dev/kvm` is inert, so the jailed default fails to open KVM; the guided install pins a non-`nodev`

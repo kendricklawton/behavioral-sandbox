@@ -144,7 +144,6 @@ fn defined_decisions(root: &Path) -> Result<BTreeSet<u32>> {
 /// scanned, `ADR 010` (crate comments) and `decision 010` (docs/ROADMAP/AGENTS.md), each in singular,
 /// plural, and joined forms: `Decision 010`, `decision 010/011`, `decisions 021, 026`,
 /// `ADRs 021 and 026`.
-///
 /// Scans a **line-joined** view (each source line separated by a single space) so a citation
 /// wrapped across a line break (`decision\n029`, as several live docs do) still parses as one token;
 /// a per-offset line map keeps best-effort attribution (the line the keyword sits on).

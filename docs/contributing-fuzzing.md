@@ -23,7 +23,7 @@ run before `serde_json` must, for any input, return a value or a typed `Protocol
 loop unboundedly, or buffer past the cap.
 
 The **signed-record envelope** (`crates/probes-loader`, `verify`/`verify_chain`). A record is
-verified precisely when the host that delivered it is *not* trusted (decision 034), so the envelope
+verified precisely when the host that delivered it is *not* trusted., so the envelope
 bytes are attacker-relayed by design. The verifier must, for any input, return the canonical record
 or a typed `VerifyError`, bounded at `MAX_ENVELOPE_BYTES`, and never panic.
 

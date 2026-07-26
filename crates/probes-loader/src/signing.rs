@@ -1,6 +1,6 @@
 //! Record integrity: an `ed25519` **detached** signature over the canonical audit-record bytes, so a
 //! consumer can detect **post-hoc alteration** of a stored or transmitted record without trusting the
-//! host, operator, or transport that relayed it (decision 034). The signing key is **host-side**: the
+//! host, operator, or transport that relayed it. The signing key is **host-side**: the
 //! guest never sees it, exactly like the eBPF probes it complements.
 //!
 //! **What is signed.** The exact bytes of [`RunRecord::to_json`](crate::RunRecord) (the deterministic
@@ -22,7 +22,7 @@
 //! single-record envelope); on for a session, which threads the chain across its records. (Truncating
 //! the *tail* of a chain is undetectable without an external anchor, the append-only limitation.)
 //!
-//! **The boundary (decision 034).** The trust root is the host signing key. This detects alteration
+//! **The boundary.** The trust root is the host signing key. This detects alteration
 //! *after* the producing host; it does **not** protect against a fully-compromised host, which can
 //! sign a consistent lie. Key custody and rotation are the hoster's; this module only signs with a
 //! given key and verifies against a trusted set, keyed by `key_id`.
@@ -86,11 +86,9 @@ impl HostKey {
     /// Load the host key from `path`, or **generate and persist** one there on first use (seed from
     /// `/dev/urandom`, written `0600`, parent dirs created). The generate-on-first-run path is why a
     /// hoster needs no key ceremony to get a signed record; custody of the file is theirs.
-    ///
     /// Concurrent first runs converge on **one** key: the publish is atomic, and a process that
     /// loses the race discards its candidate and reloads the winner's file, so no signed record is
     /// ever orphaned by an overwritten key.
-    ///
     /// # Errors
     /// [`KeyError`] if the file exists but is unreadable or malformed, or if generation/persist fails.
     pub fn load_or_generate(path: &Path) -> Result<Self, KeyError> {
@@ -111,7 +109,6 @@ impl HostKey {
     /// Load an **existing** host key from `path`, without generating one (unlike
     /// [`load_or_generate`](Self::load_or_generate)). For verification, which trusts a key that must
     /// already exist rather than minting a fresh, useless one.
-    ///
     /// # Errors
     /// [`KeyError`] if the file is missing, unreadable, or malformed.
     pub fn open(path: &Path) -> Result<Self, KeyError> {
@@ -254,7 +251,6 @@ pub struct TrustedKey(VerifyingKey);
 
 impl TrustedKey {
     /// Parse a trusted public key from its `key_id` form (64 hex chars = 32 bytes).
-    ///
     /// # Errors
     /// [`KeyError::Malformed`] if the hex is the wrong length or not a valid `ed25519` public key.
     pub fn from_hex(hex: &str) -> Result<Self, KeyError> {
@@ -297,11 +293,9 @@ pub fn default_key_path() -> PathBuf {
 /// Verify a signed record envelope against a set of **trusted** verifying keys, returning the exact
 /// canonical record bytes on success. Fails closed: an unknown `key_id`, a malformed envelope, or a
 /// signature that doesn't check is an [`Err`], never a silent pass.
-///
 /// The record's `key_id` must name a key in `trusted`; a record re-signed with an attacker's key
 /// therefore fails with [`VerifyError::UntrustedKey`] rather than verifying against its own embedded
 /// key. Uses `verify_strict` (rejects the known `ed25519` malleability corner).
-///
 /// # Errors
 /// [`VerifyError`] on a malformed envelope, an untrusted `key_id`, or a bad signature.
 pub fn verify(envelope: &str, trusted: &[TrustedKey]) -> Result<String, VerifyError> {
@@ -356,14 +350,12 @@ fn verify_entry(
     Ok((record, prev))
 }
 
-/// Verify a **sequence** of signed record envelopes as a hash chain (decision 034), returning the
+/// Verify a **sequence** of signed record envelopes as a hash chain., returning the
 /// canonical records in order. Each entry's signature must check (against `trusted`) **and** its
 /// `prev` must equal the [`record_hash`] of the previous entry's record (the first entry must be
 /// unchained). A reordered, inserted, or middle-deleted record breaks a link and is rejected.
-///
 /// Note: truncating the **tail** of the chain is not detectable here without an external anchor (the
 /// append-only limitation); it detects any edit *within* the delivered sequence.
-///
 /// # Errors
 /// [`ChainError::Entry`] if an envelope fails to verify; [`ChainError::BrokenLink`] if a `prev` link
 /// doesn't match the previous record's hash.
@@ -630,7 +622,7 @@ mod tests {
 
     #[test]
     fn a_rotated_key_set_still_verifies_records_from_the_old_key() {
-        // Key rotation (decision 034): sign with the "old" key A, rotate to "new" key B. A verifier
+        // Key rotation.: sign with the "old" key A, rotate to "new" key B. A verifier
         // that trusts the *set* {A, B} accepts records from either; a record from an untrusted C does
         // not, even though the set is non-empty.
         let old = HostKey::from_seed([1u8; 32]);

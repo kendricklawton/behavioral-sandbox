@@ -6,7 +6,7 @@ wire protocol, pinned by git rev. That pinned surface is named precisely in `AGE
 `channel` wire protocol. The **mechanism** for signalling change already exists and is good: every
 change to that surface carries an `api:` commit marker (with `!` for an incompatibility), so a pin
 bump is auditable from the git log alone; the JSON surfaces carry a versioned `schema` field
-(decision 028); the wire API negotiates a version and makes skew a typed error (decision 030). What
+.; the wire API negotiates a version and makes skew a typed error. What
 does **not** exist is the **promise**: a team evaluating the engine for a product cannot read "what
 will you not break, and how will you tell me before you do." That policy was scheduled post-tag (it
 lived inside the Phase 21 wire-spec box). But the policy *text* costs nothing to write now and is
@@ -14,7 +14,7 @@ exactly what an adopter reads before betting on the API; only its *enforcement* 
 number to bump, a curated changelog, the Rust support window) needs the tag.
 
 **Decision.** Write the semver and deprecation policy now. It takes effect at `v0.1.0`; before then,
-the existing markers are the only signal and everything is disposable (decision 035). The policy:
+the existing markers are the only signal and everything is disposable. The policy:
 
 - **Post-`v0.1.0`, the crate version is semver over the pinned surface.**
   - **MAJOR:** an incompatible change to `Sandbox` / `Limits` / `RunResult` / `VmmError` (a removed
@@ -30,7 +30,7 @@ the existing markers are the only signal and everything is disposable (decision 
   working for at least one further MINOR, and is removed no earlier than the next MAJOR. The JSON and
   wire `schema` versions move by their own rule (additive within a version; a rename or removal bumps
   the integer, decisions 028 and 030), independent of the crate's semver.
-- **The Rust support window stays deferred to `v0.1.0`** (decision 037): before the tag, supported
+- **The Rust support window stays deferred to `v0.1.0`**.: before the tag, supported
   Rust is current stable, pinned; the last-three-stable window is revisited at the tag. Unchanged
   here.
 - **Enforcement and the changelog begin at the tag.** `RELEASES.md` already carries the release
@@ -44,7 +44,7 @@ the existing markers are the only signal and everything is disposable (decision 
   the policy is reworded from "write a semver policy" to "apply and enforce this one across the
   wire spec."
 - **Start enforcing semver now (tag `v0.0.x` with promises).** Rejected. Pre-rename and pre-`v0.1.0`,
-  every tag is a disposable checkpoint (decision 035, `RELEASES.md`), and the public identifiers still
+  every tag is a disposable checkpoint., and the public identifiers still
   churn once at the rename (the working name is not final). A stability promise made before the name
   is final is a promise you will break; the policy correctly waits for the tag to bind.
 

@@ -188,8 +188,8 @@ pub enum Response {
         /// The host directory holding the snapshot bundle.
         dir: String,
     },
-    /// The session's audit record (answering [`Request::Trace`]), as the **signed record envelope**
-    /// (decision 034), carried opaquely here so this crate stays free of the probes-loader types.
+    /// The session's audit record (answering [`Request::Trace`]), as the **signed record envelope**,
+    /// carried opaquely here so this crate stays free of the probes-loader types.
     Trace {
         /// The signed envelope as a JSON object: `{schema, key_id, signature, record}`, where its
         /// `schema` is the *delivery-surface* version and `record` is the canonical `RunRecord` JSON
@@ -218,7 +218,7 @@ pub enum Response {
         fatal: bool,
     },
     /// The daemon refused because it is **at capacity**: the `--max-sessions` count ceiling or an
-    /// aggregate resource ceiling (decision 042) is full. Distinct from [`Error`](Self::Error) so a
+    /// aggregate resource ceiling. is full. Distinct from [`Error`](Self::Error) so a
     /// fleet dispatcher can branch on backpressure ("full, try another host") without string-matching
     /// a message; it is always session-ending. `retry_after_ms` is a backoff hint, not a promise (the
     /// daemon cannot know when a slot frees).
@@ -276,10 +276,8 @@ impl std::error::Error for ProtocolError {
 /// `Ok(None)` on a clean EOF (the peer hung up); blank lines are skipped so a stray newline isn't a
 /// protocol fault. The order of checks is deliberate: over-cap (before decoding) → JSON well-formed
 /// → **schema match** (before the body is trusted) → body decode.
-///
 /// This is the one decode both ends use, the daemon with `T = Request`, a client with
 /// `T = Response`, so the framing, the cap, and the schema gate can't drift between them.
-///
 /// # Errors
 /// [`ProtocolError`] on an I/O failure, an over-cap line, a wrong `schema`, or a body that isn't a
 /// valid `T`.
@@ -330,7 +328,6 @@ fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
 /// peer can't grow host memory without bound. Returns `Ok(true)` if it stopped at EOF (the line may
 /// be unterminated), `Ok(false)` if it stopped on a newline. Reads through the `BufRead`'s own buffer
 /// (`fill_buf`/`consume`), so it is byte-precise without being a syscall per byte.
-///
 /// On the over-cap path it first drains the rest of the offending line (through its `\n`, or to EOF)
 /// before returning `TooLarge`, so the stream is left at a clean line boundary. Without that, a
 /// caller that treats `TooLarge` as per-request and keeps reading (the daemon does) would resume
@@ -406,7 +403,6 @@ fn discard_to_newline(reader: &mut impl BufRead) -> Result<(), ProtocolError> {
 
 /// Write one message `body` as a single schema-stamped `\n`-terminated JSON line and flush it. The
 /// daemon writes a [`Response`]; a client writes a [`Request`].
-///
 /// # Errors
 /// [`ProtocolError::Io`] on a write failure (serialization of these fixed types is infallible);
 /// [`ProtocolError::TooLarge`] if the serialized line exceeds [`MAX_MESSAGE_BYTES`], the same

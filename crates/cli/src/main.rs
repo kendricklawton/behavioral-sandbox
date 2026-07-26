@@ -107,7 +107,6 @@ enum Cmd {
     // `ekvm --help` lists) and the detail follows after a blank line (what `ekvm <cmd> --help`
     // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
     /// Run one command in a microVM.
-    ///
     /// Boots a sandbox, runs the command inside it, and tears it down. Jailed by default (ADR 012),
     /// with `--unjailed` as the explicit opt-out. The run's host-observed audit surface rides on
     /// `--trace`, `--record`, `--record-summary`, and `--watch`.
@@ -124,25 +123,21 @@ Examples:
 Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
     /// Open an interactive session in a microVM.
-    ///
     /// One command per line. State persists on the session's filesystem until you exit; shell
     /// process state (a `cd`, a variable) does not, because each line is its own exec.
     Shell(ShellArgs),
     /// Check whether this host can run the engine.
-    ///
     /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
     /// will work, degrade, or refuse before the first sandbox, and names a first command that works
     /// on this host. Exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm
     /// run …` gates correctly.
     Doctor(doctor::DoctorArgs),
     /// Verify a signed audit record.
-    ///
     /// Checks a `--record` file's `ed25519` signature against a trusted key (the host's own, or
     /// `--key <hex>`), so alteration after the producing host is caught (ADR 034). Exits non-zero
     /// if the record was altered or signed by an untrusted key.
     Verify(verify::VerifyArgs),
     /// Run the driver daemon.
-    ///
     /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API,
     /// ADR 030), so a local client drives microVMs without linking the engine. Access control is
     /// the socket directory's permissions (no auth, a recorded non-goal).
@@ -158,31 +153,26 @@ struct RunArgs {
     #[arg(long)]
     demo_boot: bool,
     /// Run the VMM without the jailer.
-    ///
     /// The default is confined (jailed, which needs real root and the `jailer` binary, ADR 012);
     /// this is the explicit opt-out for hosts that can't jail. The guest stays behind KVM either way.
     #[arg(long, help_heading = "Isolation")]
     unjailed: bool,
     /// Refuse the boot if the cgroup caps can't be applied.
-    ///
     /// Instead of the default warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with
     /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `EKVM_REQUIRE_LIMITS`
     /// or `.ekvm.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
     /// Guest vCPUs, 1..=32 [default: 1].
-    ///
     /// Zero or over-cap is a typed CLI error, never a silent clamp (Firecracker v1.9 caps a microVM
     /// at 32, ADR 001).
     #[arg(long, value_name = "N", value_parser = parse_vcpus, help_heading = "Guest resources")]
     vcpus: Option<NonZeroU8>,
     /// Guest memory in MiB [default: 256].
-    ///
     /// At least 1; zero is a typed CLI error.
     #[arg(long, value_name = "MIB", value_parser = parse_mem_mib, help_heading = "Guest resources")]
     mem: Option<NonZeroU32>,
     /// Wall-clock budget in seconds [default: 30].
-    ///
     /// The boot deadline and the command's runtime budget alike; the guest kills the command past
     /// it. Zero is rejected at parse (there is no "no limit"), never silently rounded up.
     #[arg(long, value_name = "SECONDS", value_parser = clap::value_parser!(u64).range(1..), help_heading = "Guest resources")]
@@ -191,13 +181,11 @@ struct RunArgs {
     #[arg(long, value_name = "BYTES", help_heading = "Guest resources")]
     output_cap: Option<usize>,
     /// Boot with a NIC (a per-VM tap the host-side probes observe).
-    ///
     /// Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the
     /// host end of its /30. What crosses the tap lands in the audit record's network section.
     #[arg(long, conflicts_with = "demo_boot", help_heading = "Network")]
     net: bool,
     /// Allow one egress destination past the deny-by-default tap (repeatable).
-    ///
     /// Given as `IP[/CIDR][:PORT][/PROTO]`, e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`.
     /// Requires `--net`; the allowances build the run's egress policy, armed before the tap goes
     /// live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent
@@ -205,35 +193,29 @@ struct RunArgs {
     #[arg(long, value_name = "IP[:PORT]", value_parser = parse_allow, requires = "net", help_heading = "Network")]
     allow: Vec<AllowRule>,
     /// Set an environment variable on the guest command (repeatable).
-    ///
     /// Values are treated as secrets: the engine never logs them.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair, help_heading = "Files and environment")]
     env: Vec<(String, String)>,
     /// Inject a host file into the run's working directory (repeatable).
-    ///
     /// The guest-side name is the basename.
     #[arg(long, value_name = "FILE", help_heading = "Files and environment")]
     put: Vec<PathBuf>,
     /// Fetch a file back from the run's working directory (repeatable).
-    ///
     /// Written under the current directory at the same relative path.
     #[arg(long, value_name = "PATH", help_heading = "Files and environment")]
     get: Vec<String>,
     /// Emit the structured run result as JSON on stdout.
-    ///
     /// One object carrying the exit code, lossy stdout/stderr, the artifact list, metrics, and the
     /// effective limits, instead of relaying the raw streams.
     #[arg(long, help_heading = "Result and audit trail")]
     json: bool,
     /// Print the run's audit trail on stdout afterwards.
-    ///
     /// Attaches the host-side probes and renders the trail human-readably. Fail-open: a host without
     /// eBPF caps still runs, with the gaps explained. Machine consumers use `--record` (so this
     /// conflicts with `--json`).
     #[arg(long, conflicts_with_all = ["json", "demo_boot"], help_heading = "Result and audit trail")]
     trace: bool,
     /// Write the run's deterministic audit record to a file.
-    ///
     /// Attaches the host-side probes and writes one line of JSON, the machine surface, for later
     /// inspection or `ekvm verify`.
     #[arg(
@@ -244,7 +226,6 @@ struct RunArgs {
     )]
     record: Option<PathBuf>,
     /// Write a model-legible summary of the run to a file.
-    ///
     /// One line of JSON: a compact projection of the audit record shaped for an agent's
     /// observe-then-act loop (what it reached, what egress was denied, its resource envelope, and
     /// any coverage gap).
@@ -256,7 +237,6 @@ struct RunArgs {
     )]
     record_summary: Option<PathBuf>,
     /// Watch the run live in a full-screen view on stderr.
-    ///
     /// Shows network flows and denials, resources, the VMM's host syscalls, and a timeline while the
     /// command runs. Needs stderr on a terminal. `q` closes the view (the run continues); after the
     /// command finishes, the view stays up until closed.
@@ -387,7 +367,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     // ties these log lines to the audit record and the host's own process table.
     let span = tracing::info_span!("run", vmm_pid = tracing::field::Empty);
     let _span = span.enter();
-    // Resolve the caller's knobs against the operator's policy (decision 041). For the CLI this is a
+    // Resolve the caller's knobs against the operator's policy. For the CLI this is a
     // guardrail rather than a boundary (a local caller owns the config file, and `docs/security.md`
     // trusts them), but it keeps a host's defaults and ceilings consistent across both entry points.
     let host_policy = config::policy_of(file);
@@ -607,7 +587,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
         }
         if let Some(path) = &args.record {
             // The machine surface, one line, byte-stable: the deterministic record wrapped in an
-            // `ed25519` signature envelope (decision 034) so a consumer detects post-hoc alteration
+            // `ed25519` signature envelope. so a consumer detects post-hoc alteration
             // off-host. The signing key is host-side (the guest never sees it), loaded/generated at
             // the config-resolved path.
             let key_path = config::signing_key_path(file);

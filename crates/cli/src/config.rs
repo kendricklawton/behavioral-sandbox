@@ -50,15 +50,15 @@ pub struct AgentToml {
     require_limits: Option<bool>,
     /// Mirrors `EKVM_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
-    /// Mirrors `EKVM_SIGNING_KEY` (the host record-signing key path, decision 034). No `BootConfig`
+    /// Mirrors `EKVM_SIGNING_KEY` (the host record-signing key path). No `BootConfig`
     /// field; the CLI reads it to sign `--record`.
     signing_key: Option<PathBuf>,
     /// Mirrors `EKVM_TRUSTED_KEYS`: public keys (`key_id` hex) `ekvm verify` trusts *in addition*
-    /// to the current signing key, so rotating the host key doesn't invalidate already-signed records
-    /// (decision 034, key rotation). No `BootConfig` field.
+    /// to the current signing key, so rotating the host key doesn't invalidate already-signed records.
+    /// No `BootConfig` field.
     trusted_keys: Option<Vec<String>>,
 
-    // Operator policy (decision 041). These do **not** mirror `EKVM_*` env keys: they are the
+    // Operator policy. These do **not** mirror `EKVM_*` env keys: they are the
     // host's posture, not a per-invocation knob, and the ceilings exist precisely to bound what a
     // caller may ask for, so routing them through the flags > env > file precedence would let the
     // caller they bound edit them. See `crate::policy` for where this binds and where it is only a
@@ -79,7 +79,7 @@ pub struct AgentToml {
     max_wall_secs: Option<u64>,
     /// Ceiling on the captured-output cap, bytes.
     max_output_cap: Option<usize>,
-    /// Withdraw the `--unjailed` opt-out on this host (decision 012's escape hatch, closed).
+    /// Withdraw the `--unjailed` opt-out on this host.
     require_jail: Option<bool>,
     /// Whether a caller may attach a guest NIC at all; unset permits it.
     allow_net: Option<bool>,
@@ -96,7 +96,6 @@ pub struct AgentToml {
 impl AgentToml {
     /// Discover and parse the nearest `.ekvm.toml` walking up from `start`, or `None` if none
     /// exists between `start` and the filesystem root.
-    ///
     /// # Errors
     /// [`VmmError::Vmm`] if a file is found but can't be read or has an unknown/mistyped key or bad
     /// TOML, a config the operator wrote but got wrong must fail loudly, not be skipped.
@@ -165,7 +164,7 @@ impl AgentToml {
         self.trusted_keys.as_deref().unwrap_or(&[])
     }
 
-    /// The operator policy this file declares (decision 041). An absent file, or one that sets none
+    /// The operator policy this file declares. An absent file, or one that sets none
     /// of these keys, yields the default policy, which changes nothing.
     #[must_use]
     pub fn policy(&self) -> Policy {
@@ -239,7 +238,7 @@ pub fn policy_of(file: Option<&AgentToml>) -> Policy {
 }
 
 /// Resolve the host record-signing key path with `env (EKVM_SIGNING_KEY) > file > default`
-/// (decision 034). Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
+/// Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
 /// The default is [`probes_loader::default_key_path`] (a data-dir path, generated on first use).
 #[must_use]
 pub fn signing_key_path(file: Option<&AgentToml>) -> PathBuf {
@@ -252,7 +251,7 @@ pub fn signing_key_path(file: Option<&AgentToml>) -> PathBuf {
 /// The configured set of extra trusted public keys (`key_id` hex) for `ekvm verify`, the **union**
 /// of `EKVM_TRUSTED_KEYS` (comma-separated) and the file's `trusted_keys` list. A set, not an
 /// override: every configured key stays trusted so a record signed before a key rotation still
-/// verifies (decision 034). Parsing/validation is the caller's (`TrustedKey::from_hex`).
+/// verifies. Parsing/validation is the caller's (`TrustedKey::from_hex`).
 #[must_use]
 pub fn trusted_key_hexes(file: Option<&AgentToml>) -> Vec<String> {
     let mut out = Vec::new();

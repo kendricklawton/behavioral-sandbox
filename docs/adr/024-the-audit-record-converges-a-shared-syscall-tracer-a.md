@@ -40,7 +40,7 @@ net, detach only, no record, and is a no-op after `collect`. So a bundle always 
 clean whether it is finalized or dropped.
 
 **Deterministic JSON.** `RunRecord::to_json` is hand-rolled, dependency-free, and compact, the same
-reasoning as the hand-framed wire (decision 002): the audit-log format is a contract callers
+reasoning as the hand-framed wire.: the audit-log format is a contract callers
 parse, so the exact bytes are pinned here (a golden test), not left to a derive's field order. It is
 byte-stable (fixed key order; every array already sorted by its builder), float-free (durations are
 integer nanoseconds), and renders addresses/protocols/syscalls by name. A later phase pretty-prints it

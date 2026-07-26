@@ -1,9 +1,8 @@
 # CI — the host-safe gate, one definition: every job runs `cargo xtask ci`, the same command a dev
 # box runs, so this workflow cannot drift from the local gate. (It once did: this file used to
 # hand-mirror the steps and silently missed the eBPF object build.) x86_64 only: the supported
-# platform is x86_64 (decision 032 as narrowed); aarch64 support (and its matrix leg here) returns
+# platform is x86_64.; aarch64 support (and its matrix leg here) returns
 # only with hardware to test the privileged path on.
-#
 # The privileged tests (booting a microVM, loading/attaching eBPF) need /dev/kvm + elevated caps
 # and run under `cargo xtask ci-privileged` in ci-privileged-hosted.yml (nightly, nested KVM) —
 # never gating the everyday loop. Scheduled companions: audit.yml (advisories vs the pinned lock,

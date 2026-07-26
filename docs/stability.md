@@ -24,11 +24,11 @@ load-bearing.
 There is no released version yet, so there is no version number to bump. Downstream pins this crate by
 git rev, and the signals of change are the `api:` / `!` commit markers, the versioned `schema` field
 on the JSON surfaces
-([decision 028](./adr/028-agent-doctor-shares-one-host-check-implementation-the.md)), and the wire
+.), and the wire
 protocol's version handshake
-([decision 030](./adr/030-the-wire-api-is-versioned-newline-json-in-a-shared.md)). Every pre-`v0.1.0`
+.). Every pre-`v0.1.0`
 tag is a disposable checkpoint with no stability promise
-([decision 035](./adr/035-distribution-is-a-checksummed-tarball-an-installer.md)).
+.).
 
 ## From `v0.1.0`: semver over the pinned surface
 

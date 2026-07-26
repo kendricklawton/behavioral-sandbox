@@ -10,7 +10,7 @@
 //! below lives in one shared place instead of in flag parsing.
 //!
 //! **Why a ceiling is not just another config value.** The layering is flags > env > file
-//! (decision 027), so a plain config value is a *default a caller overrides*. That is right for
+//!., so a plain config value is a *default a caller overrides*. That is right for
 //! defaults and wrong for ceilings, which exist precisely to bound what a caller may ask for. So
 //! ceilings do not participate in that precedence: they bound the resolved value, and exceeding one
 //! is a **typed refusal**, never a silent clamp (decision 026's "enforcement is a typed refusal,
@@ -40,7 +40,6 @@ pub struct Requested {
 }
 
 /// The operator's policy for this host: defaults, ceilings, and postures.
-///
 /// Every field is optional/false by default, so an absent `.ekvm.toml` leaves the engine's existing
 /// behavior exactly as it was.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -63,11 +62,11 @@ pub struct Policy {
     /// Ceiling on the output cap, bytes.
     pub max_output_cap: Option<usize>,
 
-    /// Refuse an unjailed boot: the `--unjailed` opt-out (decision 012) is withdrawn on this host.
+    /// Refuse an unjailed boot: the `--unjailed` opt-out. is withdrawn on this host.
     /// Monotone, a caller can ask for the jail, never ask it away.
     pub require_jail: bool,
     /// Whether a caller may attach a NIC at all. `false` refuses `--net` outright; it does not change
-    /// the deny-by-default egress policy a NIC still gets (decision 008).
+    /// the deny-by-default egress policy a NIC still gets.
     pub allow_net: Option<bool>,
 
     /// Refuse a run without an audit record on this host.
@@ -144,10 +143,8 @@ impl std::error::Error for PolicyError {}
 
 impl Policy {
     /// Resolve a caller's request against this policy into concrete [`Limits`].
-    ///
     /// Two different things happen to an over-large value, and the difference is whether a caller
     /// actually asked for it:
-    ///
     /// - **An explicit request above a ceiling is refused.** The caller asked for something this host
     ///   does not permit; silently serving them less is the degradation decision 026 forbids.
     /// - **A *default* above a ceiling is clamped to the ceiling.** Nobody asked for it, so there is
@@ -155,7 +152,6 @@ impl Policy {
     ///   would otherwise refuse every bare run, because the engine's own 30s default exceeds it. This
     ///   also means a self-inconsistent policy (a default above its own ceiling) resolves to the
     ///   ceiling, the operator's stronger statement, rather than failing every run.
-    ///
     /// # Errors
     /// [`PolicyError::Ceiling`] when a value the **caller explicitly requested** exceeds its ceiling.
     pub fn resolve(&self, req: &Requested) -> Result<Limits, PolicyError> {
@@ -209,7 +205,6 @@ impl Policy {
     }
 
     /// Refuse an unjailed boot when the host requires the jail. Monotone: a caller never loosens it.
-    ///
     /// # Errors
     /// [`PolicyError::JailRequired`] when `unjailed` is asked for under `require_jail`.
     pub fn check_jail(&self, unjailed: bool) -> Result<(), PolicyError> {
@@ -221,7 +216,6 @@ impl Policy {
 
     /// Refuse a NIC when the host forbids guest networking. Absent policy permits it, so an unset
     /// `allow_net` leaves today's behavior untouched.
-    ///
     /// # Errors
     /// [`PolicyError::NetForbidden`] when `net` is asked for under `allow_net = false`.
     pub fn check_net(&self, net: bool) -> Result<(), PolicyError> {
@@ -232,7 +226,6 @@ impl Policy {
     }
 
     /// Refuse an egress policy whose requested CIDR rules extend beyond the operator's approved CIDR ceilings.
-    ///
     /// # Errors
     /// [`PolicyError::EgressNotAllowed`] when a requested CIDR is not contained within the operator's allowed list.
     pub fn check_egress(&self, egress: &EgressPolicy) -> Result<(), PolicyError> {
@@ -266,7 +259,6 @@ impl Policy {
     }
 
     /// Refuse a run without an audit record on a host that requires recording.
-    ///
     /// # Errors
     /// [`PolicyError::RecordRequired`] when recording is omitted under `require_record = true`.
     pub fn check_record(&self, recording: bool) -> Result<(), PolicyError> {

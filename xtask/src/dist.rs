@@ -1,4 +1,4 @@
-//! `cargo xtask dist`: assemble the shippable release package (decision 035), the release binary
+//! `cargo xtask dist`: assemble the shippable release package., the release binary
 //! plus the xtask-built guest kernel, rootfs, and eBPF object, staged into one directory,
 //! checksummed, and tarred. The artifacts are built here at package time, never carried in the
 //! source tree; the sha256 manifest is the integrity contract, the same discipline as the pinned
@@ -22,11 +22,11 @@ const PROBES_NAME: &str = "probes";
 
 /// `cargo xtask dist [--version V]`: build binary + artifacts, stage, checksum, tar.
 pub(crate) fn dist(version: Option<String>) -> Result<()> {
-    // The supported platform is x86_64 (decision 032); a package assembled elsewhere would carry
+    // The supported platform is x86_64.; a package assembled elsewhere would carry
     // artifacts that were never privileged-tested, so refuse rather than ship an untested claim.
     if std::env::consts::ARCH != "x86_64" {
         bail!(
-            "dist packages only x86_64 (decision 032): this host is {}",
+            "dist packages only x86_64.: this host is {}",
             std::env::consts::ARCH
         );
     }
@@ -225,7 +225,7 @@ fn tar_stage(dist_dir: &Path, name: &str, tarball: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Sign `dist/SHA256SUMS` with an `ed25519` key, writing `dist/SHA256SUMS.sig` (decision 040).
+/// Sign `dist/SHA256SUMS` with an `ed25519` key, writing `dist/SHA256SUMS.sig`.
 /// Uses `EKVM_SIGNING_KEY` if set, otherwise loads or generates a key in `dist_dir`.
 fn sign_release_manifest(dist_dir: &Path) -> Result<String> {
     let sums_path = dist_dir.join("SHA256SUMS");

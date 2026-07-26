@@ -3,7 +3,7 @@
 **Context.** The [threat model](../threat-model.md) is honest that two things sit *outside* the
 engine's boundary: micro-architectural side channels (Spectre-class, timing) between co-resident
 guests, and fair scheduling across runs under contention. Both are the hoster's, at the scheduling
-and placement layer it owns (decision 029; the "engine, not platform" property). That is correct,
+and placement layer it owns. That is correct,
 but it is stated only as an *exclusion*. An operator about to place mutually-distrusting tenants on
 shared hardware reads "not addressed here" and is left with no answer to the next question: what,
 concretely, should the host underneath the engine be doing? Firecracker itself publishes a
@@ -26,11 +26,11 @@ tenants should meet:
   physical core.
 - **KSM off.** Kernel same-page merging across guests is a documented timing side channel; the
   engine already gets its cross-clone memory sharing from a read-only base disk and a copy-on-write
-  snapshot file (decision 009), so KSM buys it nothing and costs isolation.
+  snapshot file., so KSM buys it nothing and costs isolation.
 - **CPU-vulnerability mitigations left on.** Do not boot the worker with `mitigations=off`; keep the
   microcode current.
 - **A patched host kernel within the supported floor.** The floor (`x86_64`, kernel >= 5.15) is
-  already hard in `ekvm doctor` (decision 032); *patching* the substrate within that floor is the
+  already hard in `ekvm doctor`.; *patching* the substrate within that floor is the
   operator's half of the contract (this is the same line `security.md` already draws).
 
 `ekvm doctor` gains an **advisory** surface for the machine-checkable parts of this: it reads

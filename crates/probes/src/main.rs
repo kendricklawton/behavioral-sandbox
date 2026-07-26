@@ -203,7 +203,6 @@ static EVENT_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// ([`TRACE_SET`] slot 0 = 1) the event passes iff its cgroup is a registered [`TRACE_TARGETS`] member,
 /// the shared multi-sandbox tracer. Otherwise the single-target [`FILTER`] governs: each configured
 /// (non-zero) axis must match, an absent/zero slot reads as "unfiltered".
-///
 /// `#[inline(always)]`: folded into each tracepoint so a program stays a single self-contained unit
 /// (no BPF-to-BPF call), matching the verifier profile the counter proved.
 #[inline(always)]
@@ -222,7 +221,6 @@ fn passes_filter(tgid: u32, cgroup: u64) -> bool {
 /// `arg_off` is the byte offset of the syscall's pointer argument in the tracepoint record (a
 /// `char *` path for `execve`/`openat`, a `sockaddr *` for `connect`); `path_like` selects reading it
 /// as a NUL-terminated user string or as raw leading sockaddr bytes. A tracepoint returns 0.
-///
 /// `#[inline(always)]`: each of the three tracepoints inlines this into a single self-contained
 /// program, so there is no BPF-to-BPF call for the verifier to reason about (parity with the counter).
 #[inline(always)]
@@ -508,7 +506,7 @@ fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
     // resolve and keep its host end, none of which routes off the link. ICMPv6 to a routable
     // (global-unicast) destination falls through to `POLICY6` and is denied by default, the same
     // posture v4 gives ICMPv4, so a spared Echo can't be an egress channel that leans solely on the
-    // netns having no v6 default route (decision 008).
+    // netns having no v6 default route.
     if key.proto == IPPROTO_ICMPV6 && icmp6_dst_on_link(key.dst_addr) {
         return Verdict::Pass;
     }

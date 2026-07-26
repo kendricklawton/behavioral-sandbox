@@ -389,7 +389,6 @@ pub struct RunningVm {
 /// A microVM snapshot written by [`RunningVm::snapshot`]: the device + vCPU **state** file, the guest
 /// **memory** file (roughly the guest's RAM size), and the **root disk**. [`Vm::restore`] rebuilds a
 /// VM from these on a fresh VMM.
-///
 /// The disk is one of two shapes. A **read-write** boot bundles a private, point-in-time copy that
 /// restore stages back, so the clone shares no writable backing with its source (which may be gone). A
 /// **`read_only_root`** boot (a "prewarmed" snapshot) references the shared, persistent base in place, so N
@@ -466,13 +465,11 @@ pub struct Vm;
 
 impl Vm {
     /// Boot a microVM under `config` and return once the guest reaches userspace.
-    ///
     /// By default copies the base rootfs into a fresh per-VM scratch dir and boots the copy
     /// read-write, so repeated runs stay independent and the pinned base is never mutated. With
     /// [`read_only_root`](BootConfig::read_only_root) it instead shares the base read-only (no copy)
     /// and the guest layers a per-run tmpfs overlay over it, same "base never mutated" guarantee,
     /// far less per-VM cost.
-    ///
     /// # Errors
     /// [`VmmError::LimitsUnavailable`] if [`require_limits`](BootConfig::require_limits) is set on an
     /// unjailed boot (nothing can enforce the caps), [`VmmError::NoKvm`] without `/dev/kvm`,
@@ -493,7 +490,6 @@ impl Vm {
         // (images built in place inside the chroot). The ADR 010 deny-by-default refusal that
         // stood here while combinations were unjailed retired with its last member; a new
         // not-yet-jailed feature must reinstate it rather than boot half-confined.
-        //
         // KVM checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
         // on hosts without KVM (a fake "firecracker" needs no VM).
         if !Path::new("/dev/kvm").exists() {
@@ -608,7 +604,6 @@ impl RunningVm {
     /// protocol-ready [`ClientConnection`]. This is the host side of the exec path (`exec` builds
     /// `exec` on top): it dials Firecracker's vsock socket, speaks the `CONNECT <port>` handshake,
     /// sets read/write deadlines, then does the channel handshake.
-    ///
     /// # Errors
     /// [`VmmError::GuestUnavailable`] if nothing is listening on `port` in the guest (not up yet, or
     /// not anymore), the retryable case; [`VmmError::Vmm`] if the VM was booted without a
@@ -638,7 +633,6 @@ impl RunningVm {
     }
 
     /// Run `argv` in the guest, feeding it `stdin`, and collect its stdout/stderr/exit.
-    ///
     /// Connects to the in-guest agent over vsock ([`connect_agent`](Self::connect_agent)) and speaks
     /// the exec protocol. The captured output is bounded ([`BootConfig::output_cap`]); a command
     /// that exits non-zero is a normal [`RunResult`], not an error. Each call opens a fresh
@@ -646,7 +640,6 @@ impl RunningVm {
     /// `exec`s **compose into a stateful session** (ADR 016): the agent serves every one from
     /// the same persistent working directory, so files injected or written by one command are
     /// visible to the next, until the VM (and its overlay) is torn down.
-    ///
     /// # Errors
     /// A typed [`VmmError`] across the taxonomy's three buckets: **establishment**,
     /// [`VmmError::GuestUnavailable`] if the agent isn't listening (retryable), [`VmmError::Vmm`] if
@@ -666,11 +659,9 @@ impl RunningVm {
     /// [`exec`](Self::exec); the injected files and env ride the exec request's frames, so each is
     /// bounded by the channel's per-frame cap, and the total captured output+artifacts is bounded
     /// by this VM's [`BootConfig::output_cap`] (default 16 MiB).
-    ///
     /// **Env scope.** The variables are set on the **spawned command only**, the guest agent
     /// applies them via `Command::env`, never its own process, so one run's environment can't
     /// bleed into the agent or a later run.
-    ///
     /// **Secret hygiene (pinned contract).** Injected file contents and env *values* are treated as
     /// secrets: they never appear in an engine log line, in any [`VmmError`]'s `Display`/`Debug`, or
     /// on the serial console ([`console`](Self::console)), an error path may name a file *path* or
@@ -680,7 +671,6 @@ impl RunningVm {
     /// write them to `/output`) is the run's own data in [`RunResult`], not an engine surface. The
     /// audit log will record *that* inputs were injected, paths/keys/sizes or
     /// hashes, never contents.
-    ///
     /// # Errors
     /// As [`exec`](Self::exec).
     pub fn exec_with_files(
@@ -718,7 +708,6 @@ impl RunningVm {
 
     /// Pull the guest's `/output` tree back to the host directory set as [`BootConfig::output_dir`],
     /// returning the captured paths (relative to that directory, sorted).
-    ///
     /// The bulk counterpart to the per-file [`RunResult::files`] channel path: the guest wrote to a
     /// writable block device (mounted at `/output`), and here the driver reads that image back. It
     /// **consumes the VM**, the VMM is stopped first (a cooperative power-off, then a hard kill) so
@@ -726,14 +715,12 @@ impl RunningVm {
     /// race the guest and corrupt the ext4 journal `e2fsck` replays. Read-back is fully **rootless**:
     /// `e2fsck` recovers the journal, then `debugfs rdump` extracts the tree, no loopback, no
     /// `mount`, no `sudo`.
-    ///
     /// Guest-controlled contents are sanitised: `lost+found` is dropped; symlinks whose target
     /// escapes the destination (absolute, or `..` climbing out) are removed, so a later host read of
     /// the results can't be redirected onto the host filesystem; and the extraction is bounded in
     /// both real bytes and wall-clock time, so a sparse-file or
     /// pathological image can't exhaust host disk or hang teardown. Dropping the consumed VM reclaims
     /// the scratch dir, the image included.
-    ///
     /// # Errors
     /// [`VmmError::Vmm`] if the VM was booted without an output device (no `output_dir`), or on a
     /// host-side readback failure; [`VmmError::Artifact`] if `e2fsck`/`debugfs` are missing;
@@ -806,10 +793,8 @@ impl RunningVm {
     }
 
     /// Shut the microVM down and reclaim its resources.
-    ///
     /// Asks the guest to power off (`SendCtrlAltDel`) and waits briefly; the guaranteed teardown
     /// (kill + scratch-dir removal) then runs in `Drop`, so this is best-effort and infallible.
-    ///
     /// # Errors
     /// Currently never returns `Err`, teardown is best-effort, but the signature stays fallible
     /// for the jailed/cgroup teardown that lands later.

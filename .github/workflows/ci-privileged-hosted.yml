@@ -5,8 +5,7 @@
 # end to end (boot, jailer, probes, restore, the audit record), so it runs nightly plus on demand.
 # Correctness only: nested KVM makes performance numbers unrepresentative, so the benches are not
 # gated here ("measured, not marketed" means measured on bare metal, by hand). This is the only
-# privileged lane: the supported platform is x86_64 (decision 032 as narrowed).
-#
+# privileged lane: the supported platform is x86_64.
 # SECURITY: this runs untrusted-capable code as ROOT with KVM, so it must NEVER execute fork code.
 # Triggers are schedule + manual dispatch, plus **same-repo** PRs that touch the isolation path. The
 # job-level `if` skips every fork PR, and `pull_request` (NEVER `pull_request_target`) already denies a

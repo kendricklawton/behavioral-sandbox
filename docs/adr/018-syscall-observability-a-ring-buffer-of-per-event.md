@@ -51,7 +51,7 @@ corruption, no leak.
   field reads (and their relocations) arrive when a later phase reads kernel structs.
 
 **Consequences and notes.**
-- This is still the **host's** footprint, not the guest's (decision 017's honest limit stands): a
+- This is still the **host's** footprint, not the guest's.: a
   microVM services its syscalls in-guest. The filter's cgroup axis is how events are attributed to a
   specific sandbox: `cgroup_id_of_pid` resolves a VMM pid to its cgroup id (the inode of the cgroup
   dir, which equals `bpf_get_current_cgroup_id`), and `watch_cgroup` scopes the trace to it. The bridge

@@ -24,12 +24,12 @@ does not refuse), because a single-tenant dev box that trips these is perfectly 
 - **Turn KSM off.** Kernel same-page merging across guests is a documented timing side channel, and
   the engine does not need it: cross-clone memory sharing already comes from a read-only base disk and
   a copy-on-write snapshot file
-  ([decision 009](./adr/009-snapshots-are-self-contained-bundles-restored-by.md)), so KSM only costs
+.), so KSM only costs
   isolation.
 - **Leave CPU-vulnerability mitigations on.** Do not boot the worker with `mitigations=off`, and keep
   the microcode current.
 - **Patch the host kernel.** The supported floor (`x86_64`, kernel >= 5.15) is enforced hard by
-  `ekvm doctor` ([decision 032](./adr/032-supported-platforms-two-architectures-a-security.md));
+  `ekvm doctor`.);
   keeping it *patched* within that floor is your half of the contract, the same line
   [Security](./security.md#what-is-not-a-security-bug) already draws.
 
@@ -47,6 +47,6 @@ the same "engine, not platform" line the threat model draws for co-resident fair
 - `ekvm doctor` reports the hard floor (architecture, kernel LTS) and **advises** on the SMT,
   KSM, and CPU-vulnerability state of the host.
 - The audit record is host-signed
-  ([decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md)), so what a run did
+.), so what a run did
   is verifiable off-host even if the record is later relayed through untrusted hands. Custody of the
   signing key is yours; see the [threat model](./threat-model.md#record-integrity-beyond-the-guest).

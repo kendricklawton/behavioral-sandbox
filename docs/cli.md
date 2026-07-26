@@ -44,7 +44,7 @@ ekvm run [FLAGS] -- <cmd> [args…]
 | `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host end of its /30. |
 | `--allow IP[/CIDR][:PORT][/PROTO]` | Allow one egress destination past the deny-by-default tap (repeatable), e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires `--net`; builds the run's egress policy, armed before the tap goes live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced run. |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
-| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope (decision 034) so alteration is detectable; check it with [`ekvm verify`](#ekvm-verify). |
+| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope. so alteration is detectable; check it with [`ekvm verify`](#ekvm-verify). |
 | `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record (what it reached, what egress was denied, its resource envelope, any coverage gap) shaped for an agent's observe→act loop. |
 | `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues (after the command finishes, the view stays up until closed). |
 | `--log FILTER` | Log filter for stderr (overrides `EKVM_LOG`), e.g. `info`, `debug`. |
@@ -79,7 +79,7 @@ and `--mem` work the same as on `run`.
 ## `ekvm doctor`
 
 Check this host's readiness *before* the first sandbox: `ekvm doctor` prints one line per
-prerequisite, KVM, the jailer + real-root, `firecracker` v1.9 + pinned sha256 (decision 040), iproute2/e2fsprogs, cgroup
+prerequisite, KVM, the jailer + real-root, `firecracker` v1.9 + pinned sha256., iproute2/e2fsprogs, cgroup
 delegation, the kernel version, the boot artifacts, the eBPF capabilities, and the host-hardening
 posture (SMT, KSM, CPU-vulnerability mitigations: advisory rows for a multi-tenant host, decision
 038), each marked `ok`, `warn` (a fail-open degradation or an advisory, with the consequence
@@ -92,7 +92,7 @@ box, plus the build-toolchain rows.)
 ## `ekvm verify`
 
 `ekvm run --record` and the daemon's `trace` reply sign the finalized record with a **host key** the
-guest never sees (an `ed25519` detached signature over the canonical record bytes, decision 034), so a
+guest never sees (an `ed25519` detached signature over the canonical record bytes), so a
 consumer can detect any alteration made *after* the producing host. The record file is a schema-2
 envelope, `{schema, key_id, signature, record}`, with the record carried inside as a string.
 
@@ -105,7 +105,7 @@ ekvm verify run.json                      # trusts this host's own signing key
 ekvm verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
 ```
 
-The trust root is the host signing key (decision 029: trust the host, not the guest). This detects
+The trust root is the host signing key. This detects
 post-hoc alteration; it does **not** prove a *compromised* producing host didn't sign a lie. Key
 custody and rotation are the hoster's: the key path resolves from `EKVM_SIGNING_KEY` (or
 `signing_key` in `.ekvm.toml`, else a data-dir default), generated on first use; a record's `key_id`

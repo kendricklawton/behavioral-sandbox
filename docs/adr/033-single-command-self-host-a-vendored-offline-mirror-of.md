@@ -12,7 +12,7 @@ reproducible, offline-verifiable build closes that gap.
 guest kernel + rootfs, builds the guest image and the eBPF probe object, installs the `ekvm`
 binary into a prefix (`~/.local/bin` by default), writes a starter `~/.ekvm.toml` unless one
 exists (absolute artifact paths, and a non-`nodev` `scratch_dir` when `/tmp` is `nodev`, matching
-`install.sh`, decision 035), and, on a KVM host, boots one sandbox to prove it end to end (`--no-run`
+`install.sh`), and, on a KVM host, boots one sandbox to prove it end to end (`--no-run`
 prints the proof command instead). It is orchestration over the already-tested `xtask` steps, not a
 second code path.
 
@@ -30,11 +30,11 @@ Mechanics that matter:
   `EKVM_VENDOR_DIR` (restore-from-mirror vs `download_one`); `build-rootfs`, `fetch-artifacts`, and
   `self-host` all route through it, so offline mode is one env var with zero call-site churn.
 - **The `.apk` closure is pinned at vendor time, not in the tree.** `apk` branch repos delete old
-  revisions on every bump (decision 007), so there is no stable per-package URL to hash-pin in
+  revisions on every bump., so there is no stable per-package URL to hash-pin in
   source. `vendor` runs one online `apk add` into a throwaway root with `--cache-dir`, capturing the
   exact `.apk`s + `APKINDEX`; the manifest hashes them. An offline build then resolves from that
   frozen cache, so it is *more* reproducible than the floating CDN install, and the package lockfile
-  (decision 007) still matches.
+. still matches.
 - **The mirror is gitignored, never committed.** It holds downloaded images, so it sits with
   `artifacts/` on the wrong side of the "don't commit built/downloaded images" guardrail. The
   *manifest* is the audit trail; it lives in the mirror it describes, not in source.

@@ -1,14 +1,11 @@
 #!/bin/sh
-# Install the ekvm sandbox engine from a release package (decision 035).
-#
+# Install the ekvm sandbox engine from a release package.
 # Canonical use (once releases are public):
 #   curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh | sh
-#
 # Also works from a local package (offline / pre-release testing):
 #   EKVM_DIST_TARBALL=dist/ekvm-<ver>-x86_64-linux.tar.gz sh install.sh
 # and from inside an extracted tarball (the copy packed next to bin/ekvm):
 #   sh ./install.sh
-#
 # Knobs (env):
 #   EKVM_REPO            GitHub repo to fetch from        (default packsixfour/ekvm)
 #   EKVM_VERSION         release version, no leading v    (default: the latest release)
@@ -17,7 +14,6 @@
 #   EKVM_DATA_DIR        where the artifacts go           (default $XDG_DATA_HOME/ekvm or
 #                                                           ~/.local/share/ekvm)
 #   EKVM_NO_TOML=1       don't write ~/.ekvm.toml
-#
 # The sha256 is the contract at both layers: the tarball against SHA256SUMS (when available), and
 # every extracted file against the package's MANIFEST.sha256. Nothing installs unverified.
 set -eu
@@ -103,7 +99,7 @@ fi
     || fail "package manifest verification failed"
 say "package manifest verified ($(wc -l < "$STAGE/MANIFEST.sha256") files)"
 
-# Verify the release manifest ed25519 signature if SHA256SUMS.sig is present (decision 040).
+# Verify the release manifest ed25519 signature if SHA256SUMS.sig is present.
 SUMS_SIG=""
 if [ -n "$TMP" ] && [ -f "$TMP/SHA256SUMS.sig" ]; then
     SUMS_SIG="$TMP/SHA256SUMS.sig"

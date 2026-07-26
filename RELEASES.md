@@ -14,10 +14,10 @@ green, so the tag means the whole story works end to end, not a subset.
   scheduling into scope, and the Wasmtime sibling never dilutes the core properties (it ships as a
   separate artifact with a weaker, clearly-labelled guarantee).
 - **Everything until then is a pre-release `v0.0.x`.** Checkpoint tags start at `v0.0.1`, the
-  first packaged checkpoint (`cargo xtask dist` + a draft GitHub release, decision 035); later
+  first packaged checkpoint (`cargo xtask dist` + a draft GitHub release); later
   milestones bump the `0.0.x` patch as they land. These are checkpoints, not releases: no
   stability promise, and they ship under the working name, so they are disposable by design
-  (no package managers, no promotion, decision 035). (The Cargo manifests carry `0.1.0` as their
+  (no package managers, no promotion). (The Cargo manifests carry `0.1.0` as their
   in-development working number, distinct from these git tags; every crate is `publish = false`,
   so nothing reaches crates.io before the `v0.1.0` release.)
 - **Tags are a human git step.** The coding agent's job ends at the working tree; the user cuts

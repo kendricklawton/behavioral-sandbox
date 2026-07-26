@@ -39,7 +39,7 @@ RAM, a tap, a cgroup), so the daemon bounds its own core resource: at the ceilin
 gets a distinct, session-ending `at_capacity` reply to its `open`, *before* any VM boots, instead of a
 connect-loop walking the host into memory/KVM/fd exhaustion. `at_capacity` is its own reply (not an
 `error`), so a fleet dispatcher fails over to another host on backpressure without string-matching
-(decision 042). Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
+. Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
 Because a session's `open` may ask for a custom size, `--max-sessions` alone can't bound a
 memory-heterogeneous fleet; add `--max-committed-mem-mib` / `--max-committed-vcpus` to bound the
 *summed* committed memory / vCPUs across live sessions (also refused with `at_capacity` before boot).
@@ -71,7 +71,7 @@ number gets a fatal, session-ending error before its body is trusted.
 Line-delimited JSON (not the length-prefixed binary framing of the host↔guest channel), and not gRPC,
 because the peer is a **local, trusted-ish client**: the daemon is synchronous with no async runtime,
 and hand-debuggability (`socat`, `nc`) plus "any language with a JSON library and a unix socket can
-drive it" matter more than a compact wire (decision 030). Every decode is bounded and typed, so a
+drive it" matter more than a compact wire. Every decode is bounded and typed, so a
 malformed or oversize line is an error the daemon reports or drops, never a panic (guardrail 5).
 
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
@@ -89,7 +89,7 @@ the same shapes.
 | `{"schema":1,"op":"exec","argv":["echo","hi"],"stdin":"text\n"}` | Run a command, feeding `stdin` (UTF-8 text). |
 | `{"schema":1,"op":"put","path":"in.txt","content":"data\n"}` | Write a UTF-8 file into the working directory, for a later `exec`/`get`. |
 | `{"schema":1,"op":"get","path":"out.txt"}` | Read a working-directory file back. A missing file is `present:false`, not an error. |
-| `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle. A **jailed** session is a typed refusal, deliberately (not a gap): a jailed VM's disk lives at a chroot-relative path torn down with the VM, so a bundle would record an unrestorable backing. Snapshot an unjailed source and restore jailed clones (decision 009). |
+| `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle. A **jailed** session is a typed refusal, deliberately (not a gap): a jailed VM's disk lives at a chroot-relative path torn down with the VM, so a bundle would record an unrestorable backing. Snapshot an unjailed source and restore jailed clones. |
 | `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. Sampled **live** (repeatable mid-session): its coverage reflects attach time, and an absent axis may be a transient read, not a finalized gap (unlike the CLI's `--record`). |
 | `{"schema":1,"op":"trace_summary"}` | Return the **model-legible summary** so far, the compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied, its resource envelope, any coverage gap), sampled live like `trace`. The face an agent reads between turns. |
 | `{"schema":1,"op":"close"}` | End the session and tear the sandbox down (a hung-up connection does the same). |
@@ -106,11 +106,11 @@ the same shapes.
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
 | `{"schema":1,"reply":"snapshotted","dir":"/tmp/ekvm-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
-| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope** (decision 034): `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**.: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
 | `{"schema":1,"reply":"error","message":"…","fatal":false}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. |
-| `{"schema":1,"reply":"at_capacity","retry_after_ms":1000}` | The daemon is **at capacity** (the `--max-sessions` count or an aggregate resource ceiling is full) and refused the `open` before booting anything. A distinct backpressure signal (not an `error`) a dispatcher fails over on; `retry_after_ms` is a backoff hint (decision 042). Always session-ending. |
+| `{"schema":1,"reply":"at_capacity","retry_after_ms":1000}` | The daemon is **at capacity** (the `--max-sessions` count or an aggregate resource ceiling is full) and refused the `open` before booting anything. A distinct backpressure signal (not an `error`) a dispatcher fails over on; `retry_after_ms` is a backoff hint. Always session-ending. |
 
 Drive it by hand:
 
@@ -171,7 +171,7 @@ convention of base units: **seconds**, never milliseconds.
 | `ekvm_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
 | `ekvm_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
 | `ekvm_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
-| `ekvm_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions (decision 042). |
+| `ekvm_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions. |
 | `ekvm_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
 
 A minimal scrape config:

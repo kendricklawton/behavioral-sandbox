@@ -49,7 +49,7 @@
 //!   (concurrent sandboxes) grows 1 → 512, showing it stays flat (O(1) lookup). Same needs as
 //!   `bench-meter`.
 //! - **`bench-sign`**, the record-signing overhead: per-record `ed25519` sign/verify + the SHA-256
-//!   chain hash (decision 034), sub-millisecond and off the boot path. Host-only (no KVM/eBPF).
+//!   chain hash., sub-millisecond and off the boot path. Host-only (no KVM/eBPF).
 //! - **`meter-sandbox`**, the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
@@ -137,8 +137,8 @@ enum Cmd {
     /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
     FetchArtifacts,
     /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
-    /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`
-    /// (decision 035). Vendor-aware via `EKVM_VENDOR_DIR`; the eBPF toolchain is required (a
+    /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`.
+    /// Vendor-aware via `EKVM_VENDOR_DIR`; the eBPF toolchain is required (a
     /// package without the audit half is not the product).
     Dist {
         /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
@@ -246,7 +246,7 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
-    /// Measure the record-signing overhead (decision 034): the per-record cost of one `ed25519` sign
+    /// Measure the record-signing overhead.: the per-record cost of one `ed25519` sign
     /// over already-canonical bytes, plus verify, the SHA-256 chain hash, and a chained sign, so the
     /// integrity step is measured like everything else. Host-only (no KVM, no eBPF); the point is
     /// that it is sub-millisecond and off the boot/exec path.
@@ -654,10 +654,8 @@ fn major_minor(v: &str) -> Option<(u32, u32)> {
 /// else rounds to nothing, so dropping it is the only thing that makes a faster loop (~4s). Skipping
 /// docs and `cargo deny` saves nothing once they're warm; they're left out only because a
 /// no-test run can't honestly claim to be the gate anyway.
-///
 /// Not a substitute for [`ci`]: it cannot tell you the code *works*. Run the gate before handing
 /// work over.
-///
 /// Each step it does share with `ci` is byte-identical, flags *and* environment: a differing
 /// `RUSTFLAGS` would give the two commands separate build fingerprints, so alternating between them
 /// would rebuild the world each time and make the fast loop the slow one.
@@ -809,7 +807,7 @@ fn ci_privileged() -> Result<()> {
 fn setup() -> Result<()> {
     println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `ekvm doctor` renders (decision 028): one
+    // The runtime host checks are the *same* implementation `ekvm doctor` renders.: one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
@@ -859,7 +857,7 @@ fn setup() -> Result<()> {
         println!("  {line}");
     }
 
-    // The engine/hoster line (decision 013): the engine guarantees its own privileged tools can't
+    // The engine/hoster line.: the engine guarantees its own privileged tools can't
     // be weaponized; *deploying* them, as whom, when, over what directory, is the hoster's, and
     // these are the calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
@@ -892,7 +890,6 @@ fn setup() -> Result<()> {
 /// crate is **excluded** from the workspace and builds under its own nightly toolchain with
 /// `-Z build-std` (rustup ships no prebuilt `core` for the BPF target), so this drives its build
 /// directly rather than through the workspace `cargo`.
-///
 /// Guarded so `cargo xtask` stays runnable everywhere: on a host missing any of the toolchain
 /// (`bpf-linker`, `rustup`, or the nightly + `rust-src` the `build-std` build needs), it prints a
 /// note and returns `Ok` instead of failing, the everyday host gate must not require the eBPF

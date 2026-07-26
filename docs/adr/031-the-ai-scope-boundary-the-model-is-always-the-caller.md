@@ -33,7 +33,7 @@ which is why the line is drawn at the engine's edge and not somewhere softer:
 
 Invariant 2 is untouched, and that is the whole point. Observe-and-enforce-from-the-host is not strained
 by this line; it is *served* by it. The model-legible record is a **projection of the record host-side
-eBPF already built** (decision 024): the model reads a *face* of the host's observation, it does
+eBPF already built**.: the model reads a *face* of the host's observation, it does
 not help produce it. Observation and enforcement stay entirely host-side, out of the guest and out of
 any model. So the AI-native surface adds a **reader**, never a new **authority**, which is precisely
 what lets it exist without touching the security boundary.

@@ -41,15 +41,15 @@ default.
 - The `Limits`/`Sandbox` work assumes the jailed exec path exists; `require_limits` (decision 010's
   note) and jailed-by-default land together as the confined default surface.
 - Jailed snapshot/restore and the pre-warmed pool under the jailer remain downstream of exec under the
-  jailer (a jailed VM's disk lives in the chroot, decision 009), tracked with the same boxes.
-- The jailer's per-VM netns (decision 014's answer for concurrent networked clones) rides the
+  jailer (a jailed VM's disk lives in the chroot), tracked with the same boxes.
+- The jailer's per-VM netns. rides the
   jailed-networking box: once the tap is staged into the jail, its netns removes the
   one-live-networked-clone limit.
 - In the current tree the convergence is complete: `jail` composes with every boot feature and with
   restore. Vsock: the socket binds chroot-relative at `/run/v.sock` (`jailed_exec_runs_a_command`).
   Overlay: the shared base bind-mounts into the chroot (shared-base path, propagated into the jailer's
   `MS_SLAVE` mount namespace; `jailed_overlay_is_dense_and_base_is_untouched`). NIC: the tap lives in a
-  per-VM netns the jailer joins via `--netns` (decision 014). Bulk I/O: the input/output images are
+  per-VM netns the jailer joins via `--netns`. Bulk I/O: the input/output images are
   built in place inside the chroot (`jailed_bulk_io_round_trips_through_the_chroot`), with it, the
   mutual exclusion of the opening paragraphs is fully retired and `Vm::boot`'s refusal block itself is
   gone. Restore: the bundle stages into the chroot (state copied; memory + shared base disk

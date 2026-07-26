@@ -51,7 +51,7 @@ Given those guarantees, a security bug is anything that breaks one of them:
 - A guest evading, disabling, or forging the host-side observation (the eBPF probes or the records
   they produce).
 - A signed record that verifies **after** being altered, or a forged signature accepted by
-  `ekvm verify` without the host key (the record-integrity guarantee, decision 034).
+  `ekvm verify` without the host key (the record-integrity guarantee).
 - A hostile guest causing a host panic, hang, or resource leak through the driver's public API.
 - Injected secrets (`--env` values, injected file contents) appearing in logs, errors, or the
   serial console.
@@ -71,7 +71,7 @@ dismissal:
   uid are trusted; an attacker who already has them has everything, no sandbox can claim
   otherwise.
 - **Hosts below the supported floor.** An unsupported architecture or a host kernel older than the
-  LTS floor is refused by `ekvm doctor` (decision 032); weaknesses that require running there
+  LTS floor is refused by `ekvm doctor`.; weaknesses that require running there
   anyway are the operator's acceptance, not an engine bug. The same goes for an *unpatched* host
   kernel within the floor: patching the substrate is the operator's half of the contract.
 - **`--unjailed` weakening the VMM's own confinement.** That flag is the documented dev-box

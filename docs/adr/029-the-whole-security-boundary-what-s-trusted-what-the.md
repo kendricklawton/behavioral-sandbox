@@ -37,7 +37,7 @@ in depth, but they are not a substitute for KVM.
 `vmm` jail-escape tests; resource exhaustion → the cgroup caps (`memory.max`/`cpu.max`/`pids.max`)
 plus the derived per-drive **IO-bandwidth bound** (decision 010's "derived defaults, not `Limits`
 knobs", a virtio-blk rate limiter so a disk-thrashing guest can't starve a co-resident run); network
-exfiltration/flood → deny-by-default egress enforced at the tap (decision 022); observation evasion →
+exfiltration/flood → deny-by-default egress enforced at the tap.; observation evasion →
 the guest can't reach host-kernel eBPF; leak-on-death → the cgroup-owned lifetime + sweep (decisions
 011/013); clone state-bleed → per-clone overlay + RAM. The consolidated proof is that these hold
 **together** against one hostile guest doing its worst on every axis at once.

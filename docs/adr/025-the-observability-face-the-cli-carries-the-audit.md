@@ -5,7 +5,7 @@ is worthless if it is not *legible* at the point of use, the CLI. Three audience
 directions from the one run: a human wants a readable trail after the fact, a machine wants a
 deterministic surface it can diff, and an operator wants to watch the network and syscalls unfold
 live. Serving all three could sprawl into three mechanisms and three frozen formats; the standing
-constraint is that only one machine contract exists to freeze (`RunRecord::to_json`, decision 024)
+constraint is that only one machine contract exists to freeze (`RunRecord::to_json`)
 and that the house stream rule (stderr carries diagnostics, stdout carries the run's result) keeps a
 pipeline clean. This decision fits all three faces onto one launch path without a second promised
 format.

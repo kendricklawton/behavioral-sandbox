@@ -434,7 +434,6 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
 
 /// Measure the **per-sandbox memory footprint** and how the **overlay/rootfs choice** moves it. The
 /// engine offers three ways to give a sandbox its disk, each with a different host-memory cost:
-///
 /// 1. **cold boot, per-VM RW copy** (`read_only_root = false`), each VM gets its own read-write copy
 ///    of the whole rootfs image (on the scratch dir, host RAM when that's tmpfs); nothing is shared.
 /// 2. **cold boot, shared RO base** (`read_only_root = true`), every VM mounts the *one* base image
@@ -620,7 +619,6 @@ fn ns_per_openat(path: &Path, batch: usize) -> u64 {
 
 /// Measure the **tracing overhead**: the added per-syscall cost of the attached
 /// `sys_enter_*` tracepoints, in three conditions timed on the same `openat` micro-workload:
-///
 /// 1. **baseline**, no probes attached at all;
 /// 2. **unwatched**, probes attached but the `FILTER` excludes us (the tracepoint fires on every
 ///    host `openat`, checks the filter, and drops ours in-kernel): the cost every *other* process on
@@ -764,7 +762,6 @@ fn ns_per_switch(rounds: usize) -> Result<u64> {
 /// Measure the **resource-metering overhead**: the added per-context-switch cost of the attached
 /// `sched_switch` accounting probe, in three conditions on the same ping-pong micro-workload (mirroring
 /// `bench-trace`'s baseline/unwatched/watched shape):
-///
 /// 1. **baseline**, no meter attached;
 /// 2. **attached, not metering us**, the probe is live but our cgroup isn't a target, so every switch
 ///    is a target-set lookup that misses and returns: the cost every *other* workload on the box pays
@@ -881,7 +878,6 @@ fn nearest_p50(samples: &mut [u64]) -> u64 {
 /// watching *one* sandbox; this sweeps the **watched-target-set size** (1 → 512) and shows the cost is
 /// flat, the design claim ("one shared program, an O(1) map lookup per event, independent of how many
 /// sandboxes are watched") turned into a measured curve rather than an assertion.
-///
 /// For each size the set holds **our own cgroup** (so our events take the expensive watched path) plus
 /// enough never-matching dummy cgroups to reach the size, and the per-event cost is timed on the same
 /// micro-workloads the other benches use: an `openat` burst for the syscall tracer, a ping-pong burst
@@ -1148,7 +1144,7 @@ const SAMPLE_RECORD: &str = concat!(
     r#""coverage":[]}"#,
 );
 
-/// Bench the record-signing overhead (decision 034): one `ed25519` sign over already-canonical record
+/// Bench the record-signing overhead.: one `ed25519` sign over already-canonical record
 /// bytes, plus verify, the SHA-256 chain hash, and a chained sign. **Host-only** (no KVM, no eBPF), so
 /// it never skips; the point is that the integrity step is **sub-millisecond and off the boot/exec
 /// path** (it runs once at record finalization), measured like everything else.

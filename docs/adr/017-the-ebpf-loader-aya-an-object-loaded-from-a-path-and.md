@@ -48,7 +48,7 @@ engine share the same discipline.
   reason, when aya entered (the allowlist's stated policy).
 - Attaching programs to real per-VM **taps** (in the driver's netns) must hold the same drop-owned,
   no-pin lifetime, so a torn-down sandbox leaves no dangling `tc`/XDP filter; it composes with the
-  netns teardown the driver already guards (decision 014).
+  netns teardown the driver already guards.
 - The `sys_enter_execve` counter is the host's footprint, not the guest's: a microVM services its own
   syscalls in-guest, so they never trap to these host tracepoints (the network + cgroup signals, not
   syscalls, are the strong cross-boundary ones).

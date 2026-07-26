@@ -98,8 +98,8 @@ pub struct ServeArgs {
     /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
     /// cgroup), so the daemon bounds its own core resource: at the ceiling a new connection is
     /// refused with the distinct `at_capacity` reply *before* any VM boots, rather than exhausting the
-    /// host. For a memory-heterogeneous fleet add `--max-committed-mem-mib`/`--max-committed-vcpus`
-    /// (decision 042). Size it to the host (sessions × guest memory must fit in RAM); `0` = unlimited.
+    /// host. For a memory-heterogeneous fleet add `--max-committed-mem-mib`/`--max-committed-vcpus`.
+    /// Size it to the host (sessions × guest memory must fit in RAM); `0` = unlimited.
     #[arg(long, value_name = "N", default_value_t = 16)]
     max_sessions: usize,
     /// Drop a session after this many seconds with **no progress** on the connection, whether the
@@ -112,7 +112,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "SECONDS", default_value_t = 300)]
     idle_timeout: u64,
     /// Ceiling on the vCPUs a session's `open` may ask for. Past it the `open` is **refused**, never
-    /// quietly clamped (decision 041). A hoster posture, no client chooses it.
+    /// quietly clamped. A hoster posture, no client chooses it.
     #[arg(long, value_name = "N")]
     max_vcpus: Option<NonZeroU8>,
     /// Ceiling on the guest memory (MiB) a session's `open` may ask for.
@@ -125,13 +125,13 @@ pub struct ServeArgs {
     #[arg(long, value_name = "BYTES")]
     max_output_cap: Option<usize>,
     /// Aggregate ceiling on the **summed guest memory** (MiB) across all live sessions, the resource
-    /// counterpart to `--max-sessions` (decision 042): a session whose `open` would push committed
+    /// counterpart to `--max-sessions`.: a session whose `open` would push committed
     /// memory past this is refused with `at_capacity`, *before* booting, so a memory-heterogeneous
     /// fleet can't overcommit the host into OOM. Distinct from `--max-mem-mib`, which bounds one
     /// request. `0` (the default) is unlimited: the count ceiling alone applies.
     #[arg(long, value_name = "MIB", default_value_t = 0)]
     max_committed_mem_mib: u64,
-    /// Aggregate ceiling on the **summed vCPUs** committed across all live sessions (decision 042).
+    /// Aggregate ceiling on the **summed vCPUs** committed across all live sessions.
     /// Past it a session's `open` is refused with `at_capacity` before booting. Set it to your CPU
     /// oversubscription budget (e.g. physical cores × a ratio). `0` (the default) is unlimited.
     #[arg(long, value_name = "N", default_value_t = 0)]
@@ -150,13 +150,13 @@ pub(crate) struct Server {
     pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     pub(crate) jailed: bool,
-    /// The operator's per-run policy (decision 041), read from the daemon's `.ekvm.toml` at startup.
+    /// The operator's per-run policy., read from the daemon's `.ekvm.toml` at startup.
     /// This is the enforcing copy: a client controls neither that file nor this process's
     /// environment, so the ceilings here bound what any `open` may ask for.
     pub(crate) policy: Policy,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
     pub(crate) observ: Observability,
-    /// The host record-signing key (decision 034): the `trace` reply signs the finalized record with
+    /// The host record-signing key.: the `trace` reply signs the finalized record with
     /// it so a client detects post-hoc alteration. Host-side; the guest never sees it.
     pub(crate) signing_key: probes_loader::HostKey,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
@@ -180,7 +180,7 @@ pub(crate) struct Server {
     /// Incremented by a successful [`SessionTicket::acquire`], decremented by the ticket's `Drop`.
     pub(crate) active_sessions: AtomicUsize,
     /// Summed guest memory (MiB) committed across live sessions, charged by a [`ResourceReservation`]
-    /// once an `open`'s `Limits` are known and released on its `Drop` (decision 042). The resource
+    /// once an `open`'s `Limits` are known and released on its `Drop`. The resource
     /// counterpart to [`active_sessions`](Self::active_sessions).
     pub(crate) committed_mem_mib: AtomicU64,
     /// Summed vCPUs committed across live sessions; charged and released like
@@ -285,7 +285,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // large artifact (boot scratch, prewarm, snapshots) follows.
     let snapshot_base = snapshots_dir(&base.scratch_dir);
     // Load (or generate on first use) the host record-signing key, so the `trace` reply carries a
-    // signed envelope (decision 034). Fail-closed like the metrics bind: refuse to start rather than
+    // signed envelope. Fail-closed like the metrics bind: refuse to start rather than
     // serve records that claim to be verifiable but aren't signed. The daemon has no `.ekvm.toml`
     // layer (env + flags only), so the path resolves from `EKVM_SIGNING_KEY` or the default.
     let signing_key = match probes_loader::HostKey::load_or_generate(
@@ -371,7 +371,7 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
                 // this scrape, `ekvm_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
                 // visibility surface freezing under the load it exists to report on. The committed
-                // gauges (decision 042) read the live admission atomics, always available.
+                // gauges. read the live admission atomics, always available.
                 crate::metrics::CapacitySample {
                     pool_ready: sampled
                         .pool
@@ -455,7 +455,7 @@ impl Drop for SessionTicket {
 /// A committed-resource reservation (guest memory + vCPUs) held for a session's lifetime: the
 /// aggregate counterpart to [`SessionTicket`]'s count. Acquired once an `open`'s resources are known
 /// (after `open_limits`) and released on `Drop`, so a memory-heterogeneous fleet can't be admitted
-/// past the host's real capacity even while under the session-count ceiling (decision 042).
+/// past the host's real capacity even while under the session-count ceiling.
 pub(crate) struct ResourceReservation<'a> {
     server: &'a Server,
     mem_mib: u64,
@@ -523,7 +523,7 @@ fn charge(current: &AtomicU64, ceiling: u64, amount: u64) -> bool {
 
 /// Backoff hint sent with an [`protocol::Response::AtCapacity`] refusal. A hint only: the daemon
 /// cannot know when a slot frees, and a fleet dispatcher typically fails over to another host rather
-/// than waiting, so this is a modest "come back shortly" value, not a promise (decision 042).
+/// than waiting, so this is a modest "come back shortly" value, not a promise.
 pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
 
 /// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed

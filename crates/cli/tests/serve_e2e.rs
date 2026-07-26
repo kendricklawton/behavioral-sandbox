@@ -288,7 +288,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         "the session survives a snapshot: {post_snap}"
     );
 
-    // trace: the host-observed audit record, now a signed envelope (decision 034). The wire `record`
+    // trace: the host-observed audit record, now a signed envelope. The wire `record`
     // field carries the schema-2 envelope; the record itself rides inside as a string.
     client.send("{\"op\":\"trace\"}");
     let traced = client.recv();
@@ -305,7 +305,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     );
     // The signature must actually *verify*, not merely exist (128 hex chars of garbage would pass
     // the shape check). Envelope-level field order doesn't matter to `verify`; the signed bytes are
-    // the embedded record string, which survives the reply's serde round-trip (decision 034).
+    // the embedded record string, which survives the reply's serde round-trip.
     let envelope = serde_json::to_string(&traced["record"]).expect("re-serialize envelope");
     let signer = probes_loader::TrustedKey::from_hex(
         traced["record"]["key_id"].as_str().expect("key_id string"),
@@ -326,7 +326,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         "the first trace is unchained: {traced}"
     );
 
-    // A second trace chains to the first (decision 034): its `prev` is the SHA-256 of the first
+    // A second trace chains to the first.: its `prev` is the SHA-256 of the first
     // record, so the sequence is tamper-evident as a whole, not just per record.
     let first_record = traced["record"]["record"]
         .as_str()

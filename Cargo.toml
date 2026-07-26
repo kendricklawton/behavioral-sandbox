@@ -16,7 +16,6 @@ members = [
 # triple) via `bpf-linker`, so excluding them keeps the everyday host gate (clippy --all-targets,
 # test) host-only and green; the eBPF object is built separately for its own target. See
 # `AGENTS.md` and `docs/contributing-building.md`.
-#
 # `fuzz` is the `cargo fuzz` harness: nightly + libFuzzer, its own detached workspace, never part of
 # the everyday stable gate. Excluded here too so `cargo build --workspace` ignores it. See
 # `docs/contributing-fuzzing.md`.
@@ -28,8 +27,7 @@ edition = "2021"
 # The minimum supported Rust version: the downstream MSRV floor. Kept in step with the exact
 # toolchain pinned in `rust-toolchain.toml`, so local, CI, and this floor are one Rust version and a
 # lint can't pass locally yet fail CI. The project tracks current stable with deliberate bumps (no
-# back-support burden this early), never incidental drift; a support window is revisited at v0.1.0
-# (decision 037).
+# back-support burden this early), never incidental drift; a support window is revisited at v0.1.0.
 rust-version = "1.97"
 license = "Apache-2.0"
 authors = ["K Henry LLC <founder@khenry.dev>"]
@@ -47,7 +45,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The CLI's `.ekvm.toml` config file layer. Parse-only; keys mirror the `EKVM_*` env names.
 toml = "0.8"
-# Record integrity: an `ed25519` detached signature over the canonical record bytes (decision 034),
+# Record integrity: an `ed25519` detached signature over the canonical record bytes.,
 # so a consumer detects post-hoc alteration off-host. The audited, standard implementation, never a
 # hand-rolled one; keygen randomness is read from `/dev/urandom` (Linux-only engine), so no `rand`.
 # `zeroize` scrubs the secret key from memory on drop.
@@ -55,7 +53,7 @@ ed25519-dalek = { version = "2", features = ["zeroize"] }
 # Scrub transient copies of the signing seed (the hex read from / written to the key file) so the
 # secret doesn't linger in freed memory.
 zeroize = "1"
-# SHA-256 for the record hash-chain (decision 034): each record commits to the previous one's hash.
+# SHA-256 for the record hash-chain.: each record commits to the previous one's hash.
 # Already pulled in transitively by `ed25519-dalek`; pinned here so the loader names it directly.
 sha2 = "0.10"
 # Structured logging to stderr; stdout stays reserved for a run's result / audit log.
@@ -67,7 +65,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`
 # re-allows them in tests. Enforced by the `clippy … -D warnings` step in CI and `cargo xtask ci`.
 # Each crate opts in with `[lints] workspace = true`.
-# The `ed25519`/`sha2` record-signing path (decision 034) is heavy in an unoptimized build, curve
+# The `ed25519`/`sha2` record-signing path. is heavy in an unoptimized build, curve
 # arithmetic runs 10-40x slower, which makes debug tests crawl and `bench-sign` in a dev build report
 # meaningless numbers. Optimize just those crates even in the dev profile (the dalek crates' own
 # recommendation); it leaves everything else debuggable. The definitive `bench-sign` number is still

@@ -1,13 +1,13 @@
 # 042. Hoster admission: a typed capacity refusal, resource-aware admission, committed-resource telemetry *(2026-07-24)*
 
-**Context.** The daemon (decision 030) already defends itself against overload: it gates on a session
+**Context.** The daemon. already defends itself against overload: it gates on a session
 count (`--max-sessions`) via an atomic ticket and refuses a connection **side-effect-free, before any
 boot**. But a fleet hoster (a separate repo, guardrail 4) running many daemons behind a dispatcher
 cannot build correct, resource-aware, scale-out admission on what the daemon exposes today, and the
 host must defend itself under a zero-trust assumption (even a buggy control plane can flood one node):
 
 - **Admission is a session *count*, not resources.** The wire `open` carries client-supplied
-  `vcpus`/`mem_mib` (decision 030), so a host can sit under the count ceiling while memory-overcommitted
+  `vcpus`/`mem_mib`., so a host can sit under the count ceiling while memory-overcommitted
   and then OOM at boot instead of admission-rejecting.
 - **The refusal is free text.** It is a `Response::Error { message: "at capacity...", fatal: true }`,
   so a dispatcher can only tell "full, fail over to another host" from "terminal, do not retry" by
@@ -50,7 +50,7 @@ are not (guardrail 4). This decision adds only the former.
 
 **Consequences and notes.**
 - **Additive wire, no schema bump.** An old client that receives `reply:"at_capacity"` fails as a
-  typed `ProtocolError`, never a panic (decision 030's decode gate). It lands **before** the wire
+  typed `ProtocolError`, never a panic. It lands **before** the wire
   spec freeze precisely because it changes the shape of an existing observable path (the refusal); doing
   it after would be a break, not an addition.
 - **Charging `mem_mib` per VM is a conservative upper bound.** Pooled clones share the read-only base

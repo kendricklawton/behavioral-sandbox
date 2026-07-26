@@ -89,7 +89,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     };
 
-    // Resource-aware admission (decision 042): the count ticket (acquired at accept) bounds *how many*
+    // Resource-aware admission.: the count ticket (acquired at accept) bounds *how many*
     // sessions; this reservation bounds *how much* they commit, so a memory-heterogeneous fleet can't
     // overcommit the host into OOM while still under `--max-sessions`. Charged before boot from the
     // resolved `Limits`, held for the session, released on teardown by `Drop`. A refusal is the
@@ -156,7 +156,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
 
     // The command loop: one request per line until `close`, EOF, or a session-ending fault.
     let mut total_exec_wall = Duration::ZERO;
-    // The session's record hash-chain (decision 034): each `trace` reply commits to the previous
+    // The session's record hash-chain.: each `trace` reply commits to the previous
     // one's hash, so a client can `verify_chain` the sequence and detect a reordered/dropped record.
     // `None` until the first `trace`; the first record is the unchained anchor.
     let mut record_chain: Option<String> = None;
@@ -271,7 +271,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     boot,
                     exec_wall: total_exec_wall,
                 };
-                // Sign the finalized record with the host key (decision 034) and carry the envelope:
+                // Sign the finalized record with the host key. and carry the envelope:
                 // the record rides inside it as a string, so its signed bytes survive the wire's
                 // serde round-trip and a client can verify without trusting this daemon's transport.
                 // Chained to the previous `trace` in this session, so the sequence is tamper-evident
@@ -395,7 +395,6 @@ fn serve_run(
 /// Boot the session's VM. A **bare** `open` (every knob defaulted) is served from the pre-warmed pool
 /// when the daemon has one, the fast path, since the pool's clones carry the default profile. Any
 /// custom resource knob (or no pool) is a cold boot with the requested envelope.
-///
 /// The lock is taken **non-blocking** (`try_lock`) and held only to pop **ready stock** (an O(1)
 /// pop), never across a `Vm::restore` (16-A). Two ways it declines and cold-boots instead of blocking:
 /// an empty (or poisoned) pool, and a *contended* one, `end_session` holds this same lock across its
@@ -469,7 +468,6 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
 /// between sessions, the moment the [`Pool`](vmm::Pool) doc reserves for restore cost).
-///
 /// The refill is **best-effort and non-blocking** (16-A): `try_lock`, and skip if the pool is
 /// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
 /// another's restore. Stock recovers on the next uncontended close (the holder refills all the way to
@@ -500,10 +498,9 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
 /// validating each as a typed message (never a panic): vCPUs in `1..=32`, memory and wall nonzero.
 /// Also reports whether the `open` was **bare** (every knob defaulted), which decides pool
 /// eligibility. A non-`Open` first message is the caller's error too.
-///
 /// This is the daemon's policy boundary, not a convenience: a client arrives over a socket and
 /// controls neither this process's environment nor its `.ekvm.toml`, so bounding the request here
-/// is what makes an operator ceiling real (decision 041). Asking past a ceiling is refused, never
+/// is what makes an operator ceiling real. Asking past a ceiling is refused, never
 /// quietly clamped.
 fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String> {
     let Request::Open {
@@ -687,7 +684,7 @@ mod tests {
     fn an_operator_ceiling_refuses_a_greedy_client_open() {
         // The daemon's policy boundary: a client controls neither the daemon's flags nor its
         // environment, so this is the point where an operator ceiling becomes real. Asking past it
-        // must be refused, not served a quietly smaller VM (decision 026/041).
+        // must be refused, not served a quietly smaller VM.
         let policy = Policy {
             max_vcpus: NonZeroU8::new(2),
             max_mem_mib: NonZeroU32::new(512),

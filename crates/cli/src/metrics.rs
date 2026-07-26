@@ -263,7 +263,7 @@ impl Metrics {
     /// fresh per-scrape snapshot of live capacity (warm-pool stock, committed resources, and the
     /// aggregate ceilings): `pool_ready` is `None` when the daemon runs without a pool (the family is
     /// then absent, not zero, so "no pool" and "empty pool" stay distinguishable to an alert), and the
-    /// committed/capacity gauges (decision 042) let a fleet dispatcher route on real headroom.
+    /// committed/capacity gauges. let a fleet dispatcher route on real headroom.
     pub fn render(&self, cap: &CapacitySample) -> String {
         let mut out = String::with_capacity(2048);
 
@@ -433,7 +433,7 @@ impl Metrics {
             sample(&mut out, "ekvm_pool_ready", "", ready);
         }
 
-        // Resource-aware admission headroom (decision 042): committed vs the aggregate ceiling, so a
+        // Resource-aware admission headroom.: committed vs the aggregate ceiling, so a
         // fleet dispatcher routes on real memory/vCPU headroom, not just session count. A `0` ceiling
         // means unlimited, rendered as `0` (an operator reads it as "count-only admission").
         family(
@@ -481,7 +481,7 @@ impl Metrics {
 
 /// A per-scrape snapshot of the daemon's live capacity, gathered fresh each scrape (like the pool
 /// stock already is) so the gauges are current: warm-pool stock, committed guest memory/vCPUs, and
-/// the aggregate ceilings they run against (decision 042).
+/// the aggregate ceilings they run against.
 #[derive(Default, Clone, Copy)]
 pub struct CapacitySample {
     /// Warm clones ready in the pool, or `None` for a daemon with no pool (keeps "no pool" and
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn the_committed_resource_gauges_reflect_the_capacity_sample() {
-        // The admission headroom a dispatcher routes on (decision 042): committed vs the aggregate
+        // The admission headroom a dispatcher routes on.: committed vs the aggregate
         // ceiling, both dimensions, always present (unlike the pool family).
         let text = Metrics::default().render(&CapacitySample {
             pool_ready: None,

@@ -3,7 +3,7 @@
 **Context.** The engine has to meter what a sandbox *costs*, host CPU, memory, IO, as the metering
 primitive a hoster bills on (the engine measures; billing is the hoster's, guardrail 4/3). A microVM
 services its own syscalls in-guest, so the one strong host-side signal is the **cgroup** the VMM runs in
-(decision 011): its host CPU (running the vCPUs), its charged memory, its IO. Two forces shape how that
+.: its host CPU (running the vCPUs), its charged memory, its IO. Two forces shape how that
 is measured. First, the CPU axis wants precise, event-driven, per-cgroup attribution that generalizes to
 per-task and percentile views, not just a coarse running total. Second, whatever the shape, it has to
 stay bounded as many sandboxes run at once: the natural mirror of the per-tap network attach would attach
@@ -57,6 +57,6 @@ IO ride the kernel's native cgroup v2 counters.**
   independent of the eBPF loader (they bridge only by plain values).
 - **Best-effort accuracy.** The `CPU_NS` accumulate is per-CPU-serialized by the scheduler hook but not
   atomic across CPUs, so a heavily-parallel cgroup can undercount by a hair, fine for a metering
-  signal (the same posture as the flow counters, decision 020).
+  signal (the same posture as the flow counters).
 - A privileged, ignored test (`resource_meter.rs`) proves a CPU-heavy run reports far more CPU than an
   idle one, attributed to the sandbox's cgroup; `cargo xtask meter-sandbox` is the live exit-gate demo.

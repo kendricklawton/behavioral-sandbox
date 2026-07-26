@@ -3,7 +3,7 @@
 The engine's shape in one page: the crates, and how the isolation / observability / driver
 boundaries divide them. The hard-to-reverse **decisions** (each one's rationale, the alternatives
 considered, and the why) live separately as **ADRs** under [`docs/adr/`](./adr/README.md), one
-dated, numbered `NNN-*.md` file per choice; the roadmap's `(decision)` tags point at those numbers,
+dated, numbered `NNN-*.md` file per choice; the roadmap's `.` tags point at those numbers,
 and reversing one is a new ADR, not an edit.
 
 **The Firecracker + aya sandbox engine.** A self-hostable, isolated **code-execution sandbox**:

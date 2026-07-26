@@ -84,8 +84,8 @@ forge it.
 The full record (`record.json`) carries the same facts with the forensic detail, the per-flow byte
 and packet counts, the dropped-packet count on the denial, the VMM's host-syscall footprint. It is
 signed with the host key, so `ekvm verify record.json` catches any tampering *after* the run, not
-just the guest's (decision 034). The
-summary is a **view** of it (no new observation; [decision 031](./adr/031-the-ai-scope-boundary-the-model-is-always-the-caller.md)),
+just the guest's. The
+summary is a **view** of it (no new observation)),
 measurably smaller so it fits back into an agent's context. See
 [Using the eKVM CLI](./cli.md#watching-a-run-from-the-host) for all four faces of the one record.
 

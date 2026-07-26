@@ -3,7 +3,7 @@
 **Context.** The engine's headline is a **tamper-evident** audit record, and today that word holds in
 exactly one sense: the record is **host-observed**, so the *guest* cannot forge or alter it (decision
 029, the trust boundary). But a finalized record is a plain JSON artifact, and the party that
-*consumes* it, a supervising caller (decision 031) or a hoster deciding whether to trust a run, reads
+*consumes* it, a supervising caller. or a hoster deciding whether to trust a run, reads
 it **after** it has left the producing host. Nothing today lets that consumer **detect** post-hoc
 alteration by a compromised host process, an operator, or a transport in between. "Tamper-evident"
 is therefore true against the guest and merely asserted against everyone downstream of the host. This
@@ -36,7 +36,7 @@ or transport that relayed it to them.
 - **Key custody is the hoster's.** The engine generates a host key on first use and loads it at
   startup (path via the layered config), and it signs. It does **not** manage tenant identities,
   per-tenant keys, a KMS, key distribution, or revocation infrastructure. Those are tenancy, and
-  tenancy is the hoster's, not something the engine grows (guardrail 4, decision 013). The engine's
+  tenancy is the hoster's, not something the engine grows (guardrail 4). The engine's
   whole contribution to key management is a **`key_id`** on every record and a `verify` path that
   accepts a *set* of trusted keys, so a hoster can rotate a key without invalidating records already
   signed under the old one.

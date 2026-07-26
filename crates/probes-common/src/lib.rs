@@ -158,7 +158,6 @@ impl SyscallEvent {
     /// The event's detail blob decoded for display: the path (`execve`/`openat`, lossy UTF-8) or the
     /// `connect` address (`AF_INET` as `a.b.c.d:port`, other families by number). Centralized here so
     /// every consumer decodes the same way (`std`-only).
-    ///
     /// Returns a [`Cow`](std::borrow::Cow): **borrowed** for the common case (a valid-UTF-8 path,
     /// no allocation), owned only when rendering must build a string (a `connect` sockaddr, or
     /// lossy replacement characters). A per-event fold probes its dedup map with this without
@@ -524,7 +523,6 @@ impl PolicyRule {
 /// order). A rule matches when it is `active`, its CIDR contains `dst_addr`, and its port and protocol
 /// match (a `0` port or proto is a wildcard). Single-sourced: the tc program in `crates/probes` calls
 /// this per rule, and [`egress_allowed`] loops it, so kernel and host can't disagree on the verdict.
-///
 /// The mask is built so the shift operand is always `< 32` (an out-of-range shift is UB in the kernel
 /// and rejected by the verifier): `prefix_len == 0` yields an all-zero mask (match any), `32` an
 /// all-ones mask, and an out-of-range `prefix_len` is treated as no match.

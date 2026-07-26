@@ -54,7 +54,7 @@ carries the guest vsock transport + `CONFIG_DEVTMPFS_MOUNT`, proven by the in-VM
 **Consequences and notes.**
 - **This rootfs's reproducibility bar was "pinned inputs + a fixed UUID + one scripted command," not
   byte-identical.** ~~A content-manifest hash + any `SOURCE_DATE_EPOCH`/`hash_seed` byte-for-byte
-  polish is a later refinement.~~ **Resolved later (decision 007):** `SOURCE_DATE_EPOCH` + a fixed htree hash
+  polish is a later refinement.~~ **Resolved later.:** `SOURCE_DATE_EPOCH` + a fixed htree hash
   seed + dropping apk's wall-clock install log make two builds byte-identical, verified by a gate; a
   committed lockfile records the resolved package closure.
 - **The agent now depends on the `vsock` crate** (guest-agent-only; the host still reaches

@@ -26,14 +26,14 @@ probes-common = { path = "../probes-common", features = ["std"] }
 # links one copy of nix, not two.
 nix = { version = "0.31", default-features = false, features = ["sched"] }
 
-# Record integrity (decision 034): an `ed25519` detached signature over the canonical record bytes,
+# Record integrity.: an `ed25519` detached signature over the canonical record bytes,
 # so a consumer detects post-hoc alteration off-host. The signing key is host-side (the guest never
 # sees it, like the eBPF). `serde_json` builds/parses the signature envelope only; the record itself
 # stays the hand-rolled deterministic JSON (`json.rs`), and is embedded as an opaque string so its
 # signed bytes survive a serde round-trip over the wire.
 ed25519-dalek = { workspace = true }
 serde_json = { workspace = true }
-# The session hash-chain (decision 034): each record commits to the SHA-256 of the previous one, so a
+# The session hash-chain.: each record commits to the SHA-256 of the previous one, so a
 # sequence is tamper-evident as a whole. Already in the tree under `ed25519-dalek`; named directly here.
 sha2 = { workspace = true }
 # Scrub transient copies of the signing seed on drop; the key itself is scrubbed by dalek's own

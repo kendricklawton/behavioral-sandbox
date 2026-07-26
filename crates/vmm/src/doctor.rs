@@ -257,7 +257,7 @@ pub fn can_boot(checks: &[Check]) -> bool {
     checks.iter().all(|c| c.status != CheckStatus::Fail)
 }
 
-/// Whether a **jailed** run (the default, decision 012) can work on this host as invoked right now:
+/// Whether a **jailed** run (the default) can work on this host as invoked right now:
 /// real root *and* the `jailer` binary. Not a readiness check (an unjailed run is still a valid boot,
 /// which is why the two rows above only warn); it exists so a caller can suggest a first-run command
 /// that actually works here instead of one that fails.
@@ -413,7 +413,6 @@ fn cgroup_controllers_delegated() -> bool {
 /// jailer's chroot `/dev/kvm` cannot be opened). `None` when it can't be determined (no readable
 /// `/proc/self/mountinfo`, or the path doesn't resolve), so the check reads "unknown" as "assume
 /// fine" rather than raising a false alarm.
-///
 /// Public so the guided install (`install.sh`, `cargo xtask self-host`) can pre-empt the failure by
 /// writing a non-`nodev` `scratch_dir` instead of the operator hitting it (P20.16a): a diagnostic
 /// helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.

@@ -34,5 +34,5 @@ its special-case for the old extension (the manual is now an ordinary `.md`, alr
 **Consequences.** This is a naming and discoverability change, not a capability one: the manual's
 content is unchanged, and nothing in the build or runtime depends on the filename. The only
 mechanical follow-ons are the reference repoints and the lint's dropped special-case, both landed
-here. The pre-rename working-name gate (decision 035) is untouched: this renames a doc file, not
+here. The pre-rename working-name gate. is untouched: this renames a doc file, not
 the project.

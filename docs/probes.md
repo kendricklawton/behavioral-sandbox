@@ -24,7 +24,7 @@ path, not the payload.
   (`ExecveCounter::{load, count, counts_by_pid}`) returning a typed `ProbeError`, the eBPF analogue
   of the driver's `VmmError`. It reads the compiled object from a **path** (`cargo xtask build-probes`
   output, or `EKVM_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
-  stable and `cargo xtask ci` runs everywhere (decision 017).
+  stable and `cargo xtask ci` runs everywhere.
 
 ## eBPF program types
 
@@ -123,9 +123,9 @@ clsact gives *both* directions uniformly on any device, and because egress enfor
 denied flow, the next section) lives at the same hook; observation alone is exactly that, observe-only
 (both hooks return `TC_ACT_OK`). The flow record
 (`FlowKey`/`FlowKey6` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
-the loader stays `#![forbid(unsafe_code)]` (decision 020). A sandbox's tap lives in its own network
-namespace (decision 014), so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
-safe wrapper, decision 021) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
+the loader stays `#![forbid(unsafe_code)]`. A sandbox's tap lives in its own network
+namespace, so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
+safe wrapper) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
 into a per-VM rollup. Dropping the monitor frees its userspace handles; the sandbox's netns teardown
 reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host residue. `cargo xtask
 watch-sandbox` boots a real networked sandbox and prints the per-VM flows its guest actually generated,
@@ -156,7 +156,7 @@ The userspace schema is `EgressPolicy`, an allow-list built from friendly `Ipv4A
 (`Ipv4Cidr`/`Ipv6Cidr`) and ports, lowered to the `PolicyRule`/`PolicyRule6`s the maps hold. Its **deny-by-default** is the safe default: the empty
 policy (`EgressPolicy::deny_all()`, the `Default`) allows nothing, so a sandbox launched with no explicit
 allowance reaches nothing, the eBPF, host-observed complement to the driver's no-route-to-the-world
-deny-by-default (decision 008). `TapMonitor::set_egress_policy` applies a policy to an already-attached
+deny-by-default. `TapMonitor::set_egress_policy` applies a policy to an already-attached
 monitor; `TapMonitor::enforce_in_netns` applies it **at launch**, arming the maps *before* the tc
 programs go live on the tap so there is no window where the tap is up but un-policed (the first guest
 packet is already policed). Rules go in as raw bytes (`PolicyRule::to_bytes`, so the loader needs no
@@ -204,7 +204,7 @@ the dir for the other two axes. Memory and IO don't need a probe, cgroup v2 alre
 cgroup, so `CgroupStats::read` reads `memory.peak`/`memory.current`, `io.stat` (rbytes/wbytes summed), and
 `cpu.stat`'s `usage_usec` (an independent cross-check on the eBPF CPU total) straight from the cgroup dir,
 best-effort (every field an `Option`, so a missing controller or older kernel is a `None`, never an error,
-accounting fails open, decision 010). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
+accounting fails open). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
 `ResourceSummary` for one sandbox. The split is deliberate, "cgroup-bpf **or** cgroup + tracepoints":
 eBPF where per-event timing earns its keep (CPU), the kernel's own counters where they already exist
 (memory, IO). The whole mechanism is decision 023; `resource_meter.rs` (ignored/privileged) proves a
@@ -216,11 +216,11 @@ meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 The sections above each drive one probe standalone; the fused record binds all three to a launched
 sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
 guest. It lives in
-`probes-loader` (not `vmm`, decisions 021/023/024), bridged to the driver only by plain values:
+`probes-loader` (not `vmm`), bridged to the driver only by plain values:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
   global, so each is loaded **once** for the host, `SharedMeter` and `SharedTracer`, and every sandbox
-  registers its cgroup as a *target* on both (bounded overhead, decision 024). The tap monitor is per-VM.
+  registers its cgroup as a *target* on both (bounded overhead). The tap monitor is per-VM.
 - **One post-boot attach.** `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)` runs
   once after `Sandbox::open`: it resolves the VMM's cgroup, registers it on the shared tracer + meter, and
   attaches the tap in the sandbox's netns (enforcing an egress policy if given). Every axis is fail-open,

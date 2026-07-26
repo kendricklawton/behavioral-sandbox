@@ -1,7 +1,7 @@
 # 013. The engine/hoster security line: the engine's tools can't be weaponized; deploying them is the hoster's *(2026-07-14)*
 
 **Context.** The engine's isolation boundary is unconditional, and any privileged tool it ships has to
-hold to that same standard. The orphan sweep (decision 011's GC) is the first such tool that **acts on a
+hold to that same standard. The orphan sweep. is the first such tool that **acts on a
 shared, world-writable surface**: it runs with `CAP_NET_ADMIN`/root and deletes per-VM network
 namespaces (each cascading its tap away; at the time of this decision, host taps directly) plus
 directories under the scratch base (`/tmp` by default). On a host where not everyone is trusted, that

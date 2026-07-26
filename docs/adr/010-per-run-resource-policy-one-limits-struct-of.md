@@ -24,7 +24,7 @@ struct [`Limits`], carrying **resource quantities**, never mechanism. Its knobs:
   the fourth knob.
 
 Two things it deliberately is **not**:
-- **Not network policy.** The "net policy" is a *capability* (deny-by-default egress, decision 008), not
+- **Not network policy.** The "net policy" is a *capability* (deny-by-default egress), not
   a numeric budget: it stays a separate boolean / eBPF-enforced concern and does not become a `Limits`
   field. Quantities here, capabilities there.
 - **Not per-exec.** The policy binds at the **host VMM cgroup** (per-VM, created by the jailer), the

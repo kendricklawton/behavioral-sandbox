@@ -1,14 +1,11 @@
-# The engine as a container image (decision 035): a runtime-only image assembled FROM a `cargo
+# The engine as a container image.: a runtime-only image assembled FROM a `cargo
 # xtask dist` stage (build outside, package inside), bundling the sha-pinned Firecracker v1.9 the
 # engine drives. The KVM boundary cannot come from the image: run it with the host's /dev/kvm.
-#
 #   cargo xtask dist
 #   docker build -f Containerfile --build-arg DIST=dist/ekvm-<ver>-x86_64-linux -t ekvm:<ver> .
-#
 #   docker run --rm ekvm:<ver>                                # doctor: what this host can do
 #   docker run --rm --device /dev/kvm ekvm:<ver> run --unjailed -- echo hi
 #   docker run --rm --device /dev/kvm --cap-add NET_ADMIN ekvm:<ver> run --unjailed --net ...
-#
 # The jailed default and eBPF observation need more of the host (real root in the user namespace,
 # CAP_BPF/CAP_PERFMON, cgroup v2 delegation); a hardened deployment runs those on the host or in a
 # privileged container, a hoster call the engine does not make for you.

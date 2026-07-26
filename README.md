@@ -90,7 +90,7 @@ on every change; the privileged path (microVM boot, the jailer, the eBPF probes,
 suite) runs nightly in CI on a GitHub-hosted **Ubuntu 24.04** `x86_64` runner (nested KVM) and is
 hand-verified on **Arch Linux** during development, both with **Firecracker v1.9**. `x86_64` is the
 only supported architecture: nothing untestable is claimed, and aarch64 returns only with hardware
-and a privileged CI lane behind it (decision 032). `ekvm doctor` reports your own host's
+and a privileged CI lane behind it. `ekvm doctor` reports your own host's
 readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).
 
 ## How it fits together

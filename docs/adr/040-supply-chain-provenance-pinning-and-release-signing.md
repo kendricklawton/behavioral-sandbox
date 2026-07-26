@@ -2,15 +2,15 @@
 
 **Context.** Build-input provenance is already strong. The guest kernel and boot rootfs are pinned by
 sha256 (`xtask/src/artifacts.rs`); the Alpine base, `apk-tools`, and the resolved package closure are
-pinned and the rootfs is byte-for-byte reproducible (`xtask/src/rootfs.rs`, decision 007); a
+pinned and the rootfs is byte-for-byte reproducible (`xtask/src/rootfs.rs`); a
 `cargo xtask vendor` mirror re-verifies every pinned input offline in both directions
-(`xtask/src/vendor.rs`, decision 033); the release tarball is deterministic and double-checksummed,
+(`xtask/src/vendor.rs`); the release tarball is deterministic and double-checksummed,
 an outer `SHA256SUMS` over the tarball and an inner per-file manifest, verified by `install.sh`
-(`xtask/src/dist.rs`, decision 035). Against that, an evaluator finds two real holes.
+(`xtask/src/dist.rs`). Against that, an evaluator finds two real holes.
 
 1. **The Firecracker and jailer binaries are not pinned or verified.** `install.sh` tells the operator
    to install Firecracker v1.9 on `PATH`; the self-host path drives whatever binary it finds. The
-   container image bundles a sha-pinned Firecracker (decision 035), but the tarball and self-host
+   container image bundles a sha-pinned Firecracker., but the tarball and self-host
    paths verify nothing. And Firecracker *is* the trust boundary: an unverified boundary binary
    undercuts the entire isolation claim, no matter how well the guest image is pinned.
 2. **The release `SHA256SUMS` is itself unsigned.** The tarball's integrity is checksummed, but the
@@ -27,7 +27,7 @@ an outer `SHA256SUMS` over the tarball and an inner per-file manifest, verified 
   than refuses; the pinned hash is the supported, verified default, not a hard gate (the same posture
   decision 038 takes for host hardening).
 - **Sign the release `SHA256SUMS`.** The finalized checksum file is signed with the same host
-  `ed25519` signing core the audit record already uses (decision 034), or an equivalent minisign key,
+  `ed25519` signing core the audit record already uses., or an equivalent minisign key,
   so a downloader verifies provenance against a published key without trusting the release host or its
   transport. `install.sh` verifies the signature when a trusted public key is present.
 - **SLSA provenance, SBOM, and in-toto attestation are recorded as post-tag work, not a pre-tag box.**

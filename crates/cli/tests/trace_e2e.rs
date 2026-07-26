@@ -103,7 +103,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         "the syscall axis is labeled honestly: {stdout}"
     );
 
-    // The exported record is a signed envelope (decision 034): one line of JSON carrying the
+    // The exported record is a signed envelope.: one line of JSON carrying the
     // canonical record as an embedded string alongside an `ed25519` signature and its `key_id`.
     let json = std::fs::read_to_string(&record_path).expect("read the --record file");
     assert_eq!(json.lines().count(), 1, "one line of JSON: {json}");

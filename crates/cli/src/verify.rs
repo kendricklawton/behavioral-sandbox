@@ -1,4 +1,4 @@
-//! `ekvm verify <record>`: check a signed audit record's `ed25519` signature (decision 034).
+//! `ekvm verify <record>`: check a signed audit record's `ed25519` signature.
 //!
 //! Re-reads the canonical record bytes from the envelope and verifies them against a **trusted**
 //! public key: the host's own by default, or one (or more) `--key <hex>` supplied out of band, so a
@@ -73,7 +73,7 @@ fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
 
 /// The trusted key **set**: the union of explicit `--key` values, the configured trusted keys
 /// (`EKVM_TRUSTED_KEYS` / `.ekvm.toml`, for rotation), and the host's own current signing key.
-/// Trusting a set is what lets a record signed *before* a key rotation still verify (decision 034):
+/// Trusting a set is what lets a record signed *before* a key rotation still verify.:
 /// keep the old public key in the set and it stays valid. Everything reduces to `key_id` hex, so the
 /// sources dedup cleanly.
 fn trusted_keys(

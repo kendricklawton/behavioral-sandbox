@@ -20,13 +20,13 @@ it**. The reasoning behind each piece lives in its decision record; this is the 
 - **The release tarball is deterministic, checksummed, and signed.** An outer `SHA256SUMS` covers the
   tarball, an inner per-file manifest covers every staged file, and `SHA256SUMS.sig` carries an `ed25519`
   signature; `install.sh` verifies checksums and verifies the signature when a trusted key is supplied
-  (`xtask/src/dist.rs`, [decision 035](./adr/035-distribution-is-a-checksummed-tarball-an-installer.md),
+  (`xtask/src/dist.rs`),
   [decision 040](./adr/040-supply-chain-provenance-pinning-and-release-signing.md)).
 - **The Rust dependency tree is gated.** `cargo deny` fails CI on an advisory, and the build is
   `--locked` against a pinned toolchain (see [Stability & releases](./stability.md)).
 - **The audit record is host-signed.** Separate from build provenance, each finalized record carries
   an `ed25519` signature so tampering after the producing host is detectable
-  ([decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md)).
+.).
 
 ## What is being closed
 

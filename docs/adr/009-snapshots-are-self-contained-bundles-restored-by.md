@@ -28,7 +28,7 @@ contract without a shared mutable backing file.
 - **The API client gained `patch`** (Firecracker uses `PATCH` for in-place changes to a configured VM)
   and typed bodies for `/vm`, `/snapshot/create`, `/snapshot/load`, with the closed-set discriminants
   (`Paused`/`Resumed`, `Full`, `File`) modelled as enums, the same wire-discriminant discipline as
-  `Action` (decision 001).
+  `Action`.
 
 **Alternatives considered.**
 - **Rebase the drive after load (`PATCH /drives`).** Rejected because it doesn't work: Firecracker
@@ -76,7 +76,7 @@ contract without a shared mutable backing file.
 - **Still deferred:** a snapshot with an **input or output device** is a typed error (per-clone
   images a restore can't yet recreate). A **NIC** is no longer deferred: a networked clone restores
   into a fresh per-VM netns and reuses the snapshot's baked-in identity, isolated by its namespace
-  (decision 014, superseding the earlier fresh-identity re-addressing).
+.
   `ci-privileged` now runs the VM tests serially (they boot
   real microVMs and some assert on host-global leak state).
 - **Restore identity: entropy and clocks** *(folded from the retired restore-identity record,

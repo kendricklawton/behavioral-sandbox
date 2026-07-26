@@ -159,9 +159,8 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
 
 /// The network-observability exit-gate demo (`watch-sandbox`): **live per-microVM network visibility**. Boot a real
 /// networked sandbox and watch the guest's own traffic on its tap, per flow and as a per-VM rollup,
-/// scoped to the sandbox's own netns (decision 014). Unlike the syscall trace, this is the guest's
+/// scoped to the sandbox's own netns. Unlike the syscall trace, this is the guest's
 /// *own* packets: they cross the tap on the host, so the host sees every one.
-///
 /// Needs `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
 /// privileged, user-run demo like `trace-sandbox`. `rounds` is how many guest-traffic bursts to send
 /// (watching the counters climb each one).
@@ -223,7 +222,7 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
         TapMonitor::attach_in_netns(&netns, &tap).context("attach the tap monitor in the netns")?;
 
     // The guest can reach only the host end of its point-to-point /30 (deny-by-default); under the
-    // netns model that end is the fixed 10.200.0.1 (decision 014). Have the guest fire UDP at it each
+    // netns model that end is the fixed 10.200.0.1. Have the guest fire UDP at it each
     // round and watch the per-VM counters climb: live network visibility.
     let sender = "import socket, time\n\
                   s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
@@ -264,9 +263,7 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
 
     drop(monitor);
     sandbox.shutdown().context("shut the sandbox down")?;
-    println!(
-        "\n# sandbox shut down; its netns teardown reclaimed the tap and the tc filter (decision 020)."
-    );
+    println!("\n# sandbox shut down; its netns teardown reclaimed the tap and the tc filter.");
     println!(
         "# This was the guest's OWN traffic, observed at its tap from the host and scoped by netns."
     );
@@ -277,7 +274,6 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
 /// networked sandbox, arm a deny-by-default egress policy that allows exactly one endpoint, have the guest
 /// send to that endpoint and to a blocked one, and show the allow-listed traffic passing while everything
 /// else is dropped at the tap and recorded in the denials audit trail.
-///
 /// Needs `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_NET_ADMIN`, and the built probe object, a
 /// privileged, user-run demo like `watch-sandbox`.
 pub(crate) fn enforce_sandbox() -> Result<()> {
@@ -329,8 +325,8 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
         .context("the sandbox has no tap (networking should be on)")?
         .to_string();
 
-    // Deny-by-default egress with a single allowed endpoint: the netns host end on UDP 9999
-    // (decision 022). Everything else the guest sends is dropped at the tap and logged.
+    // Deny-by-default egress with a single allowed endpoint: the netns host end on UDP 9999.
+    // Everything else the guest sends is dropped at the tap and logged.
     const ALLOWED_PORT: u16 = 9999;
     const BLOCKED_PORT: u16 = 8888;
     let host_end = std::net::Ipv4Addr::new(10, 200, 0, 1);
@@ -410,7 +406,6 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
 /// charging near-zero host CPU while a CPU-heavy guest charges most of a core, the engine *measures*,
 /// the hoster *bills*. Prints the full `ResourceSummary` (CPU from eBPF, memory/IO from the kernel's
 /// cgroup v2 counters) for the busy run.
-///
 /// Needs `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_PERFMON`, and the built probe object, a
 /// privileged, user-run demo like `trace-sandbox`.
 pub(crate) fn meter_sandbox() -> Result<()> {

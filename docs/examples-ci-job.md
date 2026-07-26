@@ -50,7 +50,7 @@ because `test_sneaky` raised, its `urlopen` never connected. The report is back 
 the record shows why it failed the way it did:
 
 ```console
-$ ekvm verify ci.json && echo verified   # the record is signed and tamper-evident (decision 034)
+$ ekvm verify ci.json && echo verified   # the record is signed and tamper-evident.
 verified
 $ jq -r .record ci.json | jq '{network, timing}'   # unwrap the signed envelope, then project
 {
