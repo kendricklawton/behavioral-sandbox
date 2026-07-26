@@ -4,21 +4,19 @@
 //! what "ready" means.
 //!
 //! Each [`Check`] is one prerequisite with a [`CheckStatus`]: [`Ok`](CheckStatus::Ok) present,
-//! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open,
-//! ADR 010), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
+//! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
 //! it, or the host is off the supported platform). The split mirrors the engine's own error
 //! discipline: the isolation boundary is never a degradation, so `/dev/kvm`, the boot artifacts, and
-//! the **supported-platform floor** (architecture + a security-maintained host-kernel LTS,
-//! ADR 032) are hard, while the jailer, resource caps, and networking tools fail open with a named
+//! the **supported-platform floor** (architecture + a security-maintained host-kernel LTS) are hard, while the jailer, resource caps, and networking tools fail open with a named
 //! consequence.
 //!
-//! The host-hardening posture rows (ADR 038) reuse [`Warn`](CheckStatus::Warn) for a second kind
+//! The host-hardening posture rows reuse [`Warn`](CheckStatus::Warn) for a second kind
 //! of advice: not a capability the engine loses, but a side-channel exposure the layer *beneath*
 //! the engine carries when mutually-distrusting tenants share the hardware. Advisory by design, a
-//! single-tenant dev box tripping them is fine (`docs/host-hardening.md` is the baseline).
+//! single-tenant dev box tripping them is fine (`docs/threat-model.md` is the baseline).
 //!
 //! The eBPF-observability capability check (`CAP_BPF`/`CAP_PERFMON` + kernel BTF) lives in the probe
-//! loader, out of this crate (ADRs 021/023); each entry point appends it. This module is
+//! loader, out of this crate; each entry point appends it. This module is
 //! `unsafe`-free std-only detection, nothing here boots a VM.
 
 use std::ffi::OsString;
@@ -29,11 +27,11 @@ use crate::BootConfig;
 
 /// The **supported host-kernel floor** (`major.minor`), a hard requirement: the engine refuses to
 /// certify a host below a security-maintained LTS, because running untrusted code on an unpatched
-/// kernel is a threat-model hole, not a convenience gap (ADR 032). 5.15 is a maintained LTS that
-/// also guarantees `cgroup.kill` (5.14, ADR 011); bump it here to tighten the floor.
+/// kernel is a threat-model hole, not a convenience gap. 5.15 is a maintained LTS that
+/// also guarantees `cgroup.kill` (5.14); bump it here to tighten the floor.
 const MIN_KERNEL: (u64, u64) = (5, 15);
 
-/// The **supported CPU architectures** (ADR 032, narrowed to `x86_64`-only: aarch64 has no
+/// The **supported CPU architectures** (narrowed to `x86_64`-only: aarch64 has no
 /// hardware or CI lane to test its privileged path on, and an untested isolation boundary is not
 /// a supported one). The engine builds for no others, so for a shipped binary this is decided at
 /// compile time; the check names an unsupported cross-compile rather than letting it fail
@@ -46,7 +44,7 @@ pub enum CheckStatus {
     /// The prerequisite is present.
     Ok,
     /// Absent, but the engine **degrades** rather than refusing: the run still works, minus the
-    /// capability the `note` names (a fail-open item, ADR 010).
+    /// capability the `note` names (a fail-open item).
     Warn,
     /// Absent and **hard**: a boot cannot happen without it (the isolation boundary, the artifacts).
     Fail,
@@ -88,7 +86,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
     let fc = config.firecracker.to_string_lossy();
     let exposed = vulnerable_entries(Path::new(SYS_CPU_VULNERABILITIES));
     vec![
-        // The supported platform, hard: off it, the engine is not certified to isolate (ADR 032).
+        // The supported platform, hard: off it, the engine is not certified to isolate.
         Check::new(
             &format!("architecture is {} (x86_64)", std::env::consts::ARCH),
             SUPPORTED_ARCHES.contains(&std::env::consts::ARCH),
@@ -198,9 +196,9 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "bulk `output_dir` readback fails; per-frame `--get` artifacts are unaffected",
         ),
-        // Host hardening (ADR 038), advisory: micro-architectural side channels between
+        // Host hardening, advisory: micro-architectural side channels between
         // co-resident guests live in the layer beneath the engine, so doctor advises the
-        // multi-tenant baseline (`docs/host-hardening.md`) and never refuses.
+        // multi-tenant baseline (`docs/threat-model.md`) and never refuses.
         Check::new(
             "CPU vulnerability mitigations in effect",
             exposed.is_empty(),
@@ -240,7 +238,7 @@ pub fn matrix() -> Vec<&'static str> {
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps",
         "  scratch dir is nodev         -> jailed /dev/kvm can't open; point EKVM_SCRATCH_DIR off nodev",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
-        "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/host-hardening.md",
+        "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/threat-model.md",
         "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
         "  unsupported arch / kernel    -> off the supported platform: refused",
@@ -304,7 +302,7 @@ fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     crate::spawn::fc_version_of(&text)
 }
 
-/// Known pinned Firecracker sha256 hashes (v1.9.0 and v1.9.1 release binaries, ADR 040).
+/// Known pinned Firecracker sha256 hashes (v1.9.0 and v1.9.1 release binaries).
 const PINNED_FIRECRACKER_SHA256: &[&str] = &[
     "c8c2496f8786da12b7bbfbc5060af3573c22baa2e5f79ff6ee084993642bbe01", // v1.9.0
     "809789cd7567b77b20edec9b301953338c2023c37ea63db82d46cb61773ad511", // v1.9.1
@@ -360,7 +358,7 @@ fn kernel_at_least(major: u64, minor: u64) -> bool {
         .is_some_and(|v| v >= (major, minor))
 }
 
-/// The sysfs facts behind the host-hardening advisory rows (ADR 038): the per-vulnerability
+/// The sysfs facts behind the host-hardening advisory rows: the per-vulnerability
 /// mitigation files, whether SMT is active, and whether KSM is merging.
 const SYS_CPU_VULNERABILITIES: &str = "/sys/devices/system/cpu/vulnerabilities";
 const SYS_SMT_ACTIVE: &str = "/sys/devices/system/cpu/smt/active";
@@ -569,7 +567,7 @@ mod tests {
             .find(|c| c.label.contains("jailer"))
             .expect("a jailer check");
         assert!(matches!(jailer.status, CheckStatus::Ok | CheckStatus::Warn));
-        // The supported-platform floor (ADR 032) is present and **hard**, architecture and a
+        // The supported-platform floor is present and **hard**, architecture and a
         // kernel LTS are never degradations, so an off-platform host is refused, not warned.
         let arch = checks
             .iter()
@@ -584,7 +582,7 @@ mod tests {
             checks.iter().any(|c| c.label.contains("LTS floor")),
             "the host-kernel LTS floor is a stated check"
         );
-        // The host-hardening posture (ADR 038) and Firecracker pin (ADR 040) are present and advisory:
+        // The host-hardening posture and Firecracker pin are present and advisory:
         // whatever this host's state, those rows never read Fail.
         for needle in ["CPU vulnerability", "SMT", "KSM", "binary sha256"] {
             let row = checks

@@ -22,7 +22,7 @@ path = "src/main.rs"
 probes-loader = { path = "../probes-loader" }
 vmm = { path = "../vmm" }
 # The `ekvm` daemon's wire protocol: the versioned newline-JSON contract it shares with the
-# reference client and the polyglot SDKs (ADR 030). A serde-only leaf, no engine internals.
+# reference client and the polyglot SDKs. A serde-only leaf, no engine internals.
 protocol = { path = "../protocol" }
 clap = { workspace = true }
 # `ekvm run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
@@ -40,7 +40,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-# The reference client for the versioned wire API (ADR 030, docs/daemon.md), used by the
+# The reference client for the versioned wire API (docs/daemon.md), used by the
 # daemon's e2e demo to prove a caller drives `ekvm` over the wire alone. A dev-dep so the daemon
 # crate can spawn `ekvm` (it owns the artifacts)
 # while the client itself stays free of `vmm`.

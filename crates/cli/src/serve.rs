@@ -5,9 +5,9 @@
 //! use, **still engine, not platform**, no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
-//! **Shape.** One connection is one sandbox **session** (the VM *is* the session, ADR 016),
+//! **Shape.** One connection is one sandbox **session** (the VM *is* the session),
 //! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`protocol`] crate (ADR 030);
+//! is the versioned newline-JSON contract in the shared [`protocol`] crate;
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
@@ -30,7 +30,7 @@
 //!
 //! **Bounded concurrency.** Every session is a full microVM (guest RAM, a tap, a cgroup), so the
 //! daemon bounds its own core resource: at the `--max-sessions` ceiling (or an aggregate
-//! `--max-committed-mem-mib`/`--max-committed-vcpus` ceiling, decision 042) a new connection gets the
+//! `--max-committed-mem-mib`/`--max-committed-vcpus` ceiling) a new connection gets the
 //! distinct `at_capacity` reply *before* any VM is booted, instead of walking the host into
 //! OOM/KVM/fd exhaustion, a backpressure signal a fleet dispatcher fails over on. The ceilings are the
 //! hoster's knobs (`0` = unlimited); admission control is engine self-protection, not tenancy (still
@@ -38,7 +38,7 @@
 //!
 //! **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
 //! ends, tearing the microVM down; and losing the whole daemon process (SIGKILL, OOM) can't leak a
-//! VM either, the lifetime sentinel (ADR 011) reaps it, and the next start clears a stale
+//! VM either, the lifetime sentinel reaps it, and the next start clears a stale
 //! socket file. A supervisor's SIGTERM/SIGINT is handled: the daemon logs, unlinks its socket, and
 //! exits cleanly (in-flight sessions end crash-consistently, their VMs reaped by the sentinel); a
 //! graceful *drain* of in-flight sessions remains a later ops concern.
@@ -75,13 +75,13 @@ pub struct ServeArgs {
     /// built (no KVM, no root for jailed clones), every session cold-boots. Omit (or `0`) to disable.
     #[arg(long, value_name = "N")]
     prewarm: Option<usize>,
-    /// Run every session's VMM without the jailer. The default is confined (jailed, ADR 012,
+    /// Run every session's VMM without the jailer. The default is confined (jailed,
     /// needs real root + the `jailer` binary); this is the daemon-wide opt-out for hosts that can't
     /// jail. A **client never chooses this**, the confinement posture is the hoster's, set here.
     #[arg(long)]
     unjailed: bool,
     /// Refuse to boot a session's VMM when the cpu/memory cgroup caps can't be applied, instead of
-    /// the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing on a
+    /// the default warn-and-boot-uncapped. Makes the resource envelope load-bearing on a
     /// multi-tenant host; needs the jailer (so not with `--unjailed`) and delegated cgroup v2
     /// controllers. Also settable via `EKVM_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
     #[arg(long)]

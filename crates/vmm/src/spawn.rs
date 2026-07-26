@@ -451,7 +451,7 @@ impl Spawned {
     /// **jailer** for a snapshot restore, so a prewarmed clone runs confined from its first instruction.
     /// The bundle (state, memory, disk) is staged into the chroot in
     /// [`run_restore`](Self::run_restore), once the API socket proves the chroot exists. A networked
-    /// snapshot's baked-in tap is recreated in a fresh per-VM netns the jailer joins (ADR 014),
+    /// snapshot's baked-in tap is recreated in a fresh per-VM netns the jailer joins,
     /// owned by the jailed uid.
     ///
     /// The cgroup **resource caps** are re-applied here, derived from the *clone's true envelope*
@@ -459,22 +459,22 @@ impl Spawned {
     /// `PUT /machine-config`, and nothing forces `config` to agree with the source), so caps derived
     /// from a mis-declaring `config` would throttle or OOM-kill a legitimate clone. `cpu.max` uses the
     /// snapshot's recorded vCPU count and `memory.max` the memory file's true guest RAM; `pids.max`
-    /// is a constant. Fail-open like a cold boot's caps (empty without delegated controllers,
-    /// ADR 010), the isolation walls (chroot, uid drop, seccomp, netns) are all present either way.
+    /// is a constant. Fail-open like a cold boot's caps (empty without delegated controllers),
+    /// the isolation walls (chroot, uid drop, seccomp, netns) are all present either way.
     fn launch_jailed_for_restore(
         config: &BootConfig,
         snapshot: &Snapshot,
         jail: &Jail,
     ) -> Result<Self, VmmError> {
         // Re-apply the resource caps a cold jailed boot gets, so a restored clone (where the
-        // untrusted code runs) is confined too, not just isolated, the co-resident-safety property
-        // (ADR 019). Both caps derive from the snapshot's true envelope, never `config`'s declaration:
+        // untrusted code runs) is confined too, not just isolated, the co-resident-safety property.
+        // Both caps derive from the snapshot's true envelope, never `config`'s declaration:
         // `memory.max` from the memory file's true size (`restore_mem_mib`, never below what the
         // clone actually uses, the OOM hazard that once kept restore uncapped), `cpu.max` from the
         // vCPU count recorded in the bundle (the clone's real parallelism; a `config` defaulting to
         // fewer vCPUs than the source must not silently throttle it), and `pids.max` is a constant.
         // A networked clone gets the fixed-name tap in a fresh netns; its baked-in guest identity is
-        // already correct there (ADR 014).
+        // already correct there.
         let mem_len = std::fs::metadata(&snapshot.mem)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -645,7 +645,7 @@ impl Spawned {
             .map(|m| u32::try_from(m.len() >> 20).unwrap_or(u32::MAX))
             .unwrap_or(0);
         // Clamp that mem-scaled ceiling to the wall's remaining budget: the ceiling is slow-disk
-        // headroom, but the run's one wall (ADR 010) is the hard bound, a load that would outrun it is
+        // headroom, but the run's one wall is the hard bound, a load that would outrun it is
         // a Timeout, never an overrun that returns minutes past the wall. `still_before` keeps the
         // remainder positive (a zero socket timeout means "block forever").
         still_before(deadline, "PUT /snapshot/load")?;
@@ -689,7 +689,7 @@ impl Spawned {
         if let Some(uds) = self.vsock_uds.clone() {
             self.await_guest_ready(&uds, deadline)?;
         }
-        // No in-guest re-addressing on restore: under the netns model (ADR 014) each clone owns a
+        // No in-guest re-addressing on restore: under the netns model each clone owns a
         // private network namespace, so the snapshot's baked-in `eth0` address/MAC/routes are
         // already correct and collision-free in it. The guest's network identity is untouched; the
         // tap it enforces on stays host-side, in the clone's own netns.
@@ -796,7 +796,7 @@ impl Spawned {
         let _span = span.enter();
 
         // The deadline spans host-side staging (`launch`) *and* this API boot: it's computed once by
-        // the caller (`boot_deadline`) and threaded in, so both share one wall (ADR 010).
+        // the caller (`boot_deadline`) and threaded in, so both share one wall.
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 
@@ -878,7 +878,7 @@ impl Spawned {
         // Static guest addressing when a NIC is attached: the kernel configures `eth0` before
         // userspace via `CONFIG_IP_PNP`. The gateway field is **empty**, so the kernel installs only
         // the connected /30 route (guest ⇄ host over the tap) and **no default route**, the guest
-        // reaches the host and nothing else (deny-by-default, ADR 008). Netmask is a /30.
+        // reaches the host and nothing else (deny-by-default). Netmask is a /30.
         //
         // IPv6 rides alongside as the `guest_ip6=<addr>/<plen>` token: `ip=`/`CONFIG_IP_PNP`
         // has no v6 form, so the guest's `/sbin/net-up` sysinit reads this token and applies it to
@@ -1333,9 +1333,9 @@ impl Drop for StagedDisk {
     }
 }
 
-/// The Firecracker `(major, minor)` the driver's API bodies are written against (ADR 001).
+/// The Firecracker `(major, minor)` the driver's API bodies are written against.
 /// Field names have drifted across releases and behavior genuinely changes (v1.9 rejects
-/// `network_overrides` on snapshot load, ADR 014), so an unexpected binary means cryptic
+/// `network_overrides` on snapshot load), so an unexpected binary means cryptic
 /// mid-boot API errors or silently different semantics, the runtime-validates-its-VMM guard: a
 /// runtime pinning and checking the version of the lower-level binary it drives.
 const PINNED_FC_VERSION: (u64, u64) = (1, 9);
@@ -1360,13 +1360,11 @@ fn warn_on_unpinned_firecracker(firecracker: &Path) {
             Some((maj, min)) => tracing::warn!(
                 found = %format!("v{maj}.{min}"),
                 pinned = %format!("v{pin_maj}.{pin_min}"),
-                "firecracker differs from the version the driver's API schema is pinned to \
-                 (ADR 001): request bodies and snapshot semantics may not match"
+                "firecracker differs from the version the driver's API schema is pinned to: request bodies and snapshot semantics may not match"
             ),
             None => tracing::warn!(
                 binary = %firecracker.display(),
-                "could not parse `firecracker --version`; the driver's API schema is pinned to \
-                 v{pin_maj}.{pin_min} (ADR 001)"
+                "could not parse `firecracker --version`; the driver's API schema is pinned to v{pin_maj}.{pin_min}"
             ),
         }
     });
@@ -1633,7 +1631,7 @@ fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
 
 /// The wall-clock deadline for one whole boot/restore, `now + timeout`, computed **once** by
 /// `Vm::boot`/`Vm::restore` and threaded through host-side staging (`launch`) *and* the API boot
-/// (`run_boot`) so the two share one budget (ADR 010: one wall for the run, not one per phase).
+/// (`run_boot`) so the two share one budget (one wall for the run, not one per phase).
 /// `Instant + Duration` panics on overflow, and `timeout` is caller-set, so a `Duration::MAX`
 /// "no limit" clamps to a day rather than panicking.
 pub(crate) fn boot_deadline(timeout: Duration) -> Instant {

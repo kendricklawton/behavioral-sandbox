@@ -1,13 +1,13 @@
 //! One client connection = one sandbox **session**. Mirrors `ekvm shell`'s lifecycle over the wire:
 //! the first message opens the sandbox (jailed by default, the daemon's launch posture, never the
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
-//! session, ADR 016), until `close` (or a hung-up connection) tears it down.
+//! session), until `close` (or a hung-up connection) tears it down.
 //!
 //! The session runs on an owned [`RunningVm`], not a [`Sandbox`](vmm::Sandbox), so a warm clone
 //! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
-//! **The verbs** (the versioned wire API, ADR 030): `open` boots; `exec` runs a command; `put`/`get`
+//! **The verbs** (the versioned wire API): `open` boots; `exec` runs a command; `put`/`get`
 //! write/read a working-directory file (a no-op exec that only injects/returns it, since injection is
 //! the engine's only file seam); `snapshot` writes a bundle (a typed refusal for a jailed session);
 //! `trace` returns the host-observed audit record (`RunRecord`) so far; `close` ends it.
@@ -18,7 +18,7 @@
 //! the CLI's shell: a **guest** fault (a bad command, a timeout, a flooded cap) is per-request and the
 //! session survives it, while an **infra/transport** fault means the VM itself is gone, so the session
 //! ends and its VM drops (tearing the microVM down). Losing the whole daemon process can't leak a VM
-//! either, the lifetime sentinel (ADR 011) owns that.
+//! either, the lifetime sentinel owns that.
 
 use std::io::{BufReader, Read};
 use std::num::{NonZeroU32, NonZeroU8};

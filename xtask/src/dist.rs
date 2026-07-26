@@ -56,7 +56,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         // host-safe; a *package* without the observability half is not the product, so hard-fail.
         bail!(
             "eBPF object not built ({}) — a dist ships the audit half; install bpf-linker + the \
-             nightly toolchain (see docs/contributing-building.md)",
+             nightly toolchain (see docs/contributing.md)",
             object.display()
         );
     }

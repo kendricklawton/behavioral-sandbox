@@ -1,9 +1,8 @@
 //! `channel`, the host↔guest wire protocol for the exec channel.
 //!
 //! One command in, its `stdout`/`stderr`/exit out, over a single bidirectional byte stream (vsock
-//! in the guest, a unix socket in tests, the protocol doesn't care). The transport is chosen in
-//! ADR 002; this crate is only the framing, so it stays near dependency-free (one `no_std` crate,
-//! `zeroize`, for an elision-proof secret wipe, see ADR 015) and unit-testable without a VM.
+//! in the guest, a unix socket in tests, the protocol doesn't care). This crate is only the framing, so it stays near dependency-free (one `no_std` crate,
+//! `zeroize`, for an elision-proof secret wipe) and unit-testable without a VM.
 //!
 //! **Shape (why it's built this way).**
 //! - A **handshake** first: a 4-byte magic + a `u16` version. Both peers *send then receive*, so a
@@ -356,7 +355,7 @@ fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
 /// The encoded size of one [`put_blob`] (its 4-byte length prefix + the bytes). Used to size the
 /// payload buffer *exactly* up front (see [`write_exec`]/[`write_put_file`]): a secret-bearing
 /// payload must live in **one** buffer so the post-send `zeroize` wipes every copy, a `Vec` that
-/// grew would strand unwiped plaintext prefixes in the reallocations it freed (ADR 015).
+/// grew would strand unwiped plaintext prefixes in the reallocations it freed.
 fn blob_len(bytes: &[u8]) -> usize {
     4 + bytes.len()
 }
@@ -386,7 +385,7 @@ pub(crate) fn write_request(w: &mut impl Write, req: &Request) -> Result<(), Cha
 /// Serialize and send a `PutFile` from **borrowed** parts, no owned [`Request`] to clone the
 /// secret bytes into first. The payload is sized exactly (one buffer, no growth) so the post-send
 /// `zeroize` wipes the engine's only copy of the injected bytes before it returns to the allocator
-/// (ADR 015; a volatile store the optimizer cannot elide, unlike a plain `fill(0)`. The kernel
+/// (a volatile store the optimizer cannot elide, unlike a plain `fill(0)`. The kernel
 /// socket buffer is out of reach, best-effort by design).
 pub(crate) fn write_put_file(
     w: &mut impl Write,
@@ -741,7 +740,7 @@ impl<'a> Body<'a> {
 /// bytes straight to the internal wire decoders so a `cargo fuzz` (libFuzzer) target can explore
 /// them. A panic, hang, or unbounded allocation on any input is the bug being hunted (guardrail 5).
 /// Not built by default and not part of the wire contract, the harness lives in `fuzz/` (excluded
-/// from the workspace); see `docs/contributing-fuzzing.md`. The in-gate, dependency-free counterpart
+/// from the workspace); see `docs/contributing.md`. The in-gate, dependency-free counterpart
 /// is [`fuzz_tests`].
 #[cfg(feature = "fuzzing")]
 pub mod fuzz {
@@ -1112,7 +1111,7 @@ mod tests {
 
     #[test]
     fn secret_payload_is_exactly_sized_so_one_buffer_holds_it() {
-        // Secret hygiene (ADR 015): the payload must be preallocated to its exact encoded size,
+        // Secret hygiene: the payload must be preallocated to its exact encoded size,
         // so it never reallocates and strands an unwiped plaintext prefix on the heap. Build the
         // payloads the same way the serializers do and assert `len == capacity` (no growth headroom).
         let path = "big.bin";

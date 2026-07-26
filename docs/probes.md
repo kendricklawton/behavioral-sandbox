@@ -116,7 +116,7 @@ load fail with a cryptic verifier reject or `EPERM`. A host that can't run the p
 the guest sends or receives crosses its **tap** device on the host, so a program on the tap sees the
 guest's own traffic directly. `TapMonitor` attaches two `tc`/clsact classifiers, `tap_ingress` and
 `tap_egress`, the two hooks clsact adds to a device, and each parses the frame's 5-tuple, IPv4 into the
-`FLOWS` map or IPv6 into a parallel `FLOWS6` (ADR 008 dual-stack: parallel `FlowKey`/`FlowKey6` types
+`FLOWS` map or IPv6 into a parallel `FLOWS6` (dual-stack: parallel `FlowKey`/`FlowKey6` types
 and maps, so the v4 path is byte-for-byte unchanged), adding the packet to that flow's per-direction
 byte/packet counters. `tc` (not XDP) because
 clsact gives *both* directions uniformly on any device, and because egress enforcement (dropping a
@@ -170,8 +170,8 @@ per-CPU drop counter (`TapMonitor::dropped_flows()`/`dropped_denials()`), the re
 section carries the counts and a `truncated` flag, and the run gets a coverage gap, so a guest that
 churns source ports to fill the table cannot quietly evict its real traffic from its own record
 (the `EVENT_DROPS` honest-loss discipline, applied to the network axis). Enforcement never depends
-on the maps: a denied packet is dropped at the tap whether or not its audit row fit. The whole mechanism (map,
-schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is decision 022; `net_enforce.rs`
+on the maps: a denied packet is dropped at the tap whether or not its audit row fit. The egress filter mechanism (map,
+schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is tested in `net_enforce.rs`
 (ignored/privileged) proves a guest reaches an allow-listed endpoint and is blocked from everything
 else; and `cargo xtask enforce-sandbox` is the live demo. Folding attach-and-enforce into the launch
 path is the fused record's convergence (below).
@@ -207,7 +207,7 @@ best-effort (every field an `Option`, so a missing controller or older kernel is
 accounting fails open). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
 `ResourceSummary` for one sandbox. The split is deliberate, "cgroup-bpf **or** cgroup + tracepoints":
 eBPF where per-event timing earns its keep (CPU), the kernel's own counters where they already exist
-(memory, IO). The whole mechanism is decision 023; `resource_meter.rs` (ignored/privileged) proves a
+(memory, IO). The accounting mechanism in `resource_meter.rs` (ignored/privileged) proves a
 CPU-heavy run reports more CPU than an idle one attributed to the sandbox; `cargo xtask
 meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 
@@ -242,8 +242,7 @@ appears in the host-syscall axis (below). `SandboxProbes::collect` is finalize-o
 and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** live reading
 (`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far), what the
 CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
-(`ekvm run --net --trace --record --watch`) is documented in [Using the eKVM CLI](./cli.md); decision
-025 covers where each surface lives.
+(`ekvm run --net --trace --record --watch`) is documented in [Using the eKVM CLI](./cli.md).
 
 ## The hardware-isolation consequence (the honest limit)
 
@@ -299,13 +298,13 @@ turns that into a real **stream of per-event records**:
 - **Filter to one sandbox.** A two-slot `FILTER` array (target tgid, target cgroup id; `0` =
   don't filter that axis) is consulted *in the program*, so a non-matching event is dropped before it
   ever reaches the ring buffer. `SyscallTracer::watch_pid` / `watch_cgroup` set it;
-  the default watches the whole host. See decision 018 (an ADR under `docs/adr/`).
+  the default watches the whole host.
 - **Or a *set* of sandboxes, for one shared tracer.** A `TRACE_TARGETS` cgroup set + a
   `TRACE_SET` mode toggle (the `METER_TARGETS`/`METER_ALL` pattern) let **one** attached tracer serve
   every concurrent sandbox, each registers its cgroup with `SyscallTracer::add_target`, and only those
   cgroups' events are emitted. A tracer-per-sandbox would instead run *N* copies of each `sys_enter_*`
   on every syscall (O(sandboxes)); the set keeps it one hash lookup. Off by default, so the single-target
-  path above is unchanged. Decision 024.
+  path above is unchanged.
 - **A live trace, attributed to a sandbox.** `SyscallTracer::stream` loops the drain,
   decoding each event with `SyscallEvent::describe` (a path, or an `a.b.c.d:port` / `[v6]:port` sockaddr) and handing
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop

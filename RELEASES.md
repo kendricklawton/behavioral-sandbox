@@ -29,7 +29,7 @@ The initial stable release of eKVM: a self-hostable engine that boots a hardware
 - **Pre-release Checkpoints (`v0.0.x`)**: Pre-release tags start at `v0.0.1`. These are disposable git checkpoint tags pinned by git rev with no stability promises.
 - **Production Releases (`v0.1.0`+)**: Tagged on `main`. Patch fixes for a release line are backported to its dedicated release branch (e.g., `release-v0.1` for `v0.1.1`).
 - **Tags are a Human Step**: The user cuts every release tag (see [`AGENTS.md`](AGENTS.md)).
-- **Full Stability & SemVer Policy**: See [docs/stability.md](docs/stability.md).
+- **Full Stability & SemVer Policy**: See [docs/embedding.md](docs/embedding.md#semver--api-stability).
 
 ---
 

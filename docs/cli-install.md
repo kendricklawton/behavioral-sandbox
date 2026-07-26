@@ -302,12 +302,25 @@ tracks their supported set.
   or use `--unjailed`. `ekvm doctor` flags this.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
+## Troubleshooting & FAQ
+
+Below are common issues reported by `ekvm doctor` or early boots, along with their root causes and resolutions.
+
+| Symptom / `ekvm doctor` check | Root Cause | Resolution |
+|---|---|---|
+| **`/dev/kvm` missing or permission denied** | `/dev/kvm` does not exist or your user lacks read-write permissions. | Check nested virtualization on cloud VMs. Add user to `kvm` group:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
+| **`ScratchDirNodev` (jailed boot fails at KVM open)** | `/tmp` is mounted with the `nodev` mount option, making the jailer's chrooted `/dev/kvm` inert. | Set scratch dir to a non-`nodev` filesystem:<br>`export EKVM_SCRATCH_DIR=/var/tmp`<br>or set `scratch_dir = "/var/tmp"` in `.ekvm.toml`. |
+| **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged users space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
+| **`unix socket path is too long (> 108 bytes)`** | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export EKVM_SCRATCH_DIR=/var/tmp` |
+| **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v ekvm)`<br>or run with `sudo -E`. |
+| **`Kernel BTF` missing** | Host Linux kernel was compiled without `CONFIG_DEBUG_INFO_BTF=y`. | Install a standard distro kernel that includes `/sys/kernel/btf/vmlinux` (Ubuntu >= 20.04, Arch, Fedora). |
+
 ## Prerequisites
 
 What the **engine** needs at runtime: what each dependency is for, and which are optional. For the
 commands that install them on a fresh box, see [Preparing the host](#preparing-the-host); for what
 **building from source** additionally needs (the Rust toolchain, `bpf-linker`), see
-[Building](./contributing-building.md#prerequisites).
+[Contributing](./contributing.md#2-prerequisites--quickstart).
 
 - **A Linux host with `/dev/kvm`** (kernel ≥ 5.15, see [Supported platforms](#supported-platforms))
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
@@ -364,7 +377,7 @@ socket path, which the kernel caps at ~108 bytes.)
 artifacts, builds the eBPF object, installs the binary, and proves the result by booting a sandbox.
 
 To drive the individual steps instead, or to work on the engine itself, consult
-[Building](./contributing-building.md), which owns the build toolchain (the Rust version policy, the
+[Contributing](./contributing.md), which owns the build toolchain (the Rust version policy, the
 probes crate's pinned nightly and `bpf-linker`), the artifact commands, and the two test gates.
 
 Once you have a binary, head to [Using the eKVM CLI](./cli.md) to run something.
@@ -394,4 +407,4 @@ The mirror is **not** committed (it holds downloaded images, like `artifacts/`);
 offline convenience, produced once. The `.apk` closure is pinned at vendor time (Alpine branch repos
 delete old package revisions, so there is no stable per-package URL to pin in source), which makes an
 offline build **more** reproducible than the live-CDN one, it installs from the frozen cache the
-manifest hashes. See [decision 033](./adr/033-single-command-self-host-a-vendored-offline-mirror-of.md) for the full rationale.
+manifest hashes.

@@ -110,7 +110,7 @@ stay page-cache-deduped across the whole fleet, not copied per VM.
 
 **Scope: the engine measures, the hoster schedules.** This curve is a sizing input, not a scheduler.
 How far you overcommit RAM or CPU, how you pin across NUMA nodes, and which run lands on which host
-are the hoster's placement policy, not engine work (the engine-not-platform line, decision 038 and the
+are the hoster's placement policy, not engine work (the engine-not-platform line and the
 [threat model](./threat-model.md#assumptions-and-residual-risk)). The engine hands you the per-clone
 footprint so you can set those ratios; it does not set them for you.
 

@@ -24,7 +24,7 @@
 //! **Honest limits.** The unprotected window is spawn → cgroup enrollment (microseconds; a driver
 //! killed inside it leaks that one VMM, as before). A host that offers no writable cgroup v2 (no
 //! `/sys/fs/cgroup`, or an unwritable one) degrades to `Drop`-only teardown with a warning, the
-//! caps here are leak-proofing, not the isolation boundary, so they fail open (ADR 010). And
+//! caps here are leak-proofing, not the isolation boundary, so they fail open. And
 //! the sentinel reclaims the VM *process tree* and its cgroups; scratch dirs and taps left by a
 //! `SIGKILL`ed driver are inert residue (no CPU, no RAM, no KVM), reclaimed by the next boot's leak
 //! checks or a reboot, not by the sentinel.

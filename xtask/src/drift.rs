@@ -1,13 +1,9 @@
 //! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else
-//! compiles or tests, and three kinds are mechanically checkable, so this pass checks them:
+//! compiles or tests, and two kinds are mechanically checkable, so this pass checks them:
 //!
-//! 1. **ADR citations.** `ADR NNN` or `decision NNN` (both spellings cite the same log) in any
-//!    tracked `.rs`/`.md` prose must name an ADR that exists under `docs/adr/` (a
-//!    `NNN-*.md` file). A renumbered or deleted ADR otherwise turns every citation into a pointer
-//!    at the wrong rationale.
-//! 2. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
+//! 1. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
 //!    something in the tree; a rename otherwise leaves the comment lying about where things live.
-//! 3. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
+//! 2. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
 //!    silently *creates* missing `SUMMARY.md` chapters as empty stubs, so a deleted page would
 //!    otherwise ship as a blank one.
 //!
@@ -20,20 +16,14 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
-/// The decision log: the ADR folder, one `NNN-*.md` file per decision. The set of numbers those
-/// filenames carry is the single source of "which decisions exist".
-const ADR_DIR: &str = "docs/adr";
-
 /// One broken reference, kept as a rendered line so the report stays a plain sorted list.
 type Violation = String;
 
 pub fn check(root: &Path) -> Result<()> {
     let tracked = tracked_files(root)?;
-    let defined = defined_decisions(root)?;
     let anchors = path_anchors(&tracked);
 
     let mut violations: Vec<Violation> = Vec::new();
-    let mut citations = 0usize;
     let mut path_refs = 0usize;
     let mut links = 0usize;
 
@@ -53,14 +43,6 @@ pub fn check(root: &Path) -> Result<()> {
             continue;
         };
 
-        for (line_no, n) in cited_decisions(&text) {
-            citations += 1;
-            if !defined.contains(&n) {
-                violations.push(format!(
-                    "{rel}:{line_no}: cites decision {n:03}, no `{n:03}-*.md` ADR in {ADR_DIR}"
-                ));
-            }
-        }
         // Backticked repo-path claims are checked in every prose file, `.rs` and `.md`
         // (a rename rots a `docs/*.md` path just as it does a comment's).
         for (line_no, cand) in path_candidates(&text, &anchors) {
@@ -90,7 +72,7 @@ pub fn check(root: &Path) -> Result<()> {
         bail!("prose drift: {} broken reference(s)", violations.len());
     }
     println!(
-        "· prose drift: {citations} ADR citation(s), {path_refs} path reference(s), \
+        "· prose drift: {path_refs} path reference(s), \
          {links} markdown link(s) all resolve"
     );
     Ok(())
@@ -114,107 +96,6 @@ fn tracked_files(root: &Path) -> Result<BTreeSet<String>> {
         .filter(|p| !p.is_empty())
         .map(str::to_owned)
         .collect())
-}
-
-/// The set of decision numbers the ADR folder defines: one number per `NNN-*.md` filename (the
-/// index `README.md` and any non-`NNN` file are ignored).
-fn defined_decisions(root: &Path) -> Result<BTreeSet<u32>> {
-    let dir = root.join(ADR_DIR);
-    let mut defined = BTreeSet::new();
-    let entries = std::fs::read_dir(&dir).with_context(|| format!("reading {ADR_DIR}"))?;
-    for entry in entries {
-        let name = entry?.file_name();
-        let name = name.to_string_lossy();
-        if !name.ends_with(".md") {
-            continue;
-        }
-        if let Some(n) = leading_number(&name) {
-            if !defined.insert(n) {
-                bail!("{ADR_DIR} defines decision {n:03} twice");
-            }
-        }
-    }
-    if defined.is_empty() {
-        bail!("{ADR_DIR} holds no `NNN-*.md` ADRs; the lint would pass vacuously");
-    }
-    Ok(defined)
-}
-
-/// Every ADR number the text cites, with its 1-based line. Two interchangeable spellings are
-/// scanned, `ADR 010` (crate comments) and `decision 010` (docs/ROADMAP/AGENTS.md), each in singular,
-/// plural, and joined forms: `Decision 010`, `decision 010/011`, `decisions 021, 026`,
-/// `ADRs 021 and 026`.
-/// Scans a **line-joined** view (each source line separated by a single space) so a citation
-/// wrapped across a line break (`decision\n029`, as several live docs do) still parses as one token;
-/// a per-offset line map keeps best-effort attribution (the line the keyword sits on).
-fn cited_decisions(text: &str) -> Vec<(usize, u32)> {
-    // Join lines with one space; record where each source line begins so an offset maps back to a
-    // line. `to_ascii_lowercase` preserves byte length, so offsets in `lower` == offsets in `joined`.
-    let mut joined = String::with_capacity(text.len());
-    let mut line_starts = Vec::new();
-    for line in text.lines() {
-        line_starts.push(joined.len());
-        joined.push_str(line);
-        joined.push(' ');
-    }
-    let line_of = |offset: usize| -> usize {
-        match line_starts.binary_search(&offset) {
-            Ok(i) => i + 1, // offset is the first byte of line i (0-based)
-            Err(i) => i,    // line_starts[i-1] <= offset < line_starts[i] ⇒ line i-1 (0-based)
-        }
-    };
-    let lower = joined.to_ascii_lowercase();
-
-    // Both keywords cite the same ADR log, so both are scanned; neither is a substring of the
-    // other, so the two passes never double-count one citation.
-    let mut found = Vec::new();
-    for keyword in ["decision", "adr"] {
-        let mut from = 0;
-        while let Some(pos) = lower[from..].find(keyword) {
-            let at = from + pos;
-            // A word start: "predecision"/"quadratic" is not a citation.
-            let word_start = at == 0 || !lower.as_bytes()[at - 1].is_ascii_alphanumeric();
-            let mut rest = &lower[at + keyword.len()..];
-            rest = rest.strip_prefix('s').unwrap_or(rest);
-            if word_start {
-                while let Some(n) = {
-                    let trimmed = rest.trim_start();
-                    let n = leading_number(trimmed);
-                    if n.is_some() {
-                        rest = &trimmed[3..];
-                    }
-                    n
-                } {
-                    found.push((line_of(at), n));
-                    // A joined continuation ("/014", ", 026", " and 026") cites more numbers.
-                    let after = rest.trim_start();
-                    rest = match after
-                        .strip_prefix('/')
-                        .or_else(|| after.strip_prefix(','))
-                        .or_else(|| after.strip_prefix("and "))
-                    {
-                        Some(next) => next,
-                        None => break,
-                    };
-                }
-            }
-            from = at + keyword.len();
-        }
-    }
-    found
-}
-
-/// A three-digit number at the start of `s`, not followed by a fourth digit.
-fn leading_number(s: &str) -> Option<u32> {
-    let b = s.as_bytes();
-    if b.len() >= 3
-        && b[..3].iter().all(u8::is_ascii_digit)
-        && !b.get(3).is_some_and(u8::is_ascii_digit)
-    {
-        s[..3].parse().ok()
-    } else {
-        None
-    }
 }
 
 /// Backticked tokens in the text that look like repo paths, with their 1-based line. Deliberately
@@ -348,36 +229,6 @@ fn markdown_links(text: &str) -> Vec<(usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn citations_parse_single_joined_and_plural_forms() {
-        let text = "per decision 010.\nDecisions 021 and 026 agree; decision 010/011 too.\n\
-                    predecision 999 is not a citation, nor is decision 12 or 1234.";
-        let got = cited_decisions(text);
-        assert_eq!(
-            got,
-            vec![(1, 10), (2, 21), (2, 26), (2, 10), (2, 11)],
-            "{got:?}"
-        );
-    }
-
-    #[test]
-    fn adr_spelling_is_cited_like_decision() {
-        // `ADR NNN` cites the same log as `decision NNN`; both spellings and their plural/joined
-        // forms parse, and a word that merely contains "adr" (quadratic) is not a citation.
-        let text = "see ADR 010 and ADRs 021/023.\nquadratic 999 is not one; ADR013 is.";
-        let got = cited_decisions(text);
-        assert_eq!(got, vec![(1, 10), (1, 21), (1, 23), (2, 13)], "{got:?}");
-    }
-
-    #[test]
-    fn citations_wrapped_across_a_line_break_are_caught() {
-        // The word "decision" ending a line with its number on the next is still one citation
-        // (attributed to the line the word sits on), the live-doc drift the line-joined scan closes.
-        let text = "see decision\n029 for why, and decisions 021,\n026 too.";
-        let got = cited_decisions(text);
-        assert_eq!(got, vec![(1, 29), (2, 21), (2, 26)], "{got:?}");
-    }
 
     #[test]
     fn path_candidates_skip_fenced_code_blocks() {

@@ -49,21 +49,16 @@ The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook, `mdbook serve docs`, o
 Markdown in place):
 
 - **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
+- **[Design specification](docs/design.md)**, full architectural design, component model, host integration, and system properties.
 - **[Using the eKVM CLI](docs/cli.md)**, how to run the engine:
   [installation](docs/cli-install.md), building the guest artifacts, `ekvm run`, `ekvm shell`.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract: the `Sandbox`
-  lifecycle, budgets, typed errors, snapshots/pool, and the engine's deliberate non-goals.
-- **[Examples](docs/examples.md)**, worked walkthroughs: [running untrusted
-  code](docs/examples-untrusted-code.md), [observing a run](docs/examples-observe-a-run.md).
+  lifecycle, budgets, typed errors, snapshots/pool, and semver stability rules.
+- **[Examples](docs/examples.md)**, worked end-to-end walkthroughs.
 - **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
-- **[Security](docs/security.md)**, the security model: what's trusted, what counts as a bug,
-  how to report one.
-- **[Contributing](docs/contributing.md)**, orientation, the
-  [architecture overview](docs/contributing-architecture.md) and the
-  [decision records](docs/adr/README.md) (each hard-to-reverse choice as one ADR: its rationale
-  and the alternatives that lost), [building](docs/contributing-building.md),
-  [testing](docs/contributing-testing.md), [fuzzing](docs/contributing-fuzzing.md).
+- **[Security](docs/security.md)**, the security model: threat model, host hardening baseline, and supply chain provenance.
+- **[Contributing](docs/contributing.md)**, invariants, developer tools, CI gates, testing, and fuzzing.
 
 ## Status
 
@@ -155,7 +150,7 @@ its trust boundary, and never traded against the hardware-isolation guarantee.
 ## Contributing
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
-[documentation](docs/contributing.md). The operating manual for agents is [`AGENTS.md`](AGENTS.md); each hard-to-reverse choice is recorded as one ADR under [`docs/adr/`](docs/adr/README.md).
+[documentation](docs/contributing.md). The operating manual for agents is [`AGENTS.md`](AGENTS.md).
 
 
 ## License

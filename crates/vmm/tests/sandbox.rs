@@ -1,5 +1,5 @@
 //! Integration tests for the [`Sandbox`] public API: the lifecycle `open → exec (files + env) →
-//! outputs → snapshot → close`, the jailed-by-default polarity (ADR 012), and the VM half of
+//! outputs → snapshot → close`, the jailed-by-default polarity, and the VM half of
 //! the secret-hygiene leak check (the host-log/error half runs without a VM in `src/exec.rs`).
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the guest rootfs. Run via
@@ -31,7 +31,7 @@ fn vmm_uid(pid: u32) -> Option<String> {
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn sandbox_opens_jailed_by_default() {
-    // The ADR 012 polarity flip, proven at the public API: the config sets *no* jail, and `open`
+    // The polarity flip, proven at the public API: the config sets *no* jail, and `open`
     // confines anyway, the VMM runs as the dropped uid and still serves an exec. The unjailed
     // path below is only reachable by writing `open_unjailed`.
     if !have_jailer_privileges() {

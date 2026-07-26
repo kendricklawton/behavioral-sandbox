@@ -4,7 +4,7 @@
 //! guest never sees it, exactly like the eBPF probes it complements.
 //!
 //! **What is signed.** The exact bytes of [`RunRecord::to_json`](crate::RunRecord) (the deterministic
-//! JSON of decision 024). Because those bytes are byte-stable, a verifier reconstructs the signed
+//! JSON). Because those bytes are byte-stable, a verifier reconstructs the signed
 //! message exactly, so a single flipped byte fails the check.
 //!
 //! **The envelope.** Signing wraps the record in a schema-2 delivery surface:
@@ -770,7 +770,7 @@ mod tests {
     #[test]
     fn arbitrary_mutations_of_an_envelope_never_panic_the_verifier() {
         // The cheap in-gate tier of the envelope fuzzing (the deep tier is the `signing_envelope`
-        // libFuzzer target, docs/contributing-fuzzing.md): deterministic mutations of a valid
+        // libFuzzer target, docs/contributing.md): deterministic mutations of a valid
         // chained envelope must always land in Ok/Err, never a panic.
         let key = test_key();
         let trusted = [key.verifying_key()];

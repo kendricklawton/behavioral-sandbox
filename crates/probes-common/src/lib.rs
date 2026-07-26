@@ -23,7 +23,7 @@ pub const DETAIL_CAP: usize = 128;
 
 /// How many leading bytes of a `connect` sockaddr the probe copies into [`SyscallEvent::detail`].
 /// 28 is `sizeof(struct sockaddr_in6)` (family + port + flowinfo + the 16-byte address + scope), so a
-/// full **IPv6** address is captured, not just its first 8 bytes (ADR 008 dual-stack). A `sockaddr_in`
+/// full **IPv6** address is captured, not just its first 8 bytes (dual-stack). A `sockaddr_in`
 /// (IPv4) is only 16 bytes, so the probe falls back to [`SOCKADDR_SNAP_V4`] when the full read would
 /// run past a short user buffer, no v4 capture regresses.
 pub const SOCKADDR_SNAP: usize = 28;
@@ -235,12 +235,12 @@ pub const ETHERTYPE_OFFSET: usize = 12;
 /// EtherType for IPv4.
 pub const ETH_P_IP: u16 = 0x0800;
 /// EtherType for ARP. Egress enforcement lets ARP through even under deny-by-default: the guest must
-/// resolve its on-link gateway (`10.200.0.1`, ADR 014) before it can reach *any* allowed endpoint.
+/// resolve its on-link gateway (`10.200.0.1`) before it can reach *any* allowed endpoint.
 pub const ETH_P_ARP: u16 = 0x0806;
 /// EtherType for IPv6, and for an 802.1Q VLAN tag. The tap parser handles only IPv4, so a frame with
 /// either of these is *unrepresentable* as a flow: the kernel counts it (as an honest coverage
 /// signal) rather than dropping it from the record silently. Neither is expected on a sandbox's
-/// IPv4-only tap (ADR 014), unlike ARP, which is why ARP is not counted here.
+/// IPv4-only tap, unlike ARP, which is why ARP is not counted here.
 pub const ETH_P_IPV6: u16 = 0x86dd;
 /// See [`ETH_P_IPV6`].
 pub const ETH_P_8021Q: u16 = 0x8100;
@@ -288,7 +288,7 @@ pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 /// egress enforcement spares it only to **on-link** destinations ([`icmp6_dst_on_link`]): the
 /// neighbor-discovery (NS/NA/RS/RA), MLD, and NUD traffic the guest needs to resolve and keep its
 /// on-link host end. ICMPv6 to a routable (global-unicast) destination is policed like any other v6
-/// flow (deny-by-default), so a spared Echo can't become an egress channel (see decision 008).
+/// flow (deny-by-default), so a spared Echo can't become an egress channel.
 pub const IPPROTO_ICMPV6: u8 = 58;
 
 /// One **directional** network flow's identity: the IPv4 5-tuple, in host byte order (so a consumer
@@ -552,7 +552,7 @@ pub fn egress_allowed(rules: &[PolicyRule], dst_addr: u32, dst_port: u16, proto:
 // ---------------------------------------------------------------------------
 // IPv6: the v6 twins of the flow key, parser, and egress policy above. Deliberately **parallel**
 // types and maps rather than widening the v4 ones, so the proven v4 datapath stays byte-for-byte
-// unchanged (ADR 008 dual-stack). Addresses are `[u8; 16]` in **network byte order** and all address
+// unchanged (dual-stack). Addresses are `[u8; 16]` in **network byte order** and all address
 // math is **byte-wise**: the eBPF target has no native `u128` (`bpf-linker` would emit compiler-rt
 // calls that don't exist there), so a shared `u128` matcher couldn't run in the kernel. The byte-wise
 // form runs identically in the kernel and in these host tests, single-sourced so they can't drift.
@@ -781,7 +781,7 @@ pub fn egress_allowed6(
 /// (`fc00::/7`, where this engine's on-link host end lives, so steady-state NUD to it stays reachable).
 /// None of these route off the connected link. An ICMPv6 destination outside this set is a routable
 /// (global-unicast) target the egress valve must police like any other v6 flow, not spare: it lets a
-/// guest Echo an arbitrary internet host, an egress channel deny-by-default forbids (see decision 008).
+/// guest Echo an arbitrary internet host, an egress channel deny-by-default forbids.
 /// Built on [`addr6_in_prefix`] so it holds in the eBPF `#![no_std]` program (byte-wise, no `u128`) and
 /// is single-sourced with the host-tested matcher the tc program calls.
 #[must_use]

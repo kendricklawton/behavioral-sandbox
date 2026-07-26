@@ -243,7 +243,7 @@ fn restored_clones_do_not_bleed_state_under_load() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_networked_clones_coexist_each_in_its_own_netns() {
-    // The netns model (ADR 014) retires the one-live-networked-clone limit. On v1.9
+    // The netns model retires the one-live-networked-clone limit. On v1.9
     // (no `network_overrides`) every clone must present the snapshot's baked-in tap name, which in a
     // shared host netns could exist only once, so only one networked clone could be live. Each clone
     // now recreates that tap in its **own** network namespace, where the baked-in identity is already

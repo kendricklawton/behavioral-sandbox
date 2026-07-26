@@ -26,8 +26,8 @@
 //! boot feature composes with the jail: the **vsock exec channel** (its unix socket bound
 //! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
 //! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`], the shared-base path, not a
-//! full rootfs copy), a **NIC** (the tap lives in a per-VM netns the jailer joins via `--netns`,
-//! ADR 014), **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
+//! full rootfs copy), a **NIC** (the tap lives in a per-VM netns the jailer joins via `--netns`),
+//! **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
 //! (the bundle staged into the chroot; a confined prewarmed pool falls out). Leak-proof, cgroup-owned
 //! teardown lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's
 //! cgroup at its precomputed path, so host death can't leak a jailed VMM either.

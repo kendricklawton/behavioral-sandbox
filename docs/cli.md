@@ -32,7 +32,7 @@ ekvm run [FLAGS] -- <cmd> [args…]
 |------|--------------|
 | `--demo-boot` | Just boot a microVM and read its console, no command. |
 | `--unjailed` | Run the VMM without the jailer (see above). Default is confined. |
-| `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped (ADR 010). Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `EKVM_REQUIRE_LIMITS` / `.ekvm.toml`. |
+| `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped. Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `EKVM_REQUIRE_LIMITS` / `.ekvm.toml`. |
 | `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the engine never logs them. |
 | `--put FILE` | Inject a host file into the run's working directory (repeatable; guest name = basename). |
 | `--get PATH` | Fetch a file from the run's working directory afterwards (repeatable; written under the current directory at the same relative path). Deny-by-default: only what you asked for is written. |
@@ -81,8 +81,7 @@ and `--mem` work the same as on `run`.
 Check this host's readiness *before* the first sandbox: `ekvm doctor` prints one line per
 prerequisite, KVM, the jailer + real-root, `firecracker` v1.9 + pinned sha256., iproute2/e2fsprogs, cgroup
 delegation, the kernel version, the boot artifacts, the eBPF capabilities, and the host-hardening
-posture (SMT, KSM, CPU-vulnerability mitigations: advisory rows for a multi-tenant host, decision
-038), each marked `ok`, `warn` (a fail-open degradation or an advisory, with the consequence
+posture (SMT, KSM, CPU-vulnerability mitigations: advisory rows for a multi-tenant host), each marked `ok`, `warn` (a fail-open degradation or an advisory, with the consequence
 named), or `FAIL` (a hard miss: no boot without it). It exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm run …`
 gates cleanly. A footer tallies the rows; `ekvm doctor --explain` adds the full
 fails-open-vs-hard-error matrix behind it, kept off the default report so the rows stay scannable
@@ -139,7 +138,7 @@ unknown key is a typed error, never a silent no-op.
 | `EKVM_MARKER` | `marker` | the console line that means "userspace is up" | `GUEST-READY` (the guest rootfs image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
 | `EKVM_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts; a jailed boot needs it off a `nodev` mount (the systemd `/tmp` default), which the guided install pins for you | `/tmp` |
 | `EKVM_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
-| `EKVM_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped (ADR 010); a host posture, needs the jailer | `false` |
+| `EKVM_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped; a host posture, needs the jailer | `false` |
 | `EKVM_PROBES_OBJECT` | — | the built eBPF object (env only, no `.ekvm.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |
 
 ```toml
@@ -155,8 +154,7 @@ log = "info"
 
 A second group of `.ekvm.toml` keys sets the **host's** posture rather than a per-run knob. These
 have **no `EKVM_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling
-whose bounded party can override it is not a ceiling ([decision
-041](./adr/041-operator-policy-defaults-clamp-explicit-asks-refuse.md)).
+whose bounded party can override it is not a ceiling.
 
 | key | kind | effect |
 |-----|------|--------|
@@ -168,8 +166,7 @@ whose bounded party can override it is not a ceiling ([decision
 The two kinds compose differently, and the difference is whether a caller actually asked:
 
 - **An explicit request above a ceiling is refused**, naming the knob, the ask, and the bound.
-  Silently serving less would be the degradation [decision
-  026](./adr/026-allow-projects-the-egress-policy-enforcement-is-a.md) forbids.
+  Silently serving less would be an unexpected degradation.
 - **A default above a ceiling is clamped.** Nobody asked for it, so there is nothing to contradict.
   This is what lets you set only `max_wall_secs = 10` without refusing every bare run (the engine's
   own default is 30s).

@@ -50,6 +50,7 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Reading this book
 
+- **[Design specification](./design.md)**, full architectural design, Firecracker VMM integration, host eBPF containment barriers, and system properties.
 - **[Using the eKVM CLI](./cli.md)**, how to run the engine: [install the
   prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
   untrusted code with `ekvm run` and hold interactive sessions with `ekvm shell`. Start here.
@@ -59,25 +60,18 @@ full non-goals list is in [Using the engine API](./embedding.md).
 - **[Using the `ekvm serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
   wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`), the pre-warmed pool for fast
   `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
-- **[Examples](./examples.md)**, worked, end-to-end walkthroughs: [running untrusted
-  code](./examples-untrusted-code.md), [observing a run from the
-  host](./examples-observe-a-run.md), [containing an agent](./examples-agent-containment.md),
-  [analyzing an untrusted binary](./examples-untrusted-binary.md), and [running a CI job from a
-  fork](./examples-ci-job.md).
+- **[Examples](./examples.md)**, worked, end-to-end walkthroughs covering untrusted code execution, host-side observation, agent containment, binary analysis, and CI job sandboxing.
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each with a live demo.
-- **[Threat model](./threat-model.md)**, what is trusted, what the adversary is assumed to control,
-  and the assumptions the guarantees rest on.
+- **[Threat model](./threat-model.md)**, what is trusted, host hardening baseline, supply-chain provenance, and residual risk.
 - **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
   report one.
-- **[Contributing](./contributing.md)**, how the work is organized, [building](./contributing-building.md),
-  [testing](./contributing-testing.md), and the invariants.
+- **[Contributing](./contributing.md)**, invariants, developer tools, CI gates, testing, and fuzzing.
 
 ## Status
 
-Early, under active development, nothing here is production yet; hard-to-reverse choices are recorded as dated
-[decision records](./adr/README.md). Every
+Early, under active development, nothing here is production yet. Every
 completed milestone ships a working demo, so each capability documented in this book is proven
 running end to end, not just asserted.
 

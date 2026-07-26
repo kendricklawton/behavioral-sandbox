@@ -12,7 +12,7 @@
 //! Every collection is deterministically sorted, so a record built from the same
 //! observations is byte-stable regardless of map-iteration order, the property the JSON
 //! output will rely on. Kept here, out of `vmm`, so the driver stays independent of the eBPF
-//! loader (ADRs 021/023); the two tracks bridge only by plain values.
+//! loader; the two tracks bridge only by plain values.
 
 use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;

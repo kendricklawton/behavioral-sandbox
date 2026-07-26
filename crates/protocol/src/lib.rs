@@ -3,7 +3,7 @@
 //! leading [`schema`](Envelope::schema) field, so the two sides agree on the shape before either
 //! trusts the other's bytes.
 //!
-//! **This is the SDK contract seed (ADR 030).** It is the one artifact the daemon
+//! **This is the SDK contract seed.** It is the one artifact the daemon
 //! ([`agent`](../cli/index.html)), the reference client (`client`), and the eventual
 //! polyglot SDKs all share, so it lives in its own **`vmm`-free** crate: the wire is the
 //! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
@@ -12,7 +12,7 @@
 //! which is exactly why [`WIRE_SCHEMA`] is stamped on every message and mismatches are rejected up
 //! front rather than silently mis-decoded.
 //!
-//! **Why JSON, not gRPC (ADR 030).** The daemon is synchronous, thread-per-connection, with no
+//! **Why JSON, not gRPC.** The daemon is synchronous, thread-per-connection, with no
 //! async runtime on the host path; gRPC would drag `tonic`/`prost` and a `tokio` stack into that
 //! posture. The peer is a **local, trusted-ish client** the hoster runs, so hand-debuggability
 //! (`socat`, `nc`) matters more than a compact wire, and any language can drive a line of JSON over a
@@ -74,8 +74,7 @@ pub struct Envelope<T> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    /// Open the connection's sandbox, the first message of a session (the VM *is* the session,
-    /// ADR 016). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
+    /// Open the connection's sandbox, the first message of a session (the VM *is* the session). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
     /// is the daemon's launch-time choice, never a client's, so a caller can't downgrade the jail.
     /// Any omitted field keeps the conservative `vmm::Limits` default.
     Open {
@@ -94,7 +93,7 @@ pub enum Request {
         output_cap: Option<usize>,
     },
     /// Run one command in the open sandbox, feeding `stdin` (UTF-8 text) to it. Repeated `exec`s
-    /// share the session's working directory (ADR 016).
+    /// share the session's working directory.
     Exec {
         /// The command and its arguments (`argv[0]` is the program). Empty is a guest fault.
         argv: Vec<String>,

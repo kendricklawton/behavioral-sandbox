@@ -6,10 +6,6 @@ API. The rustdoc on each item is the reference; this is the contract's shape and
 The second half draws the line this project refuses to cross, what the engine deliberately is
 **not**, because a runtime that quietly grows platform features stops being embeddable.
 
-Numbers in parentheses (010, 012, …) are dated
-[decision records](./adr/README.md); each ADR records the rationale and the alternatives that
-lost.
-
 ## The lifecycle
 
 ```
@@ -102,10 +98,107 @@ on names; only your own euid's residue), so a crash-looping host stays serviceab
 
 `snapshot(dir)` pauses the VM and writes a portable bundle; `Vm::restore` (and the `Pool` built on
 it) brings up exec-ready clones in milliseconds, sharing the base disk and memory file read-only
-across clones. The confinement story is deliberate (009, 012): a *jailed* VM refuses snapshotting
-(its disk lives in the chroot), you snapshot an **unjailed pre-warmed source** that runs only your own
-warm-up, and restore **jailed clones** from it, which is where the untrusted code runs. A pooled
-clone is a pre-warmed session; entropy is reseeded per clone (VMGenID), and networked clones each
+across concurrent sandboxes. Snapshotting is restricted to *unjailed* sources (their disk lives on
+a fixed host path); restoring into *jailed* clones is where the untrusted code runs confined.
+
+---
+
+## Code Recipes
+
+Below are complete, copy-pasteable Rust snippets for integrating the `vmm` crate into an application.
+
+### Recipe 1: Single-Shot Execution
+
+```rust,no_run
+use vmm::{BootConfig, Sandbox, VmmError};
+
+fn main() -> Result<(), VmmError> {
+    // 1. Resolve boot configuration from environment (EKVM_KERNEL, EKVM_ROOTFS, etc.)
+    let config = BootConfig::from_env();
+
+    // 2. Open a sandbox (confined by default under the jailer)
+    let sandbox = Sandbox::open(config)?;
+
+    // 3. Execute a command in the sandbox
+    let result = sandbox.exec(&["python3".into(), "-c".into(), "print('Hello from eKVM!')".into()], b"")?;
+
+    println!("Exit code: {}", result.exit_code);
+    println!("Stdout: {}", String::from_utf8_lossy(&result.stdout));
+    println!("Host wall-clock latency: {:?}", result.metrics.wall);
+
+    // 4. Clean up the sandbox
+    sandbox.shutdown()?;
+    Ok(())
+}
+```
+
+### Recipe 2: Custom Resource Limits & Input Files
+
+```rust,no_run
+use std::num::{NonZeroU32, NonZeroU8};
+use std::time::Duration;
+use vmm::{BootConfig, Limits, Sandbox, VmmError};
+
+fn main() -> Result<(), VmmError> {
+    // Define a 2 vCPU, 512 MiB RAM, 60s wall budget limit
+    let limits = Limits {
+        vcpus: NonZeroU8::new(2).unwrap(),
+        mem_mib: NonZeroU32::new(512).unwrap(),
+        wall: Duration::from_secs(60),
+        output_cap: 16 * 1024 * 1024, // 16 MiB output cap
+    };
+
+    // Apply limits onto boot config
+    let config = BootConfig::from_env().with_limits(limits);
+    let sandbox = Sandbox::open(config)?;
+
+    // Execute with environment variables and input files
+    let result = sandbox.exec_with_files(
+        &["sh".into(), "-c".into(), "cat input.json && echo $ENV_VAR".into()],
+        b"", // stdin
+        &[("input.json".into(), b"{\"status\": \"ok\"}".to_vec())], // Injected file
+        &[("ENV_VAR".into(), "secret-value".into())],              // Injected env
+        &[],                                                       // Artifacts to fetch
+    )?;
+
+    println!("Output: {}", String::from_utf8_lossy(&result.stdout));
+    sandbox.shutdown()?;
+    Ok(())
+}
+```
+
+### Recipe 3: Pre-Warmed MicroVM Pool
+
+```rust,no_run
+use vmm::{BootConfig, Pool, Snapshot, Vm, VmmError};
+
+fn main() -> Result<(), VmmError> {
+    // 1. Boot an unjailed source VM to prepare a pre-warmed snapshot
+    let source_cfg = BootConfig::from_env();
+    let source_vm = Vm::boot(source_cfg)?;
+
+    let snap_dir = tempfile::tempdir().unwrap();
+    let snapshot = source_vm.snapshot(snap_dir.path())?;
+
+    // 2. Initialize a pool of 4 pre-warmed clones (clones will restore jailed)
+    let pool_cfg = BootConfig::from_env();
+    let mut pool = Pool::new(snapshot, pool_cfg, 4)?;
+
+    // 3. Take a warm clone from the pool (sub-millisecond start)
+    let warm_vm = pool.take()?;
+    let result = warm_vm.exec(&["echo".into(), "warm start".into()], b"")?;
+    println!("Execution completed: {}", String::from_utf8_lossy(&result.stdout));
+
+    // 4. Refill pool back to target count
+    pool.refill()?;
+
+    // Clean up
+    pool.shutdown()?;
+    Ok(())
+}
+```
+
+A pooled clone is a pre-warmed session; entropy is reseeded per clone (VMGenID), and networked clones each
 recreate their tap in a private netns (014), so any number coexist.
 
 **Sizing rule** (stated here so you never meet it as `EMFILE`): each live VM holds up to
@@ -173,3 +266,18 @@ Wasmtime *sibling* (a sibling, not a backend, "isolation is hardware" holds here
 exception). They pin this crate's git rev; that is why public-API changes carry an `api:` marker
 in the commit subject, and why `Limits`/`RunResult`/`VmmError`/`Sandbox` and the channel protocol
 move deliberately or not at all.
+
+---
+
+## Semver & API Stability
+
+The `vmm` public library API and the `channel` wire protocol are the engine's pinned stability boundary:
+- **`Sandbox`**, **`Limits`**, **`RunResult`**
+- **`VmmError`**, including variants and the `kind()` -> `ErrorKind` bucket mapping
+- The **`channel`** wire framing protocol
+
+### Versioning Rules
+- **MAJOR**: Breaking changes to the pinned surface (removed/renamed `VmmError` variants, changed `kind()` bucket mappings, breaking channel wire protocol changes, or raising `Limits` defaults).
+- **MINOR**: Additive changes (new API methods, new `#[non_exhaustive]` error variants, new optional fields).
+- **PATCH**: Backward-compatible fixes and optimizations.
+- **Commit Tags**: Changes touching this surface are marked with `feat(api):` or `fix(api)!:` in commit subjects for clear auditability.

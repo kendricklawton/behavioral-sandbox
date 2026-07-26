@@ -1,6 +1,6 @@
 //! Dependency-free fuzz-style property tests for the wire decoders, the in-gate half of the
 //! channel's fuzzing (the deep, nightly `cargo fuzz` half lives in `fuzz/`; see
-//! `docs/contributing-fuzzing.md`).
+//! `docs/contributing.md`).
 //!
 //! **Why here.** The guest is untrusted, and a hostile guest fully controls the in-guest agent, so
 //! the *host* decodes attacker-chosen bytes every time it reads a [`Response`](crate::Response).

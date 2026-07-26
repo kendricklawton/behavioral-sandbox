@@ -1,47 +1,86 @@
-# Contributing
+# Contributing Guide
 
-Contributions are welcome. This chapter is the orientation; [Building](./contributing-building.md)
-covers the toolchain and the CI gates, and [Testing](./contributing-testing.md) covers the testing
-approach. The operating manual, read every session by humans and coding agents alike, is
-[`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) at the repo root.
+Contributions are welcome! This chapter covers system invariants, developer setup, CI gates, testing, and commit conventions.
 
-## How the work is organized
+The canonical operating manual for humans and coding agents alike is [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) at the repo root.
 
-Work is organized into design decisions recorded as dated, numbered
-[ADR under `docs/adr/`](./adr/README.md), so the reasoning outlives the diff.
+---
 
-## The invariants (never trade these away)
+## 1. System Invariants (Never trade these away)
 
-- **Isolation is hardware.** Untrusted code runs in a KVM microVM; the trust boundary is the
-  CPU, not guest-side software.
-- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF the guest
-  can't reach; in-guest agents are for convenience (exec/IO), never for security.
-- **Engine, not platform.** A self-hostable runtime + a driver API. Auth, billing, fleet
-  scheduling, and dashboards are **out of scope**, the hoster's job.
-- **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
-  capability; every allowance is explicit and recorded.
-- **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken
-  channel is a typed error, never a host panic, hang, or leak.
-- **Measured, not marketed.** Boot/restore/memory-sharing/overhead are benchmarked with percentiles.
+- **Isolation is hardware.** Untrusted code runs in a KVM microVM; the trust boundary is the CPU, not guest software.
+- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF (`aya`) that the guest cannot reach.
+- **Engine, not platform.** A self-hostable runtime + a clean driver API. Auth, billing, scheduling, and dashboards are out of scope.
+- **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal capabilities.
+- **No-panic on the host path.** A hostile or crashing guest is a typed error (`VmmError`), never a host panic, hang, or leak.
+- **Measured, not marketed.** Boot, snapshot-restore, and eBPF overhead are benchmarked with percentiles.
 
-## Commit & PR conventions
+---
 
-- One logical change per commit, written as a [Conventional Commit](https://www.conventionalcommits.org):
-  `type(scope)?: subject` with the standard types (`feat`, `fix`, `docs`, `test`, `refactor`,
-  `perf`, `chore`, `ci`, `build`). The subject is **imperative** and describes **what was done**
-  ("feat: boot a microVM from the driver", not "added VM boot"). Don't reference roadmap phase
-  IDs, the roadmap can change. A mixed change takes its most significant type rather than
-  splitting hairs.
-- **Public-API changes carry the `api` scope** (`feat(api):` / `fix(api):`, `!` appended when
-  incompatible): the engine is embedded downstream at the `vmm` library's public API (`Sandbox`,
-  `Limits`, `RunResult`, `VmmError` including its `kind()` mapping, the `channel` wire protocol),
-  pinned by git rev, so a downstream pin bump must be auditable from the log alone.
-- **Never add an AI co-author or attribution trailer.** Never commit built rootfs/kernel images
-  or generated eBPF objects, they're built by `xtask`.
-- Every PR must pass the host-safe gate (`cargo xtask ci`); privileged integration runs where
-  KVM + caps exist. See [Building](./contributing-building.md).
+## 2. Prerequisites & Quickstart
 
-## License
+- **Rust (Stable)**: Minimum supported Rust version tracks current stable (`rust-toolchain.toml`).
+- **musl Target**: Required for static in-guest agent builds:
+  ```console
+  rustup target add x86_64-unknown-linux-musl
+  ```
+- **eBPF Toolchain** (optional, for eBPF probes):
+  ```console
+  cargo install bpf-linker cargo-deny
+  rustup toolchain install nightly --component rust-src
+  ```
 
-By contributing you agree your contributions are licensed under **Apache-2.0**, the project's
-license (see [`LICENSE`](https://github.com/packsixfour/ekvm/blob/main/LICENSE)).
+### Developer Setup Commands
+
+```console
+git clone https://github.com/packsixfour/ekvm && cd ekvm
+cargo xtask setup            # Verify KVM, BTF, Firecracker, bpf-linker, caps
+cargo xtask fetch-artifacts  # Download pinned guest kernel & boot rootfs
+cargo xtask build-rootfs     # Build reproducible guest rootfs (Alpine + python3 + static agent)
+cargo xtask build-probes     # Build eBPF object (target: bpfel-unknown-none)
+```
+
+---
+
+## 3. Developer Workflows & CI Gates
+
+- **Fast Inner Loop**: `cargo xtask check` (Format + prose-drift + Clippy `-D warnings`; skips tests for instant feedback ~4s).
+- **Host-Safe Gate**: `cargo xtask ci` (Runs everywhere without root or KVM: clippy, formatting, prose links, unit tests, cargo deny, eBPF build).
+- **Privileged Gate**: `sudo -E ./ci-privileged.sh` (Runs VM-boot, exec, TAP networking, and eBPF probe attachment integration tests under KVM).
+
+---
+
+## 4. Testing Strategy & Benchmarks
+
+The testing strategy spans 4 primary layers:
+1. **Unit Tests**: Driver config assembly, protocol framing, error mappings (`cargo xtask ci`).
+2. **eBPF Build Verification**: Probes compile with `.BTF` debug sections enabled.
+3. **Privileged Integration**: End-to-end VM boot, exec, TAP network filtering, and audit probe checks (`sudo -E ./ci-privileged.sh`).
+4. **Benchmarks**: Measured latency, density, and overhead percentiles:
+   ```console
+   cargo xtask bench-boot     # Latency: cold boot vs per-VM copy
+   cargo xtask bench-warm     # Latency: snapshot restore vs pre-warmed pool
+   cargo xtask bench-density  # Memory-sharing: RSS vs PSS under load
+   cargo xtask bench-trace    # Syscall trace overhead
+   cargo xtask bench-all      # Run complete benchmark suite
+   ```
+
+---
+
+## 5. Fuzzing
+
+Fuzz targets protect boundaries where untrusted or external bytes enter the host process:
+- `channel` decoder framing
+- Wire daemon JSON protocol
+- Signed audit record envelopes
+- eBPF ring-buffer event deserializers
+
+Run seeded fuzzing locally via `cargo fuzz run <target>`.
+
+---
+
+## 6. Commit & Public API Conventions
+
+- **Conventional Commits**: Format commit subjects as `type(scope)?: imperative subject` (e.g. `feat: add vsock timeout handling`).
+- **Public API Scope (`api`)**: Any change to `vmm` public types (`Sandbox`, `Limits`, `RunResult`, `VmmError`) or wire protocols must carry the `api` scope (`feat(api):` or `fix(api)!:`).
+- **No AI Co-Author Trailers**: Keep git logs clean; do not add AI attribution trailers.

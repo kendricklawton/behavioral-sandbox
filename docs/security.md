@@ -35,7 +35,7 @@ policy reaches no network and holds minimal capability: every allowance is expli
 ## Record integrity (host-signed)
 
 The finalized audit record is **signed** with a host key the guest never sees (an `ed25519` detached
-signature over the canonical record bytes, decision 034), so a consumer detects any alteration made
+signature over the canonical record bytes), so a consumer detects any alteration made
 *after* the producing host. Verify a record with `ekvm verify <record>` (or against the trusted
 public key directly). The trust root is the host signing key: this makes "tamper-evident" hold
 off-host, but it does **not** protect against a *compromised producing host*, which can sign a

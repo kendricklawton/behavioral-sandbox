@@ -2,7 +2,7 @@
 //! (`vmm`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
 //! (`vmm_pid`/`netns`/`tap_name`) and fuse their output into the per-run [`RunRecord`].
 //!
-//! This is the caller-side launch sequence the loader's ADR log promises (ADRs 021/024):
+//! This is the caller-side launch sequence the loader specifies:
 //! the driver and the eBPF loader stay independent crates; the CLI is where they meet.
 //!
 //! **Observation fails open; enforcement does not.** A host that can't load the shared probes (no

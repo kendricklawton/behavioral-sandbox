@@ -1,4 +1,4 @@
-# The per-PR fuzz smoke (docs/contributing-fuzzing.md): a short bounded run of *every* libFuzzer
+# The per-PR fuzz smoke (docs/contributing.md): a short bounded run of *every* libFuzzer
 # target on each pull request (and push to main), so a change that breaks a decoder is caught
 # before it lands, not only on the nightly deep run (.github/workflows/fuzz.yml). This is the
 # coverage-guided complement to the in-gate dependency-light property tests: those run on the

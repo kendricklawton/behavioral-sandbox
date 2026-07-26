@@ -103,7 +103,7 @@ The wrapper sets the three env concerns a `sudo` run otherwise stacks by hand (a
 `CARGO_TARGET_DIR`, a non-`nodev` `EKVM_SCRATCH_DIR`, and rustup's `cargo` back on `PATH`);
 the gate *refuses* to run as root without the target-directory override, so a root build cannot leave
 root-owned artifacts in `./target` that block your later non-root builds, and it pre-checks the scratch
-dir is not `nodev`. See [Building](./contributing-building.md#the-privileged-gate) for the expanded form.
+dir is not `nodev`. See [Contributing](./contributing.md#3-developer-workflows--ci-gates) for the expanded form.
 
 This runs the VM-boot and probe-attach integration tests, including the containment suite. It
 **refuses** to run without root, BTF, or the eBPF object rather than skipping those tests into a
@@ -152,8 +152,7 @@ library `verify`, and the daemon's signed `trace` reply).
   record hash or run count tracked by the consumer, which is the hoster's, the same custody line as
   the signing key. A deliberate, documented limitation of append-only evidence, not a chain defect.
 
-See [decision 034](./adr/034-the-integrity-model-a-host-signed-record-and-the.md) for the full model
-and [`ekvm verify`](./cli.md#ekvm-verify) for the verify path.
+See [`ekvm verify`](./cli.md#ekvm-verify) for the verify path.
 
 ## Assumptions and residual risk
 
@@ -173,9 +172,7 @@ the boundary:
   `debugfs` over a guest-written ext4 image: complex C parsers fed attacker-controlled bytes, with
   the driver's own privileges. The calls are bounded in wall time and output bytes, and the
   extracted tree is symlink-sanitized, but a memory-corruption bug in those tools is not contained
-  today. Running them under dropped privileges is a planned hardening step; the clean fix conflicts
-  with the host path's no-`unsafe` rule (privilege-dropping via `pre_exec` is `unsafe`), so it
-  needs its own decision (an external `setpriv`-style dependency, or a dedicated helper).
+  today. Running them under dropped privileges is a planned hardening step (using an external `setpriv`-style dependency or dedicated helper).
 
 ## Out of scope (engine, not platform)
 
@@ -187,3 +184,24 @@ policy), and it self-limits by default (deny-by-default network, a dropped-uid j
 sweep). Turning that into a safe multi-tenant service is the hoster's job.
 
 See [Security](./security.md) for what counts as a security bug and how to report one.
+
+---
+
+## Host Hardening Baseline
+
+When hosting mutually-distrusting workloads on shared hardware:
+- **Dedicated Worker**: Run VMMs on host workers dedicated exclusively to sandbox execution.
+- **SMT / Core Scheduling**: Disable SMT (hyperthreading) or enable Linux kernel core scheduling (`sysfs`) to prevent micro-architectural CPU side-channels between microVMs.
+- **Disable KSM**: Keep Kernel Same-Page Merging (`ksm`) disabled to prevent timing side-channels across microVM memory pages.
+- **Kernel Mitigations**: Keep CPU vulnerability mitigations enabled (`mitigations=auto`) and host microcode up to date.
+
+`ekvm doctor` checks these host advisories automatically and flags missing host hardening baseline items.
+
+---
+
+## Supply-Chain & Provenance
+
+- **Artifact Sha256 Pinning**: The guest kernel and rootfs base images are fetched and verified against cryptographic sha256 checksums (`xtask/src/artifacts.rs`).
+- **Reproducible Guest Images**: Rootfs builds are byte-for-byte reproducible using pinned Alpine package closures (`xtask/src/rootfs.rs`).
+- **Offline Mirroring**: `cargo xtask vendor` snapshots all upstream sha256-pinned inputs into an offline mirror directory, verified via `vendor-manifest.txt`.
+- **Dependency Auditing**: CI runs `cargo deny` to check for security advisories and enforce license policy across the dependency tree.

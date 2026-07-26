@@ -1,5 +1,5 @@
 //! Per-VM guest networking, host side: a **per-VM network namespace** holding the tap that backs
-//! virtio-net (ADRs 008 and 014: deny-by-default, and the netns model that retired the earlier
+//! virtio-net (deny-by-default, and the netns model that retired the earlier
 //! one-live-networked-clone limit).
 //!
 //! Each networked VM gets its own netns (`ip netns add <name>`); the tap lives *inside* it, and the
@@ -7,7 +7,7 @@
 //! is namespaced, every VM reuses the **same fixed** name/MAC/`/30`/v6-link without any host-global
 //! allocator: two VMs holding an identically-named tap on `10.200.0.1/30` (and `fd00:200::1/64`)
 //! never collide, and a restored clone wakes with the snapshot's baked-in identity already correct in
-//! its own netns (no re-addressing). The link is **dual-stack** (ADR 008): v4 and v6 are both
+//! its own netns (no re-addressing). The link is **dual-stack**: v4 and v6 are both
 //! deny-by-default, each with a connected-prefix route only and no default route.
 //! That is what retires the one-live-networked-clone limit (v1.9 has no `network_overrides`, so restore
 //! must present the baked tap name, fine when each clone owns a private netns). Teardown is one op:
@@ -30,7 +30,7 @@ pub(crate) const TAP_NAME: &str = "fc0";
 const GUEST_MAC: &str = "02:00:00:00:00:02";
 
 /// The host end of the point-to-point link, assigned to the tap inside the netns. The guest reaches
-/// this (and nothing else, deny-by-default, ADR 008); it is unreachable from the host's own
+/// this (and nothing else, deny-by-default); it is unreachable from the host's own
 /// netns, which is by design (the driver talks to the guest over vsock, never IP).
 const HOST_IP: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
 
@@ -45,7 +45,7 @@ pub(crate) const HOST_PREFIX: u8 = 30;
 /// The host end of the per-VM link's **IPv6** ULA (`fc00::/7`, RFC 4193), the v6 analogue of
 /// [`HOST_IP`]. Fixed per netns, exactly like the v4 identity: the per-VM netns provides uniqueness,
 /// so every VM reuses the same address without a host-global allocator. The guest reaches this and
-/// nothing else (deny-by-default, ADR 008): the tap carries only the connected-prefix route, and no
+/// nothing else (deny-by-default): the tap carries only the connected-prefix route, and no
 /// v6 default route is ever installed, so v6 egress is denied by construction just as v4 is.
 const HOST_IP6: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, 1);
 

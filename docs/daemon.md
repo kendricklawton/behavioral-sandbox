@@ -24,7 +24,7 @@ the same `EKVM_*` layer the CLI reads, a daemon has no `.ekvm.toml` cwd discover
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
 jail posture is fixed when the daemon launches, so a caller can never weaken it. The same holds for
 `--require-limits` (also `EKVM_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
-can't be applied is refused rather than booted uncapped (ADR 010's fail-open is the default), so a
+can't be applied is refused rather than booted uncapped (fail-open is the default), so a
 hoster can make the resource envelope load-bearing on a shared host. Both are hoster postures, not
 per-session wire fields; the prewarm source clears `require_limits` (it must be unjailed to snapshot,
 so it can't be capped) while the jailed clones that run sessions enforce it.
@@ -106,13 +106,102 @@ the same shapes.
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
 | `{"schema":1,"reply":"snapshotted","dir":"/tmp/ekvm-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
-| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**.: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
 | `{"schema":1,"reply":"error","message":"…","fatal":false}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. |
 | `{"schema":1,"reply":"at_capacity","retry_after_ms":1000}` | The daemon is **at capacity** (the `--max-sessions` count or an aggregate resource ceiling is full) and refused the `open` before booting anything. A distinct backpressure signal (not an `error`) a dispatcher fails over on; `retry_after_ms` is a backoff hint. Always session-ending. |
 
-Drive it by hand:
+### Concrete Polyglot Protocol Examples
+
+Any language with Unix domain socket support and a JSON library can drive eKVM. Below are exact wire message exchanges for common operations.
+
+#### 1. Session Lifecycle (`open` → `exec` → `close`)
+
+**Request 1 (`open`):**
+```json
+{"schema":1,"op":"open","vcpus":1,"mem_mib":256,"wall_secs":30,"output_cap":16777216}
+```
+**Response 1:**
+```json
+{"schema":1,"reply":"opened","boot_ms":42,"pooled":true}
+```
+
+**Request 2 (`exec`):**
+```json
+{"schema":1,"op":"exec","argv":["python3","-c","import os; print(os.uname().sysname)"],"stdin":""}
+```
+**Response 2:**
+```json
+{"schema":1,"reply":"result","exit_code":0,"stdout":"Linux\n","stderr":"","exec_wall_ms":5}
+```
+
+**Request 3 (`close`):**
+```json
+{"schema":1,"op":"close"}
+```
+**Response 3:**
+```json
+{"schema":1,"reply":"closed"}
+```
+
+#### 2. File Injection & Extraction (`put` → `exec` → `get`)
+
+**Request 1 (`put` input file):**
+```json
+{"schema":1,"op":"put","path":"app.py","content":"print('Hello from injected Python script')\n"}
+```
+**Response 1:**
+```json
+{"schema":1,"reply":"put","path":"app.py"}
+```
+
+**Request 2 (`exec` script to generate output):**
+```json
+{"schema":1,"op":"exec","argv":["python3","app.py"],"stdin":""}
+```
+**Response 2:**
+```json
+{"schema":1,"reply":"result","exit_code":0,"stdout":"Hello from injected Python script\n","stderr":"","exec_wall_ms":8}
+```
+
+**Request 3 (`get` result file):**
+```json
+{"schema":1,"op":"get","path":"app.py"}
+```
+**Response 3:**
+```json
+{"schema":1,"reply":"got","path":"app.py","content":"print('Hello from injected Python script')\n","present":true}
+```
+
+#### 3. Live Audit Inspection (`trace_summary`)
+
+**Request:**
+```json
+{"schema":1,"op":"trace_summary"}
+```
+**Response:**
+```json
+{
+  "schema": 1,
+  "reply": "trace_summary",
+  "summary": {
+    "schema": 1,
+    "wall_ms": 142,
+    "exit_code": 0,
+    "egress_allowed": [],
+    "egress_denied": [],
+    "resources": {
+      "user_cpu_us": 12000,
+      "system_cpu_us": 4000,
+      "max_rss_bytes": 28432000
+    },
+    "coverage_gaps": []
+  }
+}
+```
+
+Drive it by hand using `socat` or `nc`:
 
 ```console
 $ printf '%s\n' \

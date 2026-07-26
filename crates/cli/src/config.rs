@@ -46,7 +46,7 @@ pub struct AgentToml {
     marker: Option<String>,
     /// Mirrors `EKVM_SCRATCH_DIR`.
     scratch_dir: Option<PathBuf>,
-    /// Mirrors `EKVM_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied, ADR 010).
+    /// Mirrors `EKVM_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied).
     require_limits: Option<bool>,
     /// Mirrors `EKVM_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,

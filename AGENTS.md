@@ -45,7 +45,7 @@ crates/
                  `Sandbox` lifecycle API. No `unsafe` on the host path; a hostile guest is a
                  typed error, never a panic/hang/leak.
   channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
-                 shared by the driver and the guest agent. See decision 002 (an ADR under `docs/adr/`).
+                 shared by the driver and the guest agent.
   guest-agent/   the in-guest agent (`guest-agent`): runs one command per connection and streams
                  stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs.
                  Exec/IO convenience only, never the security boundary.
@@ -61,10 +61,9 @@ crates/
                  `shell`, `doctor`; the audit record on
                  `--trace`/`--record`/`--record-summary`/`--watch`) plus `ekvm serve`, the driver
                  daemon (the versioned newline-JSON wire API over a unix socket).
-docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): running the engine
-                 (`cli*.md`), the embedder contract (`embedding.md`), the eBPF half (`probes.md`),
-                 the contributing chapters (incl. `contributing-architecture.md`, the architecture
-                 overview + repo layout), and `docs/adr/`, the decision log as one ADR per decision.
+docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): design spec
+                 (`design.md`), running the engine (`cli*.md`), the embedder contract
+                 (`embedding.md`), the eBPF half (`probes.md`), and the contributing chapters.
                  Root keeps only the standard meta files (README/CONTRIBUTING/SECURITY/…).
 xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF build at P8),
                  `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
@@ -89,11 +88,9 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
 
 ## Conventions
 
-- **Rust**, stable, one workspace. Linux-only (it needs KVM), `x86_64` only (decision 032 as
-  narrowed: nothing untestable is claimed, aarch64 returns only with hardware + a privileged CI
-  lane behind it); host kernel
+- **Rust**, stable, one workspace. Linux-only (it needs KVM), `x86_64` only; host kernel
   **≥ 5.15** (a security-maintained LTS floor, untrusted code on an unpatched kernel is a
-  threat-model hole; `ekvm doctor` enforces it, decision 032). The eBPF programs build for their
+  threat-model hole; `ekvm doctor` enforces it). The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
   build · unit tests · docs · `deny` · eBPF object build) and runs everywhere.
@@ -111,7 +108,7 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
 - **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
   show, in the fewest sentences that carry it; it never restates what the next lines visibly do.
   A prose *promise* ("can't drift", "never logged") belongs in a type or a test, with the comment
-  pointing at it; a mechanical claim (a `decision NNN` citation, a repo path, a Markdown link)
+  pointing at it; a mechanical claim (a repo path, a Markdown link)
   is checked by the gate's prose-drift lint. State the threat-model framing once per module
   (rustdoc on the item that owns it), not at every call site.
 - **No em-dashes in prose.** Repo docs, code comments, decision entries, and commit messages use
@@ -145,8 +142,4 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
 
 ## Build order
 
-Development proceeds iteratively with every capability proven running end to end. Hard-to-reverse
-choices land as `.` **ADRs** under `docs/adr/` (one `NNN-*.md` file per decision, indexed
-by `docs/adr/README.md`), keyed by their own sequential number and date (so each
-ADR stands on its own).
-
+Development proceeds iteratively with every capability proven running end to end.

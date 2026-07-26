@@ -38,7 +38,7 @@ use crate::{Limits, RunResult, VmmError};
 /// Firecracker hands to our stdout); `reboot=k panic=1` make a guest panic/reboot exit the VMM
 /// promptly; `pci=off` trims an unused bus; `random.trust_cpu=on` avoids an entropy stall at boot.
 /// The guest kernel boots with IPv6 **enabled**: the sandbox's network is dual-stack, v4 and v6,
-/// both deny-by-default (ADR 008). The guest gets a static v6 address from the `guest_ip6=`
+/// both deny-by-default. The guest gets a static v6 address from the `guest_ip6=`
 /// token `spawn.rs` appends (the kernel `ip=` param is v4-only), and reaches only the connected host
 /// end because no v6 default route is installed, exactly as for v4. Firecracker adds `root=/dev/vda`
 /// itself from the root drive, so it is not listed here.
@@ -111,7 +111,7 @@ pub struct BootConfig {
     pub boot_timeout: Duration,
     /// Wall-clock budget for each command run through this VM's `exec`: the guest agent kills the
     /// command past it, and the host's own give-up deadline is derived from it. At the public API this is
-    /// [`Limits::wall`], one wall for the whole run (ADR 010), which
+    /// [`Limits::wall`], one wall for the whole run, which
     /// [`with_limits`](BootConfig::with_limits) folds into both `boot_timeout` and this; the split
     /// exists at this layer so a driver-level caller can give boot and exec different ceilings.
     /// See [`Limits::wall`] for the semantics (including the nonzero requirement).
@@ -149,7 +149,7 @@ pub struct BootConfig {
     /// driver creates the tap (`ip tuntap`, needs `CAP_NET_ADMIN`), attaches it via
     /// `PUT /network-interfaces`, and deletes it on teardown. `false` (the default) boots with **no
     /// NIC**, deny-by-default. Even when `true`, the guest gets an *unconfigured* `eth0`: this box
-    /// adds no address, route, or masquerade (ADR 008), so the guest reaches nothing until
+    /// adds no address, route, or masquerade, so the guest reaches nothing until
     /// addressing lands. Needs `ip` (iproute2) on the host.
     pub enable_network: bool,
     /// Run Firecracker under its **jailer**: a chroot, a uid/gid drop, and the jailer's mount
@@ -162,7 +162,7 @@ pub struct BootConfig {
     /// `input_dir`/`output_dir` (the images are built in place inside the chroot).
     pub jail: Option<Jail>,
     /// Refuse the boot when the cpu/memory cgroup caps can't be applied, instead of the default
-    /// fail-open (warn and boot uncapped, ADR 010). The caps are unavailable two ways: the cgroup v2
+    /// fail-open (warn and boot uncapped). The caps are unavailable two ways: the cgroup v2
     /// cpu/memory controllers aren't delegated to the cgroup root, or the boot is **unjailed** (the
     /// caps live on the jailed VMM's cgroup, so an unjailed run has none). `false` (the default) keeps
     /// the fail-open posture, resource caps are DoS mitigation, not the isolation boundary (which
@@ -224,7 +224,7 @@ impl BootConfig {
     }
 
     /// Fold a per-sandbox [`Limits`] budget onto the config: vCPUs, memory, the wall (one wall for
-    /// the whole run, ADR 010, it becomes both the boot deadline *and* the per-exec budget),
+    /// the whole run, it becomes both the boot deadline *and* the per-exec budget),
     /// and the output cap.
     #[must_use]
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -280,7 +280,7 @@ pub(crate) fn refuse_nodev_scratch(config: &BootConfig) -> Result<(), VmmError> 
     )
 }
 
-/// The pure decision behind [`refuse_nodev_scratch`], split out so the `jailed × nodev` matrix is
+/// The pure logic behind [`refuse_nodev_scratch`], split out so the `jailed × nodev` matrix is
 /// unit-tested without a real `/proc`. Refuse only on a **confident** `nodev` under a jail; `None`
 /// (couldn't classify) and every unjailed case pass.
 fn nodev_verdict(jailed: bool, nodev: Option<bool>, scratch: &Path) -> Result<(), VmmError> {
@@ -416,7 +416,7 @@ pub struct Snapshot {
     /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
     /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
     /// restore must recreate a tap with **exactly this name**, trivially satisfied by the netns
-    /// model (ADR 014): each clone recreates the fixed-name tap inside its **own per-VM network
+    /// model: each clone recreates the fixed-name tap inside its **own per-VM network
     /// namespace**, so any number of networked clones coexist (no name collision across namespaces)
     /// and the snapshot's baked-in guest address/MAC/routes are already correct in each, with no
     /// re-addressing needed.
@@ -479,7 +479,7 @@ impl Vm {
     pub fn boot(config: BootConfig) -> Result<RunningVm, VmmError> {
         // Refuse a require_limits boot that can't be capped (unjailed) before touching /dev/kvm or
         // spawning anything: the caps live on the jailed VMM's cgroup, so an unjailed run is
-        // definitionally uncapped, which require_limits forbids (ADR 010's fail-open is the default).
+        // definitionally uncapped, which require_limits forbids (fail-open is the default).
         refuse_uncappable_boot(&config)?;
         // Refuse a jailed boot whose scratch dir is nodev with a typed error, rather than letting the
         // jailer's inert chroot /dev/kvm surface a raw Firecracker "creating KVM object" failure.
@@ -487,7 +487,7 @@ impl Vm {
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
-        // (images built in place inside the chroot). The ADR 010 deny-by-default refusal that
+        // (images built in place inside the chroot). The deny-by-default refusal that
         // stood here while combinations were unjailed retired with its last member; a new
         // not-yet-jailed feature must reinstate it rather than boot half-confined.
         // KVM checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
@@ -496,8 +496,7 @@ impl Vm {
             return Err(VmmError::NoKvm);
         }
         // One deadline for the whole boot: host-side staging (`launch`) and the API boot (`run_boot`)
-        // share it, so a slow rootfs copy can't run unbounded before the boot's own timeout starts
-        // (ADR 010).
+        // share it, so a slow rootfs copy can't run unbounded before the boot's own timeout starts.
         let deadline = crate::spawn::boot_deadline(config.boot_timeout);
         let mut spawned = Spawned::launch(&config, deadline)?;
         let boot_latency = match spawned.run_boot(&config, deadline) {
@@ -560,7 +559,7 @@ impl RunningVm {
     }
 
     /// The VM's **IPv6 link** ([`GuestLink`]), or `None` when the VM has no NIC **or** IPv6 isn't live
-    /// on the host. IPv6 is best-effort (ADR 008/032): an IPv6-disabled host has no v6 link, so a
+    /// on the host. IPv6 is best-effort: an IPv6-disabled host has no v6 link, so a
     /// `Some` here means v6 is *actually* reachable, the honest twin of [`ipv4`](Self::ipv4). Applied
     /// in-guest from the `guest_ip6=` cmdline token (the kernel `ip=` param is v4-only).
     #[must_use]
@@ -637,7 +636,7 @@ impl RunningVm {
     /// the exec protocol. The captured output is bounded ([`BootConfig::output_cap`]); a command
     /// that exits non-zero is a normal [`RunResult`], not an error. Each call opens a fresh
     /// connection (the guest agent serves one command per connection and loops), and repeated
-    /// `exec`s **compose into a stateful session** (ADR 016): the agent serves every one from
+    /// `exec`s **compose into a stateful session**: the agent serves every one from
     /// the same persistent working directory, so files injected or written by one command are
     /// visible to the next, until the VM (and its overlay) is torn down.
     /// # Errors
@@ -936,7 +935,7 @@ mod tests {
         });
         assert_eq!(cfg.vcpus.get(), 4);
         assert_eq!(cfg.mem_mib.get(), 1024);
-        // One wall for the whole run (ADR 010): the fold sets the boot deadline *and* the
+        // One wall for the whole run: the fold sets the boot deadline *and* the
         // per-exec budget from it; the output cap rides alongside.
         assert_eq!(cfg.boot_timeout, Duration::from_secs(60));
         assert_eq!(cfg.exec_wall, Duration::from_secs(60));

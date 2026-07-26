@@ -6,7 +6,7 @@
 //! or the `--json` structured result / audit log), so `ekvm run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
 //! flags > env (`EKVM_LOG`) > default. Both subcommands run
-//! **jailed by default** (ADR 012) with `--unjailed` as the explicit opt-out, and both point
+//! **jailed by default** with `--unjailed` as the explicit opt-out, and both point
 //! at the env-layered artifacts (`EKVM_ROOTFS`/`EKVM_KERNEL`/`EKVM_MARKER`, exec needs the
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
@@ -115,7 +115,7 @@ enum Cmd {
     // `ekvm --help` lists) and the detail follows after a blank line (what `ekvm <cmd> --help`
     // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
     /// Run one command in a microVM.
-    /// Boots a sandbox, runs the command inside it, and tears it down. Jailed by default (ADR 012),
+    /// Boots a sandbox, runs the command inside it, and tears it down. Jailed by default,
     /// with `--unjailed` as the explicit opt-out. The run's host-observed audit surface rides on
     /// `--trace`, `--record`, `--record-summary`, and `--watch`.
     // Boxed because `run` carries far more flags than the other subcommands: behind an indirection
@@ -142,12 +142,11 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     Doctor(doctor::DoctorArgs),
     /// Verify a signed audit record.
     /// Checks a `--record` file's `ed25519` signature against a trusted key (the host's own, or
-    /// `--key <hex>`), so alteration after the producing host is caught (ADR 034). Exits non-zero
+    /// `--key <hex>`), so alteration after the producing host is caught. Exits non-zero
     /// if the record was altered or signed by an untrusted key.
     Verify(verify::VerifyArgs),
     /// Run the driver daemon.
-    /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API,
-    /// ADR 030), so a local client drives microVMs without linking the engine. Access control is
+    /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API), so a local client drives microVMs without linking the engine. Access control is
     /// the socket directory's permissions (no auth, a recorded non-goal).
     Serve(Box<serve::ServeArgs>),
 }
@@ -161,19 +160,19 @@ struct RunArgs {
     #[arg(long)]
     demo_boot: bool,
     /// Run the VMM without the jailer.
-    /// The default is confined (jailed, which needs real root and the `jailer` binary, ADR 012);
+    /// The default is confined (jailed, which needs real root and the `jailer` binary);
     /// this is the explicit opt-out for hosts that can't jail. The guest stays behind KVM either way.
     #[arg(long, help_heading = "Isolation")]
     unjailed: bool,
     /// Refuse the boot if the cgroup caps can't be applied.
-    /// Instead of the default warn-and-boot-uncapped (ADR 010). Needs the jailer (so not with
+    /// Instead of the default warn-and-boot-uncapped. Needs the jailer (so not with
     /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `EKVM_REQUIRE_LIMITS`
     /// or `.ekvm.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
     /// Guest vCPUs, 1..=32 [default: 1].
     /// Zero or over-cap is a typed CLI error, never a silent clamp (Firecracker v1.9 caps a microVM
-    /// at 32, ADR 001).
+    /// at 32).
     #[arg(long, value_name = "N", value_parser = parse_vcpus, help_heading = "Guest resources")]
     vcpus: Option<NonZeroU8>,
     /// Guest memory in MiB [default: 256].

@@ -9,14 +9,8 @@ crate and project names all still change without notice, and will until the firs
 code contribution opens up once the surface stabilizes. This project follows the
 [Code of Conduct](CODE_OF_CONDUCT.md).
 
-The chapters below are the working manual for **collaborators** (and for reading along):
-[contributing chapters of the documentation](docs/contributing.md):
-
-- [Contributing](docs/contributing.md), how the work is organized (the roadmap's phases, the
-  decision log), the invariants, and the commit/PR conventions.
-- [Building](docs/contributing-building.md), the toolchain, `cargo xtask ci` (the host-safe gate
-  every PR must pass), and `cargo xtask ci-privileged` (the KVM + eBPF integration gate).
-- [Testing](docs/contributing-testing.md), the four-layer testing approach and the benchmarks.
+The developer instructions are consolidated in [docs/contributing.md](docs/contributing.md):
+invariants, toolchain requirements, CI gates (`cargo xtask ci` / `cargo xtask ci-privileged`), testing, benchmarks, and fuzzing.
 
 Host prerequisites and first-run instructions are in
 [Installation](docs/cli-install.md). The operating manual, the rules read every session, is
