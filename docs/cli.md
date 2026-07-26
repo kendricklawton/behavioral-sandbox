@@ -143,7 +143,8 @@ unknown key is a typed error, never a silent no-op.
 | `EKVM_PROBES_OBJECT` | — | the built eBPF object (env only, no `.ekvm.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |
 
 ```toml
-# .ekvm.toml — pinned beside a project's code
+# .ekvm.toml: pinned beside a project's code
+
 kernel = "/srv/ekvm/vmlinux"
 rootfs = "/srv/ekvm/rootfs-guest.ext4"
 marker = "GUEST-READY"

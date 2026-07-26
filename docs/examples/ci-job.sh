@@ -1,6 +1,7 @@
 #!/bin/sh
 # A minimal CI job, of the kind you'd run for an untrusted fork's pull request: unpack the submitted
-# sources and run their test suite, leaving a report behind. It reaches no network — with no `--net`
+# sources and run their test suite, leaving a report behind. It reaches no network (with no `--net`).
+#
 # the sandbox is deny-by-default, and the host record proves the job couldn't phone home even if a
 # test tried. Run it with:
 #

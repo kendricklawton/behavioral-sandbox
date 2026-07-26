@@ -467,6 +467,30 @@ impl SyscallFold {
             overflow_events: self.overflow_events,
         }
     }
+
+    /// Produce a live non-destructive [`SyscallFootprint`] snapshot from references without cloning
+    /// the outer or inner `BTreeMap` nodes.
+    #[must_use]
+    pub fn snapshot(&self) -> SyscallFootprint {
+        let notable: Vec<NotableSyscall> = self
+            .notable
+            .values()
+            .flat_map(|inner| inner.iter())
+            .map(|(detail, acc)| NotableSyscall {
+                kind: acc.kind,
+                detail: detail.clone(),
+                comm: acc.comm.clone(),
+                hits: acc.hits,
+            })
+            .collect();
+        SyscallFootprint {
+            total: self.total,
+            by_kind: self.by_kind,
+            notable,
+            notable_truncated: self.overflow_events > 0,
+            overflow_events: self.overflow_events,
+        }
+    }
 }
 
 /// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from

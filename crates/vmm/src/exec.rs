@@ -303,8 +303,7 @@ fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream,
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
         .map_err(|e| VmmError::Vmm(format!("set vsock timeouts: {e}")))?;
 
-    stream
-        .write_all(format!("CONNECT {port}\n").as_bytes())
+    writeln!(stream, "CONNECT {port}")
         .map_err(|e| VmmError::Vmm(format!("vsock CONNECT {port}: {e}")))?;
     read_connect_ack(&mut stream, port)?;
     Ok(stream)
@@ -314,7 +313,8 @@ fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream,
 /// handshake immediately after the connection is established, so a buffered read here would swallow
 /// those bytes and desync the protocol.
 fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> {
-    let mut line = Vec::new();
+    let mut line = [0u8; 64];
+    let mut len = 0usize;
     let mut byte = [0u8; 1];
     loop {
         match stream.read(&mut byte) {
@@ -328,12 +328,13 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
             }
             Ok(_) if byte[0] == b'\n' => break,
             Ok(_) => {
-                line.push(byte[0]);
-                if line.len() > 64 {
+                if len >= line.len() {
                     return Err(VmmError::Vmm(format!(
                         "vsock CONNECT {port}: ack line too long"
                     )));
                 }
+                line[len] = byte[0];
+                len += 1;
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
             Err(e)
@@ -349,7 +350,7 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
             Err(e) => return Err(VmmError::Vmm(format!("vsock CONNECT {port}: {e}"))),
         }
     }
-    let ack = String::from_utf8_lossy(&line);
+    let ack = String::from_utf8_lossy(&line[..len]);
     if ack.starts_with("OK ") {
         Ok(())
     } else {

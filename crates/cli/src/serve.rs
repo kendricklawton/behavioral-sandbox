@@ -789,7 +789,8 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
     // grants it on the directory (or re-chmods) as a deliberate choice, not an inherited umask accident.
     let listener = {
         use std::os::unix::fs::PermissionsExt as _;
-        let mut tmp = socket.to_path_buf().into_os_string();
+        let mut tmp = socket.as_os_str().to_os_string();
+
         tmp.push(format!(".{}.tmp", std::process::id()));
         // The guard unlinks the temp socket on every exit from here on, error returns and an
         // unwinding panic alike, until the rename publishes it (disarm), so a failed start leaves

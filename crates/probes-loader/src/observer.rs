@@ -141,10 +141,7 @@ impl SharedTracer {
     fn snapshot_fold(&self, cgroup_id: u64) -> Option<SyscallFootprint> {
         self.with(|inner| {
             drain_route(inner);
-            inner
-                .folds
-                .get(&cgroup_id)
-                .map(|fold| fold.clone().finish())
+            inner.folds.get(&cgroup_id).map(SyscallFold::snapshot)
         })
         .flatten()
     }

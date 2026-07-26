@@ -47,8 +47,8 @@ crates/
   channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
                  shared by the driver and the guest agent. See decision 002 (an ADR under `docs/adr/`).
   guest-agent/   the in-guest agent (`guest-agent`): runs one command per connection and streams
-                 stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs at
-                 Phase 3. Exec/IO convenience only, never the security boundary.
+                 stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs.
+                 Exec/IO convenience only, never the security boundary.
   probes/        the eBPF programs (`#![no_std]`, built for `bpfel-unknown-none` via
                  `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting.
                  CO-RE/BTF so they're portable across kernels.
@@ -96,7 +96,8 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   threat-model hole; `ekvm doctor` enforces it, decision 032). The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
-  build · unit tests · docs · `deny`; the eBPF object build joins at Phase 8) and runs everywhere.
+  build · unit tests · docs · `deny` · eBPF object build) and runs everywhere.
+
   `cargo xtask ci-privileged` runs
   the VM-boot + eBPF-load integration tests and needs `/dev/kvm` + real root, run it under `sudo`
   (your dev box or a bare-metal/nested-virt runner, a stock cloud VM can't nest KVM). The gate

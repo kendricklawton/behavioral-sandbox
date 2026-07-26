@@ -67,6 +67,15 @@ impl std::fmt::Display for CliError {
     }
 }
 
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Cli(_) => None,
+            Self::Engine(e) => Some(e),
+        }
+    }
+}
+
 impl From<VmmError> for CliError {
     fn from(e: VmmError) -> Self {
         Self::Engine(e)
