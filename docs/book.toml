@@ -1,8 +1,8 @@
 [book]
 authors = ["PackSixFour Devs"]
-multilingual = false
 src = "."
 title = "eKVM"
+
 
 [output.html]
 git-repository-url = "https://github.com/packsixfour/ekvm"
