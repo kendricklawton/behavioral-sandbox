@@ -26,9 +26,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
-use cli::audit::RunProbes;
-use cli::policy::{Policy, Requested};
-use cli::MAX_VCPUS;
+use ekvm::audit::RunProbes;
+use ekvm::policy::{Policy, Requested};
+use ekvm::MAX_VCPUS;
 use probes_loader::Timing;
 use protocol::{read_message, write_message, ProtocolError, Request, Response};
 use vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};

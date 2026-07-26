@@ -62,7 +62,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     }
 
     println!("\n== 4/5  build the release binary ==");
-    cargo(&["build", "--release", "--locked", "-p", "cli"])?;
+    cargo(&["build", "--release", "--locked", "-p", "ekvm"])?;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace_root().join("target"), PathBuf::from);
     let bin = target.join("release/ekvm");

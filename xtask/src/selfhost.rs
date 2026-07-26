@@ -50,7 +50,7 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     build_probes()?;
 
     println!("\n== 4/5  build + install the ekvm binary ==");
-    cargo(&["build", "--release", "--locked", "-p", "cli"])?;
+    cargo(&["build", "--release", "--locked", "-p", "ekvm"])?;
     let prefix = resolve_prefix(prefix)?;
     let engine_bin = install_binaries(&prefix)?;
 

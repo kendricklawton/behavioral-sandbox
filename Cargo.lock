@@ -275,25 +275,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
-name = "cli"
-version = "0.0.0"
-dependencies = [
- "clap",
- "client",
- "probes-loader",
- "protocol",
- "ratatui",
- "serde",
- "serde_json",
- "signal-hook",
- "test-support",
- "toml",
- "tracing",
- "tracing-subscriber",
- "vmm",
-]
-
-[[package]]
 name = "client"
 version = "0.0.0"
 dependencies = [
@@ -569,6 +550,25 @@ name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+
+[[package]]
+name = "ekvm"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "client",
+ "probes-loader",
+ "protocol",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "test-support",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "vmm",
+]
 
 [[package]]
 name = "equivalent"

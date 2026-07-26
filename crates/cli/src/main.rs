@@ -11,7 +11,7 @@
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
-use cli::audit;
+use ekvm::audit;
 mod config;
 mod doctor;
 mod metrics;
@@ -30,8 +30,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use cli::policy::Requested;
-use cli::MAX_VCPUS;
+use ekvm::policy::Requested;
+use ekvm::MAX_VCPUS;
 use probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
 use vmm::{sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 

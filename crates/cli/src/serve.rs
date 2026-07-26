@@ -52,8 +52,8 @@ use std::sync::{Arc, Mutex};
 
 use std::num::{NonZeroU32, NonZeroU8};
 
-use cli::audit::Observability;
-use cli::policy::Policy;
+use ekvm::audit::Observability;
+use ekvm::policy::Policy;
 use vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::Metrics;

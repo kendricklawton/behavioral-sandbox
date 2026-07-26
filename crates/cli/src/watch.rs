@@ -25,7 +25,7 @@ use ratatui::{Frame, Terminal};
 use vmm::VmmError;
 
 use crate::trace::{human_bytes, human_duration, proto_name, syscall_name};
-use cli::audit::RunProbes;
+use ekvm::audit::RunProbes;
 
 /// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.
