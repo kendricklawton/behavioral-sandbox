@@ -1,9 +1,10 @@
-# Deploy mdBook documentation to GitHub Pages (ekvm.dev) on every push to main.
+# Deploy mdBook documentation to GitHub Pages (ekvm.dev).
+# Disabled automatic push triggers until v0.0.1 release; trigger manually via workflow_dispatch when needed.
 name: Docs
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
+
 
 permissions:
   contents: read

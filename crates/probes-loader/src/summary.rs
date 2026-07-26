@@ -230,11 +230,12 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
 
 /// One coverage gap as `"axis: reason"`, the flat, model-legible form of an [`AxisGap`].
 fn gap_line(gap: &AxisGap) -> String {
-    match gap {
-        AxisGap::HostSyscalls(r) => format!("host_syscalls: {r}"),
-        AxisGap::Network(r) => format!("network: {r}"),
-        AxisGap::Cpu(r) => format!("cpu: {r}"),
-    }
+    let axis = match gap {
+        AxisGap::HostSyscalls(_) => "host_syscalls",
+        AxisGap::Network(_) => "network",
+        AxisGap::Cpu(_) => "cpu",
+    };
+    format!("{axis}: {}", gap.reason())
 }
 
 /// A destination as one compact JSON string, `"1.1.1.1:443/tcp"`, the dotted quad, the L4 port, and

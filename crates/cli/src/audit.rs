@@ -36,14 +36,16 @@ impl Observability {
         let tracer = match SharedTracer::load() {
             Ok(t) => Some(t),
             Err(e) => {
-                load_gaps.push(AxisGap::HostSyscalls(format!("load shared tracer: {e}")));
+                load_gaps.push(AxisGap::HostSyscalls(
+                    format!("load shared tracer: {e}").into(),
+                ));
                 None
             }
         };
         let meter = match SharedMeter::load() {
             Ok(m) => Some(m),
             Err(e) => {
-                load_gaps.push(AxisGap::Cpu(format!("load shared meter: {e}")));
+                load_gaps.push(AxisGap::Cpu(format!("load shared meter: {e}").into()));
                 None
             }
         };
@@ -105,19 +107,20 @@ impl Observability {
                 // half-loaded pair still attaches nothing, and the record must explain all of it.
                 if self.tracer.is_some() {
                     gaps.push(AxisGap::HostSyscalls(
-                        "shared probes incomplete; tracer not attached".to_string(),
+                        "shared probes incomplete; tracer not attached".into(),
                     ));
                 }
                 if self.meter.is_some() {
                     gaps.push(AxisGap::Cpu(
-                        "shared probes incomplete; meter not attached".to_string(),
+                        "shared probes incomplete; meter not attached".into(),
                     ));
                 }
                 if netns.is_some() && tap.is_some() {
                     gaps.push(AxisGap::Network(
-                        "shared probes unavailable; tap monitor not attached".to_string(),
+                        "shared probes unavailable; tap monitor not attached".into(),
                     ));
                 }
+
                 Ok(RunProbes { probes: None, gaps })
             }
         }
@@ -136,16 +139,13 @@ impl Observability {
 /// The reason string carried by any [`AxisGap`] variant. `AxisGap` is `#[non_exhaustive]`, so a
 /// new axis (unknown to this build) reads as a generic marker rather than a compile break.
 fn gap_reason(gap: &AxisGap) -> &str {
-    match gap {
-        AxisGap::HostSyscalls(r) | AxisGap::Network(r) | AxisGap::Cpu(r) => r,
-        _ => "(new observation axis; update the CLI to render it)",
-    }
+    gap.reason()
 }
 
 /// The reason string of a [`AxisGap::Network`] gap, else `None`, the enforcement-armed check.
 fn network_gap_reason(gap: &AxisGap) -> Option<&str> {
     match gap {
-        AxisGap::Network(r) => Some(r),
+        AxisGap::Network(_) => Some(gap.reason()),
         _ => None,
     }
 }

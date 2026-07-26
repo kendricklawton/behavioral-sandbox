@@ -119,11 +119,11 @@ fn send_was_disconnect(err: &VmmError) -> bool {
 
 pub(crate) fn run_exec<S: Read + Write>(
     conn: &mut ClientConnection<S>,
-    argv: &[String],
+    argv: &[&str],
     stdin: &[u8],
-    files_in: &[(String, Vec<u8>)],
-    env: &[(String, String)],
-    artifacts: &[String],
+    files_in: &[(&str, Vec<u8>)],
+    env: &[(&str, &str)],
+    artifacts: &[&str],
     bounds: ExecBounds,
 ) -> Result<RunResult, VmmError> {
     // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
@@ -132,6 +132,7 @@ pub(crate) fn run_exec<S: Read + Write>(
     let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _span = span.enter();
     let started = Instant::now();
+
     // The host's own deadline, independent of the socket's per-read idle timeout. A `Duration::MAX`
     // "no limit" must stay a *bounded* wait, not an `Instant + Duration` overflow panic, clamp to a
     // day (mirrors the boot deadline).
@@ -146,11 +147,12 @@ pub(crate) fn run_exec<S: Read + Write>(
     // body or env value to strand, and nothing on this path logs one.
     let sent = (|| -> Result<(), VmmError> {
         for (path, data) in files_in {
-            conn.send_put_file(path, data)?;
+            conn.send_put_file(path.as_ref(), data)?;
         }
         conn.send_exec(argv, stdin, env, artifacts, wire_timeout_ms(bounds.timeout))?;
         Ok(())
     })();
+
     if let Err(send_err) = sent {
         // The guest may have rejected an earlier request and closed *while the host was still
         // writing* (a peer disconnect: EPIPE / ECONNRESET / EOF): its typed refusal is already in
@@ -400,7 +402,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
-            &["echo".into(), "hi".into()],
+            &["echo", "hi"],
             b"",
             &[],
             &[],
@@ -426,7 +428,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
-            &["cat".into()],
+            &["cat"],
             b"from the host\n",
             &[],
             &[],
@@ -452,14 +454,14 @@ mod tests {
         let result = run_exec(
             &mut conn,
             &[
-                "sh".into(),
-                "-c".into(),
-                "mkdir -p out && tr a-z A-Z < in.txt > out/up.txt".into(),
+                "sh",
+                "-c",
+                "mkdir -p out && tr a-z A-Z < in.txt > out/up.txt",
             ],
             b"",
-            &[("in.txt".into(), b"hello\n".to_vec())],
+            &[("in.txt", b"hello\n".to_vec())],
             &[],
-            &["out/up.txt".into(), "missing.txt".into()],
+            &["out/up.txt", "missing.txt"],
             ExecBounds {
                 timeout: Duration::from_secs(5),
                 wall: Duration::from_secs(30),
@@ -553,7 +555,7 @@ mod tests {
         let mut conn = ClientConnection::connect(client).expect("connect");
         let err = run_exec(
             &mut conn,
-            &["true".into()],
+            &["true"],
             b"",
             &[],
             &[],
@@ -654,13 +656,13 @@ mod tests {
             let result = run_exec(
                 &mut conn,
                 &[
-                    "sh".into(),
-                    "-c".into(),
-                    "printf '%s ' \"$LEAK_TEST_SECRET\"; cat leak.txt".into(),
+                    "sh",
+                    "-c",
+                    "printf '%s ' \"$LEAK_TEST_SECRET\"; cat leak.txt",
                 ],
                 b"",
-                &[("leak.txt".into(), SENTINEL.as_bytes().to_vec())],
-                &[("LEAK_TEST_SECRET".into(), SENTINEL.into())],
+                &[("leak.txt", SENTINEL.as_bytes().to_vec())],
+                &[("LEAK_TEST_SECRET", SENTINEL)],
                 &[],
                 bounds(),
             )
@@ -670,9 +672,9 @@ mod tests {
                 connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
             let err = run_exec(
                 &mut conn,
-                &["true".into()],
+                &["true"],
                 b"",
-                &[("../escape.txt".into(), SENTINEL.as_bytes().to_vec())],
+                &[("../escape.txt", SENTINEL.as_bytes().to_vec())],
                 &[],
                 &[],
                 bounds(),
@@ -718,7 +720,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
-            &["definitely-not-a-real-binary-zzz".into()],
+            &["definitely-not-a-real-binary-zzz"],
             b"",
             &[],
             &[],
@@ -744,7 +746,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
-            &["sh".into(), "-c".into(), "kill -9 $$".into()],
+            &["sh", "-c", "kill -9 $$"],
             b"",
             &[],
             &[],
@@ -801,7 +803,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
-            &["nope".into()],
+            &["nope"],
             b"",
             &[],
             &[],
@@ -831,7 +833,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
-            &["echo".into(), "hi".into()],
+            &["echo", "hi"],
             b"",
             &[],
             &[],
@@ -864,7 +866,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
-            &["flood".into()],
+            &["flood"],
             b"",
             &[],
             &[],
@@ -896,7 +898,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
-            &["sleep".into()],
+            &["sleep"],
             b"",
             &[],
             &[],
@@ -930,7 +932,7 @@ mod tests {
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
-            &["flood".into()],
+            &["flood"],
             b"",
             &[],
             &[],
@@ -967,7 +969,7 @@ mod tests {
         let started = std::time::Instant::now();
         let err = run_exec(
             &mut conn,
-            &["dribble".into()],
+            &["dribble"],
             b"",
             &[],
             &[],

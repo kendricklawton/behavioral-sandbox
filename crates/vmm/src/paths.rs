@@ -4,7 +4,8 @@
 //! `Vm`, `RunningVm`, `Snapshot`) rather than the home for crate-internal plumbing. Pure,
 //! `unsafe`-free, and every failure is a typed [`VmmError`].
 
-use std::path::{Path, PathBuf};
+use std::borrow::Cow;
+use std::path::Path;
 
 use crate::VmmError;
 
@@ -19,12 +20,12 @@ pub(crate) fn path_str(p: &Path) -> Result<&str, VmmError> {
 /// with its scratch dir as cwd (so a relative vsock socket resolves per-VM, see `spawn_fc`); a
 /// relative file path would otherwise resolve against that scratch dir instead. Lexical only (no
 /// symlink resolution, no existence requirement), so it's safe on a path that doesn't exist yet.
-pub(crate) fn absolute(p: &Path) -> Result<PathBuf, VmmError> {
+pub(crate) fn absolute(p: &Path) -> Result<Cow<'_, Path>, VmmError> {
     if p.is_absolute() {
-        Ok(p.to_path_buf())
+        Ok(Cow::Borrowed(p))
     } else {
         std::env::current_dir()
-            .map(|cwd| cwd.join(p))
+            .map(|cwd| Cow::Owned(cwd.join(p)))
             .map_err(|e| VmmError::Vmm(format!("resolve {}: {e}", p.display())))
     }
 }

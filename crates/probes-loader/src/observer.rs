@@ -233,7 +233,7 @@ impl SandboxProbes {
         let cgroup_id = match cgroup_id_of_pid(vmm_pid) {
             Ok(id) => Some(id),
             Err(e) => {
-                gaps.push(AxisGap::Cpu(format!("resolve cgroup: {e}")));
+                gaps.push(AxisGap::Cpu(format!("resolve cgroup: {e}").into()));
                 None
             }
         };
@@ -243,13 +243,15 @@ impl SandboxProbes {
             Some(cgid) => match tracer.register(cgid) {
                 Ok(()) => true,
                 Err(e) => {
-                    gaps.push(AxisGap::HostSyscalls(format!("register tracer: {e}")));
+                    gaps.push(AxisGap::HostSyscalls(
+                        format!("register tracer: {e}").into(),
+                    ));
                     false
                 }
             },
             None => {
                 gaps.push(AxisGap::HostSyscalls(
-                    "cgroup id unknown, cannot attribute host syscalls".to_string(),
+                    "cgroup id unknown, cannot attribute host syscalls".into(),
                 ));
                 false
             }
@@ -266,7 +268,7 @@ impl SandboxProbes {
                 match attached {
                     Ok(m) => Some(m),
                     Err(e) => {
-                        gaps.push(AxisGap::Network(format!("attach tap: {e}")));
+                        gaps.push(AxisGap::Network(format!("attach tap: {e}").into()));
                         None
                     }
                 }
@@ -279,11 +281,11 @@ impl SandboxProbes {
             Some(cgid) => match meter.with(|m| m.add_target(cgid)) {
                 Some(Ok(())) => true,
                 Some(Err(e)) => {
-                    gaps.push(AxisGap::Cpu(format!("meter add_target: {e}")));
+                    gaps.push(AxisGap::Cpu(format!("meter add_target: {e}").into()));
                     false
                 }
                 None => {
-                    gaps.push(AxisGap::Cpu("meter lock poisoned".to_string()));
+                    gaps.push(AxisGap::Cpu("meter lock poisoned".into()));
                     false
                 }
             },
@@ -320,7 +322,7 @@ impl SandboxProbes {
                 None => {
                     self.gaps.push(AxisGap::HostSyscalls(
                         "shared tracer state unavailable at finalize (lock poisoned or fold lost)"
-                            .to_string(),
+                            .into(),
                     ));
                     SyscallFootprint::default()
                 }
@@ -336,16 +338,19 @@ impl SandboxProbes {
         if had_tracer {
             match (self.drops_at_attach, self.tracer.drops()) {
                 (Some(before), Some(after)) if after > before => {
-                    self.gaps.push(AxisGap::HostSyscalls(format!(
+                    self.gaps.push(AxisGap::HostSyscalls(
+                        format!(
                         "ring buffer dropped {} event(s) during this run's window; the footprint \
                          may undercount",
                         after - before
-                    )));
+                    )
+                        .into(),
+                    ));
                 }
                 (Some(_), Some(_)) => {} // both read, no increase: exact
                 _ => self.gaps.push(AxisGap::HostSyscalls(
                     "ring-buffer event-loss counter unreadable at finalize; possible undercount"
-                        .to_string(),
+                        .into(),
                 )),
             }
         }
@@ -357,18 +362,19 @@ impl SandboxProbes {
             Some(monitor) => match monitor.totals() {
                 Err(e) => {
                     self.gaps
-                        .push(AxisGap::Network(format!("read tap totals: {e}")));
+                        .push(AxisGap::Network(format!("read tap totals: {e}").into()));
+
                     None
                 }
                 Ok(totals) => {
                     let flows = monitor.flows().unwrap_or_else(|e| {
                         self.gaps
-                            .push(AxisGap::Network(format!("read tap flows: {e}")));
+                            .push(AxisGap::Network(format!("read tap flows: {e}").into()));
                         Vec::new()
                     });
                     let denials = monitor.denials().unwrap_or_else(|e| {
                         self.gaps
-                            .push(AxisGap::Network(format!("read tap denials: {e}")));
+                            .push(AxisGap::Network(format!("read tap denials: {e}").into()));
                         Vec::new()
                     });
                     // The kernel's full-map drop counters: nonzero means the flow table / denial
@@ -377,49 +383,59 @@ impl SandboxProbes {
                     // A failed *read* of a counter is its own gap, unknown loss is still loss.
                     let dropped_flows = monitor.dropped_flows().unwrap_or_else(|e| {
                         self.gaps
-                            .push(AxisGap::Network(format!("read tap flow drops: {e}")));
+                            .push(AxisGap::Network(format!("read tap flow drops: {e}").into()));
                         0
                     });
                     let dropped_denials = monitor.dropped_denials().unwrap_or_else(|e| {
-                        self.gaps
-                            .push(AxisGap::Network(format!("read tap denial drops: {e}")));
+                        self.gaps.push(AxisGap::Network(
+                            format!("read tap denial drops: {e}").into(),
+                        ));
                         0
                     });
                     if dropped_flows > 0 {
-                        self.gaps.push(AxisGap::Network(format!(
-                            "flow table full: {dropped_flows} new flow(s) dropped; flows and \
+                        self.gaps.push(AxisGap::Network(
+                            format!(
+                                "flow table full: {dropped_flows} new flow(s) dropped; flows and \
                              totals undercount"
-                        )));
+                            )
+                            .into(),
+                        ));
                     }
                     if dropped_denials > 0 {
-                        self.gaps.push(AxisGap::Network(format!(
-                            "denial table full: {dropped_denials} denied packet(s) missing a \
+                        self.gaps.push(AxisGap::Network(
+                            format!(
+                                "denial table full: {dropped_denials} denied packet(s) missing a \
                              destination row (the packets were still dropped at the tap)"
-                        )));
+                            )
+                            .into(),
+                        ));
                     }
                     // Non-IPv4 (IPv6/VLAN) frames the flow view can't represent: not a flow, but their
                     // presence means the section is IPv4-only, not the whole picture, so gap it. A
                     // failed read of the counter is itself a gap (unknown coverage is a gap).
                     match monitor.unparsed_l3() {
-                        Ok(n) if n > 0 => self.gaps.push(AxisGap::Network(format!(
+                        Ok(n) if n > 0 => self.gaps.push(AxisGap::Network(
+                            format!(
                             "{n} unrepresentable frame(s) (VLAN, or a truncated IPv4/IPv6 frame) \
                              crossed the tap; this section is not the complete tap traffic"
-                        ))),
+                        )
+                            .into(),
+                        )),
                         Ok(_) => {}
-                        Err(e) => self.gaps.push(AxisGap::Network(format!(
-                            "read tap unparsed-L3 counter: {e}"
-                        ))),
+                        Err(e) => self.gaps.push(AxisGap::Network(
+                            format!("read tap unparsed-L3 counter: {e}").into(),
+                        )),
                     }
                     // The IPv6 half (ADR 008 dual-stack): folded into the same section, an unreadable
                     // v6 map is its own gap so v6 traffic is never silently absent.
                     let flows6 = monitor.flows6().unwrap_or_else(|e| {
                         self.gaps
-                            .push(AxisGap::Network(format!("read tap v6 flows: {e}")));
+                            .push(AxisGap::Network(format!("read tap v6 flows: {e}").into()));
                         Vec::new()
                     });
                     let denials6 = monitor.denials6().unwrap_or_else(|e| {
                         self.gaps
-                            .push(AxisGap::Network(format!("read tap v6 denials: {e}")));
+                            .push(AxisGap::Network(format!("read tap v6 denials: {e}").into()));
                         Vec::new()
                     });
                     Some(
@@ -444,15 +460,15 @@ impl SandboxProbes {
             Some(Ok(summary)) => summary,
             Some(Err(e)) => {
                 self.gaps
-                    .push(AxisGap::Cpu(format!("read resource summary: {e}")));
+                    .push(AxisGap::Cpu(format!("read resource summary: {e}").into()));
                 crate::ResourceSummary::default()
             }
             None => {
-                self.gaps
-                    .push(AxisGap::Cpu("meter lock poisoned".to_string()));
+                self.gaps.push(AxisGap::Cpu("meter lock poisoned".into()));
                 crate::ResourceSummary::default()
             }
         };
+
         if self.metered {
             if let Some(cgid) = self.cgroup_id {
                 // Unregister *and* free the cgroup's `CPU_NS` row (the summary above already read

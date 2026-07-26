@@ -375,11 +375,14 @@ fn vulnerable_entries(dir: &Path) -> Vec<String> {
     };
     let mut out: Vec<String> = entries
         .flatten()
-        .filter(|e| {
-            std::fs::read_to_string(e.path())
-                .is_ok_and(|s| s.trim_start().starts_with("Vulnerable"))
+        .filter_map(|e| {
+            let s = std::fs::read_to_string(e.path()).ok()?;
+            if s.trim_start().starts_with("Vulnerable") {
+                Some(e.file_name().to_string_lossy().into_owned())
+            } else {
+                None
+            }
         })
-        .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     out.sort();
     out

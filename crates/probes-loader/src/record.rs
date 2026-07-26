@@ -14,6 +14,7 @@
 //! output will rely on. Kept here, out of `vmm`, so the driver stays independent of the eBPF
 //! loader (ADRs 021/023); the two tracks bridge only by plain values.
 
+use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;
 use std::time::Duration;
 
@@ -482,11 +483,21 @@ pub struct Timing {
 #[non_exhaustive]
 pub enum AxisGap {
     /// The host-syscall trace couldn't be loaded, scoped, or attributed.
-    HostSyscalls(String),
+    HostSyscalls(Cow<'static, str>),
     /// The tap monitor couldn't be attached or read.
-    Network(String),
+    Network(Cow<'static, str>),
     /// The CPU meter couldn't resolve the cgroup or register it.
-    Cpu(String),
+    Cpu(Cow<'static, str>),
+}
+
+impl AxisGap {
+    /// The reason string carried by this gap.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::HostSyscalls(r) | Self::Network(r) | Self::Cpu(r) => r.as_ref(),
+        }
+    }
 }
 
 #[cfg(test)]

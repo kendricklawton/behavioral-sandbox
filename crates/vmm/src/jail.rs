@@ -448,8 +448,9 @@ fn resolve_exec(firecracker: &Path) -> Result<PathBuf, VmmError> {
         return Ok(firecracker.to_path_buf());
     }
     if firecracker.components().count() > 1 {
-        return absolute(firecracker);
+        return absolute(firecracker).map(|p| p.into_owned());
     }
+
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
             let cand = dir.join(firecracker);

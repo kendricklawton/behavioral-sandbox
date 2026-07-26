@@ -130,11 +130,18 @@ impl AgentToml {
     #[must_use]
     pub fn env_value(&self, key: &str) -> Option<OsString> {
         match key {
-            "EKVM_FIRECRACKER" => self.firecracker.clone().map(PathBuf::into_os_string),
-            "EKVM_KERNEL" => self.kernel.clone().map(PathBuf::into_os_string),
-            "EKVM_ROOTFS" => self.rootfs.clone().map(PathBuf::into_os_string),
+            "EKVM_FIRECRACKER" => self
+                .firecracker
+                .as_ref()
+                .map(|p| p.as_os_str().to_os_string()),
+            "EKVM_KERNEL" => self.kernel.as_ref().map(|p| p.as_os_str().to_os_string()),
+            "EKVM_ROOTFS" => self.rootfs.as_ref().map(|p| p.as_os_str().to_os_string()),
             "EKVM_MARKER" => self.marker.as_ref().map(OsString::from),
-            "EKVM_SCRATCH_DIR" => self.scratch_dir.clone().map(PathBuf::into_os_string),
+            "EKVM_SCRATCH_DIR" => self
+                .scratch_dir
+                .as_ref()
+                .map(|p| p.as_os_str().to_os_string()),
+
             // A bool rendered as the canonical token `from_env_with`'s `parse_env_bool` accepts, so
             // the file slots under the env in the same composed lookup as the string keys.
             "EKVM_REQUIRE_LIMITS" => self

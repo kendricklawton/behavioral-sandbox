@@ -404,40 +404,40 @@ pub(crate) fn write_put_file(
 /// Serialize and send an `Exec` from **borrowed** parts. Like [`write_put_file`], the payload is
 /// preallocated to its exact encoded size so the serialized stdin + env values live in one buffer
 /// the post-send `zeroize` fully wipes.
-pub(crate) fn write_exec(
+pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<str>>(
     w: &mut impl Write,
-    argv: &[String],
+    argv: &[A],
     stdin: &[u8],
-    env: &[(String, String)],
-    artifacts: &[String],
+    env: &[(K, V)],
+    artifacts: &[R],
     timeout_ms: u32,
 ) -> Result<(), ChannelError> {
     let cap = 4 // argv count
-        + argv.iter().map(|a| blob_len(a.as_bytes())).sum::<usize>()
+        + argv.iter().map(|a| blob_len(a.as_ref().as_bytes())).sum::<usize>()
         + blob_len(stdin)
         + 4 // artifacts count
-        + artifacts.iter().map(|p| blob_len(p.as_bytes())).sum::<usize>()
+        + artifacts.iter().map(|p| blob_len(p.as_ref().as_bytes())).sum::<usize>()
         + 4 // timeout_ms
         + 4 // env count
         + env
             .iter()
-            .map(|(k, v)| blob_len(k.as_bytes()) + blob_len(v.as_bytes()))
+            .map(|(k, v)| blob_len(k.as_ref().as_bytes()) + blob_len(v.as_ref().as_bytes()))
             .sum::<usize>();
     let mut payload = Vec::with_capacity(cap);
     put_u32(&mut payload, argv.len() as u32);
     for arg in argv {
-        put_blob(&mut payload, arg.as_bytes());
+        put_blob(&mut payload, arg.as_ref().as_bytes());
     }
     put_blob(&mut payload, stdin);
     put_u32(&mut payload, artifacts.len() as u32);
     for path in artifacts {
-        put_blob(&mut payload, path.as_bytes());
+        put_blob(&mut payload, path.as_ref().as_bytes());
     }
     put_u32(&mut payload, timeout_ms);
     put_u32(&mut payload, env.len() as u32);
     for (key, value) in env {
-        put_blob(&mut payload, key.as_bytes());
-        put_blob(&mut payload, value.as_bytes());
+        put_blob(&mut payload, key.as_ref().as_bytes());
+        put_blob(&mut payload, value.as_ref().as_bytes());
     }
     let sent = write_frame(w, TAG_EXEC, &payload);
     payload.zeroize();
@@ -618,12 +618,12 @@ impl<S: Read + Write> ClientConnection<S> {
     ///
     /// # Errors
     /// [`ChannelError`] on a framing or write failure.
-    pub fn send_exec(
+    pub fn send_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<str>>(
         &mut self,
-        argv: &[String],
+        argv: &[A],
         stdin: &[u8],
-        env: &[(String, String)],
-        artifacts: &[String],
+        env: &[(K, V)],
+        artifacts: &[R],
         timeout_ms: u32,
     ) -> Result<(), ChannelError> {
         write_exec(&mut self.stream, argv, stdin, env, artifacts, timeout_ms)

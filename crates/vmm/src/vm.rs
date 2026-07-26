@@ -691,13 +691,21 @@ impl RunningVm {
         let budget = self.exec_wall;
         let wall = budget.saturating_add(EXEC_KILL_SLACK);
         let mut conn = connect_agent_at(uds, VSOCK_PORT, wall)?;
+        let argv_ref: Vec<&str> = argv.iter().map(AsRef::as_ref).collect();
+        let files_in_ref: Vec<(&str, Vec<u8>)> = files_in
+            .iter()
+            .map(|(p, d)| (p.as_str(), d.clone()))
+            .collect();
+        let env_ref: Vec<(&str, &str)> =
+            env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let artifacts_ref: Vec<&str> = artifacts.iter().map(AsRef::as_ref).collect();
         run_exec(
             &mut conn,
-            argv,
+            &argv_ref,
             stdin,
-            files_in,
-            env,
-            artifacts,
+            &files_in_ref,
+            &env_ref,
+            &artifacts_ref,
             ExecBounds {
                 timeout: budget,
                 wall,

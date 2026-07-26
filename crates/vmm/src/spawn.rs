@@ -163,7 +163,7 @@ impl Spawned {
             // read-write root drive unopenable. The copy is ours alone, force owner read-write.
             std::fs::set_permissions(&copy, std::fs::Permissions::from_mode(0o600))
                 .map_err(|e| VmmError::Vmm(format!("chmod rootfs copy: {e}")))?;
-            copy
+            std::borrow::Cow::Owned(copy)
         };
 
         // Bulk read-only input: build an ext4 from the host `input_dir` and attach it as a
@@ -241,7 +241,8 @@ impl Spawned {
             child: Some(child),
             console,
             workdir,
-            rootfs,
+            rootfs: rootfs.into_owned(),
+
             restored: false,
             api: ApiClient::new(socket),
             vsock_uds,
