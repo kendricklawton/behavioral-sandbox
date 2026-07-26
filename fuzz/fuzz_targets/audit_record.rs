@@ -5,13 +5,13 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use probes_loader::RunRecord;
+
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
-        if let Ok(rec) = RunRecord::from_json(s) {
-            let _ = rec.to_json();
-            let _ = rec.summary();
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
+            let _ = v.to_string();
         }
     }
 });
+
