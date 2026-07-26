@@ -1,56 +1,40 @@
 # Releases
 
-**No releases yet.** The first tagged release will be `v0.1.0`.
+Release notes for eKVM releases are documented below.
 
-## The finish line: `v0.1.0`
+## v0.1.0 (Unreleased)
 
-`v0.1.0` is the first real release: an engine that **boots a microVM, runs code, enforces and
-records what it did, self-hostable and documented**. It is cut only once every planned phase is
-green, so the tag means the whole story works end to end, not a subset.
+The initial stable release of eKVM: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
 
-- **The vNext tracks do not gate `v0.1.0`.** The polyglot SDKs (extending the engine outward, to
-  more callers) and the Wasmtime sibling (extending it sideways, to a second isolation boundary)
-  land *after* the tag. Both presuppose the frozen wire API; neither pulls tenancy/billing/
-  scheduling into scope, and the Wasmtime sibling never dilutes the core properties (it ships as a
-  separate artifact with a weaker, clearly-labelled guarantee).
-- **Everything until then is a pre-release `v0.0.x`.** Checkpoint tags start at `v0.0.1`, the
-  first packaged checkpoint (`cargo xtask dist` + a draft GitHub release); later
-  milestones bump the `0.0.x` patch as they land. These are checkpoints, not releases: no
-  stability promise, and they ship under the working name, so they are disposable by design
-  (no package managers, no promotion). (The Cargo manifests carry `0.1.0` as their
-  in-development working number, distinct from these git tags; every crate is `publish = false`,
-  so nothing reaches crates.io before the `v0.1.0` release.)
-- **Tags are a human git step.** The coding agent's job ends at the working tree; the user cuts
-  every tag (see [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md)).
+### Added
+- **Hardware Isolation Driver (`crates/vmm`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
+- **Host eBPF Observability (`crates/probes` & `crates/probes-loader`)**: `aya`-based eBPF probes for out-of-guest syscall tracing, TAP network flow monitoring, and cgroup v2 resource accounting.
+- **Daemon Wire Interface (`crates/protocol` & `crates/cli`)**: Versioned newline-delimited JSON wire API (`schema: 1`) served by `ekvm serve` over Unix domain sockets.
+- **Tamper-Evident Audit Records**: Host-observed Ed25519-signed JSON audit logs (`RunRecord`) with hash-chain verification (`trace`).
+- **Reference Rust Client (`crates/client`)**: Dependency-light reference client driving `ekvm serve` over Unix sockets.
+- **Pre-warmed Sandbox Pool**: Snapshot restoration pool producing sub-10ms warm sandbox pops.
+- **Host Diagnostics (`ekvm doctor`)**: Pre-flight host verification for `/dev/kvm`, Linux kernel floor $\ge 5.15$, cgroup v2, and BTF eBPF support.
+- **Distribution Tooling (`xtask`)**: Release packaging (`cargo xtask dist`) producing release tarballs (`ekvm-v0.1.0-x86_64-linux.tar.gz`) and single-command installer (`install.sh`).
 
-## Why there's no changelog yet
+### Pinned API Surface (v0.1.0)
+- **Rust Driver API**: `Sandbox`, `Limits`, `RunResult`, `VmmError` (`kind() -> ErrorKind`).
+- **Wire Protocol**: Line-delimited JSON format (`schema: 1`).
 
-**No `CHANGELOG.md` until `v0.1.0`.** In the pre-release line the record of what changed and why is
-deliberately not a curated changelog, which would only churn every `v0.0.x`. Instead:
+---
 
-- [The decision records](docs/adr/README.md), one dated, numbered ADR per hard-to-reverse choice,
-  so the reasoning outlives the diff.
-- The git log, one imperative subject per logical change; changes to the pinned public API carry a
-  leading `api:` marker so downstream pin bumps are auditable from the log alone.
+## The Finish Line & Pre-Release Policy
 
-Curated release notes start accumulating in this file with `v0.1.0`.
+`v0.1.0` is cut once every planned phase gate passes (`cargo xtask ci` and `cargo xtask ci-privileged`).
 
-## Rust version support
+- **Pre-release Checkpoints (`v0.0.x`)**: Pre-release tags start at `v0.0.1`. These are disposable git checkpoint tags pinned by git rev with no stability promises.
+- **Production Releases (`v0.1.0`+)**: Tagged on `main`. Patch fixes for a release line are backported to its dedicated release branch (e.g., `release-v0.1` for `v0.1.1`).
+- **Tags are a Human Step**: The user cuts every release tag (see [`AGENTS.md`](AGENTS.md)).
+- **Full Stability & SemVer Policy**: See [docs/stability.md](docs/stability.md).
 
-**Policy: the supported Rust is current stable, pinned exactly, with no back-support before `v0.1.0`.**
-The reasoning, and the Wasmtime-style last-three-stable window deferred to `v0.1.0`, are in
-[decision 037](docs/adr/037-rust-version-tracks-current-stable-no-back-support-yet.md); this section is
-the operating checklist.
+---
 
-- **Two files, kept in step:** `rust-toolchain.toml` pins the build and lint toolchain;
-  `[workspace.package].rust-version` in the root `Cargo.toml` mirrors it and is the stated downstream
-  floor. They move together, never apart, so there is no untested floor below the pin.
-- **The eBPF crate (`crates/probes`) is nightly by construction** and outside this entirely.
+## Rust Version Support
 
-**Bumping Rust (one deliberate move, never incidental drift):**
-
-1. Pick the new stable.
-2. Set `channel` in `rust-toolchain.toml` and `rust-version` in the root `Cargo.toml` to it, together.
-3. Run the gate green: `cargo xtask ci`.
-4. Note the bump in the release notes.
-
+- **Policy**: Supported Rust is current stable, pinned exactly in `rust-toolchain.toml` and mirrored in the workspace package `rust-version`.
+- **The eBPF Crate (`crates/probes`)**: Nightly by construction, targeting `bpfel-unknown-none` via `bpf-linker`.
+- **Bumping Rust**: Update `rust-toolchain.toml` and `Cargo.toml` together, verify `cargo xtask ci` passes, and document in release notes.

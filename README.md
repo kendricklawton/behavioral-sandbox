@@ -93,6 +93,27 @@ only supported architecture: nothing untestable is claimed, and aarch64 returns 
 and a privileged CI lane behind it. `ekvm doctor` reports your own host's
 readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).
 
+## Roadmap
+
+The project progresses in clear phases toward a production-ready hardware-isolated engine:
+
+- **Phase 1: `v0.1.0` Release (Core Engine Finish Line)**
+  - [x] MicroVM lifecycle management (`vmm`) and in-guest execution agent (`guest-agent`).
+  - [x] Host-side eBPF probes for syscall tracing, per-VM network tap flows, and cgroup metering (`probes`).
+  - [x] Daemon wire interface (`ekvm serve`) over Unix sockets with schema versioning (`schema: 1`).
+  - [ ] Finalize host pre-flight diagnostics (`ekvm doctor`).
+  - [ ] Complete green CI verification for host-safe (`cargo xtask ci`) and privileged (`cargo xtask ci-privileged`) gates.
+  - [ ] Tag `v0.1.0` release tarballs and single-command installer (`install.sh`).
+
+- **Phase 2: Ecosystem & External Integrations (Separate Repositories)**
+  - External polyglot client SDKs (Python, TypeScript/Node.js, Go) maintained in companion repositories.
+  - Worked integration examples showing eKVM containing untrusted code execution for AI agent frameworks.
+
+- **Phase 3: Hardware & Performance Scaling**
+  - Bare-metal `aarch64` hardware microVM execution (requires ARM hardware + privileged CI lane).
+  - Enhanced snapshot-restore pre-warmed pool performance (sub-10ms warm pops).
+  - Advanced eBPF egress filtering and granular network allow-lists (`--allow`).
+
 ## How it fits together
 
 ```

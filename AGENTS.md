@@ -135,6 +135,13 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   incompatible), so a downstream pin bump is auditable from the log alone. Internal-only changes
   don't use the scope. This is about legibility, not a new process: still one imperative subject,
   still human-committed.
+- **Preserve Backwards Compatibility.** Keep public struct fields private using the builder pattern,
+  annotate public enums with `#[non_exhaustive]`, and use `#[serde(default)]` for optional wire fields.
+  Verify Rust API stability with `cargo semver-checks check-release --baseline-rev v0.1.0` post-launch.
+- **External Client SDKs Live In Separate Repos.** Non-Rust SDKs (`ekvm-python`, `ekvm-node`, `ekvm-go`)
+  live in external companion repositories; do not pull Python, Node, or Go build tooling into this workspace.
+- **Release Branching Strategy.** Production releases land on `main` and are tagged. Patch fixes for a
+  released minor series are backported to a dedicated release branch (e.g. `release-v0.1` for `v0.1.1`).
 
 ## Build order
 
