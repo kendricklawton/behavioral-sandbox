@@ -4,7 +4,7 @@
 //! are the hoster's, above the engine).
 //!
 //! **Hand-rolled on purpose.** The exposition format is a few lines of stable text, and the daemon is
-//! synchronous with no async runtime (ADR 030's posture), so the endpoint is a plain
+//! synchronous with no async runtime, so the endpoint is a plain
 //! `TcpListener` + a bounded HTTP/1.1 responder on one thread, the same discipline as the driver's
 //! hand-rolled Firecracker HTTP client, not a `tokio`/framework import for one GET route. Scrapes are
 //! served sequentially (a scraper polls every few seconds; there is no fan-in to manage), each under
@@ -433,7 +433,7 @@ impl Metrics {
             sample(&mut out, "ekvm_pool_ready", "", ready);
         }
 
-        // Resource-aware admission headroom.: committed vs the aggregate ceiling, so a
+        // Resource-aware admission headroom: committed vs the aggregate ceiling, so a
         // fleet dispatcher routes on real memory/vCPU headroom, not just session count. A `0` ceiling
         // means unlimited, rendered as `0` (an operator reads it as "count-only admission").
         family(
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn the_committed_resource_gauges_reflect_the_capacity_sample() {
-        // The admission headroom a dispatcher routes on.: committed vs the aggregate
+        // The admission headroom a dispatcher routes on: committed vs the aggregate
         // ceiling, both dimensions, always present (unlike the pool family).
         let text = Metrics::default().render(&CapacitySample {
             pool_ready: None,

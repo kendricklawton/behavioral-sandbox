@@ -204,7 +204,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
-    // The dual-stack (ADR 008) twin of the test above, and the load-time proof that the kernel
+    // The dual-stack twin of the test above, and the load-time proof that the kernel
     // **verifier accepts** the v6 datapath (a compiled-and-linked object still has to load). Boots a
     // networked sandbox, attaches with a v6 egress policy allowing only the host end on udp/9999, then
     // sends UDP to two v6 ports on the on-link host: :9999 (allowed) and :8888 (denied). Both reach the

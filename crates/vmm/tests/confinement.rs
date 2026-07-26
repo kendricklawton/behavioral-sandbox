@@ -456,7 +456,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
         peak <= max,
         "memory.peak {peak} must never pass memory.max {max}"
     );
-    // The host never had to OOM-kill the VMM: the 128 MiB overhead budget (ADR 010)
+    // The host never had to OOM-kill the VMM: the 128 MiB overhead budget
     // absorbed the VMM's worst case while the guest's own OOM killer handled the hog.
     assert_eq!(
         cg.stat("memory.events", "oom_kill"),
@@ -474,7 +474,7 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn pids_max_is_applied_live_to_the_running_vms_cgroup() {
-    // The `pids.max` defense-in-depth cap (ADR 010): the driver asks the jailer to set it, and the
+    // The `pids.max` defense-in-depth cap: the driver asks the jailer to set it, and the
     // wire-shape unit tests in `jail.rs` assert the `--cgroup pids.max=<N>` *argument* is built. What
     // nothing checked until now is that the cap actually *took*, that the value is live on the
     // running VM's cgroup, not merely requested. A jailer that dropped the arg, a mis-derived cgroup
@@ -606,7 +606,7 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
 #[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
-    // The explicitly multi-tenant assertion (ADR 019): a hostile run storming the host's CPU alongside
+    // The explicitly multi-tenant assertion: a hostile run storming the host's CPU alongside
     // a well-behaved run on the *same host* can neither **starve** it (the victim's work still
     // completes, correctly and within a bound) nor **observe** it (distinct VMMs; network isolation is
     // the per-VM netns's job, net.rs). Each run is capped at its own cgroup, so the attacker cannot

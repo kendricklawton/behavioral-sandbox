@@ -161,7 +161,7 @@ Firecracker instances are launched via the `jailer` helper, which places the pro
 Each execution session maps to an isolated microVM instance. Pre-warmed microVM pools and snapshot restore mechanics allow sub-millisecond execution start times without sacrificing per-run isolation guarantees.
 
 ### 5. Host-Signed Audit Records
-Audit logs captured by `probes-loader` record all syscalls, network flows, and resource usage during a sandbox run. To prevent off-host tampering or forgery, the host signs finalized audit records using a host-only HMAC key (`--key`), enabling external verification of execution integrity.
+Audit logs captured by `probes-loader` record all syscalls, network flows, and resource usage during a sandbox run. To prevent off-host tampering or forgery, the host signs finalized audit records with a host-held ed25519 key, enabling external verification (`ekvm verify --key <key_id>`) of execution integrity.
 
 ### 6. Versioned Newline-JSON Daemon Protocol
 The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals and allows polyglot SDKs to control eKVM instances cleanly.

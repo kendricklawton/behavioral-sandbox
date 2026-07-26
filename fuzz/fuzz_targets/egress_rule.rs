@@ -1,4 +1,4 @@
-//! Fuzz the network egress rule parser: `parse_allow` and `Ipv4Cidr::new`/`Ipv6Cidr::new`.
+//! Fuzz the network egress rule parser: `parse_allow` (which wraps `Ipv4Cidr::new`).
 //! `--allow IP[/CIDR][:PORT][/PROTO]` parses user/CLI inputs, so hostile strings here must
 //! always return Ok/Err, never panic or overflow.
 

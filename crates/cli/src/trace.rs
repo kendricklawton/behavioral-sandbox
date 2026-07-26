@@ -64,7 +64,7 @@ pub fn render(record: &RunRecord) -> String {
                     denial.count
                 );
             }
-            // The IPv6 half (ADR 008 dual-stack): the same lines for v6 flows/denials. `FlowKey6`'s
+            // The IPv6 half (dual-stack): the same lines for v6 flows/denials. `FlowKey6`'s
             // `Display` already renders `[v6]:port -> [v6]:port proto`.
             for flow in &net.flows6 {
                 let _ = writeln!(
@@ -250,7 +250,7 @@ mod tests {
             FlowKey::new(0, u32::from_be_bytes([9, 9, 9, 9]), 0, 443, 6),
             4,
         )];
-        // A v6 flow + denial (ADR 008 dual-stack): `with_v6` folds the v6 counts into `totals`.
+        // A v6 flow + denial (dual-stack): `with_v6` folds the v6 counts into `totals`.
         let ula = |n: u8| {
             let mut a = [0u8; 16];
             a[0] = 0xfd;

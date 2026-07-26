@@ -160,8 +160,8 @@ pub(crate) struct VmLifetime {
 impl VmLifetime {
     /// Adopt a directly-spawned VMM: enroll `pid` in a fresh lifetime cgroup named `name` under the
     /// driver's own cgroup, and arm the sentinel on it. Best-effort, a host without writable
-    /// cgroup v2 gets a warning and `Drop`-only teardown (never an error: leak-proofing fails open,
-    /// ADR 010).
+    /// cgroup v2 gets a warning and `Drop`-only teardown (never an error: leak-proofing fails
+    /// open).
     pub(crate) fn adopt(pid: u32, name: &str) -> Self {
         let own_cgroup = match create_lifetime_cgroup(pid, name) {
             Ok(dir) => Some(dir),

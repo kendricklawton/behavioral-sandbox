@@ -300,7 +300,7 @@ pub(crate) fn give_to_jail(path: &Path, uid: u32, gid: u32, mode: u32) -> Result
 /// jailed Firecracker sees it. When the scratch base is **not** a shared mount (a hoster pointed
 /// `scratch_dir` at a private mount, so the propagation can't reach the slave namespace), fall back
 /// to a read-only **copy**, correct and still base-immutable, just not page-cache-deduped. Memory-sharing is
-/// a best-effort property; the isolation is not (ADR 010/011), and the copy confines identically.
+/// a best-effort property; the isolation is not, and the copy confines identically.
 ///
 /// Returns the chroot-relative path to name in the API, and `Some(host_mount_path)` when a bind mount
 /// was made, so teardown unmounts it before reclaiming the scratch dir (`None` for the copy fallback,
@@ -525,7 +525,7 @@ struct Delegated {
 }
 
 /// Read which controllers the cgroup root delegates. Absent/unreadable (a bare container) reads all
-/// false, so the caller passes no `--cgroup` and the jailed boot still runs (fail-open, ADR 010).
+/// false, so the caller passes no `--cgroup` and the jailed boot still runs (fail-open).
 fn read_delegated() -> Delegated {
     let subtree =
         std::fs::read_to_string("/sys/fs/cgroup/cgroup.subtree_control").unwrap_or_default();
@@ -561,7 +561,7 @@ fn cgroup_args_for(d: &Delegated, vcpus: NonZeroU8, mem_mib: NonZeroU32) -> Vec<
 
 /// Resolve the jailer `--cgroup` args from the delegation state, honoring a `require_limits` caller.
 /// With `require_limits` set, a host that can't apply the cpu/memory caps is a typed refusal
-/// ([`VmmError::LimitsUnavailable`]) instead of the default empty-args fail-open (ADR 010). Pure
+/// ([`VmmError::LimitsUnavailable`]) instead of the default empty-args fail-open. Pure
 /// (takes the [`Delegated`] state), so both the fail-open and fail-closed paths are unit-tested
 /// without a live cgroup fs. `require_limits` keys on cpu **and** memory, the caps that bound the
 /// resource envelope; the `pids.max` defense-in-depth cap stays best-effort either way (its absence

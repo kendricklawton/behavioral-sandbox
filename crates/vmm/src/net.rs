@@ -275,8 +275,8 @@ fn ip_in_ns(netns: &str, args: &[&str]) -> Result<(), VmmError> {
 /// `net.ipv6.conf.all.disable_ipv6=1`, or a kernel without `CONFIG_IPV6`, any of which makes
 /// `ip -6 addr add` fail. That must **not** fail the whole networked boot, doing so would regress even
 /// v4-only sandboxes on an IPv6-off host. Isolation does not rest on this address: deny-by-default is
-/// the absent v6 default route plus the eBPF egress hook (ADR 008), neither of which needs the tap to
-/// hold a v6 address. So per ADR 032 (fail-open-for-observation) this warns and returns on failure,
+/// the absent v6 default route plus the eBPF egress hook, neither of which needs the tap to
+/// hold a v6 address. So this warns and returns on failure (fail-open for observation),
 /// leaving the v6 link simply absent while v4 and isolation are unaffected.
 ///
 /// `nodad` skips duplicate-address detection: the point-to-point link has exactly one other endpoint

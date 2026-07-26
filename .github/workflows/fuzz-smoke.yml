@@ -39,7 +39,7 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
-      # Every target, 60s each (7 x 60s + build, well inside the 20m timeout). Seeds are folded in
+      # Every target, 60s each (plus the build, well inside the 20m timeout). Seeds are folded in
       # by `fuzz-smoke`, so the short budget reaches the decode logic, not the message shape.
       - name: Fuzz smoke
         run: cargo xtask fuzz-smoke --seconds 60

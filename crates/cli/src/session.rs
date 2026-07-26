@@ -89,7 +89,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         }
     };
 
-    // Resource-aware admission.: the count ticket (acquired at accept) bounds *how many*
+    // Resource-aware admission: the count ticket (acquired at accept) bounds *how many*
     // sessions; this reservation bounds *how much* they commit, so a memory-heterogeneous fleet can't
     // overcommit the host into OOM while still under `--max-sessions`. Charged before boot from the
     // resolved `Limits`, held for the session, released on teardown by `Drop`. A refusal is the
@@ -156,7 +156,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
 
     // The command loop: one request per line until `close`, EOF, or a session-ending fault.
     let mut total_exec_wall = Duration::ZERO;
-    // The session's record hash-chain.: each `trace` reply commits to the previous
+    // The session's record hash-chain: each `trace` reply commits to the previous
     // one's hash, so a client can `verify_chain` the sequence and detect a reordered/dropped record.
     // `None` until the first `trace`; the first record is the unchained anchor.
     let mut record_chain: Option<String> = None;
@@ -461,7 +461,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
     // would orphan an empty `snap-N` on every refusal, and the default daemon posture is jailed (where
     // snapshot is always a refusal), so a client looping `snapshot` would leak dirs unbounded.
     // The returned `Snapshot` is just metadata pointing at the on-disk bundle; the client gets the
-    // directory (the bundle stays on the daemon host, ADR 030 keeps bulk bytes off this line).
+    // directory (the bundle stays on the daemon host, keeping bulk bytes off this line).
     let _snapshot = vm.snapshot(&dir)?;
     Ok(dir.to_string_lossy().into_owned())
 }

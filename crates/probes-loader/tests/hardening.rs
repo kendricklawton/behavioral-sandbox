@@ -1,4 +1,4 @@
-//! The consolidated **trust-story** suite (the security boundary, ADR 029): one hostile guest
+//! The consolidated **trust-story** suite (the security boundary): one hostile guest
 //! run, contained on every axis, and the containment **shown in the host-observed audit record**,
 //! plus the proof that the guest can neither see nor disable the probes doing the observing.
 //!

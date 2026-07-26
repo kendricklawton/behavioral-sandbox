@@ -37,7 +37,7 @@
 //!
 //! **Network flows on the tap.** [`tap_ingress`]/[`tap_egress`] are `tc`/clsact
 //! classifiers on a VM's tap device: each parses the frame's 5-tuple, IPv4 into [`FLOWS`] or IPv6 into
-//! [`FLOWS6`] (ADR 008 dual-stack, parallel maps so the v4 path is untouched), and adds the packet to
+//! [`FLOWS6`] (parallel maps so the v4 path is untouched), and adds the packet to
 //! that flow's per-direction byte/packet counters. Unlike the syscall tracepoints, this *is* the
 //! guest's own traffic, a microVM's packets cross its tap on the host, so the host sees every one (the
 //! strong cross-boundary signal core property 1 leaves intact).
@@ -171,11 +171,11 @@ static FILTER: Array<u64> = Array::with_max_entries(2, 0);
 const FILTER_TGID: u32 = 0;
 const FILTER_CGROUP: u32 = 1;
 
-/// The set of cgroup ids to trace (`cgroup_id -> 1`), the syscall analogue of [`METER_TARGETS`]
-///. **One shared tracer, a target *set*** is what keeps host-syscall observation bounded under
+/// The set of cgroup ids to trace (`cgroup_id -> 1`), the syscall analogue of [`METER_TARGETS`].
+/// **One shared tracer, a target *set*** is what keeps host-syscall observation bounded under
 /// many concurrent sandboxes: the three `sys_enter_*` tracepoints are global, so a tracer-per-sandbox
 /// would attach (and run) *N* copies of each program on *every* matching syscall (O(sandboxes) per
-/// syscall, the shape ADR 023 rejects for `sched_switch`). Instead one shared tracer is attached
+/// syscall, the same shape deliberately avoided for `sched_switch`). Instead one shared tracer is attached
 /// once and every sandbox registers its cgroup here; the hot path is a single hash lookup, and
 /// [`EVENTS`] only ever carries the registered cgroups' events (not the whole host's). Consulted only
 /// when [`TRACE_SET`] is on; empty + off is the load-time single-[`FILTER`] behaviour.
@@ -321,7 +321,7 @@ const MAX_FLOWS: u32 = 4096;
 #[map]
 static DENIALS: HashMap<FlowKey, u64> = HashMap::with_max_entries(MAX_FLOWS, 0);
 
-/// The IPv6 twin of [`FLOWS`], keyed by the directional [`FlowKey6`] (ADR 008 dual-stack). A separate
+/// The IPv6 twin of [`FLOWS`], keyed by the directional [`FlowKey6`]. A separate
 /// map, not a widened key, so the v4 path stays byte-for-byte unchanged. Shares the [`FLOW_DROPS`]
 /// counter on overflow (a lost flow row is a lost flow row, whichever family), so the record's honest
 /// truncation signal covers both.
@@ -352,7 +352,7 @@ static DENIAL_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// [`FlowKey`] *or* a [`FlowKey6`], so they'd vanish from the flow view silently: an 802.1Q VLAN tag,
 /// or a truncated IPv4/IPv6 frame a parse ran off. The loader reads it and gaps the network section
 /// when nonzero. ARP is deliberately *not* counted (expected on-link, not a flow), and a well-formed
-/// IPv6 frame is now parsed into [`FLOWS6`] rather than counted here (ADR 008 dual-stack); a nonzero
+/// IPv6 frame is now parsed into [`FLOWS6`] rather than counted here; a nonzero
 /// count is a guest emitting frames the audit still can't otherwise show.
 #[map]
 static UNPARSED_L3: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
@@ -433,7 +433,7 @@ enum Direction {
 pub fn tap_ingress(ctx: TcContext) -> i32 {
     // Parse the 5-tuple **once** and hand it to both the counter and the verdict: on the enforcement
     // hot path this halves the per-packet `bpf_skb_load_bytes` calls (the old shape parsed in `count`
-    // and again in `egress_verdict`). IPv4 first (the common path), then IPv6 (ADR 008 dual-stack),
+    // and again in `egress_verdict`). IPv4 first (the common path), then IPv6,
     // each family with its own flow map + policy; a frame that is neither falls through to the
     // non-IP handling (VLAN counted as unparsed, ARP spared, everything else deny-by-default).
     if let Some(key) = parse(&ctx) {
@@ -779,8 +779,8 @@ const MAX_CGROUPS: u32 = 1024;
 static LAST_SWITCH: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 /// The set of cgroup ids to meter (`cgroup_id -> 1`), written by the loader as sandboxes come and go.
-/// **One shared program, a target *set*** is what keeps this sane under many concurrent sandboxes
-///: the `sched_switch` tracepoint is global, so a program-per-sandbox would run every attached
+/// **One shared program, a target *set*** is what keeps this sane under many concurrent sandboxes:
+/// the `sched_switch` tracepoint is global, so a program-per-sandbox would run every attached
 /// program on *every* context switch (O(sandboxes) per switch). Instead one program is attached once and
 /// consults this set, the hot path is a single hash lookup, and [`CPU_NS`] only ever holds the
 /// registered cgroups (not every cgroup on the box). Empty by default; a cgroup is metered when it is in

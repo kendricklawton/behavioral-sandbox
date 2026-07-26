@@ -49,7 +49,7 @@
 //!   (concurrent sandboxes) grows 1 → 512, showing it stays flat (O(1) lookup). Same needs as
 //!   `bench-meter`.
 //! - **`bench-sign`**, the record-signing overhead: per-record `ed25519` sign/verify + the SHA-256
-//!   chain hash., sub-millisecond and off the boot path. Host-only (no KVM/eBPF).
+//!   chain hash, sub-millisecond and off the boot path. Host-only (no KVM/eBPF).
 //! - **`meter-sandbox`**, the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
 //!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
 //!   per-run resource summary. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
@@ -145,6 +145,14 @@ enum Cmd {
         /// against the `v0.0.x` checkpoint line, `v` stripped.
         #[arg(long, value_name = "VERSION")]
         version: Option<String>,
+    },
+    /// Mint (or show) the release signing key and print the pin-and-secret ceremony: pin the
+    /// public key (`release-key.pem` + the `install.sh` heredoc), set the
+    /// `EKVM_RELEASE_SIGNING_KEY` CI secret. The private key lives at `--path`, outside the repo.
+    ReleaseKey {
+        /// Where the private key file lives (created `0600` on first use; never under `dist/`).
+        #[arg(long, value_name = "FILE")]
+        path: PathBuf,
     },
     /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
     BuildGuestAgent,
@@ -246,7 +254,7 @@ enum Cmd {
         #[arg(long, default_value_t = 100)]
         runs: usize,
     },
-    /// Measure the record-signing overhead.: the per-record cost of one `ed25519` sign
+    /// Measure the record-signing overhead: the per-record cost of one `ed25519` sign
     /// over already-canonical bytes, plus verify, the SHA-256 chain hash, and a chained sign, so the
     /// integrity step is measured like everything else. Host-only (no KVM, no eBPF); the point is
     /// that it is sub-millisecond and off the boot/exec path.
@@ -337,6 +345,7 @@ fn main() -> Result<()> {
         Cmd::BuildProbes => build_probes(),
         Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
         Cmd::Dist { version } => dist::dist(version),
+        Cmd::ReleaseKey { path } => dist::release_key(&path),
         Cmd::BuildGuestAgent => guest_bins::build_guest_agent().map(|_| ()),
         Cmd::BuildGuestExample => guest_bins::build_guest_example().map(|_| ()),
         Cmd::BuildRootfs {
@@ -464,7 +473,7 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
 }
 
 /// The per-PR smoke: fuzz every [`FUZZ_TARGETS`] target for a bounded time, seeded, fail-fast. Cheap
-/// enough to run before a push (7 targets x the default 60s) yet enough to catch a decoder a change
+/// enough to run before a push (every target x the default 60s) yet enough to catch a decoder a change
 /// just broke, the gap between "green nightly" and "this PR regressed a parser".
 fn fuzz_smoke(seconds: u64) -> Result<()> {
     require_cargo_fuzz()?;
@@ -546,10 +555,10 @@ fn cargo_fuzz_available() -> bool {
 /// The host-safe gate. `--locked` everywhere so a stale `Cargo.lock` fails here, not at release.
 fn ci() -> Result<()> {
     cargo(&["fmt", "--all", "--check"])?;
-    // The prose-drift lint runs early: it is sub-second, and a broken decision citation or a
-    // comment pointing at a renamed file should surface before the slow compile steps.
+    // The prose-drift lint runs early: it is sub-second, and a comment pointing at a renamed
+    // repo path or a dead Markdown link should surface before the slow compile steps.
     drift::check(workspace_root())?;
-    // The pinned stable toolchain and the declared MSRV floor are kept in step by hand (ADR 037);
+    // The pinned stable toolchain and the declared MSRV floor are kept in step by hand;
     // catch a bump that moved only one before the compile, not after a downstream MSRV surprise.
     toolchain_msrv_agree(workspace_root())?;
     cargo(&[
@@ -586,7 +595,7 @@ fn ci() -> Result<()> {
 
 /// Assert the pinned stable toolchain (`rust-toolchain.toml`'s `channel`) and the declared MSRV
 /// floor (`[workspace.package] rust-version` in the root `Cargo.toml`) agree at `major.minor`. They
-/// are kept in step by hand (ADR 037), so a bump touching only one silently makes the gate build at
+/// are kept in step by hand, so a bump touching only one silently makes the gate build at
 /// a compiler that differs from the floor it advertises, and a downstream pinning our MSRV would
 /// then build against a Rust we never test. A named channel (`stable`/`nightly`) carries no version
 /// to compare, so the numeric check is skipped there; today's pin is numeric.
@@ -612,7 +621,7 @@ fn toolchain_msrv_agree(root: &Path) -> Result<()> {
     if chan != floor {
         bail!(
             "toolchain/MSRV drift: rust-toolchain.toml pins `{channel}` but Cargo.toml \
-             rust-version is `{msrv}`; keep them in step (major.minor must match, ADR 037)"
+             rust-version is `{msrv}`; keep them in step (major.minor must match)"
         );
     }
     println!(

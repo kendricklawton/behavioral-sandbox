@@ -1144,7 +1144,7 @@ const SAMPLE_RECORD: &str = concat!(
     r#""coverage":[]}"#,
 );
 
-/// Bench the record-signing overhead.: one `ed25519` sign over already-canonical record
+/// Bench the record-signing overhead: one `ed25519` sign over already-canonical record
 /// bytes, plus verify, the SHA-256 chain hash, and a chained sign. **Host-only** (no KVM, no eBPF), so
 /// it never skips; the point is that the integrity step is **sub-millisecond and off the boot/exec
 /// path** (it runs once at record finalization), measured like everything else.

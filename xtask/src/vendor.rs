@@ -54,7 +54,8 @@ pub(crate) fn vendor(dir: Option<PathBuf>) -> Result<()> {
     }
 
     // The `.apk` closure + index, an online `apk add` into a throwaway root, caching every package.
-    // This is the piece decision 007 called out as "fetched-not-pinned"; the manifest below pins it.
+    // This was the one fetched-not-pinned input left in the reproducible-rootfs build; the
+    // manifest below pins it.
     println!("\n↓ resolving + caching the guest package closure ...");
     populate_apk_cache(&dir.join(APK_CACHE_SUBDIR), &alpine_tar, &apk_tools_tar)?;
 

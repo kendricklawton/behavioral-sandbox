@@ -186,7 +186,7 @@ fn addresses_the_guest_and_routes_host_to_guest() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
-    // The IPv6 twin of `addresses_the_guest_and_routes_host_to_guest` (ADR 008 dual-stack). The kernel
+    // The IPv6 twin of `addresses_the_guest_and_routes_host_to_guest`. The kernel
     // `ip=`/`CONFIG_IP_PNP` param is v4-only, so the guest's v6 address rides the `guest_ip6=`
     // cmdline token that `/sbin/net-up` applies to `eth0`. Prove: the guest carries its static v6
     // address, reaches the host v6 end over the connected /64, and (deny-by-default) cannot reach an
@@ -362,8 +362,8 @@ fn two_networked_vms_run_in_isolated_netns() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn guest_reaches_an_allowed_host_endpoint_but_not_a_blocked_one() {
-    // Prove the allow/deny posture at the transport layer, not just ICMP. Per ADR 008,
-    // "allowed" here is host-local (world-egress allow-listing is eBPF-enforced at the tap). Under
+    // Prove the allow/deny posture at the transport layer, not just ICMP. "Allowed" here is
+    // host-local by design (world-egress allow-listing is eBPF-enforced at the tap). Under
     // the netns model the tap's host end lives *inside* the VM's netns, so the host endpoint the guest
     // reaches is bound there too: a real TCP listener on the host `/30` end, entered via
     // `ip netns exec`. An off-subnet endpoint stays unreachable (no route, fast failure).

@@ -79,7 +79,7 @@ and `--mem` work the same as on `run`.
 ## `ekvm doctor`
 
 Check this host's readiness *before* the first sandbox: `ekvm doctor` prints one line per
-prerequisite, KVM, the jailer + real-root, `firecracker` v1.9 + pinned sha256., iproute2/e2fsprogs, cgroup
+prerequisite, KVM, the jailer + real-root, `firecracker` v1.9 + pinned sha256, iproute2/e2fsprogs, cgroup
 delegation, the kernel version, the boot artifacts, the eBPF capabilities, and the host-hardening
 posture (SMT, KSM, CPU-vulnerability mitigations: advisory rows for a multi-tenant host), each marked `ok`, `warn` (a fail-open degradation or an advisory, with the consequence
 named), or `FAIL` (a hard miss: no boot without it). It exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm run …`
@@ -143,7 +143,6 @@ unknown key is a typed error, never a silent no-op.
 
 ```toml
 # .ekvm.toml: pinned beside a project's code
-
 kernel = "/srv/ekvm/vmlinux"
 rootfs = "/srv/ekvm/rootfs-guest.ext4"
 marker = "GUEST-READY"

@@ -9,7 +9,7 @@ code can't see or subvert you. Every run yields a tamper-resistant, host-observe
 embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed
 audit log. **This is an engine, not a PaaS**, multi-tenant auth, billing, fleet scheduling, and a
 dashboard are the *hoster's* job, out of scope. The **AI model / agent loop is out too**: the model
-is always the *caller* driving the engine from outside, never an engine component.; the
+is always the *caller* driving the engine from outside, never an engine component; the
 engine's job is to contain what the model's code does and hand back the record. If a change pulls
 tenancy/billing/scheduling or a model into this repo, or moves the security boundary into the guest,
 the design is wrong.
@@ -111,7 +111,7 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   pointing at it; a mechanical claim (a repo path, a Markdown link)
   is checked by the gate's prose-drift lint. State the threat-model framing once per module
   (rustdoc on the item that owns it), not at every call site.
-- **No em-dashes in prose.** Repo docs, code comments, decision entries, and commit messages use
+- **No em-dashes in prose.** Repo docs, code comments, and commit messages use
   colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
   are a separate call, not covered here.

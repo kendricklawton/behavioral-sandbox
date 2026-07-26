@@ -88,9 +88,35 @@ pub struct AgentToml {
     /// Directory where audit records are saved by default.
     records_dir: Option<PathBuf>,
     /// Operator ceiling on allowed IPv4 egress CIDRs.
-    max_egress_v4: Option<Vec<String>>,
+    max_egress_v4: Option<Vec<CidrV4>>,
     /// Operator ceiling on allowed IPv6 egress CIDRs.
-    max_egress_v6: Option<Vec<String>>,
+    max_egress_v6: Option<Vec<CidrV6>>,
+}
+
+/// A `max_egress_v4` entry, validated at deserialize time: a typo'd ceiling entry must be a loud
+/// parse error, because dropping it would *widen* the ceiling (an empty ceiling means
+/// "no restriction" in [`Policy::check_egress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+struct CidrV4(Ipv4Cidr);
+
+impl TryFrom<String> for CidrV4 {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        parse_v4_cidr(&s).map(CidrV4)
+    }
+}
+
+/// The v6 twin of [`CidrV4`], for `max_egress_v6` entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "String")]
+struct CidrV6(Ipv6Cidr);
+
+impl TryFrom<String> for CidrV6 {
+    type Error = String;
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        parse_v6_cidr(&s).map(CidrV6)
+    }
 }
 
 impl AgentToml {
@@ -175,19 +201,21 @@ impl AgentToml {
     /// of these keys, yields the default policy, which changes nothing.
     #[must_use]
     pub fn policy(&self) -> Policy {
+        // Already validated at deserialize time (`CidrV4`/`CidrV6`), so this projection cannot
+        // drop an entry.
         let max_egress_v4 = self
             .max_egress_v4
             .as_deref()
             .unwrap_or(&[])
             .iter()
-            .filter_map(|s| parse_v4_cidr(s))
+            .map(|c| c.0)
             .collect();
         let max_egress_v6 = self
             .max_egress_v6
             .as_deref()
             .unwrap_or(&[])
             .iter()
-            .filter_map(|s| parse_v6_cidr(s))
+            .map(|c| c.0)
             .collect();
 
         Policy {
@@ -209,30 +237,42 @@ impl AgentToml {
     }
 }
 
-fn parse_v4_cidr(s: &str) -> Option<Ipv4Cidr> {
+fn parse_v4_cidr(s: &str) -> Result<Ipv4Cidr, String> {
     match s.split_once('/') {
         Some((ip, prefix)) => {
-            let ip: Ipv4Addr = ip.parse().ok()?;
-            let prefix: u8 = prefix.parse().ok()?;
-            Ipv4Cidr::new(ip, prefix).ok()
+            let addr: Ipv4Addr = ip
+                .parse()
+                .map_err(|_| format!("invalid IPv4 address {ip:?} in max_egress_v4 entry {s:?}"))?;
+            let prefix: u8 = prefix.parse().map_err(|_| {
+                format!("invalid CIDR prefix {prefix:?} in max_egress_v4 entry {s:?}")
+            })?;
+            Ipv4Cidr::new(addr, prefix).map_err(|e| format!("max_egress_v4 entry {s:?}: {e}"))
         }
         None => {
-            let ip: Ipv4Addr = s.parse().ok()?;
-            Some(Ipv4Cidr::host(ip))
+            let addr: Ipv4Addr = s
+                .parse()
+                .map_err(|_| format!("invalid IPv4 address in max_egress_v4 entry {s:?}"))?;
+            Ok(Ipv4Cidr::host(addr))
         }
     }
 }
 
-fn parse_v6_cidr(s: &str) -> Option<Ipv6Cidr> {
+fn parse_v6_cidr(s: &str) -> Result<Ipv6Cidr, String> {
     match s.split_once('/') {
         Some((ip, prefix)) => {
-            let ip: Ipv6Addr = ip.parse().ok()?;
-            let prefix: u8 = prefix.parse().ok()?;
-            Ipv6Cidr::new(ip, prefix).ok()
+            let addr: Ipv6Addr = ip
+                .parse()
+                .map_err(|_| format!("invalid IPv6 address {ip:?} in max_egress_v6 entry {s:?}"))?;
+            let prefix: u8 = prefix.parse().map_err(|_| {
+                format!("invalid CIDR prefix {prefix:?} in max_egress_v6 entry {s:?}")
+            })?;
+            Ipv6Cidr::new(addr, prefix).map_err(|e| format!("max_egress_v6 entry {s:?}: {e}"))
         }
         None => {
-            let ip: Ipv6Addr = s.parse().ok()?;
-            Some(Ipv6Cidr::host(ip))
+            let addr: Ipv6Addr = s
+                .parse()
+                .map_err(|_| format!("invalid IPv6 address in max_egress_v6 entry {s:?}"))?;
+            Ok(Ipv6Cidr::host(addr))
         }
     }
 }
@@ -398,6 +438,51 @@ mod tests {
         assert_eq!(composed("EKVM_ROOTFS"), Some(OsString::from("/file/root")));
         // marker: neither sets it → None, so the BootConfig default stands.
         assert_eq!(composed("EKVM_MARKER"), None);
+    }
+
+    #[test]
+    fn malformed_egress_ceiling_is_a_typed_error_not_a_dropped_entry() {
+        // A dropped ceiling entry *widens* the ceiling (empty means unrestricted in
+        // `Policy::check_egress`), so a typo must refuse the whole file, loudly, at parse time.
+        let err = AgentToml::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
+            .expect_err("a malformed CIDR entry must fail the parse");
+        assert!(
+            err.contains("10.0.0.0-8") && err.contains("max_egress_v4"),
+            "error names the entry and the key: {err}"
+        );
+
+        let err = AgentToml::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
+            .expect_err("an out-of-range prefix must fail the parse");
+        assert!(err.contains("10.0.0.0/33"), "error names the entry: {err}");
+
+        let err = AgentToml::parse("max_egress_v6 = [\"fd00::/129\"]\n")
+            .expect_err("an out-of-range v6 prefix must fail the parse");
+        assert!(err.contains("fd00::/129"), "error names the entry: {err}");
+    }
+
+    #[test]
+    fn egress_ceilings_parse_into_the_policy_unabridged() {
+        let toml = AgentToml::parse(
+            "max_egress_v4 = [\"10.0.0.0/8\", \"192.0.2.7\"]\nmax_egress_v6 = [\"fd00::/8\"]\n",
+        )
+        .expect("valid ceilings parse");
+        let policy = toml.policy();
+        assert_eq!(
+            policy.max_egress_v4,
+            vec![
+                probes_loader::Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap(),
+                probes_loader::Ipv4Cidr::host("192.0.2.7".parse().unwrap()),
+            ],
+            "every entry reaches the policy: a bare host reads as /32"
+        );
+        assert_eq!(
+            policy.max_egress_v6,
+            vec![probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
+        );
+        // Absent keys stay "no restriction": the permissive default, explicitly chosen.
+        let bare = AgentToml::parse("marker = \"UP\"\n").expect("valid");
+        assert!(bare.policy().max_egress_v4.is_empty());
+        assert!(bare.policy().max_egress_v6.is_empty());
     }
 
     #[test]

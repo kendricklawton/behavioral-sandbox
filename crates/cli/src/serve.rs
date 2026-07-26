@@ -125,7 +125,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "BYTES")]
     max_output_cap: Option<usize>,
     /// Aggregate ceiling on the **summed guest memory** (MiB) across all live sessions, the resource
-    /// counterpart to `--max-sessions`.: a session whose `open` would push committed
+    /// counterpart to `--max-sessions`: a session whose `open` would push committed
     /// memory past this is refused with `at_capacity`, *before* booting, so a memory-heterogeneous
     /// fleet can't overcommit the host into OOM. Distinct from `--max-mem-mib`, which bounds one
     /// request. `0` (the default) is unlimited: the count ceiling alone applies.
@@ -150,13 +150,13 @@ pub(crate) struct Server {
     pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     pub(crate) jailed: bool,
-    /// The operator's per-run policy., read from the daemon's `.ekvm.toml` at startup.
+    /// The operator's per-run policy, read from the daemon's `.ekvm.toml` at startup.
     /// This is the enforcing copy: a client controls neither that file nor this process's
     /// environment, so the ceilings here bound what any `open` may ask for.
     pub(crate) policy: Policy,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
     pub(crate) observ: Observability,
-    /// The host record-signing key.: the `trace` reply signs the finalized record with
+    /// The host record-signing key: the `trace` reply signs the finalized record with
     /// it so a client detects post-hoc alteration. Host-side; the guest never sees it.
     pub(crate) signing_key: probes_loader::HostKey,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
@@ -246,7 +246,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // A supervisor's stop signal gets a prompt, clean exit: log, unlink the socket (so a restart
     // never depends on the stale-path heuristic), remove this daemon's bundle dirs (else a
     // `--prewarm` restart leaks a guest-RAM-sized bundle each time), and exit 0. In-flight sessions
-    // end crash-consistently; their VMs are reaped by the lifetime sentinel (ADR 011).
+    // end crash-consistently; their VMs are reaped by the lifetime sentinel.
     install_signal_handler(
         args.socket.clone(),
         vec![
@@ -371,7 +371,7 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
                 // this scrape, `ekvm_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
                 // visibility surface freezing under the load it exists to report on. The committed
-                // gauges. read the live admission atomics, always available.
+                // gauges read the live admission atomics, always available.
                 crate::metrics::CapacitySample {
                     pool_ready: sampled
                         .pool
@@ -528,7 +528,7 @@ pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
 
 /// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed
 /// [`protocol::Response::AtCapacity`] (the client's `open` reads it as the reply, a distinct
-/// backpressure signal a dispatcher fails over on, decision 042), then the connection drops. The
+/// backpressure signal a dispatcher fails over on), then the connection drops. The
 /// write is timeout-bounded so a stalled client can't park the accept loop, and best-effort, the
 /// refusal itself must never take the daemon down.
 fn refuse_at_capacity(stream: UnixStream, server: &Server) {
@@ -1038,7 +1038,7 @@ mod tests {
     #[test]
     fn a_refused_connection_gets_the_typed_at_capacity_reply_in_bounded_time() {
         // The refused client's experience: a distinct typed `AtCapacity` reply (backpressure a
-        // dispatcher fails over on, decision 042), delivered within the refusal's 1s write bound even
+        // dispatcher fails over on), delivered within the refusal's 1s write bound even
         // though the daemon commits no VM resources to it.
         let server = test_server(1);
         let (client, daemon_end) = UnixStream::pair().expect("socketpair");

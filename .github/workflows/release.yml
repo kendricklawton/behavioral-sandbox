@@ -1,8 +1,10 @@
 # Release packaging: on a pushed v* tag (the user's act; tags are human-cut per RELEASES.md),
-# assemble `cargo xtask dist` and attach the tarball + SHA256SUMS to a DRAFT GitHub release, so
+# assemble `cargo xtask dist`, sign SHA256SUMS with the EKVM_RELEASE_SIGNING_KEY secret (a
+# detached ed25519 signature; a tag build without the secret or the .sig hard-fails, never ships
+# unsigned), and attach tarball + SHA256SUMS + SHA256SUMS.sig to a DRAFT GitHub release, so
 # publishing stays a human step too. Manual dispatch builds the package without a release, a dry
-# run of the assembly. Pre-rename releases are disposable checkpoints: no package
-# managers, no promotion.
+# run of the assembly, unsigned (the secret is never exposed to non-tag runs). Pre-rename
+# releases are disposable checkpoints: no package managers, no promotion.
 # SECURITY: tag + dispatch only, never a fork `pull_request` trigger.
 name: Release
 
@@ -44,6 +46,22 @@ jobs:
             .
             crates/probes
 
+      # Tag builds sign; dispatch dry-runs stay unsigned (they publish nothing, so the secret is
+      # never exposed to them). An unconfigured secret expands to "", which must be a hard fail
+      # here, not a confusing key-parse error later.
+      - name: Stage the release signing key (tags only)
+        if: github.ref_type == 'tag'
+        env:
+          SIGNING_KEY: ${{ secrets.EKVM_RELEASE_SIGNING_KEY }}
+        run: |
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::EKVM_RELEASE_SIGNING_KEY secret is not configured; refusing an unsigned release" >&2
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/release-signing.key"
+          echo "EKVM_RELEASE_SIGNING_KEY=$RUNNER_TEMP/release-signing.key" >> "$GITHUB_ENV"
+
       - name: Assemble the package
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
@@ -58,6 +76,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # A mis-wired secret or a signing regression must not ship unsigned artifacts.
+          if ! test -s dist/SHA256SUMS.sig; then
+            echo "::error::dist/SHA256SUMS.sig is missing or empty; refusing to release unsigned artifacts" >&2
+            exit 1
+          fi
+          # release-key.pem rides along as a convenience for manual verifiers; the trust anchor
+          # is the copy pinned in the repo (and in install.sh), not the asset next to the tarball.
           gh release create "${GITHUB_REF_NAME}" --draft --title "${GITHUB_REF_NAME}" \
-            --notes "Pre-release checkpoint. Verify: sha256sum -c SHA256SUMS. Install: see install.sh." \
-            dist/ekvm-*-x86_64-linux.tar.gz dist/SHA256SUMS
+            --notes "Pre-release checkpoint. Verify: openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig (against the repo-pinned release-key.pem), then sha256sum -c SHA256SUMS. Install: see install.sh." \
+            dist/ekvm-*-x86_64-linux.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig release-key.pem

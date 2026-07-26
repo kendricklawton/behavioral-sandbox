@@ -44,7 +44,7 @@
 //! [`flows`](TapMonitor::flows), or the per-VM rollup with [`totals`](TapMonitor::totals). This
 //! is the guest's *own* traffic (every packet crosses the tap on the host), the strong cross-boundary
 //! signal syscalls can't be. [`attach_in_netns`](TapMonitor::attach_in_netns) binds the *specific* tap
-//! the driver named for one sandbox by entering that sandbox's netns (ADR 014/021);
+//! the driver named for one sandbox by entering that sandbox's netns;
 //! [`attach`](TapMonitor::attach) takes an interface in the current netns.
 //!
 //! **Egress enforcement.** [`set_egress_policy`](TapMonitor::set_egress_policy) installs an
@@ -106,10 +106,10 @@ mod observer;
 /// aggregated from the three probes. Pure (no aya), so its whole aggregation is unit-tested host-safe.
 mod record;
 /// Record integrity: an `ed25519` detached signature over the canonical record bytes, so alteration
-/// after the producing host is detectable (ADR 034). Host-side key; the guest never sees it.
+/// after the producing host is detectable. Host-side key; the guest never sees it.
 mod signing;
 /// The model-legible projection of the record (`RunRecord::to_summary_json`): the compact, third face
-/// for an agent's observe→act loop. A pure view of the record (ADR 031), golden-tested host-safe.
+/// for an agent's observe→act loop. A pure view of the record, golden-tested host-safe.
 mod summary;
 
 pub use json::AUDIT_SCHEMA_VERSION;
@@ -659,12 +659,12 @@ pub struct NetStats {
 /// bytes/packets per IPv4 flow per direction into a map [`flows`](Self::flows) / [`totals`](Self::totals)
 /// read. Owns the aya [`Ebpf`] (programs, map, live attachments). Bind it to the *specific* tap the
 /// driver named for one sandbox with [`attach_in_netns`](Self::attach_in_netns) (its `fc0` inside its
-/// netns, ADR 014), or to an interface in the current netns with [`attach`](Self::attach).
+/// netns), or to an interface in the current netns with [`attach`](Self::attach).
 ///
 /// **Lifetime.** Dropping the monitor frees its userspace handles (the map and program fds). The
 /// in-kernel `tc` filter it left on the tap is reclaimed by the sandbox's **netns teardown** (`ip netns
-/// del` cascades the tap, its clsact qdisc, and the filters away, ADR 014/020), so a torn-down
-/// sandbox leaves no dangling program even if the loader is gone, and nothing is pinned (ADR 017).
+/// del` cascades the tap, its clsact qdisc, and the filters away), so a torn-down
+/// sandbox leaves no dangling program even if the loader is gone, and nothing is pinned.
 #[must_use = "dropping a TapMonitor frees its userspace handles and stops observing (for an interface \
               in the current netns it also detaches; a netns-attached filter goes with the netns teardown)"]
 pub struct TapMonitor {
@@ -692,7 +692,7 @@ impl TapMonitor {
     }
 
     /// Bind the monitor to the **specific tap the driver named for one sandbox**: that tap lives
-    /// inside the sandbox's own network namespace (ADR 014), so this enters that netns by name (via
+    /// inside the sandbox's own network namespace, so this enters that netns by name (via
     /// its `/run/netns/<netns>` handle), attaches both classifiers to `interface` there, and returns the
     /// calling thread to the caller's netns. Hand it a sandbox's netns name and tap name (typically
     /// `"fc0"`) and the trace is scoped to exactly that sandbox's traffic. The map is read afterward from
@@ -800,7 +800,7 @@ impl TapMonitor {
     /// they aren't in [`flows`](Self::flows) or [`totals`](Self::totals). Nonzero means the flow view
     /// is IPv4-only and the guest emitted frames it can't otherwise show (ARP is not counted, it is
     /// expected on-link, not a flow). The consumer records a coverage gap rather than an exact-looking
-    /// record. Neither IPv6 nor VLAN is configured on a sandbox's tap (ADR 014).
+    /// record. Neither IPv6 nor VLAN is configured on a sandbox's tap.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the counter map is missing or unreadable.
@@ -925,8 +925,8 @@ impl TapMonitor {
 /// from friendly [`Ipv4Addr`] CIDRs and ports and lowered to the [`PolicyRule`]s the kernel map holds.
 /// **Deny-by-default:** the empty policy ([`deny_all`](Self::deny_all) / [`Default`]) allows
 /// nothing, so a sandbox launched with no explicit allowance reaches nothing, you have to add each
-/// endpoint. This is the eBPF, host-observed complement to the driver's deny-by-default routing
-/// (ADR 008): the driver gives the guest no route to the world, and this drops anything unlisted at
+/// endpoint. This is the eBPF, host-observed complement to the driver's deny-by-default routing:
+/// the driver gives the guest no route to the world, and this drops anything unlisted at
 /// the tap, where the host can see and record it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EgressPolicy {
@@ -1161,7 +1161,7 @@ impl TapMonitor {
     /// tc programs are attached to the tap, so there is **no window** in which the tap is live but
     /// un-policed: the very first guest packet the classifier sees is already under policy. Pass
     /// [`EgressPolicy::deny_all`] for deny-by-default. Otherwise like
-    /// [`attach_in_netns`](Self::attach_in_netns) (enters the sandbox's netns via `setns`, ADR 021).
+    /// [`attach_in_netns`](Self::attach_in_netns) (enters the sandbox's netns via `setns`).
     ///
     /// # Errors
     /// As [`attach_in_netns`](Self::attach_in_netns) and [`set_egress_policy`](Self::set_egress_policy).
@@ -1795,7 +1795,7 @@ pub struct ResourceSummary {
 /// [`ResourceMeter`]'s eBPF CPU accounting: CPU rides a tracepoint (per-event timing earns its keep),
 /// memory and IO ride the counters the kernel keeps anyway. Every field is best-effort, a missing or
 /// unparseable file is [`None`], never an error, since accounting is a metering signal, not the
-/// isolation boundary (it fails open, like the driver's cgroup caps, ADR 010).
+/// isolation boundary (it fails open, like the driver's cgroup caps).
 ///
 /// Read one with [`read`](Self::read), pointed at the cgroup dir the Firecracker track placed the VMM in
 /// (`<cgroup mount>/<path>`; the driver knows it and supplies it).

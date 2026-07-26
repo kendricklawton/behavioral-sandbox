@@ -1,4 +1,4 @@
-//! CLI/daemon parity golden (the wire API, ADR 030): the **CLI** (`ekvm run --json`) and the
+//! CLI/daemon parity golden (the wire API): the **CLI** (`ekvm run --json`) and the
 //! **daemon wire API** (`agent`, driven
 //! through the reference [`client::Client`]) render the *same* command **identically**, same
 //! exit code, same stdout, same stderr. The two faces are thin hosts of one `vmm` lifecycle, so

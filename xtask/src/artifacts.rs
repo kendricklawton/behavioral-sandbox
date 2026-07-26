@@ -8,17 +8,17 @@ use anyhow::{bail, Context, Result};
 
 use crate::{artifacts_dir, boot_rootfs_path, kernel_path, vendor_dir};
 
-/// Expected sha256 of the Firecracker v1.9.0 release binary (`firecracker-v1.9.0-x86_64`, ADR 040).
+/// Expected sha256 of the Firecracker v1.9.0 release binary (`firecracker-v1.9.0-x86_64`).
 #[allow(dead_code)]
 pub(crate) const FIRECRACKER_SHA256: &str =
     "c8c2496f8786da12b7bbfbc5060af3573c22baa2e5f79ff6ee084993642bbe01";
 
-/// Expected sha256 of the Firecracker v1.9.1 release binary (`firecracker-v1.9.1-x86_64`, ADR 040).
+/// Expected sha256 of the Firecracker v1.9.1 release binary (`firecracker-v1.9.1-x86_64`).
 #[allow(dead_code)]
 pub(crate) const FIRECRACKER_SHA256_V1_9_1: &str =
     "809789cd7567b77b20edec9b301953338c2023c37ea63db82d46cb61773ad511";
 
-/// Whether `sha` matches a pinned Firecracker v1.9 release binary sha256 (ADR 040).
+/// Whether `sha` matches a pinned Firecracker v1.9 release binary sha256.
 #[allow(dead_code)]
 pub(crate) fn is_pinned_firecracker_sha256(sha: &str) -> bool {
     sha == FIRECRACKER_SHA256 || sha == FIRECRACKER_SHA256_V1_9_1

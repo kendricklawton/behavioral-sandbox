@@ -138,7 +138,7 @@ out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext
 /// reader share, so they can't drift (the address itself is never baked into the image, the host owns
 /// it). Best-effort by construction: a plain (no-NIC) boot has no `eth0` and exits cleanly, and a
 /// missing token is a clean no-op, so a non-networked boot is unaffected. Deny-by-default holds for
-/// v6 exactly as for v4 (ADR 008): only the connected `/64` route is added, never a v6 default
+/// v6 exactly as for v4: only the connected `/64` route is added, never a v6 default
 /// route, so the guest reaches the host end and nothing else. `ip` first, `ifconfig` as the fallback,
 /// so it works whether or not busybox's `ip` applet carries v6 address support.
 /// DAD is disabled (`accept_dad=0`) before the address is added, mirroring the host tap end's
@@ -710,7 +710,8 @@ fn absolute(path: &Path) -> Result<PathBuf> {
 /// Populate a vendored apk cache with the resolved guest-package closure (the `.apk` files **and**
 /// the `APKINDEX`) by running one **online** `apk add` into a throwaway root. Called by
 /// `cargo xtask vendor`; afterwards an offline build installs from this cache (`--no-network`), so a
-/// fresh host never touches the Alpine CDN, the durable hardening decision 007 deferred. The
+/// fresh host never touches the Alpine CDN, the one hardening the reproducible-rootfs build had
+/// deferred. The
 /// throwaway root exists only so apk has the base's `/etc/apk/keys` to verify signatures against; it
 /// is removed, leaving just the cache. `base_tar`/`apk_tools_tar` are the (already sha-verified)
 /// vendored tarballs, so this reuses them rather than re-downloading.

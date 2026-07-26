@@ -86,8 +86,8 @@ impl Vm {
         require_file(&snapshot.mem, "snapshot memory file", None)?;
         require_file(&snapshot.root_drive, "snapshot root disk", None)?;
 
-        // One deadline for the whole restore, computed before the pre-spawn staging so both share it
-        // ; `run_restore` enforces it around the disk stage and every API step.
+        // One deadline for the whole restore, computed before the pre-spawn staging so both share
+        // it; `run_restore` enforces it around the disk stage and every API step.
         let deadline = crate::spawn::boot_deadline(config.boot_timeout);
         let mut spawned = Spawned::launch_for_restore(config, snapshot)?;
         let latency = match spawned.run_restore(snapshot, deadline) {

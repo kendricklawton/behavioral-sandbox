@@ -95,8 +95,9 @@ sudo install -m0755 "/tmp/release-${VER}-${ARCH}/jailer-${VER}-${ARCH}"      /us
 firecracker --version
 ```
 
-Verifying that download against a pinned hash is tracked work, not yet done
-.).
+Both `install.sh` and `ekvm doctor` check a Firecracker binary found on `PATH` against the
+pinned v1.9 release sha256 and warn on a mismatch (advisory: your Firecracker is your call, but
+the pinned build is what CI exercises).
 
 On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
 pinned-version check are exercised against, so prefer them.
@@ -143,7 +144,8 @@ this table as orientation.
 
 ## Install from a release package
 
-Every release ships a release package tarball per platform plus `SHA256SUMS`, assembled by `cargo xtask dist`:
+Every release ships a release package tarball per platform plus `SHA256SUMS` and its detached
+ed25519 signature `SHA256SUMS.sig`, assembled by `cargo xtask dist`:
 the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file `MANIFEST.sha256` inside. Two first-class installation methods are supported:
 
 ### Option A: Automated Installer Script (`curl | sh`)
@@ -157,18 +159,28 @@ curl -fsSL https://get.ekvm.dev | sh
 For air-gapped hosts, manual inspection, or offline testing, download and verify the release package:
 
 ```console
-# Download release tarball and checksum file
-curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/ekvm-v0.1.0-x86_64-linux.tar.gz
+# Download release tarball, checksum manifest, and its detached signature
+curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/ekvm-0.1.0-x86_64-linux.tar.gz
 curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS
+curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS.sig
 
-# Verify integrity against SHA256SUMS
-grep "ekvm-v0.1.0-x86_64-linux.tar.gz$" SHA256SUMS | sha256sum -c -
+# Verify the manifest's signature against the release key pinned in the repo
+# (release-key.pem at the repo root; fetch it out of band, not from the release assets)
+openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
+
+# Then verify integrity against the now-trusted SHA256SUMS
+grep "ekvm-0.1.0-x86_64-linux.tar.gz$" SHA256SUMS | sha256sum -c -
 
 # Extract and install (running install.sh inside the package installs with zero network calls)
-tar -xzf ekvm-v0.1.0-x86_64-linux.tar.gz
-cd ekvm-v0.1.0-x86_64-linux
+tar -xzf ekvm-0.1.0-x86_64-linux.tar.gz
+cd ekvm-0.1.0-x86_64-linux
 sh ./install.sh
 ```
+
+The installer knobs for this layer: `EKVM_RELEASE_PUBKEY` (an SPKI PEM path or the PEM text
+itself) overrides the key pinned inside `install.sh`, and is the stronger anchor when supplied
+out of band; `EKVM_INSECURE_SKIP_SIGNATURE=1` skips the signature check (needed only for
+releases predating the signing scheme; the sha256 and manifest checks still run).
 
 Or for a package assembled locally from source:
 

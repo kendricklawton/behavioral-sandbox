@@ -16,7 +16,6 @@ Sandbox::open(config)            confined by default: KVM + the jailer
     .snapshot(dir)               a portable pre-warmed bundle (unjailed sources only)
     .collect_outputs()           the bulk /output tree, back on the host
     .shutdown()                  guaranteed reclamation (also on Drop, also on SIGKILL)
-
 ```
 
 ### Open: confined by default

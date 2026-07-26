@@ -1,6 +1,6 @@
 //! Fuzz the signed-record envelope surface: `verify`, `verify_chain` (input split on newlines),
 //! and `TrustedKey::from_hex`. The envelope is attacker-relayed by design (a verifier checks a
-//! record without trusting the host that delivered it, decision 034), so hostile bytes here must
+//! record without trusting the host that delivered it), so hostile bytes here must
 //! always land in `Ok`/`Err`, never a panic.
 
 #![no_main]

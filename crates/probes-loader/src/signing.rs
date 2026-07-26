@@ -224,6 +224,14 @@ impl HostKey {
         out.push_str("\"}");
         out
     }
+
+    /// Sign arbitrary bytes as a **raw detached** `ed25519` signature (64 bytes, no envelope).
+    /// The release-manifest scheme uses this so a stock `openssl pkeyutl -verify -rawin` can check
+    /// the signature without any ekvm binary in the loop; audit records keep the envelope.
+    #[must_use]
+    pub fn sign_detached(&self, msg: &[u8]) -> [u8; 64] {
+        self.signing.sign(msg).to_bytes()
+    }
 }
 
 /// The chain hash of a record's canonical bytes: SHA-256, hex. A chained record's `prev` field is the
@@ -266,6 +274,40 @@ impl TrustedKey {
     #[must_use]
     pub fn key_id(&self) -> String {
         hex_encode(&self.0.to_bytes())
+    }
+
+    /// This key as an SPKI **PEM** block, the encoding stock `openssl` consumes (`-pubin -inkey`),
+    /// so a release signature is verifiable with no ekvm binary in the loop.
+    /// # Errors
+    /// [`KeyError::Malformed`] if the DER/PEM encoding fails (a library-internal failure; an
+    /// `ed25519` public key always has a valid SPKI form).
+    pub fn to_spki_pem(&self) -> Result<String, KeyError> {
+        use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+        use ed25519_dalek::pkcs8::EncodePublicKey as _;
+        self.0
+            .to_public_key_pem(LineEnding::LF)
+            .map_err(|e| KeyError::Malformed(format!("SPKI PEM encoding failed: {e}")))
+    }
+
+    /// Parse a trusted public key from an SPKI **PEM** block (the [`to_spki_pem`](Self::to_spki_pem)
+    /// form, and what `openssl pkey -pubout` emits).
+    /// # Errors
+    /// [`KeyError::Malformed`] if the PEM is not a valid `ed25519` SPKI public key.
+    pub fn from_spki_pem(pem: &str) -> Result<Self, KeyError> {
+        use ed25519_dalek::pkcs8::DecodePublicKey as _;
+        VerifyingKey::from_public_key_pem(pem)
+            .map(Self)
+            .map_err(|e| KeyError::Malformed(format!("not a valid ed25519 SPKI PEM: {e}")))
+    }
+
+    /// Verify a raw detached signature ([`HostKey::sign_detached`]) over `msg`. Uses
+    /// `verify_strict`, the same malleability posture as the envelope path.
+    /// # Errors
+    /// [`VerifyError::BadSignature`] if the signature does not check.
+    pub fn verify_detached(&self, msg: &[u8], sig: &[u8; 64]) -> Result<(), VerifyError> {
+        self.0
+            .verify_strict(msg, &Signature::from_bytes(sig))
+            .map_err(|_| VerifyError::BadSignature)
     }
 }
 
@@ -350,7 +392,7 @@ fn verify_entry(
     Ok((record, prev))
 }
 
-/// Verify a **sequence** of signed record envelopes as a hash chain., returning the
+/// Verify a **sequence** of signed record envelopes as a hash chain, returning the
 /// canonical records in order. Each entry's signature must check (against `trusted`) **and** its
 /// `prev` must equal the [`record_hash`] of the previous entry's record (the first entry must be
 /// unchained). A reordered, inserted, or middle-deleted record breaks a link and is rejected.
@@ -609,6 +651,42 @@ mod tests {
     }
 
     #[test]
+    fn detached_sign_verify_round_trips_and_rejects_a_flipped_byte() {
+        let key = test_key();
+        let msg = b"deadbeef  ekvm-0.1.0-x86_64-linux.tar.gz\n";
+        let sig = key.sign_detached(msg);
+        key.verifying_key()
+            .verify_detached(msg, &sig)
+            .expect("a fresh detached signature verifies");
+        let mut tampered = *msg;
+        tampered[0] ^= 1;
+        assert_eq!(
+            key.verifying_key().verify_detached(&tampered, &sig),
+            Err(VerifyError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn spki_pem_round_trips_and_is_pinned_for_the_test_seed() {
+        let key = test_key();
+        let pem = key.verifying_key().to_spki_pem().expect("encodes");
+        let back = TrustedKey::from_spki_pem(&pem).expect("decodes");
+        assert_eq!(back.key_id(), key.key_id(), "PEM round-trip keeps the key");
+        // Pinned against the exact bytes `openssl pkeyutl -pubin -inkey` consumes (cross-checked
+        // against OpenSSL 3.x during implementation), so a dalek encoding regression is loud.
+        assert_eq!(
+            pem,
+            "-----BEGIN PUBLIC KEY-----\n\
+             MCowBQYDK2VwAyEA6kpsY+KcUgq+9VB7Ey7F+ZVHdq6+vnuSQh7qaRRG0iw=\n\
+             -----END PUBLIC KEY-----\n"
+        );
+        assert!(
+            TrustedKey::from_spki_pem("not a pem").is_err(),
+            "garbage is a typed error"
+        );
+    }
+
+    #[test]
     fn a_record_signed_by_an_untrusted_key_is_rejected() {
         let signer = test_key();
         let other = HostKey::from_seed([9u8; 32]);
@@ -622,7 +700,7 @@ mod tests {
 
     #[test]
     fn a_rotated_key_set_still_verifies_records_from_the_old_key() {
-        // Key rotation.: sign with the "old" key A, rotate to "new" key B. A verifier
+        // Key rotation: sign with the "old" key A, rotate to "new" key B. A verifier
         // that trusts the *set* {A, B} accepts records from either; a record from an untrusted C does
         // not, even though the set is non-empty.
         let old = HostKey::from_seed([1u8; 32]);

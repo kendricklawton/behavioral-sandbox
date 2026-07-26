@@ -9,13 +9,12 @@
 //! a client's `open` is real enforcement. That asymmetry is deliberate, and it is why the resolution
 //! below lives in one shared place instead of in flag parsing.
 //!
-//! **Why a ceiling is not just another config value.** The layering is flags > env > file
-//!., so a plain config value is a *default a caller overrides*. That is right for
+//! **Why a ceiling is not just another config value.** The layering is flags > env > file,
+//! so a plain config value is a *default a caller overrides*. That is right for
 //! defaults and wrong for ceilings, which exist precisely to bound what a caller may ask for. So
 //! ceilings do not participate in that precedence: they bound the resolved value, and exceeding one
-//! is a **typed refusal**, never a silent clamp (decision 026's "enforcement is a typed refusal,
-//! never a degradation": quietly handing back 4 vCPUs to a caller who asked for 32 is the
-//! degradation that rule exists to forbid).
+//! is a **typed refusal**, never a silent clamp: quietly handing back 4 vCPUs to a caller who
+//! asked for 32 is the silent degradation a refusal exists to forbid.
 
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -191,7 +190,7 @@ impl Policy {
     /// Two different things happen to an over-large value, and the difference is whether a caller
     /// actually asked for it:
     /// - **An explicit request above a ceiling is refused.** The caller asked for something this host
-    ///   does not permit; silently serving them less is the degradation decision 026 forbids.
+    ///   does not permit; silently serving them less is the degradation a refusal exists to forbid.
     /// - **A *default* above a ceiling is clamped to the ceiling.** Nobody asked for it, so there is
     ///   no caller intent to contradict, and refusing would be absurd: setting only `max_wall_secs`
     ///   would otherwise refuse every bare run, because the engine's own 30s default exceeds it. This
@@ -412,7 +411,7 @@ mod tests {
             },
             "the refusal names the knob, the ask, and the bound"
         );
-        // Silently returning 4 here would be the degradation decision 026 forbids.
+        // Silently returning 4 here would be a silent clamp, not the typed refusal enforcement requires.
         assert!(
             policy
                 .resolve(&Requested {

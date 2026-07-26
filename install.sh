@@ -13,9 +13,17 @@
 #   EKVM_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
 #   EKVM_DATA_DIR        where the artifacts go           (default $XDG_DATA_HOME/ekvm or
 #                                                           ~/.local/share/ekvm)
+#   EKVM_RELEASE_PUBKEY  release public key (SPKI PEM: a file path, or the PEM text itself);
+#                        overrides the key pinned in this script. Supplied out of band, it is a
+#                        stronger trust anchor than the pin (which is same-origin with this script).
+#   EKVM_INSECURE_SKIP_SIGNATURE=1  skip release-signature verification. NOT recommended; exists
+#                        for releases predating the signing scheme and hosts without an
+#                        Ed25519-capable openssl. Hash + manifest checks still run.
 #   EKVM_NO_TOML=1       don't write ~/.ekvm.toml
-# The sha256 is the contract at both layers: the tarball against SHA256SUMS (when available), and
-# every extracted file against the package's MANIFEST.sha256. Nothing installs unverified.
+# Integrity, outermost first: SHA256SUMS carries a detached ed25519 signature (SHA256SUMS.sig),
+# verified with stock openssl against the pinned key BEFORE the manifest is trusted; the tarball
+# is checked against SHA256SUMS; every extracted file against the package's MANIFEST.sha256.
+# Downloads hard-fail without a signature; nothing installs unverified.
 set -eu
 
 REPO="${EKVM_REPO:-packsixfour/ekvm}"
@@ -59,6 +67,52 @@ is_nodev() {
 need tar
 need sha256sum
 
+SKIP_SIG="${EKVM_INSECURE_SKIP_SIGNATURE:-}"
+
+# The pinned release public key. Trust framing, stated honestly: this pin is same-origin with the
+# script (both live in the repo), so it defeats a tampered *release asset*, not a compromised
+# repo; EKVM_RELEASE_PUBKEY supplied out of band is the stronger anchor. The PIN_EOF markers are
+# load-bearing: a dist test asserts this block is byte-identical to the repo's release-key.pem,
+# so the key xtask signs against and the key installers trust can never drift.
+write_pinned_release_key() {
+    cat > "$1" <<'PIN_EOF'
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAi7i9h0nOfdhTwRpLC/HgDdmMkRhFrviVL2kET+fWoUU=
+-----END PUBLIC KEY-----
+PIN_EOF
+}
+
+# Resolve the public key to verify against into RELEASE_PUB (a file path). $1 is a writable dir
+# for materializing the pinned or inline PEM.
+resolve_release_pub() {
+    case "${EKVM_RELEASE_PUBKEY:-}" in
+        "")
+            write_pinned_release_key "$1/release-key.pem"
+            RELEASE_PUB="$1/release-key.pem" ;;
+        "-----BEGIN"*)
+            printf '%s\n' "$EKVM_RELEASE_PUBKEY" > "$1/release-key.pem"
+            RELEASE_PUB="$1/release-key.pem" ;;
+        *)
+            [ -f "$EKVM_RELEASE_PUBKEY" ] || fail "EKVM_RELEASE_PUBKEY is not a file or a PEM block: $EKVM_RELEASE_PUBKEY"
+            RELEASE_PUB="$EKVM_RELEASE_PUBKEY" ;;
+    esac
+}
+
+# Verify the detached ed25519 signature ($2) over the manifest's exact bytes ($1) with the host's
+# own openssl, never a binary from the artifact under test. Fail closed on BOTH the exit status
+# and the output string: openssl pkeyutl has a known history of exit-status bugs across versions,
+# and the success line is not localized.
+verify_release_sig() {
+    VOUT=$(openssl pkeyutl -verify -pubin -inkey "$RELEASE_PUB" -rawin -in "$1" -sigfile "$2" 2>&1) \
+        || fail "release signature verification failed (needs openssl >= 1.1.1 with Ed25519; EKVM_INSECURE_SKIP_SIGNATURE=1 overrides): $VOUT"
+    case "$VOUT" in
+        *"Signature Verified Successfully"*)
+            ok "release signature verified (detached ed25519, $(basename -- "$RELEASE_PUB"))" ;;
+        *)
+            fail "unexpected openssl verify output, treating as failure: $VOUT" ;;
+    esac
+}
+
 TMP=""
 cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
@@ -70,10 +124,14 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
 STAGE=""
 if [ -n "$SCRIPT_DIR" ] && [ -x "$SCRIPT_DIR/bin/ekvm" ] && [ -f "$SCRIPT_DIR/MANIFEST.sha256" ]; then
     info "Installing from extracted package at $SCRIPT_DIR"
+    # No release signature reaches this mode (the manifest lives inside the artifact it attests):
+    # self-attested by design; say so rather than imply more.
+    warn "extracted-package mode: the per-file manifest is the only integrity check here"
     STAGE="$SCRIPT_DIR"
 else
     if [ -z "$TARBALL" ]; then
         need curl
+        [ -n "$SKIP_SIG" ] || need openssl
         if [ -z "$VERSION" ]; then
             VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
                 | sed -n 's/^ *"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)
@@ -85,22 +143,39 @@ else
         info "Downloading $ASSET from $REPO v$VERSION"
         curl -fsSL -o "$TMP/$ASSET" "$BASE/$ASSET"    || fail "download failed: $BASE/$ASSET"
         curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || fail "download failed: $BASE/SHA256SUMS"
-        curl -fsSL -o "$TMP/SHA256SUMS.sig" "$BASE/SHA256SUMS.sig" 2>/dev/null || true
+        # Signature first: SHA256SUMS is trusted only after its detached signature checks, and a
+        # missing .sig is a hard fail, never a silent downgrade.
+        if [ -z "$SKIP_SIG" ]; then
+            curl -fsSL -o "$TMP/SHA256SUMS.sig" "$BASE/SHA256SUMS.sig" \
+                || fail "download failed: $BASE/SHA256SUMS.sig (a release predating the signing scheme installs only with EKVM_INSECURE_SKIP_SIGNATURE=1)"
+            resolve_release_pub "$TMP"
+            verify_release_sig "$TMP/SHA256SUMS" "$TMP/SHA256SUMS.sig"
+        else
+            warn "EKVM_INSECURE_SKIP_SIGNATURE=1: release signature NOT verified; authenticity rests on the download channel alone"
+        fi
         ( cd "$TMP" && grep "  $ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
             || fail "sha256 verification of $ASSET failed"
         ok "sha256 verified against SHA256SUMS"
         TARBALL="$TMP/$ASSET"
     else
         [ -f "$TARBALL" ] || fail "EKVM_DIST_TARBALL not found: $TARBALL"
+        TMP=$(mktemp -d)
         SUMS=$(dirname -- "$TARBALL")/SHA256SUMS
+        SUMS_SIG=$(dirname -- "$TARBALL")/SHA256SUMS.sig
         if [ -f "$SUMS" ]; then
+            if [ -z "$SKIP_SIG" ] && [ -f "$SUMS_SIG" ]; then
+                need openssl
+                resolve_release_pub "$TMP"
+                verify_release_sig "$SUMS" "$SUMS_SIG"
+            else
+                warn "no verified release signature next to tarball (dev dists are unsigned); relying on sha256 + manifest"
+            fi
             ( cd "$(dirname -- "$TARBALL")" && grep "  $(basename -- "$TARBALL")\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
                 || fail "sha256 verification of $TARBALL against $SUMS failed"
             ok "sha256 verified against $SUMS"
         else
             warn "no SHA256SUMS next to tarball; relying on inner manifest only"
         fi
-        [ -n "$TMP" ] || TMP=$(mktemp -d)
     fi
 
     tar -C "$TMP" -xzf "$TARBALL" || fail "extract failed: $TARBALL"
@@ -112,29 +187,6 @@ fi
 ( cd "$STAGE" && grep -v '  MANIFEST\.sha256$' MANIFEST.sha256 | sha256sum --quiet -c - ) \
     || fail "package manifest verification failed"
 ok "package manifest verified ($(wc -l < "$STAGE/MANIFEST.sha256") files)"
-
-# Verify the release manifest ed25519 signature if SHA256SUMS.sig is present.
-SUMS_SIG=""
-if [ -n "$TMP" ] && [ -f "$TMP/SHA256SUMS.sig" ]; then
-    SUMS_SIG="$TMP/SHA256SUMS.sig"
-elif [ -n "$TARBALL" ] && [ -f "$(dirname -- "$TARBALL")/SHA256SUMS.sig" ]; then
-    SUMS_SIG="$(dirname -- "$TARBALL")/SHA256SUMS.sig"
-fi
-
-if [ -n "$SUMS_SIG" ]; then
-    PUBKEY="${EKVM_PUBKEY:-${EKVM_TRUSTED_KEYS:-}}"
-    if [ -n "$PUBKEY" ]; then
-        "$STAGE/bin/ekvm" verify "$SUMS_SIG" --key "$PUBKEY" >/dev/null \
-            || fail "ed25519 signature verification of SHA256SUMS.sig failed for key $PUBKEY"
-        ok "ed25519 signature verified against trusted public key"
-    else
-        SIG_KEY=$(grep -o '"key_id":"[^"]*"' "$SUMS_SIG" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
-        if [ -n "$SIG_KEY" ]; then
-            SIG_KEY_SHORT=$(printf '%.16s' "$SIG_KEY")
-            warn "SHA256SUMS is ed25519-signed (key_id ${SIG_KEY_SHORT}...); set EKVM_PUBKEY to verify"
-        fi
-    fi
-fi
 
 mkdir -p "$PREFIX" "$DATA"
 install -m 0755 "$STAGE/bin/ekvm" "$PREFIX/ekvm"

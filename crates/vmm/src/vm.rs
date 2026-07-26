@@ -691,9 +691,9 @@ impl RunningVm {
         let wall = budget.saturating_add(EXEC_KILL_SLACK);
         let mut conn = connect_agent_at(uds, VSOCK_PORT, wall)?;
         let argv_ref: Vec<&str> = argv.iter().map(AsRef::as_ref).collect();
-        let files_in_ref: Vec<(&str, Vec<u8>)> = files_in
+        let files_in_ref: Vec<(&str, &[u8])> = files_in
             .iter()
-            .map(|(p, d)| (p.as_str(), d.clone()))
+            .map(|(p, d)| (p.as_str(), d.as_slice()))
             .collect();
         let env_ref: Vec<(&str, &str)> =
             env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();

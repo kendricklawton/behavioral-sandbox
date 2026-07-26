@@ -79,11 +79,11 @@ pub struct NetSection {
     pub totals: NetStats,
     /// Per-flow byte/packet counters, sorted deterministically by destination then source.
     pub flows: Vec<FlowRecord>,
-    /// The IPv6 per-flow breakdown (ADR 008 dual-stack), sorted the same way. Separate from
+    /// The IPv6 per-flow breakdown (dual-stack), sorted the same way. Separate from
     /// [`flows`](Self::flows) so a v4-only consumer is unaffected; [`totals`](Self::totals) sums both.
     pub flows6: Vec<FlowRecord6>,
-    /// Destinations the egress policy blocked, with the dropped-packet count, the audit trail
-    /// ADR 022 folds in here. **Aggregated by destination** (one row per blocked endpoint,
+    /// Destinations the egress policy blocked, with the dropped-packet count, the enforcement
+    /// audit trail folded in here. **Aggregated by destination** (one row per blocked endpoint,
     /// summed across guest source ports) and sorted by that destination triple.
     pub denials: Vec<DenialRecord>,
     /// The IPv6 blocked-destination trail, aggregated and sorted like [`denials`](Self::denials).
@@ -887,7 +887,7 @@ mod tests {
         assert_eq!(a, b); // same flows, different input order → identical section
         assert_eq!(a.flows[0].key.dst_addr, u32::from_be_bytes([1, 1, 1, 1]));
         // A full kernel table marks the section truncated: either counter alone is enough, and the
-        // healthy shape (0/0) reads complete. This is the honest-loss contract of ADR 022's
+        // healthy shape (0/0) reads complete. This is the honest-loss contract of the denial
         // trail: a guest churning source ports can fill the table but not silence the loss.
         assert!(!a.truncated());
         assert!(NetSection::from_tap(vec![], totals, vec![], 1, 0).truncated());

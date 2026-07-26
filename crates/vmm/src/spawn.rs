@@ -528,7 +528,7 @@ impl Spawned {
         let _span = span.enter();
 
         // The deadline is computed once by the caller (`boot_deadline`) so it spans the pre-spawn
-        // staging (`launch_for_restore`) and this restore together, one wall (ADR 010).
+        // staging (`launch_for_restore`) and this restore together, one wall.
         self.await_api_socket(deadline)?;
         tracing::debug!("api socket ready");
 

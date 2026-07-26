@@ -42,6 +42,30 @@ off-host, but it does **not** protect against a *compromised producing host*, wh
 consistent lie (that is the hoster's key custody, and a compromised host is out of scope below). See
 the [threat model](./threat-model.md#record-integrity-beyond-the-guest) for the full boundary.
 
+## Release integrity (signed manifest)
+
+Every release's `SHA256SUMS` carries a **detached ed25519 signature** (`SHA256SUMS.sig`) made by
+the release key. `install.sh` verifies it with the host's own `openssl` (never a binary from the
+artifact being verified) against the public key pinned inside the script, before trusting the
+manifest, hashing the tarball, or extracting anything; a download without a valid signature is a
+hard fail. The pinned copy also lives at `release-key.pem` in the repo, and a test keeps the two
+byte-identical.
+
+Stated honestly, the trust boundary of this scheme:
+
+- **The anchor is the GitHub repo plus its Actions secrets.** A `curl | sh` of `install.sh` is
+  same-origin with the pin, so the pin defeats a tampered *release asset*, not a compromised
+  repo or CI secret. Supplying `EKVM_RELEASE_PUBKEY` out of band is the stronger anchor.
+- **No rollback or freshness protection.** An attacker controlling the download path can serve
+  an older, validly signed release wholesale.
+- **No revocation or expiry.** Rotation is committing a new pin; installers already distributed
+  keep trusting the old key.
+- **Self-attested modes.** Installing from an extracted package verifies only the per-file
+  manifest inside the artifact (and says so); a local dev tarball without a sibling `.sig`
+  verifies hashes only.
+- `EKVM_INSECURE_SKIP_SIGNATURE=1` is the explicit, loudly-warned opt-out (deny by default,
+  every allowance explicit), needed only for pre-scheme releases.
+
 ## What counts as a security bug
 
 Given those guarantees, a security bug is anything that breaks one of them:
@@ -71,7 +95,7 @@ dismissal:
   uid are trusted; an attacker who already has them has everything, no sandbox can claim
   otherwise.
 - **Hosts below the supported floor.** An unsupported architecture or a host kernel older than the
-  LTS floor is refused by `ekvm doctor`.; weaknesses that require running there
+  LTS floor is refused by `ekvm doctor`; weaknesses that require running there
   anyway are the operator's acceptance, not an engine bug. The same goes for an *unpatched* host
   kernel within the floor: patching the substrate is the operator's half of the contract.
 - **`--unjailed` weakening the VMM's own confinement.** That flag is the documented dev-box

@@ -486,12 +486,12 @@ fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
 #[test]
 #[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
-    // ADR 009, entropy + clocks. Every clone wakes from the same memory image, so if the
+    // Entropy + clocks. Every clone wakes from the same memory image, so if the
     // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical, the
     // classic clone-entropy vulnerability (shared session keys/nonces/UUIDs). The pinned stack has
     // both halves of the fix (Firecracker v1.9 ships VMGenID; kernel 6.1 has the vmgenid driver,
     // which reseeds the CRNG on a generation bump): this proves it end to end. Clock skew is
-    // measured and reported, not asserted (ADR 009 records the posture).
+    // measured and reported, not asserted.
     let bundle = TmpDir::new("snap-entropy");
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
 

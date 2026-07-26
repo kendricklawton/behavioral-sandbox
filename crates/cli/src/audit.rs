@@ -58,7 +58,7 @@ impl Observability {
 
     /// Bind the probes to one booted sandbox (post-boot, by plain values). With both shared probes
     /// live this is [`SandboxProbes::attach`], passing `egress` through: `Some(policy)` arms
-    /// enforcement on the tap (armed before it goes live, ADR 022), `None` is observe-only.
+    /// enforcement on the tap (armed before it goes live), `None` is observe-only.
     ///
     /// **Observation fails open; enforcement does not.** Without the shared probes the bundle
     /// simply doesn't attach and the record's coverage explains every unbound axis (a thinner but

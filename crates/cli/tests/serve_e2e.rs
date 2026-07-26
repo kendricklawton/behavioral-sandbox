@@ -1,4 +1,4 @@
-//! The `agent` daemon end to end, as tests (the wire API, ADR 030, docs/daemon.md): drive the
+//! The `agent` daemon end to end, as tests (the wire API, docs/daemon.md): drive the
 //! real daemon over its unix socket through the full
 //! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.
@@ -326,7 +326,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         "the first trace is unchained: {traced}"
     );
 
-    // A second trace chains to the first.: its `prev` is the SHA-256 of the first
+    // A second trace chains to the first: its `prev` is the SHA-256 of the first
     // record, so the sequence is tamper-evident as a whole, not just per record.
     let first_record = traced["record"]["record"]
         .as_str()

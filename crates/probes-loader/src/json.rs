@@ -2,7 +2,7 @@
 //! *outside* the guest.
 //!
 //! Hand-rolled, dependency-free, and **compact** (no incidental whitespace), for the same reasons the
-//! host↔guest wire is hand-framed (ADR 002): the audit-log format is a contract downstream SDKs
+//! host↔guest wire is hand-framed: the audit-log format is a contract downstream SDKs
 //! parse, so pinning the exact bytes here, rather than trusting a derive's field order, is the
 //! point. The output is **byte-stable**: object keys are written in a fixed order and every array the
 //! record carries is already sorted by its builder ([`NetSection::from_tap`](crate::NetSection),
@@ -113,7 +113,7 @@ fn net_to_json(out: &mut String, net: &NetSection) {
         field(out, "packets", denial.count, false);
         out.push('}');
     }
-    // The IPv6 flows and denials (ADR 008 dual-stack), additive `flows6`/`denials6` arrays so a v4-only
+    // The IPv6 flows and denials (dual-stack), additive `flows6`/`denials6` arrays so a v4-only
     // consumer is unaffected and the schema stays 1. Addresses render as v6 strings.
     out.push_str("],\"flows6\":[");
     for (i, flow) in net.flows6.iter().enumerate() {

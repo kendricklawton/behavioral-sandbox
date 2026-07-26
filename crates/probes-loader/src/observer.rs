@@ -1,14 +1,14 @@
 //! The attach bundle: bind the three host-side probes to one sandbox and roll their
 //! output into a [`RunRecord`], and detach + finalize on close.
 //!
-//! `vmm` stays independent of this crate (ADRs 021/023/024), so the bundle takes **plain
+//! `vmm` stays independent of this crate, so the bundle takes **plain
 //! values** the driver already exposes, the VMM pid (→ its cgroup, for the syscall tracer and the CPU
 //! meter) and the netns + tap names (for the network monitor), never a `Sandbox`. The composition is
 //! the caller's (the CLI/daemon later): a short launch sequence around `Sandbox::open`.
 //!
-//! **Both host-wide probes are shared, not per-VM.** The `sched_switch` meter (ADR 023) and
+//! **Both host-wide probes are shared, not per-VM.** The `sched_switch` meter and
 //! the three `sys_enter_*` tracepoints are *global*: a fresh copy per sandbox would run *N* programs on
-//! every context switch / syscall (O(sandboxes), the shape ADR 023 rejects). So each is loaded
+//! every context switch / syscall (O(sandboxes), an unbounded shape). So each is loaded
 //! **once** for the host, [`SharedMeter`] and [`SharedTracer`], and every sandbox registers its cgroup
 //! as a *target* on both; the per-event cost stays a single hash lookup regardless of how many sandboxes
 //! are live, and each shared map only ever holds the registered cgroups. The tap monitor is legitimately
@@ -18,7 +18,7 @@
 //! only *registers its cgroup* (which exists once the jailer creates it during boot), there is no
 //! per-VM program to stand up before boot: [`SandboxProbes::attach`] runs once, after `open`. The syscall
 //! tracer therefore observes the VMM's host footprint from **registration onward**, not the pre-boot
-//! window, a deliberate trade for the bounded-overhead shared model (ADR 024); the record's core
+//! window, a deliberate trade for the bounded-overhead shared model; the record's core
 //! (network + resources + denials) is unaffected.
 //!
 //! **Fail-open.** Every axis degrades independently to a recorded [`AxisGap`]; a host missing caps, BTF,
@@ -34,7 +34,7 @@ use crate::{cgroup_id_of_pid, EgressPolicy, ProbeError, ResourceMeter, SyscallTr
 
 /// A process-shared [`ResourceMeter`]: loaded **once** and handed to every sandbox's
 /// [`attach`](SandboxProbes::attach), which registers its cgroup as a target. The one CPU-metering
-/// program for the whole host (ADR 023). Cheap, thread-safe clone.
+/// program for the whole host. Cheap, thread-safe clone.
 #[derive(Clone)]
 pub struct SharedMeter(Arc<Mutex<ResourceMeter>>);
 
@@ -423,7 +423,7 @@ impl SandboxProbes {
                             format!("read tap unparsed-L3 counter: {e}").into(),
                         )),
                     }
-                    // The IPv6 half (ADR 008 dual-stack): folded into the same section, an unreadable
+                    // The IPv6 half (dual-stack): folded into the same section, an unreadable
                     // v6 map is its own gap so v6 traffic is never silently absent.
                     let flows6 = monitor.flows6().unwrap_or_else(|e| {
                         self.gaps
@@ -557,7 +557,7 @@ pub struct LiveSnapshot {
 impl Drop for SandboxProbes {
     /// Detach on close: unregister this run's cgroup from the shared tracer + meter so neither set
     /// accumulates dead cgroups. A no-op after [`collect`](Self::collect) (which already detached). The
-    /// per-VM tap detaches via its own aya `Ebpf` drop (nothing pinned, ADR 017); its in-kernel
+    /// per-VM tap detaches via its own aya `Ebpf` drop (nothing pinned); its in-kernel
     /// filter is reclaimed by the sandbox's netns teardown.
     fn drop(&mut self) {
         if self.finalized {

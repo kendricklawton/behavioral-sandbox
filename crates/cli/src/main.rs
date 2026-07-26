@@ -91,7 +91,7 @@ impl From<VmmError> for CliError {
     version,
     about = "Run untrusted code in a Firecracker microVM, with a host-observed audit trail.",
     // A first-run reader needs a command to type, not a feature list: `doctor` explains the host,
-    // then the two run forms differ only by whether this host can jail (ADR 012).
+    // then the two run forms differ only by whether this host can jail.
     after_help = "\
 Getting started:
   ekvm doctor                          check what this host can do
@@ -337,8 +337,8 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
 
 /// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `ekvm`
 /// run left: a `Ctrl-C`/SIGKILL of a boot subcommand skips `Drop`, so the lifetime sentinel reaps
-/// the VM process but the scratch dir and netns are out of its scope (ADR 011). Run once before a
-/// boot subcommand as the boot-time GC the engine owes its host (ADR 013). Best-effort and
+/// the VM process but the scratch dir and netns are out of its scope. Run once before a
+/// boot subcommand as the boot-time GC the engine owes its host. Best-effort and
 /// conservative: [`sweep_orphans`] only reclaims this euid's dead-pid dirs, so it never touches a
 /// concurrent run's live sandbox.
 fn sweep_vm_residue(file: Option<&config::AgentToml>) {

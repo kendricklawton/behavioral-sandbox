@@ -64,7 +64,7 @@ impl Pool {
     pub fn new(snapshot: Snapshot, config: BootConfig, target: usize) -> Result<Self, VmmError> {
         // State the fd bound up front rather than letting the prefill discover it as an
         // illegible mid-restore `EMFILE` in whatever syscall lands first. Warn-only: sizing is
-        // fairness hygiene, not the isolation boundary (the ADR 010 fail-open posture).
+        // fairness hygiene, not the isolation boundary, so it fails open rather than refusing.
         if let Some((need, soft)) = nofile_soft_limit().and_then(|s| fd_budget_excess(target, s)) {
             tracing::warn!(
                 target,

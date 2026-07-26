@@ -202,7 +202,7 @@ fn exec_budgets_are_per_sandbox_knobs() {
     limits.wall = Duration::from_secs(2);
     limits.output_cap = 4096;
     let mut cfg = guest_rootfs_config().with_limits(limits);
-    // One `wall` covers boot and exec at the public API (ADR 010); this test wants a tight *exec*
+    // One `wall` covers boot and exec at the public API; this test wants a tight *exec*
     // budget without gambling on a 2 s boot, so it uses the driver-level split beneath the public API.
     cfg.boot_timeout = Duration::from_secs(30);
     let sandbox = Sandbox::open_unjailed(cfg).expect("open");
@@ -276,7 +276,7 @@ fn many_sandboxes_run_concurrently_without_interference() {
 #[test]
 #[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_concurrent_stateful_sessions_stay_isolated() {
-    // Two stateful sessions at once: session identity is VM identity (ADR 016), so
+    // Two stateful sessions at once: session identity is VM identity, so
     // isolation between them is KVM, not agent bookkeeping. Both sandboxes are live together and
     // their execs interleave A1 → B1 → A2 → B2 on the *same* relative filename; each session then
     // reads back exactly its own accumulated state, and a file that exists only in B is absent

@@ -103,7 +103,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         "the syscall axis is labeled honestly: {stdout}"
     );
 
-    // The exported record is a signed envelope.: one line of JSON carrying the
+    // The exported record is a signed envelope: one line of JSON carrying the
     // canonical record as an embedded string alongside an `ed25519` signature and its `key_id`.
     let json = std::fs::read_to_string(&record_path).expect("read the --record file");
     assert_eq!(json.lines().count(), 1, "one line of JSON: {json}");
@@ -412,7 +412,7 @@ print('p14-9f-complete')
     );
 }
 
-/// The reference **agent-containment** example (ADR 031, docs/embedding.md), as a CI-reproducible proof.
+/// The reference **agent-containment** example (docs/embedding.md), as a CI-reproducible proof.
 /// The scripted agent (`docs/examples/agent-tool-loop.py`, no model, no secrets) runs in a sandbox
 /// egress-policed to **one** endpoint, calls one allowed "tool" and one forbidden one, and the
 /// host-observed record + its model-legible summary prove **exactly what it reached and what was
