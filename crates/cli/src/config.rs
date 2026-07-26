@@ -25,7 +25,7 @@ use probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 use vmm::VmmError;
 
-use ekvm::policy::Policy;
+use crate::policy::Policy;
 
 /// The file name discovered up from the cwd.
 const FILE_NAME: &str = ".ekvm.toml";

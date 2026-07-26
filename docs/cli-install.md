@@ -143,18 +143,34 @@ this table as orientation.
 
 ## Install from a release package
 
-Every release ships one tarball per platform plus `SHA256SUMS`, assembled by `cargo xtask dist`:
-the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file
-`MANIFEST.sha256` inside. `install.sh` verifies both layers before touching anything, then installs
-the binary to `~/.local/bin`, the artifacts to `~/.local/share/ekvm`, and writes a starter
-`~/.ekvm.toml` (kernel/rootfs paths, plus a non-`nodev` `scratch_dir` when your `/tmp` is
-`nodev`, so the jailed default boots) if you don't have one:
+Every release ships a release package tarball per platform plus `SHA256SUMS`, assembled by `cargo xtask dist`:
+the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file `MANIFEST.sha256` inside. Two first-class installation methods are supported:
+
+### Option A: Automated Installer Script (`curl | sh`)
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh | sh
+curl -fsSL https://get.ekvm.dev | sh
 ```
 
-Offline, or straight from a package you built or downloaded by hand:
+### Option B: Manual Release Tarball Download & Extraction
+
+For air-gapped hosts, manual inspection, or offline testing, download and verify the release package:
+
+```console
+# Download release tarball and checksum file
+curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/ekvm-v0.1.0-x86_64-linux.tar.gz
+curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS
+
+# Verify integrity against SHA256SUMS
+grep "ekvm-v0.1.0-x86_64-linux.tar.gz$" SHA256SUMS | sha256sum -c -
+
+# Extract and install (running install.sh inside the package installs with zero network calls)
+tar -xzf ekvm-v0.1.0-x86_64-linux.tar.gz
+cd ekvm-v0.1.0-x86_64-linux
+sh ./install.sh
+```
+
+Or for a package assembled locally from source:
 
 ```console
 cargo xtask dist                                            # assemble dist/ekvm-<ver>-x86_64-linux.tar.gz

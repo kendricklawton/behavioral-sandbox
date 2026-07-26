@@ -373,6 +373,9 @@ const FUZZ_TARGETS: &[&str] = &[
     "channel_frame",
     "channel_handshake",
     "syscall_event",
+    "egress_rule",
+    "audit_record",
+    "agent_config",
 ];
 
 /// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance
@@ -807,7 +810,7 @@ fn ci_privileged() -> Result<()> {
 fn setup() -> Result<()> {
     println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `ekvm doctor` renders.: one
+    // The runtime host checks are the *same* implementation `ekvm doctor` renders: one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
@@ -857,7 +860,7 @@ fn setup() -> Result<()> {
         println!("  {line}");
     }
 
-    // The engine/hoster line.: the engine guarantees its own privileged tools can't
+    // The engine/hoster line: the engine guarantees its own privileged tools can't
     // be weaponized; *deploying* them, as whom, when, over what directory, is the hoster's, and
     // these are the calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.

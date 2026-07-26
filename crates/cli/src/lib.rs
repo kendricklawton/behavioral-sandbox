@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod config;
 pub mod policy;
 
 /// Firecracker v1.9 caps a microVM at 32 vCPUs (ADR 001), so both the CLI (`--vcpus`) and the

@@ -24,8 +24,22 @@ DATA="${EKVM_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ekvm}"
 VERSION="${EKVM_VERSION:-}"
 TARBALL="${EKVM_DIST_TARBALL:-}"
 
+if [ -t 1 ]; then
+    BOLD='\033[1m'
+    GREEN='\033[32m'
+    BLUE='\033[34m'
+    YELLOW='\033[33m'
+    RED='\033[31m'
+    RESET='\033[0m'
+else
+    BOLD='' GREEN='' BLUE='' YELLOW='' RED='' RESET=''
+fi
+
 say()  { printf '%s\n' "$*"; }
-fail() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
+info() { printf '%b==>%b %b%s%b\n' "$BLUE" "$RESET" "$BOLD" "$*" "$RESET"; }
+ok()   { printf '%b  ✓%b %s\n' "$GREEN" "$RESET" "$*"; }
+warn() { printf '%b  !%b %s\n' "$YELLOW" "$RESET" "$*"; }
+fail() { printf '%binstall.sh: error:%b %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 
 # Whether the filesystem holding $1 is mounted `nodev` (device nodes there are inert, so the jailer's
@@ -55,7 +69,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
 
 STAGE=""
 if [ -n "$SCRIPT_DIR" ] && [ -x "$SCRIPT_DIR/bin/ekvm" ] && [ -f "$SCRIPT_DIR/MANIFEST.sha256" ]; then
-    say "installing from the extracted package at $SCRIPT_DIR"
+    info "Installing from extracted package at $SCRIPT_DIR"
     STAGE="$SCRIPT_DIR"
 else
     if [ -z "$TARBALL" ]; then
@@ -63,18 +77,18 @@ else
         if [ -z "$VERSION" ]; then
             VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
                 | sed -n 's/^ *"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)
-            [ -n "$VERSION" ] || fail "could not resolve the latest release of $REPO (private repo, or no release yet?) — set EKVM_VERSION or EKVM_DIST_TARBALL"
+            [ -n "$VERSION" ] || fail "could not resolve latest release of $REPO (private repo or no release yet?): set EKVM_VERSION or EKVM_DIST_TARBALL"
         fi
         ASSET="ekvm-$VERSION-x86_64-linux.tar.gz"
         BASE="https://github.com/$REPO/releases/download/v$VERSION"
         TMP=$(mktemp -d)
-        say "downloading $ASSET from $REPO v$VERSION"
+        info "Downloading $ASSET from $REPO v$VERSION"
         curl -fsSL -o "$TMP/$ASSET" "$BASE/$ASSET"    || fail "download failed: $BASE/$ASSET"
         curl -fsSL -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS" || fail "download failed: $BASE/SHA256SUMS"
         curl -fsSL -o "$TMP/SHA256SUMS.sig" "$BASE/SHA256SUMS.sig" 2>/dev/null || true
         ( cd "$TMP" && grep "  $ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
             || fail "sha256 verification of $ASSET failed"
-        say "sha256 verified against SHA256SUMS"
+        ok "sha256 verified against SHA256SUMS"
         TARBALL="$TMP/$ASSET"
     else
         [ -f "$TARBALL" ] || fail "EKVM_DIST_TARBALL not found: $TARBALL"
@@ -82,22 +96,22 @@ else
         if [ -f "$SUMS" ]; then
             ( cd "$(dirname -- "$TARBALL")" && grep "  $(basename -- "$TARBALL")\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
                 || fail "sha256 verification of $TARBALL against $SUMS failed"
-            say "sha256 verified against $SUMS"
+            ok "sha256 verified against $SUMS"
         else
-            say "note: no SHA256SUMS next to the tarball; relying on the inner manifest only"
+            warn "no SHA256SUMS next to tarball; relying on inner manifest only"
         fi
         [ -n "$TMP" ] || TMP=$(mktemp -d)
     fi
 
     tar -C "$TMP" -xzf "$TARBALL" || fail "extract failed: $TARBALL"
     STAGE=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d -name 'ekvm-*' | head -n1)
-    [ -n "$STAGE" ] || fail "no ekvm-* directory inside the tarball"
+    [ -n "$STAGE" ] || fail "no ekvm-* directory inside tarball"
 fi
 
 # Every file must match the package manifest before anything is copied into place.
 ( cd "$STAGE" && grep -v '  MANIFEST\.sha256$' MANIFEST.sha256 | sha256sum --quiet -c - ) \
     || fail "package manifest verification failed"
-say "package manifest verified ($(wc -l < "$STAGE/MANIFEST.sha256") files)"
+ok "package manifest verified ($(wc -l < "$STAGE/MANIFEST.sha256") files)"
 
 # Verify the release manifest ed25519 signature if SHA256SUMS.sig is present.
 SUMS_SIG=""
@@ -112,21 +126,22 @@ if [ -n "$SUMS_SIG" ]; then
     if [ -n "$PUBKEY" ]; then
         "$STAGE/bin/ekvm" verify "$SUMS_SIG" --key "$PUBKEY" >/dev/null \
             || fail "ed25519 signature verification of SHA256SUMS.sig failed for key $PUBKEY"
-        say "ed25519 signature verified against trusted public key"
+        ok "ed25519 signature verified against trusted public key"
     else
         SIG_KEY=$(grep -o '"key_id":"[^"]*"' "$SUMS_SIG" 2>/dev/null | head -n1 | cut -d'"' -f4 || true)
         if [ -n "$SIG_KEY" ]; then
-            say "note: SHA256SUMS is ed25519-signed (key_id ${SIG_KEY:0:16}...); set EKVM_PUBKEY to verify"
+            SIG_KEY_SHORT=$(printf '%.16s' "$SIG_KEY")
+            warn "SHA256SUMS is ed25519-signed (key_id ${SIG_KEY_SHORT}...); set EKVM_PUBKEY to verify"
         fi
     fi
 fi
 
 mkdir -p "$PREFIX" "$DATA"
 install -m 0755 "$STAGE/bin/ekvm" "$PREFIX/ekvm"
-say "installed $PREFIX/ekvm"
+ok "installed $PREFIX/ekvm"
 for f in vmlinux rootfs-guest.ext4 probes; do
     install -m 0644 "$STAGE/share/ekvm/$f" "$DATA/$f"
-    say "installed $DATA/$f"
+    ok "installed $DATA/$f"
 done
 
 # A starter config, written only if none exists (the engine's own nearest-up-from-cwd discovery
@@ -152,14 +167,14 @@ if [ -z "${EKVM_NO_TOML:-}" ] && [ ! -e "$HOME/.ekvm.toml" ]; then
         fi
     } > "$HOME/.ekvm.toml"
     if [ -n "$SCRATCH" ]; then
-        say "wrote $HOME/.ekvm.toml (kernel + rootfs paths, and scratch_dir: /tmp is nodev here)"
+        ok "wrote $HOME/.ekvm.toml (kernel + rootfs paths, and scratch_dir: /tmp is nodev here)"
     else
-        say "wrote $HOME/.ekvm.toml (kernel + rootfs paths)"
+        ok "wrote $HOME/.ekvm.toml (kernel + rootfs paths)"
     fi
 fi
 
 say ""
-say "done. Next steps:"
+info "Installation complete! Next steps:"
 case ":$PATH:" in
     *":$PREFIX:"*) ;;
     *) say "  - add $PREFIX to your PATH" ;;
@@ -175,12 +190,12 @@ FC_BIN=$(command -v firecracker 2>/dev/null || true)
 if [ -n "$FC_BIN" ]; then
     FC_HASH=$(sha256sum "$FC_BIN" 2>/dev/null | awk '{print $1}')
     if [ "$FC_HASH" = "$FC_PIN1" ] || [ "$FC_HASH" = "$FC_PIN2" ]; then
-        say "  - Firecracker binary on PATH verified ($FC_BIN, sha256 ok)"
+        ok "Firecracker binary on PATH verified ($FC_BIN, sha256 ok)"
     else
-        say "  - Firecracker binary on PATH ($FC_BIN, sha256 ${FC_HASH:-unknown}); pinned v1.9 release sha256 is $FC_PIN1"
+        warn "Firecracker binary on PATH ($FC_BIN, sha256 ${FC_HASH:-unknown}); pinned v1.9 release sha256 is $FC_PIN1"
     fi
 else
-    say "  - Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH, from"
+    warn "Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH from:"
     say "      https://github.com/firecracker-microvm/firecracker/releases/tag/v1.9.0 (sha256: $FC_PIN1)"
 fi
 say "  - check the host; it prints the exact run command for this host:"

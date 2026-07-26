@@ -117,8 +117,10 @@ and a green CI run mean the same thing.
 The targets are `protocol_message` (the daemon reads any client's bytes, the outermost boundary),
 `channel_response` (host reads guest), `signing_envelope` (the record verifier reading an envelope
 relayed by an untrusted host), `channel_request` (guest reads host), `channel_frame` (the shared
-framing), `channel_handshake` (the magic + version exchanged before any message), and `syscall_event`
-(the eBPF-boundary parsers, defense in depth). A crash is written under `fuzz/artifacts/` and replays
+framing), `channel_handshake` (the magic + version exchanged before any message), `syscall_event`
+(the eBPF-boundary parsers, defense in depth), `egress_rule` (the CLI `--allow` policy string parser),
+`audit_record` (the `RunRecord` JSON audit parser & summarizer), and `agent_config` (the `.ekvm.toml`
+configuration file parser and operator policy builder). A crash is written under `fuzz/artifacts/` and replays
 with `cargo +nightly fuzz run <target> fuzz/artifacts/<file>` (libFuzzer needs nightly, which is why
 `cargo xtask fuzz` selects it for you); feed a minimized reproducer back as an in-gate property test
 in the target's crate when you fix it.

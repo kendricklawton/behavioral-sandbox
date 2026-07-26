@@ -12,7 +12,7 @@
 #![forbid(unsafe_code)]
 
 use ekvm::audit;
-mod config;
+use ekvm::config;
 mod doctor;
 mod metrics;
 mod serve;
@@ -22,7 +22,6 @@ mod verify;
 mod watch;
 
 use std::io::{IsTerminal, Read, Write};
-use std::net::Ipv4Addr;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
@@ -30,9 +29,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use ekvm::policy::Requested;
+use ekvm::policy::{parse_allow, AllowRule, Requested};
 use ekvm::MAX_VCPUS;
-use probes_loader::{EgressPolicy, Ipv4Cidr, Protocol, Timing, MAX_POLICY_RULES};
+use probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
 use vmm::{sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
@@ -682,57 +681,6 @@ fn open(config: BootConfig, unjailed: bool) -> Result<Sandbox, VmmError> {
     } else {
         Sandbox::open(config)
     }
-}
-
-/// One parsed `--allow` allowance: a validated destination CIDR with optional port/protocol, the
-/// CLI face of one [`EgressPolicy`] rule. `Clone` for clap's repeatable collection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct AllowRule {
-    cidr: Ipv4Cidr,
-    port: Option<u16>,
-    proto: Option<Protocol>,
-}
-
-/// Parse one `--allow` value, `IP[/CIDR][:PORT][/PROTO]`, into an [`AllowRule`]. Parsed
-/// right-to-left so the grammar is unambiguous: an optional `/tcp`|`/udp` **protocol** suffix comes
-/// off first (the only non-numeric `/`, so a numeric CIDR prefix can never be mistaken for it), then
-/// an optional `:port`, then the address with an optional `/prefix`. Every malformed field is a
-/// typed CLI error naming the offending token, never a silently dropped allowance.
-fn parse_allow(s: &str) -> Result<AllowRule, String> {
-    // Trailing protocol: `/tcp` or `/udp` (case-insensitive), else none.
-    let (head, proto) = match s.rsplit_once('/') {
-        Some((rest, tail)) if tail.eq_ignore_ascii_case("tcp") => (rest, Some(Protocol::Tcp)),
-        Some((rest, tail)) if tail.eq_ignore_ascii_case("udp") => (rest, Some(Protocol::Udp)),
-        _ => (s, None),
-    };
-    // Optional `:port`.
-    let (addr_cidr, port) = match head.rsplit_once(':') {
-        Some((addr, p)) => {
-            let port: u16 = p
-                .parse()
-                .map_err(|_| format!("invalid port {p:?} in --allow {s:?}"))?;
-            (addr, Some(port))
-        }
-        None => (head, None),
-    };
-    // The address, with an optional `/prefix` CIDR (absent = a single-host `/32`).
-    let cidr = match addr_cidr.split_once('/') {
-        Some((ip, prefix)) => {
-            let ip: Ipv4Addr = ip
-                .parse()
-                .map_err(|_| format!("invalid IPv4 address {ip:?} in --allow {s:?}"))?;
-            let prefix: u8 = prefix
-                .parse()
-                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in --allow {s:?}"))?;
-            Ipv4Cidr::new(ip, prefix).map_err(|e| format!("--allow {s:?}: {e}"))?
-        }
-        None => Ipv4Cidr::host(
-            addr_cidr
-                .parse()
-                .map_err(|_| format!("invalid IPv4 address {addr_cidr:?} in --allow {s:?}"))?,
-        ),
-    };
-    Ok(AllowRule { cidr, port, proto })
 }
 
 /// Fold the `--allow` rules into a deny-by-default [`EgressPolicy`]. Refuses more than the kernel

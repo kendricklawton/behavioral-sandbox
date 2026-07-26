@@ -18,12 +18,57 @@
 //! degradation that rule exists to forbid).
 
 use std::fmt;
+use std::net::Ipv4Addr;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr};
+use probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
 use vmm::Limits;
+
+/// One parsed `--allow` allowance: a validated destination CIDR with optional port/protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AllowRule {
+    pub cidr: Ipv4Cidr,
+    pub port: Option<u16>,
+    pub proto: Option<Protocol>,
+}
+
+/// Parse one `--allow` value, `IP[/CIDR][:PORT][/PROTO]`, into an [`AllowRule`]. Parsed
+/// right-to-left so the grammar is unambiguous.
+pub fn parse_allow(s: &str) -> Result<AllowRule, String> {
+    let (head, proto) = match s.rsplit_once('/') {
+        Some((rest, tail)) if tail.eq_ignore_ascii_case("tcp") => (rest, Some(Protocol::Tcp)),
+        Some((rest, tail)) if tail.eq_ignore_ascii_case("udp") => (rest, Some(Protocol::Udp)),
+        _ => (s, None),
+    };
+    let (addr_cidr, port) = match head.rsplit_once(':') {
+        Some((addr, p)) => {
+            let port: u16 = p
+                .parse()
+                .map_err(|_| format!("invalid port {p:?} in --allow {s:?}"))?;
+            (addr, Some(port))
+        }
+        None => (head, None),
+    };
+    let cidr = match addr_cidr.split_once('/') {
+        Some((ip, prefix)) => {
+            let ip: Ipv4Addr = ip
+                .parse()
+                .map_err(|_| format!("invalid IPv4 address {ip:?} in --allow {s:?}"))?;
+            let prefix: u8 = prefix
+                .parse()
+                .map_err(|_| format!("invalid CIDR prefix {prefix:?} in --allow {s:?}"))?;
+            Ipv4Cidr::new(ip, prefix).map_err(|e| format!("--allow {s:?}: {e}"))?
+        }
+        None => Ipv4Cidr::host(
+            addr_cidr
+                .parse()
+                .map_err(|_| format!("invalid IPv4 address {addr_cidr:?} in --allow {s:?}"))?,
+        ),
+    };
+    Ok(AllowRule { cidr, port, proto })
+}
 
 /// What a caller asked for. `None` means "unspecified", which takes the operator default (else the
 /// engine's conservative [`Limits`] default).

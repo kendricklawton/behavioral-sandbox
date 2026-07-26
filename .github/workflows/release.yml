@@ -1,7 +1,7 @@
 # Release packaging: on a pushed v* tag (the user's act; tags are human-cut per RELEASES.md),
 # assemble `cargo xtask dist` and attach the tarball + SHA256SUMS to a DRAFT GitHub release, so
 # publishing stays a human step too. Manual dispatch builds the package without a release, a dry
-# run of the assembly. Pre-rename releases are disposable checkpoints.: no package
+# run of the assembly. Pre-rename releases are disposable checkpoints: no package
 # managers, no promotion.
 # SECURITY: tag + dispatch only, never a fork `pull_request` trigger.
 name: Release

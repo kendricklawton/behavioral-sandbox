@@ -36,6 +36,13 @@ features = ["fuzzing"]
 path = "../crates/probes-common"
 features = ["std"]
 
+# CLI policy and config parsers (`parse_allow`, `AgentToml`).
+[dependencies.ekvm]
+path = "../crates/cli"
+
+[dependencies.toml]
+workspace = true
+
 # A separate one-crate workspace: detaches this crate from the repo's workspace so the everyday
 # stable gate never tries to build it.
 [workspace]
@@ -89,6 +96,27 @@ bench = false
 [[bin]]
 name = "syscall_event"
 path = "fuzz_targets/syscall_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "egress_rule"
+path = "fuzz_targets/egress_rule.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audit_record"
+path = "fuzz_targets/audit_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "agent_config"
+path = "fuzz_targets/agent_config.rs"
 test = false
 doc = false
 bench = false
