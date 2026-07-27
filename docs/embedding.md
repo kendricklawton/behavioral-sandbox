@@ -260,9 +260,8 @@ fail legibly (`xtask setup`'s degradation matrix, the pinned Firecracker probe),
 (fd, boot, restore, memory-sharing), and a wire protocol whose version handshake makes skew a typed error
 instead of a silent misbehavior.
 
-Downstream of the public API, in separate repos, live the language SDKs (Go/Python/Node/C#) and the
-Wasmtime *sibling* (a sibling, not a backend, "isolation is hardware" holds here without
-exception). They pin this crate's git rev; that is why public-API changes carry an `api:` marker
+Downstream of the public API, in separate repos, live the language SDKs (Go/Python/Node/C#).
+They pin this crate's git rev; that is why public-API changes carry an `api:` marker
 in the commit subject, and why `Limits`/`RunResult`/`VmmError`/`Sandbox` and the channel protocol
 move deliberately or not at all.
 

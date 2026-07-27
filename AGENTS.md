@@ -14,12 +14,6 @@ engine's job is to contain what the model's code does and hand back the record. 
 tenancy/billing/scheduling or a model into this repo, or moves the security boundary into the guest,
 the design is wrong.
 
-The **Wasmtime sibling** is a separate repo built on
-this engine's frozen wire API + audit-log format, a sibling, never in this
-repo. The Wasmtime variant is a *sibling, not a backend*, so *isolation is hardware* holds here
-without exception; its code lives elsewhere.
-
-
 **Why this exists.** A self-hostable, embeddable engine for running untrusted code with hardware
 isolation and a trustworthy, host-observed audit log isn't something you can pull off the shelf. This
 fills that gap. Every phase ships a **working demo**, so each capability is proven running end to end,

@@ -91,26 +91,6 @@ impl ApiClient {
         self.send("PATCH", path, body, API_TIMEOUT)
     }
 
-    /// Configure Firecracker's `/logger` endpoint.
-    #[allow(dead_code)]
-    pub(crate) fn set_logger(&self, log_fifo: PathBuf, level: &str) -> Result<(), VmmError> {
-        self.put(
-            "/logger",
-            &LoggerConfig {
-                log_fifo,
-                level: level.to_string(),
-                show_level: true,
-                show_log_origin: true,
-            },
-        )
-    }
-
-    /// Configure Firecracker's `/metrics` endpoint.
-    #[allow(dead_code)]
-    pub(crate) fn set_metrics(&self, metrics_fifo: PathBuf) -> Result<(), VmmError> {
-        self.put("/metrics", &MetricsConfig { metrics_fifo })
-    }
-
     /// Serialize `body`, send `method path`, and expect a `2xx`; a `4xx` fault becomes a typed error.
     fn send<B: Serialize>(
         &self,
@@ -438,6 +418,63 @@ pub(crate) struct MemBackend<'a> {
 #[derive(Serialize)]
 pub(crate) enum MemBackendType {
     File,
+}
+
+/// Connect to a Unix domain socket with a deadline, so a wedged listener is a typed timeout rather
+/// than a parked host thread.
+///
+/// **Thread-free by construction.** `std`'s `UnixStream::connect` blocks, so bounding it used to
+/// mean handing the connect to a throwaway thread and abandoning it on timeout: one detached,
+/// never-joined thread per dial (and this is called for *every* Firecracker API request and every
+/// exec dial), each stuck in `connect` for as long as the peer stayed wedged, holding its fd. A
+/// non-blocking socket needs no thread at all.
+///
+/// The retry loop is the AF_UNIX shape: for a unix socket, `connect` either completes or fails
+/// **immediately** (`ECONNREFUSED` with no listener, so the callers' "nothing is accepting"
+/// classification is unchanged), except when the listener's backlog is full, which a non-blocking
+/// socket reports as `EAGAIN` where a blocking one would have parked. That is precisely the
+/// wedged-peer case the deadline exists for, so it is retried until the deadline, then reported as
+/// a timeout. Each attempt uses a fresh socket: after a failed `connect` the socket's state is
+/// unspecified, so reusing it would be undefined-ish territory for the sake of one syscall.
+pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
+    use nix::errno::Errno;
+    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+    use std::os::fd::AsRawFd as _;
+
+    let addr = UnixAddr::new(path)?;
+    let deadline = Instant::now() + timeout;
+    let mut backoff = crate::spawn::PollBackoff::new();
+    loop {
+        // `SOCK_CLOEXEC` matches what `UnixStream::connect` sets: without it every socket would
+        // leak into the Firecracker/jailer children this driver spawns.
+        let fd = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+            None,
+        )?;
+        match connect(fd.as_raw_fd(), &addr) {
+            Ok(()) => {
+                let stream = UnixStream::from(fd);
+                // The callers drive blocking reads/writes under their own `SO_RCVTIMEO`, so hand
+                // back a blocking stream: non-blocking was an implementation detail of the dial.
+                stream.set_nonblocking(false)?;
+                return Ok(stream);
+            }
+            // Backlog full (the wedged peer) or an interrupted call: both retryable within the
+            // deadline. Any other errno is the peer's real answer, surfaced immediately.
+            Err(Errno::EAGAIN | Errno::EINPROGRESS | Errno::EINTR) => {}
+            Err(e) => return Err(e.into()),
+        }
+        drop(fd);
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "unix connect timed out",
+            ));
+        }
+        backoff.sleep();
+    }
 }
 
 #[cfg(test)]
@@ -828,78 +865,4 @@ mod tests {
         assert_eq!(json["mem_backend"]["backend_path"], "/b/snapshot.mem");
         assert_eq!(json["resume_vm"], true);
     }
-}
-
-/// Connect to a Unix domain socket with a deadline, so a wedged listener is a typed timeout rather
-/// than a parked host thread.
-///
-/// **Thread-free by construction.** `std`'s `UnixStream::connect` blocks, so bounding it used to
-/// mean handing the connect to a throwaway thread and abandoning it on timeout: one detached,
-/// never-joined thread per dial (and this is called for *every* Firecracker API request and every
-/// exec dial), each stuck in `connect` for as long as the peer stayed wedged, holding its fd. A
-/// non-blocking socket needs no thread at all.
-///
-/// The retry loop is the AF_UNIX shape: for a unix socket, `connect` either completes or fails
-/// **immediately** (`ECONNREFUSED` with no listener, so the callers' "nothing is accepting"
-/// classification is unchanged), except when the listener's backlog is full, which a non-blocking
-/// socket reports as `EAGAIN` where a blocking one would have parked. That is precisely the
-/// wedged-peer case the deadline exists for, so it is retried until the deadline, then reported as
-/// a timeout. Each attempt uses a fresh socket: after a failed `connect` the socket's state is
-/// unspecified, so reusing it would be undefined-ish territory for the sake of one syscall.
-pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
-    use nix::errno::Errno;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
-    use std::os::fd::AsRawFd as _;
-
-    let addr = UnixAddr::new(path)?;
-    let deadline = Instant::now() + timeout;
-    let mut backoff = crate::spawn::PollBackoff::new();
-    loop {
-        // `SOCK_CLOEXEC` matches what `UnixStream::connect` sets: without it every socket would
-        // leak into the Firecracker/jailer children this driver spawns.
-        let fd = socket(
-            AddressFamily::Unix,
-            SockType::Stream,
-            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
-            None,
-        )?;
-        match connect(fd.as_raw_fd(), &addr) {
-            Ok(()) => {
-                let stream = UnixStream::from(fd);
-                // The callers drive blocking reads/writes under their own `SO_RCVTIMEO`, so hand
-                // back a blocking stream: non-blocking was an implementation detail of the dial.
-                stream.set_nonblocking(false)?;
-                return Ok(stream);
-            }
-            // Backlog full (the wedged peer) or an interrupted call: both retryable within the
-            // deadline. Any other errno is the peer's real answer, surfaced immediately.
-            Err(Errno::EAGAIN | Errno::EINPROGRESS | Errno::EINTR) => {}
-            Err(e) => return Err(e.into()),
-        }
-        drop(fd);
-        if Instant::now() >= deadline {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "unix connect timed out",
-            ));
-        }
-        backoff.sleep();
-    }
-}
-
-/// Configures Firecracker's `/logger` API endpoint.
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Clone)]
-pub(crate) struct LoggerConfig {
-    pub log_fifo: PathBuf,
-    pub level: String,
-    pub show_level: bool,
-    pub show_log_origin: bool,
-}
-
-/// Configures Firecracker's `/metrics` API endpoint.
-#[allow(dead_code)]
-#[derive(Debug, Serialize, Clone)]
-pub(crate) struct MetricsConfig {
-    pub metrics_fifo: PathBuf,
 }

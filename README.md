@@ -143,9 +143,8 @@ claims. **Out of scope, by design:** multi-tenant auth, billing, fleet schedulin
 dashboard, that's whatever *hosts* the engine. The lifecycle
 contract and the full non-goals list live in [docs/embedding.md](docs/embedding.md).
 
-**Adjacent (separate repos):** a Wasmtime-based *software-isolation* sibling built to compare both
-boundaries. It is its own repo built on this engine's frozen wire API, a sibling, never part of
-its trust boundary, and never traded against the hardware-isolation guarantee.
+**Adjacent (separate repos):** the language SDKs, which pin this engine's public API and wire
+protocol rather than living inside its trust boundary.
 
 ## Contributing
 

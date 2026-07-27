@@ -280,8 +280,7 @@ fn runs_a_static_native_binary_and_captures_its_artifact() {
     // Runtime-agnostic proof: a **static native ELF** (no interpreter, no libc, no loader) runs
     // unchanged through the same exec path. Inject the binary read-only via a block device,
     // exec it, and capture the file it writes via the output device, showing the engine runs
-    // *any* Linux binary handed in at runtime, not just the baked-in interpreters. (Contrast the
-    // Wasmtime sibling, which needs code recompiled to wasm32.)
+    // *any* Linux binary handed in at runtime, not just the baked-in interpreters.
     // Resolve the built example from `CARGO_TARGET_DIR` when set (the privileged gate sets it so a
     // root build doesn't poison `./target`), else the workspace's default `target/`, the same
     // directory `cargo xtask build-guest-example` wrote it to.
