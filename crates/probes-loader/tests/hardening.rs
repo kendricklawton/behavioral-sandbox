@@ -20,8 +20,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use probes_loader::{
-    check_support, object_path, AxisGap, EgressPolicy, Protocol, SandboxProbes, SharedMeter,
-    SharedTracer, Timing,
+    check_support, object_path, AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes,
+    SharedMeter, SharedTracer, Timing,
 };
 use test_support::{have_real_root, process_threads, LimitCgroup};
 use vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
@@ -179,10 +179,13 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     std::thread::sleep(Duration::from_millis(100)); // let the last datagrams settle onto the tap
 
     // Finalize the fused record while the sandbox is still alive.
-    let record = probes.collect(Timing {
-        boot: vm.boot_latency(),
-        exec_wall: out.metrics.wall,
-    });
+    let record = probes.collect(
+        RecordSubject::new(vm.name().to_string(), 0),
+        Timing {
+            boot: vm.boot_latency(),
+            exec_wall: out.metrics.wall,
+        },
+    );
     let network = record
         .network
         .as_ref()
@@ -319,10 +322,13 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
 
     std::thread::sleep(Duration::from_millis(100));
 
-    let record = probes.collect(Timing {
-        boot: vm.boot_latency(),
-        exec_wall: out.metrics.wall,
-    });
+    let record = probes.collect(
+        RecordSubject::new(vm.name().to_string(), 0),
+        Timing {
+            boot: vm.boot_latency(),
+            exec_wall: out.metrics.wall,
+        },
+    );
 
     // The host kept recording through the guest's probing: the guest's own packets are in the
     // record. It could not disable what it could not reach.
@@ -502,10 +508,13 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     );
 
     std::thread::sleep(Duration::from_millis(100));
-    let record = probes.collect(Timing {
-        boot: vm.boot_latency(),
-        exec_wall: hog_out.metrics.wall,
-    });
+    let record = probes.collect(
+        RecordSubject::new(vm.name().to_string(), 0),
+        Timing {
+            boot: vm.boot_latency(),
+            exec_wall: hog_out.metrics.wall,
+        },
+    );
     let network = record
         .network
         .as_ref()

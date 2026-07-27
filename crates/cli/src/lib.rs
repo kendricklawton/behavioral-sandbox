@@ -9,7 +9,7 @@ pub mod audit;
 pub mod config;
 pub mod policy;
 
-/// Firecracker v1.9 caps a microVM at 32 vCPUs, so both the CLI (`--vcpus`) and the
+/// Firecracker caps a microVM at 32 vCPUs, so both the CLI (`--vcpus`) and the
 /// daemon (`open`) refuse anything above it at their edge rather than surfacing a late Firecracker
 /// API error mid-boot. Single-sourced here so the two entry points can't drift on the cap.
 pub const MAX_VCPUS: u8 = 32;

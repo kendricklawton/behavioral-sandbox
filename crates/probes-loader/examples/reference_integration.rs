@@ -28,7 +28,7 @@
 use std::error::Error;
 use std::time::Duration;
 
-use probes_loader::{SandboxProbes, SharedMeter, SharedTracer, Timing};
+use probes_loader::{RecordSubject, SandboxProbes, SharedMeter, SharedTracer, Timing};
 use vmm::{BootConfig, Limits, Sandbox};
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -77,10 +77,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     // 6. Finalize the host-observed record **while the sandbox is still alive** (it reads the live
     //    cgroup + maps), then close. Timing enters as plain `Duration`s, so the record never depends
     //    on the driver type.
-    let record = probes.collect(Timing {
-        boot: sandbox.boot_latency(),
-        exec_wall: run.metrics.wall,
-    });
+    //    The subject names *which* sandbox and *when*: a signature proves a record is authentic,
+    //    never what it describes, so an embedder archiving records supplies both here.
+    let record = probes.collect(
+        RecordSubject::new(sandbox.name().to_string(), unix_nanos_now()),
+        Timing {
+            boot: sandbox.boot_latency(),
+            exec_wall: run.metrics.wall,
+        },
+    );
     sandbox.shutdown()?;
 
     // 7. Report both faces: what the code produced, and what the host observed from outside it.
@@ -106,4 +111,14 @@ fn workload_from_args() -> Vec<String> {
     } else {
         after
     }
+}
+
+/// Wall-clock now, nanoseconds since the Unix epoch; `0` if the host clock is unreadable, which a
+/// record carries as "unstamped" rather than refusing the run.
+fn unix_nanos_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
 }

@@ -29,10 +29,49 @@ use crate::{NetStats, ResourceSummary};
 /// record without bound.
 pub const MAX_NOTABLE: usize = 64;
 
+/// **What** a record is about and **when** it happened: the two questions a signature cannot answer.
+///
+/// A signature proves a record is authentic. It does not say which sandbox produced it, or when, so
+/// an operator holding two records could not tell them apart, and a record that cannot be attributed
+/// cannot settle a dispute. Both fields are therefore part of the signed bytes.
+///
+/// Deliberately **not** a tenant. The engine has no notion of one (that is the hoster's layer, a
+/// recorded non-goal); it reports the identity it actually minted, and the hoster maps that to
+/// whatever identity its own layer tracks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RecordSubject {
+    /// The sandbox's name, `RunningVm::name` (`ekvm-<pid>-<seq>`). The same handle as its scratch
+    /// dir and its netns, so a record can be correlated with on-disk residue and with the host's
+    /// own view. Unique among live VMs; pair it with [`started_unix_ns`](Self::started_unix_ns)
+    /// for a durable identity, since pids are reused after a driver exits.
+    pub sandbox_id: String,
+    /// Wall-clock start of the run, nanoseconds since the Unix epoch. Distinct from
+    /// [`Timing`], which says how *long* the run took and never *when*: a record without this
+    /// cannot be placed on a timeline or correlated with anything else the host logged. `0` when
+    /// the host clock could not be read, the same fail-open honesty as [`RunRecord::coverage`].
+    pub started_unix_ns: u64,
+}
+
+impl RecordSubject {
+    /// Name a record's subject. `started_unix_ns` is wall-clock nanoseconds since the Unix epoch;
+    /// pass `0` when the host clock could not be read, which reads as "unstamped" rather than as
+    /// the epoch.
+    #[must_use]
+    pub fn new(sandbox_id: String, started_unix_ns: u64) -> Self {
+        Self {
+            sandbox_id,
+            started_unix_ns,
+        }
+    }
+}
+
 /// One run's fused audit record: what the host observed the sandbox do, from outside the guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RunRecord {
+    /// Which sandbox this describes, and when it ran.
+    pub subject: RecordSubject,
     /// The guest's own network traffic on its tap, plus the blocked-egress trail. `None` when the
     /// sandbox had no NIC (nothing to observe), distinct from "observed, and it was empty".
     pub network: Option<NetSection>,
@@ -54,6 +93,7 @@ impl RunRecord {
     /// probes, and what the unit tests exercise directly.
     #[must_use]
     pub fn from_parts(
+        subject: RecordSubject,
         network: Option<NetSection>,
         resources: ResourceSummary,
         host_syscalls: SyscallFootprint,
@@ -61,6 +101,7 @@ impl RunRecord {
         coverage: Vec<AxisGap>,
     ) -> Self {
         Self {
+            subject,
             network,
             resources,
             host_syscalls,
@@ -909,6 +950,7 @@ mod tests {
         let totals = NetStats::default();
         let build = |flows: Vec<(FlowKey, FlowCounts)>| {
             RunRecord::from_parts(
+                RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
                 Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
                 ResourceSummary::default(),
                 SyscallFootprint::from_events(CG, &cg_events),
@@ -927,6 +969,7 @@ mod tests {
     #[test]
     fn no_network_sandbox_yields_none_with_a_gap() {
         let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::from_events(CG, &[ev(Syscall::Execve as u32, CG, b"/init", "init")]),
@@ -954,8 +997,14 @@ mod tests {
             boot: Duration::from_millis(88),
             exec_wall: Duration::from_millis(9),
         };
-        let record =
-            RunRecord::from_parts(None, resources, SyscallFootprint::default(), timing, vec![]);
+        let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            None,
+            resources,
+            SyscallFootprint::default(),
+            timing,
+            vec![],
+        );
         assert_eq!(record.resources, resources);
         assert_eq!(record.timing, timing);
     }

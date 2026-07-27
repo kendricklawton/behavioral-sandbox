@@ -261,7 +261,7 @@ mod tests {
     use probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
 
     use super::SUMMARY_NOTABLE_CAP;
-    use crate::record::{NetSection, RunRecord, SyscallFootprint, Timing};
+    use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
     use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
 
     /// A synthetic `SyscallEvent` from public fields (no eBPF), matching the other modules' helper.
@@ -339,6 +339,7 @@ mod tests {
             ],
         );
         RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
             resources,
             host_syscalls,
@@ -424,6 +425,7 @@ mod tests {
     #[test]
     fn no_network_renders_null_and_gaps_escape() {
         let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -472,6 +474,7 @@ mod tests {
             egress_bytes: 999,
         };
         let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
             ResourceSummary::default(),
             SyscallFootprint::from_events(0x42, &events),

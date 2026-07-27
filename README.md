@@ -26,7 +26,7 @@ Built in the open, milestone by milestone, each one shipping as a working demo.
 ## Getting started
 
 **Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` host, kernel
-**≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.9 on
+**≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.16 on
 `PATH` (the engine drives it, it doesn't bundle it). Starting from a bare machine,
 [Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version of all of
 that; `cargo xtask setup` (or `ekvm doctor` once built) then reports exactly what your host is still
@@ -83,7 +83,7 @@ work before it. The project is developed by a small group: **only project collab
 **Verified on:** the host-safe gate (build, tests, lints) runs in CI on **Ubuntu 24.04** `x86_64`
 on every change; the privileged path (microVM boot, the jailer, the eBPF probes, the integration
 suite) runs nightly in CI on a GitHub-hosted **Ubuntu 24.04** `x86_64` runner (nested KVM) and is
-hand-verified on **Arch Linux** during development, both with **Firecracker v1.9**. `x86_64` is the
+hand-verified on **Arch Linux** during development, both with **Firecracker v1.16**. `x86_64` is the
 only supported architecture: nothing untestable is claimed, and aarch64 returns only with hardware
 and a privileged CI lane behind it. `ekvm doctor` reports your own host's
 readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).

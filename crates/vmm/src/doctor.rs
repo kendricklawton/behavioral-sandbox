@@ -134,12 +134,12 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             &format!("firecracker on PATH ({fc})"),
             command_on_path(&fc),
             false,
-            "no VMM to launch: install Firecracker v1.9, or set EKVM_FIRECRACKER",
+            "no VMM to launch: install Firecracker v1.16, or set EKVM_FIRECRACKER",
         ),
         // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
-            "firecracker is the pinned v1.9",
-            firecracker_version(&fc) == Some((1, 9)),
+            "firecracker is the pinned v1.16",
+            firecracker_version(&fc) == Some(PINNED_FIRECRACKER),
             true,
             "boots continue with a warning; API request bodies may not match another version",
         ),
@@ -302,10 +302,20 @@ fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     crate::spawn::fc_version_of(&text)
 }
 
-/// Known pinned Firecracker sha256 hashes (v1.9.0 and v1.9.1 release binaries).
+/// The Firecracker release this engine is pinned to and tested against, as `(major, minor)`.
+///
+/// Deliberately exact rather than a floor. A floor would silently bless versions nothing here has
+/// ever booted, and the API request bodies this driver hand-rolls are versioned surface. The cost of
+/// an exact pin is that it goes stale invisibly, which is what `.github/workflows/firecracker-pin.yml`
+/// exists to catch: upstream patches only the last two minor series (plus a 6-month floor), so a pin
+/// that falls behind is running an unpatched VMM at the isolation boundary.
+const PINNED_FIRECRACKER: (u64, u64) = (1, 16);
+
+/// sha256 of the pinned release's `firecracker` binary (not the tarball: the check hashes the
+/// resolved binary on `PATH`). Only supported releases belong here; an older hash left in place
+/// would bless a VMM upstream no longer patches.
 const PINNED_FIRECRACKER_SHA256: &[&str] = &[
-    "c8c2496f8786da12b7bbfbc5060af3573c22baa2e5f79ff6ee084993642bbe01", // v1.9.0
-    "809789cd7567b77b20edec9b301953338c2023c37ea63db82d46cb61773ad511", // v1.9.1
+    "2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7", // v1.16.1
 ];
 
 fn resolve_binary_path(bin: &str) -> Option<PathBuf> {

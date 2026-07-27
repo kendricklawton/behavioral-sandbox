@@ -271,7 +271,9 @@ fn record(ctx: &TracePointContext, kind: Syscall, arg_off: usize, path_like: boo
 
     // A full ring buffer drops the event, best-effort observability, never blocking the syscall,
     // but the drop is *counted*, so the loader can report the loss instead of undercounting silently.
-    if EVENTS.output(&ev, 0).is_err() {
+    // Turbofish since aya-ebpf 0.2: `output` became `output<T: ?Sized>(data: impl Borrow<T>, ..)`,
+    // and `&ev` satisfies that bound for more than one `T`, so the element type must be named.
+    if EVENTS.output::<SyscallEvent>(&ev, 0).is_err() {
         if let Some(drops) = EVENT_DROPS.get_ptr_mut(0) {
             // SAFETY: this CPU's own slot of the one-element per-CPU array; the pointer is only used
             // inside the null-check and this program is its sole writer on this CPU.

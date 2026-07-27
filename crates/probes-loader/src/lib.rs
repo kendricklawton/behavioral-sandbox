@@ -116,7 +116,7 @@ pub use json::AUDIT_SCHEMA_VERSION;
 pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
 pub use record::{
     AxisGap, DenialRecord, DenialRecord6, FlowRecord, FlowRecord6, NetSection, NotableSyscall,
-    RunRecord, SyscallCounts, SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
+    RecordSubject, RunRecord, SyscallCounts, SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
 };
 pub use signing::{
     default_key_path, record_hash, verify, verify_chain, ChainError, HostKey, KeyError, TrustedKey,
@@ -633,8 +633,6 @@ const DENIAL_DROPS_MAP: &str = "DENIAL_DROPS";
 /// represent (`#[map] static UNPARSED_L3`), read by [`TapMonitor::unparsed_l3`] so the network
 /// section is gapped as IPv4-only rather than silently omitting them.
 const UNPARSED_L3_MAP: &str = "UNPARSED_L3";
-/// `EEXIST`: a clsact qdisc already on the interface is not an error (the attach is idempotent).
-const EEXIST: i32 = 17;
 /// Where `ip netns` bind-mounts a named network namespace's handle (matches the driver's own
 /// `netns_path`), so [`TapMonitor::attach_in_netns`] can open a sandbox's netns by name.
 const NETNS_DIR: &str = "/run/netns";
@@ -1288,10 +1286,12 @@ fn attach_classifiers(
     interface: &str,
     forget_links: bool,
 ) -> Result<(), ProbeError> {
-    // clsact gives a device both a `tc` ingress and egress hook. Idempotent: an already-present clsact
-    // (EEXIST) is fine; any other failure (no CAP_NET_ADMIN, or the interface is gone) is a typed error.
+    // clsact gives a device both a `tc` ingress and egress hook. Idempotent: an already-present
+    // clsact is fine; any other failure (no CAP_NET_ADMIN, or the interface is gone) is a typed
+    // error. aya models "already there" as its own variant, so this matches on the variant rather
+    // than on a raw `EEXIST` errno, which is what the pre-0.14 code had to do.
     if let Err(e) = tc::qdisc_add_clsact(interface) {
-        if e.raw_os_error() != Some(EEXIST) {
+        if !matches!(e, aya::programs::TcError::AlreadyAttached) {
             return Err(ProbeError::Attach(format!(
                 "add clsact qdisc on {interface}: {e}"
             )));

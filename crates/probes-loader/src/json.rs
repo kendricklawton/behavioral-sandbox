@@ -45,6 +45,18 @@ impl RunRecord {
         // schema version, first, so a consumer reads it before anything else.
         field(&mut out, "schema", AUDIT_SCHEMA_VERSION, true);
 
+        // Subject next: what this record is about and when. A consumer filing or correlating
+        // records needs both before it cares what the sandbox did.
+        out.push_str(",\"subject\":{\"sandbox_id\":");
+        json_str(&mut out, &self.subject.sandbox_id);
+        field(
+            &mut out,
+            "started_unix_ns",
+            self.subject.started_unix_ns,
+            false,
+        );
+        out.push('}');
+
         out.push_str(",\"timing\":{");
         field(&mut out, "boot_ns", clamped_ns(self.timing.boot), true);
         field(
@@ -336,7 +348,7 @@ mod tests {
 
     use probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
 
-    use crate::record::{NetSection, RunRecord, SyscallFootprint, Timing};
+    use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
     use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
 
     /// Build a synthetic `SyscallEvent` from public fields (no eBPF), matching `record.rs`'s helper.
@@ -414,6 +426,7 @@ mod tests {
             ],
         );
         RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
             resources,
             host_syscalls,
@@ -433,7 +446,7 @@ mod tests {
         ]);
         let json = record.to_json();
         let expected = concat!(
-            "{\"schema\":1,\"timing\":{\"boot_ns\":120000000,\"exec_wall_ns\":42000000}",
+            "{\"schema\":1,\"subject\":{\"sandbox_id\":\"ekvm-4242-0\",\"started_unix_ns\":1700000000000000000},\"timing\":{\"boot_ns\":120000000,\"exec_wall_ns\":42000000}",
             ",\"network\":{\"totals\":{\"ingress_packets\":2,\"ingress_bytes\":120,",
             "\"egress_packets\":3,\"egress_bytes\":200},\"flows\":[",
             "{\"src\":\"10.200.0.2\",\"src_port\":40000,\"dst\":\"1.1.1.1\",\"dst_port\":53,",
@@ -539,6 +552,7 @@ mod tests {
             "dropped_flows > 0 must mark truncation"
         );
         let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             Some(dropped),
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -569,6 +583,7 @@ mod tests {
     #[test]
     fn no_network_renders_null_and_control_chars_escape() {
         let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -585,5 +600,53 @@ mod tests {
             json.contains("\"reason\":\"tab\\tand \\\"quote\\\" and \\\\slash\""),
             "{json}"
         );
+    }
+
+    #[test]
+    fn a_record_says_what_it_is_about_and_when() {
+        // A signature proves a record is authentic, never what it describes. Without a subject an
+        // operator holding two records cannot tell which sandbox produced which, or place either on
+        // a timeline, so a record that cannot be attributed cannot settle a dispute. Both fields are
+        // inside the signed bytes, which is why this is pinned rather than left to the golden test:
+        // the golden test would happily be updated to a record with no subject at all.
+        let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-777-3".into(), 1_700_000_000_123_456_789),
+            None,
+            ResourceSummary::default(),
+            SyscallFootprint::default(),
+            Timing {
+                boot: Duration::from_millis(1),
+                exec_wall: Duration::from_millis(1),
+            },
+            vec![],
+        );
+        let json = record.to_json();
+        assert!(
+            json.contains(r#""sandbox_id":"ekvm-777-3""#),
+            "a record must name its sandbox: {json}"
+        );
+        assert!(
+            json.contains(r#""started_unix_ns":1700000000123456789"#),
+            "a record must say when the run started: {json}"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_host_clock_is_an_unstamped_record_not_a_refused_run() {
+        // Fail-open, the same posture as a coverage gap: a host whose clock cannot be read still
+        // gets a record, stamped 0, which reads as "unstamped" rather than as the Unix epoch. The
+        // alternative (refusing to record) would lose the observation entirely, which is worse.
+        let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-777-4".into(), 0),
+            None,
+            ResourceSummary::default(),
+            SyscallFootprint::default(),
+            Timing {
+                boot: Duration::from_millis(1),
+                exec_wall: Duration::from_millis(1),
+            },
+            vec![],
+        );
+        assert!(record.to_json().contains(r#""started_unix_ns":0"#));
     }
 }

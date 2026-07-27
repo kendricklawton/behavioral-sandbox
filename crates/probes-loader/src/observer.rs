@@ -29,7 +29,9 @@ use std::sync::{Arc, Mutex};
 
 use probes_common::SyscallEvent;
 
-use crate::record::{AxisGap, NetSection, RunRecord, SyscallFold, SyscallFootprint, Timing};
+use crate::record::{
+    AxisGap, NetSection, RecordSubject, RunRecord, SyscallFold, SyscallFootprint, Timing,
+};
 use crate::{cgroup_id_of_pid, EgressPolicy, ProbeError, ResourceMeter, SyscallTracer, TapMonitor};
 
 /// A process-shared [`ResourceMeter`]: loaded **once** and handed to every sandbox's
@@ -308,7 +310,7 @@ impl SandboxProbes {
     /// alive**, the cgroup dir and map fds must be live. `timing` comes from the caller
     /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `vmm`.
     /// Each axis degrades to a recorded gap on a read error.
-    pub fn collect(mut self, timing: Timing) -> RunRecord {
+    pub fn collect(mut self, subject: RecordSubject, timing: Timing) -> RunRecord {
         // Host syscalls: drain + finish this cgroup's fold on the shared tracer (also unregisters it).
         // A lost fold or poisoned lock is a *recorded gap*, never an empty footprint passed off as a
         // quiet run.
@@ -481,6 +483,7 @@ impl SandboxProbes {
 
         self.finalized = true;
         RunRecord::from_parts(
+            subject,
             network,
             resources,
             host_syscalls,

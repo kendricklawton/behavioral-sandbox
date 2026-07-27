@@ -201,6 +201,7 @@ pub(crate) fn syscall_name(kind: Syscall) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use probes_loader::RecordSubject;
     use probes_loader::{
         FlowCounts, FlowKey, FlowKey6, NetSection, NetStats, ResourceSummary, SyscallEvent,
         SyscallFootprint, Timing,
@@ -275,6 +276,7 @@ mod tests {
         resources.cgroup.memory_peak = Some(14 * 1024 * 1024);
         resources.cgroup.io_wbytes = Some(512);
         RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             Some(NetSection::from_tap(flows, totals, denials, 0, 0).with_v6(flows6, denials6)),
             resources,
             SyscallFootprint::from_events(
@@ -315,6 +317,7 @@ audit trail (host-observed, from outside the guest)
     #[test]
     fn no_network_names_the_flag_that_enables_it() {
         let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),

@@ -13,8 +13,8 @@
 //! one and couldn't arm the tap is a typed refusal, never a silent unenforced run.
 
 use probes_loader::{
-    AxisGap, EgressPolicy, LiveSnapshot, ResourceSummary, RunRecord, SandboxProbes, SharedMeter,
-    SharedTracer, SyscallFootprint, Timing,
+    AxisGap, EgressPolicy, LiveSnapshot, RecordSubject, ResourceSummary, RunRecord, SandboxProbes,
+    SharedMeter, SharedTracer, SyscallFootprint, Timing,
 };
 use vmm::VmmError;
 
@@ -71,11 +71,16 @@ impl Observability {
     /// [`VmmError::Vmm`] when `egress` is `Some` but enforcement could not be armed.
     pub fn attach(
         &self,
+        sandbox_id: &str,
         vmm_pid: u32,
         netns: Option<&str>,
         tap: Option<&str>,
         egress: Option<&EgressPolicy>,
     ) -> Result<RunProbes, VmmError> {
+        // Stamped here, not at collect: attaching the probes *is* the start of observation, so this
+        // is when the run began. A host with an unreadable clock yields 0, the same fail-open
+        // honesty the coverage gaps carry, rather than refusing the run.
+        let subject = RecordSubject::new(sandbox_id.to_string(), unix_nanos_now());
         match (&self.tracer, &self.meter) {
             (Some(tracer), Some(meter)) => {
                 let probes = SandboxProbes::attach(vmm_pid, netns, tap, egress, tracer, meter);
@@ -92,6 +97,7 @@ impl Observability {
                 Ok(RunProbes {
                     probes: Some(probes),
                     gaps: Vec::new(),
+                    subject,
                 })
             }
             _ => {
@@ -121,7 +127,11 @@ impl Observability {
                     ));
                 }
 
-                Ok(RunProbes { probes: None, gaps })
+                Ok(RunProbes {
+                    probes: None,
+                    gaps,
+                    subject,
+                })
             }
         }
     }
@@ -150,10 +160,24 @@ fn network_gap_reason(gap: &AxisGap) -> Option<&str> {
     }
 }
 
+/// Wall-clock now, nanoseconds since the Unix epoch, or `0` if the host clock is unreadable or
+/// before the epoch. Never panics and never refuses a run over a clock: an unstamped record is worse
+/// than a run that did not happen only for the auditor, so this degrades like a coverage gap.
+fn unix_nanos_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_nanos()).ok())
+        .unwrap_or(0)
+}
+
 /// One run's live probe handle: the attached [`SandboxProbes`] bundle, or, fail-open, nothing but
 /// the gaps that explain why. Either way [`collect`](Self::collect) yields a [`RunRecord`].
 pub struct RunProbes {
     probes: Option<SandboxProbes>,
+    /// What this run's record is about: fixed when the probes attached, so every record this handle
+    /// yields (live or final) names the same sandbox and the same start.
+    subject: RecordSubject,
     /// The coverage carried into the record when no bundle attached (empty otherwise, an attached
     /// bundle records its own gaps).
     gaps: Vec<AxisGap>,
@@ -179,6 +203,7 @@ impl RunProbes {
             Some(probes) => {
                 let snap = probes.snapshot();
                 RunRecord::from_parts(
+                    self.subject.clone(),
                     snap.network,
                     snap.resources.unwrap_or_default(),
                     snap.host_syscalls.unwrap_or_default(),
@@ -187,6 +212,7 @@ impl RunProbes {
                 )
             }
             None => RunRecord::from_parts(
+                self.subject.clone(),
                 None,
                 ResourceSummary::default(),
                 SyscallFootprint::default(),
@@ -201,8 +227,9 @@ impl RunProbes {
     /// absence explained in coverage.
     pub fn collect(self, timing: Timing) -> RunRecord {
         match self.probes {
-            Some(probes) => probes.collect(timing),
+            Some(probes) => probes.collect(self.subject, timing),
             None => RunRecord::from_parts(
+                self.subject,
                 None,
                 ResourceSummary::default(),
                 SyscallFootprint::default(),
@@ -223,6 +250,7 @@ mod tests {
         // The fail-open path a capability-less host takes: no bundle, gaps carried through.
         let probes = RunProbes {
             probes: None,
+            subject: RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             gaps: vec![
                 AxisGap::HostSyscalls("load shared tracer: no BTF".into()),
                 AxisGap::Cpu("load shared meter: no BTF".into()),

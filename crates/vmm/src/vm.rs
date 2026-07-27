@@ -587,6 +587,23 @@ impl RunningVm {
         self.tap.as_ref().map(|t| t.name.as_str())
     }
 
+    /// This VM's **name**, unique among live VMs on the host: the leaf of its scratch dir,
+    /// `ekvm-<pid>-<seq>`, where the pid is this driver's and the sequence is per-process.
+    ///
+    /// Exposed because it is the handle everything else about the VM is already keyed on: the
+    /// scratch dir on disk, the netns (and so `ip netns list`), and the driver's own log lines. An
+    /// audit record naming it can therefore be correlated with on-disk residue and with the host's
+    /// view, which a synthesized identifier could not do.
+    ///
+    /// Unique among *live* VMs, not globally: pids are reused once a driver exits, so a consumer
+    /// archiving records must pair this with the run's start time to get a durable identity.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.workdir
+            .file_name()
+            .map_or("", |n| n.to_str().unwrap_or(""))
+    }
+
     /// The per-VM **network namespace** name backing this VM's NIC, when booted with
     /// [`enable_network`](BootConfig::enable_network); `None` otherwise. The tap the guest's virtio-net
     /// rides ([`tap_name`](Self::tap_name)) lives inside it, isolated from the host and every other VM,

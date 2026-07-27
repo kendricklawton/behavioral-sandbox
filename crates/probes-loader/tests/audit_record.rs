@@ -25,8 +25,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use probes_loader::{
-    check_support, object_path, AxisGap, EgressPolicy, Protocol, SandboxProbes, SharedMeter,
-    SharedTracer, Timing,
+    check_support, object_path, AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes,
+    SharedMeter, SharedTracer, Timing,
 };
 use vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
@@ -138,10 +138,13 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 
     // Finalize the record while the sandbox is still alive: reads all three probes, detaches
     // this run's cgroup from the shared tracer + meter, and returns the fused record.
-    let record = probes.collect(Timing {
-        boot: vm.boot_latency(),
-        exec_wall: out.metrics.wall,
-    });
+    let record = probes.collect(
+        RecordSubject::new(vm.name().to_string(), 0),
+        Timing {
+            boot: vm.boot_latency(),
+            exec_wall: out.metrics.wall,
+        },
+    );
 
     // --- The network touch shows up *exactly* --------------------------------------------------------
     let network = record
@@ -263,10 +266,13 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
     );
     std::thread::sleep(Duration::from_millis(100)); // let the last datagrams settle onto the tap
 
-    let record = probes.collect(Timing {
-        boot: vm.boot_latency(),
-        exec_wall: out.metrics.wall,
-    });
+    let record = probes.collect(
+        RecordSubject::new(vm.name().to_string(), 0),
+        Timing {
+            boot: vm.boot_latency(),
+            exec_wall: out.metrics.wall,
+        },
+    );
 
     let network = record
         .network

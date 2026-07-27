@@ -20,7 +20,7 @@ description = "The eBPF programs (no_std): syscall tracepoints, tc/XDP on the ta
 [dependencies]
 # The in-kernel eBPF side of aya: `#[tracepoint]`/`#[classifier]`/… macros, program contexts, and
 # map types. Its userspace counterpart (`aya`) lives in `crates/probes-loader`.
-aya-ebpf = "0.1"
+aya-ebpf = "0.2"
 
 # The wire record written into the ring buffer (`SyscallEvent`), shared with the userspace reader so
 # the two sides can't drift. `no_std`, no default features: the BPF side never wants `std`.

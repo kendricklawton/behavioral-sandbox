@@ -144,10 +144,13 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // over the wire yet), so this is pure fail-open: a host without the eBPF caps yields a
     // coverage-gapped record, never a refused session. `egress = None` means `attach` cannot return
     // the enforcement refusal, but stay defensive and treat any error as "no probes".
-    let probes = match server
-        .observ
-        .attach(vm.vmm_pid(), vm.netns(), vm.tap_name(), None)
-    {
+    let probes = match server.observ.attach(
+        vm.name(),
+        vm.vmm_pid(),
+        vm.netns(),
+        vm.tap_name(),
+        None,
+    ) {
         Ok(p) => Some(p),
         Err(e) => {
             tracing::warn!(error = %e, "probe attach failed; `trace` will report an empty record");

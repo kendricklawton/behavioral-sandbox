@@ -561,6 +561,14 @@ impl Sandbox {
         self.vm.kill_handle()
     }
 
+    /// This sandbox's **name**, unique among live sandboxes on the host, and the handle its scratch
+    /// dir, netns, and log lines already share. An audit record naming it can be correlated with
+    /// on-disk residue and with the host's own view. See [`RunningVm::name`].
+    #[must_use]
+    pub fn name(&self) -> &str {
+        self.vm.name()
+    }
+
     /// The PID of the VMM process, for out-of-band supervision and the host-side observers (the
     /// eBPF track); valid only while the sandbox lives. See [`RunningVm::vmm_pid`].
     #[must_use]

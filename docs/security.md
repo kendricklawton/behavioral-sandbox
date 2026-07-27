@@ -42,6 +42,20 @@ off-host, but it does **not** protect against a *compromised producing host*, wh
 consistent lie (that is the hoster's key custody, and a compromised host is out of scope below). See
 the [threat model](./threat-model.md#record-integrity-beyond-the-guest) for the full boundary.
 
+**A signature proves a record is authentic, not what it describes.** So every record also carries a
+`subject`, inside the signed bytes: `sandbox_id` (the sandbox's name, the same handle as its scratch
+dir and its netns, so a record can be correlated with on-disk residue and with the host's own view)
+and `started_unix_ns` (wall-clock start, so a record can be placed on a timeline). Without both, two
+records could not be told apart and neither could settle a dispute. `sandbox_id` is unique among
+*live* sandboxes, not globally, since pids are reused once a driver exits; a consumer archiving
+records pairs it with `started_unix_ns` for a durable identity.
+
+Note what the subject deliberately is **not**: a tenant, an account, or a user. The engine has no
+notion of those (a [recorded non-goal](./embedding.md)); it reports the identity it actually minted,
+and a hoster maps that to whatever identity its own layer tracks. A host whose clock cannot be read
+stamps `0`, which reads as "unstamped" rather than as the epoch, the same fail-open honesty the
+record's coverage gaps carry.
+
 ## Release integrity (signed manifest)
 
 Every release's `SHA256SUMS` carries a **detached ed25519 signature** (`SHA256SUMS.sig`) made by

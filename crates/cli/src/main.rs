@@ -190,7 +190,7 @@ struct RunArgs {
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
     /// Guest vCPUs, 1..=32 [default: 1].
-    /// Zero or over-cap is a typed CLI error, never a silent clamp (Firecracker v1.9 caps a microVM
+    /// Zero or over-cap is a typed CLI error, never a silent clamp (Firecracker caps a microVM
     /// at 32).
     #[arg(long, value_name = "N", value_parser = parse_vcpus, help_heading = "Guest resources")]
     vcpus: Option<NonZeroU8>,
@@ -489,6 +489,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         || egress.is_some();
     let probes = if observing {
         Some(audit::Observability::load().attach(
+            sandbox.name(),
             sandbox.vmm_pid(),
             sandbox.netns(),
             sandbox.tap_name(),
@@ -1007,7 +1008,7 @@ mod tests {
             parse_vcpus("0").is_err(),
             "zero is unbootable, not a small budget"
         );
-        assert!(parse_vcpus("33").is_err(), "over the v1.9 cap");
+        assert!(parse_vcpus("33").is_err(), "over the vCPU cap");
         assert!(parse_vcpus("300").is_err(), "u8 overflow");
         assert!(parse_vcpus("").is_err());
         assert!(parse_vcpus("two").is_err());
