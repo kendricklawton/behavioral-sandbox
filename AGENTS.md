@@ -109,11 +109,12 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
   are a separate call, not covered here.
-- **Git is human-driven.** The user makes every commit and push; the **coding agent** (Claude,
-  Gemini, Codex, as opposed to `ekvm`/ekvm, this project) never runs `git commit` / `git push` (or
-  any other CI-triggering action). The coding agent's job ends at: changes made, demo working,
-  and, **only when asked**, a commit message drafted (Conventional Commits per the next bullet; never
-  an AI co-author/attribution trailer).
+- **Git is human-driven.** The user makes every commit, push, and **pull request**; the **coding
+  agent** (Claude, Gemini, Codex, as opposed to `ekvm`/ekvm, this project) never runs `git commit` /
+  `git push`, never opens, approves, or merges a PR (`gh pr create` / `gh pr merge` / review
+  approvals included), and never takes any other CI-triggering action. The coding agent's job ends
+  at: changes made, demo working, and, **only when asked**, a commit message or PR description
+  drafted (Conventional Commits per the next bullet; never an AI co-author/attribution trailer).
 - **Commit messages follow Conventional Commits.** `type(scope)?: subject` with the standard types
   (`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`, `ci`, `build`). The subject stays
   imperative and describes **what was done** ("fix: bound session reads by a deadline", not "fixed
