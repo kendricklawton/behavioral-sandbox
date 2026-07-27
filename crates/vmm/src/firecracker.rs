@@ -802,11 +802,11 @@ mod tests {
     fn vsock_serializes_to_expected_fields() {
         let json = serde_json::to_value(Vsock {
             guest_cid: 3,
-            uds_path: "/tmp/agent-1-0/v.sock",
+            uds_path: "/tmp/ekvm-1-0/v.sock",
         })
         .unwrap();
         assert_eq!(json["guest_cid"], 3);
-        assert_eq!(json["uds_path"], "/tmp/agent-1-0/v.sock");
+        assert_eq!(json["uds_path"], "/tmp/ekvm-1-0/v.sock");
     }
 
     #[test]

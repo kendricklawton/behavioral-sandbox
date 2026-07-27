@@ -1,5 +1,5 @@
 //! CLI/daemon parity golden (the wire API): the **CLI** (`ekvm run --json`) and the
-//! **daemon wire API** (`agent`, driven
+//! **daemon wire API** (`ekvm serve`, driven
 //! through the reference [`client::Client`]) render the *same* command **identically**, same
 //! exit code, same stdout, same stderr. The two faces are thin hosts of one `vmm` lifecycle, so
 //! a run must never depend on which door it came through; this pins that invariant against drift (a
@@ -91,7 +91,7 @@ fn cases() -> Vec<(Vec<String>, String, RunOutcome)> {
     ]
 }
 
-/// A spawned `agent` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
+/// A spawned `ekvm serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
 /// session VM is then reaped by the lifetime sentinel; the socket file is cleared on the next bind).
 struct Daemon {
     child: Child,
@@ -118,10 +118,10 @@ fn shared_env(cmd: &mut Command, root: &std::path::Path) {
     }
 }
 
-/// Launch `agent --unjailed` on a private socket, returning once the socket is connectable.
+/// Launch `ekvm serve --unjailed` on a private socket, returning once the socket is connectable.
 fn launch_daemon() -> (Daemon, PathBuf) {
     let root = workspace_root();
-    let dir = std::env::temp_dir().join(format!("agent-golden-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ekvm-golden-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");

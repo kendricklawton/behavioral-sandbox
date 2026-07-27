@@ -5,7 +5,7 @@
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches the
 //! host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
-//! object). Run via `cargo xtask ci-privileged`. Drives the **built `agent` binary** (Cargo's
+//! object). Run via `cargo xtask ci-privileged`. Drives the **built `ekvm` binary** (Cargo's
 //! `CARGO_BIN_EXE_ekvm`), so what's tested is exactly what an operator runs.
 
 // A test binary: `expect`/`panic!` in non-`#[test]` helpers are the idiomatic assertions, which the
@@ -297,7 +297,7 @@ print('p14-9b-egress')
     );
 }
 
-/// The absolute artifact paths, so every spawned `agent` finds the kernel/rootfs regardless of the
+/// The absolute artifact paths, so every spawned `ekvm` finds the kernel/rootfs regardless of the
 /// working directory (`--get` writes relative to the cwd, so the run itself uses a scratch cwd).
 fn artifact_env() -> [(String, std::path::PathBuf); 2] {
     let root = workspace_root();

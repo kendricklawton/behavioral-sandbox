@@ -138,7 +138,7 @@ impl HostKey {
         }
         // The staging file is unlinked by `tmp`'s `Drop` on *every* exit from here on, the write
         // error, the hard-link outcome, and an unwinding panic in between, so no `<key>.tmp.<n>`
-        // orphan is left in the key directory (guardrail 5: a failure path leaks nothing). The
+        // orphan is left in the key directory (a failure path leaks nothing). The
         // published key is the hard-linked `path`, a separate name, so removing the staging copy
         // unconditionally is correct.
         let tmp = StagingFile(temp_sibling(path));
@@ -437,7 +437,7 @@ fn temp_sibling(path: &Path) -> PathBuf {
 
 /// An RAII guard for the pre-publish staging file in [`HostKey::persist`]. Its `Drop` unlinks the
 /// file on every scope exit, an error return *or* an unwinding panic, so a failure between creating
-/// the staging copy and hard-linking it into place leaves no orphan behind (guardrail 5). A `SIGKILL`
+/// the staging copy and hard-linking it into place leaves no orphan behind. A `SIGKILL`
 /// in that window still leaks, `Drop` cannot run then and no in-process guard can close that, but the
 /// name is process-and-sequence unique (see [`temp_sibling`]), so a leaked file never collides with a
 /// later run and is never read.
@@ -887,7 +887,7 @@ mod tests {
 
     #[test]
     fn concurrent_first_run_generation_converges_on_one_key() {
-        let dir = std::env::temp_dir().join(format!("agent-key-race-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ekvm-key-race-{}", std::process::id()));
         let path = dir.join("record-signing.ed25519");
         let _ = std::fs::remove_dir_all(&dir);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
@@ -928,7 +928,7 @@ mod tests {
         // The leak `StagingFile` closes: a panic between creating the staging temp and publishing
         // it must not strand a `<key>.tmp.<n>` orphan. Catch an unwind out of a scope holding a
         // live guard and assert the file is gone.
-        let dir = std::env::temp_dir().join(format!("agent-key-unwind-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ekvm-key-unwind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let tmp = dir.join("record-signing.ed25519.tmp.0");
         std::fs::write(&tmp, b"seed").expect("write staging");
@@ -948,7 +948,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_persists_then_reloads_the_same_key() {
-        let dir = std::env::temp_dir().join(format!("agent-key-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ekvm-key-{}", std::process::id()));
         let path = dir.join("record-signing.ed25519");
         let _ = std::fs::remove_dir_all(&dir);
         let first = HostKey::load_or_generate(&path).expect("generates");

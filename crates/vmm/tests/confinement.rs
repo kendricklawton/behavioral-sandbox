@@ -154,8 +154,8 @@ fn driver_death_cannot_leak_a_vm() {
         // lifetime-cgroup enrollment itself regressed (the VMM left in the driver's own cgroup),
         // which is exactly this test's failure mode. Disambiguate by probing writability directly:
         // if this host can create a cgroup, enrollment had no excuse, so fail, never skip.
-        let probe = Path::new("/sys/fs/cgroup")
-            .join(format!("agent-degraded-probe-{}", std::process::id()));
+        let probe =
+            Path::new("/sys/fs/cgroup").join(format!("ekvm-degraded-probe-{}", std::process::id()));
         if std::fs::create_dir(&probe).is_ok() {
             let _ = std::fs::remove_dir(&probe);
             panic!(

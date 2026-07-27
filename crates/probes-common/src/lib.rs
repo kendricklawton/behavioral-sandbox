@@ -1222,7 +1222,7 @@ mod tests {
     /// The in-gate half of this crate's fuzzing (the deep `cargo fuzz` half is the `syscall_event`
     /// target in `fuzz/`). The kernel writes the [`SyscallEvent`] record, so its bytes are trusted,
     /// but `parse_ipv4_5tuple` reads a **guest-crafted** Ethernet frame off the tap: attacker bytes.
-    /// Guardrail 5 says either must be a value-or-`None`, never a panic, on any input. This sprays
+    /// Either must be a value-or-`None`, never a panic, on any input. This sprays
     /// arbitrary-length buffers at both parsers (and the formatting helpers that build strings from
     /// the parsed bytes) with a tiny deterministic PRNG, no dependency, fixed seed so it never flakes.
     #[test]

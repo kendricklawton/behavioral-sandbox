@@ -2,7 +2,7 @@
 //! [wire API](protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
 //! socket**, so a local client drives microVMs without linking the `vmm` library itself. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
-//! use, **still engine, not platform**, no tenancy, no auth, no billing, no scheduler (those are the
+//! use: no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
 //! **Shape.** One connection is one sandbox **session** (the VM *is* the session),
@@ -20,7 +20,7 @@
 //! default, JSON with `--log-json` for a log shipper), and `--metrics ADDR` serves a Prometheus
 //! text-exposition endpoint ([`crate::metrics`]) the hoster scrapes, sessions, verbs, faults, boot and
 //! exec latency histograms, pool stock. The daemon exposes its numbers; dashboards and alerting are
-//! the hoster's (engine, not platform).
+//! the hoster's.
 //!
 //! **Access control is the hoster's.** The daemon does no authentication (a recorded non-goal): who
 //! may connect is governed by the filesystem permissions on the socket and its directory, which the
@@ -867,7 +867,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
         tmp.push(format!(".{}.tmp", std::process::id()));
         // The guard unlinks the temp socket on every exit from here on, error returns and an
         // unwinding panic alike, until the rename publishes it (disarm), so a failed start leaves
-        // no `.tmp` orphan beside the canonical path (guardrail 5).
+        // no `.tmp` orphan beside the canonical path.
         let tmp = StagedPath::new(std::path::PathBuf::from(tmp));
         let _ = std::fs::remove_file(tmp.path()); // clear a leftover temp from a prior crashed start
         let listener = UnixListener::bind(tmp.path()).map_err(|e| {
@@ -901,7 +901,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
 /// An RAII guard for a staged-then-published path (the daemon's temp socket, a pool's snapshot
 /// bundle dir): `Drop` removes it, file or directory, on every scope exit, an error return *or* an
 /// unwinding panic, until [`published`](Self::published) disarms it. Closes the leak a panic
-/// between staging and publishing would otherwise leave behind (guardrail 5); a `SIGKILL` in that
+/// between staging and publishing would otherwise leave behind; a `SIGKILL` in that
 /// window still leaks, which the next start's stale-path reclaim covers.
 struct StagedPath {
     path: PathBuf,

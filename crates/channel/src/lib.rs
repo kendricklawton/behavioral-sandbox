@@ -738,7 +738,7 @@ impl<'a> Body<'a> {
 
 /// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
 /// bytes straight to the internal wire decoders so a `cargo fuzz` (libFuzzer) target can explore
-/// them. A panic, hang, or unbounded allocation on any input is the bug being hunted (guardrail 5).
+/// them. A panic, hang, or unbounded allocation on any input is the bug being hunted.
 /// Not built by default and not part of the wire contract, the harness lives in `fuzz/` (excluded
 /// from the workspace); see `docs/contributing.md`. The in-gate, dependency-free counterpart
 /// is [`fuzz_tests`].

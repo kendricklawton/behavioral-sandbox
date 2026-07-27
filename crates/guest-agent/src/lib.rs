@@ -240,7 +240,7 @@ where
             let mut cmd = Command::new("sh");
             cmd.arg("-c")
                 .arg(TRAMPOLINE_SCRIPT)
-                .arg("agent-exec-trampoline") // $0
+                .arg("ekvm-exec-trampoline") // $0
                 .arg(&cg.path)
                 .arg(program)
                 .args(args);
@@ -472,7 +472,7 @@ impl ExecCgroup {
     /// Create a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a cgroup v2 mount.
     fn create() -> Option<Self> {
         let path = PathBuf::from(CGROUP_ROOT).join(format!(
-            "agent-exec-{}-{}",
+            "ekvm-exec-{}-{}",
             std::process::id(),
             CGROUP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -519,7 +519,7 @@ impl RunDir {
     /// A fresh, uniquely-named per-run dir under `/tmp`, removed on drop.
     fn fresh() -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!(
-            "agent-run-{}-{}",
+            "ekvm-run-{}-{}",
             std::process::id(),
             RUN_SEQ.fetch_add(1, Ordering::Relaxed)
         ));

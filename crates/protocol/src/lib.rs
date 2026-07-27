@@ -1,10 +1,10 @@
-//! The `agent` wire protocol: a **versioned, newline-delimited JSON** contract. A client sends one
+//! The eKVM wire protocol: a **versioned, newline-delimited JSON** contract. A client sends one
 //! [`Request`] line, the daemon answers with one or more [`Response`] lines; every message carries a
 //! leading [`schema`](Envelope::schema) field, so the two sides agree on the shape before either
 //! trusts the other's bytes.
 //!
 //! **This is the SDK contract seed.** It is the one artifact the daemon
-//! ([`agent`](../cli/index.html)), the reference client (`client`), and the eventual
+//! ([`ekvm serve`](../ekvm/index.html)), the reference client (`client`), and the eventual
 //! polyglot SDKs all share, so it lives in its own **`vmm`-free** crate: the wire is the
 //! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
 //! linking the engine. Freezing and formally speccing it comes with the polyglot SDKs (separate
@@ -16,8 +16,8 @@
 //! async runtime on the host path; gRPC would drag `tonic`/`prost` and a `tokio` stack into that
 //! posture. The peer is a **local, trusted-ish client** the hoster runs, so hand-debuggability
 //! (`socat`, `nc`) matters more than a compact wire, and any language can drive a line of JSON over a
-//! unix socket with only a JSON library. The one adversarial concern that still applies is guardrail
-//! 5 (no host panic/hang/unbounded allocation on any input): every decode is bounded by
+//! unix socket with only a JSON library. The one adversarial concern that still applies is the
+//! decoder's contract (no panic/hang/unbounded allocation on any input): every decode is bounded by
 //! [`MAX_MESSAGE_BYTES`] and returns a typed [`ProtocolError`], never a panic.
 //!
 //! **Text, not binary.** `stdin`, `put`/`get` `content`, and the returned `stdout`/`stderr` are
@@ -25,7 +25,7 @@
 //! render a run identically). Bulk or binary I/O is the block-device path
 //! (`BootConfig::input_dir`/`output_dir`), an embedding-API concern, never this per-message line.
 //!
-//! **Non-goals: this is the *engine's* wire, not a *platform's* (guardrail 4).** The protocol
+//! **Non-goals: this is the *engine's* wire, not a *platform's*.** The protocol
 //! deliberately carries **no** notion of a *tenant*, a *credential*, a *quota*, a *price*, or a
 //! *host to schedule onto*: there is no identity field, no auth handshake, no account or billing
 //! token, no request routing. One connection drives one sandbox on the one host the daemon runs on,
@@ -48,7 +48,7 @@ use serde::{Deserialize, Serialize};
 /// request/response shape changes in a non-additive way.
 pub const WIRE_SCHEMA: u32 = 1;
 
-/// Upper bound on one protocol line, before decoding, the guardrail-5 allocation cap so a peer that
+/// Upper bound on one protocol line, before decoding, the allocation cap so a peer that
 /// never sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an
 /// unbounded read. Generous: a per-message `stdin`/`content` string plus its JSON envelope fits,
 /// while the exec channel still enforces the real `vmm::MAX_PAYLOAD` on the bytes that reach
@@ -132,7 +132,7 @@ pub enum Request {
     /// Ask for the session's **model-legible summary** so far ([`Response::TraceSummary`]): the same
     /// compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied,
     /// its resource envelope, any coverage gap), sampled **live** and non-destructively like
-    /// [`Trace`](Self::Trace), the face an agent driving `agent` reads between turns, so the wire
+    /// [`Trace`](Self::Trace), the face a model driving the engine reads between turns, so the wire
     /// exposes the projection, not just the full record. Fail-open, same as `trace`.
     TraceSummary,
     /// End the session: tear the sandbox down and close the connection. Dropping the connection
@@ -228,7 +228,7 @@ pub enum Response {
 }
 
 /// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile
-/// or buggy peer is a typed error the daemon answers or drops, never a panic (guardrail 5).
+/// or buggy peer is a typed error the daemon answers or drops, never a panic.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProtocolError {
@@ -431,7 +431,7 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
 /// bytes to the daemon's untrusted-client parse path (the hand-rolled line reader + schema gate,
 /// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`ekvm serve`)
 /// reads exactly these bytes off its socket from any client, so a panic, hang, or unbounded
-/// allocation on any input is the bug being hunted (guardrail 5). Not built by default; the harness
+/// allocation on any input is the bug being hunted. Not built by default; the harness
 /// lives in `fuzz/` (excluded from the workspace). The in-gate, dependency-light counterpart is
 /// [`fuzz_tests`].
 #[cfg(feature = "fuzzing")]

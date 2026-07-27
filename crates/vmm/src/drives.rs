@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn sanitize_symlinks_drops_escapes_including_chained_intermediate_links() {
         use std::os::unix::fs::symlink;
-        let dir = ScratchDir::created("agent-sanitize");
+        let dir = ScratchDir::created("ekvm-sanitize");
         let dest = dir.path();
 
         // A real file + a legitimate in-tree symlink to it: must survive.

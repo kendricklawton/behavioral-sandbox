@@ -188,7 +188,7 @@ pub(crate) fn netns_path(name: &str) -> PathBuf {
     Path::new("/run/netns").join(name)
 }
 
-/// `ip netns add <name>`, creating the per-VM network namespace. The name is `agent-<pid>-<seq>` with
+/// `ip netns add <name>`, creating the per-VM network namespace. The name is `ekvm-<pid>-<seq>` with
 /// **our own** pid (`std::process::id()`), so a collision can only be residue from a *prior* process
 /// that shared our pid, necessarily dead, since pids are unique among the living, and its teardown
 /// left the netns behind (e.g. a dir-less orphan the sweep never saw). So on collision we reclaim the
@@ -233,7 +233,7 @@ fn ip_netns_add(name: &str) -> Result<(), VmmError> {
 
 /// `ip netns del <name>`, best-effort: every teardown and half-configured-boot cleanup routes through
 /// here (and the orphan sweep, for a dead driver's netns). Deleting the netns cascades away the tap in
-/// it. A failure is logged, never propagated or panicked (the no-panic host path), so an orphaned netns
+/// it. A failure is logged, never propagated or panicked, so an orphaned netns
 /// is at least visible.
 pub(crate) fn netns_del(name: &str) {
     // Bounded, because this runs inside teardown/`Drop`: `ip netns del` can wedge in the kernel (rtnl
@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn netns_path_is_the_iproute2_handle() {
-        assert_eq!(netns_path("agent-42-0"), Path::new("/run/netns/agent-42-0"));
+        assert_eq!(netns_path("ekvm-42-0"), Path::new("/run/netns/ekvm-42-0"));
     }
 
     #[test]

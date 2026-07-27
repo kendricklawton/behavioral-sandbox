@@ -28,7 +28,7 @@ pub struct VerifyArgs {
 }
 
 /// Verify the record file, printing the outcome and returning a non-zero exit on any failure.
-pub fn run(args: VerifyArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
+pub fn run(args: VerifyArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
     let envelope = read_bounded(&args.record)?;
 
     let trusted = trusted_keys(&args, file)?;
@@ -78,7 +78,7 @@ fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
 /// sources dedup cleanly.
 fn trusted_keys(
     args: &VerifyArgs,
-    file: Option<&config::AgentToml>,
+    file: Option<&config::EkvmToml>,
 ) -> Result<Vec<TrustedKey>, CliError> {
     let mut hexes: Vec<String> = args.keys.clone();
     hexes.extend(config::trusted_key_hexes(file));

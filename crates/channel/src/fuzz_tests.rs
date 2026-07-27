@@ -4,7 +4,7 @@
 //!
 //! **Why here.** The guest is untrusted, and a hostile guest fully controls the in-guest agent, so
 //! the *host* decodes attacker-chosen bytes every time it reads a [`Response`](crate::Response).
-//! Guardrail 5 says a broken channel is a typed error, never a host panic, hang, or leak. These
+//! A broken channel must be a typed error, never a host panic, hang, or leak. These
 //! tests assert exactly that: for **any** input, the decoders return a value or a typed
 //! [`ChannelError`], never panic, never loop unboundedly, and never allocate past
 //! [`MAX_PAYLOAD`](crate::MAX_PAYLOAD).

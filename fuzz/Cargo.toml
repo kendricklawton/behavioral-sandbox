@@ -38,7 +38,7 @@ features = ["fuzzing"]
 path = "../crates/probes-common"
 features = ["std"]
 
-# CLI policy and config parsers (`parse_allow`, `AgentToml`).
+# CLI policy and config parsers (`parse_allow`, `EkvmToml`).
 [dependencies.ekvm]
 path = "../crates/cli"
 
@@ -115,8 +115,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "agent_config"
-path = "fuzz_targets/agent_config.rs"
+name = "ekvm_config"
+path = "fuzz_targets/ekvm_config.rs"
 test = false
 doc = false
 bench = false

@@ -286,7 +286,7 @@ is intent, not omission):
   bounded files); a caller needing bulk transfer or async cancellation drives the library directly.
   A one-shot CLI cancels by process signal (Ctrl-C → the sandbox's `Drop` tears the VM down).
 - **Tenancy, auth, billing, fleet scheduling, a dashboard, image/registry management**, these are
-  the *hoster's* platform, above the engine (guardrail 4); they never land in this repo.
+  the *hoster's* platform, above the engine; they never land in this repo.
 
 The per-axis eBPF demos (one probe at a time) live in
 [Host-side observability & enforcement](./probes.md), under *Try it*.

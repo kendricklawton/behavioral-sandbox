@@ -4,7 +4,7 @@
 //!
 //! **Why here.** The daemon (`ekvm serve`) reads these bytes off its unix socket from *any* client:
 //! this is the outermost untrusted-input boundary the engine exposes, unlike the channel decoder,
-//! which only sees a guest already contained inside a VM. Guardrail 5 says a hostile or buggy peer is
+//! which only sees a guest already contained inside a VM. A hostile or buggy peer must be
 //! a typed [`ProtocolError`], never a host panic, hang, or leak. These tests assert exactly that: for
 //! **any** input, the reader returns a value or a typed error, never panics, never loops unboundedly,
 //! and never buffers past [`MAX_MESSAGE_BYTES`](crate::MAX_MESSAGE_BYTES).

@@ -2,7 +2,7 @@
 //! serve` decodes exactly these bytes off its unix socket from *any* client, the outermost
 //! untrusted-input boundary the engine exposes (unlike the channel decoder, which only sees a guest
 //! already contained inside a VM). Hostile bytes here must always land in a value or a typed
-//! `ProtocolError`, never a panic, hang, or unbounded buffer (guardrail 5).
+//! `ProtocolError`, never a panic, hang, or unbounded buffer.
 
 #![no_main]
 

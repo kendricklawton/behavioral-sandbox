@@ -2,7 +2,7 @@
 //! `parse_ipv4_5tuple` (an Ethernet frame off the tap). The record is kernel-written, so it is
 //! defense in depth, but `parse_ipv4_5tuple` reads a **guest-crafted** frame: attacker bytes. Either
 //! must be a value-or-`None`, and the string-building accessors must clamp on an attacker-influenced
-//! `detail_len`, never panic or read past the buffer (guardrail 5).
+//! `detail_len`, never panic or read past the buffer.
 
 #![no_main]
 

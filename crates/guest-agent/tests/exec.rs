@@ -215,7 +215,7 @@ fn session_state_persists_across_connections() {
     // session dir see one working directory, a file injected before the first exec, and a file
     // that exec writes, are both still there for the second. (One-shot `serve` keeps its
     // fresh-and-removed semantics; this is the `serve_session` path the in-VM binary runs.)
-    let dir = std::env::temp_dir().join(format!("agent-session-test-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ekvm-session-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
     // Exec 1: read the injected file, append to it, and write a new one.
@@ -284,7 +284,7 @@ fn a_relative_program_built_in_the_session_runs_by_its_path() {
     // the run's working dir (where the command runs), not the agent's own cwd. Exec 1 builds an
     // executable `./tool` in the session dir; exec 2 runs it by that relative path and must not be
     // falsely rejected as "no such binary".
-    let dir = std::env::temp_dir().join(format!("agent-relprog-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ekvm-relprog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
     // One exec per connection against the shared session dir: build the executable, then run it.

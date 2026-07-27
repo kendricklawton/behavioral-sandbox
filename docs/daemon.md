@@ -78,7 +78,7 @@ because the peer is a **local, trusted-ish client**: the daemon is synchronous w
 [the design notes](./design.md#7-synchronous-engine-no-async-runtime)),
 and hand-debuggability (`socat`, `nc`) plus "any language with a JSON library and a unix socket can
 drive it" matter more than a compact wire. Every decode is bounded and typed, so a
-malformed or oversize line is an error the daemon reports or drops, never a panic (guardrail 5).
+malformed or oversize line is an error the daemon reports or drops, never a panic.
 
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
 working directory, and closing the connection tears the sandbox down.

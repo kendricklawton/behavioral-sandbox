@@ -49,7 +49,7 @@ fn tracer_captures_this_process_openat_with_its_path() {
 
     // `sys_enter_openat` fires whether or not the path exists, so a unique nonexistent path is a
     // clean, collision-free needle to find in the stream.
-    let marker = format!("/tmp/agent-p9-openat-{me}-marker");
+    let marker = format!("/tmp/ekvm-p9-openat-{me}-marker");
     let _ = std::fs::File::open(&marker);
     sleep(Duration::from_millis(50));
 
@@ -190,7 +190,7 @@ fn attributes_events_to_this_process_cgroup() {
         .expect("filter to this cgroup");
     tracer.drain(|_| {}).expect("clear the baseline");
 
-    let marker = format!("/tmp/agent-p94-cgroup-{}-marker", std::process::id());
+    let marker = format!("/tmp/ekvm-p94-cgroup-{}-marker", std::process::id());
     let _ = std::fs::File::open(&marker);
     sleep(Duration::from_millis(50));
 
@@ -243,7 +243,7 @@ fn a_workload_child_shows_up_attributed_to_its_cgroup() {
     // The workload: `cat <missing>` is one child that both `execve`s (itself) and `openat`s a known
     // path (the file it tries to read). The path never exists, so the open just fails ENOENT, but
     // `sys_enter_openat` fires regardless, carrying the path, and nothing is created or left behind.
-    let marker = format!("/tmp/agent-p96-workload-{me}-missing");
+    let marker = format!("/tmp/ekvm-p96-workload-{me}-missing");
     let status = Command::new("cat")
         .arg(&marker)
         .status()
@@ -295,7 +295,7 @@ fn stream_delivers_a_live_trace_over_a_window() {
         let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                let _ = std::fs::File::open("/tmp/agent-p93-stream-probe");
+                let _ = std::fs::File::open("/tmp/ekvm-p93-stream-probe");
                 sleep(Duration::from_millis(5));
             }
         })

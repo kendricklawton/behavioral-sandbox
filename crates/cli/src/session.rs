@@ -12,7 +12,7 @@
 //! the engine's only file seam); `snapshot` writes a bundle (a typed refusal for a jailed session);
 //! `trace` returns the host-observed audit record (`RunRecord`) so far; `close` ends it.
 //!
-//! No-panic host path (guardrail 5): a hostile or buggy client, bad JSON, a wrong first message, a
+//! Untrusted input: a hostile or buggy client, bad JSON, a wrong first message, a
 //! wrong wire schema, a command that can't spawn, a mid-session hang-up, is a typed
 //! [`Response::Error`] or a dropped connection, never a daemon panic. The exec-fault taxonomy follows
 //! the CLI's shell: a **guest** fault (a bad command, a timeout, a flooded cap) is per-request and the

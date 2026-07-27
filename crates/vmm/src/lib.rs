@@ -88,7 +88,7 @@ mod tests {
 
 /// Every way driving a microVM can fail, as a typed value, the driver's **error taxonomy**.
 ///
-/// A hostile or crashing guest is one of these, never a host panic/hang/leak (the host path is
+/// A hostile or crashing guest is one of these, never a host panic/hang/leak (the crate is
 /// `#![forbid(unsafe_code)]` and the CI gate denies `unwrap`/`expect` outside tests). The variants
 /// fall in three buckets:
 ///
@@ -356,7 +356,7 @@ impl Default for Limits {
         Self {
             vcpus: NonZeroU8::MIN, // 1
             // 256; the fallback arm can't fire (256 is nonzero), spelled without `unwrap`
-            // because the host path denies it (guardrail 5).
+            // because the host path denies it.
             mem_mib: NonZeroU32::new(256).unwrap_or(NonZeroU32::MIN),
             wall: exec::DEFAULT_EXEC_TIMEOUT,
             output_cap: exec::MAX_EXEC_OUTPUT,

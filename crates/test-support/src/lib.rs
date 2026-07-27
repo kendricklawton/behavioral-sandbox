@@ -31,7 +31,7 @@ impl ScratchDir {
         use std::sync::atomic::{AtomicU32, Ordering};
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "agent-{tag}-{}-{}",
+            "ekvm-{tag}-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -106,8 +106,8 @@ impl LimitCgroup {
     }
 
     fn create_with_quota(cpu_quota_us: u64, mem_mib: u32, tag: &str) -> Option<Self> {
-        let parent = PathBuf::from("/sys/fs/cgroup")
-            .join(format!("agent-test-{}-{tag}", std::process::id()));
+        let parent =
+            PathBuf::from("/sys/fs/cgroup").join(format!("ekvm-test-{}-{tag}", std::process::id()));
         std::fs::create_dir(&parent).ok()?;
         let this = Self {
             dir: parent.join("leaf"),

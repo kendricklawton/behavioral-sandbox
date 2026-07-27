@@ -64,13 +64,13 @@ impl std::fmt::Display for ClientError {
         match self {
             ClientError::Protocol(e) => write!(f, "{e}"),
             ClientError::Remote { message, fatal } => {
-                write!(f, "agent error (fatal={fatal}): {message}")
+                write!(f, "daemon error (fatal={fatal}): {message}")
             }
             ClientError::AtCapacity { retry_after_ms } => {
-                write!(f, "agent at capacity (retry after {retry_after_ms}ms)")
+                write!(f, "daemon at capacity (retry after {retry_after_ms}ms)")
             }
-            ClientError::Unexpected(resp) => write!(f, "unexpected reply from agent: {resp:?}"),
-            ClientError::Closed => write!(f, "agent closed the connection without replying"),
+            ClientError::Unexpected(resp) => write!(f, "unexpected reply from daemon: {resp:?}"),
+            ClientError::Closed => write!(f, "daemon closed the connection without replying"),
         }
     }
 }
@@ -127,7 +127,7 @@ pub struct ExecOutcome {
     pub exec_wall_ms: u64,
 }
 
-/// One connection to a running `agent`, i.e. one sandbox session. Dropping it hangs up the
+/// One connection to a running `ekvm serve`, i.e. one sandbox session. Dropping it hangs up the
 /// connection, which tears the session's sandbox down daemon-side (the same as [`close`](Self::close)
 /// without the acknowledgement).
 #[derive(Debug)]

@@ -305,7 +305,7 @@ fn main() -> ExitCode {
     // The `.ekvm.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
     // failure here, before any boot (config typos must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let file = match config::AgentToml::discover(&cwd) {
+    let file = match config::EkvmToml::discover(&cwd) {
         Ok(f) => f,
         Err(e) => {
             let _ = writeln!(std::io::stderr(), "ekvm: {e}");
@@ -333,7 +333,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
+fn run(cmd: Cmd, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
     match cmd {
         Cmd::Run(args) => {
             sweep_vm_residue(file);
@@ -360,7 +360,7 @@ fn run(cmd: Cmd, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError>
 /// boot subcommand as the boot-time GC the engine owes its host. Best-effort and
 /// conservative: [`sweep_orphans`] only reclaims this euid's dead-pid dirs, so it never touches a
 /// concurrent run's live sandbox.
-fn sweep_vm_residue(file: Option<&config::AgentToml>) {
+fn sweep_vm_residue(file: Option<&config::EkvmToml>) {
     match sweep_orphans(&base_config(file).scratch_dir) {
         Ok(r) if r.dirs_reclaimed + r.netns_reclaimed > 0 => tracing::info!(
             dirs = r.dirs_reclaimed,
@@ -376,7 +376,7 @@ fn sweep_vm_residue(file: Option<&config::AgentToml>) {
 /// its flags. Composes a single lookup that prefers the real environment, then the `.ekvm.toml`
 /// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
 /// stay one vocabulary keyed by the `EKVM_*` names.
-fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
+fn base_config(file: Option<&config::EkvmToml>) -> BootConfig {
     BootConfig::from_env_with(|key| {
         std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
     })
@@ -387,7 +387,7 @@ fn base_config(file: Option<&config::AgentToml>) -> BootConfig {
 /// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
 /// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
 /// / `--record` full JSON / `--record-summary` model-legible projection, the three faces of one record).
-fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
+fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
     // The run's root span: boot, exec, and the audit-record events all nest under it, so one run's
     // telemetry is greppable as a unit. `vmm_pid` is recorded once the sandbox is up, the id that
     // ties these log lines to the audit record and the host's own process table.
@@ -465,8 +465,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
-        // it panics on a closed pipe (`ekvm run … | head -0`), and a no-panic host path
-        // includes the shell pipeline case.
+        // it panics on a closed pipe (`ekvm run … | head -0`).
         let _ = writeln!(
             std::io::stdout(),
             "booted microVM to userspace in {} ms",
@@ -658,7 +657,7 @@ fn run_command(args: RunArgs, file: Option<&config::AgentToml>) -> Result<ExitCo
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
-fn shell(args: ShellArgs, file: Option<&config::AgentToml>) -> Result<ExitCode, CliError> {
+fn shell(args: ShellArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
     let limits = shell_policy(&args, &config::policy_of(file))?;
     let mut config = base_config(file).with_limits(limits);
     if args.require_limits {
@@ -835,7 +834,7 @@ fn read_put_files(puts: &[PathBuf]) -> Result<Vec<(String, Vec<u8>)>, VmmError> 
 }
 
 /// Write the guest's returned artifacts under the current directory, refusing anything the run
-/// didn't explicitly ask for. Deny-by-default (`AGENTS.md` guardrail 3): the operator's `--get` set is
+/// didn't explicitly ask for. Deny-by-default: the operator's `--get` set is
 /// the *only* allowance, so a returned path that wasn't requested (a planted `.git/config`,
 /// `Makefile`) is refused, never written. The exec API already guarantees each path is relative and
 /// non-climbing (`run_exec`); here we additionally resolve every component without following a

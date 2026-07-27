@@ -300,7 +300,7 @@ impl RunningVm {
 /// in place, never copied, so it rides as `None` and is left untouched. `Drop` removes the files,
 /// best-effort, on every exit from the create window, an error return *or* an unwinding panic,
 /// until [`disarm`](Self::disarm) marks the bundle complete, so the caller's dir holds a bundle or
-/// nothing and a later `Vm::restore` can't half-open a torn one (guardrail 5).
+/// nothing and a later `Vm::restore` can't half-open a torn one.
 struct PartialBundle<'a> {
     state: &'a Path,
     mem: &'a Path,
@@ -337,7 +337,7 @@ mod tests {
         // The leak the guard closes: a panic between the snapshot-create API call and the disarm
         // must not strand torn, guest-RAM-sized bundle files a later restore would half-open. And
         // the disarm half: a completed bundle survives the guard.
-        let dir = std::env::temp_dir().join(format!("agent-bundle-unwind-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ekvm-bundle-unwind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let state = dir.join("snapshot.state");
         let mem = dir.join("snapshot.mem");

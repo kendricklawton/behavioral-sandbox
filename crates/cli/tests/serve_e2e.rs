@@ -1,4 +1,4 @@
-//! The `agent` daemon end to end, as tests (the wire API, docs/daemon.md): drive the
+//! The `ekvm serve` daemon end to end, as tests (the wire API, docs/daemon.md): drive the
 //! real daemon over its unix socket through the full
 //! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.
@@ -13,7 +13,7 @@
 //! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agent --prewarm 1` and asserts a bare
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
-//! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the agent
+//! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the guest-agent
 //! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p cli -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root, except [`a_jailed_daemon_serves_prewarmed_opens`], which exists precisely
@@ -50,7 +50,7 @@ fn skip_reason() -> Option<String> {
     None
 }
 
-/// A spawned `agent` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
+/// A spawned `ekvm serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
 /// session VMs are then reaped by the lifetime sentinel; the socket file it leaves is cleared on the
 /// next bind).
 struct Daemon {
@@ -96,7 +96,7 @@ fn scrape_metrics(port: u16) -> String {
     response
 }
 
-/// Launch `agent` on a private socket, pointed at the workspace's guest rootfs. `prewarm` becomes
+/// Launch `ekvm serve` on a private socket, pointed at the workspace's guest rootfs. `prewarm` becomes
 /// `--prewarm N` when set (the pool path); `metrics_port` becomes `--metrics 127.0.0.1:PORT`.
 /// Returns once the socket is connectable.
 fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, PathBuf) {

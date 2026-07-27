@@ -530,7 +530,7 @@ mod tests {
 40 21 0:22 / /home rw,relatime shared:3 - btrfs /dev/sda2 rw";
         // The jailer's chroot /dev/kvm under /tmp is on the nodev fs, the exact failure case.
         assert_eq!(
-            mount_nodev_in(mi, Path::new("/tmp/agent-1/root/dev/kvm")),
+            mount_nodev_in(mi, Path::new("/tmp/ekvm-1/root/dev/kvm")),
             Some(true)
         );
         // A scratch dir under $HOME is not nodev, the recommended fix.
@@ -547,7 +547,7 @@ mod tests {
         let mi = "50 21 0:23 / /mnt/my\\040scratch rw,nodev shared:4 - ext4 /dev/sdb rw\n\
                   21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw";
         assert_eq!(
-            mount_nodev_in(mi, Path::new("/mnt/my scratch/agent-1")),
+            mount_nodev_in(mi, Path::new("/mnt/my scratch/ekvm-1")),
             Some(true)
         );
     }

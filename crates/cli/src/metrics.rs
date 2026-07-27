@@ -1,7 +1,6 @@
 //! The daemon's metrics: a small atomic registry ([`Metrics`]) the session threads increment, and a
-//! **Prometheus text-exposition endpoint** ([`serve`]) the *hoster* scrapes, the operational face of
-//! "engine, not platform" (the daemon exposes its own numbers; dashboards, alerting, and retention
-//! are the hoster's, above the engine).
+//! **Prometheus text-exposition endpoint** ([`serve`]) the *hoster* scrapes: the daemon exposes its
+//! own numbers; dashboards, alerting, and retention are the hoster's, above the engine.
 //!
 //! **Hand-rolled on purpose.** The exposition format is a few lines of stable text, and the daemon is
 //! synchronous with no async runtime, so the endpoint is a plain
@@ -16,7 +15,7 @@
 //! label, and deliberately **low label cardinality** (fixed `pooled`/`verb`/`kind` sets, nothing
 //! per-session or per-client, which would grow without bound).
 //!
-//! Guardrail 5 applies to the scraper too: the request head is read through a hard byte cap and a
+//! The scraper is untrusted input too: the request head is read through a hard byte cap and a
 //! socket timeout, so a hostile or broken peer is a dropped connection, never a panic, hang, or
 //! unbounded allocation.
 
@@ -618,8 +617,7 @@ fn answer_scrape(
 
 /// Read the request head, through the end of the headers (`\r\n\r\n`), capped at
 /// [`MAX_REQUEST_BYTES`] and by one absolute `deadline` across all reads. A peer that never finishes
-/// its head inside the cap or the deadline is an error, so it can't grow memory or hold the endpoint
-/// (guardrail 5).
+/// its head inside the cap or the deadline is an error, so it can't grow memory or hold the endpoint.
 fn read_request_head(stream: &mut TcpStream, deadline: Instant) -> std::io::Result<Vec<u8>> {
     let mut head = Vec::with_capacity(256);
     let mut chunk = [0u8; 512];

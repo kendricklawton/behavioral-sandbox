@@ -137,7 +137,7 @@ impl Spawned {
 
         // The staging window: the guard removes the scratch dir on every exit from here, an error
         // `?` or an unwinding panic in the copy/image builds alike, so a failed stage leaves no
-        // orphan (guardrail 5). Disarmed just before the tap exists: from there a plain removal
+        // orphan. Disarmed just before the tap exists: from there a plain removal
         // could strand a dir-less netns, so the netns-gated `reclaim_scratch*` helpers own cleanup.
         let staged = WorkdirGuard::new(create_workdir(&config.scratch_dir)?);
 
@@ -1268,7 +1268,7 @@ fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
 
 /// Create the restore-disk staging dir private (mode `0700`, owned by us), or, if it already exists,
 /// adopt it only after verifying it is ours and `0700`. The baked-in path is predictable
-/// (`/tmp/agent-<srcpid>-<seq>`, from the snapshot's source) and `/tmp` is world-writable, so a
+/// (`/tmp/ekvm-<srcpid>-<seq>`, from the snapshot's source) and `/tmp` is world-writable, so a
 /// blind `create_dir_all` would silently adopt an attacker-planted world-writable dir, letting a
 /// local user rename-swap the staged disk before `PUT /snapshot/load` opens it (guest boots an
 /// attacker's rootfs). This mirrors `create_workdir`'s posture; the only pre-existing dir it may
@@ -1546,7 +1546,7 @@ fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
 
 /// RAII guard for the boot's scratch dir during the pre-VMM staging window (rootfs copy, bulk-I/O
 /// image builds): `Drop` removes the dir on every scope exit, an error return *or* an unwinding
-/// panic, so a failed stage leaves no orphan (guardrail 5). [`disarm`](Self::disarm) hands the path
+/// panic, so a failed stage leaves no orphan. [`disarm`](Self::disarm) hands the path
 /// back once a netns may exist, from where a plain removal could strand a dir-less netns and the
 /// netns-gated `reclaim_scratch*` helpers own cleanup instead.
 struct WorkdirGuard {
@@ -1702,7 +1702,7 @@ mod tests {
         // A "firecracker" that exits immediately, complaining on stderr: `sh --api-sock <path>`
         // rejects the flag. Boot must fail fast with the exit surfaced, not wait out the whole
         // deadline, and carry the stderr tail. Needs no KVM, so it runs in the host gate.
-        let dir = ScratchDir::created("agent-fake-fc");
+        let dir = ScratchDir::created("ekvm-fake-fc");
         let kernel = dir.path().join("vmlinux");
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
@@ -1747,8 +1747,8 @@ mod tests {
     #[test]
     fn staging_dir_is_created_private_and_adopts_only_its_own() {
         use std::os::unix::fs::PermissionsExt;
-        let base = ScratchDir::created("agent-stage-priv");
-        let dir = base.path().join("agent-99999-0");
+        let base = ScratchDir::created("ekvm-stage-priv");
+        let dir = base.path().join("ekvm-99999-0");
         // Fresh create: private 0700, regardless of umask.
         ensure_private_staging_dir(&dir).expect("create the staging dir");
         let mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
@@ -1756,7 +1756,7 @@ mod tests {
         // A second call adopts our own 0700 dir (the lingering-empty-from-a-prior-restore case).
         ensure_private_staging_dir(&dir).expect("adopt our own private dir");
         // A world-writable pre-existing dir (an attacker's plant) is refused.
-        let squatted = base.path().join("agent-88888-0");
+        let squatted = base.path().join("ekvm-88888-0");
         std::fs::create_dir(&squatted).expect("create squatted dir");
         std::fs::set_permissions(&squatted, std::fs::Permissions::from_mode(0o777))
             .expect("widen mode");
@@ -1769,10 +1769,10 @@ mod tests {
     #[test]
     fn a_staged_restore_disk_is_private_and_never_clobbers() {
         use std::os::unix::fs::PermissionsExt;
-        let base = ScratchDir::created("agent-stage-disk");
+        let base = ScratchDir::created("ekvm-stage-disk");
         let src = base.path().join("bundle-disk");
         std::fs::write(&src, b"snapshot disk bytes").expect("write source disk");
-        let backing = base.path().join("agent-77777-0/rootfs.ext4");
+        let backing = base.path().join("ekvm-77777-0/rootfs.ext4");
         stage_restore_disk(&src, &backing).expect("stage the disk");
         assert_eq!(
             std::fs::read(&backing).expect("read staged disk"),
@@ -1798,13 +1798,13 @@ mod tests {
         // made the privacy check refuse every jailed private-disk restore, the daemon's whole
         // `--prewarm` path.
         use std::os::unix::fs::PermissionsExt;
-        let base = ScratchDir::created("agent-stage-jail");
+        let base = ScratchDir::created("ekvm-stage-jail");
         let root = base.path().join("chroot-root"); // stands in for <jail>/root
         let src = base.path().join("bundle-disk");
         std::fs::write(&src, b"private disk bytes").expect("write source disk");
 
-        // Baked-in path /var/tmp/agent-66666-0/rootfs.ext4, re-rooted into the chroot.
-        let disk_target = root.join("var/tmp/agent-66666-0/rootfs.ext4");
+        // Baked-in path /var/tmp/ekvm-66666-0/rootfs.ext4, re-rooted into the chroot.
+        let disk_target = root.join("var/tmp/ekvm-66666-0/rootfs.ext4");
         let parent = disk_target.parent().expect("leaf dir");
         let chain = parent.parent().expect("traversal chain");
         std::fs::create_dir_all(chain).expect("create traversal chain");
@@ -1824,7 +1824,7 @@ mod tests {
         );
 
         // The old sequence's shape stays refused: a pre-created (0755) leaf is not adoptable.
-        let pre_created = root.join("var/tmp/agent-55555-0/rootfs.ext4");
+        let pre_created = root.join("var/tmp/ekvm-55555-0/rootfs.ext4");
         let bad_leaf = pre_created.parent().expect("leaf");
         std::fs::create_dir_all(bad_leaf).expect("pre-create leaf");
         // Pin the mode explicitly so the assertion doesn't depend on the runner's umask.
@@ -1842,8 +1842,7 @@ mod tests {
         // The leak the guard closes: a panic mid-staging (rootfs copy, an image build) must not
         // strand the scratch dir. And the disarm half: a dir handed off to the netns-aware path
         // must survive the guard's drop.
-        let base =
-            std::env::temp_dir().join(format!("agent-workdir-unwind-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("ekvm-workdir-unwind-{}", std::process::id()));
         std::fs::create_dir_all(&base).expect("mkdir");
 
         let doomed = base.join("staging");
@@ -1875,7 +1874,7 @@ mod tests {
         // `StagedDisk`'s rustdoc promises the panic-unwind cover for the out-of-workdir staged
         // restore disk; pin it: an armed guard dropped by an unwind unstages the file (and its
         // staging marker + now-empty parent), a `take`n one leaves the disk alone.
-        let base = std::env::temp_dir().join(format!("agent-disk-unwind-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("ekvm-disk-unwind-{}", std::process::id()));
         let staging = base.join("stage");
         std::fs::create_dir_all(&staging).expect("mkdir");
         let disk = staging.join("rootfs.ext4");
@@ -1927,7 +1926,7 @@ mod tests {
     fn overlong_socket_path_is_a_clear_error_not_a_cryptic_bind_failure() {
         // A short path is fine; a path past the kernel's sun_path limit is rejected up front with an
         // actionable message (name the knob), not a bind failure surfacing as a boot timeout.
-        assert!(check_sun_path(Path::new("/tmp/agent-1-0/fc.sock")).is_ok());
+        assert!(check_sun_path(Path::new("/tmp/ekvm-1-0/fc.sock")).is_ok());
         let long = PathBuf::from(format!("/{}/fc.sock", "x".repeat(SUN_PATH_MAX)));
         let err = check_sun_path(&long).unwrap_err().to_string();
         assert!(err.contains("too long"), "explains the limit: {err}");

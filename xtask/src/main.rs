@@ -8,7 +8,7 @@
 //!   agent + the guest rootfs first, so the in-VM exec test has something to boot.
 //! - **`setup`**, checks the host can do KVM + eBPF and reports what's missing.
 //! - **`self-host`**, the single self-host command: obtain the pinned kernel + rootfs, build the
-//!   guest image + eBPF object, install `agent`, and (on a KVM host) boot one sandbox to
+//!   guest image + eBPF object, install `ekvm`, and (on a KVM host) boot one sandbox to
 //!   prove it. Offline when `EKVM_VENDOR_DIR` points at a `vendor` mirror.
 //! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
 //!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
@@ -114,10 +114,10 @@ enum Cmd {
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
     /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
-    /// object, install the `agent` binary, and (on a KVM host) boot one sandbox to prove
+    /// object, install the `ekvm` binary, and (on a KVM host) boot one sandbox to prove
     /// it. Offline when `EKVM_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
     SelfHost {
-        /// Where to install the `agent` binary (default `~/.local/bin`).
+        /// Where to install the `ekvm` binary (default `~/.local/bin`).
         #[arg(long, value_name = "DIR")]
         prefix: Option<PathBuf>,
         /// Build + install only; skip the sandbox boot proof (it just prints the command).
@@ -390,7 +390,7 @@ const FUZZ_TARGETS: &[&str] = &[
     "syscall_event",
     "egress_rule",
     "audit_record",
-    "agent_config",
+    "ekvm_config",
 ];
 
 /// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance

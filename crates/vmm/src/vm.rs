@@ -929,8 +929,8 @@ mod tests {
         // `abort` now route through this one helper, so a failed boot reclaims exactly as a drop does.
         // (The netns-lingers branch needs CAP_NET_ADMIN to make `netns_exists` meaningful; the
         // privileged suite covers the sweep reclaiming a stranded netns+dir pair.)
-        let base = ScratchDir::created("agent-reclaim");
-        let workdir = base.path().join("agent-1-0");
+        let base = ScratchDir::created("ekvm-reclaim");
+        let workdir = base.path().join("ekvm-1-0");
         std::fs::create_dir(&workdir).expect("create workdir");
         reclaim_scratch(&workdir, None);
         assert!(

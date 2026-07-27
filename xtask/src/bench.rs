@@ -27,7 +27,7 @@ pub(crate) fn image_used_bytes(path: &Path) -> Result<u64> {
 /// Measure boot-to-userspace latency of the guest rootfs. Boots `runs` times on **each** of
 /// two paths, the read-only *shared* base (no per-VM copy) and the read-write *copy* base, and
 /// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
-/// duplicates the whole image per boot, the shared path doesn't. "Measured, not marketed."
+/// duplicates the whole image per boot, the shared path doesn't.
 pub(crate) fn bench_boot(runs: usize) -> Result<()> {
     crate::require_kvm("bench-boot")?;
     if runs == 0 {
@@ -117,7 +117,7 @@ fn prewarm_python_snapshot(
     tag: &str,
 ) -> Result<(Snapshot, ScratchDir)> {
     let bundle =
-        ScratchDir(std::env::temp_dir().join(format!("agent-bench-{tag}-{}", std::process::id())));
+        ScratchDir(std::env::temp_dir().join(format!("ekvm-bench-{tag}-{}", std::process::id())));
     let _ = std::fs::remove_dir_all(&bundle.0);
     let source =
         Vm::boot(warm_bench_config(kernel, rootfs, true)).context("boot the prewarmed source")?;
@@ -626,7 +626,7 @@ fn ns_per_openat(path: &Path, batch: usize) -> u64 {
 /// 3. **watched**, the filter includes us, so every `openat` writes a whole `SyscallEvent` into the
 ///    ring buffer: the cost the *one sandbox you watch* pays.
 ///
-/// The delta of (2)/(3) over (1) is the honest, measured overhead, "measured, not marketed". Needs
+/// The delta of (2)/(3) over (1) is the honest, measured overhead. Needs
 /// `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM), so it runs on any eBPF-capable host.
 pub(crate) fn bench_trace(runs: usize) -> Result<()> {
     if let Err(e) = probes_loader::check_support() {
@@ -650,7 +650,7 @@ pub(crate) fn bench_trace(runs: usize) -> Result<()> {
     // A path that does not (and will not) exist: every `File::open` is then a pure `openat`, no file
     // created or read. Named by pid so concurrent benches don't share a path.
     let missing =
-        std::env::temp_dir().join(format!("agent-bench-trace-{}-missing", std::process::id()));
+        std::env::temp_dir().join(format!("ekvm-bench-trace-{}-missing", std::process::id()));
     println!("bench-trace: {runs} bursts x {BATCH} openat/burst per condition\n");
 
     // Warm the CPU (frequency governor, i-cache, branch predictor) before the first timed
@@ -769,7 +769,7 @@ fn ns_per_switch(rounds: usize) -> Result<u64> {
 /// 3. **attached, metering us**, our cgroup is a target, so every switch does the lookup **and**
 ///    accumulates our on-CPU time: the cost the *one sandbox you meter* pays.
 ///
-/// The delta of (2)/(3) over (1) is the honest, measured overhead, "measured, not marketed", and the
+/// The delta of (2)/(3) over (1) is the honest, measured overhead, and the
 /// evidence for the "bounded, sane under many sandboxes" claim: one shared program, a hash lookup per
 /// switch, independent of how many cgroups are metered. Needs `CAP_BPF`+`CAP_PERFMON` and the built
 /// object (not KVM), so it runs on any eBPF-capable host.
@@ -916,7 +916,7 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
 
     // The syscall tracer: cost per watched openat as the trace target set grows.
     let missing =
-        std::env::temp_dir().join(format!("agent-bench-scale-{}-missing", std::process::id()));
+        std::env::temp_dir().join(format!("ekvm-bench-scale-{}-missing", std::process::id()));
     let mut tracer = SyscallTracer::load().context("load + attach the syscall tracer")?;
     tracer
         .add_target(me)

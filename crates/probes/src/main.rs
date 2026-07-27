@@ -413,7 +413,7 @@ static POLICY6: Array<PolicyRule6> = Array::with_max_entries(MAX_POLICY_RULES as
 /// Enforcement toggle: slot 0 is `0` for **observe-only** (accept every packet, the original
 /// behavior) or `1` for **deny-by-default egress** (guest-sent IPv4 packets must match [`POLICY`]).
 /// Zero-initialized at load, so a monitor enforces nothing until the loader opts in, existing
-/// observation keeps working unchanged, and every allowance is explicit (guardrail 3).
+/// observation keeps working unchanged, and every allowance is explicit.
 #[map]
 static ENFORCE: Array<u32> = Array::with_max_entries(1, 0);
 

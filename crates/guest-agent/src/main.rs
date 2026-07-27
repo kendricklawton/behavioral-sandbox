@@ -129,7 +129,7 @@ fn run_unix(path: &str) -> Result<(), String> {
 /// one `/tmp`, in a guest it changes nothing (and a snapshot clone keeps its pid, so the path is
 /// stable across restore).
 fn session_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("agent-session-{}", std::process::id()))
+    std::env::temp_dir().join(format!("ekvm-session-{}", std::process::id()))
 }
 
 /// Serve one connection, logging (not propagating) a failure so one bad peer never ends the loop.

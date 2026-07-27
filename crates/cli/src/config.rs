@@ -35,7 +35,7 @@ const FILE_NAME: &str = ".ekvm.toml";
 /// silently no-op.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct AgentToml {
+pub struct EkvmToml {
     /// Mirrors `EKVM_FIRECRACKER`.
     firecracker: Option<PathBuf>,
     /// Mirrors `EKVM_KERNEL`.
@@ -119,7 +119,7 @@ impl TryFrom<String> for CidrV6 {
     }
 }
 
-impl AgentToml {
+impl EkvmToml {
     /// Discover and parse the nearest `.ekvm.toml` walking up from `start`, or `None` if none
     /// exists between `start` and the filesystem root.
     /// # Errors
@@ -144,7 +144,7 @@ impl AgentToml {
         Self::parse(&text).map_err(|e| VmmError::Vmm(format!("{}: {e}", path.display())))
     }
 
-    /// Parse TOML text into an [`AgentToml`], surfacing an unknown-key/type error as a plain string
+    /// Parse TOML text into an [`EkvmToml`], surfacing an unknown-key/type error as a plain string
     /// (the pure core the file reader and the unit tests share).
     fn parse(text: &str) -> Result<Self, String> {
         toml::from_str(text).map_err(|e| e.message().to_string())
@@ -280,18 +280,18 @@ fn parse_v6_cidr(s: &str) -> Result<Ipv6Cidr, String> {
 /// The operator policy for this process: the nearest `.ekvm.toml`'s, or the permissive default when
 /// there is no file. One call site so the CLI and the daemon can't drift on how policy is sourced.
 #[must_use]
-pub fn policy_of(file: Option<&AgentToml>) -> Policy {
-    file.map(AgentToml::policy).unwrap_or_default()
+pub fn policy_of(file: Option<&EkvmToml>) -> Policy {
+    file.map(EkvmToml::policy).unwrap_or_default()
 }
 
 /// Resolve the host record-signing key path with `env (EKVM_SIGNING_KEY) > file > default`
 /// Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
 /// The default is [`probes_loader::default_key_path`] (a data-dir path, generated on first use).
 #[must_use]
-pub fn signing_key_path(file: Option<&AgentToml>) -> PathBuf {
+pub fn signing_key_path(file: Option<&EkvmToml>) -> PathBuf {
     std::env::var_os("EKVM_SIGNING_KEY")
         .map(PathBuf::from)
-        .or_else(|| file.and_then(AgentToml::signing_key).map(Path::to_path_buf))
+        .or_else(|| file.and_then(EkvmToml::signing_key).map(Path::to_path_buf))
         .unwrap_or_else(probes_loader::default_key_path)
 }
 
@@ -300,7 +300,7 @@ pub fn signing_key_path(file: Option<&AgentToml>) -> PathBuf {
 /// override: every configured key stays trusted so a record signed before a key rotation still
 /// verifies. Parsing/validation is the caller's (`TrustedKey::from_hex`).
 #[must_use]
-pub fn trusted_key_hexes(file: Option<&AgentToml>) -> Vec<String> {
+pub fn trusted_key_hexes(file: Option<&EkvmToml>) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(v) = std::env::var_os("EKVM_TRUSTED_KEYS") {
         out.extend(
@@ -321,10 +321,10 @@ pub fn trusted_key_hexes(file: Option<&AgentToml>) -> Vec<String> {
 /// The `BootConfig` layers can't carry `log` (it has no field), so this mirrors that precedence for
 /// the one config value that drives `tracing` instead of the engine.
 #[must_use]
-pub fn resolve_log(flag: Option<&str>, file: Option<&AgentToml>) -> Option<String> {
+pub fn resolve_log(flag: Option<&str>, file: Option<&EkvmToml>) -> Option<String> {
     flag.map(str::to_string)
         .or_else(|| std::env::var("EKVM_LOG").ok())
-        .or_else(|| file.and_then(AgentToml::log).map(str::to_string))
+        .or_else(|| file.and_then(EkvmToml::log).map(str::to_string))
 }
 
 #[cfg(test)]
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn unknown_key_is_a_typed_error_not_a_silent_no_op() {
         // A typo (`kernal`) must fail loudly, per the deny-unknown-fields contract.
-        let err = AgentToml::parse("kernal = \"/x/vmlinux\"\n").expect_err("typo must error");
+        let err = EkvmToml::parse("kernal = \"/x/vmlinux\"\n").expect_err("typo must error");
         assert!(
             err.contains("kernal") || err.contains("unknown"),
             "names the bad key: {err}"
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn known_keys_parse_into_env_values() {
-        let toml = AgentToml::parse(
+        let toml = EkvmToml::parse(
             "kernel = \"/k/vmlinux\"\nrootfs = \"/r/root.ext4\"\nmarker = \"UP\"\nlog = \"debug\"\n",
         )
         .expect("valid toml parses");
@@ -368,14 +368,14 @@ mod tests {
     fn require_limits_bool_renders_the_env_token_from_env_parses() {
         // The file bool slots under the env in one composed lookup: `env_value` renders the canonical
         // token, and `BootConfig::from_env_with` parses it back onto the posture (env > file > default).
-        let on = AgentToml::parse("require_limits = true\n").expect("valid toml parses");
+        let on = EkvmToml::parse("require_limits = true\n").expect("valid toml parses");
         assert_eq!(
             on.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("true"))
         );
         assert!(vmm::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
 
-        let off = AgentToml::parse("require_limits = false\n").expect("valid toml parses");
+        let off = EkvmToml::parse("require_limits = false\n").expect("valid toml parses");
         assert_eq!(
             off.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("false"))
@@ -383,21 +383,21 @@ mod tests {
         assert!(!vmm::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
 
         // Unset in the file falls through to the default.
-        let bare = AgentToml::parse("marker = \"UP\"\n").expect("valid toml parses");
+        let bare = EkvmToml::parse("marker = \"UP\"\n").expect("valid toml parses");
         assert_eq!(bare.env_value("EKVM_REQUIRE_LIMITS"), None);
     }
 
     #[test]
     fn signing_key_parses_from_the_file_layer() {
         let toml =
-            AgentToml::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
+            EkvmToml::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
         assert_eq!(
             toml.signing_key(),
             Some(Path::new("/keys/host.ed25519")),
             "the file layer carries the record-signing key path"
         );
         assert_eq!(
-            AgentToml::default().signing_key(),
+            EkvmToml::default().signing_key(),
             None,
             "unset falls through"
         );
@@ -405,11 +405,10 @@ mod tests {
 
     #[test]
     fn trusted_keys_parse_as_a_list_from_the_file_layer() {
-        let toml =
-            AgentToml::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
+        let toml = EkvmToml::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
         assert_eq!(toml.trusted_keys(), ["aa".to_string(), "bb".to_string()]);
         assert!(
-            AgentToml::default().trusted_keys().is_empty(),
+            EkvmToml::default().trusted_keys().is_empty(),
             "unset is an empty set, not an error"
         );
     }
@@ -418,7 +417,7 @@ mod tests {
     fn env_beats_file_beats_default_via_the_composed_lookup() {
         // The layering `BootConfig::from_env_with` sees: env wins over file, file over default. Model
         // that composition here without a real process env or a real BootConfig.
-        let file = AgentToml::parse("kernel = \"/file/vmlinux\"\nrootfs = \"/file/root\"\n")
+        let file = EkvmToml::parse("kernel = \"/file/vmlinux\"\nrootfs = \"/file/root\"\n")
             .expect("valid");
         // A fake environment that only sets the kernel.
         let env = |key: &str| -> Option<OsString> {
@@ -444,25 +443,25 @@ mod tests {
     fn malformed_egress_ceiling_is_a_typed_error_not_a_dropped_entry() {
         // A dropped ceiling entry *widens* the ceiling (empty means unrestricted in
         // `Policy::check_egress`), so a typo must refuse the whole file, loudly, at parse time.
-        let err = AgentToml::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
+        let err = EkvmToml::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
             .expect_err("a malformed CIDR entry must fail the parse");
         assert!(
             err.contains("10.0.0.0-8") && err.contains("max_egress_v4"),
             "error names the entry and the key: {err}"
         );
 
-        let err = AgentToml::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
+        let err = EkvmToml::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
             .expect_err("an out-of-range prefix must fail the parse");
         assert!(err.contains("10.0.0.0/33"), "error names the entry: {err}");
 
-        let err = AgentToml::parse("max_egress_v6 = [\"fd00::/129\"]\n")
+        let err = EkvmToml::parse("max_egress_v6 = [\"fd00::/129\"]\n")
             .expect_err("an out-of-range v6 prefix must fail the parse");
         assert!(err.contains("fd00::/129"), "error names the entry: {err}");
     }
 
     #[test]
     fn egress_ceilings_parse_into_the_policy_unabridged() {
-        let toml = AgentToml::parse(
+        let toml = EkvmToml::parse(
             "max_egress_v4 = [\"10.0.0.0/8\", \"192.0.2.7\"]\nmax_egress_v6 = [\"fd00::/8\"]\n",
         )
         .expect("valid ceilings parse");
@@ -480,7 +479,7 @@ mod tests {
             vec![probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
         );
         // Absent keys stay "no restriction": the permissive default, explicitly chosen.
-        let bare = AgentToml::parse("marker = \"UP\"\n").expect("valid");
+        let bare = EkvmToml::parse("marker = \"UP\"\n").expect("valid");
         assert!(bare.policy().max_egress_v4.is_empty());
         assert!(bare.policy().max_egress_v6.is_empty());
     }
@@ -494,7 +493,7 @@ mod tests {
         std::fs::write(base.join(".ekvm.toml"), "marker = \"FROMFILE\"\n").expect("write");
         // A nearer file shadows the farther one.
         std::fs::write(base.join("a/.ekvm.toml"), "marker = \"NEARER\"\n").expect("write nearer");
-        let found = AgentToml::discover(&leaf)
+        let found = EkvmToml::discover(&leaf)
             .expect("discover ok")
             .expect("a file exists");
         assert_eq!(found.log(), None);
@@ -505,7 +504,7 @@ mod tests {
         // None above the tree.
         let empty = std::env::temp_dir().join(format!("ekvm-cfg-empty-{}", std::process::id()));
         std::fs::create_dir_all(&empty).expect("mkdir empty");
-        assert_eq!(AgentToml::discover(&empty).expect("ok"), None);
+        assert_eq!(EkvmToml::discover(&empty).expect("ok"), None);
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_dir_all(&empty);
     }

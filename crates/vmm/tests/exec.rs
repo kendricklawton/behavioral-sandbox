@@ -343,7 +343,7 @@ fn injects_a_large_file_via_block_device() {
     // A whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
     // **larger than the 1 MiB channel frame cap** (the whole point) in a host dir, inject it as a
     // read-only block device, and prove the guest reads it back byte-for-byte from `/input`.
-    let dir = std::env::temp_dir().join(format!("agent-p34-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("ekvm-p34-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("input dir");
     let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect(); // 4 MiB, > 1 MiB
     std::fs::write(dir.join("big.bin"), &payload).expect("write input file");

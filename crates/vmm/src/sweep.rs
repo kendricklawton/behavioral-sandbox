@@ -216,7 +216,7 @@ fn restore_staging_in(dir: &Path) -> bool {
 
 /// The owner pid embedded in a per-VM scratch-dir name, iff `name` matches the exact
 /// `ekvm-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else,
-/// including the test suite's `agent-<tag>-<pid>` temp dirs, is not a sweep candidate.
+/// including the test suite's `ekvm-<tag>-<pid>` temp dirs, is not a sweep candidate.
 fn owner_pid(name: &str) -> Option<u32> {
     let rest = name.strip_prefix(VM_DIR_PREFIX)?.strip_prefix('-')?;
     let (pid, seq) = rest.split_once('-')?;
@@ -314,10 +314,10 @@ mod tests {
 
     #[test]
     fn sweep_reclaims_dead_dirs_and_spares_live_and_foreign_ones() {
-        let base = ScratchDir::created("agent-sweep-base");
+        let base = ScratchDir::created("ekvm-sweep-base");
         let dead = base.path().join(format!("ekvm-{}-0", dead_pid()));
         let live = base.path().join(format!("ekvm-{}-0", std::process::id()));
-        let foreign = base.path().join("agent-bundle-1234"); // the test suite's TmpDir shape
+        let foreign = base.path().join("ekvm-bundle-1234"); // the test suite's TmpDir shape
         for d in [&dead, &live, &foreign] {
             std::fs::create_dir(d).expect("create test dir");
         }
@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn restore_staging_is_witnessed_only_by_a_live_stagers_marker() {
-        let dir = ScratchDir::created("agent-stage-marker");
+        let dir = ScratchDir::created("ekvm-stage-marker");
         // No marker: nothing staging (a plain orphan, or a dead driver's own boot disk).
         assert!(!restore_staging_in(dir.path()));
         std::fs::write(dir.path().join("rootfs.ext4"), b"disk").expect("write a disk");
@@ -384,7 +384,7 @@ mod tests {
     fn sweep_defers_a_dead_dir_a_live_restore_is_staging_into() {
         // A cross-process restore stages the source's disk into the source's now-dead-pid dir; the
         // sweep must not `remove_dir_all` it mid-copy. The witness is the stager's live-pid marker.
-        let base = ScratchDir::created("agent-sweep-stage");
+        let base = ScratchDir::created("ekvm-sweep-stage");
         let staging = base.path().join(format!("ekvm-{}-0", dead_pid()));
         std::fs::create_dir(&staging).expect("create staging dir");
         std::fs::write(staging.join("rootfs.ext4"), b"disk").expect("stage a disk");
@@ -407,7 +407,7 @@ mod tests {
         // The regression the hosted CI run caught: a writable-root boot leaves the driver's own
         // `rootfs.ext4` in its workdir, and a driver that crashes soon after booting must not have
         // its dir mistaken for an in-flight restore stage and left behind.
-        let base = ScratchDir::created("agent-sweep-owndisk");
+        let base = ScratchDir::created("ekvm-sweep-owndisk");
         let dir = base.path().join(format!("ekvm-{}-0", dead_pid()));
         std::fs::create_dir(&dir).expect("create dead driver dir");
         std::fs::write(dir.join("rootfs.ext4"), b"disk").expect("write its boot disk");
@@ -423,7 +423,7 @@ mod tests {
         // a dir this process creates (like every real workdir) must pass the filter. (The
         // rejection side, a foreign-uid decoy, needs a second uid, so it can't be unit-tested
         // unprivileged; the filter's equality is the whole mechanism.)
-        let dir = ScratchDir::created("agent-sweep-uid");
+        let dir = ScratchDir::created("ekvm-sweep-uid");
         let dir_uid = std::fs::metadata(dir.path()).expect("stat test dir").uid();
         assert_eq!(own_euid(), Some(dir_uid));
     }

@@ -2245,7 +2245,7 @@ mod tests {
         // Point `read` at a temp dir standing in for a cgroup dir: it collects the files that exist and
         // leaves the rest None (best-effort), never failing. No eBPF, no real cgroup, host-safe.
         let dir = std::env::temp_dir().join(format!(
-            "agent-cgstats-{}-{}",
+            "ekvm-cgstats-{}-{}",
             std::process::id(),
             // vary by a fixed nonce; no clock/rng on the host path here, and one dir per test run is fine
             "t"

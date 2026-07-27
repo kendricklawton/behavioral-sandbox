@@ -118,7 +118,7 @@ fn ensure_guest_target() -> Result<()> {
     Ok(())
 }
 
-/// Verify the built binary is actually statically linked, "measured, not marketed." A sys-crate or
+/// Verify the built binary is actually statically linked. A sys-crate or
 /// `build.rs` can silently reintroduce a `NEEDED` dynamic dependency, and a dynamically-linked
 /// binary baked into a scratch rootfs would fail at boot with a confusing loader error. Two checks,
 /// so the guarantee matches the claim: `readelf -d` finds no `(NEEDED)` shared objects, **and**
