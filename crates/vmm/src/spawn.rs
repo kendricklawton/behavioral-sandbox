@@ -591,8 +591,11 @@ impl Spawned {
                 chroot.mounts.extend(mem_mount);
             }
             // The disk, at `<chroot>/<baked path>`. The baked path is absolute (the source resolved
-            // it), so re-rooting it is a strip + join; its parent dirs are created root-owned 0755,
-            // which the jailed uid can traverse.
+            // it), so re-rooting it is a strip + join. The traversal chain is created root-owned
+            // 0755 (the jailed uid can walk it), but for a private disk the *leaf* dir is
+            // `stage_restore_disk`'s to create: its staging contract (0700, owner euid, refuse a
+            // pre-existing dir that isn't) means pre-creating the leaf here would refuse every
+            // jailed private-disk restore, the daemon's whole `--prewarm` path.
             let baked_rel = snapshot.root_backing.strip_prefix("/").map_err(|_| {
                 VmmError::Vmm(format!(
                     "snapshot's baked-in disk path is not absolute: {}",
@@ -600,10 +603,19 @@ impl Spawned {
                 ))
             })?;
             let disk_target = root.join(baked_rel);
-            if let Some(parent) = disk_target.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    VmmError::Vmm(format!("create chroot disk dirs {}: {e}", parent.display()))
-                })?;
+            let staging_parent = disk_target.parent();
+            if let Some(parent) = staging_parent {
+                let chain = if snapshot.shared_base {
+                    // A bind-mount target needs its full parent chain; the mount covers the leaf.
+                    Some(parent)
+                } else {
+                    parent.parent()
+                };
+                if let Some(chain) = chain {
+                    std::fs::create_dir_all(chain).map_err(|e| {
+                        VmmError::Vmm(format!("create chroot disk dirs {}: {e}", chain.display()))
+                    })?;
+                }
             }
             still_before(deadline, "stage restore disk")?;
             if snapshot.shared_base {
@@ -624,6 +636,13 @@ impl Spawned {
             } else {
                 stage_restore_disk(&snapshot.root_drive, &disk_target)?;
                 give_to_jail(&disk_target, uid, gid, 0o600)?;
+                // The dropped uid opens the disk *through* the staging dir, so hand the dir over
+                // with the file (0700, jail-owned): the privacy contract already held (the dir was
+                // created fresh by `stage_restore_disk` just above), and ownership now matches the
+                // process that must traverse it.
+                if let Some(parent) = staging_parent {
+                    give_to_jail(parent, uid, gid, 0o700)?;
+                }
                 disk_unstage = StagedDisk::armed(disk_target);
             }
             // Mounts were recorded eagerly above; here just learn the jailer's cgroup so teardown
@@ -1585,7 +1604,7 @@ fn overlay_size_mib(mem_mib: NonZeroU32) -> u32 {
 /// decomposition: a flat 20 ms poll adds up to 20 ms (~10 ms on average) of pure quantization to every
 /// start, a large slice of a ~40 ms restore, and needless jitter on the boot tail. The `contains`/
 /// `connect` check each tick is cheap, so a finer interval near readiness costs nothing that matters.
-struct PollBackoff {
+pub(crate) struct PollBackoff {
     next: Duration,
 }
 
@@ -1597,7 +1616,7 @@ impl PollBackoff {
     const CAP: Duration = Duration::from_millis(5);
 
     /// Start at [`INITIAL`](Self::INITIAL), so a near-immediate readiness is caught almost at once.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             next: Self::INITIAL,
         }
@@ -1612,7 +1631,7 @@ impl PollBackoff {
     }
 
     /// Sleep the current interval, then advance toward the cap.
-    fn sleep(&mut self) {
+    pub(crate) fn sleep(&mut self) {
         std::thread::sleep(self.bump());
     }
 }
@@ -1768,6 +1787,52 @@ mod tests {
         assert!(
             stage_restore_disk(&src, &backing).is_err(),
             "re-staging over an existing disk must fail, not overwrite"
+        );
+    }
+
+    #[test]
+    fn jailed_disk_staging_leaves_the_leaf_to_the_privacy_contract() {
+        // The jailed-restore sequence for a private disk, host-safe (own uid stands in for the
+        // jail's): the traversal chain is pre-created, but the staging *leaf* must be left for
+        // `stage_restore_disk` to create 0700. Regression: pre-creating the leaf (default 0755)
+        // made the privacy check refuse every jailed private-disk restore, the daemon's whole
+        // `--prewarm` path.
+        use std::os::unix::fs::PermissionsExt;
+        let base = ScratchDir::created("agent-stage-jail");
+        let root = base.path().join("chroot-root"); // stands in for <jail>/root
+        let src = base.path().join("bundle-disk");
+        std::fs::write(&src, b"private disk bytes").expect("write source disk");
+
+        // Baked-in path /var/tmp/agent-66666-0/rootfs.ext4, re-rooted into the chroot.
+        let disk_target = root.join("var/tmp/agent-66666-0/rootfs.ext4");
+        let parent = disk_target.parent().expect("leaf dir");
+        let chain = parent.parent().expect("traversal chain");
+        std::fs::create_dir_all(chain).expect("create traversal chain");
+
+        stage_restore_disk(&src, &disk_target).expect("stage into the fresh leaf");
+        let mode = std::fs::metadata(parent)
+            .expect("stat leaf")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "the staging leaf is private");
+        // The ownership handoff to the (here: own) uid the confined VMM runs as.
+        let uid = crate::sweep::own_euid().expect("own euid");
+        give_to_jail(parent, uid, uid, 0o700).expect("hand the leaf to the jail uid");
+        assert_eq!(
+            std::fs::read(&disk_target).expect("staged disk readable"),
+            b"private disk bytes"
+        );
+
+        // The old sequence's shape stays refused: a pre-created (0755) leaf is not adoptable.
+        let pre_created = root.join("var/tmp/agent-55555-0/rootfs.ext4");
+        let bad_leaf = pre_created.parent().expect("leaf");
+        std::fs::create_dir_all(bad_leaf).expect("pre-create leaf");
+        // Pin the mode explicitly so the assertion doesn't depend on the runner's umask.
+        std::fs::set_permissions(bad_leaf, std::fs::Permissions::from_mode(0o755))
+            .expect("widen leaf");
+        assert!(
+            stage_restore_disk(&src, &pre_created).is_err(),
+            "a leaf this code did not create 0700 must be refused, not adopted"
         );
     }
 

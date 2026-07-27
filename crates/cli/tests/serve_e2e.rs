@@ -16,7 +16,9 @@
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the agent
 //! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p cli -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
-//! doesn't need root.
+//! doesn't need root, except [`a_jailed_daemon_serves_prewarmed_opens`], which exists precisely
+//! because the jailed daemon composes pieces no other suite drives together (it self-skips
+//! without root).
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
 // deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -98,8 +100,21 @@ fn scrape_metrics(port: u16) -> String {
 /// `--prewarm N` when set (the pool path); `metrics_port` becomes `--metrics 127.0.0.1:PORT`.
 /// Returns once the socket is connectable.
 fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, PathBuf) {
+    launch_daemon_opts(prewarm, metrics_port, false)
+}
+
+fn launch_daemon_opts(
+    prewarm: Option<usize>,
+    metrics_port: Option<u16>,
+    jailed: bool,
+) -> (Daemon, PathBuf) {
     let root = workspace_root();
-    let dir = std::env::temp_dir().join(format!("agent-e2e-{}-{:?}", std::process::id(), prewarm));
+    let dir = std::env::temp_dir().join(format!(
+        "agent-e2e-{}-{:?}-{}",
+        std::process::id(),
+        prewarm,
+        if jailed { "jailed" } else { "unjailed" }
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
@@ -107,10 +122,11 @@ fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, 
     let socket = dir.join("ekvm.sock");
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ekvm"));
-    cmd.arg("serve")
-        .arg("--unjailed")
-        .arg("--socket")
-        .arg(&socket);
+    cmd.arg("serve");
+    if !jailed {
+        cmd.arg("--unjailed");
+    }
+    cmd.arg("--socket").arg(&socket);
     if let Some(n) = prewarm {
         cmd.arg("--prewarm").arg(n.to_string());
     }
@@ -535,5 +551,48 @@ fn a_prewarmed_open_is_served_from_the_pool() {
         .exec(&["echo".to_string(), "warm".to_string()], "")
         .unwrap_or_else(|e| panic!("exec: {e}"));
     assert_eq!(run.stdout, "warm\n", "a pooled session execs normally");
+    client.close().unwrap_or_else(|e| panic!("close: {e}"));
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_jailed_daemon_serves_prewarmed_opens() {
+    // The composition the rest of this (deliberately unjailed) suite never drives: `serve
+    // --prewarm` under the jailer. The daemon's pool source is a Sandbox, so its bundle carries a
+    // private disk, and every jailed clone stages that disk into its chroot; a staging regression
+    // there once killed every jailed pool build while the unjailed suite and the vmm-level
+    // shared-base pool test both stayed green. This is the missing gate.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping a_jailed_daemon_serves_prewarmed_opens: {why}");
+        return;
+    }
+    if !test_support::have_real_root() {
+        eprintln!(
+            "skipping a_jailed_daemon_serves_prewarmed_opens: needs real root (the jailer mknods \
+             device nodes)"
+        );
+        return;
+    }
+    let (_daemon, socket) = launch_daemon_opts(Some(1), None, true);
+
+    let mut client = Client::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
+    if let Err(e) = client.set_read_timeout(Some(Duration::from_secs(45))) {
+        panic!("set read timeout: {e}");
+    }
+    let opened = client
+        .open(OpenOptions::default())
+        .unwrap_or_else(|e| panic!("open: {e}"));
+    assert!(
+        opened.pooled,
+        "a bare open on a jailed --prewarm daemon must come from the pool; `pooled: false` means \
+         the jailed pool build failed and the daemon silently fell back to cold boots"
+    );
+    let run = client
+        .exec(&["echo".to_string(), "confined-warm".to_string()], "")
+        .unwrap_or_else(|e| panic!("exec: {e}"));
+    assert_eq!(
+        run.stdout, "confined-warm\n",
+        "the jailed pooled session execs"
+    );
     client.close().unwrap_or_else(|e| panic!("close: {e}"));
 }

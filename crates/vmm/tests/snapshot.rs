@@ -411,6 +411,65 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
 
 #[test]
 #[ignore = "needs /dev/kvm + real root + the jailer + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
+fn restores_a_private_disk_snapshot_under_the_jailer() {
+    // The daemon's `--prewarm` shape, distinct from the shared-base test above: a `Sandbox` pool
+    // source copies its rootfs per-VM into the workdir, so its bundle carries a **private** disk
+    // and every jailed clone *stages* that disk into the chroot instead of bind-mounting a shared
+    // base. Regression: the staging leaf used to be pre-created along with the traversal chain
+    // (default 0755), which the 0700 privacy check then refused, so every jailed private-disk
+    // restore failed and a jailed daemon could never keep a pool.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping restores_a_private_disk_snapshot_under_the_jailer: needs real root (euid 0)"
+        );
+        return;
+    }
+    let bundle = TmpDir::new("snap-jailed-private");
+    // The daemon's base config leaves `read_only_root` off, so its Sandbox source carries a
+    // per-VM rootfs copy inside the workdir: that is what makes the bundle a private disk. The
+    // shared test config turns it on (for the overlay tests), so switch it off here or this
+    // test silently drifts onto the shared-base branch the previous test already covers.
+    let mut source_cfg = guest_rootfs_config();
+    source_cfg.read_only_root = false;
+    let source = vmm::Sandbox::open_unjailed(source_cfg).expect("pool source should boot");
+    let snap = source.snapshot(bundle.path()).expect("snapshot the source");
+    source.shutdown().expect("source shutdown");
+    assert!(
+        !snap.shared_base(),
+        "a Sandbox source must yield a private-disk bundle, or this test no longer covers the \
+         daemon's staging path"
+    );
+
+    let mut cfg = guest_rootfs_config();
+    cfg.jail = Some(Jail::default());
+    let clone = Vm::restore(&snap, &cfg).expect("jailed private-disk restore should resume");
+    let out = clone
+        .exec(&["echo".into(), "confined-private".into()], b"")
+        .expect("exec on the jailed private-disk clone");
+    assert_eq!(
+        out.stdout,
+        b"confined-private\n",
+        "clone should serve execs; console:\n{}",
+        clone.console()
+    );
+    assert_eq!(out.exit_code, 0);
+    clone.shutdown().expect("clone shutdown");
+
+    // And pooled, the daemon's actual consumer of this path.
+    let mut pool = Pool::new(snap, cfg, 2).expect("jailed private-disk pool should prefill");
+    assert_eq!(pool.ready(), 2, "both private-disk clones should be pooled");
+    let vm = pool.take().expect("take a confined clone");
+    let out = vm
+        .exec(&["echo".into(), "pooled".into()], b"")
+        .expect("exec on the pooled clone");
+    assert_eq!(out.stdout, b"pooled\n");
+    assert_eq!(out.exit_code, 0);
+    vm.shutdown().expect("pooled clone shutdown");
+    pool.shutdown();
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn restored_clone_cpu_cap_follows_the_snapshot_not_the_config() {
     // The `cpu.max` a jailed restore re-applies must come from the snapshot's **recorded** vCPU
     // count, the clone's true parallelism, since the vCPUs come from the snapshot state (restore

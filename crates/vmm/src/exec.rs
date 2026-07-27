@@ -52,17 +52,84 @@ pub(crate) const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
 /// deadline for a legitimate timeout; the host fires only when the guest fails to report.
 pub(crate) const EXEC_KILL_SLACK: Duration = Duration::from_secs(5);
 
+/// Cap on the **dial-retry window** in [`connect_agent_at`]. Peer closes during establishment are
+/// observed at millisecond scale (whatever their exact trigger; see the retry loop's comment), so
+/// a brief window absorbs them, while capping *below* the caller's full timeout keeps a genuinely
+/// dead agent from burning a 35s exec wall per request: today's fail-in-milliseconds becomes
+/// fail-in-≤2s, not fail-in-35s.
+const DIAL_RETRY_CAP: Duration = Duration::from_secs(2);
+
 /// Dial Firecracker's vsock socket, speak the `CONNECT <port>` handshake, and complete the channel
 /// handshake, the whole host side of reaching the guest agent. Factored out of
 /// [`RunningVm::connect_agent`] so it can be tested against a fake vsock socket without a VM.
+///
+/// A peer close during establishment (any face of it: EPIPE writing `CONNECT`, EOF before the
+/// ack, EOF in the channel handshake) is retried within `min(timeout, DIAL_RETRY_CAP)`: the
+/// condition is observed transient in practice, and its exact trigger is not pinned down (the
+/// guest kernel queues pending vsock dials, so it is *not* simply the agent being between
+/// accepts), so this is deliberate symptom-level hardening: one request-scale race must not kill
+/// a whole session. Exhaustion returns the last [`VmmError::GuestUnavailable`]. Per-attempt
+/// connect/ack deadlines and the successful stream's read/write timeouts all stay the caller's
+/// full `timeout` (the exec loop's per-read idle timer rides on them), so the worst case is
+/// ~`timeout + DIAL_RETRY_CAP` when the final attempt hangs.
 pub(crate) fn connect_agent_at(
     uds: &Path,
     port: u32,
     timeout: Duration,
 ) -> Result<ClientConnection<UnixStream>, VmmError> {
+    let retry_deadline = Instant::now() + timeout.min(DIAL_RETRY_CAP);
+    let mut backoff = crate::spawn::PollBackoff::new();
+    loop {
+        match connect_agent_once(uds, port, timeout) {
+            Ok(conn) => return Ok(conn),
+            Err(e @ VmmError::GuestUnavailable(_)) if Instant::now() < retry_deadline => {
+                tracing::debug!(error = %e, "vsock dial failed transiently; retrying");
+                backoff.sleep();
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// One dial attempt, no retry: the body [`connect_agent_at`] loops over, and what
+/// [`RunningVm::probe_agent`] uses directly, a pool health check must discard a dead clone
+/// (instant ECONNREFUSED on its stale socket) in microseconds, not spend a retry window on a
+/// corpse; an *idle healthy* clone is parked in `accept()`, so the probe needs no retry.
+pub(crate) fn connect_agent_once(
+    uds: &Path,
+    port: u32,
+    timeout: Duration,
+) -> Result<ClientConnection<UnixStream>, VmmError> {
     let stream = vsock_connect(uds, port, timeout)?;
-    ClientConnection::connect(stream)
-        .map_err(|e| VmmError::Vmm(format!("channel handshake over vsock: {e}")))
+    ClientConnection::connect(stream).map_err(|e| {
+        let detail = format!("channel handshake over vsock: {e}");
+        // A peer close mid-handshake is the same transient "not serving right now" condition as a
+        // close during CONNECT, typed retryable; anything else (bad magic, a mismatched agent) is
+        // a permanent fault, and retrying it would only mislabel it as unavailability.
+        if channel_err_is_disconnect(&e) {
+            VmmError::GuestUnavailable(format!("{detail} (is the guest agent listening?)"))
+        } else {
+            VmmError::Vmm(detail)
+        }
+    })
+}
+
+/// Whether an io error kind is a peer disconnect (EPIPE / ECONNRESET / EOF), the shared predicate
+/// behind [`send_was_disconnect`] and the establishment-phase retryable classification.
+fn is_disconnect(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+/// [`is_disconnect`] over a [`ChannelError`]: `Io` with a disconnect kind. `Protocol` and every
+/// other (current or future, the enum is `#[non_exhaustive]`) variant reads as **not** a
+/// disconnect, so unknown failures default to permanent rather than silently retried.
+fn channel_err_is_disconnect(e: &ChannelError) -> bool {
+    matches!(e, ChannelError::Io(io) if is_disconnect(io.kind()))
 }
 
 /// Drive one exec over an established [`ClientConnection`]: send the request, then aggregate the
@@ -105,16 +172,7 @@ fn wire_timeout_ms(timeout: Duration) -> u32 {
 /// local write timeout leaves the guest healthy and awaiting a request: for those, reading back would
 /// just park for the full socket read timeout, so the caller surfaces the send error directly.
 fn send_was_disconnect(err: &VmmError) -> bool {
-    matches!(
-        err,
-        VmmError::Channel(ChannelError::Io(e))
-            if matches!(
-                e.kind(),
-                std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::UnexpectedEof
-            )
-    )
+    matches!(err, VmmError::Channel(e) if channel_err_is_disconnect(e))
 }
 
 pub(crate) fn run_exec<S: Read + Write>(
@@ -303,8 +361,17 @@ fn vsock_connect(uds: &Path, port: u32, timeout: Duration) -> Result<UnixStream,
         .and_then(|()| stream.set_write_timeout(Some(timeout)))
         .map_err(|e| VmmError::Vmm(format!("set vsock timeouts: {e}")))?;
 
-    writeln!(stream, "CONNECT {port}")
-        .map_err(|e| VmmError::Vmm(format!("vsock CONNECT {port}: {e}")))?;
+    writeln!(stream, "CONNECT {port}").map_err(|e| {
+        let detail = format!("vsock CONNECT {port}: {e}");
+        // EPIPE/ECONNRESET here is the write-side face of the same peer-close the ack read sees
+        // as EOF: which one lands is a timing coin-flip, so both must classify retryable, or the
+        // dial-retry seam only heals half the race.
+        if is_disconnect(e.kind()) {
+            VmmError::GuestUnavailable(format!("{detail} (is the guest agent listening?)"))
+        } else {
+            VmmError::Vmm(detail)
+        }
+    })?;
     read_connect_ack(&mut stream, port)?;
     Ok(stream)
 }
@@ -346,6 +413,12 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
                 return Err(VmmError::Timeout(format!(
                     "vsock CONNECT {port}: no ack before deadline"
                 )))
+            }
+            Err(e) if is_disconnect(e.kind()) => {
+                // A reset mid-ack: the same peer-close as the EOF arm above, same retryable type.
+                return Err(VmmError::GuestUnavailable(format!(
+                    "vsock CONNECT {port}: {e} (is the guest agent listening?)"
+                )));
             }
             Err(e) => return Err(VmmError::Vmm(format!("vsock CONNECT {port}: {e}"))),
         }
@@ -393,6 +466,155 @@ mod tests {
             let _ = serve_session(stream, &std::env::temp_dir().join("agent-session-test"));
         });
         (dir, uds, handle)
+    }
+
+    /// Where a flaky fake peer closes each of its first `drops` connections, modeling the faces of
+    /// a peer close during establishment the dial retry must absorb.
+    enum DropPhase {
+        /// Close the instant the connection is accepted (the host sees EPIPE on the CONNECT write
+        /// or EOF before the ack, timing's choice).
+        BeforeAck,
+        /// Answer `OK`, then close before the channel handshake.
+        AfterAck,
+    }
+
+    /// A [`fake_vsock_agent`] that drops its first `drops` connections at `phase`, then serves the
+    /// real agent on the next one: the regression harness for the establishment retry.
+    fn flaky_vsock_agent(
+        tag: &str,
+        drops: usize,
+        phase: DropPhase,
+    ) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>) {
+        use std::os::unix::net::UnixListener;
+        let dir = ScratchDir::created(tag);
+        let uds = dir.path().join(VSOCK_UDS);
+        let listener = UnixListener::bind(&uds).expect("bind fake vsock");
+        let handle = std::thread::spawn(move || {
+            for _ in 0..drops {
+                let (mut stream, _) = listener.accept().expect("accept doomed dial");
+                if matches!(phase, DropPhase::AfterAck) {
+                    let mut b = [0u8; 1];
+                    loop {
+                        stream.read_exact(&mut b).expect("read CONNECT");
+                        if b[0] == b'\n' {
+                            break;
+                        }
+                    }
+                    stream.write_all(b"OK 10000\n").expect("write ack");
+                }
+                drop(stream); // the peer-close under test
+            }
+            let (mut stream, _) = listener.accept().expect("accept the surviving dial");
+            let mut b = [0u8; 1];
+            loop {
+                stream.read_exact(&mut b).expect("read CONNECT");
+                if b[0] == b'\n' {
+                    break;
+                }
+            }
+            stream.write_all(b"OK 10000\n").expect("write ack");
+            let _ = serve_session(stream, &std::env::temp_dir().join("agent-session-test"));
+        });
+        (dir, uds, handle)
+    }
+
+    #[test]
+    fn connect_retries_through_dropped_dials() {
+        // A peer close before the ack must not kill the caller (in the daemon: the session): the
+        // dial retries within its window and the request proceeds on the surviving connection.
+        let (_dir, uds, server) =
+            flaky_vsock_agent("agent-vsock-flaky-preack", 2, DropPhase::BeforeAck);
+        let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5))
+            .expect("retry through two dropped dials");
+        let result = run_exec(
+            &mut conn,
+            &["echo", "survived"],
+            b"",
+            &[],
+            &[],
+            &[],
+            ExecBounds {
+                timeout: Duration::from_secs(5),
+                wall: Duration::from_secs(30),
+                max_output: MAX_EXEC_OUTPUT,
+            },
+        )
+        .expect("exec after the retried dial");
+        assert_eq!(result.stdout, b"survived\n");
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn connect_retries_through_a_handshake_close() {
+        // The other face: the ack arrives but the peer closes before the channel handshake. Same
+        // transient condition, same retry, previously a fatal `Vmm` error.
+        let (_dir, uds, server) =
+            flaky_vsock_agent("agent-vsock-flaky-postack", 2, DropPhase::AfterAck);
+        let conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5));
+        assert!(
+            conn.is_ok(),
+            "a post-ack close is retryable, not fatal: {:?}",
+            conn.err()
+        );
+        drop(conn);
+        server.join().expect("server thread");
+    }
+
+    #[test]
+    fn a_dead_peer_is_a_bounded_guest_unavailable() {
+        // A peer that never serves: the retry window must expire with the typed retryable error,
+        // within the documented bound (~timeout + retry cap), never hang.
+        use std::os::unix::net::UnixListener;
+        let dir = ScratchDir::created("agent-vsock-dead");
+        let uds = dir.path().join(VSOCK_UDS);
+        let listener = UnixListener::bind(&uds).expect("bind fake vsock");
+        let dead = std::thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((stream, _)) => drop(stream),
+                Err(_) => return,
+            }
+        });
+        let window = Duration::from_millis(300);
+        let started = Instant::now();
+        let err = connect_agent_at(&uds, VSOCK_PORT, window)
+            .map(|_| ())
+            .expect_err("an always-closing peer must fail");
+        let elapsed = started.elapsed();
+        assert!(
+            matches!(err, VmmError::GuestUnavailable(_)),
+            "exhaustion surfaces the retryable variant: {err}"
+        );
+        assert!(
+            elapsed < window * 4,
+            "the retry window is bounded (allowing the documented per-attempt looseness): {elapsed:?}"
+        );
+        drop(dead); // detached: the listener thread dies with the process
+    }
+
+    #[test]
+    fn a_single_shot_probe_fails_fast_on_a_dead_socket() {
+        // The pool's health check must discard a corpse in microseconds, not spend the dial-retry
+        // window on it: `connect_agent_once` (what `probe_agent` uses) never retries.
+        let dir = ScratchDir::created("agent-vsock-stale");
+        let uds = dir.path().join(VSOCK_UDS);
+        // A socket file nothing listens on: the SIGKILLed-clone shape (instant ECONNREFUSED).
+        {
+            use std::os::unix::net::UnixListener;
+            let _bound_then_dropped = UnixListener::bind(&uds).expect("bind then drop");
+        }
+        let started = Instant::now();
+        let err = connect_agent_once(&uds, VSOCK_PORT, PROBE_TIMEOUT)
+            .map(|_| ())
+            .expect_err("a dead socket must refuse");
+        assert!(
+            matches!(err, VmmError::GuestUnavailable(_)),
+            "a stale socket is the discard signal: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "no retry window is spent on a corpse: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

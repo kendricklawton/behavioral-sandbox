@@ -104,7 +104,13 @@ enum Cmd {
     /// makes it fast: ~4s vs ~17s), so it says the code compiles and lints, not that it works.
     Check,
     /// Privileged integration tests (KVM + eBPF), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
-    CiPrivileged,
+    CiPrivileged {
+        /// Run the test phase this many times (setup runs once): the release-readiness soak, so
+        /// "N consecutive clean privileged runs" is one command. Fails fast, naming the run that
+        /// broke.
+        #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
+        repeat: u32,
+    },
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
     /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
@@ -332,7 +338,7 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Ci => ci(),
         Cmd::Check => fast_check(),
-        Cmd::CiPrivileged => ci_privileged(),
+        Cmd::CiPrivileged { repeat } => ci_privileged(repeat),
         Cmd::Setup => setup(),
         Cmd::SelfHost { prefix, no_run } => selfhost::self_host(prefix, no_run),
         Cmd::Vendor { dir, verify } => {
@@ -691,7 +697,7 @@ fn fast_check() -> Result<()> {
 
 /// Booting a microVM and loading/attaching eBPF need `/dev/kvm` + elevated caps, so those tests are
 /// `#[ignore]`d and run only here, on a machine that has them.
-fn ci_privileged() -> Result<()> {
+fn ci_privileged(repeat: u32) -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
     }
@@ -803,14 +809,26 @@ fn ci_privileged() -> Result<()> {
     // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent prewarmed clones). Run
     // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
     // leak check. Real-VM integration is I/O-bound on boot anyway, so serial costs little.
-    cargo(&[
-        "test",
-        "--workspace",
-        "--locked",
-        "--",
-        "--ignored",
-        "--test-threads=1",
-    ])?;
+    // `--repeat N` loops only this phase (setup above ran once): the soak that makes "N
+    // consecutive clean runs" a single command, for chasing intermittent failures. Fail fast so
+    // the broken run's logs sit right above the error.
+    for run in 1..=repeat {
+        if repeat > 1 {
+            println!("\n== privileged run {run}/{repeat} ==");
+        }
+        cargo(&[
+            "test",
+            "--workspace",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .with_context(|| format!("privileged run {run}/{repeat} failed"))?;
+        if repeat > 1 {
+            println!("privileged run {run}/{repeat}: ok");
+        }
+    }
     println!("\n✓ privileged integration passed");
     Ok(())
 }

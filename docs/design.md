@@ -165,3 +165,46 @@ Audit logs captured by `probes-loader` record all syscalls, network flows, and r
 
 ### 6. Versioned Newline-JSON Daemon Protocol
 The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals and allows polyglot SDKs to control eKVM instances cleanly.
+
+### 7. Synchronous Engine, No Async Runtime
+The driver and the daemon are **synchronous**: blocking I/O, one thread per session, no `tokio` or
+other executor anywhere in `vmm`, `channel`, or `ekvm serve`. This is a decision, not an accident of
+how the code grew, and it rests on three arguments.
+
+**Concurrency here is bounded by microVMs, not by sockets.** An async runtime earns its complexity
+when a process multiplexes many thousands of cheap, mostly-idle connections. A session's real cost
+is a whole Firecracker microVM holding hundreds of MiB of guest RAM, so the daemon's ceiling
+(`--max-sessions`, default 16, plus the committed-memory ceilings) is reached by host RAM long
+before thread stacks are worth a thought. Thread-per-session at this scale is free, and it keeps a
+stack trace readable end to end.
+
+**The dependency surface is a security property.** This engine's pitch is that a hoster can audit
+what runs untrusted code. `vmm` is `#![forbid(unsafe_code)]` with a deliberately small dependency
+graph gated by `cargo deny`; pulling an executor and its ecosystem into that crate would enlarge
+the supply-chain surface of exactly the component whose minimalism is the point.
+
+**Async swaps the bug catalog rather than emptying it.** Timing bugs come from concurrency, which
+this engine has either way. Going async trades abandoned threads and blocking-call hazards for
+cancellation-safety bugs, untracked `tokio::spawn` tasks (the same leak shape, one level up), and
+executor starvation, which are materially harder to observe than a thread count in `/proc` (the
+axis the boot soak's leak assertions actually watch). Bounding a blocking call needs care, not a
+runtime: `connect_with_timeout` does it with a non-blocking socket and a deadline, no thread and
+no executor.
+
+**What would change this decision.** Stated so the trade-off can be re-opened on evidence rather
+than on taste:
+
+- A credible need for hundreds to thousands of concurrent **idle** sessions (parked connections,
+  not running VMs), where per-thread stacks become the binding constraint.
+- Genuinely multiplexed daemon work: streaming exec output to many concurrent watchers, long-lived
+  event subscriptions, or a network-facing (rather than local-socket) protocol.
+- A profile showing thread-per-session as a **measured** bottleneck, per the measured-not-marketed
+  guardrail.
+
+None of these are on the roadmap, so the engine stays synchronous for the foreseeable future.
+
+**This does not constrain downstream.** Async is the right choice in plenty of places that consume
+this engine, and the architecture keeps them outside this repo: the polyglot SDKs (a Python SDK
+should ship an `async` variant, since the agent frameworks calling it are async) and any hoster's
+platform layer multiplexing many daemons. They speak the wire protocol, which is transport-agnostic
+and says nothing about how either side schedules its work.

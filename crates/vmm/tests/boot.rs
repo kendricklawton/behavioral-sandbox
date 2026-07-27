@@ -534,11 +534,25 @@ fn repeated_boots_leave_no_leaks() {
                 assert!(leaked.is_empty(), "netns leaked by cycle {i}: {leaked:?}");
             }
             assert_eq!(open_fds(), fds_before, "fds off baseline by cycle {i}");
-            assert_eq!(
-                process_threads(),
-                threads_before,
-                "threads off baseline by cycle {i}"
-            );
+            // Re-read once after a short settle before failing: a thread that has exited but not
+            // yet been reaped is a *measurement* race, not a leak, and the two must be told apart
+            // rather than papered over. A real leak survives the settle; the census then names it.
+            let threads_now = process_threads();
+            if threads_now != threads_before {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+                let settled = process_threads();
+                assert_eq!(
+                    settled,
+                    threads_before,
+                    "threads off baseline by cycle {i} (saw {threads_now}, still {settled} after \
+                     a 250ms settle, so this is a leak, not a reaping race)\n{}",
+                    thread_census()
+                );
+                eprintln!(
+                    "note: cycle {i} read {threads_now} threads vs baseline {threads_before}, \
+                     but settled to {settled} within 250ms: a thread mid-exit, not a leak"
+                );
+            }
         } else {
             vmm_pids.push(boot_exec_shutdown(net));
         }
@@ -585,8 +599,10 @@ fn repeated_boots_leave_no_leaks() {
         "fds must return to baseline after the soak"
     );
     assert_eq!(
-        threads_after, threads_before,
-        "threads must return to baseline after the soak"
+        threads_after,
+        threads_before,
+        "threads must return to baseline after the soak\n{}",
+        thread_census()
     );
 }
 
@@ -604,6 +620,74 @@ fn process_threads() -> usize {
                 .ok()
         })
         .unwrap_or(0)
+}
+
+/// A one-line-per-thread census of this process: `tid comm state wchan`. A bare count says a
+/// thread leaked but not *which*, and this leak is rare enough (one extra thread, seen twice, both
+/// times at the same checkpoint) that a failing run has to carry its own evidence: there is no
+/// re-running it under a debugger. `comm` names the owner (the driver's console readers are
+/// `agent-console`; an unnamed `boot-<n>` is the harness's own), `state` tells a live thread from
+/// one mid-exit (`Z`/`X` means the count is a reaping race, not a leak), and `wchan` names the
+/// call it is parked in (a leak stuck in `unix_stream_connect`, `pipe_read`, or `futex` each
+/// point at a different owner).
+fn thread_census() -> String {
+    let mut rows = Vec::new();
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return "<unreadable /proc/self/task>".to_string();
+    };
+    for task in tasks.flatten() {
+        let dir = task.path();
+        let tid = task.file_name().to_string_lossy().into_owned();
+        let read = |leaf: &str| {
+            std::fs::read_to_string(dir.join(leaf))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "?".into())
+        };
+        // `stat`'s third field is the state; the comm field before it can contain spaces, so split
+        // on the last ')' rather than on whitespace.
+        let stat = read("stat");
+        let state = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .unwrap_or("?")
+            .to_string();
+        rows.push(format!(
+            "  tid {tid} comm={:?} state={state} wchan={}",
+            read("comm"),
+            read("wchan")
+        ));
+    }
+    rows.sort();
+    rows.join("\n")
+}
+
+/// The census only ever runs on a failing soak, so a bug in it would surface exactly when the
+/// evidence matters most and is unreproducible. Host-safe (a `/proc` read, no KVM), so it runs in
+/// the everyday gate: a named live thread must appear, with a state and a `comm` that identify it.
+#[test]
+fn the_thread_census_names_a_live_thread() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    let parked = std::thread::Builder::new()
+        .name("census-canary".into())
+        .spawn(move || {
+            let _ = tx.send(());
+            let _ = done_rx.recv();
+        })
+        .expect("spawn the canary");
+    rx.recv().expect("canary started");
+
+    let census = thread_census();
+    assert!(
+        census.contains("census-canary"),
+        "the census must name a live thread by comm:\n{census}"
+    );
+    assert!(
+        census.contains("state=") && census.contains("wchan="),
+        "each row carries the state and wchan that tell a leak from a reaping race:\n{census}"
+    );
+    let _ = done_tx.send(());
+    parked.join().expect("canary joined");
 }
 
 /// Open fds in this process, counted through `/proc/self/fd`. The count includes the read itself

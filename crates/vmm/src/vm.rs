@@ -25,7 +25,8 @@ use channel::ClientConnection;
 use crate::console::Console;
 use crate::drives::{collect_output_image, OutputDevice};
 use crate::exec::{
-    connect_agent_at, run_exec, ExecBounds, EXEC_KILL_SLACK, PROBE_TIMEOUT, VSOCK_TIMEOUT,
+    connect_agent_at, connect_agent_once, run_exec, ExecBounds, EXEC_KILL_SLACK, PROBE_TIMEOUT,
+    VSOCK_TIMEOUT,
 };
 use crate::firecracker::{Action, ApiClient};
 use crate::jail::{remove_cgroup, Chroot, Jail};
@@ -450,6 +451,15 @@ impl Snapshot {
         &self.root_drive
     }
 
+    /// Whether the root disk is a **shared read-only base** referenced in place (restore
+    /// bind-mounts it, clones share one page cache) rather than a private per-VM copy the restore
+    /// stages at the baked-in path. The two modes take different jailed staging paths, so a test
+    /// or embedder sizing a pool can tell which one a bundle exercises.
+    #[must_use]
+    pub fn shared_base(&self) -> bool {
+        self.shared_base
+    }
+
     /// The source's vCPU count, what a clone restored from this bundle actually runs (the vCPUs
     /// come from the snapshot state, not the restoring config). A jailed restore's `cpu.max` is
     /// derived from this; exposed so an embedder sizing a pool can read a bundle's CPU envelope.
@@ -602,10 +612,11 @@ impl RunningVm {
     /// Connect to the in-guest agent over vsock and complete the channel handshake, returning a
     /// protocol-ready [`ClientConnection`]. This is the host side of the exec path (`exec` builds
     /// `exec` on top): it dials Firecracker's vsock socket, speaks the `CONNECT <port>` handshake,
-    /// sets read/write deadlines, then does the channel handshake.
+    /// sets read/write deadlines, then does the channel handshake. A peer close during
+    /// establishment is retried briefly (a bounded dial-retry window) before surfacing.
     /// # Errors
-    /// [`VmmError::GuestUnavailable`] if nothing is listening on `port` in the guest (not up yet, or
-    /// not anymore), the retryable case; [`VmmError::Vmm`] if the VM was booted without a
+    /// [`VmmError::GuestUnavailable`] if nothing answered on `port` within the dial-retry window
+    /// (not up yet, or not anymore); [`VmmError::Vmm`] if the VM was booted without a
     /// `guest_cid` or on any other I/O or channel failure; [`VmmError::Timeout`] if the connect
     /// exceeds the deadline.
     pub fn connect_agent(&self, port: u32) -> Result<ClientConnection<UnixStream>, VmmError> {
@@ -617,9 +628,11 @@ impl RunningVm {
     /// connect-and-close just cycles it). The prewarmed [`Pool`](crate::Pool)'s health check on a clone
     /// that has been sitting idle: a dead or wedged clone surfaces as a typed error, most
     /// specifically [`VmmError::GuestUnavailable`], so the pool can discard it and serve another.
-    /// Deliberately short-deadlined: an idle, healthy agent accepts immediately.
+    /// Deliberately short-deadlined **and single-shot** (no dial retry): an idle, healthy agent is
+    /// parked in `accept()` and answers first try, and a dead clone's stale socket must be
+    /// discarded in microseconds, not after a retry window spent on a corpse.
     pub(crate) fn probe_agent(&self) -> Result<(), VmmError> {
-        connect_agent_at(self.require_vsock()?, VSOCK_PORT, PROBE_TIMEOUT).map(|_| ())
+        connect_agent_once(self.require_vsock()?, VSOCK_PORT, PROBE_TIMEOUT).map(|_| ())
     }
 
     /// The Firecracker vsock socket, or a typed error naming the fix if the VM was booted without a
@@ -641,8 +654,9 @@ impl RunningVm {
     /// visible to the next, until the VM (and its overlay) is torn down.
     /// # Errors
     /// A typed [`VmmError`] across the taxonomy's three buckets: **establishment**,
-    /// [`VmmError::GuestUnavailable`] if the agent isn't listening (retryable), [`VmmError::Vmm`] if
-    /// the VM has no vsock, [`VmmError::Timeout`]
+    /// [`VmmError::GuestUnavailable`] if the agent didn't answer within the brief dial-retry
+    /// window (transient peer closes during establishment are retried before this surfaces),
+    /// [`VmmError::Vmm`] if the VM has no vsock, [`VmmError::Timeout`]
     /// on a stalled connect/ack; **steady-state transport**, [`VmmError::Channel`] on a mid-exec
     /// framing/IO fault; **guest fault**, [`VmmError::GuestExec`] if the agent couldn't run the
     /// command, [`VmmError::ExecTimeout`] if it outran its budget, [`VmmError::OutputCap`] if it

@@ -444,6 +444,98 @@ pub(crate) enum MemBackendType {
 mod tests {
     use super::*;
 
+    /// This process's thread count, the axis the boot soak's leak check asserts on.
+    fn process_threads() -> usize {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("Threads:"))?
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn a_refused_dial_keeps_its_errno_and_a_wedged_peer_times_out() {
+        use nix::sys::socket::{
+            bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, UnixAddr,
+        };
+        use std::os::fd::AsRawFd as _;
+        let dir = test_support::ScratchDir::created("fc-connect-wedged");
+
+        // No listener at all: callers classify `ConnectionRefused` as "nothing is accepting", so
+        // the non-blocking dial must still surface exactly that, not a timeout.
+        let missing = dir.path().join("absent.sock");
+        let err = connect_with_timeout(&missing, Duration::from_secs(1))
+            .expect_err("a missing socket must fail");
+        assert!(
+            matches!(
+                err.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ),
+            "the peer's own errno survives: {err} ({:?})",
+            err.kind()
+        );
+
+        // A listener that never accepts, with a 1-deep backlog: once it fills, further dials are
+        // the wedged-peer case, and the deadline (not a parked thread) is what ends them.
+        let wedged = dir.path().join("wedged.sock");
+        let addr = UnixAddr::new(&wedged).expect("addr");
+        let server = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+        .expect("server socket");
+        bind(server.as_raw_fd(), &addr).expect("bind");
+        listen(&server, Backlog::new(1).expect("backlog")).expect("listen");
+
+        // Hold every successful dial open so the backlog stays full.
+        let mut held = Vec::new();
+        let mut timed_out = None;
+        for _ in 0..64 {
+            match connect_with_timeout(&wedged, Duration::from_millis(150)) {
+                Ok(s) => held.push(s),
+                Err(e) => {
+                    timed_out = Some(e);
+                    break;
+                }
+            }
+        }
+        let err = timed_out.expect("a never-accepting listener must eventually refuse a dial");
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "a full backlog is the deadline's case, not an error passthrough: {err}"
+        );
+
+        // The leak this function was rewritten to close: the old implementation abandoned a
+        // thread parked in `connect` on every timeout, so a wedged peer (a hung Firecracker API
+        // socket) stranded one thread *and its fd* per dial, forever, with nothing to reap them.
+        // The backlog is full now, so each of these dials is that case. A few threads of drift
+        // from the parallel test harness are tolerable; sixteen are the bug.
+        const WEDGED_DIALS: usize = 16;
+        let threads_before = process_threads();
+        for _ in 0..WEDGED_DIALS {
+            assert!(
+                connect_with_timeout(&wedged, Duration::from_millis(20)).is_err(),
+                "the backlog is full; every further dial must time out"
+            );
+        }
+        let grew = process_threads().saturating_sub(threads_before);
+        assert!(
+            grew < WEDGED_DIALS / 2,
+            "timed-out dials stranded {grew} threads (of {WEDGED_DIALS} dials): a wedged peer \
+             must cost no threads"
+        );
+        drop(held);
+    }
+
     #[test]
     fn snapshot_timeout_scales_with_guest_ram_and_floors_at_the_base() {
         // A tiny guest still gets at least the base reply latency.
@@ -738,15 +830,61 @@ mod tests {
     }
 }
 
-/// Connect to a Unix domain socket with a deadline/timeout, so a wedged socket listener doesn't block.
+/// Connect to a Unix domain socket with a deadline, so a wedged listener is a typed timeout rather
+/// than a parked host thread.
+///
+/// **Thread-free by construction.** `std`'s `UnixStream::connect` blocks, so bounding it used to
+/// mean handing the connect to a throwaway thread and abandoning it on timeout: one detached,
+/// never-joined thread per dial (and this is called for *every* Firecracker API request and every
+/// exec dial), each stuck in `connect` for as long as the peer stayed wedged, holding its fd. A
+/// non-blocking socket needs no thread at all.
+///
+/// The retry loop is the AF_UNIX shape: for a unix socket, `connect` either completes or fails
+/// **immediately** (`ECONNREFUSED` with no listener, so the callers' "nothing is accepting"
+/// classification is unchanged), except when the listener's backlog is full, which a non-blocking
+/// socket reports as `EAGAIN` where a blocking one would have parked. That is precisely the
+/// wedged-peer case the deadline exists for, so it is retried until the deadline, then reported as
+/// a timeout. Each attempt uses a fresh socket: after a failed `connect` the socket's state is
+/// unspecified, so reusing it would be undefined-ish territory for the sake of one syscall.
 pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    let path = path.to_owned();
-    std::thread::spawn(move || {
-        let _ = tx.send(UnixStream::connect(path));
-    });
-    rx.recv_timeout(timeout)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "unix connect timed out"))?
+    use nix::errno::Errno;
+    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+    use std::os::fd::AsRawFd as _;
+
+    let addr = UnixAddr::new(path)?;
+    let deadline = Instant::now() + timeout;
+    let mut backoff = crate::spawn::PollBackoff::new();
+    loop {
+        // `SOCK_CLOEXEC` matches what `UnixStream::connect` sets: without it every socket would
+        // leak into the Firecracker/jailer children this driver spawns.
+        let fd = socket(
+            AddressFamily::Unix,
+            SockType::Stream,
+            SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+            None,
+        )?;
+        match connect(fd.as_raw_fd(), &addr) {
+            Ok(()) => {
+                let stream = UnixStream::from(fd);
+                // The callers drive blocking reads/writes under their own `SO_RCVTIMEO`, so hand
+                // back a blocking stream: non-blocking was an implementation detail of the dial.
+                stream.set_nonblocking(false)?;
+                return Ok(stream);
+            }
+            // Backlog full (the wedged peer) or an interrupted call: both retryable within the
+            // deadline. Any other errno is the peer's real answer, surfaced immediately.
+            Err(Errno::EAGAIN | Errno::EINPROGRESS | Errno::EINTR) => {}
+            Err(e) => return Err(e.into()),
+        }
+        drop(fd);
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "unix connect timed out",
+            ));
+        }
+        backoff.sleep();
+    }
 }
 
 /// Configures Firecracker's `/logger` API endpoint.

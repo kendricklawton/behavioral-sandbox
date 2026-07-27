@@ -10,6 +10,7 @@
 //! models or a matching CPU template.
 
 use std::path::Path;
+use std::time::Duration;
 
 use crate::firecracker::{
     snapshot_api_timeout, SnapshotCreate, SnapshotType, VmState, VmStateKind,
@@ -18,6 +19,11 @@ use crate::paths::{absolute, path_str, require_file};
 use crate::spawn::Spawned;
 use crate::vm::{BootConfig, RunningVm, Snapshot, Vm};
 use crate::VmmError;
+
+/// How long a snapshot waits for the guest agent to answer again after the resume. The guest
+/// re-arms its vsock listener within milliseconds of resuming; this bound exists so a guest that
+/// died under the pause surfaces as a typed timeout, not an exec that burns its whole wall.
+const AGENT_RESUME_WAIT: Duration = Duration::from_secs(10);
 
 impl Vm {
     /// Restore a microVM from a [`Snapshot`] on a fresh VMM and resume it, returning once it's
@@ -101,6 +107,9 @@ impl Vm {
 impl RunningVm {
     /// Pause the VM, write a [`Snapshot`] bundle (device + vCPU state, guest memory, and the root
     /// disk) into `dir`, then resume, the VM keeps running and can be shut down or snapshotted again.
+    /// For a vsock VM, returning also means the guest agent answers again (Firecracker drops every
+    /// vsock connection at create, and the guest re-arms its listener only after the resume), so
+    /// the next `exec` cannot race that window.
     ///
     /// A **read-write** boot's disk is copied into the bundle **inside the paused window**, so the copy
     /// agrees with the memory image; a **`read_only_root`** boot (a prewarmed snapshot) references the shared
@@ -215,6 +224,29 @@ impl RunningVm {
                  drop it (teardown reaps it) rather than reusing this handle"
             );
             return Err(e);
+        }
+        // Firecracker closes every vsock connection at snapshot creation, and the guest re-arms
+        // its listener only after the resume: an exec issued the instant this returns can race
+        // that window and die mid-handshake. Wait until the agent answers again (the promise
+        // `Vm::restore` already keeps), so returning means the session is still exec-ready. The
+        // bundle on disk is complete either way; a timeout here is the *session* wedged, and the
+        // error says so.
+        if self.vsock_uds.is_some() {
+            let deadline = std::time::Instant::now() + AGENT_RESUME_WAIT;
+            let mut backoff = crate::spawn::PollBackoff::new();
+            loop {
+                match self.probe_agent() {
+                    Ok(()) => break,
+                    Err(e) if std::time::Instant::now() >= deadline => {
+                        return Err(VmmError::Timeout(format!(
+                            "guest agent not reachable after snapshot resume (the bundle at {} is \
+                             complete; this session VM is wedged): {e}",
+                            dir.display()
+                        )));
+                    }
+                    Err(_) => backoff.sleep(),
+                }
+            }
         }
         tracing::info!(dir = %dir.display(), shared_base, "wrote microVM snapshot bundle");
         Ok(Snapshot {

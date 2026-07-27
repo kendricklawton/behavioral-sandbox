@@ -19,6 +19,13 @@ sha2 = { workspace = true }
 tracing = { workspace = true }
 # The host↔guest exec channel: the driver speaks the shared protocol over Firecracker's vsock.
 channel = { path = "../channel" }
+# A **deadline-bounded** unix-socket connect. `std` only offers a blocking `UnixStream::connect`,
+# so bounding it used to mean a detached thread per dial (never joined, and stuck forever if the
+# peer's backlog stayed full): a real thread/fd leak on a wedged VMM. A non-blocking socket plus a
+# retry loop needs no thread, and nix's socket calls are *safe* functions, so the driver stays
+# `#![forbid(unsafe_code)]` (the same reasoning that put nix in `probes-loader` for `setns`).
+# Pinned to the 0.31 the workspace already carries so the build links one copy.
+nix = { version = "0.31", default-features = false, features = ["socket"] }
 
 [dev-dependencies]
 # The round-trip channel test runs the real guest agent behind a fake vsock socket, no VM needed.
