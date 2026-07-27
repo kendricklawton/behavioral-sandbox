@@ -110,7 +110,7 @@ fn launch_daemon_opts(
 ) -> (Daemon, PathBuf) {
     let root = workspace_root();
     let dir = std::env::temp_dir().join(format!(
-        "agent-e2e-{}-{:?}-{}",
+        "ekvm-e2e-{}-{:?}-{}",
         std::process::id(),
         prewarm,
         if jailed { "jailed" } else { "unjailed" }
@@ -595,4 +595,69 @@ fn a_jailed_daemon_serves_prewarmed_opens() {
         "the jailed pooled session execs"
     );
     client.close().unwrap_or_else(|e| panic!("close: {e}"));
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn cancel_reclaims_a_session_wedged_in_a_long_exec() {
+    // The one verb legal while a request is in flight. Without it a client blocked in a long `exec`
+    // has no way to reach the daemon: hanging up works, but the session thread stays inside
+    // `exec` until the wall budget lapses, holding its `--max-sessions` slot and the guest's RAM.
+    // Here the exec would run 60s; the cancel must end it in a small fraction of that.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping cancel_reclaims_a_session_wedged_in_a_long_exec: {why}");
+        return;
+    }
+    let (_daemon, socket) = launch_daemon(None, None);
+
+    let mut stream = UnixStream::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
+    // A second handle so the cancel can be written while the first is blocked awaiting the reply,
+    // which is exactly the shape a real SDK needs (the blocked call owns the connection).
+    let mut canceller = stream
+        .try_clone()
+        .unwrap_or_else(|e| panic!("clone the connection: {e}"));
+
+    // A generous session budget so the *exec*, not the wall clock, is what cancel interrupts.
+    writeln!(stream, r#"{{"schema":1,"op":"open","wall_secs":120}}"#)
+        .unwrap_or_else(|e| panic!("send open: {e}"));
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .unwrap_or_else(|e| panic!("clone for reading: {e}")),
+    );
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .unwrap_or_else(|e| panic!("read the open reply: {e}"));
+    assert!(
+        line.contains(r#""reply":"opened""#),
+        "expected an opened reply, got {line}"
+    );
+
+    writeln!(
+        stream,
+        r#"{{"schema":1,"op":"exec","argv":["sleep","60"]}}"#
+    )
+    .unwrap_or_else(|e| panic!("send exec: {e}"));
+
+    // Let the exec actually reach the guest, so this cancels a *running* command rather than
+    // racing the daemon before it dispatches.
+    std::thread::sleep(Duration::from_secs(2));
+    let started = Instant::now();
+    writeln!(canceller, r#"{{"schema":1,"op":"cancel"}}"#)
+        .unwrap_or_else(|e| panic!("send cancel: {e}"));
+
+    line.clear();
+    reader
+        .read_line(&mut line)
+        .unwrap_or_else(|e| panic!("read the cancel reply: {e}"));
+    let elapsed = started.elapsed();
+    assert!(
+        line.contains(r#""reply":"cancelled""#),
+        "expected a cancelled reply, got {line}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "cancel should end a 60s exec promptly, took {elapsed:?}"
+    );
 }

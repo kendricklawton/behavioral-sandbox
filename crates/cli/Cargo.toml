@@ -34,6 +34,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # `ekvm`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
 # Already in the dependency tree transitively (crossterm), so no new crate enters the tree.
+# A **non-destructive** readability check on the session socket, so the daemon can notice a
+# `cancel` (or a hang-up) while an exec is in flight. `UnixStream::peek` is still unstable, and
+# nix's `recv(MSG_PEEK)` is a *safe* function, so the CLI needs no `unsafe` (the same reasoning
+# that put nix in `vmm` for a bounded connect and `probes-loader` for `setns`). Already in the
+# tree via `vmm`, so no new crate enters it.
+nix = { version = "0.31", default-features = false, features = ["socket"] }
 signal-hook = "0.3"
 toml = { workspace = true }
 tracing.workspace = true

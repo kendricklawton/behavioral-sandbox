@@ -30,7 +30,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use protocol::{read_message, write_message, ProtocolError, Request, Response};
+use protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
 
 /// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]
@@ -41,10 +41,12 @@ pub enum ClientError {
     /// `fatal` mirrors the daemon's meaning, `true` means the session is gone (reconnect), `false`
     /// is a per-request fault the session survived.
     Remote {
-        /// The daemon's human-readable reason.
+        /// The daemon's human-readable reason. For display and logs; branch on `kind`.
         message: String,
         /// Whether the session ended (the sandbox is gone).
         fatal: bool,
+        /// Which layer faulted, so a caller decides what to do without parsing `message`.
+        kind: FaultKind,
     },
     /// The daemon refused because it is **at capacity** (an [`AtCapacity`](Response::AtCapacity)
     /// reply): backpressure, distinct from a request fault, so a dispatcher fails over to another host
@@ -63,8 +65,12 @@ impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientError::Protocol(e) => write!(f, "{e}"),
-            ClientError::Remote { message, fatal } => {
-                write!(f, "daemon error (fatal={fatal}): {message}")
+            ClientError::Remote {
+                message,
+                fatal,
+                kind,
+            } => {
+                write!(f, "daemon error ({kind:?}, fatal={fatal}): {message}")
             }
             ClientError::AtCapacity { retry_after_ms } => {
                 write!(f, "daemon at capacity (retry after {retry_after_ms}ms)")
@@ -100,8 +106,9 @@ pub struct OpenOptions {
     pub mem_mib: Option<u32>,
     /// Wall-clock budget in seconds (>= 1); `None` keeps the default 30.
     pub wall_secs: Option<u64>,
-    /// Aggregate captured-output cap in bytes; `None` keeps the default 16 MiB.
-    pub output_cap: Option<usize>,
+    /// Aggregate captured-output cap in bytes; `None` keeps the default 16 MiB. `u64` to match
+    /// the wire, whose width cannot depend on the caller's pointer size.
+    pub output_cap: Option<u64>,
 }
 
 /// What [`Client::open`] returns: the sandbox booted.
@@ -293,6 +300,26 @@ impl Client {
         }
     }
 
+    /// Abandon an in-flight request and end the session, acknowledged with `Cancelled`.
+    ///
+    /// The only verb legal while another request is outstanding, which means the only one worth
+    /// sending from a *second* thread: a caller blocked in [`exec`](Self::exec) holds `&mut self`,
+    /// so cancelling a running command means writing to a cloned socket handle rather than calling
+    /// this. Called between requests it is a protocol error, since nothing is in flight.
+    ///
+    /// **This ends the session; it does not abort one command.** Cancelling kills the sandbox, so
+    /// session state is gone. Snapshot first if it matters.
+    ///
+    /// # Errors
+    /// [`ClientError`] on a decode fault or a remote error.
+    pub fn cancel(&mut self) -> Result<(), ClientError> {
+        self.send(&Request::Cancel)?;
+        match self.recv()? {
+            Response::Cancelled => Ok(()),
+            other => Err(unexpected(other)),
+        }
+    }
+
     /// Send one request line, stamped with the wire schema.
     fn send(&mut self, req: &Request) -> Result<(), ClientError> {
         write_message(&mut self.writer, req).map_err(ClientError::Protocol)
@@ -305,7 +332,15 @@ impl Client {
     fn recv(&mut self) -> Result<Response, ClientError> {
         match read_message::<Response>(&mut self.reader)? {
             None => Err(ClientError::Closed),
-            Some(Response::Error { message, fatal }) => Err(ClientError::Remote { message, fatal }),
+            Some(Response::Error {
+                message,
+                fatal,
+                kind,
+            }) => Err(ClientError::Remote {
+                message,
+                fatal,
+                kind,
+            }),
             Some(Response::AtCapacity { retry_after_ms }) => {
                 Err(ClientError::AtCapacity { retry_after_ms })
             }

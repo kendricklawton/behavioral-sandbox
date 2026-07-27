@@ -3,6 +3,23 @@
 //! leading [`schema`](Envelope::schema) field, so the two sides agree on the shape before either
 //! trusts the other's bytes.
 //!
+//! **Compatibility: fields grow, values grow, replies do not.** The rule set every SDK must
+//! implement, stated here because each one reimplements these shapes without serde and would
+//! otherwise each invent its own answer (`docs/daemon.md` "Compatibility rules" is the same
+//! statement for a non-Rust reader):
+//!
+//! 1. **Unknown fields are ignored.** A message may gain a field within a `schema`, so decoding
+//!    must not reject an object for carrying something extra. This is how the wire evolves without
+//!    a version bump, and it is why no message type here sets `deny_unknown_fields`.
+//! 2. **An unknown `reply` is a hard error.** Deliberately the opposite of rule 1: the protocol is
+//!    strict request/response, so a reply that cannot be interpreted means the client has lost
+//!    track of what is being answered, and skipping it would silently desynchronize the session
+//!    rather than lose one message. Growing the reply set is a [`WIRE_SCHEMA`] bump.
+//! 3. **An unknown enumerated *value* degrades.** A value carries no framing, so an unfamiliar one
+//!    can map to a conservative default without losing sync. [`FaultKind`] is the case that
+//!    exists: it decodes to [`Unknown`](FaultKind::Unknown), read as
+//!    [`Infra`](FaultKind::Infra).
+//!
 //! **This is the SDK contract seed.** It is the one artifact the daemon
 //! ([`ekvm serve`](../ekvm/index.html)), the reference client (`client`), and the eventual
 //! polyglot SDKs all share, so it lives in its own **`vmm`-free** crate: the wire is the
@@ -71,8 +88,13 @@ pub struct Envelope<T> {
 /// `{"schema":1,"op":"exec","argv":["echo","hi"]}`, self-describing and hand-writable. The verb set
 /// is the versioned lifecycle:
 /// `open` → (`exec` | `put` | `get` | `snapshot` | `trace` | `trace_summary`)\* → `close`.
+///
+/// `#[non_exhaustive]`: a Rust peer must keep a catch-all arm, so adding a verb is not a source
+/// break for it. That says nothing about the *wire*, where an unknown `op` is still a hard decode
+/// error; growing the verb set is a schema-level decision, this only keeps the Rust half honest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Request {
     /// Open the connection's sandbox, the first message of a session (the VM *is* the session). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
     /// is the daemon's launch-time choice, never a client's, so a caller can't downgrade the jail.
@@ -89,8 +111,12 @@ pub enum Request {
         #[serde(default)]
         wall_secs: Option<u64>,
         /// Aggregate captured-output cap in bytes; omitted keeps the default 16 MiB.
+        ///
+        /// `u64`, not `usize`: this is a wire value a 32-bit client and a 64-bit daemon must agree
+        /// on, so its width cannot depend on whose pointer is being counted. The daemon clamps it
+        /// to its own `usize` on the way in.
         #[serde(default)]
-        output_cap: Option<usize>,
+        output_cap: Option<u64>,
     },
     /// Run one command in the open sandbox, feeding `stdin` (UTF-8 text) to it. Repeated `exec`s
     /// share the session's working directory.
@@ -138,11 +164,34 @@ pub enum Request {
     /// End the session: tear the sandbox down and close the connection. Dropping the connection
     /// without this does the same teardown; `close` just makes it explicit and acknowledged.
     Close,
+    /// Abandon an **in-flight** request and end the session now, answered with
+    /// [`Response::Cancelled`].
+    ///
+    /// The one verb legal while another request is outstanding: every other verb is a protocol
+    /// violation until its predecessor is answered. It exists because a client blocked on a long
+    /// [`Exec`](Self::Exec) has no other way to reach the daemon.
+    ///
+    /// **This ends the session, it does not abort one command.** The engine cancels a running exec
+    /// by killing the sandbox (the guest dies, the exec channel closes, the blocked call returns),
+    /// so there is no "stop this command, keep my VM" to expose. Session state dies with it; a
+    /// caller who wants it must `snapshot` before the exec it may cancel.
+    ///
+    /// Sending nothing and simply hanging up has the same effect, but the daemon cannot notice
+    /// until the in-flight request finishes on its own, so the sandbox holds its `--max-sessions`
+    /// slot and its guest RAM for up to the session's remaining wall budget. `cancel` reclaims both
+    /// immediately and is acknowledged.
+    Cancel,
 }
 
 /// A daemon → client message. Internally tagged by a `reply` field.
+///
+/// `#[non_exhaustive]`: a Rust client must keep a catch-all arm, so a daemon that grows a reply is
+/// not a source break for it. The *wire* is stricter: an unknown `reply` is still a hard decode
+/// error, so adding one remains a schema-level decision (unlike [`FaultKind`], which degrades to
+/// [`Unknown`](FaultKind::Unknown) on purpose).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Response {
     /// The sandbox booted; carries its boot-to-userspace latency and whether it came from the
     /// pre-warmed pool (a fast `open`) or a cold boot.
@@ -205,16 +254,26 @@ pub enum Response {
     },
     /// The session ended cleanly (acknowledging a [`Request::Close`]).
     Closed,
+    /// The in-flight request was abandoned and the sandbox torn down, acknowledging a
+    /// [`Request::Cancel`]. Always the connection's last message. Whatever the cancelled request
+    /// had produced is discarded: there is no partial [`Result`](Self::Result).
+    Cancelled,
     /// The request could not be served: a malformed message, a boot/channel failure, or a guest
     /// fault. `fatal` distinguishes a session-ending failure (the sandbox is gone, reconnect) from
     /// a per-request one the session survives (e.g. a command that couldn't spawn).
     Error {
         /// A human-readable reason (never carries injected secrets, an engine `VmmError` rendering
-        /// may name a path or an env *key*, never a value).
+        /// may name a path or an env *key*, never a value). For display and logs; branch on
+        /// [`kind`](Self::Error::kind), never on this text.
         message: String,
         /// `true` if the session is over (the connection will close); `false` if the client may send
         /// another request.
         fatal: bool,
+        /// Which layer faulted, so a caller can decide *what to do* without parsing `message`.
+        /// Defaults to [`FaultKind::Unknown`] when absent, so a peer predating this field decodes
+        /// rather than failing.
+        #[serde(default = "unknown_fault")]
+        kind: FaultKind,
     },
     /// The daemon refused because it is **at capacity**: the `--max-sessions` count ceiling or an
     /// aggregate resource ceiling. is full. Distinct from [`Error`](Self::Error) so a
@@ -225,6 +284,51 @@ pub enum Response {
         /// Suggested backoff before retrying, in milliseconds. A hint only.
         retry_after_ms: u64,
     },
+}
+
+/// The `kind` a [`Response::Error`] decodes to when the peer omitted the field entirely (a daemon
+/// predating it). Conservative on purpose: an unclassified fault is not the caller's to fix.
+fn unknown_fault() -> FaultKind {
+    FaultKind::Unknown(String::new())
+}
+
+/// Which layer faulted, so a client branches on a **value** rather than on the prose in
+/// [`Response::Error`]'s `message`. The wire form of the engine's pinned error taxonomy
+/// (`vmm::ErrorKind`), restated here because this crate stays `vmm`-free; the daemon maps one onto
+/// the other, and a test pins the mapping.
+///
+/// The `fatal` flag answers "is this session over?"; this answers "whose fault, and what should I
+/// do?", which is the question an SDK caller actually has: a different host may serve an
+/// [`Infra`](Self::Infra) fault, a retry never fixes a [`Guest`](Self::Guest) one.
+///
+/// **Unknown kinds degrade, they don't fail.** A client built against this schema that meets a kind
+/// added later decodes it as [`Unknown`](Self::Unknown) carrying the raw string, so the enum can
+/// grow without a schema bump breaking every existing SDK. Treat `Unknown` like
+/// [`Infra`](Self::Infra) (conservative: assume the host, not the caller).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum FaultKind {
+    /// The host couldn't stand the sandbox up, or a bounded wait expired. Not the caller's fault:
+    /// retry, or try another host. (`vmm::ErrorKind::Infra`.)
+    Infra,
+    /// A framing or I/O fault on an already-established exec channel, or a guest that went silent
+    /// past its deadline. The sandbox is unreliable: retire it rather than blame the command.
+    /// (`vmm::ErrorKind::Transport`.)
+    Transport,
+    /// The run is at fault: the command couldn't be spawned, outran its budget, or flooded output.
+    /// Retrying the same command unchanged gets the same answer. (`vmm::ErrorKind::Guest`.)
+    Guest,
+    /// The client's own message was the problem: wrong [`WIRE_SCHEMA`], undecodable, oversize, or
+    /// out of order (an `open` on an already-open session). Fix the client.
+    Protocol,
+    /// The daemon understood the request and declined to serve it: a posture the operator chose
+    /// (snapshotting a jailed session) or a capability this session lacks (no probes attached).
+    /// Not a failure, and not retryable as-is.
+    Refused,
+    /// A kind this client predates. Carries the raw wire string so it can still be logged.
+    #[serde(untagged)]
+    Unknown(String),
 }
 
 /// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile
@@ -541,6 +645,7 @@ mod tests {
             Response::Error {
                 message: "no such binary".into(),
                 fatal: false,
+                kind: FaultKind::Guest,
             },
             Response::AtCapacity {
                 retry_after_ms: 1000,
@@ -672,5 +777,147 @@ mod tests {
         ));
         // Third read: clean EOF, nothing stranded.
         assert!(matches!(read_message::<Request>(&mut cursor), Ok(None)));
+    }
+
+    #[test]
+    fn a_fault_kind_this_client_predates_decodes_instead_of_failing() {
+        // The whole point of `Unknown`: a daemon that grows a new kind must not break every SDK
+        // built before it. The raw string survives so the fault is still loggable.
+        let line = br#"{"schema":1,"reply":"error","message":"x","fatal":true,"kind":"quota"}"#;
+        let resp: Response = read_message(&mut &line[..])
+            .expect("a future kind decodes")
+            .expect("one message");
+        assert!(
+            matches!(&resp, Response::Error { kind: FaultKind::Unknown(k), .. } if k == "quota"),
+            "a future kind should decode as Unknown carrying its raw string, got {resp:?}"
+        );
+    }
+
+    #[test]
+    fn an_error_without_a_kind_decodes_as_unknown() {
+        // A peer predating the field at all: absent `kind` must not be a decode failure.
+        let line = br#"{"schema":1,"reply":"error","message":"x","fatal":false}"#;
+        let resp: Response = read_message(&mut &line[..])
+            .expect("a kind-less error decodes")
+            .expect("one message");
+        assert!(
+            matches!(
+                &resp,
+                Response::Error {
+                    kind: FaultKind::Unknown(_),
+                    ..
+                }
+            ),
+            "an absent kind should decode as Unknown, not fail, got {resp:?}"
+        );
+    }
+
+    #[test]
+    fn the_known_fault_kinds_are_snake_case_on_the_wire() {
+        // The wire spelling is the SDK contract: these strings are what Python/Node/Go match on.
+        for (kind, want) in [
+            (FaultKind::Infra, "infra"),
+            (FaultKind::Transport, "transport"),
+            (FaultKind::Guest, "guest"),
+            (FaultKind::Protocol, "protocol"),
+            (FaultKind::Refused, "refused"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&kind).unwrap(),
+                serde_json::json!(want)
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_name_in_unknown_decodes_as_the_known_kind() {
+        // `Unknown` is untagged, so it is the *decoder's* fallback, not a distinct wire value: a
+        // peer that sends "guest" gets `Guest`, which is the point. The consequence worth pinning
+        // is that `Unknown` does not round-trip for names that collide with known variants, so
+        // nothing (a generator, an SDK) should construct one that way.
+        let shadowed = serde_json::to_string(&FaultKind::Unknown("guest".into()))
+            .expect("a fault kind serializes");
+        assert_eq!(
+            shadowed, "\"guest\"",
+            "Unknown serializes as its bare payload"
+        );
+        let decoded: FaultKind = serde_json::from_str(&shadowed).expect("it decodes");
+        assert_eq!(
+            decoded,
+            FaultKind::Guest,
+            "a known name decodes as the known variant, never back into Unknown"
+        );
+    }
+
+    #[test]
+    fn output_cap_is_fixed_width_on_the_wire() {
+        // A 32-bit client and a 64-bit daemon must agree on this number, so it cannot be `usize`.
+        // A value above `u32::MAX` has to survive the round trip: on a 32-bit peer it would
+        // previously have failed to decode at all.
+        let over_32_bits = u64::from(u32::MAX) + 1;
+        let req = Request::Open {
+            vcpus: None,
+            mem_mib: None,
+            wall_secs: None,
+            output_cap: Some(over_32_bits),
+        };
+        let mut wire = Vec::new();
+        write_message(&mut wire, &req).expect("an open serializes");
+        let back: Request = read_message(&mut &wire[..])
+            .expect("it decodes")
+            .expect("one message");
+        assert_eq!(back, req, "a >32-bit output_cap must survive the wire");
+    }
+
+    #[test]
+    fn an_unknown_field_is_ignored_so_the_wire_can_grow_additively() {
+        // Compatibility rule 1, and the only one that is currently a serde *default* rather than
+        // an explicit attribute: nothing here sets `deny_unknown_fields`, so a client predating a
+        // field the daemon added still decodes the message. Pinned because turning that default
+        // around is a one-character change that would silently break every deployed SDK on the
+        // next daemon upgrade.
+        let line =
+            br#"{"schema":1,"reply":"opened","boot_ms":7,"pooled":true,"cpu_model":"future"}"#;
+        let resp: Response = read_message(&mut &line[..])
+            .expect("an unknown field must not fail the decode")
+            .expect("one message");
+        assert_eq!(
+            resp,
+            Response::Opened {
+                boot_ms: 7,
+                pooled: true
+            },
+            "the known fields decode; the unknown one is ignored"
+        );
+
+        // The same rule on the request side, which the daemon relies on to accept a newer client.
+        let line = br#"{"schema":1,"op":"exec","argv":["echo"],"nice":10}"#;
+        let req: Request = read_message(&mut &line[..])
+            .expect("an unknown field must not fail the decode")
+            .expect("one message");
+        assert_eq!(
+            req,
+            Request::Exec {
+                argv: vec!["echo".to_string()],
+                stdin: None
+            }
+        );
+    }
+
+    #[test]
+    fn an_unknown_reply_is_a_hard_error_not_a_skipped_message() {
+        // Compatibility rule 2, the deliberate opposite of rule 1. A reply this client cannot
+        // interpret means it has lost track of what the daemon is answering, so it must surface
+        // rather than be skipped: silently continuing would misattribute every later reply to the
+        // wrong request. Growing the reply set is a schema bump, and this test is what makes that
+        // a promise instead of a preference.
+        let line = br#"{"schema":1,"reply":"streamed","chunk":"partial output"}"#;
+        let err = read_message::<Response>(&mut &line[..])
+            .map(|_| ())
+            .expect_err("an unknown reply must not decode");
+        assert!(
+            matches!(err, ProtocolError::Malformed(_)),
+            "expected a typed malformed error, got {err:?}"
+        );
     }
 }

@@ -72,7 +72,7 @@ fn rand_string(rng: &mut Rng) -> String {
 }
 
 fn rand_request(rng: &mut Rng) -> Request {
-    match rng.below(8) {
+    match rng.below(9) {
         0 => Request::Open {
             vcpus: Some(rng.byte()),
             mem_mib: Some(rng.next_u64() as u32),
@@ -97,12 +97,31 @@ fn rand_request(rng: &mut Rng) -> Request {
         4 => Request::Snapshot,
         5 => Request::Trace,
         6 => Request::TraceSummary,
+        7 => Request::Cancel,
         _ => Request::Close,
     }
 }
 
+/// A random [`FaultKind`], including the untagged `Unknown` arm.
+///
+/// `Unknown`'s payload is prefixed so it can never spell a known variant's wire name. That is a
+/// round-trip requirement, not neatness: `Unknown` is untagged, so `Unknown("guest")` serializes to
+/// `"guest"` and decodes back as `Guest`, and `request_and_response_round_trip` asserts equality.
+/// Today's `ALPHABET` cannot spell `guest` anyway, but that is an accident of the alphabet, and
+/// widening it later must not resurrect a confusing intermittent failure.
+fn rand_fault_kind(rng: &mut Rng) -> FaultKind {
+    match rng.below(6) {
+        0 => FaultKind::Infra,
+        1 => FaultKind::Transport,
+        2 => FaultKind::Guest,
+        3 => FaultKind::Protocol,
+        4 => FaultKind::Refused,
+        _ => FaultKind::Unknown(format!("x-{}", rand_string(rng))),
+    }
+}
+
 fn rand_response(rng: &mut Rng) -> Response {
-    match rng.below(9) {
+    match rng.below(10) {
         0 => Response::Opened {
             boot_ms: rng.next_u64(),
             pooled: rng.below(2) == 0,
@@ -128,10 +147,12 @@ fn rand_response(rng: &mut Rng) -> Response {
         6 => Response::Error {
             message: rand_string(rng),
             fatal: rng.below(2) == 0,
+            kind: rand_fault_kind(rng),
         },
         7 => Response::AtCapacity {
             retry_after_ms: rng.next_u64(),
         },
+        8 => Response::Cancelled,
         _ => Response::Put {
             path: rand_string(rng),
         },

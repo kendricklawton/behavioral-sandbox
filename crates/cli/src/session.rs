@@ -30,7 +30,7 @@ use ekvm::audit::RunProbes;
 use ekvm::policy::{Policy, Requested};
 use ekvm::MAX_VCPUS;
 use probes_loader::Timing;
-use protocol::{read_message, write_message, ProtocolError, Request, Response};
+use protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
 use vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::{Metrics, Verb};
@@ -79,7 +79,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
             if !matches!(e, ProtocolError::Io(_)) {
                 server.metrics.protocol_error();
             }
-            let _ = write_response(&mut writer, &fatal(format!("before open: {e}")));
+            let _ = write_response(
+                &mut writer,
+                &fatal(format!("before open: {e}"), FaultKind::Protocol),
+            );
             return;
         }
     };
@@ -87,7 +90,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         Ok(parsed) => parsed,
         Err(message) => {
             server.metrics.open_failed();
-            let _ = write_response(&mut writer, &fatal(message));
+            let _ = write_response(&mut writer, &fatal(message, FaultKind::Protocol));
             return;
         }
     };
@@ -127,7 +130,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
         Ok(booted) => booted,
         Err(e) => {
             server.metrics.open_failed();
-            let _ = write_response(&mut writer, &fatal(format!("open sandbox: {e}")));
+            let _ = write_response(
+                &mut writer,
+                &fatal(format!("open sandbox: {e}"), wire_kind(e.kind())),
+            );
             return;
         }
     };
@@ -177,7 +183,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
             Ok(Some(Request::Open { .. })) => {
                 if !send(
                     &mut writer,
-                    &nonfatal("session already open (open is the first message only)"),
+                    &nonfatal(
+                        "session already open (open is the first message only)",
+                        FaultKind::Protocol,
+                    ),
                 ) {
                     break;
                 }
@@ -185,7 +194,21 @@ pub fn serve(stream: UnixStream, server: &Server) {
             Ok(Some(Request::Exec { argv, stdin })) => {
                 server.metrics.request(Verb::Exec);
                 let t0 = Instant::now();
-                let result = vm.exec(&argv, stdin.as_deref().unwrap_or("").as_bytes());
+                let (result, interrupted) =
+                    exec_watching_for_cancel(&vm, &argv, stdin.as_deref().unwrap_or(""), &writer);
+                if interrupted {
+                    // The sandbox is gone, so the exec's own error is noise; acknowledge only if
+                    // the client actually sent `cancel` (an outright hang-up gets no reply, there
+                    // is nobody to read it).
+                    server.metrics.request_failed(false);
+                    if matches!(
+                        read_message::<Request>(&mut reader),
+                        Ok(Some(Request::Cancel))
+                    ) {
+                        let _ = write_response(&mut writer, &Response::Cancelled);
+                    }
+                    break;
+                }
                 if !serve_run(
                     &mut writer,
                     &server.metrics,
@@ -199,6 +222,21 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         stderr: lossy(&r.stderr),
                         exec_wall_ms: ms(r.metrics.wall),
                     },
+                ) {
+                    break;
+                }
+            }
+            Ok(Some(Request::Cancel)) => {
+                // Legal only while a request is in flight, and that case is handled inside
+                // `exec_watching_for_cancel`. Reaching the top of the loop means nothing is
+                // outstanding, so there is nothing to cancel: the client's state machine is wrong,
+                // but the session is fine.
+                if !send(
+                    &mut writer,
+                    &nonfatal(
+                        "nothing in flight to cancel (cancel is legal only while a request is outstanding)",
+                        FaultKind::Protocol,
+                    ),
                 ) {
                     break;
                 }
@@ -262,7 +300,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     Ok(dir) => Response::Snapshotted { dir },
                     Err(e) => {
                         server.metrics.request_failed(true);
-                        nonfatal(format!("snapshot: {e}"))
+                        nonfatal(format!("snapshot: {e}"), wire_kind(e.kind()))
                     }
                 };
                 if !send(&mut writer, &resp) {
@@ -293,7 +331,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     }
                     None => {
                         server.metrics.request_failed(true);
-                        nonfatal("audit probes are not attached for this session")
+                        nonfatal(
+                            "audit probes are not attached for this session",
+                            FaultKind::Refused,
+                        )
                     }
                 };
                 if !send(&mut writer, &resp) {
@@ -314,10 +355,30 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     },
                     None => {
                         server.metrics.request_failed(true);
-                        nonfatal("audit probes are not attached for this session")
+                        nonfatal(
+                            "audit probes are not attached for this session",
+                            FaultKind::Refused,
+                        )
                     }
                 };
                 if !send(&mut writer, &resp) {
+                    break;
+                }
+            }
+            // `Request` is `#[non_exhaustive]`, so this arm exists and the compiler can no longer
+            // tell us a verb went unhandled: the check that used to be a build error is now this
+            // runtime reply. Unreachable from the wire (an unknown `op` fails at decode), so getting
+            // here means `protocol` grew a verb the daemon never wired up. Loud on purpose.
+            Ok(Some(other)) => {
+                server.metrics.protocol_error();
+                tracing::error!(request = ?other, "unhandled wire verb; the daemon is behind its own protocol crate");
+                if !send(
+                    &mut writer,
+                    &nonfatal(
+                        "this daemon does not implement that verb",
+                        FaultKind::Protocol,
+                    ),
+                ) {
                     break;
                 }
             }
@@ -340,12 +401,12 @@ pub fn serve(stream: UnixStream, server: &Server) {
             }
             Err(e @ ProtocolError::Schema(_)) => {
                 server.metrics.protocol_error();
-                let _ = send(&mut writer, &fatal(e.to_string()));
+                let _ = send(&mut writer, &fatal(e.to_string(), FaultKind::Protocol));
                 break;
             }
             Err(e) => {
                 server.metrics.protocol_error();
-                if !send(&mut writer, &nonfatal(e.to_string())) {
+                if !send(&mut writer, &nonfatal(e.to_string(), FaultKind::Protocol)) {
                     break;
                 }
             }
@@ -390,7 +451,10 @@ fn serve_run(
             // Logged host-side too: the error reply reaches only the one client, and an operator
             // (or CI log) diagnosing a failed request needs the cause without owning that client.
             tracing::warn!(error = %e, fatal = !session_survives, "request failed");
-            let sent = send(w, &error(e.to_string(), !session_survives));
+            let sent = send(
+                w,
+                &error(e.to_string(), !session_survives, wire_kind(e.kind())),
+            );
             sent && session_survives
         }
     }
@@ -576,7 +640,10 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String>
         }
         requested.wall_secs = Some(*s);
     }
-    requested.output_cap = *output_cap;
+    // Narrow the wire's fixed-width `u64` to this host's `usize`. Saturating, not wrapping: on a
+    // 32-bit daemon an absurd cap becomes "as much as this host can address", which the policy layer
+    // then clamps to the operator's ceiling anyway. Lossless on 64-bit.
+    requested.output_cap = output_cap.map(|c| usize::try_from(c).unwrap_or(usize::MAX));
 
     let limits = policy.resolve(&requested).map_err(|e| e.to_string())?;
     Ok((limits, bare))
@@ -611,19 +678,106 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+/// How long each readability check waits before re-testing whether the exec finished. The `peek`
+/// itself blocks for this, so the watch costs one syscall per tick, never a spin; it only bounds how
+/// stale a cancel can be, so it trades a few milliseconds of latency against wakeups on an idle
+/// session.
+const CANCEL_POLL: Duration = Duration::from_millis(50);
+
+/// Run one guest command while watching the socket, returning `(result, interrupted)`.
+///
+/// `interrupted` means the client became readable mid-exec: either a [`Request::Cancel`] or an
+/// outright hang-up. Both mean the same thing (nothing else is legal while a request is in flight),
+/// so both kill the sandbox, which is what unblocks the exec: the guest dies, the vsock peer closes,
+/// and `exec` returns a typed error instead of running out its wall budget with a client that is no
+/// longer listening.
+///
+/// **Thread discipline.** The worker is scoped, so it is *always* joined: `thread::scope` cannot
+/// return until it finishes. That is safe here only because `exec` is bounded on both sides, by the
+/// session's wall budget and, once the kill lands, by the dead guest. A scoped thread wrapping an
+/// unbounded call would be a host hang, which is why the `peek` (not a second blocking read) does
+/// the watching: a reader parked on a silent client would have no such bound.
+fn exec_watching_for_cancel(
+    vm: &RunningVm,
+    argv: &[String],
+    stdin: &str,
+    socket: &UnixStream,
+) -> (Result<vmm::RunResult, VmmError>, bool) {
+    let kill = vm.kill_handle();
+    std::thread::scope(|scope| {
+        let worker = scope.spawn(|| vm.exec(argv, stdin.as_bytes()));
+        let mut interrupted = false;
+        while !worker.is_finished() {
+            if !interrupted && client_spoke(socket) {
+                interrupted = true;
+                // Best-effort: a kill that cannot land leaves the exec to its own wall budget,
+                // which is the pre-cancel behavior, never a hang.
+                if let Err(e) = kill.kill() {
+                    tracing::warn!(error = %e, "cancel could not reach the sandbox");
+                }
+            }
+        }
+        // Joins the worker: `exec` has returned by construction.
+        (
+            worker
+                .join()
+                .unwrap_or_else(|_| Err(VmmError::Vmm("exec worker panicked".to_string()))),
+            interrupted,
+        )
+    })
+}
+
+/// Whether the client sent anything (or hung up), waiting up to [`CANCEL_POLL`].
+///
+/// `peek` is deliberate: it does **not** consume, so the pending line is still there for the reply
+/// path to parse, and the session's framing cannot desync on a partially-arrived message.
+fn client_spoke(socket: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd as _;
+
+    let restore = socket.read_timeout().ok().flatten();
+    let _ = socket.set_read_timeout(Some(CANCEL_POLL));
+    let spoke = match nix::sys::socket::recv(
+        socket.as_raw_fd(),
+        &mut [0u8; 1],
+        nix::sys::socket::MsgFlags::MSG_PEEK,
+    ) {
+        Ok(0) => true, // hung up
+        Ok(_) => true, // said something, illegal while a request is in flight
+        Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => false,
+        Err(_) => true, // a broken socket is not a client we can still answer
+    };
+    let _ = socket.set_read_timeout(restore);
+    spoke
+}
+
 /// A session-ending error response.
-fn fatal(message: String) -> Response {
-    error(message, true)
+fn fatal(message: String, kind: FaultKind) -> Response {
+    error(message, true, kind)
 }
 
 /// A per-request error response the session survives.
-fn nonfatal(message: impl Into<String>) -> Response {
-    error(message.into(), false)
+fn nonfatal(message: impl Into<String>, kind: FaultKind) -> Response {
+    error(message.into(), false, kind)
 }
 
 /// Build a typed error response.
-fn error(message: String, fatal: bool) -> Response {
-    Response::Error { message, fatal }
+fn error(message: String, fatal: bool, kind: FaultKind) -> Response {
+    Response::Error {
+        message,
+        fatal,
+        kind,
+    }
+}
+
+/// The engine's pinned error taxonomy, as the wire's. Kept a total, wildcard-free match so a new
+/// `ErrorKind` variant fails the build here instead of silently becoming the wrong wire kind;
+/// `a_vmm_error_kind_maps_onto_the_wire_kind` pins it.
+fn wire_kind(kind: ErrorKind) -> FaultKind {
+    match kind {
+        ErrorKind::Infra => FaultKind::Infra,
+        ErrorKind::Transport => FaultKind::Transport,
+        ErrorKind::Guest => FaultKind::Guest,
+    }
 }
 
 /// The session's read half, bounded by one **absolute deadline per message** instead of a bare
@@ -964,6 +1118,49 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the write must give up at its timeout, not hang"
+        );
+    }
+
+    #[test]
+    fn a_vmm_error_kind_maps_onto_the_wire_kind() {
+        // The daemon computes the engine's pinned bucket and must hand it to the client intact:
+        // before this, `kind()` was computed only to derive `fatal` and then discarded, leaving an
+        // SDK to string-match `message`. A drift here is a silently wrong SDK branch, not a
+        // compile error, so pin all three.
+        assert_eq!(wire_kind(ErrorKind::Infra), FaultKind::Infra);
+        assert_eq!(wire_kind(ErrorKind::Transport), FaultKind::Transport);
+        assert_eq!(wire_kind(ErrorKind::Guest), FaultKind::Guest);
+    }
+
+    #[test]
+    fn fatal_and_kind_answer_different_questions() {
+        // `fatal` says "is this session over", `kind` says "whose fault is it". A guest fault is
+        // non-fatal (send another command); an infra fault ends the session but is not the
+        // caller's to fix. Collapsing the two is exactly the bug this field fixes.
+        let guest = nonfatal("no such binary", FaultKind::Guest);
+        assert!(
+            matches!(
+                &guest,
+                Response::Error {
+                    fatal: false,
+                    kind: FaultKind::Guest,
+                    ..
+                }
+            ),
+            "a guest fault leaves the session usable, got {guest:?}"
+        );
+
+        let infra = fatal("open sandbox: no kvm".to_string(), FaultKind::Infra);
+        assert!(
+            matches!(
+                &infra,
+                Response::Error {
+                    fatal: true,
+                    kind: FaultKind::Infra,
+                    ..
+                }
+            ),
+            "a failed boot ends the session but is the host's fault, got {infra:?}"
         );
     }
 }
