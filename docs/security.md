@@ -1,9 +1,8 @@
 # Security
 
 The engine's whole reason to exist is running code you don't trust and getting a truthful account
-of what it did, so the security model is the product, not an afterthought. This page states what is
-trusted, what counts as a security bug (and what does not), how to report one, and what happens
-after a report. The reporting mechanism also lives
+of what it did. This page states what is trusted, what counts as a security bug (and what does
+not), how to report one, and what happens after a report. The reporting mechanism also lives
 in [`SECURITY.md`](https://github.com/packsixfour/ekvm/blob/main/SECURITY.md) at the repo root
 (GitHub surfaces it in the Security tab).
 
@@ -11,50 +10,23 @@ in [`SECURITY.md`](https://github.com/packsixfour/ekvm/blob/main/SECURITY.md) at
 
 Until the first tagged release (`v0.1.0`), every version is a development snapshot: no version
 receives backported fixes, and nothing here should be treated as production-ready. This page states
-the current stance, not a finished audit; the full **[threat model](./threat-model.md)** (assets, the
-trust boundary, the adversary, and the attack-class-by-attack-class containment with the tests that
-prove it) is its companion.
+the current stance, not a finished audit; the full **[threat model](./threat-model.md)** is its
+companion.
 
 ## What is trusted, and what is not
 
-The trust boundary is the CPU, not any software inside the guest:
-
-- **Trusted:** the host CPU's virtualization (KVM), the host kernel, and the driver running on the
-  host (the VMM process, the jailer, and the host-side eBPF). The security-relevant observation and
-  policy live here, out of the guest's reach.
-- **Not trusted:** everything inside the guest, the untrusted code, and the in-guest agent that
-  carries exec and I/O. The in-guest agent is a convenience, never a security boundary; a hostile
-  guest is assumed to control it completely.
-
-Two consequences follow directly. Host-side **syscall** visibility is coarse for a microVM (the
-guest runs its own kernel, so its syscalls are serviced in-guest and never trap to a host
-tracepoint); the strong cross-boundary signals are the guest's **network** (its tap device) and its
-**resource use** (its cgroup), which the host observes directly. And a sandbox with no explicit
-policy reaches no network and holds minimal capability: every allowance is explicit and recorded.
+The trust boundary is the CPU, not any software inside the guest: KVM, the host kernel, and the
+driver running on the host (the VMM process, the jailer, the eBPF probes) are trusted; everything
+inside the guest, including the in-guest agent, is not. The full boundary, its consequences, and
+the attack-class-by-attack-class containment are the [threat model](./threat-model.md)'s, stated
+once there. The posture that follows it everywhere: a sandbox with no explicit policy reaches no
+network and holds minimal capability, and every allowance is explicit and recorded.
 
 ## Record integrity (host-signed)
 
-The finalized audit record is **signed** with a host key the guest never sees (an `ed25519` detached
-signature over the canonical record bytes), so a consumer detects any alteration made
-*after* the producing host. Verify a record with `ekvm verify <record>` (or against the trusted
-public key directly). The trust root is the host signing key: this makes "tamper-evident" hold
-off-host, but it does **not** protect against a *compromised producing host*, which can sign a
-consistent lie (that is the hoster's key custody, and a compromised host is out of scope below). See
-the [threat model](./threat-model.md#record-integrity-beyond-the-guest) for the full boundary.
+The finalized audit record is signed with an Ed25519 host key. Verification via `ekvm verify <record>` validates signature validity against the host key. The threat model details [record verification boundaries](./threat-model.md#record-integrity-beyond-the-guest).
 
-**A signature proves a record is authentic, not what it describes.** So every record also carries a
-`subject`, inside the signed bytes: `sandbox_id` (the sandbox's name, the same handle as its scratch
-dir and its netns, so a record can be correlated with on-disk residue and with the host's own view)
-and `started_unix_ns` (wall-clock start, so a record can be placed on a timeline). Without both, two
-records could not be told apart and neither could settle a dispute. `sandbox_id` is unique among
-*live* sandboxes, not globally, since pids are reused once a driver exits; a consumer archiving
-records pairs it with `started_unix_ns` for a durable identity.
-
-Note what the subject deliberately is **not**: a tenant, an account, or a user. The engine has no
-notion of those (a [recorded non-goal](./embedding.md)); it reports the identity it actually minted,
-and a hoster maps that to whatever identity its own layer tracks. A host whose clock cannot be read
-stamps `0`, which reads as "unstamped" rather than as the epoch, the same fail-open honesty the
-record's coverage gaps carry.
+Each record includes `sandbox_id` and `started_unix_ns` in the signed payload to correlate the audit event with host execution state.
 
 ## Release integrity (signed manifest)
 
@@ -65,7 +37,7 @@ manifest, hashing the tarball, or extracting anything; a download without a vali
 hard fail. The pinned copy also lives at `release-key.pem` in the repo, and a test keeps the two
 byte-identical.
 
-Stated honestly, the trust boundary of this scheme:
+The trust boundary of this scheme:
 
 - **The anchor is the GitHub repo plus its Actions secrets.** A `curl | sh` of `install.sh` is
   same-origin with the pin, so the pin defeats a tampered *release asset*, not a compromised
@@ -95,15 +67,13 @@ Given those guarantees, a security bug is anything that breaks one of them:
   serial console.
 
 Because this is an **engine, not a platform**, multi-tenant concerns it deliberately does not own
-(tenant authentication, quotas, billing) are the hoster's responsibility, not a bug here. The
-engine's job is that its own tools cannot be weaponized and that it self-limits (deny-by-default
-network, a dropped-uid jail, an own-euid orphan sweep); turning them into a safe multi-tenant
-service is the hoster's.
+(tenant authentication, quotas, billing) are the hoster's responsibility, not a bug here; the full
+line is the threat model's
+[out-of-scope section](./threat-model.md#out-of-scope-engine-not-platform).
 
 ## What is not a security bug
 
-The mirror list, so reports stay signal. These are out of scope by the model above, not by
-dismissal:
+The mirror list, so reports stay signal:
 
 - **Anything that starts from a compromised host.** The host kernel, KVM, and the engine's own
   uid are trusted; an attacker who already has them has everything, no sandbox can claim

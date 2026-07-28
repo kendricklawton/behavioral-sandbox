@@ -6,15 +6,15 @@ All examples assume you have installed the prerequisites ([Installation](./cli-i
 
 ---
 
-## 1. Running Untrusted Code
+## 1. Run untrusted code
 
-Run a script or a binary you don't trust inside a microVM, feed it input, and read a structured result back. Every command here is `ekvm run`, jailed by default; add `--unjailed` on a dev box without real root and the `jailer` binary.
+Run a script or binary inside a microVM, feed it input, and receive a structured result. `ekvm run` is jailed by default (requires root); examples below use `--unjailed` for development environments.
 
 ### A script, with stdin
-The guest command reads stdin like any process; logs go to stderr, so `2>/dev/null` leaves only the program's own output:
+Logs go to stderr, so `2>/dev/null` leaves only the program's own output:
 
 ```console
-$ echo 'hello' | ekvm run -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
+$ echo 'hello' | ekvm run --unjailed -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
 HELLO
 ```
 
@@ -22,7 +22,7 @@ HELLO
 `--json` replaces the raw relay with one JSON object on stdout: the exit code, streams, artifacts, and host-measured metrics. A crash *inside* the guest comes back as a result (`exit_code`), not an engine error:
 
 ```console
-$ ekvm run --json -- python3 -c 'print(2 + 2)' 2>/dev/null | jq .exit_code
+$ ekvm run --unjailed --json -- python3 -c 'print(2 + 2)' 2>/dev/null | jq .exit_code
 0
 ```
 
@@ -31,7 +31,7 @@ Inject host files into the run's working directory with `--put`, and fetch resul
 
 ```console
 $ echo 'a,b,c' > input.csv
-$ ekvm run --put input.csv --get output.txt -- \
+$ ekvm run --unjailed --put input.csv --get output.txt -- \
     python3 -c 'open("output.txt","w").write(open("input.csv").read().count(",").__str__())'
 $ cat output.txt
 2
@@ -39,9 +39,9 @@ $ cat output.txt
 
 ---
 
-## 2. Observing a Run from the Host
+## 2. Observe a run from the host
 
-Running code is half the point; the other half is observing what it did from *outside* the guest, where untrusted code cannot forge or disable the record.
+The other half of a run is its record, observed from where the code cannot forge or disable it.
 
 ### The whole run, fused
 The CLI carries the fused surface: one run, all three host eBPF probes bound to it, one audit record out:
@@ -56,20 +56,17 @@ ekvm run --net --watch --trace --record run.json -- \
 - `--trace` prints the human-readable audit trail on stdout.
 - `--record run.json` writes the signed, deterministic JSON record.
 
-### Per-axis observation commands
-- **Host Syscalls**: `cargo xtask trace-sandbox` (attributes VMM host syscalls to the sandbox cgroup).
-- **Network Flows**: `cargo xtask watch-sandbox` (monitors TAP packets).
-- **Egress Enforcement**: `cargo xtask enforce-sandbox` (drops unauthorized TAP packets).
-- **Resource Metering**: `cargo xtask meter-sandbox` (meters CPU/memory/IO via `sched_switch` & cgroup v2).
+Each axis also has a standalone live demo; see
+[Host-side observability & enforcement](./probes.md).
 
 ---
 
-## 3. Containing an Agent and Proving What It Did
+## 3. Contain an agent, and prove what it did
 
 Untrusted AI agents or dynamic scripts may invoke tools or phone home. `ekvm` enforces deny-by-default egress at the virtual TAP interface and produces an out-of-guest audit record that proves what traffic was permitted and what was dropped.
 
-### Scripted Tool Loop
-Consider an agent attempting two UDP network calls—one to a search index (`10.200.0.1:9000`), and one to an exfiltration webhook (`10.200.0.1:9100`).
+### An agent that phones home
+Consider an agent attempting two UDP network calls: one to a search index (`10.200.0.1:9000`), one to an exfiltration webhook (`10.200.0.1:9100`).
 
 ```console
 ekvm run --net \
@@ -85,7 +82,7 @@ print("both calls sent")
 '
 ```
 
-### Verified Out-of-Guest Observation
+### What the record proves
 Even though the guest transcript reports both calls as sent, `summary.json` proves ground truth:
 
 ```json
@@ -97,34 +94,32 @@ Even though the guest transcript reports both calls as sent, `summary.json` prov
 }
 ```
 
-`ekvm verify record.json` verifies the host signature, confirming the guest did not alter the record.
+`ekvm verify record.json` checks the host signature; [`ekvm verify`](./cli.md#ekvm-verify) states exactly what that does and does not prove.
 
 ---
 
-## 4. Analyzing an Untrusted Binary
+## 4. Analyze an untrusted binary
 
-Run an unknown static Linux ELF binary in a microVM and observe its system calls and network behavior from the host:
+Run an unknown static Linux ELF in a microVM and observe it from the host (`analyze-me` is any
+static binary you want to watch):
 
 ```console
-$ ekvm run --net --trace \
+$ ekvm run --unjailed --net --trace \
     --put analyze-me -- /bin/sh -c 'chmod +x analyze-me && ./analyze-me'
 ```
 
-The human-readable audit trail outlines all `openat`, `execve`, and `connect` attempts made by the binary:
+Network activity at the TAP interface provides external visibility into binary behavior. Host-side tracepoints observe VMM host syscalls; guest-kernel syscalls are handled inside the VM (see [Threat model](./threat-model.md)). The audit trail shows flow attempts and enforcement results:
 
 ```text
 ── audit record ─────────────────────────────────────────────
  timing     boot 126 ms · exec 38 ms
- syscalls   execve  /bin/sh, ./analyze-me
-            openat  /etc/hostname, …
-            connect 203.0.113.9:443
  network    reached  —
             denied   203.0.113.9:443/tcp        ← phone-home blocked at TAP
 ```
 
 ---
 
-## 5. Running a CI Job from a Fork
+## 5. Run a CI job from a fork
 
 Execute untrusted CI pull request scripts safely:
 
@@ -134,4 +129,4 @@ $ ekvm run \
     --record-summary ci.json -- /bin/sh ci-job.sh
 ```
 
-With no `--net` flag, the sandbox has no virtual NIC allocated. `ci.json` records `"network": null`, providing verifiable proof that the execution had no path off the host to exfiltrate secrets or fetch unverified dependencies.
+With no `--net` flag the sandbox has no NIC at all, and `ci.json` records `"network": null`: the record's proof of it.

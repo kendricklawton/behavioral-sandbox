@@ -1,33 +1,23 @@
-# eKVM Architecture and Design
+# Architecture and design
 
 ## Scope
 
-### What is eKVM
+### What this is
 
-`eKVM` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a **Firecracker** microVM (hardware isolation via Linux KVM); **host-side eBPF** (`aya`) observes and enforces what it does—syscalls, network flows, resource accounting—from *outside* the guest, where untrusted code cannot see or subvert it.
+`eKVM` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a **Firecracker** microVM (hardware isolation via Linux KVM); **host-side eBPF** (`aya`) observes and enforces what it does, syscalls, network flows, resource accounting, from *outside* the guest, where untrusted code cannot see or subvert it.
 
 Every execution yields a tamper-resistant, host-observed, host-signed **audit log** of execution events.
 
-### Core Properties
+### Core properties
 
 1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM; the security boundary is hardware (CPU/KVM), not guest-side software.
 2. **Observe & enforce from the host.** Visibility and policy live in host-side eBPF that the guest cannot reach. In-guest agents exist for convenience (exec/IO framing), never for security.
 3. **Engine, not platform.** A self-hostable runtime + a clean driver API. Multi-tenancy auth, billing, fleet scheduling, and dashboards belong to the hoster.
-4. **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are benchmarked with empirical percentiles.
+4. **Empirical benchmarks.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are measured via percentiles.
 
-### Features
+## Host integration
 
-- **Hardware Confinement**: MicroVMs run constrained under Linux KVM, jailed via chroot, unprivileged user namespaces, seccomp filters, and cgroup v2 resource limits.
-- **Host-Side Observability**: Host-side eBPF programs trace guest syscalls, monitor network flows, and meter CPU usage from the host kernel.
-- **Egress Policy Enforcement**: Network egress is deny-by-default; eBPF `tc` filters enforce explicit IP/CIDR/port allow-lists at the virtual TAP interface.
-- **Tamper-Evident Audit Logging**: Execution events are serialized into deterministic JSON records and host-signed using a host-only key.
-- **Versioned Wire Protocol**: The `ekvm serve` daemon exposes a versioned newline-delimited JSON API over a Unix domain socket, allowing polyglot clients to drive sandboxes without linking engine internals.
-
----
-
-## Host Integration
-
-The following diagram illustrates how eKVM integrates hardware isolation, host-side eBPF probes, and containerization barriers:
+Where the pieces sit, and which boundaries a run crosses:
 
 ```mermaid
 flowchart TB
@@ -69,17 +59,18 @@ flowchart TB
     TCEnforcer -->|Flow & Deny Events| Daemon
 ```
 
-### Host Requirements
+### Host requirements
 
 - **OS & Kernel**: Linux host with kernel `>= 5.15` (enforcing `cgroup.kill` and security-maintained LTS APIs).
 - **Architecture**: `x86_64` with hardware virtualization extensions (`/dev/kvm`).
 - **Permissions**: Root or delegated capabilities (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_BPF`) for jailing, network namespace management, and eBPF loading.
 
-### Host Networking Integration
+### Networking
 
-- Each sandbox runs inside a dedicated, isolated **per-VM network namespace** (`netns`).
-- Communication with the host uses a virtual TAP device (`fc0`) allocated inside the sandbox netns.
-- By default, guest networking has no route to the outside world (deny-by-default). When configured with `--net` and `--allow`, host-side eBPF `tc` programs inspect every packet at the TAP interface and enforce destination allow-lists.
+Each sandbox gets its own network namespace, with a tap device (`fc0`) inside it as the guest's
+only path out. By default that path leads nowhere (deny-by-default); with `--net` and `--allow`,
+host-side eBPF `tc` programs inspect every packet at the tap and enforce the destination
+allow-list.
 
 ```mermaid
 flowchart LR
@@ -104,11 +95,12 @@ flowchart LR
     Map -->|No Match (Deny)| AuditLog
 ```
 
-### Storage Architecture
+### Storage
 
-- **Root Filesystem**: A read-only base image (Alpine Linux base with pre-installed static `guest-agent`) shared across sandboxes.
-- **Per-Run Overlay**: A `tmpfs` writable overlay per execution, ensuring state changes do not persist across sandbox runs unless explicitly saved.
-- **Bulk Input/Output**: Optional read-only ext4 block devices for large input payloads (`--input-dir`) and writable ext4 block devices for output extraction (`--output-dir`).
+The guest root is a read-only base image (Alpine, with the static `guest-agent` baked in), shared
+across sandboxes, with a writable `tmpfs` overlay per run, so nothing a run changes outlives it
+unless explicitly collected. Bulk data rides block devices instead: a read-only ext4 built from
+`--input-dir`, and a writable one extracted after teardown for `--output-dir`.
 
 ```mermaid
 flowchart TB
@@ -129,50 +121,49 @@ flowchart TB
 
 ---
 
-## Internal Architecture
+## Internal architecture
 
-### Repo Layout and Core Components
+### Repo layout
 
-The codebase is organized as a single Cargo workspace split along isolation, observability, and driver boundaries:
+One Cargo workspace, split along the isolation/observability/driver boundaries:
 
 - `crates/vmm`: The Firecracker VMM driver. Manages microVM lifecycles (boot, exec, shutdown), rootfs/TAP networking setup, snapshots, pre-warmed VM pools, jailer/cgroup confinement, and the public `Sandbox` API.
 - `crates/channel`: Host↔guest wire framing protocol over stream sockets (`vsock` / Unix sockets). Dependency-free, `no_std`-compatible framing with zeroize memory hygiene.
 - `crates/guest-agent`: Statically linked in-guest binary (`guest-agent`) compiled for `x86_64-unknown-linux-musl`. Executes commands inside the guest and streams `stdout`, `stderr`, and exit codes over `channel`.
 - `crates/probes`: eBPF programs (`bpfel-unknown-none`) compiled via `bpf-linker`. Contains raw kernel tracepoint handlers, `tc` egress policy enforcers, and cgroup accounting hooks.
 - `crates/probes-common`: Zero-dependency, `#![no_std]` `#[repr(C)]` POD struct definitions shared between eBPF kernel programs and userspace loaders.
-- `crates/probes-loader`: Userspace loader built on `aya`. Responsible for loading eBPF ELF objects into the host kernel, attaching tracepoints/tc filters to sandboxes, reading ring buffers, and streaming audit events.
-- `crates/cli`: The primary user-facing binary (`ekvm`). Implements CLI subcommands (`run`, `shell`, `doctor`, `inspect`) and the `ekvm serve` daemon.
-- `xtask`: Developer automation tool. Runs host-safe CI checks (`cargo xtask ci`), privileged VM integration tests (`ci-privileged`), rootfs/kernel builds, and self-hosting vendoring routines.
+- `crates/probes-loader`: the userspace loader, built on `aya`: load the eBPF objects, attach tracepoints/tc filters to a sandbox, read the maps, stream audit events.
+- `crates/cli`: the `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `ekvm serve` daemon.
+- `xtask`: dev orchestration: the host-safe gate (`cargo xtask ci`), the privileged gate (`ci-privileged`), the rootfs/kernel builds, vendoring. Never shipped.
 
 ---
 
-## Key Architectural Decisions
+## Key architectural decisions
 
-### 1. Hardware Isolation over Software Containers
-Software sandboxes (e.g., container runtimes, seccomp-only filters) share the host Linux kernel surface with untrusted code. eKVM enforces hardware isolation by placing untrusted code inside a Firecracker microVM backed by KVM. A guest kernel panic or compromise cannot compromise the host kernel.
+### 1. Hardware isolation over software containers
+Untrusted code goes inside a Firecracker microVM backed by KVM, never behind a shared-kernel sandbox: a guest kernel panic or compromise cannot compromise the host kernel.
 
-### 2. Host-Side eBPF Observability & Policy
-In-guest monitoring agents can be subverted if the guest kernel or root account is compromised. eKVM places all security observability and enforcement in host-side eBPF tracepoints and `tc` classifiers attached from the host kernel, out of reach of guest code.
+### 2. Host-side eBPF observability & policy
+An in-guest monitoring agent falls with the guest. All security-relevant observation and enforcement therefore lives in host-side eBPF, tracepoints and `tc` classifiers attached from the host kernel, out of the guest's reach.
 
-### 3. Jailed Execution by Default
+### 3. Jailed execution by default
 Firecracker instances are launched via the `jailer` helper, which places the process inside a restricted chroot, drops privileges to an unprivileged user/group, applies seccomp filters, and assigns cgroup v2 limits before executing guest code.
 
-### 4. Ephemeral Sandbox Sessions & Snapshots
-Each execution session maps to an isolated microVM instance. Pre-warmed microVM pools and snapshot restore mechanics allow sub-millisecond execution start times without sacrificing per-run isolation guarantees.
+### 4. Ephemeral sandbox sessions & snapshots
+Each execution session maps to an isolated microVM instance. Pre-warmed pools and snapshot restore start a run in milliseconds (measured percentiles in [Benchmarks](./benchmarks.md)) without sacrificing per-run isolation.
 
-### 5. Host-Signed Audit Records
-Audit logs captured by `probes-loader` record all syscalls, network flows, and resource usage during a sandbox run. To prevent off-host tampering or forgery, the host signs finalized audit records with a host-held ed25519 key, enabling external verification (`ekvm verify --key <key_id>`) of execution integrity.
+### 5. Host-signed audit records
+Audit records captured by `probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. The host signs each finalized record with a host-held ed25519 key, so alteration after the run is detectable off-host (`ekvm verify`).
 
-### 6. Versioned Newline-JSON Daemon Protocol
-The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals and allows polyglot SDKs to control eKVM instances cleanly.
+### 6. Versioned newline-JSON daemon protocol
+The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals; polyglot SDKs drive the wire, not the crate.
 
-### 7. Synchronous Engine, No Async Runtime
+### 7. Synchronous engine, no async runtime
 The driver and the daemon are **synchronous**: blocking I/O, one thread per session, no `tokio` or
 other executor anywhere in `vmm`, `channel`, or `ekvm serve`. This is a decision, not an accident of
 how the code grew, and it rests on three arguments.
 
-**Concurrency here is bounded by microVMs, not by sockets.** An async runtime earns its complexity
-when a process multiplexes many thousands of cheap, mostly-idle connections. A session's real cost
+**Concurrency here is bounded by microVMs, not by sockets.** A session's real cost
 is a whole Firecracker microVM holding hundreds of MiB of guest RAM, so the daemon's ceiling
 (`--max-sessions`, default 16, plus the committed-memory ceilings) is reached by host RAM long
 before thread stacks are worth a thought. Thread-per-session at this scale is free, and it keeps a
@@ -198,10 +189,9 @@ than on taste:
   not running VMs), where per-thread stacks become the binding constraint.
 - Genuinely multiplexed daemon work: streaming exec output to many concurrent watchers, long-lived
   event subscriptions, or a network-facing (rather than local-socket) protocol.
-- A profile showing thread-per-session as a **measured** bottleneck, per the measured-not-marketed
-  guardrail.
+- A profile showing thread-per-session as a **measured** bottleneck under realistic workloads.
 
-None of these are on the roadmap, so the engine stays synchronous for the foreseeable future.
+None of these are on the roadmap, so the engine stays synchronous.
 
 **This does not constrain downstream.** Async is the right choice in plenty of places that consume
 this engine, and the architecture keeps them outside this repo: the polyglot SDKs (a Python SDK

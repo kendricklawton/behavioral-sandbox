@@ -13,8 +13,8 @@ means four things, in this order.
 Commands are given for **Ubuntu/Debian** and **Arch**, the two distros this engine is continuously
 tested on (Ubuntu 24.04 in CI, Arch by hand during development, see
 [Verified on](#supported-platforms)). Any other distro follows the same four steps with its own
-package manager. The two differ in ways that actually bite, so read your own column rather than
-assuming; [Distro differences](#distro-differences-that-bite) collects them.
+package manager; [Distro differences](#distro-differences-that-bite) collects where the two
+diverge.
 
 ### 1. Check that the box qualifies
 
@@ -61,7 +61,7 @@ ls -l /dev/kvm
 ```
 
 - **`crw-rw---- root kvm`** (Ubuntu/Debian): mode `0660`, so a plain user cannot open it until they
-  join the `kvm` group. Do step 3.
+  join the `kvm` group, below.
 - **`crw-rw-rw- root kvm`** (Arch): mode `0666` from systemd's shipped udev rule
   (`/usr/lib/udev/rules.d/50-udev-default.rules`), so anyone can already open it. Skip to step 4.
 
@@ -81,11 +81,12 @@ id -nG | tr ' ' '\n' | grep -x kvm   # prints kvm once the group is in effect
 ### 4. Install Firecracker and its jailer
 
 The engine drives Firecracker, it does not bundle it (the container image is the one exception), so
-both binaries have to be on `PATH`. **Supported: v1.15 and v1.16** — the releases the Firecracker
-team still patches, per the release-status table in their release policy doc. v1.16 is what CI
-tests and what the sha256 below pins; v1.15 works too, and the driver adapts its snapshot-load request
-to it. Anything older boots with a warning but is neither tested here nor patched upstream, which is
-the wrong footing for running untrusted code.
+both binaries have to be on `PATH`. Two versions matter, and both track upstream's own patch
+window: the **pinned** release (currently **v1.16.1**) is what CI tests and the sha256 below
+verifies, and the **floor** (currently **v1.15**) is the oldest series the Firecracker team still
+patches, with the driver adapting its API requests to any release in between. Below the floor, a
+boot continues with a warning but is neither tested here nor patched upstream, which is the wrong
+footing for running untrusted code.
 
 This range **moves with upstream, not with our release cadence**: when a series ages out of their
 table the floor rises, which a weekly CI job checks so it cannot drift unnoticed.
@@ -108,8 +109,8 @@ the pinned build is what CI exercises).
 On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
 pinned-version check are exercised against, so prefer them.
 
-Now pick an install path below. Whichever you pick, running `ekvm doctor` afterwards is how you
-confirm these four steps actually took.
+Now pick an install path below, and run `ekvm doctor` afterwards to confirm these four steps
+took.
 
 ### Distro differences that bite
 
@@ -154,13 +155,13 @@ Every release ships a release package tarball per platform plus `SHA256SUMS` and
 ed25519 signature `SHA256SUMS.sig`, assembled by `cargo xtask dist`:
 the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file `MANIFEST.sha256` inside. Two first-class installation methods are supported:
 
-### Option A: Automated Installer Script (`curl | sh`)
+### Option A: the installer script (`curl | sh`)
 
 ```console
 curl -fsSL https://get.ekvm.dev | sh
 ```
 
-### Option B: Manual Release Tarball Download & Extraction
+### Option B: verify and extract by hand
 
 For air-gapped hosts, manual inspection, or offline testing, download and verify the release package:
 
@@ -170,8 +171,9 @@ curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/ekvm-0.1.0
 curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS
 curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS.sig
 
-# Verify the manifest's signature against the release key pinned in the repo
-# (release-key.pem at the repo root; fetch it out of band, not from the release assets)
+# Verify the manifest's signature against the release key pinned in the repo.
+# Obtain release-key.pem out of band, never from the release assets: from a clone of the
+# repo (it sits at the root), or the raw file on GitHub over a channel you already trust.
 openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
 
 # Then verify integrity against the now-trusted SHA256SUMS
@@ -236,7 +238,9 @@ hoster call the image documents rather than makes (see the `Containerfile` heade
 
 ## Self-host in one command
 
-Once you have the [prerequisites](#prerequisites), the whole stand-up is a single command:
+From a clone of the repo with a Rust toolchain installed (see
+[Contributing](./contributing.md#2-prerequisites--quickstart)), plus the
+[prerequisites](#prerequisites), the whole stand-up is a single command:
 
 ```console
 cargo xtask self-host           # obtain the pinned kernel + rootfs, build the guest image + eBPF
@@ -265,7 +269,7 @@ compatibility note: the parts the isolation-and-audit thesis rests on are **hard
 rest **degrade with a stated consequence**. `ekvm doctor` reports exactly where your host sits and
 exits non-zero if a hard requirement is missing.
 
-**Hard requirements** (off these, the host is not supported)):
+**Hard requirements** (off these, the host is not supported):
 
 | | Requirement | Why |
 |---|---|---|
@@ -275,35 +279,26 @@ exits non-zero if a hard requirement is missing.
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
 | **Firecracker + jailer** | present on `PATH` | no VMM to launch (the jailer's absence degrades to `--unjailed`) |
 
-**Supported / tested versions:** Firecracker **v1.15–v1.16** supported (upstream's own patch
-window), **v1.16 tested** in CI. Outside that range boots continue with a warning. The **guest
-kernel** baked into the rootfs is pinned to a
-Firecracker-supported version, Firecracker periodically retires old guest kernels, so a fresh build
-tracks their supported set.
+**Supported / tested versions:** Firecracker per
+[step 4 above](#4-install-firecracker-and-its-jailer) (v1.15 through v1.16, v1.16 tested in CI).
+The **guest kernel** baked into the rootfs is pinned to a Firecracker-supported version;
+Firecracker periodically retires old guest kernels, so a fresh build tracks their supported set.
 
-**Verified on** (measured, not marketed, this is the honest test surface as of pre-1.0):
+**Verified on** (the test surface as of pre-1.0):
 
 - **Host-safe gate** (build, unit tests, lints, docs, the eBPF object build) runs in CI on **Ubuntu
   24.04** `x86_64` on every change.
 - **The privileged path** (microVM boot, the jailer, the eBPF probes, the end-to-end integration
   suite) runs in CI on a GitHub-hosted **Ubuntu 24.04** runner (`x86_64`, nested KVM) and by hand
-  on **Arch Linux** (rolling) during development, both with **Firecracker v1.16**. Those two are the
-  continuously-tested distros, and they bracket the tool-version spectrum (rolling-newest against
-  LTS-oldest; Ubuntu's e2fsprogs and IPv6 defaults each caught a real issue Arch could not). Other
-  distros are supported per the checks above but not continuously exercised; `ekvm doctor` names
-  exactly what a given host is missing.
+  on **Arch Linux** (rolling) during development, both with **Firecracker v1.16**. Other distros
+  are supported per the checks above but not continuously exercised; `ekvm doctor` names exactly
+  what a given host is missing.
 - **`aarch64` is not supported at this time**: it was never privileged-tested (no arm64 KVM
   hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
   carried untested. A contribution that brings tested arm artifacts plus a privileged CI lane
   reopens it.
-- One distro-specific gotcha already surfaced: on hosts that mount `/tmp` as tmpfs `nodev` (the
-  systemd default on Arch, and some Ubuntu setups), the jailer's chroot `/dev/kvm` there is inert, so
-  a raw jailed run fails until scratch points off `nodev`. The packaged install and `cargo xtask
-  self-host` now pin a non-`nodev` `scratch_dir` for you; a from-source run sets
-  `EKVM_SCRATCH_DIR` itself. `ekvm doctor` flags it either way, and reports your own host's
-  arch, kernel, and Firecracker version. See
-  [Distro differences](#distro-differences-that-bite) for how to test it and the rest of the
-  per-distro list.
+- One distro-specific gotcha already surfaced: a `nodev` `/tmp` makes a raw jailed run fail;
+  [Distro differences](#distro-differences-that-bite) owns the test and the fix.
 - On distros that enable **AppArmor** by default (Ubuntu and Debian), a confinement profile can deny
   the jailer or Firecracker in ways that look like an engine bug. If a jailed boot fails for a reason
   none of the checks above explain, read `dmesg | grep -i apparmor` before chasing it further.
@@ -313,26 +308,22 @@ tracks their supported set.
 - No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
   egress enforcement refuses** rather than running unenforced.
 - **cgroup v2** controllers not delegated → jailed VMs run without CPU/memory caps (a fail-open DoS
-  mitigation, not the isolation boundary)).
+  mitigation, not the isolation boundary).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
-- **Scratch dir on a `nodev` mount** (the default `/tmp` on modern systemd hosts) → the jailer's chroot
-  `/dev/kvm` is inert, so the jailed default fails to open KVM; the guided install pins a non-`nodev`
-  `scratch_dir` for you, else set `EKVM_SCRATCH_DIR` to a non-`nodev` path (e.g. under `$HOME`),
-  or use `--unjailed`. `ekvm doctor` flags this.
+- **Scratch dir on a `nodev` mount** → the jailed default fails to open KVM
+  ([Distro differences](#distro-differences-that-bite) has the fix); `--unjailed` still runs.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
-## Troubleshooting & FAQ
+## Troubleshooting
 
-Below are common issues reported by `ekvm doctor` or early boots, along with their root causes and resolutions.
-
-| Symptom / `ekvm doctor` check | Root Cause | Resolution |
+| Symptom / `ekvm doctor` check | Root cause | Fix |
 |---|---|---|
-| **`/dev/kvm` missing or permission denied** | `/dev/kvm` does not exist or your user lacks read-write permissions. | Check nested virtualization on cloud VMs. Add user to `kvm` group:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
+| **`/dev/kvm` missing or permission denied** | No virtualization exposed (stock cloud VMs lack nested virt), or the user is not in the `kvm` group. | Check nested virtualization on cloud VMs. Add user to `kvm` group:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
 | **`ScratchDirNodev` (jailed boot fails at KVM open)** | `/tmp` is mounted with the `nodev` mount option, making the jailer's chrooted `/dev/kvm` inert. | Set scratch dir to a non-`nodev` filesystem:<br>`export EKVM_SCRATCH_DIR=/var/tmp`<br>or set `scratch_dir = "/var/tmp"` in `.ekvm.toml`. |
 | **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged users space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
 | **`unix socket path is too long (> 108 bytes)`** | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export EKVM_SCRATCH_DIR=/var/tmp` |
 | **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v ekvm)`<br>or run with `sudo -E`. |
-| **`Kernel BTF` missing** | Host Linux kernel was compiled without `CONFIG_DEBUG_INFO_BTF=y`. | Install a standard distro kernel that includes `/sys/kernel/btf/vmlinux` (Ubuntu >= 20.04, Arch, Fedora). |
+| **`Kernel BTF` missing** | Host Linux kernel was compiled without `CONFIG_DEBUG_INFO_BTF=y`. | Install a standard distro kernel that includes `/sys/kernel/btf/vmlinux` (Ubuntu >= 22.04, Arch, Fedora). |
 
 ## Prerequisites
 
@@ -387,13 +378,12 @@ mkdir -p ~/.ekvm
 sudo -E env EKVM_SCRATCH_DIR="$HOME/.ekvm" "$(command -v ekvm)" run -- echo hello
 ```
 
-(The short dir name is deliberate: a jailed boot nests the per-VM dir name twice inside its API
-socket path, which the kernel caps at ~108 bytes.)
+(The short dir name is deliberate: the ~108-byte socket-path cap under
+[Distro differences](#distro-differences-that-bite).)
 
 ## Compiling from source
 
-[Self-host in one command](#self-host-in-one-command) is the short path: it obtains the guest
-artifacts, builds the eBPF object, installs the binary, and proves the result by booting a sandbox.
+[Self-host in one command](#self-host-in-one-command) is the short path.
 
 To drive the individual steps instead, or to work on the engine itself, consult
 [Contributing](./contributing.md), which owns the build toolchain (the Rust version policy, the
@@ -427,3 +417,19 @@ offline convenience, produced once. The `.apk` closure is pinned at vendor time 
 delete old package revisions, so there is no stable per-package URL to pin in source), which makes an
 offline build **more** reproducible than the live-CDN one, it installs from the frozen cache the
 manifest hashes.
+
+## Uninstall
+
+The engine's whole footprint is four paths, so removal is four commands, no tool needed:
+
+```console
+rm ~/.local/bin/ekvm            # the binary (or your EKVM_INSTALL_PREFIX)
+rm -rf ~/.local/share/ekvm      # kernel, rootfs, probes object (or your EKVM_DATA_DIR)
+rm ~/.ekvm.toml                 # the starter config, if the install wrote one
+rm -rf ~/.ekvm                  # the non-nodev scratch dir, if the install set one up
+```
+
+Nothing else outlives the runs: per-VM scratch under `scratch_dir` is reclaimed at teardown, and a
+crashed run's residue is reclaimed by the next run's own-euid sweep, so there is nothing to hunt
+for. Firecracker and the jailer were installed by you (step 4), so removing them, and leaving the
+`kvm` group, are your calls, not the engine's.

@@ -56,8 +56,7 @@ of its rules the counter hits on purpose:
 
 - **Bounded loops.** Walking the fixed 16-byte `comm` buffer to its NUL terminator is a loop whose
   bound is a compile-time constant, so the verifier can prove it terminates even with a data-dependent
-  `break`. An *unbounded* `while` would be rejected. (Older kernels rejected all loops; bounded loops
-  have been allowed since 5.3.)
+  `break`. An *unbounded* `while` would be rejected.
 - **Map access patterns.** A map lookup returns a pointer that may be null (key absent). The verifier
   **forbids dereferencing it without a null-check first**. `get_ptr_mut` returns an `Option`, so the
   `if let Some(slot) = ...` *is* the mandatory check; the deref happens only inside the `Some` arm,
@@ -118,13 +117,16 @@ guest's own traffic directly. `TapMonitor` attaches two `tc`/clsact classifiers,
 `tap_egress`, the two hooks clsact adds to a device, and each parses the frame's 5-tuple, IPv4 into the
 `FLOWS` map or IPv6 into a parallel `FLOWS6` (dual-stack: parallel `FlowKey`/`FlowKey6` types
 and maps, so the v4 path is byte-for-byte unchanged), adding the packet to that flow's per-direction
-byte/packet counters. `tc` (not XDP) because
+byte/packet counters.
+
+`tc` (not XDP) because
 clsact gives *both* directions uniformly on any device, and because egress enforcement (dropping a
 denied flow, the next section) lives at the same hook; observation alone is exactly that, observe-only
 (both hooks return `TC_ACT_OK`). The flow record
 (`FlowKey`/`FlowKey6` → `FlowCounts`) is single-sourced in `crates/probes-common` and read back as raw bytes, so
-the loader stays `#![forbid(unsafe_code)]`. A sandbox's tap lives in its own network
-namespace, so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
+the loader stays `#![forbid(unsafe_code)]`.
+
+A sandbox's tap lives in its own network namespace, so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
 safe wrapper) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
 into a per-VM rollup. Dropping the monitor frees its userspace handles; the sandbox's netns teardown
 reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host residue. `cargo xtask
@@ -171,9 +173,9 @@ section carries the counts and a `truncated` flag, and the run gets a coverage g
 churns source ports to fill the table cannot quietly evict its real traffic from its own record
 (the `EVENT_DROPS` honest-loss discipline, applied to the network axis). Enforcement never depends
 on the maps: a denied packet is dropped at the tap whether or not its audit row fit. The egress filter mechanism (map,
-schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is tested in `net_enforce.rs`
-(ignored/privileged) proves a guest reaches an allow-listed endpoint and is blocked from everything
-else; and `cargo xtask enforce-sandbox` is the live demo. Folding attach-and-enforce into the launch
+schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is pinned by `net_enforce.rs`
+(ignored/privileged): a guest reaches an allow-listed endpoint and is blocked from everything
+else. `cargo xtask enforce-sandbox` is the live demo. Folding attach-and-enforce into the launch
 path is the fused record's convergence (below).
 
 ## Resource accounting from the cgroup
@@ -219,8 +221,9 @@ guest. It lives in
 `probes-loader` (not `vmm`), bridged to the driver only by plain values:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
-  global, so each is loaded **once** for the host, `SharedMeter` and `SharedTracer`, and every sandbox
-  registers its cgroup as a *target* on both (bounded overhead). The tap monitor is per-VM.
+  global, so each is loaded **once** for the host, as `SharedMeter` and `SharedTracer` (the share-one-
+  program wrappers over the meter above and the per-event syscall tracer introduced below), and every
+  sandbox registers its cgroup as a *target* on both (bounded overhead). The tap monitor is per-VM.
 - **One post-boot attach.** `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)` runs
   once after `Sandbox::open`: it resolves the VMM's cgroup, registers it on the shared tracer + meter, and
   attaches the tap in the sandbox's netns (enforcing an egress policy if given). Every axis is fail-open,
@@ -312,9 +315,9 @@ turns that into a real **stream of per-event records**:
   which equals `bpf_get_current_cgroup_id`), so `watch_cgroup(cgroup_id_of_pid(vmm_pid)?)` scopes the
   trace to exactly one sandbox. The bridge is plain values, so `probes-loader` never depends on `vmm`.
 
-The honest limit is unchanged (isolation is hardware): these are the **host's** syscalls, a
-Firecracker worker's `execve`/`openat`/`connect`, never the guest's, which are serviced in-guest and
-never trap here.
+The honest limit from
+[the hardware-isolation consequence](#the-hardware-isolation-consequence-the-honest-limit)
+holds here unchanged: these are the **host's** syscalls, never the guest's.
 
 ```console
 cargo build -p probes-loader --example trace_syscalls

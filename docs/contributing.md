@@ -1,23 +1,21 @@
-# Contributing Guide
-
-Contributions are welcome! This chapter covers system invariants, developer setup, CI gates, testing, and commit conventions.
+# Contributing
 
 The canonical operating manual for humans and coding agents alike is [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) at the repo root.
 
 ---
 
-## 1. System Invariants (Never trade these away)
+## 1. System invariants (never trade these away)
 
 - **Isolation is hardware.** Untrusted code runs in a KVM microVM; the trust boundary is the CPU, not guest software.
 - **Observe & enforce from the host.** Visibility and policy live in host-side eBPF (`aya`) that the guest cannot reach.
 - **Engine, not platform.** A self-hostable runtime + a clean driver API. Auth, billing, scheduling, and dashboards are out of scope.
 - **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal capabilities.
 - **No-panic on the host path.** A hostile or crashing guest is a typed error (`VmmError`), never a host panic, hang, or leak.
-- **Measured, not marketed.** Boot, snapshot-restore, and eBPF overhead are benchmarked with percentiles.
+- **Empirical benchmarks.** Boot, snapshot-restore, and eBPF overhead are benchmarked using percentiles.
 
 ---
 
-## 2. Prerequisites & Quickstart
+## 2. Prerequisites & quickstart
 
 - **Rust (Stable)**: Minimum supported Rust version tracks current stable (`rust-toolchain.toml`).
 - **musl Target**: Required for static in-guest agent builds:
@@ -36,7 +34,7 @@ The canonical operating manual for humans and coding agents alike is [`AGENTS.md
   The nightly is pinned in `crates/probes/rust-toolchain.toml` and `bpf-linker` in `xtask`; a gate
   test compares every copy of both against those sources.
 
-### Developer Setup Commands
+### Developer setup commands
 
 ```console
 git clone https://github.com/packsixfour/ekvm && cd ekvm
@@ -48,17 +46,25 @@ cargo xtask build-probes     # Build eBPF object (target: bpfel-unknown-none)
 
 ---
 
-## 3. Developer Workflows & CI Gates
+## 3. Developer workflows & CI gates
 
-- **Fast Inner Loop**: `cargo xtask check` (Format + prose-drift + Clippy `-D warnings`; skips tests for instant feedback ~4s).
+- **Fast Inner Loop**: `cargo xtask check` (Format + prose-drift + Clippy `-D warnings`; skips tests for ~4s feedback).
 - **Host-Safe Gate**: `cargo xtask ci` (Runs everywhere without root or KVM: clippy, formatting, prose links, unit tests, cargo deny, eBPF build).
 - **Privileged Gate**: `sudo -E ./ci-privileged.sh` (Runs VM-boot, exec, TAP networking, and eBPF probe attachment integration tests under KVM).
 
+The privileged wrapper sets the three env concerns a `sudo` run otherwise stacks by hand: a
+throwaway `CARGO_TARGET_DIR` (the gate *refuses* to run as root without it, so a root build cannot
+leave root-owned artifacts in `./target` that block later non-root builds), a non-`nodev`
+`EKVM_SCRATCH_DIR` (pre-checked, since the jailer cannot make device nodes on a `nodev` mount), and
+rustup's `cargo` back on `PATH`. The gate also refuses outright without root, BTF, or the eBPF
+object, rather than letting the capability-gated tests skip themselves into a hollow green (a
+skipped test is a pass to cargo).
+
 ---
 
-## 4. Testing Strategy & Benchmarks
+## 4. Testing strategy & benchmarks
 
-The testing strategy spans 4 primary layers:
+Four layers:
 1. **Unit Tests**: Driver config assembly, protocol framing, error mappings (`cargo xtask ci`).
 2. **eBPF Build Verification**: Probes compile with `.BTF` debug sections enabled.
 3. **Privileged Integration**: End-to-end VM boot, exec, TAP network filtering, and audit probe checks (`sudo -E ./ci-privileged.sh`).
@@ -85,15 +91,15 @@ Run seeded fuzzing locally via `cargo fuzz run <target>`.
 
 ---
 
-## 6. Commit & Public API Conventions
+## 6. Commit & public API conventions
 
 - **Conventional Commits**: Format commit subjects as `type(scope)?: imperative subject` (e.g. `feat: add vsock timeout handling`).
 - **Public API Scope (`api`)**: Any change to `vmm` public types (`Sandbox`, `Limits`, `RunResult`, `VmmError`) or wire protocols must carry the `api` scope (`feat(api):` or `fix(api)!:`).
-- **No AI Co-Author Trailers**: Keep git logs clean; do not add AI attribution trailers.
+- **No AI Co-Author Trailers**: do not add AI attribution trailers.
 
 ---
 
-## 7. Firecracker Version Policy
+## 7. Firecracker version policy
 
 Firecracker is the isolation boundary and it is **not a crate**: no advisory database,
 `cargo deny` run, or Dependabot PR will ever mention it. Everything in this section exists
@@ -138,7 +144,7 @@ its parsers fail loudly if the format moves instead of silently matching nothing
 2. Delete dead gates: the `_SINCE` assertions fail on exactly the conditionals that are
    now dead, so make those fields unconditional.
 3. Drop `doctor.rs` sha256 entries for series that left support.
-4. Update the host-requirements prose (`RELEASES.md`, `docs/cli-install.md`).
+4. Update the host-requirements prose (`README.md`, `RELEASES.md`, `docs/cli-install.md`).
 5. `cargo xtask ci`, then the privileged gate against the pinned binary.
 6. Commit as `feat(api)!` and tag the next minor: a floor raise is always a breaking
    change. The outgoing minor's release branch keeps the old floor and receives security

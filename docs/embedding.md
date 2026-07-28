@@ -31,45 +31,19 @@ by a forgotten flag (012). Artifacts (kernel, rootfs, `firecracker`) layer from 
 ### Exec: synchronous, bounded, faithful
 
 `exec` connects to the in-guest agent over vsock, runs one command, and returns a `RunResult`:
-`exit_code`, `stdout`, `stderr`, requested artifact `files`, and host-measured `metrics` (wall time
-the driver observed, the guest can't lie about it). Three properties are load-bearing:
+`exit_code`, `stdout`, `stderr`, requested artifact `files`, and host-measured `metrics`. Three properties are load-bearing:
 
-- **A crash inside the sandbox is a result, not an error.** Non-zero exit, even death by signal
-  (`128 + signal`), comes back as a faithful `RunResult`. Typed `VmmError`s are reserved for the
-  engine's own failure classes.
-- **Every bound is host-enforced.** The command's wall budget is sent to the guest (which kills it
-  cooperatively → `ExecTimeout`), but the host keeps its own derived deadline (`ExecUnresponsive`)
-  and an output cap (`OutputCap`), so a hostile or wedged guest can never park the caller or grow
-  host memory. The in-guest agent is exec/IO convenience, never the security boundary.
-- **Per-exec inputs ride the call, under a secret-hygiene contract (015).** `stdin`, injected
-  `files`, and `env` arrive with the request; env lands on the spawned command only, never the
-  agent's process. Injected file contents and env *values* never appear in an engine log line, in
-  any `VmmError`'s `Display`/`Debug`, or on the serial console, an error may name a file path or
-  an env key, never a value, and the wire copies the engine builds are zero-wiped after send.
-  Leak tests pin this; extending them is the review bar for any new log line that touches inputs.
-  Bulk data goes on the block-device paths instead: `input_dir` (read-only image built from a host
-  dir) and `output_dir` + `collect_outputs()` (a writable image extracted rootlessly after
-  teardown).
+- **Guest crash handling:** Non-zero exit code or termination by signal (`128 + signal`) returns a valid `RunResult`. Typed `VmmError` variants indicate engine-level failures.
+- **Host-enforced bounds:** Derived wall-clock deadlines (`ExecUnresponsive`) and output limits (`OutputCap`) prevent resource leaks from uncoordinated guests.
+- **Per-exec input security:** `stdin`, injected `files`, and `env` are scoped to the spawned process. Secret values are excluded from logs, error messages, and console output. Bulk file transfers use block-device storage (`input_dir` and `output_dir`).
 
 ### Sessions: the VM is the session (016)
 
-Repeated `exec`s against one sandbox compose: the in-guest agent serves every connection from one
-persistent working directory, and the boot's overlay makes the wider guest filesystem accumulate
-too. Install a package in exec 1, use it in exec 3. Session identity is VM identity, no session
-ids, no session protocol: two isolated sessions are two VMs, so isolation between sessions is KVM,
-not agent bookkeeping. State's lifetime is the VM's; `shutdown` discards it with the overlay.
+Repeated `exec` operations within a sandbox share guest working directory and overlay filesystem state. Session state persists for the VM lifetime and is cleared upon `shutdown`.
 
-### Budgets: quantities on one struct, failing open (010)
+### Budgets: resource policy (010)
 
-`Limits` is the per-sandbox resource policy: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`),
-`wall` (one wall for the whole run, the boot deadline and each exec's budget), and `output_cap`.
-The two quantity fields are typed nonzero because zero is not a small budget but an unbootable
-guest, the illegal value can't be constructed. Quantities only, never
-capabilities: network egress is a separate deny-by-default concern (008), enforced in a different
-layer. The cgroup caps **fail open**, a host without delegated controllers boots uncapped, with a
-warning, because caps are fairness/DoS hygiene; the **isolation walls never degrade**: a jail that
-can't be built is a hard error, never a silent half-confinement. Defaults are conservative and
-load-bearing (1 vCPU, 256 MiB, 30 s, 16 MiB); raising one is a breaking, `api:`-marked change.
+`Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. Non-zero types ensure valid budget parameters. Network egress is configured separately via policy rules. Cgroup constraints operate on a best-effort basis if host controllers are unassigned, while sandbox isolation remains mandatory.
 
 ### Errors: three buckets you can branch on
 
@@ -97,16 +71,17 @@ on names; only your own euid's residue), so a crash-looping host stays serviceab
 
 `snapshot(dir)` pauses the VM and writes a portable bundle; `Vm::restore` (and the `Pool` built on
 it) brings up exec-ready clones in milliseconds, sharing the base disk and memory file read-only
-across concurrent sandboxes. Snapshotting is restricted to *unjailed* sources (their disk lives on
-a fixed host path); restoring into *jailed* clones is where the untrusted code runs confined.
+across concurrent sandboxes. (`Vm` is the driver's lower layer: `Vm::boot`/`Vm::restore` yield a
+running microVM handle, and a `Sandbox` wraps exactly one of them with the jailed-by-default
+posture; the snapshot and pool recipes below work at the `Vm` layer.) Snapshotting is restricted
+to *unjailed* sources (their disk lives on a fixed host path); restoring into *jailed* clones is
+where the untrusted code runs confined.
 
 ---
 
-## Code Recipes
+## Recipes
 
-Below are complete, copy-pasteable Rust snippets for integrating the `vmm` crate into an application.
-
-### Recipe 1: Single-Shot Execution
+### One shot: open, run, read the result
 
 ```rust,no_run
 use vmm::{BootConfig, Sandbox, VmmError};
@@ -125,13 +100,12 @@ fn main() -> Result<(), VmmError> {
     println!("Stdout: {}", String::from_utf8_lossy(&result.stdout));
     println!("Host wall-clock latency: {:?}", result.metrics.wall);
 
-    // 4. Clean up the sandbox
     sandbox.shutdown()?;
     Ok(())
 }
 ```
 
-### Recipe 2: Custom Resource Limits & Input Files
+### Budgets and files on the call
 
 ```rust,no_run
 use std::num::{NonZeroU32, NonZeroU8};
@@ -166,7 +140,7 @@ fn main() -> Result<(), VmmError> {
 }
 ```
 
-### Recipe 3: Pre-Warmed MicroVM Pool
+### The pre-warmed pool
 
 ```rust,no_run
 use vmm::{BootConfig, Pool, Snapshot, Vm, VmmError};
@@ -183,7 +157,7 @@ fn main() -> Result<(), VmmError> {
     let pool_cfg = BootConfig::from_env();
     let mut pool = Pool::new(snapshot, pool_cfg, 4)?;
 
-    // 3. Take a warm clone from the pool (sub-millisecond start)
+    // 3. Take a warm clone from the pool (milliseconds; measured in docs/benchmarks.md)
     let warm_vm = pool.take()?;
     let result = warm_vm.exec(&["echo".into(), "warm start".into()], b"")?;
     println!("Execution completed: {}", String::from_utf8_lossy(&result.stdout));
@@ -191,7 +165,6 @@ fn main() -> Result<(), VmmError> {
     // 4. Refill pool back to target count
     pool.refill()?;
 
-    // Clean up
     pool.shutdown()?;
     Ok(())
 }
@@ -226,9 +199,7 @@ It composes the driver and the loader the way a downstream host application woul
 `--output-cap`, `--json` (the structured result as one JSON object on stdout, stderr carries the
 logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `ekvm shell` holds one sandbox
 open as an interactive stateful session. If you're writing an SDK, start from the daemon's
-[reference client](./daemon.md#the-reference-client) (`client`), it drives the same
-lifecycle over the wire API with nothing of the engine linked, which is exactly the surface a
-non-Rust SDK has.
+[reference client](./daemon.md#the-reference-client) (`client`), which exists for exactly that.
 
 ## Where the engine ends (the engine/PaaS line)
 
@@ -261,21 +232,26 @@ fail legibly (`xtask setup`'s degradation matrix, the pinned Firecracker probe),
 instead of a silent misbehavior.
 
 Downstream of the public API, in separate repos, live the language SDKs (Go/Python/Node/C#).
-They pin this crate's git rev; that is why public-API changes carry an `api:` marker
-in the commit subject, and why `Limits`/`RunResult`/`VmmError`/`Sandbox` and the channel protocol
-move deliberately or not at all.
+They pin this crate's git rev; the pinned surface and its movement rules are the
+[Semver section](#semver--api-stability) below.
+
+**The crates are never published to crates.io** (`publish = false` across the workspace), a
+decision, not a gap. A crates.io version is immutable and available forever, but this engine's
+support window is computed from Firecracker's and deliberately ends: an old published version
+would sit on the registry looking usable long after every VMM it can drive stopped receiving
+patches. Distribution stays the signed release package for operators and the git-rev pin for
+embedders, both of which the support policy in `RELEASES.md` can actually govern.
 
 ---
 
-## Semver & API Stability
+## Semver & API stability
 
 The `vmm` public library API and the `channel` wire protocol are the engine's pinned stability boundary:
 - **`Sandbox`**, **`Limits`**, **`RunResult`**
 - **`VmmError`**, including variants and the `kind()` -> `ErrorKind` bucket mapping
 - The **`channel`** wire framing protocol
 
-### Versioning Rules
+### Versioning rules
 - **MAJOR**: Breaking changes to the pinned surface (removed/renamed `VmmError` variants, changed `kind()` bucket mappings, breaking channel wire protocol changes, or raising `Limits` defaults).
 - **MINOR**: Additive changes (new API methods, new `#[non_exhaustive]` error variants, new optional fields).
-- **PATCH**: Backward-compatible fixes and optimizations.
 - **Commit Tags**: Changes touching this surface are marked with `feat(api):` or `fix(api)!:` in commit subjects for clear auditability.

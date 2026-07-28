@@ -1,3 +1,6 @@
+# Every member is `publish = false` on purpose: this project is never published to crates.io.
+# The support window is computed from Firecracker's and ends; an immutable registry version would
+# outlive it, looking usable on an unpatched VMM. See docs/embedding.md.
 [workspace]
 resolver = "2"
 members = [

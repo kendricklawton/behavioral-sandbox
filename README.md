@@ -12,22 +12,23 @@ eKVM runs untrusted code inside a **Firecracker** microVM, so the trust boundary
 not guest-side software. Around that microVM, **host-side eBPF** (via **aya**) watches and enforces
 what the code does, its syscalls, its network, its cgroup, from *outside* the guest, where the code
 can't see or subvert it. Every run yields a tamper-evident **audit record**, host-observed and
-**host-signed** (so alteration after the run is detectable off-host, verify it with `ekvm verify`),
+**host-signed** (verify with `ekvm verify`),
 of exactly what happened: the network flows, the notable syscalls, the resources it used, and any
 egress that was denied.
 
 It is an **engine, not a platform**: a runtime plus a clean driver API you self-host, with no
 multi-tenant auth, billing, fleet scheduling, or dashboard. A sandbox with no explicit policy
 reaches no network and holds minimal capability; every allowance is explicit and recorded. Boot,
-snapshot-restore, memory-sharing, and eBPF overhead are benchmarked with percentiles.
+snapshot-restore, memory-sharing, and eBPF overhead are benchmarked using nearest-rank percentiles.
 
 Built in the open, milestone by milestone, each one shipping as a working demo.
 
 ## Getting started
 
-**Requirements:** Linux with `/dev/kvm` (it needs KVM), an `x86_64` host, kernel
-**≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) v1.16 on
-`PATH` (the engine drives it, it doesn't bundle it). Starting from a bare machine,
+**Requirements:** Linux with `/dev/kvm`, an `x86_64` host, kernel
+**≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) on
+`PATH` (v1.15 through v1.16 supported, v1.16.1 pinned and tested; the engine drives it, it
+doesn't bundle it). Starting from a bare machine,
 [Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version of all of
 that; `cargo xtask setup` (or `ekvm doctor` once built) then reports exactly what your host is still
 missing before the first sandbox.
@@ -70,14 +71,15 @@ cgroup limits, seccomp); and is wrapped in the embedder-facing `Sandbox` lifecyc
 ([docs/embedding.md](docs/embedding.md)). The host-side eBPF track observes a running sandbox's
 host syscall footprint and its per-VM network flows, enforces deny-by-default egress in the
 kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)), each with a
-measured overhead and a live demo. The audit log that fuses these into one host-observed per-run
+live demo and measured overheads ([docs/benchmarks.md](docs/benchmarks.md)). The audit log that fuses these into one host-observed per-run
 record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `ekvm serve` daemon.
 
-**Pre-1.0 and unstable, expect breaking changes.** Until the first stable release, nothing here
+**Pre-1.0, expect breaking changes.** Until the first tagged release, nothing here
 carries a compatibility guarantee: the `Sandbox`/`vmm` API, the `ekvm serve` wire protocol (and its
 `protocol` crate), the audit-log/record format, and the crate names can all change without
-notice. If you build on it, pin to a specific git rev. A first stable release is planned but **not yet scheduled**, and there is a long road of breaking
-work before it. The project is developed by a small group: **only project collaborators commit code**
+notice. If you build on it, pin to a specific git rev. The first tagged release, `v0.1.0`, will pin
+the driver API and wire protocol under the support policy in [RELEASES.md](RELEASES.md); no date is
+promised. The project is developed by a small group: **only project collaborators commit code**
 (the repo is not open to outside pull requests yet, see [CONTRIBUTING](CONTRIBUTING.md)).
 
 **Verified on:** the host-safe gate (build, tests, lints) runs in CI on **Ubuntu 24.04** `x86_64`
@@ -90,24 +92,10 @@ readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).
 
 ## Roadmap
 
-The project progresses in clear phases toward a production-ready hardware-isolated engine:
-
-- **Phase 1: `v0.1.0` Release (Core Engine Finish Line)**
-  - [x] MicroVM lifecycle management (`vmm`) and in-guest execution agent (`guest-agent`).
-  - [x] Host-side eBPF probes for syscall tracing, per-VM network tap flows, and cgroup metering (`probes`).
-  - [x] Daemon wire interface (`ekvm serve`) over Unix sockets with schema versioning (`schema: 1`).
-  - [ ] Finalize host pre-flight diagnostics (`ekvm doctor`).
-  - [ ] Complete green CI verification for host-safe (`cargo xtask ci`) and privileged (`cargo xtask ci-privileged`) gates.
-  - [ ] Tag `v0.1.0` release tarballs and single-command installer (`install.sh`).
-
-- **Phase 2: Ecosystem & External Integrations (Separate Repositories)**
-  - External polyglot client SDKs (Python, TypeScript/Node.js, Go) maintained in companion repositories.
-  - Worked integration examples showing eKVM containing untrusted code execution for AI agent frameworks.
-
-- **Phase 3: Hardware & Performance Scaling**
-  - Bare-metal `aarch64` hardware microVM execution (requires ARM hardware + privileged CI lane).
-  - Enhanced snapshot-restore pre-warmed pool performance (sub-10ms warm pops).
-  - Advanced eBPF egress filtering and granular network allow-lists (`--allow`).
+Direction is recorded, not promised. [Roadmap: deferred capabilities](docs/roadmap.md) lists
+where the engine is headed; every entry is engine-scoped, and an entry becomes a feature only
+when it ships with a working demo and empirical benchmarks. Release mechanics, host requirements, and the support policy live in
+[RELEASES.md](RELEASES.md).
 
 ## How it fits together
 
@@ -118,8 +106,7 @@ untrusted code
       → per-run audit log (network flows · notable syscalls · resources · denials)
 ```
 
-The guest runs the code; the **host kernel** sees and governs it. That split, hardware
-isolation *plus* out-of-guest observability and enforcement, is the whole idea.
+Untrusted code executes within the microVM while the host kernel observes and enforces policy from outside the guest.
 
 ## Layout
 

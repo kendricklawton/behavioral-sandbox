@@ -6,8 +6,9 @@ library. It is a thin host of the same public API the [CLI](./cli.md) and [embed
 use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
 the hoster's, above the engine, and are a recorded non-goal).
 
-> **Status.** The wire API is **versioned** (every message carries a `schema` field). Until then the shape may
-> still change, which is why every message is schema-stamped and a mismatch is rejected up front.
+> **Status.** The wire API is **versioned**: every message carries a `schema` field, and a
+> mismatch is rejected up front. Until the first tagged release the shape may still change; the
+> stamp is what makes that survivable for a client.
 
 ## Run it
 
@@ -38,8 +39,8 @@ against a permissive ambient umask; the directory remains the designed gate.)
 RAM, a tap, a cgroup), so the daemon bounds its own core resource: at the ceiling a new connection
 gets a distinct, session-ending `at_capacity` reply to its `open`, *before* any VM boots, instead of a
 connect-loop walking the host into memory/KVM/fd exhaustion. `at_capacity` is its own reply (not an
-`error`), so a fleet dispatcher fails over to another host on backpressure without string-matching
-. Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
+`error`), so a fleet dispatcher fails over to another host on backpressure without
+string-matching. Size it to the host (sessions × guest memory must fit in RAM); `0` means unlimited.
 Because a session's `open` may ask for a custom size, `--max-sessions` alone can't bound a
 memory-heterogeneous fleet; add `--max-committed-mem-mib` / `--max-committed-vcpus` to bound the
 *summed* committed memory / vCPUs across live sessions **and pre-warmed pool clones** (a clone's
@@ -47,7 +48,6 @@ RAM is real before any session exists, so the pool charges the ceiling too: a `-
 ceiling can't hold refuses to start, a refill only restores what current headroom affords, and a
 warm take hands its clone's charge over to the session's own reservation). Sessions past the
 ceiling are refused with `at_capacity` before boot.
-This is engine self-protection, not tenancy: no queueing, no auth, no scheduling.
 
 **Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
 guarantee: a session with no request from its client for this long is dropped, freeing its microVM
@@ -172,69 +172,53 @@ The short version: **fields grow, values grow, replies do not.** A `schema` mism
 fatal and always reported before a body is trusted, so a client built against a future revision
 fails immediately instead of half-understanding a session.
 
-### Concrete Polyglot Protocol Examples
+### Protocol examples
 
-Any language with Unix domain socket support and a JSON library can drive eKVM. Below are exact wire message exchanges for common operations.
+A whole session, driven by hand (an `open` with no fields takes the defaults):
 
-#### 1. Session Lifecycle (`open` → `exec` → `close`)
-
-**Request 1 (`open`):**
-```json
-{"schema":1,"op":"open","vcpus":1,"mem_mib":256,"wall_secs":30,"output_cap":16777216}
-```
-**Response 1:**
-```json
-{"schema":1,"reply":"opened","boot_ms":42,"pooled":true}
-```
-
-**Request 2 (`exec`):**
-```json
-{"schema":1,"op":"exec","argv":["python3","-c","import os; print(os.uname().sysname)"],"stdin":""}
-```
-**Response 2:**
-```json
-{"schema":1,"reply":"result","exit_code":0,"stdout":"Linux\n","stderr":"","exec_wall_ms":5}
-```
-
-**Request 3 (`close`):**
-```json
-{"schema":1,"op":"close"}
-```
-**Response 3:**
-```json
+```console
+$ printf '%s\n' \
+    '{"schema":1,"op":"open"}' \
+    '{"schema":1,"op":"exec","argv":["echo","hi"]}' \
+    '{"schema":1,"op":"close"}' \
+  | socat - UNIX-CONNECT:./ekvm.sock
+{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}
+{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}
 {"schema":1,"reply":"closed"}
 ```
 
-#### 2. File Injection & Extraction (`put` → `exec` → `get`)
+#### Inject, run, extract (`put` → `exec` → `get`)
 
-**Request 1 (`put` input file):**
+The round trip a caller uses to collect what a run *produced*, not just what it printed:
+
+**Request 1 (`put` the input):**
 ```json
-{"schema":1,"op":"put","path":"app.py","content":"print('Hello from injected Python script')\n"}
+{"schema":1,"op":"put","path":"app.py","content":"with open('out.txt', 'w') as f:\n    f.write('generated in the guest\\n')\n"}
 ```
 **Response 1:**
 ```json
 {"schema":1,"reply":"put","path":"app.py"}
 ```
 
-**Request 2 (`exec` script to generate output):**
+**Request 2 (`exec` it):**
 ```json
 {"schema":1,"op":"exec","argv":["python3","app.py"],"stdin":""}
 ```
 **Response 2:**
 ```json
-{"schema":1,"reply":"result","exit_code":0,"stdout":"Hello from injected Python script\n","stderr":"","exec_wall_ms":8}
+{"schema":1,"reply":"result","exit_code":0,"stdout":"","stderr":"","exec_wall_ms":8}
 ```
 
-**Request 3 (`get` result file):**
+**Request 3 (`get` the file the run wrote):**
 ```json
-{"schema":1,"op":"get","path":"app.py"}
+{"schema":1,"op":"get","path":"out.txt"}
 ```
 **Response 3:**
 ```json
-{"schema":1,"reply":"got","path":"app.py","content":"print('Hello from injected Python script')\n","present":true}
+{"schema":1,"reply":"got","path":"out.txt","content":"generated in the guest\n","present":true}
 ```
 
-#### 3. Live Audit Inspection (`trace_summary`)
+#### Live audit inspection (`trace_summary`)
 
 **Request:**
 ```json
@@ -261,23 +245,10 @@ Any language with Unix domain socket support and a JSON library can drive eKVM. 
 }
 ```
 
-Drive it by hand using `socat` or `nc`:
-
-```console
-$ printf '%s\n' \
-    '{"schema":1,"op":"open"}' \
-    '{"schema":1,"op":"exec","argv":["echo","hi"]}' \
-    '{"schema":1,"op":"close"}' \
-  | socat - UNIX-CONNECT:./ekvm.sock
-{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}
-{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}
-{"schema":1,"reply":"closed"}
-```
-
 ## Observability for the hoster
 
 The daemon exposes its own numbers; dashboards, alerting, and retention are the hoster's, above the
-engine (engine, not platform).
+engine.
 
 ### Structured logs
 
@@ -355,30 +326,24 @@ client.close()?;                                    // tear the sandbox down
 
 ## Non-goals: where a PaaS would begin
 
-The daemon is the engine's *programmatic interface*, and it stops exactly where a platform would
-start. These are the features a hoster builds **above** `ekvm`, deliberately absent from the wire
-and the daemon, and PRs adding them are wrong by design (engine, not platform):
+The canonical engine/PaaS line, tenancy, auth, billing, scheduling, dashboards, is drawn in
+[Where the engine ends](./embedding.md#where-the-engine-ends-the-enginepaas-line); the daemon adds
+nothing that crosses it. Its wire-level consequences:
 
-- **No tenancy or identity.** No message carries a tenant, account, or user. One connection drives
-  one sandbox; two callers are two connections to two VMs. *Whose* run is whose is the hoster's
-  bookkeeping, above the socket.
-- **No authentication or authorization.** The daemon does no auth handshake and trusts whoever can
-  reach the socket completely. Who may connect is the filesystem permissions on the socket and its
-  directory (place it where only trusted local clients can reach it), an access-control layer the
-  hoster owns, not a field on the wire.
-- **No billing or quotas.** The daemon *measures* (the [metrics endpoint](#metrics-prometheus),
-  host-observed) but never *charges* or *caps by account*. Turning numbers into a bill or a per-tenant
-  limit is the hoster's.
-- **No fleet scheduling.** One `ekvm` drives sandboxes on its one host. Bin-packing across hosts,
-  queues, and autoscaling are the hoster's scheduler; the daemon has no notion of another host.
-- **No public/HTTP platform API.** The surface is a *local* unix socket speaking newline-JSON. A
-  daemon that grew a multi-tenant identity model or a public HTTP surface would be a **hoster**, not
-  this repo.
+- **No message carries a tenant, account, or user.** One connection drives one sandbox; two
+  callers are two connections to two VMs. Whose run is whose is the hoster's bookkeeping, above
+  the socket.
+- **The socket is the whole auth surface.** No handshake: whoever can reach the socket is trusted.
+  Access control is the filesystem permissions on the socket and its directory (see
+  [Run it](#run-it)).
+- **The daemon measures, never charges.** The [metrics endpoint](#metrics-prometheus) exposes
+  host-observed numbers; bills, quotas, and per-tenant caps are built above them.
+- **One daemon, one host.** Bin-packing, queues, and autoscaling live in the hoster's scheduler;
+  the daemon has no notion of another host, and its surface stays a local unix socket, never a
+  public HTTP API.
 
-The line is a security boundary too: everything the daemon ships is inert without the host
-privileges the hoster grants, and the confinement posture is fixed at launch so a client can never
-weaken it. This restates, at the wire-API layer, the embedding-side
-[Where the engine ends](./embedding.md#where-the-engine-ends-the-enginepaas-line).
+The line is a security boundary too: the confinement posture is fixed at daemon launch, so a
+client can never weaken it.
 
 ## Teardown
 

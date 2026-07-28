@@ -8,12 +8,14 @@ host and built the guest artifacts yet, do [Installation](./cli-install.md) firs
 
 ```console
 # Prove the boundary: boot a microVM to userspace and read its console.
-cargo run -p cli -- run --demo-boot
+ekvm run --demo-boot
 
 # Run code inside one. The defaults point at the guest rootfs (built by
 # `cargo xtask build-rootfs` or `self-host`), which carries python3 and the in-guest exec agent:
-cargo run -p cli -- run -- python3 -c 'print(2 + 2)'
+ekvm run -- python3 -c 'print(2 + 2)'
 ```
+
+(From a source checkout without installing, the same commands are `cargo run -p cli -- run ...`.)
 
 `ekvm run` is **jailed by default**, the VMM runs under Firecracker's jailer (chroot, uid/gid
 drop, seccomp, its own namespaces, a cgroup), which needs real root and the `jailer` binary. On a
@@ -42,9 +44,9 @@ ekvm run [FLAGS] -- <cmd> [args…]
 | `--output-cap BYTES` | Cap on captured stdout+stderr+artifacts (default 16 MiB). |
 | `--json` | Emit the structured run result as one JSON object on stdout (exit code, streams, artifacts, metrics, and the effective `limits`) instead of relaying the raw streams. |
 | `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host end of its /30. |
-| `--allow IP[/CIDR][:PORT][/PROTO]` | Allow one egress destination past the deny-by-default tap (repeatable), e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires `--net`; builds the run's egress policy, armed before the tap goes live. A host that can't enforce (missing eBPF caps) is a typed refusal, never a silent unenforced run. |
+| `--allow IP[/CIDR][:PORT][/PROTO]` | Allow one egress destination past the deny-by-default tap (repeatable), e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires `--net`; semantics in [Enforcing egress with `--allow`](#enforcing-egress-with---allow). |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
-| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope. so alteration is detectable; check it with [`ekvm verify`](#ekvm-verify). |
+| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope, so alteration is detectable; check it with [`ekvm verify`](#ekvm-verify). |
 | `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record (what it reached, what egress was denied, its resource envelope, any coverage gap) shaped for an agent's observe→act loop. |
 | `--watch` | Watch the run **live**: a full-screen view on stderr (flows and denials, resources, the VMM's host syscalls, a timeline). Needs stderr on a terminal; `q` closes the view, the run continues (after the command finishes, the view stays up until closed). |
 | `--log FILTER` | Log filter for stderr (overrides `EKVM_LOG`), e.g. `info`, `debug`. |
@@ -124,8 +126,8 @@ anchor (the append-only limitation).
 
 ## Configuration
 
-Configuration layers **flags > environment (`EKVM_*`) > file (`.ekvm.toml`) > defaults**, one
-value, four sources, highest wins. The **file** layer is the nearest `.ekvm.toml` walking up from
+Configuration layers **flags > environment (`EKVM_*`) > file (`.ekvm.toml`) > defaults**. The
+**file** layer is the nearest `.ekvm.toml` walking up from
 the current directory (the `.gitignore` convention), so a project pins its engine config beside its
 code; its keys mirror the environment names 1:1 (minus the `EKVM_` prefix, lowercased), and an
 unknown key is a typed error, never a silent no-op.
@@ -134,7 +136,7 @@ unknown key is a typed error, never a silent no-op.
 |----------|-------------------|-------------------|---------|
 | `EKVM_FIRECRACKER` | `firecracker` | the `firecracker` binary | `firecracker` (PATH) |
 | `EKVM_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
-| `EKVM_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-guest.ext4` (the guest rootfs image) |
+| `EKVM_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-guest.ext4` |
 | `EKVM_MARKER` | `marker` | the console line that means "userspace is up" | `GUEST-READY` (the guest rootfs image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
 | `EKVM_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts; a jailed boot needs it off a `nodev` mount (the systemd `/tmp` default), which the guided install pins for you | `/tmp` |
 | `EKVM_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
@@ -189,9 +191,9 @@ must not read a security control out of whatever directory it was started in.
 
 ## Watching a run from the host
 
-`ekvm run` carries the engine's convergence on flags: `--trace`, `--record`, and `--watch` bind
-the host-side eBPF probes to the sandbox at launch and fuse what they saw into one per-run audit
-record, observed from *outside* the guest, where the code can't forge or disable it.
+`--trace`, `--record`, and `--watch` bind the host-side eBPF probes to the sandbox at launch and
+fuse what they saw into one per-run audit record, observed from *outside* the guest, where the
+code can't forge or disable it.
 
 ```console
 # Watch it live, read the trail after, keep the machine record + the model-legible summary:
@@ -213,16 +215,14 @@ Four faces, one record:
   for an agent's observe→act loop, what it *reached* (distinct destinations, flows collapsed to
   their endpoint), what egress was *denied*, its resource envelope, and any coverage gap, with the
   forensic detail (per-flow counters, per-syscall `comm`/hits) dropped. A *view* of the record, not
-  new observation: measurably compact (well under half the full record on a busy run), deterministic,
-  and byte-stable, so an agent gets a small, stable summary to feed back into its next turn.
+  new observation: compact, deterministic, and byte-stable, so an agent gets a small, stable
+  summary to feed back into its next turn.
 
 Each machine JSON surface carries a leading integer **`schema`** field, the `--json` run result, the
 `--record` audit record, and the `--record-summary` projection version **independently**, each
 starting at `1`. The compatibility policy:
 **within a version, changes are additive only**, a new field a consumer can ignore; **renaming or
-removing a field, or changing a value's meaning, bumps the version.** A parser keys on `schema` to
-know which shape it is reading. This is versioned *before* anything external parses it, so the wire
-API and the language SDKs harden a stable contract, not a moving one.
+removing a field, or changing a value's meaning, bumps the version.**
 
 The probes need kernel BTF, `CAP_BPF`+`CAP_PERFMON` (+ `CAP_NET_ADMIN` for the tap), and the built
 object (`cargo xtask build-probes`). Everything is **fail-open**: on a host without them the run

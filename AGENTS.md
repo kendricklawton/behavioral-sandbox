@@ -27,8 +27,8 @@ not just asserted.
    cannot reach. In-guest agents exist for convenience (exec/IO), **never** for security.
 3. **Engine, not platform.** A self-hostable runtime + a driver API; tenancy/billing/scheduling/
    dashboards are the hoster's. (A recorded non-goal.)
-4. **Measured, not marketed.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
-   benchmarked with percentiles, never hand-waved.
+4. **Empirical benchmarks.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
+   benchmarked using percentiles.
 
 ## Repo layout
 
@@ -77,8 +77,7 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
    repo. Those belong to whatever hosts the engine.
 5. **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken
    channel is a typed error, never a host panic, hang, or leak.
-6. **Measured, not marketed.** Boot/restore/memory-sharing/overhead are benchmarked with percentiles;
-   no hand-waved performance claims.
+6. **Empirical benchmarks.** Boot, restore, memory sharing, and overhead are benchmarked with percentiles.
 
 ## Conventions
 

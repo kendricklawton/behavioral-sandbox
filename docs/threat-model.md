@@ -1,13 +1,10 @@
 # Threat model
 
 This is the engine's threat model: the assets it protects, the boundary it trusts, the adversary it
-assumes, and, attack class by attack class, how each is contained and where that containment is
-proven. It is deliberately concrete: every claim points at the mechanism that enforces it and the
-test that exercises it, because the security model is measured, not asserted (a core property).
+assumes, and, attack class by attack class, how each is contained and verified. Each claim specifies the enforcing mechanism and test coverage.
 
-The one-line version: **untrusted code runs inside a KVM microVM, and everything that observes or
-constrains it lives on the host, outside the guest's reach.** The trust boundary is the CPU, not any
-software inside the guest.
+The core model: **untrusted code runs inside a KVM microVM, and everything that observes or
+constrains it lives on the host, outside the guest's reach.** The trust boundary is CPU-enforced (KVM).
 
 ## Assets
 
@@ -81,16 +78,12 @@ Assumptions), or physical/side-channel attacks.
 **Note on Snapshot CPU Portability:** Firecracker snapshots preserve the producing host's vCPU CPUID state (`cpu_template` is unset by default). Cross-host snapshot restore requires matching CPU models or an explicit CPU template to avoid guest illegal instruction faults.
 
 
-The **consolidated** proof is that these hold *together*, against one hostile guest doing its worst
-on every axis at once: it exfiltrates (denied and recorded), floods the network (dropped at volume),
-exhausts memory and forks a storm (bounded by the cgroup, zero host threads), and hunts for the
-probes (finds nothing, and is recorded anyway), and each attempt fails while the run stays
-contained and usable. "Safe for multi-tenant hosting" means exactly this suite green, nothing less.
+The consolidated suite verifies these controls operate concurrently under hostile workloads. Multi-tenant deployment requires this integration test suite to pass cleanly.
 
 ## Verify it yourself
 
-The table above is only as trustworthy as your ability to re-run it. The containment claims are
-proven by the integration suite, which you can run against your own host rather than take on faith.
+The table above is only as trustworthy as your ability to re-run it: the integration suite proves
+the containment claims against your own host rather than asking for faith.
 
 The suite is **privileged**: it boots real microVMs and attaches real probes, so it needs a host with
 `/dev/kvm`, real root, `CAP_BPF` + `CAP_PERFMON`, and kernel BTF. From the repo root:
@@ -99,15 +92,13 @@ The suite is **privileged**: it boots real microVMs and attaches real probes, so
 sudo -E ./ci-privileged.sh
 ```
 
-The wrapper sets the three env concerns a `sudo` run otherwise stacks by hand (a throwaway
-`CARGO_TARGET_DIR`, a non-`nodev` `EKVM_SCRATCH_DIR`, and rustup's `cargo` back on `PATH`);
-the gate *refuses* to run as root without the target-directory override, so a root build cannot leave
-root-owned artifacts in `./target` that block your later non-root builds, and it pre-checks the scratch
-dir is not `nodev`. See [Contributing](./contributing.md#3-developer-workflows--ci-gates) for the expanded form.
+The wrapper handles the environment a `sudo` run otherwise stacks by hand, and the gate *refuses*
+to run misconfigured rather than letting capability-gated tests skip themselves into a hollow
+green. The mechanics live in
+[Contributing](./contributing.md#3-developer-workflows--ci-gates).
 
-This runs the VM-boot and probe-attach integration tests, including the containment suite. It
-**refuses** to run without root, BTF, or the eBPF object rather than skipping those tests into a
-hollow green (to `cargo`, a skipped test is a pass). The everyday `cargo xtask ci` gate is host-safe
+This runs the VM-boot and probe-attach integration tests, including the containment suite. The
+everyday `cargo xtask ci` gate is host-safe
 and runs everywhere, but it does **not** include this suite; the containment proof lives behind the
 privileged lane.
 
@@ -133,9 +124,7 @@ loader **signs** each finalized record with a host key the guest never sees (an 
 signature over the canonical record bytes), and ships a verify path (`ekvm verify`, the
 library `verify`, and the daemon's signed `trace` reply).
 
-- **What the signature proves:** the record was not altered after the producing host signed it. A
-  consumer holding the trusted public key detects any changed byte, dropped field, or substituted
-  record, without trusting the host, operator, or transport that relayed it.
+- **What the signature proves:** the record was not altered after the producing host signed it.
 - **What it does not prove:** that a **compromised producing host** told the truth. A host that holds
   the signing key at signing time can sign a consistent lie; the signature authenticates *"this host
   attests to these bytes,"* not *"these bytes are true."* This is the same trust root the boundary
@@ -150,14 +139,13 @@ library `verify`, and the daemon's signed `trace` reply).
   consumer handed only a truncated prefix cannot distinguish it from the whole sequence, since every
   link it holds is intact. Detecting a dropped tail needs an out-of-band anchor, the latest expected
   record hash or run count tracked by the consumer, which is the hoster's, the same custody line as
-  the signing key. A deliberate, documented limitation of append-only evidence, not a chain defect.
+  the signing key.
 
 See [`ekvm verify`](./cli.md#ekvm-verify) for the verify path.
 
 ## Assumptions and residual risk
 
-The boundary is only as strong as what it trusts. Explicitly assumed sound, and therefore *out* of
-the boundary:
+Explicitly assumed sound, and therefore *out* of the boundary:
 
 - **KVM and the host CPU's virtualization.** A hypervisor-level or CPU vulnerability that breaks VM
   isolation is outside this model; the jailer + seccomp are defense in depth that narrow the VMM's
@@ -187,21 +175,22 @@ See [Security](./security.md) for what counts as a security bug and how to repor
 
 ---
 
-## Host Hardening Baseline
+## Host hardening baseline
 
-When hosting mutually-distrusting workloads on shared hardware:
-- **Dedicated Worker**: Run VMMs on host workers dedicated exclusively to sandbox execution.
-- **SMT / Core Scheduling**: Disable SMT (hyperthreading) or enable Linux kernel core scheduling (`sysfs`) to prevent micro-architectural CPU side-channels between microVMs.
-- **Disable KSM**: Keep Kernel Same-Page Merging (`ksm`) disabled to prevent timing side-channels across microVM memory pages.
-- **Kernel Mitigations**: Keep CPU vulnerability mitigations enabled (`mitigations=auto`) and host microcode up to date.
-
-`ekvm doctor` checks these host advisories automatically and flags missing host hardening baseline items.
+When hosting mutually-distrusting workloads on shared hardware: dedicate the worker to sandbox
+execution; disable SMT or enable core scheduling, so microVMs can't share a physical core's
+micro-architectural state; keep KSM off, so page dedup can't become a cross-VM timing channel; and
+keep CPU mitigations (`mitigations=auto`) and host microcode current. These are the hoster's
+knobs, not the engine's (side channels sit in residual risk above); `ekvm doctor` flags each one
+it can check.
 
 ---
 
-## Supply-Chain & Provenance
+## Supply chain & provenance
 
-- **Artifact Sha256 Pinning**: The guest kernel and rootfs base images are fetched and verified against cryptographic sha256 checksums (`xtask/src/artifacts.rs`).
-- **Reproducible Guest Images**: Rootfs builds are byte-for-byte reproducible using pinned Alpine package closures (`xtask/src/rootfs.rs`).
-- **Offline Mirroring**: `cargo xtask vendor` snapshots all upstream sha256-pinned inputs into an offline mirror directory, verified via `vendor-manifest.txt`.
+Every upstream input the guest is built from is pinned by sha256 and verified on fetch: the guest
+kernel and base rootfs (`xtask/src/artifacts.rs`), and the Alpine package closure, which makes the
+rootfs build byte-for-byte reproducible (`xtask/src/rootfs.rs`). `cargo xtask vendor` snapshots
+the whole pinned input set into an offline mirror, so an air-gapped host can rebuild the guest
+without trusting a network path at build time.
 - **Dependency Auditing**: CI runs `cargo deny` to check for security advisories and enforce license policy across the dependency tree.
