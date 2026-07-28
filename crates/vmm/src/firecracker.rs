@@ -125,7 +125,7 @@ impl ApiClient {
         // just inside the timeout would hold this call open indefinitely. The write is one small
         // `write_all` Firecracker drains promptly, so a per-write timeout suffices there; the read
         // side is re-armed to the *remaining* budget before every read by [`DeadlineReader`].
-        let deadline = Instant::now() + timeout;
+        let deadline = crate::spawn::deadline_after(timeout);
         stream
             .set_write_timeout(Some(timeout))
             .map_err(|e| io_err(&ctx(), &e))?;
@@ -468,7 +468,9 @@ pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::R
     use std::os::fd::AsRawFd as _;
 
     let addr = UnixAddr::new(path)?;
-    let deadline = Instant::now() + timeout;
+    // `deadline_after`, never a bare `+`: `timeout` flows from `Limits::wall`, where
+    // `Duration::MAX` is a supported "no limit" and the bare add panics on overflow.
+    let deadline = crate::spawn::deadline_after(timeout);
     let mut backoff = crate::spawn::PollBackoff::new();
     loop {
         // `SOCK_CLOEXEC` matches what `UnixStream::connect` sets: without it every socket would
@@ -506,6 +508,20 @@ pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_no_limit_dial_timeout_is_clamped_not_a_panic() {
+        // `Limits::wall = Duration::MAX` ("no limit") reaches this dial through the exec path,
+        // and the bare `Instant + Duration` add panicked before the first connect attempt, so
+        // surviving to the typed error IS the assertion.
+        let missing = Path::new("/nonexistent/ekvm-no-such-dir/agent.sock");
+        let err = connect_with_timeout(missing, Duration::MAX).expect_err("nothing listens there");
+        assert_ne!(
+            err.kind(),
+            std::io::ErrorKind::TimedOut,
+            "a dead path fails at connect, immediately, not by burning the clamped deadline"
+        );
+    }
 
     /// This process's thread count, the axis the boot soak's leak check asserts on.
     fn process_threads() -> usize {

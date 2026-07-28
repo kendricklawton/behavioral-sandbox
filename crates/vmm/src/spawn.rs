@@ -1727,6 +1727,14 @@ fn still_before(deadline: Instant, what: &str) -> Result<(), VmmError> {
 /// `Instant + Duration` panics on overflow, and `timeout` is caller-set, so a `Duration::MAX`
 /// "no limit" clamps to a day rather than panicking.
 pub(crate) fn boot_deadline(timeout: Duration) -> Instant {
+    deadline_after(timeout)
+}
+
+/// `Instant::now() + timeout`, minus the overflow panic: a caller-controlled `Duration::MAX`
+/// "no limit" clamps to a day. The **only** way a caller-flowing duration may become a deadline
+/// (`Limits::wall` reaches the exec dial and the API client unclamped; the bare `+` panicking
+/// there was a host panic on the no-panic path).
+pub(crate) fn deadline_after(timeout: Duration) -> Instant {
     let now = Instant::now();
     now.checked_add(timeout)
         .unwrap_or_else(|| now + Duration::from_secs(86_400))
