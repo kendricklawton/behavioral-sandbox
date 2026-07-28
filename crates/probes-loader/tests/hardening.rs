@@ -431,11 +431,14 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
          got {}",
         hog_out.exit_code
     );
+    // `maybe_read`: the file itself is version-gated, so the `expect` names the real
+    // requirement where `read`'s ENOENT panic would not.
     let peak: u64 = cg
-        .read("memory.peak")
+        .maybe_read("memory.peak")
+        .expect("memory.peak missing (kernel >= 5.19)")
         .trim()
         .parse()
-        .expect("parse memory.peak (kernel >= 5.19)");
+        .expect("parse memory.peak");
     let max: u64 = cg
         .read("memory.max")
         .trim()

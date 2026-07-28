@@ -429,25 +429,25 @@ fn guest_mem_hog_is_bounded_by_the_cgroup() {
     let result = vm
         .exec(&hog, b"")
         .expect("the mem-hog exec must complete (guest OOM, not VMM death)");
-    eprintln!(
-        "mem-hog: guest exit {}, host memory.peak {} / memory.max {}",
-        result.exit_code,
-        cg.read("memory.peak").trim(),
-        cg.read("memory.max").trim(),
-    );
-
     // The cap held. `memory.peak` is the high-water mark of what the kernel charged this cgroup;
-    // it must be a real load (the hog charged here) and must not pass the cap.
+    // it must be a real load (the hog charged here) and must not pass the cap. `maybe_read`
+    // because the file itself is version-gated: the `expect` names the real requirement where
+    // `read`'s ENOENT panic would not.
     let peak: u64 = cg
-        .read("memory.peak")
+        .maybe_read("memory.peak")
+        .expect("memory.peak missing (kernel >= 5.19)")
         .trim()
         .parse()
-        .expect("parse memory.peak (kernel >= 5.19)");
+        .expect("parse memory.peak");
     let max: u64 = cg
         .read("memory.max")
         .trim()
         .parse()
         .expect("parse memory.max");
+    eprintln!(
+        "mem-hog: guest exit {}, host memory.peak {peak} / memory.max {max}",
+        result.exit_code,
+    );
     assert!(
         peak > 64 * 1024 * 1024,
         "the hog should have pushed real memory through the cgroup (peak {peak})"

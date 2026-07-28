@@ -135,22 +135,45 @@ impl LimitCgroup {
         }
     }
 
-    /// The raw contents of a control file in the leaf (`memory.peak`, `memory.max`, …); empty if
-    /// unreadable.
+    /// The raw contents of a control file in the leaf (`memory.peak`, `memory.max`, …). Panics if
+    /// unreadable (the idiomatic test assertion, like [`enter`](Self::enter)): the enforcement
+    /// asserts built on these reads must fail closed, a defaulted `""`/`0` would green them
+    /// vacuously over a file that was never read.
     #[must_use]
     pub fn read(&self, file: &str) -> String {
-        std::fs::read_to_string(self.dir.join(file)).unwrap_or_default()
+        let path = self.dir.join(file);
+        match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => panic!("read control file {}: {e}", path.display()),
+        }
     }
 
-    /// A named counter out of a flat `key value` stat file (`memory.events`, `cpu.stat`); `0` if
-    /// the key is absent.
+    /// [`read`](Self::read) for a control file that may legitimately not exist (a kernel-version
+    /// gate like `memory.peak`, 5.19+): `None` instead of the panic, so the *caller* names the
+    /// real requirement in its own `expect` rather than failing on a bare ENOENT.
+    #[must_use]
+    pub fn maybe_read(&self, file: &str) -> Option<String> {
+        std::fs::read_to_string(self.dir.join(file)).ok()
+    }
+
+    /// A named counter out of a flat `key value` stat file (`memory.events`, `cpu.stat`). Panics
+    /// if the file is unreadable, the key is absent, or its value is malformed (same fail-closed
+    /// rationale as [`read`](Self::read)): every current caller asserts on a key cgroup v2
+    /// guarantees, so its absence means the measurement didn't happen, not that it was zero.
     #[must_use]
     pub fn stat(&self, file: &str, key: &str) -> u64 {
-        self.read(file)
+        match self
+            .read(file)
             .lines()
-            .find_map(|l| l.strip_prefix(key))
-            .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0)
+            // The space after the key is part of the match: a bare `strip_prefix` would let a
+            // shorter key claim a longer one's line (`oom` matching `oom_kill 3`).
+            .find_map(|l| l.strip_prefix(key)?.strip_prefix(' '))
+            .map(|v| v.trim().parse())
+        {
+            Some(Ok(n)) => n,
+            Some(Err(e)) => panic!("parse `{key}` in {file}: {e}"),
+            None => panic!("no `{key}` line in {file} (nothing measured, not zero)"),
+        }
     }
 }
 

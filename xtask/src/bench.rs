@@ -999,6 +999,16 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     tracer
         .drain(|_| {})
         .context("clear the pre-measurement baseline")?;
+    // Warm the CPU before the first sweep column (see the note in `bench_trace`). Here a cold
+    // start doesn't fabricate overhead, it hides it: the drift check compares first vs last
+    // column, and a cold-inflated first column masks real per-event growth.
+    const WARMUP: usize = 3;
+    for _ in 0..WARMUP {
+        ns_per_openat(&missing, BATCH);
+        // Drained per burst like the measured loop: three undrained bursts overflow the ring,
+        // and a warmup exercising the reserve-fails path warms slightly different code.
+        tracer.drain(|_| {}).context("drain the warmup burst")?;
+    }
     println!("syscall tracer — ns per watched openat:");
     println!("  targets   ns/openat(p50)");
     let mut tracer_p50s: Vec<u64> = Vec::new();
@@ -1025,6 +1035,12 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     // The resource meter: cost per context switch as the meter target set grows.
     let mut meter = ResourceMeter::load().context("load + attach the resource meter")?;
     meter.add_target(me).context("register our cgroup")?;
+    // Same warmup as the tracer sweep above: the first column must not be the cold one. Before the
+    // reset, not after, so the baseline this sweep runs against is zeroed the way the tracer's ring
+    // is drained: the warmup's own accounting doesn't carry into the measured columns.
+    for _ in 0..WARMUP {
+        ns_per_switch(ROUNDS)?;
+    }
     meter.reset(me).context("zero our CPU baseline")?;
     println!("\nresource meter — ns per context switch:");
     println!("  targets   ns/switch(p50)");

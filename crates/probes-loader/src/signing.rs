@@ -115,8 +115,25 @@ impl HostKey {
         Self::load(path)
     }
 
-    /// Load a key from a hex-seed file.
+    /// Load a key from a hex-seed file. Refuses a group- or world-accessible file: the record's
+    /// "host-signed" claim rests on this seed being unreadable to other local users, and silently
+    /// using a lax-mode key (copied, restored from a backup) would make every signature forgeable
+    /// without a word said. First-run generation writes `0600`, so this only fires on a file the
+    /// operator supplied or widened.
     fn load(path: &Path) -> Result<Self, KeyError> {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(path)
+            .map_err(KeyError::Io)?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(KeyError::Malformed(format!(
+                "signing-key file {} is mode {mode:03o}: group/world access makes host \
+                 signatures forgeable; `chmod 600` it",
+                path.display()
+            )));
+        }
         let text = Zeroizing::new(std::fs::read_to_string(path).map_err(KeyError::Io)?);
         let mut seed = Zeroizing::new([0u8; 32]);
         hex_decode(text.trim(), &mut *seed).map_err(|()| {
@@ -148,9 +165,14 @@ impl HostKey {
             .mode(0o600)
             .open(tmp.path())
             .map_err(KeyError::Io)?;
-        let mut hex = Zeroizing::new(hex_encode(&self.signing.to_bytes()));
-        hex.push('\n');
+        // The seed's transient copies stay under `Zeroizing`, and the newline is a second write
+        // rather than a `push` into the exactly-sized hex string: that push forced a
+        // reallocation, freeing the old buffer with the full hex seed in it un-zeroized
+        // (`Zeroizing` scrubs only the final buffer it drops).
+        let seed = Zeroizing::new(self.signing.to_bytes());
+        let hex = Zeroizing::new(hex_encode(&*seed));
         f.write_all(hex.as_bytes()).map_err(KeyError::Io)?;
+        f.write_all(b"\n").map_err(KeyError::Io)?;
         drop(f);
         match std::fs::hard_link(tmp.path(), path) {
             Ok(()) => Ok(true),
