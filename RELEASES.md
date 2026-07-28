@@ -1,10 +1,8 @@
 # Releases
 
-Release notes for eKVM releases are documented below.
-
 ## v0.1.0 (Unreleased)
 
-The initial stable release of eKVM: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
+The first supported release of eKVM: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
 
 ### Added
 - **Hardware Isolation Driver (`crates/vmm`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
@@ -12,7 +10,7 @@ The initial stable release of eKVM: a self-hostable engine that boots a hardware
 - **Daemon Wire Interface (`crates/protocol` & `crates/cli`)**: Versioned newline-delimited JSON wire API (`schema: 1`) served by `ekvm serve` over Unix domain sockets.
 - **Tamper-Evident Audit Records**: Host-observed Ed25519-signed JSON audit logs (`RunRecord`) with hash-chain verification (`trace`).
 - **Reference Rust Client (`crates/client`)**: Dependency-light reference client driving `ekvm serve` over Unix sockets.
-- **Pre-warmed Sandbox Pool**: Snapshot-restore pool for warm sandbox starts (pool take p50 under 1 ms; restore-to-first-result p50 ~100 ms; see [docs/benchmarks.md](docs/benchmarks.md) for the measured percentiles).
+- **Pre-warmed Sandbox Pool**: Snapshot-restore pool for warm sandbox starts (pool take p50 6 ms; pool-take-to-first-result p50 112 ms, p99 154 ms; see [docs/benchmarks.md](docs/benchmarks.md) for benchmark results).
 - **Host Diagnostics (`ekvm doctor`)**: Pre-flight host verification for `/dev/kvm`, Linux kernel floor >= 5.15, cgroup v2, and BTF eBPF support.
 - **Distribution Tooling (`xtask`)**: Release packaging (`cargo xtask dist`) producing release tarballs (`ekvm-0.1.0-x86_64-linux.tar.gz`), a signed `SHA256SUMS` manifest, and single-command installer (`install.sh`).
 
@@ -62,8 +60,7 @@ never enters the repo or `dist/`.
 
 - **Latest minor**: fixes and features, on `main`.
 - **Previous minor**: security and serious-bug backports only, on its release branch
-  (`release-vX.Y`, patch tags `vX.Y.1`, `vX.Y.2`, ...). No feature backports: the answer
-  to a feature request on an old line is the current minor.
+  (`release-vX.Y`, patch tags `vX.Y.1`, `vX.Y.2`, ...).
 - **Older minors**: unsupported.
 
 **The previous minor's window is computed, not dated.** Each release line supports a

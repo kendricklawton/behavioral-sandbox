@@ -1,22 +1,13 @@
 # Benchmarks
 
-*Measured, not marketed.* Every performance claim this engine makes is backed by a benchmark you can
-re-run, reported with percentiles, against an honest baseline. This page is the results report; the
-numbers below come from the benchmark suite in [`xtask`](https://github.com/packsixfour/ekvm/tree/main/xtask), re-run with `cargo xtask bench-all`.
+Performance measurements are backed by reproducible benchmarks reported as nearest-rank percentiles against baseline execution. The numbers below are produced by the benchmark suite in [`xtask`](https://github.com/packsixfour/ekvm/tree/main/xtask) via `cargo xtask bench-all`.
 
 ## Methodology
 
-- **Percentiles, never averages.** Latencies and per-event costs are reported as
-  `min / p50 / p90 / p99 / max`, nearest-rank (no interpolation). An average hides the tail a caller
-  actually feels; a percentile does not.
-- **Honest tails.** A percentile whose rank lands on the last sample has no observation above it, so
-  it is just `max` relabeled. Those print `—`: a `p99` needs `n ≥ 100` to mean anything, and a short
-  run is not allowed to dress its slowest sample up as a tail.
-- **Against a baseline.** Each number is stated against the honest thing it improves on: a warm start
-  against a **cold boot**, a probe's cost against **no probe attached**, a clone's true footprint
-  against the **naive Rss** that double-counts shared pages.
-- **Only-if-it-worked.** A timed run that did not produce its expected result is an error, never a
-  fast sample: a bench that timed failures would be lying.
+- **Nearest-rank percentiles**: `min / p50 / p90 / p99 / max` without interpolation.
+- **Tail metrics**: Percentile ranks requiring higher sample counts than executed return `—` instead of relabeling `max` (e.g. `p99` requires `n ≥ 100`).
+- **Baseline comparison**: Warm starts are measured against cold boots, eBPF overhead against unattached baselines, and shared memory footprint (PSS) against un-deduplicated RSS.
+- **Success gating**: Benchmark runs that fail or error out are excluded from latency calculations.
 - **Reproduce.** One command runs the whole suite as a single report:
 
   ```console
@@ -29,12 +20,11 @@ numbers below come from the benchmark suite in [`xtask`](https://github.com/pack
   on and skips any section it can't run, with the reason, so a report says exactly what it measured.
 
 The numbers on this page were measured on: **Linux 7.0.11, Intel i5-10310U (8 vCPUs @ 1.70 GHz),
-15 GiB RAM**, ekvm rootfs 132 MiB, guest 256 MiB / 1 vCPU. Your hardware will differ; re-run the
-suite to get numbers for your host.
+15 GiB RAM**, Firecracker v1.16.1, ekvm rootfs 132 MiB, guest 256 MiB / 1 vCPU.
 
 ## Start latency: cold boot vs snapshot restore vs pool take
 
-`cargo xtask bench-warm --runs 100`. The **cold boot** is the honest baseline (a fresh microVM on a
+`cargo xtask bench-warm --runs 100`. The **cold boot** is the baseline (a fresh microVM on a
 private read-write copy of the rootfs, disk copy and all). The **snapshot restore** brings up a clone
 from one prewarmed snapshot; the **pool take** pops a prefilled clone (its restore paid off the clock,
 between requests). Each path is split into its isolated **start** (begin a sandbox → an exec-ready VM)
@@ -44,22 +34,23 @@ Start latency (ms, n=100):
 
 | path              | min | p50 | p90 | p99 | max |
 |-------------------|----:|----:|----:|----:|----:|
-| cold boot         | 317 | 380 | 476 | 627 | 755 |
-| snapshot restore  |  31 |  41 |  50 |  59 |  64 |
-| pool take         |   0 |   0 |   5 |   9 |  27 |
+| cold boot         | 382 | 452 | 512 | 572 | 624 |
+| snapshot restore  |  18 |  49 |  58 |  92 | 104 |
+| pool take         |   1 |   6 |   7 |   8 |   9 |
 
 Time-to-first-result (ms, n=100):
 
 | path               | min | p50 | p90 | p99 | max |
 |--------------------|----:|----:|----:|----:|----:|
-| cold boot + exec   | 359 | 431 | 534 | 714 | 838 |
-| restore + exec     |  74 | 102 | 123 | 168 | 210 |
-| pool take + exec   |  42 |  66 | 238 | 537 | 765 |
+| cold boot + exec   | 431 | 512 | 581 | 662 | 679 |
+| restore + exec     |  65 | 159 | 188 | 246 | 258 |
+| pool take + exec   |  44 | 112 | 138 | 154 | 160 |
 
-**Result:** a snapshot restore starts ~9× faster than a cold boot (p50 41 ms vs 380 ms), and a pool
-take is effectively instant (p50 0 ms). Restore is the tighter path end-to-end (p99 168 ms vs the pool
-path's 537 ms) because the pool's first exec races the off-clock refill for CPU; when tail latency
-matters more than steady-state throughput, restore-per-request is the steadier choice.
+**Result:** a snapshot restore starts ~9× faster than a cold boot (p50 49 ms vs 452 ms), and a pool
+take is single-digit milliseconds (p50 6 ms, max 9 ms: the pop plus its health probe). End-to-end
+the pool path is now both the fastest and the tightest (p50 112 ms, p99 154 ms, vs restore's
+159/246): the long pool tail the previous recorded run showed (p99 537 ms, the first exec racing
+the off-clock refill) did not reproduce on this stack.
 
 ### Bottleneck found and fixed
 
@@ -67,7 +58,7 @@ The decomposition above is what makes a bottleneck legible: the three start path
 the driver's **readiness waits**, the loops that poll for the API socket, the userspace marker, and
 (on restore) the guest agent, sleeping on a fixed 20 ms / 10 ms interval between checks. A fixed
 interval adds up to a whole interval (about half of it on average) of pure *quantization* to every
-start: readiness has already happened, but the poll won't notice until its next tick. On a ~40 ms
+start. On a ~40 ms
 restore that is a large slice; on the boot tail it is needless jitter.
 
 The fix replaces the fixed sleep with an adaptive back-off (start at 1 ms, double to a 5 ms cap), so
@@ -84,27 +75,28 @@ fell from 103 to 79 ms, and the pool-take tail from a 148 ms worst case to 67 ms
 unchanged at the median, it is dominated by the guest's own kernel-and-init time, where the poll is a
 small fraction, but its tail tightened too. The lesson the numbers taught: on the paths the snapshot
 machinery makes fast, a coarse *host-side poll* had become a meaningful fraction of the whole start.
+(That experiment was recorded on the Firecracker v1.9 stack; the v1.16 tables above supersede its
+absolute numbers, the lesson stands.)
 
 ## Memory-sharing density: how many concurrent microVMs before it degrades
 
-`cargo xtask bench-density --count 32`. Restores clones one at a time from a single prewarmed snapshot,
+`cargo xtask bench-density --count 16`. Restores clones one at a time from a single prewarmed snapshot,
 keeps **every clone alive**, and samples the summed **Rss** (naive, counts the shared base in full for
 every VM) against the summed **Pss** (proportional set size, shared pages divided across their
 sharers, the true host footprint). The Rss/Pss gap *is* the memory-sharing benefit, made a number. It
 stops at the target, a restore failure, or a memory floor (`max(1 GiB, 5% of RAM)`, so it never swaps
-the host).
+the host). Raise `--count` for a longer curve; the marginal-cost number is what sizing needs.
 
 | clones | Rss sum (MiB) | Pss sum (MiB) |
 |-------:|--------------:|--------------:|
-|      1 |            31 |            31 |
-|      2 |            62 |            32 |
-|      4 |           123 |            35 |
-|      8 |           249 |            40 |
-|     16 |           505 |            51 |
-|     32 |           755 |            68 |
+|      1 |            40 |            40 |
+|      2 |            81 |            46 |
+|      4 |           163 |            57 |
+|      8 |           327 |            80 |
+|     16 |           621 |           103 |
 
-**Result:** at 32 concurrent clones the naive Rss reads 755 MiB, but only **68 MiB** is actually
-resident, **11× denser** than if nothing were shared. The marginal cost of one more clone is ~1 MiB
+**Result:** at 16 concurrent clones the naive Rss reads 621 MiB, but only **103 MiB** is actually
+resident, **6× denser** than if nothing were shared. The marginal cost of one more clone is ~4.2 MiB
 of Pss (its copy-on-write dirty pages); the read-only base disk and the 256 MiB snapshot memory file
 stay page-cache-deduped across the whole fleet, not copied per VM.
 
@@ -138,7 +130,11 @@ One caveat, which the harness itself demonstrates: the whole-host number attribu
 of shared files, so a page-cache-warm base shrinks the shared-base row. The numbers above are from a
 standalone run on a settled host; `bench-all`'s footprint section runs after other benches have already
 cached the base and reports a lower shared-base cost for exactly that reason, the shared cost is paid
-once per host, and whichever cohort touches the base first pays it.
+once per host, and whichever cohort touches the base first pays it. (This table is the one on this
+page still measured on the v1.9 stack: a valid whole-host sample needs a freshly settled host, run
+`bench-footprint` first after a reboot or an idle stretch, and a post-bench attempt on the v1.16
+stack disqualified itself with a negative row, cache reclaim from the earlier benches outpacing the
+cohort's own cost.)
 
 ## eBPF probe overhead
 
@@ -167,8 +163,30 @@ What each measures, and the claim it backs:
   each event is a single O(1) hash lookup no matter how many sandboxes are watched, total probe
   overhead scales with the **event rate**, not with the number of concurrent sandboxes.
 
-Run these on your host and record the deltas; the design guarantee is that both per-event costs are
-bounded and independent of the sandbox count.
+Measured on the reference host (n=100 bursts per condition):
+
+Added cost per `openat` (`bench-trace`, ns/openat):
+
+| condition                | min  | p50  | p90  | p99  | max  |
+|--------------------------|-----:|-----:|-----:|-----:|-----:|
+| baseline (no probes)     | 1395 | 1667 | 4474 | 5210 | 5351 |
+| unwatched (filtered out) | 1665 | 1804 | 2057 | 2377 | 2622 |
+| watched (event written)  | 1969 | 2163 | 2570 | 3631 | 4744 |
+
+At p50, a live-but-filtered probe adds **~137 ns** per openat (what every unwatched process pays for
+the probe existing) and full capture adds **~496 ns** (what the one watched sandbox pays), with all
+100,000 watched events captured, none dropped.
+
+Scaling (`bench-scale`, watched-set size 1 → 512): tracer p50 2136 → 2126 ns/openat, meter p50
+3743 → 3823 ns/switch. Both flat, as designed: one shared program, one O(1) lookup per event, so
+probe overhead scales with the event rate, not the concurrent-sandbox count.
+
+The meter's absolute three-condition table is deliberately not recorded yet: on the reference host
+its baseline condition, measured first, ran ~3× slower than the attached conditions (scheduler
+placement and frequency ramp-up dominate the ping-pong workload's early samples), which would print
+a nonsense negative overhead. Until the harness interleaves its conditions, the honest published
+numbers for the meter are the flat scale sweep above, which bounds its per-switch cost with the
+workload included.
 
 ## Record signing overhead
 
@@ -180,19 +198,19 @@ eBPF), so it always runs:
 cargo xtask bench-sign --runs 1000        # per-record ed25519 sign/verify + the sha256 chain hash
 ```
 
-Measured on the reference host below (a `--release` build over a 760-byte canonical record), per
-operation, in **nanoseconds**:
+Measured on the reference host (n=1000, over a 760-byte canonical record), per operation, in
+**nanoseconds**:
 
 | operation             | min | p50 | p90 | p99 | max |
 |-----------------------|-----|-----|-----|-----|-----|
-| sign (unchained)      | 47449 | 52130 | 83113 | 132529 | 306601 |
-| sign (chained)        | 47870 | 51897 | 77383 | 112041 | 336789 |
-| verify                | 79750 | 88749 | 129967 | 181759 | 410207 |
-| record_hash (sha256)  | 7073 | 7754 | 11789 | 22940 | 443027 |
+| sign (unchained)      | 90525 | 104514 | 126662 | 217478 | 362834 |
+| sign (chained)        | 91189 | 104372 | 126470 | 202486 | 328051 |
+| verify                | 105828 | 123156 | 153265 | 281192 | 423491 |
+| record_hash (sha256)  | 10936 | 12732 | 16653 | 39824 | 91871 |
 
-The takeaway is the order of magnitude: a sign is **~50 microseconds** (p50), verify ~90, the chain
-hash ~8, all far under a millisecond and dwarfed by a run's boot (hundreds of ms) and exec. Chaining a
-record (the session hash-chain) costs the same as an unchained sign. Signing therefore adds no
-measurable latency to a run. (Run in `--release`: `ed25519` is 10-40x slower in an unoptimized build,
-so a `cargo xtask` debug build reports numbers that aren't representative; the workspace also
-opt-levels the `dalek`/`sha2` crates in the dev profile so tests aren't slowed.)
+The takeaway is the order of magnitude: a sign is **~105 microseconds** (p50), verify ~125, the chain
+hash ~13, all far under a millisecond and dwarfed by a run's boot (hundreds of ms) and exec. Chaining
+a record (the session hash-chain) costs the same as an unchained sign. Signing therefore adds no
+measurable latency to a run. (The workspace opt-levels the `dalek`/`sha2` crates even in the dev
+profile, so the `cargo xtask` harness measures optimized crypto; absolute values still swing with the
+host's CPU frequency state, the order of magnitude is the claim.)
