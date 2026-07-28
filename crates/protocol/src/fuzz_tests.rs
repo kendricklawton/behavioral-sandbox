@@ -86,6 +86,17 @@ fn rand_request(rng: &mut Rng) -> Request {
             } else {
                 None
             },
+            // `Some(vec![])` and `None` are distinct values that must both survive the round trip,
+            // so generate the empty list as well as the absent field.
+            env: if rng.below(2) == 0 {
+                Some(
+                    (0..rng.below(4))
+                        .map(|_| (rand_string(rng), rand_string(rng)))
+                        .collect(),
+                )
+            } else {
+                None
+            },
         },
         2 => Request::Put {
             path: rand_string(rng),

@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 use ekvm::audit::RunProbes;
 use ekvm::policy::{Policy, Requested};
-use ekvm::MAX_VCPUS;
+use ekvm::{vcpus_supported, MAX_VCPUS};
 use probes_loader::Timing;
 use protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
 use vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
@@ -194,11 +194,16 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     break;
                 }
             }
-            Ok(Some(Request::Exec { argv, stdin })) => {
+            Ok(Some(Request::Exec { argv, stdin, env })) => {
                 server.metrics.request(Verb::Exec);
                 let t0 = Instant::now();
-                let (result, interrupted) =
-                    exec_watching_for_cancel(&vm, &argv, stdin.as_deref().unwrap_or(""), &writer);
+                let (result, interrupted) = exec_watching_for_cancel(
+                    &vm,
+                    &argv,
+                    stdin.as_deref().unwrap_or(""),
+                    env.as_deref().unwrap_or(&[]),
+                    &writer,
+                );
                 if interrupted {
                     // The sandbox is gone, so the exec's own error is noise; acknowledge only if
                     // the client actually sent `cancel` (an outright hang-up gets no reply, there
@@ -605,7 +610,8 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
 }
 
 /// Fold an [`Request::Open`]'s optional knobs onto the [`Limits`] the operator's `policy` allows,
-/// validating each as a typed message (never a panic): vCPUs in `1..=32`, memory and wall nonzero.
+/// validating each as a typed message (never a panic): a vCPU count the VMM accepts (1 or an even
+/// number up to 32), memory and wall nonzero.
 /// Also reports whether the `open` was **bare** (every knob defaulted), which decides pool
 /// eligibility. A non-`Open` first message is the caller's error too.
 /// This is the daemon's policy boundary, not a convenience: a client arrives over a socket and
@@ -624,12 +630,14 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String>
     };
     let bare = vcpus.is_none() && mem_mib.is_none() && wall_secs.is_none() && output_cap.is_none();
 
-    // Shape errors first (a 0 or an over-32 vCPU count is malformed regardless of policy), so the
-    // caller gets the specific complaint rather than a ceiling message about a nonsense value.
+    // Shape errors first (a vCPU count the VMM would refuse is malformed regardless of policy), so
+    // the caller gets the specific complaint rather than a ceiling message about a nonsense value.
     let mut requested = Requested::default();
     if let Some(v) = vcpus {
-        if *v == 0 || *v > MAX_VCPUS {
-            return Err(format!("vcpus must be in 1..={MAX_VCPUS}, got {v}"));
+        if !vcpus_supported(*v) {
+            return Err(format!(
+                "vcpus must be 1 or an even number in 1..={MAX_VCPUS}, got {v}"
+            ));
         }
         requested.vcpus = NonZeroU8::new(*v);
     }
@@ -704,11 +712,14 @@ fn exec_watching_for_cancel(
     vm: &RunningVm,
     argv: &[String],
     stdin: &str,
+    env: &[(String, String)],
     socket: &UnixStream,
 ) -> (Result<vmm::RunResult, VmmError>, bool) {
     let kill = vm.kill_handle();
     std::thread::scope(|scope| {
-        let worker = scope.spawn(|| vm.exec(argv, stdin.as_bytes()));
+        // `exec_with_files` rather than `exec`: same call, but it carries the session's env. No
+        // files or artifacts here, those ride the `put`/`get` verbs on their own.
+        let worker = scope.spawn(|| vm.exec_with_files(argv, stdin.as_bytes(), &[], env, &[]));
         let mut interrupted = false;
         while !worker.is_finished() {
             if !interrupted && client_spoke(socket) {

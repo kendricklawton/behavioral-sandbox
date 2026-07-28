@@ -92,7 +92,11 @@ pub struct Envelope<T> {
 /// `#[non_exhaustive]`: a Rust peer must keep a catch-all arm, so adding a verb is not a source
 /// break for it. That says nothing about the *wire*, where an unknown `op` is still a hard decode
 /// error; growing the verb set is a schema-level decision, this only keeps the Rust half honest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Debug` is **hand-written and redacting** (below), not derived, for the same reason
+/// `channel::Request`'s is: this type carries secret-bearing payloads (`Put::content`,
+/// `Exec::stdin`, `Exec::env` *values*), and the daemon does log a request on its unhandled-verb
+/// path. A derived `Debug` would put file contents and env values into that log line.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Request {
@@ -127,6 +131,19 @@ pub enum Request {
         /// block-device path, not this field.
         #[serde(default)]
         stdin: Option<String>,
+        /// Environment variables for the **spawned command only**, as `KEY=VALUE` pairs; omitted is
+        /// none. The guest agent applies them via `Command::env`, never to its own process, so one
+        /// exec's environment cannot bleed into the agent or into a later exec on the same session.
+        ///
+        /// **Values are secrets by contract**: they never appear in a log line, an error, or this
+        /// type's `Debug`, which renders keys and a count only. A caller may still leak them by
+        /// having the command print them, which is the run's own output, not an engine surface.
+        ///
+        /// Additive, so no `WIRE_SCHEMA` bump: a daemon that predates the field ignores it, and a
+        /// client that predates it simply omits it. (This closes the gap where `ekvm run --env`
+        /// could set variables but no wire client could.)
+        #[serde(default)]
+        env: Option<Vec<(String, String)>>,
     },
     /// Write `content` (UTF-8 text) to `path` in the session's working directory, so a later `exec`
     /// sees it. A relative `path` is resolved against that working directory; the file persists for
@@ -181,6 +198,66 @@ pub enum Request {
     /// slot and its guest RAM for up to the session's remaining wall budget. `cancel` reclaims both
     /// immediately and is acknowledged.
     Cancel,
+}
+
+impl std::fmt::Debug for Request {
+    /// The redacting `Debug` (see the type doc). Secret-bearing payloads render as counts and key
+    /// names only, so no log line, formatting path, or panic message can leak them; everything else
+    /// (paths, argv, resource knobs) renders normally, so the variant stays legible.
+    ///
+    /// The classification mirrors the engine's stated contract exactly: an error may name a file
+    /// *path* or an env *key*, never a value.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exec { argv, stdin, env } => {
+                let keys: Vec<&str> = env.iter().flatten().map(|(k, _)| k.as_str()).collect();
+                f.debug_struct("Exec")
+                    .field("argv", argv)
+                    .field(
+                        "stdin",
+                        &format_args!(
+                            "<redacted; {} byte(s)>",
+                            stdin.as_deref().map_or(0, str::len)
+                        ),
+                    )
+                    .field(
+                        "env",
+                        &format_args!(
+                            "<{} var(s), values redacted; keys: {keys:?}>",
+                            env.as_ref().map_or(0, Vec::len)
+                        ),
+                    )
+                    .finish()
+            }
+            Self::Put { path, content } => f
+                .debug_struct("Put")
+                .field("path", path)
+                .field(
+                    "content",
+                    &format_args!("<redacted; {} byte(s)>", content.len()),
+                )
+                .finish(),
+            // No secret-bearing field: resource knobs, a path, or nothing at all.
+            Self::Open {
+                vcpus,
+                mem_mib,
+                wall_secs,
+                output_cap,
+            } => f
+                .debug_struct("Open")
+                .field("vcpus", vcpus)
+                .field("mem_mib", mem_mib)
+                .field("wall_secs", wall_secs)
+                .field("output_cap", output_cap)
+                .finish(),
+            Self::Get { path } => f.debug_struct("Get").field("path", path).finish(),
+            Self::Snapshot => f.write_str("Snapshot"),
+            Self::Trace => f.write_str("Trace"),
+            Self::TraceSummary => f.write_str("TraceSummary"),
+            Self::Close => f.write_str("Close"),
+            Self::Cancel => f.write_str("Cancel"),
+        }
+    }
 }
 
 /// A daemon → client message. Internally tagged by a `reply` field.
@@ -594,6 +671,12 @@ mod tests {
             Request::Exec {
                 argv: vec!["echo".into(), "hi".into()],
                 stdin: Some("piped\n".into()),
+                env: None,
+            },
+            Request::Exec {
+                argv: vec!["env".into()],
+                stdin: None,
+                env: Some(vec![("TOKEN".into(), "s3cret".into())]),
             },
             Request::Put {
                 path: "input.txt".into(),
@@ -899,9 +982,69 @@ mod tests {
             req,
             Request::Exec {
                 argv: vec!["echo".to_string()],
-                stdin: None
+                stdin: None,
+                env: None,
             }
         );
+    }
+
+    #[test]
+    fn debug_redacts_secrets_but_keeps_the_request_legible() {
+        // The daemon logs a request on its unhandled-verb path (`tracing::error!(request = ?other)`),
+        // so `Debug` is a live leak path, not a theoretical one. Env *values* and file *content* must
+        // never render; keys, paths, and argv must, or the log line is useless for debugging.
+        let exec = Request::Exec {
+            argv: vec!["env".into()],
+            stdin: Some("stdin-secret".into()),
+            env: Some(vec![
+                ("AWS_SECRET_ACCESS_KEY".into(), "leaked-value".into()),
+                ("TOKEN".into(), "another-secret".into()),
+            ]),
+        };
+        let rendered = format!("{exec:?}");
+        for secret in ["leaked-value", "another-secret", "stdin-secret"] {
+            assert!(
+                !rendered.contains(secret),
+                "Debug leaked a secret value ({secret}): {rendered}"
+            );
+        }
+        // Loggable by contract: an error may name an env key or an argv, never a value.
+        assert!(rendered.contains("AWS_SECRET_ACCESS_KEY"), "{rendered}");
+        assert!(rendered.contains("TOKEN"), "{rendered}");
+        assert!(rendered.contains("env"), "{rendered}");
+        // The counts survive, so a reader can still tell how much was carried.
+        assert!(
+            rendered.contains('2'),
+            "var count should render: {rendered}"
+        );
+
+        // `put` carries file content, which the engine's contract treats as a secret too. This
+        // variant predates the env field and was already leaking through the derived `Debug`.
+        let put = Request::Put {
+            path: "creds.json".into(),
+            content: "very-secret-file-body".into(),
+        };
+        let rendered = format!("{put:?}");
+        assert!(
+            !rendered.contains("very-secret-file-body"),
+            "Debug leaked file content: {rendered}"
+        );
+        assert!(
+            rendered.contains("creds.json"),
+            "a path is loggable: {rendered}"
+        );
+
+        // A variant with nothing secret still renders its fields, so redaction did not cost
+        // legibility across the board.
+        let open = Request::Open {
+            vcpus: Some(2),
+            mem_mib: Some(512),
+            wall_secs: None,
+            output_cap: None,
+        };
+        let rendered = format!("{open:?}");
+        assert!(rendered.contains("vcpus"), "{rendered}");
+        assert!(rendered.contains('2'), "{rendered}");
     }
 
     #[test]

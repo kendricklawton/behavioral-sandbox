@@ -480,6 +480,42 @@ fn the_reference_client_drives_a_full_session() {
     assert_eq!(run.exit_code, 0, "echo exits 0");
     assert_eq!(run.stdout, "hello\n", "exec returns stdout");
 
+    // `env` over the wire: the CLI could always set variables (`ekvm run --env`), but no wire client
+    // could, so an SDK had no way to pass configuration to a command. Prove both halves of the
+    // contract, since the second is the one that matters.
+    let print_var = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "printf %s \"$WIRE_TOKEN\"".to_string(),
+    ];
+    let run = client
+        .exec_with_env(
+            &print_var,
+            "",
+            &[(
+                "WIRE_TOKEN".to_string(),
+                "carried-over-the-wire".to_string(),
+            )],
+        )
+        .unwrap_or_else(|e| panic!("exec_with_env: {e}"));
+    assert_eq!(run.exit_code, 0, "the command runs");
+    assert_eq!(
+        run.stdout, "carried-over-the-wire",
+        "the variable must reach the spawned command"
+    );
+
+    // The scoping promise: env is set on the **spawned command only**, so it must not survive into
+    // the next exec on the same session. If it leaked, one caller's credentials would be visible to
+    // every later command in that session, which is the whole reason the agent uses `Command::env`
+    // rather than setting its own environment.
+    let run = client
+        .exec(&print_var, "")
+        .unwrap_or_else(|e| panic!("exec: {e}"));
+    assert_eq!(
+        run.stdout, "",
+        "a later exec must not inherit the previous exec's environment"
+    );
+
     client
         .put("data.txt", "payload\n")
         .unwrap_or_else(|e| panic!("put: {e}"));

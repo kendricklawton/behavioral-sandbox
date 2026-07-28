@@ -200,9 +200,28 @@ impl Client {
     /// [`ClientError`] on a decode fault or a remote error (a command that couldn't spawn is a
     /// non-fatal [`Remote`](ClientError::Remote); the session survives it).
     pub fn exec(&mut self, argv: &[String], stdin: &str) -> Result<ExecOutcome, ClientError> {
+        self.exec_with_env(argv, stdin, &[])
+    }
+
+    /// Run one command with `env` set on the **spawned command only**, the richer form of
+    /// [`exec`](Self::exec). The guest agent applies the variables via `Command::env`, never to its
+    /// own process, so they cannot bleed into a later exec on the same session.
+    ///
+    /// Values are secrets by contract: they are never logged by the daemon and never rendered by
+    /// [`Request`]'s `Debug`. What the *command* does with them is the run's own output.
+    /// # Errors
+    /// As [`exec`](Self::exec).
+    pub fn exec_with_env(
+        &mut self,
+        argv: &[String],
+        stdin: &str,
+        env: &[(String, String)],
+    ) -> Result<ExecOutcome, ClientError> {
         self.send(&Request::Exec {
             argv: argv.to_vec(),
             stdin: (!stdin.is_empty()).then(|| stdin.to_string()),
+            // Absent rather than an empty list, so the common case stays off the wire entirely.
+            env: (!env.is_empty()).then(|| env.to_vec()),
         })?;
         match self.recv()? {
             Response::Result {
