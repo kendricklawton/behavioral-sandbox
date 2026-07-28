@@ -346,7 +346,9 @@ fn put_u32(payload: &mut Vec<u8>, value: u32) {
     payload.extend_from_slice(&value.to_le_bytes());
 }
 
-/// Append a `u32`-length-prefixed blob to `payload`.
+/// Append a `u32`-length-prefixed blob to `payload`. The `as u32` cannot truncate: every caller
+/// pre-checks its whole encoded payload against [`MAX_PAYLOAD`] (1 MiB) before building, so no
+/// single blob can approach `u32::MAX`.
 fn put_blob(payload: &mut Vec<u8>, bytes: &[u8]) {
     put_u32(payload, bytes.len() as u32);
     payload.extend_from_slice(bytes);
@@ -392,7 +394,17 @@ pub(crate) fn write_put_file(
     path: &str,
     data: &[u8],
 ) -> Result<(), ChannelError> {
-    let mut payload = Vec::with_capacity(blob_len(path.as_bytes()) + blob_len(data));
+    // Rejected on the computed size, *before* allocating: `write_frame` would refuse the built
+    // payload anyway, but only after a multi-GiB `data` had been copied (and then zeroized) in
+    // full. The early check also makes `put_blob`'s `as u32` provably lossless here.
+    let cap = blob_len(path.as_bytes()) + blob_len(data);
+    if cap > MAX_PAYLOAD {
+        return Err(ChannelError::PayloadTooLarge {
+            tag: TAG_PUTFILE,
+            len: cap,
+        });
+    }
+    let mut payload = Vec::with_capacity(cap);
     put_blob(&mut payload, path.as_bytes());
     put_blob(&mut payload, data);
     let sent = write_frame(w, TAG_PUTFILE, &payload);
@@ -422,6 +434,14 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
             .iter()
             .map(|(k, v)| blob_len(k.as_ref().as_bytes()) + blob_len(v.as_ref().as_bytes()))
             .sum::<usize>();
+    // Same early rejection as `write_put_file`: refuse on the computed size before staging a
+    // copy of stdin + every env value that would only be built to be thrown away.
+    if cap > MAX_PAYLOAD {
+        return Err(ChannelError::PayloadTooLarge {
+            tag: TAG_EXEC,
+            len: cap,
+        });
+    }
     let mut payload = Vec::with_capacity(cap);
     put_u32(&mut payload, argv.len() as u32);
     for arg in argv {
@@ -502,7 +522,16 @@ pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), 
         Response::Stdout(b) => write_frame(w, TAG_STDOUT, b),
         Response::Stderr(b) => write_frame(w, TAG_STDERR, b),
         Response::File { path, data } => {
-            let mut payload = Vec::new();
+            // Sized and size-checked before building, like the request writers: an oversize
+            // artifact is refused without first copying it into a growing buffer.
+            let cap = blob_len(path.as_bytes()) + blob_len(data);
+            if cap > MAX_PAYLOAD {
+                return Err(ChannelError::PayloadTooLarge {
+                    tag: TAG_FILE,
+                    len: cap,
+                });
+            }
+            let mut payload = Vec::with_capacity(cap);
             put_blob(&mut payload, path.as_bytes());
             put_blob(&mut payload, data);
             write_frame(w, TAG_FILE, &payload)

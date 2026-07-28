@@ -135,9 +135,24 @@ fn session_dir() -> std::path::PathBuf {
 /// Serve one connection, logging (not propagating) a failure so one bad peer never ends the loop.
 /// `serve_session` emits its own `exec` span with the command + exit; only failures need a line
 /// here.
-fn serve_one<S: std::io::Read + std::io::Write + Send>(stream: S) {
-    if let Err(e) = serve_session(stream, &session_dir()) {
-        tracing::warn!("connection failed: {e}");
+fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
+    // One thread per connection, so a wedged session cannot take the listener down with it. The
+    // whole-tree reap that ends an exec is best-effort (it needs cgroup v2 in the guest), so on an
+    // off-spec guest a command that double-forks a daemon holds the output pipes open and its
+    // `pump` never sees EOF; served inline, that one stuck exec would block `accept` and wedge
+    // every later exec too, not just its own. The session dir stays shared on purpose (it is the
+    // session's state, not any one exec's), which is the same sharing the sequential path had.
+    let spawned = std::thread::Builder::new()
+        .name("ekvm-session".to_string())
+        .spawn(move || {
+            if let Err(e) = serve_session(stream, &session_dir()) {
+                tracing::warn!("connection failed: {e}");
+            }
+        });
+    if let Err(e) = spawned {
+        // The spawn took the stream with it, so this connection just closes: the host sees a
+        // failed dial and surfaces its typed error, which beats blocking the accept loop.
+        tracing::warn!("cannot spawn a session thread ({e}); dropping the connection");
     }
 }
 

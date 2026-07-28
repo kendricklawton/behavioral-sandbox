@@ -369,43 +369,99 @@ fn unknown_fault() -> FaultKind {
     FaultKind::Unknown(String::new())
 }
 
-/// Which layer faulted, so a client branches on a **value** rather than on the prose in
-/// [`Response::Error`]'s `message`. The wire form of the engine's pinned error taxonomy
-/// (`vmm::ErrorKind`), restated here because this crate stays `vmm`-free; the daemon maps one onto
-/// the other, and a test pins the mapping.
-///
-/// The `fatal` flag answers "is this session over?"; this answers "whose fault, and what should I
-/// do?", which is the question an SDK caller actually has: a different host may serve an
-/// [`Infra`](Self::Infra) fault, a retry never fixes a [`Guest`](Self::Guest) one.
-///
-/// **Unknown kinds degrade, they don't fail.** A client built against this schema that meets a kind
-/// added later decodes it as [`Unknown`](Self::Unknown) carrying the raw string, so the enum can
-/// grow without a schema bump breaking every existing SDK. Treat `Unknown` like
-/// [`Infra`](Self::Infra) (conservative: assume the host, not the caller).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum FaultKind {
+/// Declares [`FaultKind`] once: each named variant's doc, its **wire string**, the `wire_str`
+/// encoder, and the `NAMED` table the decoder walks all come from this one list, so a new kind
+/// cannot be spelled in one place and forgotten in another. That is the whole reason the macro
+/// exists: with the list written out by hand, a variant missing from `NAMED` would still compile,
+/// still serialize, and silently decode as [`FaultKind::Unknown`], which is exactly the drift the
+/// hand-written `Deserialize` was introduced to prevent. The enum's own rustdoc lives inside the
+/// expansion (the type is public API, and a doc comment out here would document the macro instead).
+macro_rules! fault_kinds {
+    ($( $(#[$doc:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
+        /// Which layer faulted, so a client branches on a **value** rather than on the prose in
+        /// [`Response::Error`]'s `message`. The wire form of the engine's pinned error taxonomy
+        /// (`vmm::ErrorKind`), restated here because this crate stays `vmm`-free; the daemon maps
+        /// one onto the other, and a test pins the mapping.
+        ///
+        /// The `fatal` flag answers "is this session over?"; this answers "whose fault, and what
+        /// should I do?", which is the question an SDK caller actually has: a different host may
+        /// serve an [`Infra`](Self::Infra) fault, a retry never fixes a [`Guest`](Self::Guest) one.
+        ///
+        /// **Unknown kinds degrade, they don't fail.** A client built against this schema that
+        /// meets a kind added later decodes it as [`Unknown`](Self::Unknown) carrying the raw
+        /// string, so the enum can grow without a schema bump breaking every existing SDK. Treat
+        /// `Unknown` like [`Infra`](Self::Infra) (conservative: assume the host, not the caller).
+        #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+        #[non_exhaustive]
+        pub enum FaultKind {
+            $(
+                $(#[$doc])*
+                #[serde(rename = $wire)]
+                $variant,
+            )+
+            /// A kind this client predates. Carries the raw wire string so it can still be logged
+            /// (a non-string `kind` is rendered with `to_string`, see the hand-written
+            /// `Deserialize`).
+            #[serde(untagged)]
+            Unknown(String),
+        }
+
+        impl FaultKind {
+            /// This kind's wire string, or `None` for [`Unknown`](Self::Unknown) (which carries
+            /// its own). The same literal the `Serialize` derive renames to, so encode and decode
+            /// cannot disagree.
+            fn wire_str(&self) -> Option<&'static str> {
+                match self {
+                    $( FaultKind::$variant => Some($wire), )+
+                    FaultKind::Unknown(_) => None,
+                }
+            }
+
+            /// Every named kind, in declaration order: what the decoder searches and what
+            /// `every_named_kind_round_trips` exercises. Generated, so it cannot fall behind the
+            /// enum.
+            const NAMED: &'static [FaultKind] = &[ $( FaultKind::$variant, )+ ];
+        }
+    };
+}
+
+fault_kinds! {
     /// The host couldn't stand the sandbox up, or a bounded wait expired. Not the caller's fault:
     /// retry, or try another host. (`vmm::ErrorKind::Infra`.)
-    Infra,
+    Infra => "infra",
     /// A framing or I/O fault on an already-established exec channel, or a guest that went silent
     /// past its deadline. The sandbox is unreliable: retire it rather than blame the command.
     /// (`vmm::ErrorKind::Transport`.)
-    Transport,
+    Transport => "transport",
     /// The run is at fault: the command couldn't be spawned, outran its budget, or flooded output.
     /// Retrying the same command unchanged gets the same answer. (`vmm::ErrorKind::Guest`.)
-    Guest,
+    Guest => "guest",
     /// The client's own message was the problem: wrong [`WIRE_SCHEMA`], undecodable, oversize, or
     /// out of order (an `open` on an already-open session). Fix the client.
-    Protocol,
+    Protocol => "protocol",
     /// The daemon understood the request and declined to serve it: a posture the operator chose
     /// (snapshotting a jailed session) or a capability this session lacks (no probes attached).
     /// Not a failure, and not retryable as-is.
-    Refused,
-    /// A kind this client predates. Carries the raw wire string so it can still be logged.
-    #[serde(untagged)]
-    Unknown(String),
+    Refused => "refused",
+}
+
+/// Hand-written so the degrade-don't-fail promise above holds for **any** JSON, not just strings.
+/// The derived `untagged` `Unknown(String)` only catches strings, so a `kind` that is a number,
+/// `null`, or an object failed the whole error reply as `Malformed`: the client would lose the
+/// daemon's `message` and, per this crate's rule that an undecodable reply desyncs the session,
+/// throw away a session over a field that exists purely to be advisory.
+impl<'de> Deserialize<'de> for FaultKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(d)?;
+        let Some(s) = raw.as_str() else {
+            return Ok(FaultKind::Unknown(raw.to_string()));
+        };
+        Ok(FaultKind::NAMED
+            .iter()
+            .find(|k| k.wire_str() == Some(s))
+            .cloned()
+            .unwrap_or_else(|| FaultKind::Unknown(s.to_string())))
+    }
 }
 
 /// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile
@@ -909,6 +965,35 @@ mod tests {
                 serde_json::to_value(&kind).unwrap(),
                 serde_json::json!(want)
             );
+        }
+    }
+
+    #[test]
+    fn every_named_kind_round_trips() {
+        // `NAMED`, `wire_str`, and the enum are all generated from the one `fault_kinds!` list, so
+        // a new variant is in this loop by construction: it cannot be spelled for encoding and
+        // forgotten for decoding.
+        for kind in FaultKind::NAMED {
+            let json = serde_json::to_value(kind).expect("serialize");
+            let back: FaultKind = serde_json::from_value(json).expect("deserialize");
+            assert_eq!(&back, kind, "{kind:?} must survive a wire round trip");
+        }
+        // A serde-shaped variant object from a generic encoder degrades rather than failing.
+        let odd: FaultKind = serde_json::from_value(serde_json::json!({ "infra": null })).unwrap();
+        assert!(matches!(odd, FaultKind::Unknown(_)));
+    }
+
+    #[test]
+    fn a_non_string_kind_degrades_instead_of_failing_the_reply() {
+        // The whole point of the hand-written decoder: an advisory field must never cost the
+        // client the daemon's `message` (and, per the desync rule, its session).
+        for raw in [
+            serde_json::json!(5),
+            serde_json::json!(null),
+            serde_json::json!(["infra"]),
+        ] {
+            let decoded: FaultKind = serde_json::from_value(raw).expect("degrades, never fails");
+            assert!(matches!(decoded, FaultKind::Unknown(_)));
         }
     }
 
