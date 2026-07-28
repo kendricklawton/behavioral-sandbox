@@ -21,15 +21,19 @@ pub const COMM_CAP: usize = 16;
 /// the record is a fixed-size ring-buffer entry; a longer path is truncated to this many bytes.
 pub const DETAIL_CAP: usize = 128;
 
-/// How many leading bytes of a `connect` sockaddr the probe copies into [`SyscallEvent::detail`].
-/// 28 is `sizeof(struct sockaddr_in6)` (family + port + flowinfo + the 16-byte address + scope), so a
-/// full **IPv6** address is captured, not just its first 8 bytes (dual-stack). A `sockaddr_in`
-/// (IPv4) is only 16 bytes, so the probe falls back to [`SOCKADDR_SNAP_V4`] when the full read would
-/// run past a short user buffer, no v4 capture regresses.
+/// The **maximum** leading bytes of a `connect` sockaddr the probe copies into
+/// [`SyscallEvent::detail`]. 28 is `sizeof(struct sockaddr_in6)` (family + port + flowinfo + the
+/// 16-byte address + scope), so a full **IPv6** address is captured, not just its first 8 bytes
+/// (dual-stack). The probe picks between this and [`SOCKADDR_SNAP_V4`] by the caller's own
+/// `addrlen`, so a 16-byte `sockaddr_in` is not over-read; a caller that *declares* a longer
+/// `addrlen` than it uses still gets the longer snapshot, since the declared length is all the
+/// probe has at `sys_enter`.
 pub const SOCKADDR_SNAP: usize = 28;
 
-/// The IPv4 `sockaddr_in` size (family + port + 4-byte address), the probe's fallback copy length when
-/// the full [`SOCKADDR_SNAP`] read faults on a buffer only big enough for a v4 address.
+/// The IPv4 `sockaddr_in` size (family + port + 4-byte address): the copy length the probe uses
+/// for any `addrlen` below [`SOCKADDR_SNAP`]. For a family shorter still (`sockaddr_nl` is 12, an
+/// `AF_UNIX` short path less), `detail_len` reports the caller's `addrlen` rather than this, so the
+/// record shows the family instead of claiming bytes that were never the address.
 pub const SOCKADDR_SNAP_V4: usize = 16;
 
 /// Which syscall a [`SyscallEvent`] records. The wire field is a raw [`u32`]

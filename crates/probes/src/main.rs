@@ -220,11 +220,19 @@ fn passes_filter(tgid: u32, cgroup: u64) -> bool {
 /// Emit one [`SyscallEvent`] for the current syscall into [`EVENTS`], unless [`FILTER`] rejects it.
 /// `arg_off` is the byte offset of the syscall's pointer argument in the tracepoint record (a
 /// `char *` path for `execve`/`openat`, a `sockaddr *` for `connect`); `path_like` selects reading it
-/// as a NUL-terminated user string or as raw leading sockaddr bytes. A tracepoint returns 0.
+/// as a NUL-terminated user string or as raw leading sockaddr bytes, and `len_off` (sockaddr only,
+/// ignored otherwise) is the offset of the companion `addrlen` argument that bounds the copy.
+/// A tracepoint returns 0.
 /// `#[inline(always)]`: each of the three tracepoints inlines this into a single self-contained
 /// program, so there is no BPF-to-BPF call for the verifier to reason about (parity with the counter).
 #[inline(always)]
-fn record(ctx: &TracePointContext, kind: Syscall, arg_off: usize, path_like: bool) -> u32 {
+fn record(
+    ctx: &TracePointContext,
+    kind: Syscall,
+    arg_off: usize,
+    path_like: bool,
+    len_off: usize,
+) -> u32 {
     let pid_tgid = bpf_get_current_pid_tgid();
     let tgid = (pid_tgid >> 32) as u32;
     let tid = pid_tgid as u32;
@@ -255,16 +263,55 @@ fn record(ctx: &TracePointContext, kind: Syscall, arg_off: usize, path_like: boo
                 ev.detail_len = read.len() as u32;
             }
         } else {
-            // SAFETY: copies a fixed, constant count of leading sockaddr bytes from user space; a
-            // short or unmapped user buffer simply fails, leaving `detail_len` at 0. Try the full
-            // `sockaddr_in6` length first (a complete IPv6 address); if that read faults on a buffer
-            // only sized for a v4 `sockaddr_in`, fall back to the shorter copy so no v4 capture is lost.
-            if unsafe { bpf_probe_read_user_buf(src, &mut ev.detail[..SOCKADDR_SNAP]) }.is_ok() {
-                ev.detail_len = SOCKADDR_SNAP as u32;
-            } else if unsafe { bpf_probe_read_user_buf(src, &mut ev.detail[..SOCKADDR_SNAP_V4]) }
-                .is_ok()
-            {
-                ev.detail_len = SOCKADDR_SNAP_V4 as u32;
+            // The caller's own `addrlen` picks the snapshot size. Reading the full
+            // `sockaddr_in6` length unconditionally over-reads a 16-byte `sockaddr_in` by 12
+            // bytes of whatever follows it in the traced process's memory, and (worse than the
+            // read itself) publishes those bytes in the event stream as captured sockaddr. The
+            // fault-and-fall-back it relied on almost never fires: a 16-byte buffer mid-page
+            // reads fine. Both arms stay constant-size, which is what keeps the copies simple
+            // for the verifier.
+            // SAFETY: reads the tracepoint's stable argument area at a constant offset.
+            // Narrowed to `i32` first, because `connect`'s `addrlen` is an `int`: the raw
+            // register can carry dirty upper bits or a negative value that the kernel truncates
+            // to something small, and reading it as a full `u64` would let a caller name a huge
+            // length and pull the 28-byte arm over a 16-byte buffer, publishing adjacent memory.
+            let raw = unsafe { ctx.read_at::<u64>(len_off) }.unwrap_or(0);
+            let addrlen = (raw as i32).max(0) as usize;
+            if addrlen >= SOCKADDR_SNAP {
+                // SAFETY: constant-size copy from user space, bounded by the destination slice;
+                // an unmapped buffer fails the read and leaves `detail_len` at 0.
+                if unsafe { bpf_probe_read_user_buf(src, &mut ev.detail[..SOCKADDR_SNAP]) }.is_ok()
+                {
+                    ev.detail_len = SOCKADDR_SNAP as u32;
+                }
+            } else if addrlen >= 8 {
+                // Everything shorter than a `sockaddr_in6` reads the `sockaddr_in` size, so a
+                // still-shorter family (`sockaddr_nl` is 12) keeps naming its family instead of
+                // vanishing from the record as "nothing captured". The floor is 8 because that
+                // is what `probes_common::describe_sockaddr` needs to name a family at all: a
+                // shorter capture would render as "too short", which is the same silence with
+                // more steps.
+                // SAFETY: as above, the shorter constant-size copy.
+                if unsafe { bpf_probe_read_user_buf(src, &mut ev.detail[..SOCKADDR_SNAP_V4]) }
+                    .is_ok()
+                {
+                    // The copy is constant-size (the verifier wants that), but the caller's
+                    // `addrlen` may be shorter, so scrub what the read pulled in past it: those
+                    // bytes are the traced process's adjacent memory, and the whole `detail`
+                    // array rides the ring buffer whatever `detail_len` says. Constant loop
+                    // bound, so the verifier can unroll it.
+                    let kept = if addrlen < SOCKADDR_SNAP_V4 {
+                        addrlen
+                    } else {
+                        SOCKADDR_SNAP_V4
+                    };
+                    for (i, b) in ev.detail[..SOCKADDR_SNAP_V4].iter_mut().enumerate() {
+                        if i >= kept {
+                            *b = 0;
+                        }
+                    }
+                    ev.detail_len = kept as u32;
+                }
             }
         }
     }
@@ -286,21 +333,21 @@ fn record(ctx: &TracePointContext, kind: Syscall, arg_off: usize, path_like: boo
 /// `tracepoint/syscalls/sys_enter_execve`, records the program path (arg 0, `const char *filename`).
 #[tracepoint]
 pub fn trace_execve(ctx: TracePointContext) -> u32 {
-    record(&ctx, Syscall::Execve, 16, true)
+    record(&ctx, Syscall::Execve, 16, true, 0)
 }
 
 /// `tracepoint/syscalls/sys_enter_openat`, records the opened path (arg 1, `const char *filename`,
 /// past the `int dfd` at arg 0).
 #[tracepoint]
 pub fn trace_openat(ctx: TracePointContext) -> u32 {
-    record(&ctx, Syscall::Openat, 24, true)
+    record(&ctx, Syscall::Openat, 24, true, 0)
 }
 
 /// `tracepoint/syscalls/sys_enter_connect`, records the leading sockaddr bytes (arg 1,
 /// `struct sockaddr *uservaddr`, past the `int fd` at arg 0).
 #[tracepoint]
 pub fn trace_connect(ctx: TracePointContext) -> u32 {
-    record(&ctx, Syscall::Connect, 24, false)
+    record(&ctx, Syscall::Connect, 24, false, 32)
 }
 
 /// Per-flow byte/packet counters, keyed by the directional IPv4 [`FlowKey`]. Bounded at
@@ -611,7 +658,11 @@ fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
         // reaches here, the caller counted it into `FLOWS6` first. A second small `load` on this
         // uncommon path.
         if let Ok(ethertype) = ctx.load::<u16>(ETHERTYPE_OFFSET).map(u16::from_be) {
-            if ethertype == ETH_P_IPV6 || ethertype == ETH_P_8021Q {
+            // `ETH_P_IP` here is the truncated-or-malformed-IPv4 case (a well-formed v4 frame,
+            // fragments included, was keyed by the caller): under enforcement `egress_verdict`
+            // drops exactly this frame, so leaving it uncounted would drop traffic the record
+            // then claims never existed.
+            if ethertype == ETH_P_IP || ethertype == ETH_P_IPV6 || ethertype == ETH_P_8021Q {
                 count_map_drop(&UNPARSED_L3);
             }
         }

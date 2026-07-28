@@ -629,9 +629,10 @@ const FLOW_DROPS_MAP: &str = "FLOW_DROPS";
 /// The [`FLOW_DROPS_MAP`] twin for denial rows (`#[map] static DENIAL_DROPS`), read by
 /// [`TapMonitor::dropped_denials`].
 const DENIAL_DROPS_MAP: &str = "DENIAL_DROPS";
-/// The per-CPU counter of non-IPv4 (IPv6/VLAN) frames the tap saw but the flow parser can't
-/// represent (`#[map] static UNPARSED_L3`), read by [`TapMonitor::unparsed_l3`] so the network
-/// section is gapped as IPv4-only rather than silently omitting them.
+/// The per-CPU counter of frames the tap saw but the flow parser can't represent (IPv6, VLAN,
+/// or a truncated/malformed IPv4 frame; `#[map] static UNPARSED_L3`), read by
+/// [`TapMonitor::unparsed_l3`] so the network section is gapped rather than silently omitting
+/// them.
 const UNPARSED_L3_MAP: &str = "UNPARSED_L3";
 /// Where `ip netns` bind-mounts a named network namespace's handle (matches the driver's own
 /// `netns_path`), so [`TapMonitor::attach_in_netns`] can open a sandbox's netns by name.
@@ -794,11 +795,12 @@ impl TapMonitor {
         per_cpu_sum(&self.ebpf, DENIAL_DROPS_MAP)
     }
 
-    /// Non-IPv4 (IPv6 or 802.1Q VLAN) frames the tap saw that the flow parser can't represent, so
-    /// they aren't in [`flows`](Self::flows) or [`totals`](Self::totals). Nonzero means the flow view
-    /// is IPv4-only and the guest emitted frames it can't otherwise show (ARP is not counted, it is
-    /// expected on-link, not a flow). The consumer records a coverage gap rather than an exact-looking
-    /// record. Neither IPv6 nor VLAN is configured on a sandbox's tap.
+    /// Frames the tap saw that the flow parser can't represent (IPv6, 802.1Q VLAN, or a
+    /// truncated/malformed IPv4 frame), so they aren't in [`flows`](Self::flows) or
+    /// [`totals`](Self::totals). Nonzero means the guest emitted traffic the flow view can't
+    /// otherwise show (ARP is not counted, it is expected on-link, not a flow). The consumer
+    /// records a coverage gap rather than an exact-looking record. Neither IPv6 nor VLAN is
+    /// configured on a sandbox's tap, so on a healthy guest this stays zero.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the counter map is missing or unreadable.
