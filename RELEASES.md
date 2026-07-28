@@ -20,6 +20,15 @@ The initial stable release of eKVM: a self-hostable engine that boots a hardware
 - **Rust Driver API**: `Sandbox`, `Limits`, `RunResult`, `VmmError` (`kind() -> ErrorKind`).
 - **Wire Protocol**: Line-delimited JSON format (`schema: 1`).
 
+### Host Requirements (v0.1.0)
+- **Host**: Linux `x86_64`, kernel >= 5.15, with `/dev/kvm`, cgroup v2, and kernel BTF
+  (`/sys/kernel/btf/vmlinux`). `ekvm doctor` verifies all of it and prints the fix for
+  whatever is missing.
+- **Firecracker**: v1.15 through v1.16 supported (upstream's current support window);
+  v1.16.1 is the pinned, tested, hash-verified release. The operator installs the binary
+  (see [docs/cli-install.md](docs/cli-install.md)), so an upstream security patch never
+  waits on a release of this engine.
+
 ---
 
 ## The Finish Line & Pre-Release Policy
@@ -46,6 +55,26 @@ never enters the repo or `dist/`.
 - **Production Releases (`v0.1.0`+)**: Tagged on `main`. Patch fixes for a release line are backported to its dedicated release branch (e.g., `release-v0.1` for `v0.1.1`).
 - **Tags are a Human Step**: The user cuts every release tag (see [`AGENTS.md`](AGENTS.md)).
 - **Full Stability & SemVer Policy**: See [docs/embedding.md](docs/embedding.md#semver--api-stability).
+
+---
+
+## Support Policy (release lines)
+
+- **Latest minor**: fixes and features, on `main`.
+- **Previous minor**: security and serious-bug backports only, on its release branch
+  (`release-vX.Y`, patch tags `vX.Y.1`, `vX.Y.2`, ...). No feature backports: the answer
+  to a feature request on an old line is the current minor.
+- **Older minors**: unsupported.
+
+**The previous minor's window is computed, not dated.** Each release line supports a
+Firecracker range, floor through pin (v0.1.0 supports v1.15 through v1.16). The line stays
+supported for as long as any Firecracker series in that range is still under upstream
+support; once the last of them ages out (about one Firecracker release cycle, roughly six
+months, after the next eKVM minor ships), every VMM the line can drive is unpatched, and
+continuing to "support" it would bless untrusted code on an unmaintained isolation
+boundary, the same threat-model reasoning behind `ekvm doctor`'s host kernel floor. The
+weekly `firecracker-pin` workflow watches upstream's support table, so the end of a window
+is observed, not remembered.
 
 ---
 
