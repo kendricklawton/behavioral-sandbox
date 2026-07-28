@@ -24,6 +24,54 @@ pub(crate) fn image_used_bytes(path: &Path) -> Result<u64> {
     Ok(meta.blocks().saturating_mul(512))
 }
 
+/// A one-line progress ticker on stderr, drawn only when stderr is a TTY: the report on stdout
+/// stays pipe-clean, and a CI log gets no carriage-return spam. Ticks are placed between timed
+/// samples, never inside one, so the draw cost cannot land in a measurement.
+struct Progress {
+    label: String,
+    total: usize,
+    tty: bool,
+}
+
+impl Progress {
+    fn new(label: &str, total: usize) -> Self {
+        use std::io::IsTerminal;
+        Self {
+            label: label.to_string(),
+            total,
+            tty: std::io::stderr().is_terminal(),
+        }
+    }
+
+    /// Redraw the line: `done` of `total` complete, `note` carrying the freshest sample.
+    fn tick(&self, done: usize, note: &str) {
+        if !self.tty {
+            return;
+        }
+        use std::io::Write;
+        const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
+        let spin = SPINNER[done % SPINNER.len()];
+        let mut err = std::io::stderr();
+        let _ = write!(
+            err,
+            "\r  {spin} {} {done}/{} {note}\x1b[K",
+            self.label, self.total
+        );
+        let _ = err.flush();
+    }
+
+    /// Clear the line, so the next stdout print starts on a clean row.
+    fn clear(&self) {
+        if !self.tty {
+            return;
+        }
+        use std::io::Write;
+        let mut err = std::io::stderr();
+        let _ = write!(err, "\r\x1b[K");
+        let _ = err.flush();
+    }
+}
+
 /// Measure boot-to-userspace latency of the guest rootfs. Boots `runs` times on **each** of
 /// two paths, the read-only *shared* base (no per-VM copy) and the read-write *copy* base, and
 /// reports percentiles for both, so the base **size**'s effect on boot is visible: the copy path
@@ -53,6 +101,7 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
         ("read-write per-VM copy", false),
     ] {
         let mut latencies = Vec::with_capacity(runs);
+        let progress = Progress::new(label, runs);
         for i in 0..runs {
             let mut cfg = BootConfig::from_env();
             cfg.kernel = kernel.clone();
@@ -65,9 +114,12 @@ pub(crate) fn bench_boot(runs: usize) -> Result<()> {
             // differ on, so measuring it is the point. (bench-warm times its cold boot the same way.)
             let t0 = Instant::now();
             let vm = Vm::boot(cfg).with_context(|| format!("{label}: boot {i} failed"))?;
-            latencies.push(t0.elapsed().as_millis() as u64);
+            let ms = t0.elapsed().as_millis() as u64;
+            latencies.push(ms);
             vm.shutdown().ok();
+            progress.tick(i + 1, &format!("(last {ms} ms)"));
         }
+        progress.clear();
         report_percentiles(label, &mut latencies, "ms");
         p50s.push(nearest_p50(&mut latencies));
     }
@@ -178,7 +230,10 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     println!("bench-warm: guest rootfs {used_mib} MiB, {runs} runs per path\n");
 
     // One prewarmed snapshot feeds the restore and pool paths.
+    let prep = Progress::new("building the prewarmed python snapshot", 1);
+    prep.tick(0, "");
     let (snapshot, _bundle) = prewarm_python_snapshot(&kernel, &rootfs, "warm")?;
+    prep.clear();
     let mem_mib = image_used_bytes(snapshot.mem_path())? / (1024 * 1024);
 
     // Each path splits into two per-run samples: the **start** (begin a sandbox → an exec-ready VM)
@@ -190,29 +245,37 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
     // run pays without snapshots, disk copy and all.
     let mut cold_start = Vec::with_capacity(runs);
     let mut cold_result = Vec::with_capacity(runs);
+    let progress = Progress::new("cold boot", runs);
     for i in 0..runs {
         let t0 = Instant::now();
         let vm = Vm::boot(warm_bench_config(&kernel, &rootfs, false))
             .with_context(|| format!("cold boot {i}"))?;
         cold_start.push(t0.elapsed().as_millis() as u64);
         timed_python(&vm).with_context(|| format!("cold exec {i}"))?;
-        cold_result.push(t0.elapsed().as_millis() as u64);
+        let ms = t0.elapsed().as_millis() as u64;
+        cold_result.push(ms);
         vm.shutdown().ok();
+        progress.tick(i + 1, &format!("(last {ms} ms to first result)"));
     }
+    progress.clear();
 
     // Path 2: restore a fresh clone from the prewarmed snapshot. The start here is the snapshot
     // restore itself, bring a clone to exec-ready, the fast-start the whole snapshot machinery buys.
     let restore_cfg = warm_bench_config(&kernel, &rootfs, true);
     let mut restore_start = Vec::with_capacity(runs);
     let mut restore_result = Vec::with_capacity(runs);
+    let progress = Progress::new("snapshot restore", runs);
     for i in 0..runs {
         let t0 = Instant::now();
         let vm = Vm::restore(&snapshot, &restore_cfg).with_context(|| format!("restore {i}"))?;
         restore_start.push(t0.elapsed().as_millis() as u64);
         timed_python(&vm).with_context(|| format!("restore exec {i}"))?;
-        restore_result.push(t0.elapsed().as_millis() as u64);
+        let ms = t0.elapsed().as_millis() as u64;
+        restore_result.push(ms);
         vm.shutdown().ok();
+        progress.tick(i + 1, &format!("(last {ms} ms to first result)"));
     }
+    progress.clear();
 
     // Path 3: pool take. The start pops prefilled stock (plus a health probe); the refill that pays
     // the restore back runs off the clock, per the pool's caller-chooses-when contract, so this is
@@ -221,15 +284,19 @@ pub(crate) fn bench_warm(runs: usize) -> Result<()> {
         .context("prefill the prewarmed pool")?;
     let mut take_start = Vec::with_capacity(runs);
     let mut take_result = Vec::with_capacity(runs);
+    let progress = Progress::new("pool take", runs);
     for i in 0..runs {
         let t0 = Instant::now();
         let vm = pool.take().with_context(|| format!("pool take {i}"))?;
         take_start.push(t0.elapsed().as_millis() as u64);
         timed_python(&vm).with_context(|| format!("pool exec {i}"))?;
-        take_result.push(t0.elapsed().as_millis() as u64);
+        let ms = t0.elapsed().as_millis() as u64;
+        take_result.push(ms);
         vm.shutdown().ok();
         pool.refill().with_context(|| format!("pool refill {i}"))?;
+        progress.tick(i + 1, &format!("(last {ms} ms to first result)"));
     }
+    progress.clear();
     pool.shutdown();
 
     // The three headline start latencies, isolated (cold boot / snapshot restore / pool take)...
@@ -360,6 +427,7 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
     // Print a row at 1, each power of two, and the final count, a curve without a line per clone.
     let is_checkpoint = |n: usize| n == 1 || n == count || n.is_power_of_two();
 
+    let progress = Progress::new("restoring clones", count);
     for _ in 0..count {
         // Guard the floor before paying another restore.
         let avail = mem_available_kib()?;
@@ -381,7 +449,10 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
             }
         }
         let n = clones.len();
+        progress.tick(n, "");
         if is_checkpoint(n) {
+            // The checkpoint row prints to stdout; clear the ticker so the row starts clean.
+            progress.clear();
             let (mut rss, mut pss) = (0u64, 0u64);
             for vm in &clones {
                 let (r, p) = rss_pss_kib(vm.vmm_pid())?;
@@ -401,6 +472,7 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
             rows.push((n, rss, pss));
         }
     }
+    progress.clear();
 
     // Tear every clone down (Drop guarantees it too; explicit is politer and prompt).
     for vm in clones.drain(..) {
@@ -526,12 +598,15 @@ fn footprint_cohort(
 ) -> Result<()> {
     let before = mem_available_kib()?;
     let mut vms: Vec<RunningVm> = Vec::with_capacity(count);
+    let progress = Progress::new(label, count);
     for i in 0..count {
         if mem_available_kib()? < floor_kib {
             break;
         }
         vms.push(spawn().with_context(|| format!("{label}: bring up sandbox {i}"))?);
+        progress.tick(vms.len(), "");
     }
+    progress.clear();
     if vms.is_empty() {
         bail!("{label}: free memory was below the floor before the first sandbox could come up");
     }
