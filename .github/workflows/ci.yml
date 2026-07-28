@@ -74,13 +74,13 @@ jobs:
         with:
           persist-credentials: false
 
+      # actionlint is a Go binary that install-action's tool list does not carry, so this uses
+      # upstream's documented CI install (their download script drops the binary in the cwd).
       - name: Install actionlint
-        uses: taiki-e/install-action@v2
-        with:
-          tool: actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
 
       - name: actionlint
-        run: actionlint -color
+        run: ./actionlint -color
 
   # The single check to require in branch protection. Green only if every job above succeeded or
   # was skipped — add a job above and it's covered here automatically, no branch-rule edit needed.
