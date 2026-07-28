@@ -454,6 +454,22 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     // Read the local `--put` files *before* the (jailed-by-default) boot: a bad path is a cheap stat
     // failure, so validate it up front rather than paying a full boot + teardown only to fail on it.
     let files_in = read_put_files(&args.put)?;
+
+    // If this run will sign a record, resolve the key **now**, before booting. The signing path
+    // rejects a group/world-readable key file (its secrecy is what the "host-signed" claim rests
+    // on), and finding that out after the guest has already run would throw the record away with
+    // the work already done. Last of the pre-flight checks, because it is the only one that
+    // *creates* something (a first-run key), which a run rejected by a cheaper check above should
+    // not do. Loading is idempotent: the write path reloads the same key.
+    if record_path.is_some() {
+        let key_path = config::signing_key_path(file);
+        probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+            CliError::Cli(format!(
+                "signing key {} is unusable, so this run could not be recorded: {e}",
+                key_path.display()
+            ))
+        })?;
+    }
     let mut config = base_config(file).with_limits(limits);
     config.enable_network = args.net;
     // Flag layer over env/file (both folded by `base_config`): the flag only strengthens the
@@ -501,7 +517,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
 
     let boot_latency = sandbox.boot_latency();
     let vmm_pid = sandbox.vmm_pid();
-    let stdin = piped_stdin();
+    let stdin = piped_stdin()?;
     let (sandbox, result) = if args.watch {
         // Exec on a worker thread that owns the sandbox; the main thread runs the live view off
         // non-destructive probe snapshots until the worker flags completion.
@@ -940,17 +956,31 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
 /// regardless, reading it all first would let `cat 10GB.bin | ekvm run …` balloon host RAM before
 /// the same error. The `+ 1` still overshoots the cap by a byte so the oversize case is caught rather
 /// than silently truncated to exactly the cap. Bulk data belongs on the block-device path anyway.
-fn piped_stdin() -> Vec<u8> {
+fn piped_stdin() -> Result<Vec<u8>, CliError> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut buf = Vec::new();
-    let _ = stdin
+    // A failed read is a hard error, never a shrug: proceeding with whatever arrived would run
+    // the guest on silently truncated input and sign a record that calls it complete. The one
+    // exception is a *closed* fd 0 (`ekvm run … 0<&-`), which is not a truncated read but no
+    // stdin at all, the same thing a terminal means here.
+    /// `EBADF`. Named because `io::ErrorKind` has no stable variant for it (it arrives as
+    /// `Uncategorized`), so the raw errno is the only way to tell "fd 0 is closed" from a real
+    /// read failure.
+    const EBADF: i32 = 9;
+    if let Err(e) = stdin
         .lock()
         .take(MAX_PAYLOAD as u64 + 1)
-        .read_to_end(&mut buf);
-    buf
+        .read_to_end(&mut buf)
+    {
+        if e.raw_os_error() != Some(EBADF) {
+            return Err(CliError::Cli(format!("read piped stdin: {e}")));
+        }
+        buf.clear();
+    }
+    Ok(buf)
 }
 
 /// Initialize stderr logging from the filter [`config::resolve_log`] already resolved

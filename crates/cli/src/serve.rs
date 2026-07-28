@@ -62,6 +62,26 @@ use crate::metrics::Metrics;
 // `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `ekvm` binary.
 use crate::EXIT_OPERATIONAL;
 
+/// How long an accept loop pauses after a **resource-exhaustion** accept error, so a condition
+/// that fails instantly and persistently (see [`accept_error_is_exhaustion`]) cannot spin a core
+/// and flood the log. Long enough to matter under pressure, short enough that recovery is prompt.
+pub(crate) const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether an `accept` error is the kind that will keep failing immediately (out of file
+/// descriptors, process- or system-wide, or out of memory), which is what makes an unpaced retry
+/// loop harmful. Everything else, notably `ECONNABORTED` from a peer that hung up mid-handshake,
+/// is transient and routine: pausing on those would hand any local peer a throttle.
+pub(crate) fn accept_error_is_exhaustion(e: &std::io::Error) -> bool {
+    /// `EMFILE` (per-process fd limit), `ENFILE` (system-wide), and `ENOBUFS` (which `accept(2)`
+    /// documents alongside `ENOMEM` as "not enough free memory"), none of which `io::ErrorKind`
+    /// has a stable variant for; `ENOMEM` itself arrives as `OutOfMemory`.
+    const EMFILE: i32 = 24;
+    const ENFILE: i32 = 23;
+    const ENOBUFS: i32 = 105;
+    matches!(e.raw_os_error(), Some(EMFILE | ENFILE | ENOBUFS))
+        || e.kind() == std::io::ErrorKind::OutOfMemory
+}
+
 /// `ekvm serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
 /// is the shared global flag on the `ekvm` CLI, so it is not repeated here.
 #[derive(clap::Args)]
@@ -376,8 +396,19 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => spawn_session(stream, Arc::clone(&server)),
-            // A transient accept error must not end the daemon, log and keep serving.
-            Err(e) => tracing::warn!(error = %e, "accept failed"),
+            // An accept error must not end the daemon, log and keep serving. Resource exhaustion
+            // is paced, though: `EMFILE`/`ENFILE` persist and fail instantly, and the daemon's own
+            // sessions drive the fd count, so an unpaced retry would pin a core and flood the log
+            // at exactly the moment the host is already overloaded. A transient error
+            // (`ECONNABORTED`, a peer that hung up between connect and accept) is *not* paced:
+            // it is routine, and sleeping on it would let any local peer throttle the daemon by
+            // dialing and dropping in a loop.
+            Err(e) => {
+                tracing::warn!(error = %e, "accept failed");
+                if accept_error_is_exhaustion(&e) {
+                    std::thread::sleep(ACCEPT_BACKOFF);
+                }
+            }
         }
     }
     ExitCode::SUCCESS
@@ -841,6 +872,21 @@ fn build_pool_from(
 /// permissions that gate access).
 fn bind(socket: &Path) -> Result<UnixListener, String> {
     if socket.exists() {
+        // Only a socket is reclaimable. A mistyped `--socket` naming a real file (config, data)
+        // must be a refusal, not a deletion: this daemon often runs as root, so the remove below
+        // would take out anything root can write.
+        let is_socket = std::fs::symlink_metadata(socket)
+            .map(|m| {
+                use std::os::unix::fs::FileTypeExt as _;
+                m.file_type().is_socket()
+            })
+            .map_err(|e| format!("stat {}: {e}", socket.display()))?;
+        if !is_socket {
+            return Err(format!(
+                "{} exists and is not a socket; refusing to remove it (mistyped --socket?)",
+                socket.display()
+            ));
+        }
         if UnixStream::connect(socket).is_ok() {
             return Err(format!(
                 "another ekvm daemon is already listening on {}",
@@ -961,6 +1007,37 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+
+    #[test]
+    fn only_exhaustion_accept_errors_are_paced() {
+        // The predicate is what keeps the backoff off the routine path, so pin both halves: a
+        // bare errno list drifts silently (nothing else in the tree names these numbers), and a
+        // predicate that crept wider would hand any local peer a throttle by dialing and dropping.
+        for errno in [
+            24,  /* EMFILE */
+            23,  /* ENFILE */
+            105, /* ENOBUFS */
+        ] {
+            assert!(
+                accept_error_is_exhaustion(&std::io::Error::from_raw_os_error(errno)),
+                "errno {errno} is resource exhaustion and must be paced"
+            );
+        }
+        assert!(accept_error_is_exhaustion(&std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            "ENOMEM"
+        )));
+        for e in [
+            std::io::Error::from_raw_os_error(103), // ECONNABORTED, the peer hung up mid-handshake
+            std::io::Error::from_raw_os_error(4),   // EINTR
+            std::io::Error::from_raw_os_error(11),  // EAGAIN
+        ] {
+            assert!(
+                !accept_error_is_exhaustion(&e),
+                "{e} is transient: pacing it would let a peer throttle the daemon"
+            );
+        }
+    }
 
     /// A minimal daemon state for admission tests: no pool, no VM, degraded probes. Holding a
     /// [`SessionTicket`] or a [`ResourceReservation`] never touches a sandbox, so the caps are

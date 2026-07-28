@@ -572,7 +572,13 @@ pub fn serve(listener: TcpListener, metrics: Arc<Metrics>, sample: impl Fn() -> 
         let stream = match conn {
             Ok(s) => s,
             Err(e) => {
+                // Paced only on resource exhaustion, which fails instantly and persistently; a
+                // transient error must not become a throttle any peer can pull (see the daemon's
+                // accept loop, whose predicate this shares).
                 tracing::warn!(error = %e, "metrics accept failed");
+                if crate::serve::accept_error_is_exhaustion(&e) {
+                    std::thread::sleep(crate::serve::ACCEPT_BACKOFF);
+                }
                 continue;
             }
         };

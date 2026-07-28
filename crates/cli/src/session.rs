@@ -722,16 +722,21 @@ fn exec_watching_for_cancel(
         let worker = scope.spawn(|| vm.exec_with_files(argv, stdin.as_bytes(), &[], env, &[]));
         let mut interrupted = false;
         while !worker.is_finished() {
-            if !interrupted && client_spoke(socket) {
+            if client_spoke(socket) {
                 interrupted = true;
                 // Best-effort: a kill that cannot land leaves the exec to its own wall budget,
                 // which is the pre-cancel behavior, never a hang.
                 if let Err(e) = kill.kill() {
                     tracing::warn!(error = %e, "cancel could not reach the sandbox");
                 }
+                // Nothing left to watch: the join below blocks (zero CPU) until the exec
+                // returns, bounded by its wall budget. Staying in this loop would busy-spin,
+                // since `client_spoke`'s 50ms block was the only thing pacing it.
+                break;
             }
         }
-        // Joins the worker: `exec` has returned by construction.
+        // Joins the worker: already-returned on the loop's natural exit, or blocking out the
+        // killed exec's remaining wall budget after a cancel.
         (
             worker
                 .join()
