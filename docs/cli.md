@@ -36,7 +36,7 @@ ekvm run [FLAGS] -- <cmd> [args…]
 | `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the engine never logs them. |
 | `--put FILE` | Inject a host file into the run's working directory (repeatable; guest name = basename). |
 | `--get PATH` | Fetch a file from the run's working directory afterwards (repeatable; written under the current directory at the same relative path). Deny-by-default: only what you asked for is written. |
-| `--vcpus N` | Guest vCPUs (default 1). A whole number in 1..=32; zero or over-cap is a typed error, never a silent clamp (Firecracker v1.9 caps a microVM at 32). |
+| `--vcpus N` | Guest vCPUs (default 1). Firecracker's `vcpu_count` domain: **1 or an even number, up to 32**. Zero, an odd count above 1, or an over-cap value is a typed error at parse, never a silent clamp. |
 | `--mem MIB` | Guest memory in MiB (default 256). A whole number of at least 1; zero is a typed error. |
 | `--wall SECONDS` | Wall-clock budget (default 30, minimum 1): the boot deadline and the command's runtime budget alike. |
 | `--output-cap BYTES` | Cap on captured stdout+stderr+artifacts (default 16 MiB). |
@@ -79,7 +79,7 @@ and `--mem` work the same as on `run`.
 ## `ekvm doctor`
 
 Check this host's readiness *before* the first sandbox: `ekvm doctor` prints one line per
-prerequisite, KVM, the jailer + real-root, `firecracker` v1.9 + pinned sha256, iproute2/e2fsprogs, cgroup
+prerequisite, KVM, the jailer + real-root, `firecracker` v1.16 + pinned sha256, iproute2/e2fsprogs, cgroup
 delegation, the kernel version, the boot artifacts, the eBPF capabilities, and the host-hardening
 posture (SMT, KSM, CPU-vulnerability mitigations: advisory rows for a multi-tenant host), each marked `ok`, `warn` (a fail-open degradation or an advisory, with the consequence
 named), or `FAIL` (a hard miss: no boot without it). It exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm run …`

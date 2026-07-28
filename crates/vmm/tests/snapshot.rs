@@ -243,12 +243,13 @@ fn restored_clones_do_not_bleed_state_under_load() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn restored_networked_clones_coexist_each_in_its_own_netns() {
-    // The netns model retires the one-live-networked-clone limit. On v1.9
-    // (no `network_overrides`) every clone must present the snapshot's baked-in tap name, which in a
-    // shared host netns could exist only once, so only one networked clone could be live. Each clone
-    // now recreates that tap in its **own** network namespace, where the baked-in identity is already
+    // Every clone presents the snapshot's baked-in tap name, which in a single shared host netns
+    // could exist only once, so only one networked clone could ever be live. Each clone instead
+    // recreates that tap in its **own** network namespace, where the baked-in identity is already
     // correct, so N networked clones run at once. This proves two concurrent networked clones, each
     // isolated in its own netns, each carrying the baked identity, each reaching its own host end.
+    // (The pinned VMM's `network_overrides` would also sidestep the collision, by renaming the tap
+    // at load; `net.rs` records why the namespace is the isolation-preserving answer instead.)
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;
@@ -548,11 +549,16 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
     // Entropy + clocks. Every clone wakes from the same memory image, so if the
     // kernel CRNG never reseeded, two clones' first `getrandom` draws would be byte-identical, the
     // classic clone-entropy vulnerability (shared session keys/nonces/UUIDs). The pinned stack has
-    // both halves of the fix (Firecracker v1.9 ships VMGenID; kernel 6.1 has the vmgenid driver,
-    // which reseeds the CRNG on a generation bump): this proves it end to end. Clock skew is
-    // measured and reported, not asserted.
+    // both halves of the fix (Firecracker ships VMGenID; kernel 6.1 has the vmgenid driver,
+    // which reseeds the CRNG on a generation bump): this proves it end to end.
     let bundle = TmpDir::new("snap-entropy");
     let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+
+    // Let the bundle visibly age before restoring, so the clock half of this test can actually
+    // discriminate. A clone restored from a snapshot taken moments ago is within tolerance whether
+    // or not the clock is fixed up; one restored from a snapshot this much older is not.
+    const SNAPSHOT_AGE: std::time::Duration = std::time::Duration::from_secs(5);
+    std::thread::sleep(SNAPSHOT_AGE);
 
     let draw = |label: &str| {
         let clone = Vm::restore(&snap, &guest_rootfs_config())
@@ -569,6 +575,14 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
                 b"",
             )
             .unwrap_or_else(|e| panic!("clone {label} exec: {e}"));
+        // The host-side reference is captured the moment the exec returns: the guest read its clock
+        // at most the exec round trip ago, so this pairing bounds the measurement noise to that
+        // round trip. Comparing against a timestamp taken any later (after another clone's
+        // restore/exec/shutdown) would fold that unrelated wall time into the "skew".
+        let host_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
         assert_eq!(out.exit_code, 0, "clone {label} python should exit 0");
         let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
         let mut lines = stdout.lines();
@@ -582,26 +596,42 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
         clone
             .shutdown()
             .unwrap_or_else(|e| panic!("clone {label} shutdown: {e}"));
-        (hex, epoch)
+        (hex, host_epoch - epoch)
     };
 
-    let (hex_a, epoch_a) = draw("A");
-    let (hex_b, _epoch_b) = draw("B");
+    let (hex_a, skew_a) = draw("A");
+    let (hex_b, skew_b) = draw("B");
     assert_ne!(
         hex_a, hex_b,
         "two clones' first urandom draws must differ (VMGenID must reseed the CRNG on restore)"
     );
 
-    // Clock posture (measured, not asserted): report the restored guest's wall-clock skew vs the
-    // host. kvm-clock keeps the monotonic clock sane; CLOCK_REALTIME may lag by the snapshot age.
-    let host_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    eprintln!(
-        "clock: restored clone A wall-clock skew vs host ≈ {}s",
-        host_epoch - epoch_a
-    );
+    // Clock posture. `Vm::restore` sends `clock_realtime` on `PUT /snapshot/load`, which asks
+    // Firecracker to advance the guest's kvmclock by the wall time elapsed since the snapshot was
+    // taken instead of resuming it frozen. That is a promise the docs make, so it is asserted here
+    // rather than merely printed: without the fix-up a clone restored `SNAPSHOT_AGE` after its
+    // snapshot reads back an epoch at least that far behind the host's. Clone B restores even
+    // later (the sleep plus clone A's whole draw), so it checks the fix-up across a larger age,
+    // not just the same one twice.
+    //
+    // The tolerance is deliberately loose. It is not a claim about time-sync accuracy (the advance
+    // is only as good as the host's own clock, and the guest never runs NTP); it only has to be
+    // tight enough to fail when the clock resumes frozen, which is why it sits below `SNAPSHOT_AGE`.
+    let tolerance = (SNAPSHOT_AGE.as_secs() as i64) - 2;
+    for (label, skew) in [("A", skew_a), ("B", skew_b)] {
+        eprintln!(
+            "clock: restored clone {label} wall-clock skew vs host ≈ {skew}s \
+             (snapshot aged ≥{}s before restore)",
+            SNAPSHOT_AGE.as_secs()
+        );
+        assert!(
+            skew.abs() < tolerance,
+            "clone {label}: a restored clone's clock must be advanced across the snapshot's age, \
+             not resumed frozen: skew {skew}s is not under {tolerance}s after a snapshot aged at \
+             least {}s",
+            SNAPSHOT_AGE.as_secs()
+        );
+    }
 }
 
 #[test]

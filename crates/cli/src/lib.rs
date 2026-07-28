@@ -9,7 +9,9 @@ pub mod audit;
 pub mod config;
 pub mod policy;
 
-/// Firecracker caps a microVM at 32 vCPUs, so both the CLI (`--vcpus`) and the
-/// daemon (`open`) refuse anything above it at their edge rather than surfacing a late Firecracker
-/// API error mid-boot. Single-sourced here so the two entry points can't drift on the cap.
-pub const MAX_VCPUS: u8 = 32;
+/// The pinned Firecracker's vCPU ceiling and the predicate for the rest of its domain (`[1, 32]`,
+/// and 1 or an even number), re-exported from the engine rather than restated. Both the CLI
+/// (`--vcpus`) and the daemon (`open`) refuse an out-of-domain count at their own edge rather than
+/// surfacing a late API error mid-boot, and taking the rule from `vmm` is what keeps the three
+/// checks from drifting apart the way a copied constant does.
+pub use vmm::{vcpus_supported, MAX_VCPUS};

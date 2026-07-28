@@ -260,8 +260,11 @@ fn io_err(ctx: &str, e: &std::io::Error) -> VmmError {
 }
 
 // ---- API request bodies (serialized to the JSON Firecracker expects) --------------------------
-// Field names and shapes are pinned to Firecracker v1.9; the API
-// schema has drifted across versions, so a version bump means re-checking these.
+// Field names and shapes are written against the pinned release's `swagger/firecracker.yaml`
+// (see `spawn::PINNED_FC_VERSION`). The schema drifts across releases and fields get deprecated
+// before they are removed, so a version bump means re-reading that file, not just the changelog:
+// `mem_file_path` on load and `vsock_id` on the vsock device are both deprecated-but-accepted
+// today, and nothing here uses either.
 
 /// `PUT /boot-source`, the guest kernel and its command line.
 #[derive(Serialize)]
@@ -399,14 +402,37 @@ pub(crate) enum SnapshotType {
 }
 
 /// `PUT /snapshot/load`, rebuild a VM from a snapshot on a fresh VMM and (with `resume_vm`) resume
-/// it. `mem_backend` names the memory file. Firecracker opens each block device's backing file **at
-/// load**, at the path baked into the snapshot, so the driver stages the bundle's disk copy there
-/// before calling this (see `Vm::restore`).
+/// it. `mem_backend` names the memory file (the older `mem_file_path` is deprecated).
+///
+/// The load body is where the pin's *capabilities* show up, so what is deliberately **not** sent
+/// matters as much as what is:
+/// - `network_overrides` (rename the host tap at load) exists on the pin, but the per-VM netns
+///   already makes every clone's baked-in tap name correct in its own namespace, so there is
+///   nothing to rename. See `net.rs`.
+/// - `vsock_override` (rebind the vsock UDS at load) exists on the pin; the driver instead bakes a
+///   **relative** socket path and gives each VMM its own cwd, which achieves the same per-clone
+///   socket without the field.
+/// - There is **no** drive-path override at any version, which is why Firecracker reopens each
+///   block device at the path baked into the snapshot and why `stage_restore_disk` exists.
 #[derive(Serialize)]
 pub(crate) struct SnapshotLoad<'a> {
     pub snapshot_path: &'a str,
     pub mem_backend: MemBackend<'a>,
     pub resume_vm: bool,
+    /// Advance the guest's kvmclock by the wall-clock time elapsed since the snapshot was taken,
+    /// instead of resuming it frozen at the instant of the snapshot (`KVM_CLOCK_REALTIME` on the
+    /// restore's `KVM_SET_CLOCK`). Without it a clone wakes believing no time passed, so its
+    /// monotonic clock stalls by the snapshot's age: for a **prewarmed pool**, whose whole point is
+    /// that a clone may sit minutes between snapshot and take, that skew is the common case rather
+    /// than the exception. x86_64-only upstream, which is this engine's only target anyway.
+    ///
+    /// **`None` omits the key**, which is load-bearing rather than tidy: the field only exists from
+    /// v1.16, Firecracker rejects unknown fields outright, and sending it unconditionally therefore
+    /// broke restore on every older release, including ones upstream still patches. Set from the
+    /// probed version (`spawn::clock_realtime_arg`), so an older-but-supported binary gets a body it
+    /// accepts and only loses the clock fix-up.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock_realtime: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -858,10 +884,53 @@ mod tests {
                 backend_path: "/b/snapshot.mem",
             },
             resume_vm: true,
+            clock_realtime: Some(true),
         })
         .unwrap();
         assert_eq!(json["snapshot_path"], "/b/snapshot.state");
         assert_eq!(json["mem_backend"]["backend_type"], "File");
+        assert_eq!(json["mem_backend"]["backend_path"], "/b/snapshot.mem");
+        assert_eq!(json["resume_vm"], true);
+        // The clock fix-up rides the load body, so a restored clone's monotonic clock advances by
+        // the snapshot's age instead of resuming frozen. The key must be spelled exactly this way:
+        // Firecracker rejects an unknown field outright, so a typo fails every restore.
+        assert_eq!(json["clock_realtime"], true);
+        // The three fields the driver deliberately does not send. `network_overrides` and
+        // `vsock_override` exist on the pin but are unnecessary under the netns + relative-socket
+        // model, and no drive-path override exists at any version; an accidental `Some`-typed field
+        // creeping in here would change restore semantics silently.
+        for absent in ["network_overrides", "vsock_override", "mem_file_path"] {
+            assert!(
+                json.get(absent).is_none(),
+                "the load body must not carry {absent}: {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_older_supported_firecracker_gets_a_load_body_without_the_clock_key() {
+        // The defect this shape exists to prevent: `clock_realtime` only exists from v1.16, and
+        // Firecracker rejects an *unknown field* rather than ignoring it, so a body carrying the key
+        // fails the whole restore on v1.14/v1.15, both of which upstream still patches. `None` must
+        // therefore omit the key entirely, not serialize `"clock_realtime": null` (which is still an
+        // unknown field to a release that has never heard of it).
+        let json = serde_json::to_value(SnapshotLoad {
+            snapshot_path: "/b/snapshot.state",
+            mem_backend: MemBackend {
+                backend_type: MemBackendType::File,
+                backend_path: "/b/snapshot.mem",
+            },
+            resume_vm: true,
+            clock_realtime: None,
+        })
+        .unwrap();
+        assert!(
+            json.get("clock_realtime").is_none(),
+            "an omitted clock fix-up must not appear as a key at all: {json}"
+        );
+        // The rest of the body is unchanged, so an older release loses the clock advance and nothing
+        // else: still a real restore, still resumed.
+        assert_eq!(json["snapshot_path"], "/b/snapshot.state");
         assert_eq!(json["mem_backend"]["backend_path"], "/b/snapshot.mem");
         assert_eq!(json["resume_vm"], true);
     }

@@ -36,8 +36,9 @@ impl Vm {
     /// A **read-write** snapshot's private disk copy is staged at its baked-in path; a **read-only
     /// shared base** is referenced in place, so many clones restored from one prewarmed snapshot share it
     /// (page-cache-deduped) while each gets its own in-RAM overlay. Because an **unjailed** restore
-    /// stages that private copy at the one baked-in host path Firecracker reopens the disk from (v1.9
-    /// has no drive-path override on load), unjailed restores of a **read-write** snapshot are
+    /// stages that private copy at the one baked-in host path Firecracker reopens the disk from
+    /// (`PUT /snapshot/load` carries network and vsock overrides but no drive-path override, on the
+    /// pinned release or any other), unjailed restores of a **read-write** snapshot are
     /// **single-flight**: run them sequentially (the prewarmed [`Pool`](crate::Pool) does), or use a
     /// **jailed** restore (each stages inside its own chroot) or a **`read_only_root`** prewarmed snapshot
     /// (shared base, no staging) for concurrent clones. A **prewarmed** snapshot (one taken with
@@ -51,8 +52,11 @@ impl Vm {
     /// address/MAC/routes are already correct and collision-free, so no re-addressing, and any
     /// number of networked clones coexist. Entropy is reseeded via VMGenID (Firecracker bumps the
     /// generation on restore and the guest kernel reseeds its CRNG, proven by test, not assumed), so
-    /// clones don't share RNG state. The guest's **wall clock is not fixed up**: it lags by the
-    /// snapshot's age until the workload resyncs it.
+    /// clones don't share RNG state. The guest's clock is **advanced across the snapshot's age** at
+    /// load (the `clock_realtime` flag on `PUT /snapshot/load`), so a clone
+    /// does not wake believing no time passed. That advance is the host's measure of elapsed time,
+    /// not a time sync: a workload needing better accuracy than the host's own clock still has to
+    /// resync itself.
     ///
     /// With [`jail`](BootConfig::jail) set, the clone restores **under the jailer**: the
     /// bundle is staged into the chroot, the state file copied, the memory file and a shared base

@@ -383,12 +383,12 @@ impl Spawned {
             return Self::launch_jailed_for_restore(config, snapshot, jail);
         }
         let workdir = create_workdir(&config.scratch_dir)?;
-        // A networked snapshot baked in its tap's `host_dev_name` (v1.9 has no `network_overrides`), so
-        // restore must present a tap with that name, trivially satisfied by the netns model: recreate
-        // the fixed-name tap in a **fresh per-VM netns** (named after this restore's scratch dir). The
-        // clone wakes with the snapshot's baked-in address/MAC/routes, which are already correct in its
-        // own isolated netns, so no re-addressing is needed and any number of clones coexist (netns
-        // retires the v1.9 one-live-networked-clone limit). A direct boot runs Firecracker with the
+        // A networked snapshot baked in its tap's `host_dev_name`, so restore must present a tap with
+        // that name (the pin's `network_overrides` could rename it instead; `net.rs` records why the
+        // namespace is the better answer). Trivially satisfied here: recreate the fixed-name tap in a
+        // **fresh per-VM netns** (named after this restore's scratch dir). The clone wakes with the
+        // snapshot's baked-in address/MAC/routes, which are already correct in its own isolated netns,
+        // so no re-addressing is needed and any number of clones coexist. A direct boot runs Firecracker with the
         // driver's own privilege, so the tap needs no per-uid owner. Created before Firecracker so it
         // can join the netns; a failed create reclaims its own netns, and we still own the workdir.
         let tap = if snapshot.tap_name.is_some() {
@@ -680,6 +680,11 @@ impl Spawned {
                     backend_path: &mem_arg,
                 },
                 resume_vm: true,
+                // Advance the guest's kvmclock across the snapshot's age rather than resuming it
+                // frozen; a pooled clone can sit minutes between snapshot and take, so the skew is
+                // the normal case there. Omitted on a binary that predates the field, which is what
+                // keeps a supported-but-older release restoring at all.
+                clock_realtime: clock_realtime_arg(),
             },
             load_timeout,
         );
@@ -1222,7 +1227,8 @@ fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmError> {
             return Err(VmmError::Vmm(format!(
                 "root disk path {} already exists: a concurrent restore of this snapshot, or a live \
                  source VM still holding it. An unjailed restore of a read-write snapshot is \
-                 single-flight (v1.9 reopens the disk at this baked-in path); restore clones \
+                 single-flight (Firecracker reopens the disk at this baked-in path, and no release \
+                 offers a drive-path override on load); restore clones \
                  sequentially, or use a jailed or read_only_root snapshot for concurrent clones, or \
                  drop the source first.",
                 backing.display()
@@ -1352,44 +1358,90 @@ impl Drop for StagedDisk {
     }
 }
 
-/// The Firecracker `(major, minor)` the driver's API bodies are written against.
-/// Field names have drifted across releases and behavior genuinely changes (v1.9 rejects
-/// `network_overrides` on snapshot load), so an unexpected binary means cryptic
-/// mid-boot API errors or silently different semantics, the runtime-validates-its-VMM guard: a
-/// runtime pinning and checking the version of the lower-level binary it drives.
-const PINNED_FC_VERSION: (u64, u64) = (1, 9);
+/// The **oldest** Firecracker this engine supports, deliberately tracking upstream's own support
+/// window rather than a number of our choosing. Upstream's own release-status table (their release
+/// policy doc) is the authority (v1.14 ended the day v1.16 shipped; v1.15 and v1.16 are the current
+/// "Supported" rows), and `.github/workflows/firecracker-pin.yml` fails weekly if this drifts from
+/// it.
+///
+/// The floor exists to reject *unpatched* VMMs, not old ones: `doctor` enforces a host kernel floor
+/// on the grounds that untrusted code on an unpatched kernel is a threat-model hole, and the same
+/// argument says a release upstream still patches must be accepted. So this rises only when a series
+/// leaves upstream's table, never to chase a newer feature.
+pub(crate) const MIN_SUPPORTED_FC_VERSION: (u64, u64) = (1, 15);
 
-/// Arms [`warn_on_unpinned_firecracker`] exactly once per process: the pin is process-wide and the
-/// probe costs a child spawn, so one loud warning at the first boot is the right dose.
-static FC_VERSION_PROBE: std::sync::Once = std::sync::Once::new();
+/// The **newest** supported Firecracker: the release CI exercises, `install.sh` hashes, and
+/// `doctor` names first. Everything in `MIN_SUPPORTED..=PINNED` is expected to work; only this one
+/// is actually tested, which is why the range is documented as "supported" and this one as "tested".
+///
+/// **The single source of this pin.** `doctor` reports it and `install.sh` mirrors its sha256; a
+/// second copy is how the pair sat on v1.9 for 21 months while only one of them was bumped.
+pub(crate) const PINNED_FC_VERSION: (u64, u64) = (1, 16);
 
-/// Warn, once per process, loudly, but never refuse, when `firecracker --version` reports a
-/// different major/minor than [`PINNED_FC_VERSION`]. A warning rather than a typed error because an
-/// embedder may knowingly run a compatible build; a *missing* or unrunnable binary stays silent
-/// here, since the spawn itself fails with the legible typed error moments later.
+/// First release accepting `clock_realtime` on `PUT /snapshot/load`. Firecracker rejects unknown
+/// fields outright, so sending it to anything older fails **every** restore: the field is therefore
+/// conditional ([`clock_realtime_arg`]) rather than unconditional, which is what lets the supported
+/// floor sit at [`MIN_SUPPORTED_FC_VERSION`] instead of being dragged up to this by one optional
+/// nicety.
+const FC_CLOCK_REALTIME_SINCE: (u64, u64) = (1, 16);
+
+/// The probed `(major, minor)` of the `firecracker` this process drives, resolved at the first
+/// boot/restore and cached: the pin check is process-wide and the probe costs a child spawn.
+/// `None` until something has spawned, or if the version could not be parsed.
+///
+/// One cache for the process, so an embedder pointing separate `BootConfig`s at *different*
+/// firecracker binaries gets the first one's version for all of them. Deliberate: the alternative
+/// is a probe per boot on the hot path, and a single-binary host is the shape every deployment has.
+static FC_VERSION: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+
+/// Probe (once) and warn, loudly but never fatally, when the binary is outside the supported range.
+/// A warning rather than a typed error because an embedder may knowingly run a build we have not
+/// tested; a *missing* or unrunnable binary stays silent here, since the spawn itself fails with the
+/// legible typed error moments later.
 fn warn_on_unpinned_firecracker(firecracker: &Path) {
-    FC_VERSION_PROBE.call_once(|| {
-        let Ok(out) = Command::new(firecracker).arg("--version").output() else {
-            return;
-        };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let (pin_maj, pin_min) = PINNED_FC_VERSION;
-        match fc_version_of(&text) {
-            Some(v) if v == PINNED_FC_VERSION => {}
-            Some((maj, min)) => tracing::warn!(
-                found = %format!("v{maj}.{min}"),
-                pinned = %format!("v{pin_maj}.{pin_min}"),
-                "firecracker differs from the version the driver's API schema is pinned to: request bodies and snapshot semantics may not match"
-            ),
-            None => tracing::warn!(
-                binary = %firecracker.display(),
-                "could not parse `firecracker --version`; the driver's API schema is pinned to v{pin_maj}.{pin_min}"
-            ),
-        }
+    let probed = *FC_VERSION.get_or_init(|| {
+        let out = Command::new(firecracker).arg("--version").output().ok()?;
+        fc_version_of(&String::from_utf8_lossy(&out.stdout))
     });
+    let (min_maj, min_min) = MIN_SUPPORTED_FC_VERSION;
+    let (pin_maj, pin_min) = PINNED_FC_VERSION;
+    match probed {
+        // Inside the supported range: silent. Only the tested version is `PINNED`, but every release
+        // in the range is one upstream patches and this driver builds valid request bodies for.
+        Some(v) if (MIN_SUPPORTED_FC_VERSION..=PINNED_FC_VERSION).contains(&v) => {}
+        Some((maj, min)) if (maj, min) < MIN_SUPPORTED_FC_VERSION => tracing::warn!(
+            found = %format!("v{maj}.{min}"),
+            supported = %format!("v{min_maj}.{min_min}..=v{pin_maj}.{pin_min}"),
+            "firecracker is older than any release upstream still patches: boots may work, but this \
+             engine neither tests nor supports it, and running untrusted code on an unpatched VMM is \
+             the hole the isolation boundary exists to close"
+        ),
+        Some((maj, min)) => tracing::warn!(
+            found = %format!("v{maj}.{min}"),
+            supported = %format!("v{min_maj}.{min_min}..=v{pin_maj}.{pin_min}"),
+            "firecracker is newer than the release this engine is tested against: request bodies and \
+             snapshot semantics may have moved"
+        ),
+        None => tracing::warn!(
+            binary = %firecracker.display(),
+            "could not parse `firecracker --version`; this engine supports v{min_maj}.{min_min}..=v{pin_maj}.{pin_min}"
+        ),
+    }
 }
 
-/// The `(major, minor)` out of `firecracker --version` output (first line `Firecracker v1.9.1`).
+/// The `clock_realtime` value for `PUT /snapshot/load`: `Some(true)` only when the probed binary is
+/// new enough to know the field, else `None` so it is omitted from the body entirely.
+///
+/// Conservative by construction: an unprobed or unparseable version omits the field, and the omitted
+/// body is the one every supported release accepts. The cost of guessing wrong in that direction is
+/// a restored clone whose clock did not advance; guessing wrong the other way fails the restore
+/// outright, which is what shipping this unconditionally actually did.
+fn clock_realtime_arg() -> Option<bool> {
+    let probed = (*FC_VERSION.get()?)?;
+    (probed >= FC_CLOCK_REALTIME_SINCE).then_some(true)
+}
+
+/// The `(major, minor)` out of `firecracker --version` output (first line `Firecracker v1.16.1`).
 /// Single-sourced here (the driver's own boot-time pin check) so `doctor`'s readiness probe reports
 /// the exact same version the driver validates against, the two surfaces can't drift.
 pub(crate) fn fc_version_of(text: &str) -> Option<(u64, u64)> {
@@ -1661,7 +1713,57 @@ pub(crate) fn boot_deadline(timeout: Duration) -> Instant {
 
 #[cfg(test)]
 mod version_tests {
-    use super::fc_version_of;
+    use super::{
+        fc_version_of, FC_CLOCK_REALTIME_SINCE, MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION,
+    };
+
+    #[test]
+    fn the_supported_range_covers_every_release_upstream_still_patches() {
+        // Upstream's release-status table currently marks v1.15 and v1.16 "Supported" (v1.14 ended
+        // the day v1.16 shipped). The floor must not sit *above* the oldest of those: refusing a
+        // release upstream still fixes would push operators onto an unpatched VMM to satisfy us,
+        // inverting the reason the floor exists. `firecracker-pin.yml` re-checks this against the
+        // live table weekly, because the answer changes without any commit here.
+        assert!(
+            MIN_SUPPORTED_FC_VERSION <= (1, 15),
+            "the floor has risen above a release upstream still patches"
+        );
+        assert!(
+            MIN_SUPPORTED_FC_VERSION < PINNED_FC_VERSION,
+            "the supported range must be a range, not a single version"
+        );
+    }
+
+    #[test]
+    fn the_clock_fixup_is_gated_above_the_floor_not_at_it() {
+        // The whole point of gating `clock_realtime`: the field arrived *after* the floor, so an
+        // ungated send would drag the effective floor up to v1.16 and break the two older supported
+        // releases. If a future bump ever makes the floor meet the gate, this assertion is the
+        // reminder that the conditional has become dead code and can be simplified away.
+        assert!(
+            FC_CLOCK_REALTIME_SINCE > MIN_SUPPORTED_FC_VERSION,
+            "clock_realtime is available on every supported release; the gate is now dead code"
+        );
+        assert!(
+            FC_CLOCK_REALTIME_SINCE <= PINNED_FC_VERSION,
+            "the tested version must be new enough to exercise the field at all"
+        );
+    }
+
+    #[test]
+    fn the_supported_range_classifies_each_version_the_way_the_warning_does() {
+        // The three buckets the boot-time warning renders, checked as plain comparisons so the
+        // policy is pinned independently of the log strings.
+        let supported = |v: (u64, u64)| (MIN_SUPPORTED_FC_VERSION..=PINNED_FC_VERSION).contains(&v);
+        for v in [(1, 15), (1, 16)] {
+            assert!(supported(v), "v{}.{} is upstream-supported", v.0, v.1);
+        }
+        // v1.14 belongs here, not above: its support ended the day v1.16 shipped.
+        for v in [(1, 9), (1, 13), (1, 14)] {
+            assert!(!supported(v), "v{}.{} is past upstream support", v.0, v.1);
+        }
+        assert!(!supported((1, 17)), "an untested newer release still warns");
+    }
 
     #[test]
     fn fc_version_parses_the_real_output_shape() {
@@ -1671,6 +1773,8 @@ mod version_tests {
             Some((1, 9))
         );
         assert_eq!(fc_version_of("Firecracker v1.13.0"), Some((1, 13)));
+        // The current pin, so the parser is exercised on the version actually shipped against.
+        assert_eq!(fc_version_of("Firecracker v1.16.1"), Some((1, 16)));
         for garbage in ["", "garbage", "Firecracker v", "Firecracker vX.Y"] {
             assert_eq!(fc_version_of(garbage), None, "{garbage:?} must not parse");
         }

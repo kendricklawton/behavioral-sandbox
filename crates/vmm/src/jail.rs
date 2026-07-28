@@ -467,8 +467,11 @@ fn resolve_exec(firecracker: &Path) -> Result<PathBuf, VmmError> {
 
 /// The cgroup dir the jailer will create for a VM, computed **before** the jailer is spawned:
 /// `--cgroup-version 2` with no `--parent-cgroup` places the VMM at
-/// `<cgroup root>/<exec-file name>/<id>` (the jailer requires the exec-file name to contain
-/// "firecracker", so the component is stable). Precomputing it lets the lifetime sentinel
+/// `<cgroup root>/<exec-file name>/<id>`. The name component is whatever the resolved binary is
+/// called: the jailer used to require it to contain "firecracker" and no longer does (v1.13), so an
+/// embedder pointing `EKVM_FIRECRACKER` at, say, `/opt/fc` now gets a `fc` component instead of a
+/// rejected spawn. Reading it off the resolved path rather than assuming a literal is what keeps
+/// this correct either way. Precomputing it lets the lifetime sentinel
 /// watch the cgroup from the moment the jailer is spawned instead of after boot; `run_boot` still
 /// learns the *actual* dir from `/proc` and warns if they ever disagree.
 pub(crate) fn jailer_cgroup_dir(firecracker: &Path, id: &str) -> Option<PathBuf> {

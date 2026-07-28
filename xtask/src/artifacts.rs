@@ -16,8 +16,24 @@ pub(crate) struct Artifact {
     pub(crate) dest: PathBuf,
 }
 
-/// The kernel + rootfs pinned for the host architecture. Matched to Firecracker v1.9's CI
-/// artifacts (uncompressed `vmlinux` + a minimal Ubuntu ext4). Only x86_64 is pinned so far.
+/// The guest kernel + demo rootfs pinned for the host architecture: an uncompressed `vmlinux` and a
+/// minimal Ubuntu ext4, both from Firecracker's public CI artifact bucket. Only x86_64 is pinned so
+/// far.
+///
+/// **The `v1.9` in the URL is a bucket path, not a coupling to the pinned Firecracker release.**
+/// Upstream publishes CI artifacts under per-branch prefixes that do not track release tags (there
+/// is no `v1.16` prefix at all), and the newest prefixes swapped the demo rootfs from ext4 to
+/// squashfs, which this boot path does not read. So this deliberately stays put: the **sha256 is the
+/// contract**, the URL is replaceable, and moving prefixes buys a newer guest kernel at the cost of
+/// a rootfs format change. Bump it as its own decision, with its own privileged run, never as a
+/// side effect of bumping the VMM.
+///
+/// The 6.1 kernel here is well clear of the pinned VMM's floor: Firecracker dropped support for
+/// guest kernel 4.14 in v1.10, and 5.10/6.1 are what it tests against.
+///
+/// Note what this is *not*: the Firecracker binary itself is never fetched here. The operator
+/// installs it (see `docs/cli-install.md`), so an upstream security patch is theirs to apply without
+/// waiting on a release of this engine.
 pub(crate) fn artifacts() -> Result<Vec<Artifact>> {
     let base = "https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.9";
     match std::env::consts::ARCH {

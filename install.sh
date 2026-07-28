@@ -236,19 +236,19 @@ esac
 if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/ekvm" ]; then
     say "  - non-default data dir, so observability needs: export EKVM_PROBES_OBJECT=\"$DATA/probes\""
 fi
-FC_PIN1="c8c2496f8786da12b7bbfbc5060af3573c22baa2e5f79ff6ee084993642bbe01"
-FC_PIN2="809789cd7567b77b20edec9b301953338c2023c37ea63db82d46cb61773ad511"
+# Keep in step with PINNED_FIRECRACKER_SHA256 in crates/vmm/src/doctor.rs.
+FC_PIN1="2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7"
 FC_BIN=$(command -v firecracker 2>/dev/null || true)
 if [ -n "$FC_BIN" ]; then
     FC_HASH=$(sha256sum "$FC_BIN" 2>/dev/null | awk '{print $1}')
-    if [ "$FC_HASH" = "$FC_PIN1" ] || [ "$FC_HASH" = "$FC_PIN2" ]; then
+    if [ "$FC_HASH" = "$FC_PIN1" ]; then
         ok "Firecracker binary on PATH verified ($FC_BIN, sha256 ok)"
     else
-        warn "Firecracker binary on PATH ($FC_BIN, sha256 ${FC_HASH:-unknown}); pinned v1.9 release sha256 is $FC_PIN1"
+        warn "Firecracker binary on PATH ($FC_BIN, sha256 ${FC_HASH:-unknown}); pinned v1.16 release sha256 is $FC_PIN1"
     fi
 else
-    warn "Firecracker is not bundled: install firecracker + jailer (v1.9) on PATH from:"
-    say "      https://github.com/firecracker-microvm/firecracker/releases/tag/v1.9.0 (sha256: $FC_PIN1)"
+    warn "Firecracker is not bundled: install firecracker + jailer (v1.16) on PATH from:"
+    say "      https://github.com/firecracker-microvm/firecracker/releases/tag/v1.16.1 (sha256: $FC_PIN1)"
 fi
 say "  - check the host; it prints the exact run command for this host:"
 say "      ekvm doctor"

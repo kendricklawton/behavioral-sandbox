@@ -134,14 +134,19 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             &format!("firecracker on PATH ({fc})"),
             command_on_path(&fc),
             false,
-            "no VMM to launch: install Firecracker v1.16, or set EKVM_FIRECRACKER",
+            "no VMM to launch: install Firecracker (see `ekvm doctor` for the supported range), or \
+             set EKVM_FIRECRACKER",
         ),
         // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
-            "firecracker is the pinned v1.16",
-            firecracker_version(&fc) == Some(PINNED_FIRECRACKER),
+            &format!("firecracker is a supported release ({})", supported_range()),
+            firecracker_version(&fc).is_some_and(|v| {
+                (crate::spawn::MIN_SUPPORTED_FC_VERSION..=crate::spawn::PINNED_FC_VERSION)
+                    .contains(&v)
+            }),
             true,
-            "boots continue with a warning; API request bodies may not match another version",
+            "boots continue with a warning; outside this range request bodies and snapshot \
+             semantics are untested, and below it upstream no longer ships security patches",
         ),
         Check::new(
             "firecracker binary sha256 matches pinned release",
@@ -232,7 +237,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
 pub fn matrix() -> Vec<&'static str> {
     vec![
         "fails open (a warning, still runs):",
-        "  firecracker not v1.9         -> boots continue; API bodies may not match",
+        "  firecracker out of range     -> boots continue; below the floor upstream ships no patches",
         "  firecracker sha256 unpinned  -> boots continue; verify custom binary out of band",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps",
@@ -291,7 +296,15 @@ fn geteuid() -> Option<u32> {
     line.split_whitespace().nth(2).and_then(|s| s.parse().ok())
 }
 
-/// `(major, minor)` of `<fc> --version` (first line `Firecracker v1.9.1`), or `None` if missing or
+/// The supported Firecracker range as an operator-facing string (`v1.14..=v1.16`), rendered from
+/// the two constants so the report can never name a range the driver does not actually accept.
+fn supported_range() -> String {
+    let (lo_maj, lo_min) = crate::spawn::MIN_SUPPORTED_FC_VERSION;
+    let (hi_maj, hi_min) = crate::spawn::PINNED_FC_VERSION;
+    format!("v{lo_maj}.{lo_min}..=v{hi_maj}.{hi_min}, tested on v{hi_maj}.{hi_min}")
+}
+
+/// `(major, minor)` of `<fc> --version` (first line `Firecracker v1.16.1`), or `None` if missing or
 /// unparseable, the same parse the driver runs to warn on an unpinned binary.
 fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     let out = std::process::Command::new(fc)
@@ -301,15 +314,6 @@ fn firecracker_version(fc: &str) -> Option<(u64, u64)> {
     let text = String::from_utf8_lossy(&out.stdout);
     crate::spawn::fc_version_of(&text)
 }
-
-/// The Firecracker release this engine is pinned to and tested against, as `(major, minor)`.
-///
-/// Deliberately exact rather than a floor. A floor would silently bless versions nothing here has
-/// ever booted, and the API request bodies this driver hand-rolls are versioned surface. The cost of
-/// an exact pin is that it goes stale invisibly, which is what `.github/workflows/firecracker-pin.yml`
-/// exists to catch: upstream patches only the last two minor series (plus a 6-month floor), so a pin
-/// that falls behind is running an unpatched VMM at the isolation boundary.
-const PINNED_FIRECRACKER: (u64, u64) = (1, 16);
 
 /// sha256 of the pinned release's `firecracker` binary (not the tarball: the check hashes the
 /// resolved binary on `PATH`). Only supported releases belong here; an older hash left in place

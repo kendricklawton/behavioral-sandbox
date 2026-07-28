@@ -81,11 +81,17 @@ id -nG | tr ' ' '\n' | grep -x kvm   # prints kvm once the group is in effect
 ### 4. Install Firecracker and its jailer
 
 The engine drives Firecracker, it does not bundle it (the container image is the one exception), so
-both binaries have to be on `PATH`. v1.9 is the pinned version; a different one boots with a warning
-because its API bodies may not match.
+both binaries have to be on `PATH`. **Supported: v1.15 and v1.16** — the releases the Firecracker
+team still patches, per the release-status table in their release policy doc. v1.16 is what CI
+tests and what the sha256 below pins; v1.15 works too, and the driver adapts its snapshot-load request
+to it. Anything older boots with a warning but is neither tested here nor patched upstream, which is
+the wrong footing for running untrusted code.
+
+This range **moves with upstream, not with our release cadence**: when a series ages out of their
+table the floor rises, which a weekly CI job checks so it cannot drift unnoticed.
 
 ```console
-VER=v1.9.1
+VER=v1.16.1
 ARCH=x86_64
 curl -fsSL -o /tmp/fc.tgz \
   "https://github.com/firecracker-microvm/firecracker/releases/download/${VER}/firecracker-${VER}-${ARCH}.tgz"
@@ -96,7 +102,7 @@ firecracker --version
 ```
 
 Both `install.sh` and `ekvm doctor` check a Firecracker binary found on `PATH` against the
-pinned v1.9 release sha256 and warn on a mismatch (advisory: your Firecracker is your call, but
+pinned v1.16 release sha256 and warn on a mismatch (advisory: your Firecracker is your call, but
 the pinned build is what CI exercises).
 
 On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
@@ -190,7 +196,7 @@ EKVM_DIST_TARBALL=dist/ekvm-<ver>-x86_64-linux.tar.gz sh install.sh
 ```
 
 Knobs (env): `EKVM_INSTALL_PREFIX` (binary dir), `EKVM_DATA_DIR` (artifact dir), `EKVM_VERSION`
-(a specific release), `EKVM_NO_TOML=1` (skip the config write). Firecracker v1.9 stays a host
+(a specific release), `EKVM_NO_TOML=1` (skip the config write). Firecracker v1.16 stays a host
 prerequisite (the engine drives it, it doesn't bundle it). eBPF observability needs no configuration:
 the engine finds the installed `probes` object under the data dir on its own, so
 `EKVM_PROBES_OBJECT` is only needed if you relocated the install with `EKVM_DATA_DIR`.
@@ -269,8 +275,9 @@ exits non-zero if a hard requirement is missing.
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
 | **Firecracker + jailer** | present on `PATH` | no VMM to launch (the jailer's absence degrades to `--unjailed`) |
 
-**Tested-against / pinned versions:** Firecracker **v1.9** (a different version boots with a warning;
-API bodies may not match). The **guest kernel** baked into the rootfs is pinned to a
+**Supported / tested versions:** Firecracker **v1.15–v1.16** supported (upstream's own patch
+window), **v1.16 tested** in CI. Outside that range boots continue with a warning. The **guest
+kernel** baked into the rootfs is pinned to a
 Firecracker-supported version, Firecracker periodically retires old guest kernels, so a fresh build
 tracks their supported set.
 
@@ -280,7 +287,7 @@ tracks their supported set.
   24.04** `x86_64` on every change.
 - **The privileged path** (microVM boot, the jailer, the eBPF probes, the end-to-end integration
   suite) runs in CI on a GitHub-hosted **Ubuntu 24.04** runner (`x86_64`, nested KVM) and by hand
-  on **Arch Linux** (rolling) during development, both with **Firecracker v1.9**. Those two are the
+  on **Arch Linux** (rolling) during development, both with **Firecracker v1.16**. Those two are the
   continuously-tested distros, and they bracket the tool-version spectrum (rolling-newest against
   LTS-oldest; Ubuntu's e2fsprogs and IPv6 defaults each caught a real issue Arch could not). Other
   distros are supported per the checks above but not continuously exercised; `ekvm doctor` names

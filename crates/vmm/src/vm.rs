@@ -38,12 +38,20 @@ use crate::{Limits, RunResult, VmmError};
 /// Kernel command line for the guest. `console=ttyS0` puts its console on the serial port (which
 /// Firecracker hands to our stdout); `reboot=k panic=1` make a guest panic/reboot exit the VMM
 /// promptly; `pci=off` trims an unused bus; `random.trust_cpu=on` avoids an entropy stall at boot.
+/// `clocksource=kvm-clock` keeps the guest's clock on the paravirtual clocksource: left to itself
+/// the kernel demotes kvm-clock below raw `tsc` on any invariant-TSC host (every modern CPU), and a
+/// TSC-read clock is frozen state Firecracker restores as-is, so the `clock_realtime` fix-up on
+/// `PUT /snapshot/load` would be applied to a clock the guest never reads. Only kvm-clock lets a
+/// restored clone's wall clock advance across the snapshot's age (pinned by the privileged
+/// `restored_clones_do_not_share_entropy_or_freeze_the_clock` test); reads stay vmexit-free either
+/// way (the pvclock page is TSC-based when the TSC is stable).
 /// The guest kernel boots with IPv6 **enabled**: the sandbox's network is dual-stack, v4 and v6,
 /// both deny-by-default. The guest gets a static v6 address from the `guest_ip6=`
 /// token `spawn.rs` appends (the kernel `ip=` param is v4-only), and reaches only the connected host
 /// end because no v6 default route is installed, exactly as for v4. Firecracker adds `root=/dev/vda`
 /// itself from the root drive, so it is not listed here.
-const DEFAULT_BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on";
+const DEFAULT_BOOT_ARGS: &str =
+    "console=ttyS0 reboot=k panic=1 pci=off random.trust_cpu=on clocksource=kvm-clock";
 
 /// Substring that marks the guest reached userspace. The default is the **guest rootfs's** ready
 /// sentinel, printed by `guest-agent` once its vsock listener accepts: that image is what the
@@ -249,6 +257,19 @@ fn parse_env_bool(v: &std::ffi::OsStr) -> Option<bool> {
     }
 }
 
+/// The pinned Firecracker's `vcpu_count` domain: `[1, 32]`, and **1 or an even number**. Refuse
+/// anything outside it before the spawn, so a bad [`Limits::vcpus`](crate::Limits::vcpus) is a typed
+/// refusal naming the rule rather than a `PUT /machine-config` fault raised after a VMM is already
+/// running (which then has to be torn down). Only a **cold boot** consults this: a restore takes its
+/// vCPU count from the snapshot state and issues no `/machine-config` at all.
+pub(crate) fn refuse_unsupported_vcpus(config: &BootConfig) -> Result<(), VmmError> {
+    let n = config.vcpus.get();
+    if !crate::vcpus_supported(n) {
+        return Err(VmmError::UnsupportedVcpus(n));
+    }
+    Ok(())
+}
+
 /// Refuse an **unjailed** boot or restore that asked for `require_limits`: the cpu/memory caps live
 /// on the jailed VMM's cgroup, so without the jailer there is nothing to enforce them and the run
 /// would be uncapped, exactly what `require_limits` forbids. The *jailed-but-undelegated* case is
@@ -414,9 +435,9 @@ pub struct Snapshot {
     /// baked in **relative** (`v.sock`), so Firecracker re-binds it in each restored VMM's own scratch
     /// dir (its cwd) rather than on one shared absolute path, letting concurrent clones coexist.
     pub(crate) has_vsock: bool,
-    /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). The
-    /// pinned Firecracker (v1.9) has no `network_overrides` on load (probed: "unknown field"), so
-    /// restore must recreate a tap with **exactly this name**, trivially satisfied by the netns
+    /// The source had a NIC, and the snapshot baked in this host tap name (`host_dev_name`). Restore
+    /// recreates a tap with **exactly this name** rather than renaming it with the pin's
+    /// `network_overrides` (`net.rs` records why the namespace is preferred), trivially satisfied by the netns
     /// model: each clone recreates the fixed-name tap inside its **own per-VM network
     /// namespace**, so any number of networked clones coexist (no name collision across namespaces)
     /// and the snapshot's baked-in guest address/MAC/routes are already correct in each, with no
@@ -482,7 +503,9 @@ impl Vm {
     /// far less per-VM cost.
     /// # Errors
     /// [`VmmError::LimitsUnavailable`] if [`require_limits`](BootConfig::require_limits) is set on an
-    /// unjailed boot (nothing can enforce the caps), [`VmmError::NoKvm`] without `/dev/kvm`,
+    /// unjailed boot (nothing can enforce the caps), [`VmmError::UnsupportedVcpus`] if
+    /// [`Limits::vcpus`](crate::Limits::vcpus) is not 1 or an even number in `[1, 32]`,
+    /// [`VmmError::NoKvm`] without `/dev/kvm`,
     /// [`VmmError::Artifact`] for a missing kernel/rootfs/binary, [`VmmError::Timeout`] if
     /// boot-to-userspace exceeds `boot_timeout`, and [`VmmError::Vmm`] for any Firecracker API or
     /// process failure. On any error the child is killed and the scratch dir removed before returning.
@@ -494,6 +517,9 @@ impl Vm {
         // Refuse a jailed boot whose scratch dir is nodev with a typed error, rather than letting the
         // jailer's inert chroot /dev/kvm surface a raw Firecracker "creating KVM object" failure.
         refuse_nodev_scratch(&config)?;
+        // Same shape for a vCPU count the pinned VMM won't take: name the rule here rather than
+        // spawn a VMM only to have `PUT /machine-config` reject it.
+        refuse_unsupported_vcpus(&config)?;
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
@@ -976,6 +1002,41 @@ mod tests {
     // (`jail_refuses_half_confined_boots` lived here while some boot features were not yet jailed;
     // it retired once the jail composed with every feature, so there is nothing left to
     // refuse. If a future feature ships unjailed, reinstate the refusal in `Vm::boot` and this test.)
+
+    #[test]
+    fn a_vcpu_count_the_vmm_would_reject_is_refused_before_the_spawn() {
+        // Firecracker documents `vcpu_count` as `[1, 32]`, "either 1 or an even number". `Limits`
+        // types the field `NonZeroU8`, which can spell 3 and 64, so the rest of the domain has to be
+        // a guard: without it these reach `PUT /machine-config` and come back as a fault *after* a
+        // VMM has been spawned and has to be torn down again.
+        let vcpus = |n: u8| BootConfig {
+            vcpus: NonZeroU8::new(n).expect("nonzero"),
+            ..BootConfig::default()
+        };
+        for legal in [1u8, 2, 4, 16, 32] {
+            assert!(
+                refuse_unsupported_vcpus(&vcpus(legal)).is_ok(),
+                "{legal} vCPUs is inside Firecracker's documented domain"
+            );
+        }
+        // Odd above 1, and past the ceiling.
+        for illegal in [3u8, 5, 31, 33, 34, 64, 255] {
+            assert!(
+                matches!(
+                    refuse_unsupported_vcpus(&vcpus(illegal)),
+                    Err(VmmError::UnsupportedVcpus(n)) if n == illegal
+                ),
+                "{illegal} vCPUs must be refused, and the error must carry the count"
+            );
+        }
+        // The refusal buckets with the other "fix the config and retry" faults, not as a guest fault.
+        assert_eq!(
+            VmmError::UnsupportedVcpus(3).kind(),
+            crate::ErrorKind::Infra
+        );
+        // The default `Limits` must itself be inside the domain, or every default boot is refused.
+        assert!(refuse_unsupported_vcpus(&BootConfig::default()).is_ok());
+    }
 
     #[test]
     fn require_limits_refuses_an_unjailed_boot() {

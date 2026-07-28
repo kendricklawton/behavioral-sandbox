@@ -184,6 +184,13 @@ pub enum VmmError {
     /// in boot. A host-configuration fault (repoint the scratch dir), so it buckets
     /// [`Infra`](ErrorKind::Infra); unjailed boots have no jailer chroot and are never affected.
     ScratchDirNodev(std::path::PathBuf),
+    /// [`Limits::vcpus`] is outside what the pinned Firecracker accepts: its `vcpu_count` is
+    /// documented `[1, 32]` and must be **1 or an even number**. Caught **before** the spawn, so the
+    /// refusal names the constraint instead of a cryptic `PUT /machine-config` fault arriving
+    /// mid-boot, after a VMM has already been started and has to be torn down again. A
+    /// caller-configuration fault (pick a legal count and retry), so it buckets
+    /// [`Infra`](ErrorKind::Infra) with the other "fix the config, then retry" refusals.
+    UnsupportedVcpus(u8),
 }
 
 impl std::fmt::Display for VmmError {
@@ -213,6 +220,11 @@ impl std::fmt::Display for VmmError {
                 "scratch dir {} is on a nodev mount: the jailer's chroot /dev/kvm can't be opened \
                  there, so a jailed boot fails; set EKVM_SCRATCH_DIR to a path off a nodev mount",
                 dir.display()
+            ),
+            VmmError::UnsupportedVcpus(n) => write!(
+                f,
+                "{n} vCPUs is not a count Firecracker accepts: vcpu_count must be 1 or an even \
+                 number in [1, 32]"
             ),
         }
     }
@@ -268,11 +280,13 @@ impl VmmError {
             | VmmError::Timeout(_)
             | VmmError::GuestUnavailable(_)
             | VmmError::Vmm(_)
-            // Host-configuration faults (caps can't be applied; the scratch dir is nodev), not the
-            // guest's: retry after fixing the delegation, the jail posture, or the scratch path,
-            // exactly Infra's "fix the host" contract.
+            // Host- or caller-configuration faults (caps can't be applied; the scratch dir is
+            // nodev; the vCPU count isn't one the VMM accepts), not the guest's: retry after fixing
+            // the delegation, the jail posture, the scratch path, or the count, exactly Infra's
+            // "fix the host" contract.
             | VmmError::LimitsUnavailable(_)
-            | VmmError::ScratchDirNodev(_) => ErrorKind::Infra,
+            | VmmError::ScratchDirNodev(_)
+            | VmmError::UnsupportedVcpus(_) => ErrorKind::Infra,
             // `ExecUnresponsive` is a *liveness* fault (the guest went silent/hostile mid-exec), so
             // it buckets with `Channel` as Transport: its own contract is "retire the VM, not blame
             // the command", which is Transport's, not Guest's.
@@ -305,6 +319,23 @@ impl From<ChannelError> for VmmError {
 /// fails otherwise), never silent growth.
 pub const FDS_PER_VM: usize = 8;
 
+/// The largest `vcpu_count` the pinned Firecracker accepts. Public because the CLI and the daemon
+/// both bound a caller's request at their own edge, and a second copy of this number is how a pin
+/// drifts: they read it from here.
+pub const MAX_VCPUS: u8 = 32;
+
+/// Whether `vcpus` is a count the pinned Firecracker will actually boot. Its `vcpu_count` is
+/// documented as `[1, MAX_VCPUS]` and "either 1 or an even number", so `0`, `3`, and `64` are all
+/// out, and only the first of those is unrepresentable in [`Limits::vcpus`]'s `NonZeroU8`.
+///
+/// Exposed so an embedder can validate a user-supplied count *before* building a [`Limits`] and
+/// eating a [`VmmError::UnsupportedVcpus`] at boot; [`Vm::boot`] applies the same predicate itself,
+/// so this is a convenience, never the enforcement.
+#[must_use]
+pub const fn vcpus_supported(vcpus: u8) -> bool {
+    vcpus != 0 && vcpus <= MAX_VCPUS && (vcpus == 1 || vcpus.is_multiple_of(2))
+}
+
 /// A per-sandbox resource budget. The engine exposes these knobs; the *hoster* sets policy. This is
 /// the per-run resource-policy surface: one
 /// options struct of **quantities** (vCPUs, memory, deadlines, an output cap), not capabilities,
@@ -321,7 +352,12 @@ pub const FDS_PER_VM: usize = 8;
 pub struct Limits {
     /// Guest vCPUs. Typed [`NonZeroU8`]: a zero-vCPU guest is not a small budget but an
     /// unbootable one, so the illegal value is unrepresentable rather than a late Firecracker API
-    /// error, and the width states the realistic domain (the pinned v1.9 caps a microVM at 32).
+    /// error, and the width states the realistic domain.
+    ///
+    /// The type can't express the rest of the pinned VMM's domain: `vcpu_count` is `[1, 32]` and
+    /// must be **1 or an even number**, so `3` and `64` are refused with
+    /// [`UnsupportedVcpus`](VmmError::UnsupportedVcpus) *before* any VMM is spawned rather than
+    /// surfacing as a mid-boot API fault.
     pub vcpus: NonZeroU8,
     /// Guest memory, MiB. Typed [`NonZeroU32`] for the same reason as [`vcpus`](Limits::vcpus):
     /// zero is not a budget, so it can't be constructed.

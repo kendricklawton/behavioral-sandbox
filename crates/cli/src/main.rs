@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use ekvm::policy::{parse_allow, AllowRule, Policy, Requested};
-use ekvm::MAX_VCPUS;
+use ekvm::{vcpus_supported, MAX_VCPUS};
 use probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
 use vmm::{sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
 
@@ -189,7 +189,7 @@ struct RunArgs {
     /// or `.ekvm.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
-    /// Guest vCPUs, 1..=32 [default: 1].
+    /// Guest vCPUs, 1 or an even number up to 32 [default: 1].
     /// Zero or over-cap is a typed CLI error, never a silent clamp (Firecracker caps a microVM
     /// at 32).
     #[arg(long, value_name = "N", value_parser = parse_vcpus, help_heading = "Guest resources")]
@@ -285,7 +285,7 @@ struct ShellArgs {
     /// Refuse the boot if the cpu/memory cgroup caps can't be applied (see `run --require-limits`).
     #[arg(long)]
     require_limits: bool,
-    /// Guest vCPUs (default 1). A whole number in 1..=32 (see `run --vcpus`).
+    /// Guest vCPUs (default 1). 1 or an even number up to 32 (see `run --vcpus`).
     #[arg(long, value_name = "N", value_parser = parse_vcpus)]
     vcpus: Option<NonZeroU8>,
     /// Guest memory in MiB (default 256). A whole number of at least 1 (see `run --mem`).
@@ -784,16 +784,19 @@ fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliErr
     Ok(limits)
 }
 
-/// Parse `--vcpus`: a whole number in `1..=32` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing
-/// straight into the non-zero type rejects `0` (and any non-number / u8 overflow); the explicit cap
-/// check rejects an over-32 value. Either way it is a **typed CLI error, never a silent clamp**, the
-/// value is refused at parse, not narrowed behind the caller's back or surfaced as a late boot error.
+/// Parse `--vcpus` into the [`Limits::vcpus`] [`NonZeroU8`]. Parsing straight into the non-zero type
+/// rejects `0` (and any non-number / u8 overflow); [`vcpus_supported`] rejects the rest of what the
+/// pinned VMM won't boot, an over-32 count or an odd one above 1. Either way it is a **typed CLI
+/// error, never a silent clamp**: the value is refused at parse, not narrowed behind the caller's
+/// back or surfaced as a late boot error.
 fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
     let vcpus: NonZeroU8 = s
         .parse()
         .map_err(|_| format!("expected a whole number of vCPUs in 1..={MAX_VCPUS}, got {s:?}"))?;
-    if vcpus.get() > MAX_VCPUS {
-        return Err(format!("vCPUs must be in 1..={MAX_VCPUS}, got {vcpus}"));
+    if !vcpus_supported(vcpus.get()) {
+        return Err(format!(
+            "vCPUs must be 1 or an even number in 1..={MAX_VCPUS}, got {vcpus}"
+        ));
     }
     Ok(vcpus)
 }
@@ -1000,9 +1003,10 @@ mod tests {
     }
 
     #[test]
-    fn vcpus_parse_within_the_one_to_thirty_two_domain() {
+    fn vcpus_parse_only_counts_the_vmm_would_boot() {
         assert_eq!(parse_vcpus("1"), Ok(NonZeroU8::MIN));
         assert_eq!(parse_vcpus("32"), NonZeroU8::new(32).ok_or(String::new()));
+        assert_eq!(parse_vcpus("2"), NonZeroU8::new(2).ok_or(String::new()));
         // Zero, over-cap, u8 overflow, and non-numbers are each a typed error, never a clamp.
         assert!(
             parse_vcpus("0").is_err(),
@@ -1012,7 +1016,16 @@ mod tests {
         assert!(parse_vcpus("300").is_err(), "u8 overflow");
         assert!(parse_vcpus("").is_err());
         assert!(parse_vcpus("two").is_err());
-        // The over-cap message names the cap so the refusal is actionable.
+        // The parity half of Firecracker's domain: an odd count above 1 is refused here rather than
+        // reaching `PUT /machine-config` and failing after a VMM has been spawned. 1 is the
+        // deliberate exception, and it is the default.
+        for odd in ["3", "5", "31"] {
+            assert!(
+                parse_vcpus(odd).is_err(),
+                "{odd} is odd and above 1, which Firecracker refuses"
+            );
+        }
+        // The refusal names the cap so it is actionable.
         assert!(parse_vcpus("64")
             .unwrap_err()
             .contains(&MAX_VCPUS.to_string()));
