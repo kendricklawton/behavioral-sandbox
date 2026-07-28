@@ -1385,47 +1385,66 @@ pub(crate) const PINNED_FC_VERSION: (u64, u64) = (1, 16);
 /// nicety.
 const FC_CLOCK_REALTIME_SINCE: (u64, u64) = (1, 16);
 
-/// The probed `(major, minor)` of the `firecracker` this process drives, resolved at the first
+/// What probing `firecracker --version` established, cached process-wide.
+#[derive(Debug, Clone, Copy)]
+enum FcProbe {
+    /// The binary could not be run at all (missing, not executable): stays silent in the version
+    /// warning, because the spawn itself fails with the legible typed error moments later, and a
+    /// "could not parse" warning about a binary that does not exist misleads.
+    Unavailable,
+    /// The binary ran but its version output was unrecognizable.
+    Unparseable,
+    /// A parsed `(major, minor)`.
+    Version((u64, u64)),
+}
+
+/// The probed version of the `firecracker` this process drives, resolved at the first
 /// boot/restore and cached: the pin check is process-wide and the probe costs a child spawn.
-/// `None` until something has spawned, or if the version could not be parsed.
 ///
 /// One cache for the process, so an embedder pointing separate `BootConfig`s at *different*
 /// firecracker binaries gets the first one's version for all of them. Deliberate: the alternative
 /// is a probe per boot on the hot path, and a single-binary host is the shape every deployment has.
-static FC_VERSION: std::sync::OnceLock<Option<(u64, u64)>> = std::sync::OnceLock::new();
+static FC_VERSION: std::sync::OnceLock<FcProbe> = std::sync::OnceLock::new();
 
 /// Probe (once) and warn, loudly but never fatally, when the binary is outside the supported range.
 /// A warning rather than a typed error because an embedder may knowingly run a build we have not
-/// tested; a *missing* or unrunnable binary stays silent here, since the spawn itself fails with the
-/// legible typed error moments later.
+/// tested; a *missing* or unrunnable binary stays silent here ([`FcProbe::Unavailable`]).
 fn warn_on_unpinned_firecracker(firecracker: &Path) {
-    let probed = *FC_VERSION.get_or_init(|| {
-        let out = Command::new(firecracker).arg("--version").output().ok()?;
-        fc_version_of(&String::from_utf8_lossy(&out.stdout))
-    });
+    let probed =
+        *FC_VERSION.get_or_init(
+            || match Command::new(firecracker).arg("--version").output() {
+                Err(_) => FcProbe::Unavailable,
+                Ok(out) => match fc_version_of(&String::from_utf8_lossy(&out.stdout)) {
+                    Some(v) => FcProbe::Version(v),
+                    None => FcProbe::Unparseable,
+                },
+            },
+        );
     let (min_maj, min_min) = MIN_SUPPORTED_FC_VERSION;
     let (pin_maj, pin_min) = PINNED_FC_VERSION;
     match probed {
         // Inside the supported range: silent. Only the tested version is `PINNED`, but every release
         // in the range is one upstream patches and this driver builds valid request bodies for.
-        Some(v) if (MIN_SUPPORTED_FC_VERSION..=PINNED_FC_VERSION).contains(&v) => {}
-        Some((maj, min)) if (maj, min) < MIN_SUPPORTED_FC_VERSION => tracing::warn!(
+        FcProbe::Version(v) if (MIN_SUPPORTED_FC_VERSION..=PINNED_FC_VERSION).contains(&v) => {}
+        FcProbe::Version((maj, min)) if (maj, min) < MIN_SUPPORTED_FC_VERSION => tracing::warn!(
             found = %format!("v{maj}.{min}"),
             supported = %format!("v{min_maj}.{min_min}..=v{pin_maj}.{pin_min}"),
             "firecracker is older than any release upstream still patches: boots may work, but this \
              engine neither tests nor supports it, and running untrusted code on an unpatched VMM is \
-             the hole the isolation boundary exists to close"
+             the hole the isolation boundary exists to close; install a supported release: \
+             https://github.com/firecracker-microvm/firecracker/releases"
         ),
-        Some((maj, min)) => tracing::warn!(
+        FcProbe::Version((maj, min)) => tracing::warn!(
             found = %format!("v{maj}.{min}"),
             supported = %format!("v{min_maj}.{min_min}..=v{pin_maj}.{pin_min}"),
             "firecracker is newer than the release this engine is tested against: request bodies and \
              snapshot semantics may have moved"
         ),
-        None => tracing::warn!(
+        FcProbe::Unparseable => tracing::warn!(
             binary = %firecracker.display(),
             "could not parse `firecracker --version`; this engine supports v{min_maj}.{min_min}..=v{pin_maj}.{pin_min}"
         ),
+        FcProbe::Unavailable => {}
     }
 }
 
@@ -1437,7 +1456,9 @@ fn warn_on_unpinned_firecracker(firecracker: &Path) {
 /// a restored clone whose clock did not advance; guessing wrong the other way fails the restore
 /// outright, which is what shipping this unconditionally actually did.
 fn clock_realtime_arg() -> Option<bool> {
-    let probed = (*FC_VERSION.get()?)?;
+    let FcProbe::Version(probed) = *FC_VERSION.get()? else {
+        return None;
+    };
     (probed >= FC_CLOCK_REALTIME_SINCE).then_some(true)
 }
 

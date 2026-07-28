@@ -170,7 +170,9 @@ impl VmLifetime {
                     pid,
                     %reason,
                     "no lifetime cgroup for this VM; teardown is Drop-only (driver death would \
-                     leak the VMM)"
+                     leak the VMM); if the denied path is another user's session scope, this \
+                     shell came from `su`/`sudo -s`: log in as this user directly for a \
+                     delegated cgroup"
                 );
                 None
             }

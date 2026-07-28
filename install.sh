@@ -229,7 +229,7 @@ say ""
 info "Installation complete! Next steps:"
 case ":$PATH:" in
     *":$PREFIX:"*) ;;
-    *) say "  - add $PREFIX to your PATH" ;;
+    *) say "  - add $PREFIX to your PATH:  export PATH=\"$PREFIX:\$PATH\"" ;;
 esac
 # The engine finds the eBPF object under the default data dir on its own, so only a *relocated*
 # install still needs the override spelled out.
@@ -238,20 +238,33 @@ if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/ekvm" ]; then
 fi
 # Keep in step with PINNED_FIRECRACKER_SHA256 in crates/vmm/src/doctor.rs.
 FC_PIN1="2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7"
+# The release the printed commands below install; keep in step with PINNED_FC_VERSION in
+# crates/vmm/src/spawn.rs (a dist test compares the series so the two cannot drift).
+FC_VER="v1.16.1"
 FC_BIN=$(command -v firecracker 2>/dev/null || true)
 if [ -n "$FC_BIN" ]; then
     FC_HASH=$(sha256sum "$FC_BIN" 2>/dev/null | awk '{print $1}')
     if [ "$FC_HASH" = "$FC_PIN1" ]; then
         ok "Firecracker binary on PATH verified ($FC_BIN, sha256 ok)"
     else
-        warn "Firecracker binary on PATH ($FC_BIN, sha256 ${FC_HASH:-unknown}); pinned v1.16 release sha256 is $FC_PIN1"
+        warn "Firecracker binary on PATH ($FC_BIN, sha256 ${FC_HASH:-unknown}); pinned $FC_VER release sha256 is $FC_PIN1"
     fi
 else
-    warn "Firecracker is not bundled: install firecracker + jailer (v1.16) on PATH from:"
-    say "      https://github.com/firecracker-microvm/firecracker/releases/tag/v1.16.1 (sha256: $FC_PIN1)"
+    # Upstream ships versioned binary names inside a versioned directory; without the exact
+    # commands an operator improvises the download, the rename, and which file the sha covers.
+    warn "Firecracker is not bundled: install firecracker + jailer $FC_VER on PATH:"
+    say "      curl -LO https://github.com/firecracker-microvm/firecracker/releases/download/$FC_VER/firecracker-$FC_VER-x86_64.tgz"
+    say "      tar xzf firecracker-$FC_VER-x86_64.tgz"
+    say "      install release-$FC_VER-x86_64/firecracker-$FC_VER-x86_64 \"$PREFIX/firecracker\""
+    say "      install release-$FC_VER-x86_64/jailer-$FC_VER-x86_64 \"$PREFIX/jailer\""
+    say "      (sha256 of the firecracker binary, not the tarball: $FC_PIN1)"
 fi
 say "  - check the host; it prints the exact run command for this host:"
 say "      ekvm doctor"
+# Unjailed first: it works in the shell reading this, while sudo needs rights a fresh operator
+# account may lack. The sudo form re-injects the caller's PATH: sudoers secure_path overrides
+# PATH even under -E, hiding both a user-local ekvm and the firecracker/jailer binaries the
+# engine itself resolves.
 say "  - then run something (the default jails the VMM, which needs real root):"
-say "      sudo -E ekvm run -- echo hello       # jailed, the supported posture"
-say "      ekvm run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+say "      ekvm run --unjailed -- echo hello                 # no root needed: still behind KVM, VMM unconfined"
+say "      sudo -E env \"PATH=\$PATH\" ekvm run -- echo hello   # jailed, the supported posture"

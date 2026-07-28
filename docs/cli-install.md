@@ -212,9 +212,13 @@ The one thing worth knowing before you do: a run is **jailed by default**, and t
 root (it creates device nodes in the chroot). So on a normal user account the first command is either
 
 ```console
-sudo -E ekvm run -- echo hello       # jailed, the supported posture
-ekvm run --unjailed -- echo hello    # no root: still behind KVM, but the VMM runs unconfined
+ekvm run --unjailed -- echo hello                 # no root needed: still behind KVM, but the VMM runs unconfined
+sudo -E env "PATH=$PATH" ekvm run -- echo hello   # jailed, the supported posture
 ```
+
+The `env "PATH=$PATH"` is not decoration: sudoers `secure_path` (on by default on Ubuntu and most
+distros) overrides PATH even under `-E`, which hides both a `~/.local/bin` install of `ekvm` and the
+firecracker/jailer binaries the engine resolves at spawn time.
 
 There is deliberately no silent fallback between the two: dropping the jail is something you ask for,
 never something the engine does quietly for you. If a run fails on a host-readiness cause, the error

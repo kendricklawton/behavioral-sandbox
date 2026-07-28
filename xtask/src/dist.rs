@@ -419,6 +419,41 @@ mod tests {
         }
     }
 
+    /// Same drift guard, for the release *version* the installer's printed commands download.
+    /// The sha test above would catch a drifted binary, but only after an operator installed the
+    /// wrong one; this catches the printed instructions themselves going stale when
+    /// `PINNED_FC_VERSION` moves.
+    #[test]
+    fn install_sh_firecracker_version_is_in_the_pinned_series() {
+        let repo = workspace_root();
+        let install = std::fs::read_to_string(repo.join("install.sh")).unwrap();
+        let spawn = std::fs::read_to_string(repo.join("crates/vmm/src/spawn.rs")).unwrap();
+
+        let fc_ver = install
+            .lines()
+            .find_map(|l| l.strip_prefix("FC_VER=\"v")?.strip_suffix('"'))
+            .expect("install.sh single-sources the release as FC_VER=\"vX.Y.Z\"");
+        // `pub(crate) const PINNED_FC_VERSION: (u64, u64) = (1, 16);` -> "1, 16" -> "1.16".
+        let pinned_series = spawn
+            .lines()
+            .find(|l| l.contains("PINNED_FC_VERSION: (u64, u64)"))
+            .and_then(|l| l.rsplit('(').next())
+            .map(|t| {
+                t.trim_end_matches(|c: char| !c.is_ascii_digit())
+                    .replace(", ", ".")
+            })
+            .expect("spawn.rs declares PINNED_FC_VERSION: (u64, u64)");
+        assert!(
+            !pinned_series.is_empty() && pinned_series.contains('.'),
+            "parsed an empty series out of spawn.rs: the declaration's shape moved"
+        );
+        assert!(
+            fc_ver == pinned_series || fc_ver.starts_with(&format!("{pinned_series}.")),
+            "install.sh tells operators to install v{fc_ver}, but the engine pins the v{pinned_series} \
+             series: the printed install commands drifted"
+        );
+    }
+
     /// Same drift guard, for the eBPF build toolchain. Unlike `aya` (a Cargo dependency, pinned by
     /// `Cargo.lock`), the nightly compiler and `bpf-linker` are installed **out of band**, so each
     /// needs its own pin, and each pin has copies a workflow file cannot resolve at runtime: a

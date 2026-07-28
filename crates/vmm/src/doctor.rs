@@ -84,6 +84,7 @@ impl Check {
 #[must_use]
 pub fn checks(config: &BootConfig) -> Vec<Check> {
     let fc = config.firecracker.to_string_lossy();
+    let fc_present = command_on_path(&fc);
     let exposed = vulnerable_entries(Path::new(SYS_CPU_VULNERABILITIES));
     vec![
         // The supported platform, hard: off it, the engine is not certified to isolate.
@@ -115,7 +116,9 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "/dev/kvm writable (kvm group or root)",
             kvm_writable(),
             false,
-            "every boot fails (NoKvm): add your user to the `kvm` group, or run as root",
+            "every boot fails (NoKvm): join the `kvm` group (`sudo usermod -aG kvm $USER`, then a \
+             fresh login) or run as root; already in the group? check the device mode \
+             (`ls -l /dev/kvm`)",
         ),
         // The boot artifacts, hard: nothing boots without a kernel + rootfs at the configured paths.
         Check::new(
@@ -132,28 +135,44 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         ),
         Check::new(
             &format!("firecracker on PATH ({fc})"),
-            command_on_path(&fc),
+            fc_present,
             false,
-            "no VMM to launch: install Firecracker (see `ekvm doctor` for the supported range), or \
-             set EKVM_FIRECRACKER",
+            &format!(
+                "no VMM to launch: install firecracker + jailer ({}) from \
+                 https://github.com/firecracker-microvm/firecracker/releases, or set \
+                 EKVM_FIRECRACKER",
+                supported_range()
+            ),
         ),
-        // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
+        // The two rows below judge the binary the row above found; with no binary they must not
+        // pretend to have judged one ("custom or unpinned" about nothing misleads an operator),
+        // so their note collapses to a deferral instead.
         Check::new(
             &format!("firecracker is a supported release ({})", supported_range()),
-            firecracker_version(&fc).is_some_and(|v| {
-                (crate::spawn::MIN_SUPPORTED_FC_VERSION..=crate::spawn::PINNED_FC_VERSION)
-                    .contains(&v)
-            }),
+            fc_present
+                && firecracker_version(&fc).is_some_and(|v| {
+                    (crate::spawn::MIN_SUPPORTED_FC_VERSION..=crate::spawn::PINNED_FC_VERSION)
+                        .contains(&v)
+                }),
             true,
-            "boots continue with a warning; outside this range request bodies and snapshot \
-             semantics are untested, and below it upstream no longer ships security patches",
+            if fc_present {
+                "boots continue with a warning; outside this range request bodies and snapshot \
+                 semantics are untested, and below it upstream no longer ships security patches"
+            } else {
+                "not checked: no firecracker binary found (fix the missing row above first)"
+            },
         ),
         Check::new(
             "firecracker binary sha256 matches pinned release",
-            firecracker_hash_matches(&fc),
+            fc_present && firecracker_hash_matches(&fc),
             true,
-            "custom or unpinned Firecracker binary on host; verify binary provenance out of band",
+            if fc_present {
+                "custom or unpinned Firecracker binary on host; verify binary provenance out of band"
+            } else {
+                "not checked: no firecracker binary found (fix the missing row above first)"
+            },
         ),
+        // The jailer path, fails open: `--unjailed` still boots (behind the KVM boundary).
         Check::new(
             "real root (euid 0: the jailer mknod's device nodes)",
             geteuid() == Some(0),
@@ -532,6 +551,45 @@ mod tests {
         // `sh` is on PATH on any host the test runs on; a nonsense name is not.
         assert!(command_on_path("sh"));
         assert!(!command_on_path("definitely-not-a-real-binary-xyzzy"));
+    }
+
+    #[test]
+    fn a_missing_firecracker_defers_the_rows_that_would_judge_it() {
+        // Field-found on a fresh host: with no binary at all, the version and sha256 rows used to
+        // warn "custom or unpinned binary; verify provenance", judging a binary that does not
+        // exist. They must defer to the FAIL row instead of pretending to have checked something.
+        let cfg = BootConfig {
+            firecracker: "definitely-not-a-real-binary-xyzzy".into(),
+            ..Default::default()
+        };
+        let checks = checks(&cfg);
+
+        let row = |needle: &str| {
+            checks
+                .iter()
+                .find(|c| c.label.contains(needle))
+                .expect("a firecracker row matching the needle")
+        };
+        let on_path = row("firecracker on PATH");
+        assert_eq!(on_path.status, CheckStatus::Fail);
+        assert!(
+            on_path
+                .note
+                .as_deref()
+                .is_some_and(|n| n.contains("https://")),
+            "the FAIL row itself says where to get a release, not `see ekvm doctor` circularly"
+        );
+        for needle in ["supported release", "binary sha256"] {
+            let dependent = row(needle);
+            assert_eq!(dependent.status, CheckStatus::Warn, "{needle}");
+            assert!(
+                dependent
+                    .note
+                    .as_deref()
+                    .is_some_and(|n| n.contains("not checked")),
+                "`{needle}` must defer, not judge a binary that does not exist"
+            );
+        }
     }
 
     #[test]

@@ -105,14 +105,19 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
         );
         // Name a first command that works *here*: the jailed default needs real root plus the
         // jailer, so suggesting it unconditionally would hand a fresh operator a failing command.
+        // The unjailed form is listed first for the same reason: it works in the very shell
+        // reading this, while the sudo form needs rights a fresh operator account may lack.
+        // That sudo form re-injects the caller's PATH via `env`: sudoers `secure_path` (on by
+        // default on the common distros) overrides PATH even under `-E`, which hides both a
+        // user-local `ekvm` and the firecracker/jailer binaries the engine itself resolves.
         if doctor::jailed_run_available() {
             let _ = writeln!(out, "\nTry it:\n  ekvm run -- echo hello");
         } else {
             let _ = writeln!(
                 out,
                 "\nTry it (the default jails the VMM, which needs real root):\
-                 \n  sudo -E ekvm run -- echo hello       # jailed, the supported posture\
-                 \n  ekvm run --unjailed -- echo hello    # no root: still behind KVM, VMM unconfined"
+                 \n  ekvm run --unjailed -- echo hello                 # no root needed: still behind KVM, VMM unconfined\
+                 \n  sudo -E env \"PATH=$PATH\" ekvm run -- echo hello   # jailed, the supported posture"
             );
         }
         ExitCode::SUCCESS
