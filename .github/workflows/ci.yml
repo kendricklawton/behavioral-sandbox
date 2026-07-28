@@ -31,18 +31,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
       # Everything `cargo xtask ci` needs, so none of its layers soft-skip here: stable
-      # fmt/clippy, and the probes' nightly + rust-src (`build-std` for bpfel-unknown-none).
+      # fmt/clippy, and the probes' pinned nightly + rust-src (`build-std` for bpfel-unknown-none).
       - name: Install the toolchains
         run: |
           rustup component add rustfmt clippy
-          rustup toolchain install nightly --profile minimal --component rust-src
+          rustup toolchain install nightly-2026-07-20 --profile minimal --component rust-src
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@v2
         with:
           # The probes are their own workspace (own toolchain, own target dir); cache both.
           workspaces: |
@@ -51,24 +51,43 @@ jobs:
 
       # Prebuilt binary, so the gate's `cargo deny check` layer has its tool.
       - name: Install cargo-deny
-        uses: taiki-e/install-action@7572810d7dd469b651bb7793945692cf78da5dd7 # v2.85.0
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
 
       # No prebuilt binaries published; compiled once per cache key, then served from the
-      # cached ~/.cargo/bin.
+      # cached ~/.cargo/bin. Version-pinned to match crates/probes/rust-toolchain.toml's nightly.
       - name: Install bpf-linker
-        run: cargo install bpf-linker --locked
+        run: cargo install bpf-linker --locked --version 0.10.3
 
       - name: Run the gate
         run: cargo xtask ci
+
+  # Workflow linting. The one job that does not delegate to `cargo xtask ci`: actionlint is a Go
+  # binary that only inspects files CI runs, so requiring it on every dev box would be the wrong trade.
+  lint-workflows:
+    name: lint workflows (actionlint)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install actionlint
+        uses: taiki-e/install-action@v2
+        with:
+          tool: actionlint
+
+      - name: actionlint
+        run: actionlint -color
 
   # The single check to require in branch protection. Green only if every job above succeeded or
   # was skipped — add a job above and it's covered here automatically, no branch-rule edit needed.
   ci-status:
     name: CI status
     if: always()
-    needs: [gate]
+    needs: [gate, lint-workflows]
     runs-on: ubuntu-latest
     steps:
       - name: Verify every job passed

@@ -24,11 +24,17 @@ The canonical operating manual for humans and coding agents alike is [`AGENTS.md
   ```console
   rustup target add x86_64-unknown-linux-musl
   ```
-- **eBPF Toolchain** (optional, for eBPF probes):
+- **eBPF Toolchain** (optional, for eBPF probes). Both are pinned: unlike `aya`, which is a Cargo
+  dependency held by `Cargo.lock`, these are installed out of band, so an unpinned install takes
+  whatever shipped today and a compiler change can break the build with no commit from anyone.
+  `bpf-linker` links against the pinned nightly's LLVM, so the two move together.
   ```console
-  cargo install bpf-linker cargo-deny
-  rustup toolchain install nightly --component rust-src
+  cargo install cargo-deny
+  cargo install bpf-linker --locked --version 0.10.3
+  rustup toolchain install nightly-2026-07-20 --profile minimal --component rust-src
   ```
+  The nightly is pinned in `crates/probes/rust-toolchain.toml` and `bpf-linker` in `xtask`; a gate
+  test compares every copy of both against those sources.
 
 ### Developer Setup Commands
 

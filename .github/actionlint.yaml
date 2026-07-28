@@ -1,6 +1,10 @@
-# actionlint config: declare the self-hosted runner labels ci-privileged.yml targets, so the
-# linter can check them. `kvm` is the custom label to set when registering the KVM-capable
-# bare-metal box as a self-hosted runner.
+# actionlint config, read by the `lint-workflows` job in ci.yml (before that job existed this file
+# configured a linter nothing ran, which reads as coverage and is not).
+#
+# Declares the self-hosted runner labels a privileged lane would target, so the linter can check
+# them. `kvm` is the custom label to set when registering a KVM-capable bare-metal box as a
+# self-hosted runner. The privileged gate currently runs on a GitHub-hosted runner with nested KVM
+# (ci-privileged-hosted.yml), so no workflow uses this label today; it stays for the bare-metal lane.
 self-hosted-runner:
   labels:
     - kvm

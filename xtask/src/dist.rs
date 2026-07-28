@@ -330,6 +330,7 @@ pub(crate) fn release_key(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BPF_LINKER_VERSION;
 
     struct TempDir(PathBuf);
     impl Drop for TempDir {
@@ -366,6 +367,160 @@ mod tests {
             .verifying_key()
             .verify_detached(tampered.as_bytes(), &sig)
             .is_err());
+    }
+
+    /// Same drift guard, for the Firecracker pin. `install.sh` carries its own copy of the pinned
+    /// release sha256 (installers run it before this repo is built, so it cannot call into `vmm`),
+    /// and `doctor.rs` carries the one the engine checks at runtime. Two copies of a security-
+    /// relevant hash drift silently: the pair sat on v1.9 for 21 months, about a year past
+    /// upstream's support window, and nothing compared them.
+    #[test]
+    fn install_sh_firecracker_pin_matches_doctor() {
+        let repo = workspace_root();
+        let install = std::fs::read_to_string(repo.join("install.sh")).unwrap();
+        let doctor = std::fs::read_to_string(repo.join("crates/vmm/src/doctor.rs")).unwrap();
+
+        let shas_in = |text: &str, prefix: &str| -> Vec<String> {
+            text.lines()
+                .filter(|l| l.contains(prefix))
+                .filter_map(|l| {
+                    l.split('"')
+                        .find(|t| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()))
+                })
+                .map(str::to_string)
+                .collect()
+        };
+
+        let installer = shas_in(&install, "FC_PIN");
+        assert!(
+            !installer.is_empty(),
+            "install.sh should carry at least one pinned Firecracker sha256 (FC_PIN*)"
+        );
+        // Every hash the installer trusts must be one the engine also blesses; the engine may know
+        // about more (a newly hashed patch release lands there first).
+        let blessed: Vec<String> = doctor
+            .lines()
+            .filter(|l| l.contains("// v1."))
+            .filter_map(|l| {
+                l.split('"')
+                    .find(|t| t.len() == 64 && t.chars().all(|c| c.is_ascii_hexdigit()))
+            })
+            .map(str::to_string)
+            .collect();
+        assert!(
+            !blessed.is_empty(),
+            "doctor.rs should carry PINNED_FIRECRACKER_SHA256 entries commented with their version"
+        );
+        for sha in &installer {
+            assert!(
+                blessed.contains(sha),
+                "install.sh pins {sha}, which doctor.rs no longer blesses: the two copies drifted"
+            );
+        }
+    }
+
+    /// Same drift guard, for the eBPF build toolchain. Unlike `aya` (a Cargo dependency, pinned by
+    /// `Cargo.lock`), the nightly compiler and `bpf-linker` are installed **out of band**, so each
+    /// needs its own pin, and each pin has copies a workflow file cannot resolve at runtime: a
+    /// GitHub Actions step cannot read `rust-toolchain.toml` or a Rust constant, so it restates the
+    /// version. This compares every copy against its single source, which is the only thing standing
+    /// between them and the drift that let the Firecracker pin sit 21 months stale.
+    ///
+    /// Both are checked together because they move together: `bpf-linker` links against the pinned
+    /// nightly's LLVM, so bumping one alone is how the pair desynchronizes.
+    #[test]
+    fn ebpf_toolchain_pins_are_single_sourced() {
+        let repo = workspace_root();
+        // The sources of truth: the toolchain file, and xtask's own constant.
+        let toolchain = std::fs::read_to_string(repo.join("crates/probes/rust-toolchain.toml"))
+            .expect("crates/probes/rust-toolchain.toml");
+        let channel = toolchain
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#'))
+            .find_map(|l| l.strip_prefix("channel"))
+            .and_then(|rest| rest.trim_start().strip_prefix('='))
+            .map(|v| v.trim().trim_matches('"').to_string())
+            .expect("crates/probes/rust-toolchain.toml must declare [toolchain] channel");
+        // A floating channel is the defect this test exists to prevent, not merely an inconsistency:
+        // every copy would "agree" while each machine built with a different compiler.
+        assert!(
+            channel.starts_with("nightly-") && channel.len() > "nightly-".len(),
+            "the probes toolchain must pin an exact dated nightly, got {channel:?}: a floating \
+             channel means CI builds with whatever shipped that morning"
+        );
+
+        // **Every** workflow, discovered by reading the directory rather than a hardcoded list: a
+        // list silently exempts whatever it omits, which reads as coverage and is not. (The first
+        // version of this test listed four files and missed both fuzz workflows, each of which
+        // installed a floating nightly.) A new workflow is covered the moment it is added.
+        let dir = repo.join(".github/workflows");
+        let mut checked = 0usize;
+        let mut entries: Vec<_> = std::fs::read_dir(&dir)
+            .expect(".github/workflows")
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "yml" || e == "yaml"))
+            .collect();
+        entries.sort();
+        assert!(
+            !entries.is_empty(),
+            "no workflows found in {}",
+            dir.display()
+        );
+        for path in &entries {
+            let wf = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let text = std::fs::read_to_string(path).expect("read workflow");
+            for line in text.lines() {
+                let line = line.trim();
+                if line.starts_with('#') {
+                    continue;
+                }
+                if line.contains("rustup toolchain install") && line.contains("nightly") {
+                    assert!(
+                        line.contains(&channel),
+                        "{wf} installs a nightly that is not the pinned {channel}: {line}"
+                    );
+                    checked += 1;
+                }
+                for (tool, version) in [("bpf-linker", BPF_LINKER_VERSION)] {
+                    if line.contains(&format!("cargo install {tool}")) {
+                        assert!(
+                            line.contains(&format!("--version {version}")),
+                            "{wf} installs {tool} unpinned; `--locked` locks its dependencies, not \
+                             {tool} itself, so add `--version {version}`: {line}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        // A rename of the install step (or a move to a composite action) would otherwise make every
+        // assertion above vacuous while the test still passed: no matches, no failures, green.
+        assert!(
+            checked > 0,
+            "no pinned toolchain/tool installs matched in {}: the patterns this test greps for have \
+             drifted from what the workflows actually run, so it is asserting nothing",
+            dir.display()
+        );
+
+        // The contributor-facing docs hand out the same commands; a reader who follows them must
+        // land on the pinned versions, not on whatever is newest.
+        let contributing = std::fs::read_to_string(repo.join("docs/contributing.md"))
+            .expect("docs/contributing.md");
+        for line in contributing.lines() {
+            for (tool, version) in [("bpf-linker", BPF_LINKER_VERSION)] {
+                if line.contains(&format!("cargo install {tool}")) {
+                    assert!(
+                        line.contains(&format!("--version {version}")),
+                        "docs/contributing.md tells contributors to install {tool} unpinned: {line}"
+                    );
+                }
+            }
+        }
     }
 
     /// The two pins can never drift: the PEM `install.sh` embeds (what installers trust) must be

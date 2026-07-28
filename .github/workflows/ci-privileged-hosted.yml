@@ -40,8 +40,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Any v1.9.x, the driver pins on major.minor (doctor probes it). Bump the patch as upstream moves.
-  FC_VERSION: v1.9.1
+  # Must match spawn.rs's PINNED_FC_VERSION (major.minor) and doctor.rs's pinned sha256: the
+  # privileged gate is the only place the driver meets a real VMM, so testing a different release
+  # than the one shipped would validate nothing. firecracker-pin.yml watches for a newer one.
+  FC_VERSION: v1.16.1
 
 jobs:
   hosted:
@@ -54,7 +56,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -107,11 +109,15 @@ jobs:
 
       - name: Toolchains (nightly + rust-src + bpf-linker for the eBPF object; musl for the guest agent)
         run: |
-          rustup toolchain install nightly --profile minimal --component rust-src
+          # Both pinned, and kept equal to their single sources by
+          # `ebpf_toolchain_pins_are_single_sourced`: the nightly to
+          # crates/probes/rust-toolchain.toml, bpf-linker to xtask's BPF_LINKER_VERSION.
+          # `--locked` alone locks bpf-linker's dependencies, not bpf-linker itself.
+          rustup toolchain install nightly-2026-07-20 --profile minimal --component rust-src
           rustup target add x86_64-unknown-linux-musl
-          cargo install bpf-linker --locked
+          cargo install bpf-linker --locked --version 0.10.3
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             .

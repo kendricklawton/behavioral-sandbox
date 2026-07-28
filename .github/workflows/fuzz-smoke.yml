@@ -21,14 +21,17 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
-      - name: Install the nightly toolchain
-        run: rustup toolchain install nightly --profile minimal
+      # The pinned nightly, matching crates/probes/rust-toolchain.toml: `cargo xtask fuzz` selects
+      # it explicitly (`cargo +nightly-<date> fuzz`), so installing the floating alias here would
+      # leave the run with no toolchain at all. One nightly serves the whole repo.
+      - name: Install the pinned nightly toolchain
+        run: rustup toolchain install nightly-2026-07-20 --profile minimal
 
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@v2
         with:
           # The fuzz harness is its own workspace; cache it alongside the root (for xtask).
           workspaces: |
@@ -36,6 +39,8 @@ jobs:
             fuzz
 
       # No prebuilt binary; compiled once per cache key, then served from the cached ~/.cargo/bin.
+      # Version-pinned: `--locked` locks cargo-fuzz's dependencies, not cargo-fuzz, so without it a
+      # crash found here may not reproduce on a dev box running a different fuzzer.
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
 
@@ -46,7 +51,7 @@ jobs:
 
       - name: Upload the crashing input
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-smoke-artifacts
           path: fuzz/artifacts/

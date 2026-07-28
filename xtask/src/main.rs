@@ -400,13 +400,15 @@ fn require_cargo_fuzz() -> Result<()> {
     if cargo_fuzz_available() {
         return Ok(());
     }
+    let nightly = probes_nightly().unwrap_or("<unreadable pin>");
     bail!(
-        "cargo-fuzz not found — install it with `cargo install cargo-fuzz` and add a nightly \
-         toolchain (`rustup toolchain install nightly`). See docs/contributing.md."
+        "cargo-fuzz not found — install it with `cargo install cargo-fuzz --locked` and add the \
+         pinned toolchain (`rustup toolchain install {nightly} --profile minimal`). \
+         See docs/contributing.md."
     )
 }
 
-/// Build the shared `+nightly fuzz <sub> <target> <corpus> [seeds]` argv. The writable corpus
+/// Build the shared `+<pinned nightly> fuzz <sub> <target> <corpus> [seeds]` argv. The writable corpus
 /// (libFuzzer accumulates new inputs here; generated, gitignored) is created so naming it explicitly
 /// (which we must, to also pass the seeds) doesn't trip cargo-fuzz's default. `with_seeds` folds in
 /// the committed read-only seed corpus, so `run`/`coverage` start *past* the first-byte reject (real
@@ -414,7 +416,11 @@ fn require_cargo_fuzz() -> Result<()> {
 fn cargo_fuzz_argv(sub: &str, target: &str, root: &Path, with_seeds: bool) -> Result<Vec<String>> {
     let corpus = root.join("fuzz/corpus").join(target);
     std::fs::create_dir_all(&corpus).context("create the fuzz corpus dir")?;
-    let mut args: Vec<String> = ["+nightly", "fuzz", sub, target]
+    // `+<pinned>`, not a bare `+nightly`: the alias is whatever the last `rustup update` fetched, so
+    // a bare `+nightly` would ignore the pin entirely and a crash found here could be unreproducible
+    // on the next machine. One nightly serves the whole repo (see [`probes_nightly`]).
+    let toolchain = format!("+{}", probes_nightly()?);
+    let mut args: Vec<String> = [toolchain.as_str(), "fuzz", sub, target]
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
@@ -427,9 +433,10 @@ fn cargo_fuzz_argv(sub: &str, target: &str, root: &Path, with_seeds: bool) -> Re
 }
 
 /// Invoke `cargo <args>` from the repo root (cargo-fuzz discovers the `fuzz/` crate there). The
-/// `+nightly` in `args` forces the nightly toolchain via the rustup proxy: libFuzzer builds with
-/// `-Zsanitizer=address`, nightly-only, so inheriting a stable default would fail with "the option
-/// `Z` is only accepted on the nightly compiler". rustup propagates the selection to the inner build.
+/// leading `+<pinned nightly>` in `args` forces that toolchain via the rustup proxy: libFuzzer builds
+/// with `-Zsanitizer=address`, nightly-only, so inheriting a stable default would fail with "the
+/// option `Z` is only accepted on the nightly compiler". rustup propagates the selection to the
+/// inner build.
 fn run_cargo_fuzz(args: &[String], root: &Path) -> Result<()> {
     println!("$ cargo {}", args.join(" "));
     let status = Command::new("cargo")
@@ -451,8 +458,11 @@ fn run_cargo_fuzz(args: &[String], root: &Path) -> Result<()> {
 /// component, an opt-in install like cargo-fuzz itself, so check for it up front and bail with the
 /// one-line fix rather than letting the run fail cryptically at the merge step.
 fn require_llvm_tools() -> Result<()> {
+    // The *pinned* toolchain, matching what `cargo_fuzz_argv` selects: checking the `nightly` alias
+    // would report ready off a toolchain the coverage run never uses.
+    let nightly = probes_nightly()?;
     let installed = Command::new("rustup")
-        .args(["component", "list", "--toolchain", "nightly", "--installed"])
+        .args(["component", "list", "--toolchain", nightly, "--installed"])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -463,7 +473,7 @@ fn require_llvm_tools() -> Result<()> {
     }
     bail!(
         "llvm-tools not installed — `cargo fuzz coverage` needs it to merge the profile: \
-         `rustup component add llvm-tools --toolchain nightly`. See docs/contributing.md."
+         `rustup component add llvm-tools --toolchain {nightly}`. See docs/contributing.md."
     )
 }
 
@@ -856,12 +866,22 @@ fn setup() -> Result<()> {
     // verifying static links); an operator running the shipped engine does not, so they are not in
     // the shared `ekvm doctor` set.
     println!("\ndev toolchain (for building, not running):");
+    // Verified, not just announced: a row that printed the pin while any version satisfied it would
+    // be the same hollow-green this gate exists to refuse.
     check(
-        "bpf-linker installed",
-        dev_tool_path("bpf-linker").is_some(),
+        &format!(
+            "bpf-linker installed, pinned {BPF_LINKER_VERSION} (found {})",
+            bpf_linker_version().unwrap_or_else(|| "none".into())
+        ),
+        bpf_linker_version().as_deref() == Some(BPF_LINKER_VERSION),
     );
     check(
-        "nightly toolchain + rust-src (eBPF object build: `cargo xtask build-probes`)",
+        &format!(
+            "pinned nightly {} + rust-src (eBPF object build: `cargo xtask build-probes`)",
+            // The gate test guarantees this parses, so the fallback is unreachable in a checked-out
+            // tree; it exists so a setup *report* never fails outright over a display string.
+            probes_nightly().unwrap_or("<unreadable pin>")
+        ),
         nightly_ebpf_ready(),
     );
     check(
@@ -928,8 +948,9 @@ fn setup() -> Result<()> {
 fn build_probes() -> Result<()> {
     if !in_path("bpf-linker") {
         println!(
-            "· skipping eBPF object build: bpf-linker not found \
-             (install it: `cargo install bpf-linker`; see `cargo xtask setup`)"
+            "· skipping eBPF object build: bpf-linker not found (install it: \
+             `cargo install bpf-linker --locked --version {BPF_LINKER_VERSION}`; \
+             see `cargo xtask setup`)"
         );
         return Ok(());
     }
@@ -945,21 +966,25 @@ fn build_probes() -> Result<()> {
     // would otherwise fall through to the build and `bail!`, failing the everyday gate, the exact
     // thing this guard exists to prevent (`ci` must run everywhere). Skip cleanly instead.
     if !nightly_ebpf_ready() {
+        let nightly = probes_nightly()?;
         println!(
-            "· skipping eBPF object build: nightly toolchain with `rust-src` not installed \
-             (add it: `rustup toolchain install nightly && rustup component add rust-src \
-             --toolchain nightly`; see `cargo xtask setup`)"
+            "· skipping eBPF object build: the pinned toolchain {nightly} with `rust-src` is not \
+             installed (add it: `rustup toolchain install {nightly} --profile minimal \
+             --component rust-src`; see `cargo xtask setup`)"
         );
         return Ok(());
     }
     let dir = workspace_root().join("crates/probes");
-    // `rustup run nightly` forces the nightly toolchain the crate's `rust-toolchain.toml` pins: a
-    // parent `cargo xtask` leaks `RUSTUP_TOOLCHAIN=stable` into this child, which would otherwise
-    // override that file and fail `build-std`. The crate's `.cargo/config.toml` supplies the target +
-    // `build-std`; `bpf-linker` (on PATH) links the object. `--locked` holds the probes lockfile.
-    println!("$ rustup run nightly cargo build --release --locked  (in crates/probes → bpfel-unknown-none)");
+    // `rustup run <pinned nightly>` names the toolchain explicitly because a parent `cargo xtask`
+    // leaks `RUSTUP_TOOLCHAIN=stable` into this child, which would otherwise override the crate's
+    // `rust-toolchain.toml` and fail `build-std`. The channel comes *from* that file
+    // ([`probes_nightly`]) rather than a literal, so naming it here can't drift from the pin. The
+    // crate's `.cargo/config.toml` supplies the target + `build-std`; `bpf-linker` (on PATH) links
+    // the object. `--locked` holds the probes lockfile.
+    let nightly = probes_nightly()?;
+    println!("$ rustup run {nightly} cargo build --release --locked  (in crates/probes → bpfel-unknown-none)");
     let status = Command::new("rustup")
-        .args(["run", "nightly", "cargo", "build", "--release", "--locked"])
+        .args(["run", nightly, "cargo", "build", "--release", "--locked"])
         .current_dir(&dir)
         .status()
         .context("building crates/probes (eBPF object)")?;
@@ -1055,8 +1080,14 @@ fn nightly_ebpf_ready() -> bool {
     let Some(rustup) = dev_tool_path("rustup") else {
         return false;
     };
+    // The *pinned* toolchain, not the `nightly` alias: with an exact date pinned, having some
+    // nightly installed says nothing about having this one, and reporting ready on the wrong
+    // toolchain would turn a clean skip into a confusing build failure.
+    let Ok(nightly) = probes_nightly() else {
+        return false;
+    };
     let mut cmd = Command::new(rustup);
-    cmd.args(["component", "list", "--toolchain", "nightly", "--installed"]);
+    cmd.args(["component", "list", "--toolchain", nightly, "--installed"]);
     // Under a sudo that reset `$HOME` to root's, `rustup` would read root's empty `~/.rustup` and
     // report no nightly. Point it at the *invoking* user's toolchain home so the row is honest
     // whichever way setup is run (only when `RUSTUP_HOME` isn't already pinned by the environment).
@@ -1075,6 +1106,59 @@ fn nightly_ebpf_ready() -> bool {
                     .any(|l| l.trim().starts_with("rust-src"))
         })
         .unwrap_or(false)
+}
+
+/// The exact nightly `crates/probes` builds with, read out of its `rust-toolchain.toml` at compile
+/// time. **That file is the single source**: `rustup run <channel>` with a literal `nightly` here
+/// would silently override the pin (an explicit toolchain argument outranks the file), which is the
+/// same second-copy drift that let the Firecracker pin sit 21 months stale. Parsed rather than
+/// duplicated so the two can't disagree; `ebpf_toolchain_pins_are_single_sourced` extends that to
+/// the CI workflows, which cannot read the file at all.
+/// A malformed toolchain file is an error, never a silent fall back to the floating `nightly`
+/// channel: falling back would build with an unpinned compiler while every message still claimed
+/// the pin, which is worse than not pinning at all. `ebpf_toolchain_pins_are_single_sourced` fails
+/// the gate long before this could fire.
+fn probes_nightly() -> Result<&'static str> {
+    toolchain_channel(include_str!("../../crates/probes/rust-toolchain.toml")).context(
+        "crates/probes/rust-toolchain.toml does not declare a [toolchain] channel: the eBPF \
+         nightly pin is unreadable",
+    )
+}
+
+/// The `channel = "..."` value out of a `rust-toolchain.toml`. Deliberately a line scan, not a TOML
+/// parse: `xtask` is dev tooling and this is one unambiguous key, so the dependency isn't worth it.
+fn toolchain_channel(text: &str) -> Option<&str> {
+    text.lines()
+        .map(str::trim)
+        // Skip the comment prose above the table, which also contains the word `channel`.
+        .filter(|l| !l.starts_with('#'))
+        .find_map(|l| l.strip_prefix("channel"))?
+        .trim_start()
+        .strip_prefix('=')?
+        .trim()
+        .trim_matches('"')
+        .into()
+}
+
+/// The `bpf-linker` version the eBPF object is linked with. Unlike `aya` (a Cargo dependency, so
+/// `Cargo.lock` pins it), this is a **host binary installed out of band**, and
+/// `cargo install bpf-linker --locked` locks bpf-linker's *dependencies*, not bpf-linker itself, so
+/// without this every install takes whatever is newest. It links against the pinned nightly's LLVM,
+/// so the pair moves together: bump both, or neither.
+const BPF_LINKER_VERSION: &str = "0.10.3";
+
+/// The installed `bpf-linker`'s version (`bpf-linker 0.10.3` on stdout), or `None` if it isn't
+/// installed or won't report one. Resolved the sudo-aware way, like the other `~/.cargo/bin` dev
+/// tools, so `sudo cargo xtask setup` doesn't misreport it as absent.
+fn bpf_linker_version() -> Option<String> {
+    let out = Command::new(dev_tool_path("bpf-linker")?)
+        .arg("--version")
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_string)
 }
 
 /// The workspace root (not the cwd), so the commands work from anywhere.
