@@ -31,6 +31,13 @@ const OUTPUT_EXTRACT_CAP: u64 = 2 * (OUTPUT_IMAGE_MIB as u64) * 1024 * 1024; // 
 /// Wall-clock bound on the output readback (`e2fsck` + `debugfs rdump`), so a pathological image can
 /// never hang the host teardown. Read-back is off the boot path; generous is fine.
 const OUTPUT_READBACK_TIMEOUT: Duration = Duration::from_secs(120);
+/// The readback tools' `wait_bounded` tick: off the boot path, so latency is cheap, and rdump's
+/// over-budget callback walks the extracted tree each tick, so faster would cost real CPU.
+const READBACK_POLL: Duration = Duration::from_millis(50);
+/// How long a killed helper is given to be reaped before it is detached (see
+/// [`kill_and_reap_briefly`]). Short: a killable child dies at once, and anything slower is the
+/// D-state case, where waiting longer only lengthens the hang.
+const HELPER_REAP_GRACE: Duration = Duration::from_millis(200);
 /// A booted VM's writable output device: the ext4 image the guest mounts at `/output`, and the host
 /// directory its tree is extracted into on [`RunningVm::collect_outputs`].
 #[derive(Debug, Clone)]
@@ -42,7 +49,11 @@ pub(crate) struct OutputDevice {
 /// **rootless** via `mke2fs -d` (no loopback, no `sudo`). Sized from the tree's byte total with
 /// slack and given enough inodes for its file count; the image lands in `workdir` (the per-VM
 /// scratch dir) so teardown reclaims it. Returns the image path.
-pub(crate) fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBuf, VmmError> {
+pub(crate) fn build_input_image(
+    src_dir: &Path,
+    workdir: &Path,
+    deadline: Instant,
+) -> Result<PathBuf, VmmError> {
     require_dir(src_dir, "input directory")?;
     let (bytes, files) = measure_tree(src_dir)?;
     // ext4 has a small floor and `mke2fs` needs metadata headroom; over-sizing only wastes scratch
@@ -59,6 +70,7 @@ pub(crate) fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBu
             OsStr::new(&format!("{size_mib}M")),
             image.as_os_str(),
         ],
+        deadline,
     )?;
     run_host_tool(
         "mke2fs",
@@ -78,6 +90,7 @@ pub(crate) fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBu
             src_dir.as_os_str(),
             image.as_os_str(),
         ],
+        deadline,
     )?;
     Ok(image)
 }
@@ -88,7 +101,7 @@ pub(crate) fn build_input_image(src_dir: &Path, workdir: &Path) -> Result<PathBu
 /// [`OUTPUT_IMAGE_MIB`] on the host regardless of how little the command writes. Labelled
 /// [`OUTPUT_LABEL`] so the guest mounts it by label. The image lands in `workdir` (reclaimed on
 /// teardown); [`RunningVm::collect_outputs`] reads it back after the VMM exits.
-pub(crate) fn build_output_image(workdir: &Path) -> Result<PathBuf, VmmError> {
+pub(crate) fn build_output_image(workdir: &Path, deadline: Instant) -> Result<PathBuf, VmmError> {
     let image = workdir.join("output.ext4");
     run_host_tool(
         "truncate",
@@ -97,6 +110,7 @@ pub(crate) fn build_output_image(workdir: &Path) -> Result<PathBuf, VmmError> {
             OsStr::new(&format!("{OUTPUT_IMAGE_MIB}M")),
             image.as_os_str(),
         ],
+        deadline,
     )?;
     run_host_tool(
         "mke2fs",
@@ -113,6 +127,7 @@ pub(crate) fn build_output_image(workdir: &Path) -> Result<PathBuf, VmmError> {
             OsStr::new("lazy_itable_init=0,lazy_journal_init=0"),
             image.as_os_str(),
         ],
+        deadline,
     )?;
     Ok(image)
 }
@@ -167,24 +182,28 @@ fn require_dir(path: &Path, what: &str) -> Result<(), VmmError> {
 /// Run a host build tool (`truncate`/`mke2fs`) for a data block device. A missing tool is a typed
 /// [`VmmError::Artifact`], the driver's only other external process is `firecracker`, so these are
 /// real new runtime dependencies, surfaced clearly rather than as a cryptic spawn failure.
-fn run_host_tool(program: &str, args: &[&OsStr]) -> Result<(), VmmError> {
-    // `.output()` (not `.status()` with inherited stdio): capture stderr so a real failure (e.g.
-    // `mke2fs` on a full scratch fs) names the cause instead of an undiagnosable one-liner, and null
-    // stdin so a tool line can never land on the pipe-clean structured-result stdout.
-    let output = Command::new(program)
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| tool_spawn_error(program, e))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail = stderr.trim();
+fn run_host_tool(program: &str, args: &[&OsStr], deadline: Instant) -> Result<(), VmmError> {
+    // Bounded (not a bare `.output()`): a scratch filesystem that has stopped answering would
+    // otherwise stall the boot with no typed error. stderr is captured so a real failure (e.g.
+    // `mke2fs` on a full scratch fs) names the cause, and stdin/stdout are nulled so no tool line
+    // can land on the pipe-clean structured-result stdout.
+    //
+    // The wall is whichever of the two runs out first: the **caller's** boot deadline, which is
+    // the wall the run was actually promised, or [`IMAGE_TOOL_TIMEOUT`], which caps a wedged tool
+    // on a boot with a generous (or absent) budget. A private constant alone would let a hung
+    // `mke2fs` sit for two minutes under a ten-second wall.
+    let wall = deadline
+        .saturating_duration_since(Instant::now())
+        .min(crate::proc::IMAGE_TOOL_TIMEOUT);
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    let (status, stderr) = crate::proc::output_bounded(cmd, wall, program)?;
+    if !status.success() {
         return Err(VmmError::Vmm(format!(
-            "{program} failed building a block device image (exit {}): {tail}",
-            output
-                .status
-                .code()
-                .map_or_else(|| "signal".to_string(), |c| c.to_string())
+            "{program} failed building a block device image: {}",
+            // Never just the stderr: `mke2fs` killed by a signal writes none, and the exit status
+            // is then the whole diagnosis.
+            crate::proc::failure_detail(status, &stderr)
         )));
     }
     Ok(())
@@ -238,7 +257,7 @@ fn fsck_output_image(image: &Path, deadline: Instant) -> Result<(), VmmError> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|e| tool_spawn_error("e2fsck", e))?;
-    let status = wait_bounded(&mut child, deadline, "e2fsck", || None)?;
+    let status = wait_bounded(&mut child, deadline, "e2fsck", READBACK_POLL, || None)?;
     match status.code() {
         Some(0) => Ok(()),
         // Errors were found and corrected (1) or corrected + reboot-advised (2): the tree is now
@@ -292,7 +311,7 @@ fn rdump_capped(
     // The extra bound rdump carries over a plain wait: abort the moment the extracted tree's
     // allocated blocks pass `byte_cap` (a sparse-file blow-up materialising as real host zeros),
     // not only when it outruns the deadline.
-    let status = wait_bounded(&mut child, deadline, "debugfs rdump", || {
+    let status = wait_bounded(&mut child, deadline, "debugfs rdump", READBACK_POLL, || {
         (dir_alloc_bytes(dest) > byte_cap).then_some(VmmError::OutputCap {
             limit: byte_cap.min(usize::MAX as u64) as usize,
         })
@@ -304,16 +323,23 @@ fn rdump_capped(
     }
 }
 
-/// Poll `child` to exit under `deadline`, killing and reaping it on any exit path so a readback
-/// helper (`e2fsck`, `debugfs`) run on a wholly guest-controlled image can never park the host
-/// thread. `over_budget` is checked each tick for an extra abort condition (rdump's byte cap);
+/// Poll `child` to exit under `deadline`, killing and reaping it on any exit path so a shelled-out
+/// helper run against guest-controlled or wedge-prone state (`e2fsck`/`debugfs` on a guest image,
+/// the jail's `mount`) can never park the host thread. `over_budget` is checked each tick for an extra abort condition (rdump's byte cap);
 /// returning `Some(err)` kills the child and surfaces that error. A `try_wait` failure, the
-/// deadline, or an over-budget signal all kill+reap before returning a typed error; the `what`
-/// label names the tool in the timeout/wait messages.
-fn wait_bounded(
+/// deadline, or an over-budget signal all kill and *briefly* reap ([`kill_and_reap_briefly`]:
+/// an unkillable D-state child is detached, never waited on) before returning a typed error;
+/// the `what` label names the tool in the timeout/wait messages.
+///
+/// `poll` is the tick, and the caller owns the trade: it bounds both the added latency for a
+/// fast helper (the readback tools tolerate 50ms, a boot-path `mount` finishing in ~1ms does
+/// not) and how often `over_budget` runs (rdump's callback walks the extracted tree, so a fast
+/// tick there would make the watchdog itself expensive).
+pub(crate) fn wait_bounded(
     child: &mut Child,
     deadline: Instant,
     what: &str,
+    poll: Duration,
     mut over_budget: impl FnMut() -> Option<VmmError>,
 ) -> Result<ExitStatus, VmmError> {
     loop {
@@ -321,24 +347,44 @@ fn wait_bounded(
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
                 if let Some(err) = over_budget() {
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    kill_and_reap_briefly(child, what, HELPER_REAP_GRACE);
                     return Err(err);
                 }
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(VmmError::Timeout(format!(
-                        "{what} exceeded the output-readback deadline"
-                    )));
+                    kill_and_reap_briefly(child, what, HELPER_REAP_GRACE);
+                    return Err(VmmError::Timeout(format!("{what} exceeded its deadline")));
                 }
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(poll);
             }
             Err(e) => {
-                // Don't leak a live helper on a `wait` error: kill and reap before surfacing it.
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap_briefly(child, what, HELPER_REAP_GRACE);
                 return Err(VmmError::Vmm(format!("wait on {what}: {e}")));
+            }
+        }
+    }
+}
+
+/// Kill `child` and reap it, but only briefly: a child SIGKILL cannot reach (D-state, the very
+/// wedge these helpers are bounded against) would turn the reap's `wait` into the hang the
+/// deadline just prevented. Past `grace` it is detached with a warning and lingers as a zombie
+/// until this process exits, the same trade `proc::run_bounded` makes on the teardown path: the
+/// no-hang promise outranks a zombie. Returns whether the child was actually reaped, so a caller
+/// with follow-on work that depends on the process being gone (joining its console reader, which
+/// only ends at the child's stdout EOF) can skip that work instead of blocking on it.
+pub(crate) fn kill_and_reap_briefly(child: &mut Child, what: &str, grace: Duration) -> bool {
+    let _ = child.kill();
+    let deadline = Instant::now() + grace;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            _ => {
+                tracing::warn!(
+                    child = what,
+                    "killed child could not be reaped (running past the grace, D-state?, or a \
+                     wait error); detaching it"
+                );
+                return false;
             }
         }
     }
@@ -517,6 +563,7 @@ mod tests {
             &mut child,
             started + Duration::from_millis(100),
             "sleep",
+            Duration::from_millis(10),
             || None,
         )
         .expect_err("a 30s sleep must not finish before a 100ms deadline");
@@ -551,6 +598,7 @@ mod tests {
             &mut child,
             Instant::now() + Duration::from_secs(5),
             "true",
+            Duration::from_millis(10),
             || None,
         )
         .expect("a fast child returns its status");

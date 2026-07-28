@@ -1,5 +1,6 @@
-//! Bounded external-helper execution for the **teardown path**, where a hung child would hang `Drop`
-//! itself, the one place the driver must never block.
+//! Bounded external-helper execution: [`run_bounded`] for the **teardown path**, where a hung child
+//! would hang `Drop` itself, and [`output_bounded`] for the **boot path**, where one gives the
+//! caller a typed error instead of an unbounded stall.
 //!
 //! Firecracker aside, the driver shells out to a few host tools (`ip`, `umount`, `mke2fs`, ...). Most
 //! run on the boot path, where the boot deadline gates them and a stall fails the *run*, which the
@@ -22,6 +23,73 @@ use std::time::{Duration, Instant};
 /// `umount -l` normally return in milliseconds, so this is pure headroom for a briefly-busy kernel,
 /// not a budget a healthy helper ever spends.
 pub(crate) const TEARDOWN_HELPER_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The wall a **boot-path** `ip` invocation gets ([`output_bounded`]). The same rtnl-lock wedge that
+/// motivated bounding `ip netns del` on teardown reaches `netns add` / `tuntap add` too; healthy
+/// runs are milliseconds.
+pub(crate) const IP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The wall a block-device build tool (`truncate`/`mke2fs`) gets. Generous: `mke2fs -d` on a large
+/// bulk-input tree legitimately takes seconds, so this bounds a hung scratch filesystem, not a busy
+/// one.
+pub(crate) const IMAGE_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The wall the one-shot `firecracker --version` probe gets. Without it, an `EKVM_FIRECRACKER`
+/// pointed at a binary that hangs on `--version` hangs **every** boot with no typed error, since
+/// the probe runs before any deadline is consulted.
+pub(crate) const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How a failed helper reads in an error: its own stderr when it wrote one, else its exit status.
+/// A tool killed by a signal (a deadline kill, an operator's `kill`, the OOM killer) writes
+/// nothing at all, and an error message ending in a bare colon names no cause: the status is then
+/// the only fact there is. Callers name the tool themselves, so this carries only the "why".
+pub(crate) fn failure_detail(status: std::process::ExitStatus, stderr: &str) -> String {
+    let line = stderr.trim();
+    if line.is_empty() {
+        status.to_string()
+    } else {
+        line.to_string()
+    }
+}
+
+/// Run `cmd` with a hard wall, returning its exit status and captured stderr, for a **boot-path**
+/// helper whose caller wants a typed error rather than a stall. Unlike [`run_bounded`] (teardown:
+/// detach and carry on), a timeout here is an `Err` the run surfaces; the child is killed and
+/// briefly reaped, then detached if it cannot be (the D-state case, where waiting is the hang this
+/// exists to prevent). The status comes back rather than a bare success flag so a signal-killed
+/// (silent) helper can still be described, see [`failure_detail`].
+///
+/// stderr is read **after** the child exits, which terminates because these particular helpers
+/// (`ip`, `truncate`, `mke2fs`) do not background a child that would inherit the pipe: reaping the
+/// child closes the last write end. A helper that flooded more than a pipe buffer would block and
+/// be caught by the wall instead, so the unbounded case is a timeout, never a deadlock. Do not
+/// point this at an arbitrary operator-supplied program (`firecracker --version` deliberately uses
+/// a file instead, see `spawn::probe_fc_version`).
+pub(crate) fn output_bounded(
+    mut cmd: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<(std::process::ExitStatus, String), crate::VmmError> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| crate::drives::tool_spawn_error(label, e))?;
+    let deadline = Instant::now() + timeout;
+    let status = crate::drives::wait_bounded(
+        &mut child,
+        deadline,
+        label,
+        Duration::from_millis(5),
+        || None,
+    )?;
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    Ok((status, stderr))
+}
 
 /// What a bounded helper run produced: it exited within the wall (with its success flag and captured
 /// stderr), or it outran the wall and was **detached** (left running, unreaped), never waited.
@@ -86,6 +154,28 @@ pub(crate) fn run_bounded(mut cmd: Command, timeout: Duration, label: &str) -> B
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_silent_failure_is_described_by_its_status() {
+        // The regression this exists to hold: a helper killed by a signal writes no stderr, and
+        // an error built from stderr alone ends in a bare colon, naming no cause at all.
+        let killed = Command::new("sh")
+            .args(["-c", "kill -9 $$"])
+            .output()
+            .expect("run a self-killing shell");
+        assert!(killed.stderr.is_empty(), "the signal path writes no stderr");
+        let detail = failure_detail(killed.status, "");
+        assert!(
+            !detail.trim().is_empty(),
+            "a silent helper must still be described, got {detail:?}"
+        );
+        // Its own diagnosis wins when it wrote one.
+        let failed = Command::new("false").status().expect("run `false`");
+        assert_eq!(
+            failure_detail(failed, "  mount: only root can do that\n"),
+            "mount: only root can do that"
+        );
+    }
 
     #[test]
     fn a_fast_helper_exits_within_the_wall() {

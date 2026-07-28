@@ -172,7 +172,7 @@ impl Spawned {
             None => None,
             Some(dir) => {
                 still_before(deadline, "input image build")?;
-                Some(build_input_image(dir, staged.path())?)
+                Some(build_input_image(dir, staged.path(), deadline)?)
             }
         };
 
@@ -183,7 +183,7 @@ impl Spawned {
             Some(dest) => {
                 still_before(deadline, "output image build")?;
                 Some(OutputDevice {
-                    image: build_output_image(staged.path())?,
+                    image: build_output_image(staged.path(), deadline)?,
                     dest: dest.clone(),
                 })
             }
@@ -580,6 +580,7 @@ impl Spawned {
                 &workdir,
                 uid,
                 gid,
+                deadline,
             )?;
             mem_arg = mem_rel;
             // Record the bind mount into `chroot.mounts` *now*, before the fallible steps below: an
@@ -627,6 +628,7 @@ impl Spawned {
                     &workdir,
                     uid,
                     gid,
+                    deadline,
                 )?;
                 // Same eager recording as the memory mount above: the shared-base disk bind must be
                 // detachable by teardown/abort the instant it exists, not only if we reach the end.
@@ -848,6 +850,7 @@ impl Spawned {
                     &config.scratch_dir,
                     uid,
                     gid,
+                    deadline,
                 )?;
                 rootfs_arg = arg;
                 if let (Some(chroot), Some(mount)) = (self.chroot.as_mut(), mount) {
@@ -866,12 +869,12 @@ impl Spawned {
             // chroot nests in it), so teardown's `remove_dir_all` reclaims them as before, and
             // `collect_outputs` reads the output image at its host-side path after the VMM exits.
             if let Some(dir) = config.input_dir.as_ref() {
-                let image = build_input_image(dir, &root)?;
+                let image = build_input_image(dir, &root, deadline)?;
                 give_to_jail(&image, uid, gid, 0o444)?;
                 self.input_image = Some(image);
             }
             if let Some(dest) = config.output_dir.as_ref() {
-                let image = build_output_image(&root)?;
+                let image = build_output_image(&root, deadline)?;
                 give_to_jail(&image, uid, gid, 0o600)?;
                 self.output = Some(OutputDevice {
                     image,
@@ -1407,19 +1410,116 @@ enum FcProbe {
 static FC_VERSION: std::sync::OnceLock<FcProbe> = std::sync::OnceLock::new();
 
 /// Probe (once) and warn, loudly but never fatally, when the binary is outside the supported range.
+/// Run `firecracker --version` under a wall and classify the result. Bounded because this is the
+/// one probe that runs before any boot deadline is consulted: an `EKVM_FIRECRACKER` pointed at a
+/// binary that hangs on `--version` would hang every boot forever with nothing to report. A wedged
+/// probe is [`FcProbe::Unavailable`], the silent case, since the spawn that follows produces the
+/// legible typed error.
+fn probe_fc_version(firecracker: &Path) -> FcProbe {
+    // stdout goes to a **file**, not a pipe. `EKVM_FIRECRACKER` may point at a wrapper script, and
+    // a wrapper that backgrounds anything inheriting stdout keeps a pipe's write end open forever:
+    // reading it after the child is reaped would then block inside this `OnceLock`, hanging every
+    // boot, which is the failure the wall above exists to prevent. A file read always terminates.
+    // stdin/stderr are nulled (as `Command::output()` nulled stdin) so a wrapper cannot consume the
+    // driver's stdin or write onto an embedder's stderr. What a file costs that a pipe didn't: a
+    // wrapper flooding stdout writes to disk for up to the wall instead of blocking at 64 KiB, so
+    // the file is unlinked at creation and its space returns the moment the fd closes.
+    let Ok((sink, back)) = scratch_pair() else {
+        return FcProbe::Unavailable;
+    };
+    let mut cmd = Command::new(firecracker);
+    cmd.arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(sink))
+        .stderr(std::process::Stdio::null());
+    match cmd.spawn() {
+        Err(_) => FcProbe::Unavailable,
+        Ok(mut child) => {
+            let deadline = deadline_after(crate::proc::VERSION_PROBE_TIMEOUT);
+            if crate::drives::wait_bounded(
+                &mut child,
+                deadline,
+                "firecracker --version",
+                Duration::from_millis(5),
+                || None,
+            )
+            .is_err()
+            {
+                FcProbe::Unavailable
+            } else {
+                match read_head(back, VERSION_HEAD_CAP) {
+                    Ok(head) => match fc_version_of(&head) {
+                        Some(v) => FcProbe::Version(v),
+                        None => FcProbe::Unparseable,
+                    },
+                    Err(_) => FcProbe::Unavailable,
+                }
+            }
+        }
+    }
+}
+
+/// How much of the probe's captured stdout is read back. A version banner is one line; the cap is
+/// what keeps a binary that floods stdout from being read into host RAM.
+const VERSION_HEAD_CAP: u64 = 4096;
+
+/// A private scratch file for a child's stdout: `(the child's write handle, our read-back handle)`,
+/// both onto the same **already-unlinked** file.
+///
+/// `create_new` (`O_CREAT|O_EXCL`) and 0600, not `File::create`: the driver usually runs as root and
+/// the temp dir is world-writable, so a predictable name opened with plain `create` is a symlink
+/// hijack, a local user pre-creating the path aims the truncating open at any file root can write.
+/// `O_EXCL` refuses to follow a symlink at all, and the retry loop covers a name that already
+/// exists. Unlinking straight away means nothing is left behind on any exit path (including a
+/// panic elsewhere) and the read-back can't be pointed at a different file than the one written.
+fn scratch_pair() -> std::io::Result<(std::fs::File, std::fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let dir = std::env::temp_dir();
+    let mut last = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no unique scratch name");
+    for attempt in 0..8u32 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let path = dir.join(format!(
+            "ekvm-fcver-{}-{stamp}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(sink) => {
+                // Unlink before the `?`, so even a failed clone (out of fds) leaves nothing on
+                // disk: the file exists on the filesystem only for these two lines.
+                let cloned = sink.try_clone();
+                let _ = std::fs::remove_file(&path);
+                return Ok((sink, cloned?));
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Read at most `cap` bytes from the start of `file`, lossily as text. `take` before the read, not
+/// a truncation after: `fs::read` would pull a flooding child's whole output into host RAM and only
+/// then throw it away. The seek is required because the handle shares its file offset with the
+/// child's (both are dups of one open file description), so it sits at end-of-write.
+fn read_head(mut file: std::fs::File, cap: u64) -> std::io::Result<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = Vec::new();
+    file.take(cap).read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// A warning rather than a typed error because an embedder may knowingly run a build we have not
 /// tested; a *missing* or unrunnable binary stays silent here ([`FcProbe::Unavailable`]).
 fn warn_on_unpinned_firecracker(firecracker: &Path) {
-    let probed =
-        *FC_VERSION.get_or_init(
-            || match Command::new(firecracker).arg("--version").output() {
-                Err(_) => FcProbe::Unavailable,
-                Ok(out) => match fc_version_of(&String::from_utf8_lossy(&out.stdout)) {
-                    Some(v) => FcProbe::Version(v),
-                    None => FcProbe::Unparseable,
-                },
-            },
-        );
+    let probed = *FC_VERSION.get_or_init(|| probe_fc_version(firecracker));
     let (min_maj, min_min) = MIN_SUPPORTED_FC_VERSION;
     let (pin_maj, pin_min) = PINNED_FC_VERSION;
     match probed {

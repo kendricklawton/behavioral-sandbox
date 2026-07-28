@@ -89,6 +89,16 @@ pub(crate) const IFACE_ID: &str = "eth0";
 /// How long a graceful `SendCtrlAltDel` power-off is given to land before teardown stops waiting
 /// (the guaranteed kill in `Drop`/`stop_and_reap` takes over), and how often that wait polls.
 pub(crate) const POWER_OFF_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long a SIGKILLed VMM is given to be reaped before teardown detaches it and moves on
+/// (`drives::kill_and_reap_briefly`). Longer than the helper grace: this reap is the normal
+/// teardown path for every VM, so it must not give up on a merely-busy host (a multi-vCPU
+/// Firecracker under `cpu.max` still needs CPU to finish dying), while still refusing to park
+/// `Drop` behind a process in uninterruptible sleep, where no signal lands and `wait` never
+/// returns. Detaching does not leave the VMM running, the `SIGKILL` is already delivered or
+/// pending; it leaves it **unreaped** (a zombie holding a pid slot until this process exits),
+/// which is the accepted trade against hanging teardown.
+pub(crate) const VMM_REAP_GRACE: Duration = Duration::from_secs(2);
 pub(crate) const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
@@ -850,8 +860,14 @@ impl RunningVm {
             // A wedged (or unwaitable) guest: hard-kill so the fd to the output image is released
             // before readback rather than trusting a later `Drop`. The `-o sync` mount means the
             // command's completed writes are already on the image; `e2fsck` recovers the journal.
-            let _ = self.child.kill();
-            let _ = self.child.wait();
+            // Bounded like the `Drop` teardown's reap: a D-state VMM must not park this thread.
+            if !crate::drives::kill_and_reap_briefly(&mut self.child, "firecracker", VMM_REAP_GRACE)
+            {
+                // Unreaped: its fd to the output image may still be open, so the readback below
+                // can see a torn image. `e2fsck` recovers the journal, and the alternative is
+                // hanging here indefinitely.
+                return;
+            }
         }
         self.console.join();
     }
@@ -897,11 +913,17 @@ pub(crate) fn teardown(
     // Flag teardown *before* the reap: from here every outstanding `KillHandle` no-ops, so a
     // late `kill` can never signal a pid the `wait` below has just made recyclable.
     lifetime.mark_down();
-    let _ = child.kill();
-    let _ = child.wait();
-    console.join();
-    // The VMM is reaped above, so its cgroup is now empty and removable. Do this before the scratch
-    // dir so a slow `remove_dir_all` can't widen the window a leaked cgroup lives in.
+    // Bounded: this runs in `Drop`, and a VMM stuck in uninterruptible sleep (a wedged KVM ioctl,
+    // a virtio flush against a hung backing filesystem) survives SIGKILL until the kernel op
+    // finishes, so a bare `wait` would hang teardown. The console reader only ends at the child's
+    // stdout EOF, so joining it is exactly as unbounded: skip it when the reap didn't land.
+    if crate::drives::kill_and_reap_briefly(child, "firecracker", VMM_REAP_GRACE) {
+        console.join();
+    }
+    // The VMM is reaped above (or, on the rare detach, at least killed), so its cgroup is empty
+    // and removable; `remove_cgroup` is best-effort, so the detached case just leaves it for the
+    // sweep. Before the scratch dir, so a slow `remove_dir_all` can't widen the window a leaked
+    // cgroup lives in.
     if let Some(cgroup) = chroot.and_then(|c| c.cgroup_dir.as_deref()) {
         remove_cgroup(cgroup);
     }

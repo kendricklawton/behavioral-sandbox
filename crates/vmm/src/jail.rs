@@ -35,6 +35,7 @@
 use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::Instant;
 
 use crate::console::Console;
 use crate::paths::absolute;
@@ -313,6 +314,7 @@ pub(crate) fn stage_ro_base_into_chroot(
     scratch_dir: &Path,
     uid: u32,
     gid: u32,
+    deadline: Instant,
 ) -> Result<(String, Option<PathBuf>), VmmError> {
     let rel = format!("/{name}");
     if !scratch_is_shared_mount(scratch_dir) {
@@ -331,7 +333,7 @@ pub(crate) fn stage_ro_base_into_chroot(
     // The bind-mount target must exist; create an empty placeholder the mount then shadows.
     std::fs::File::create(&dst)
         .map_err(|e| VmmError::Vmm(format!("create bind target {}: {e}", dst.display())))?;
-    bind_ro(&src, &dst)?;
+    bind_ro(&src, &dst, deadline)?;
     Ok((rel, Some(dst)))
 }
 
@@ -339,46 +341,96 @@ pub(crate) fn stage_ro_base_into_chroot(
 /// regardless of a `-o ro` on the initial call, so a second `remount,ro,bind` is what actually drops
 /// write access, the base then can't be mutated through the chroot even before Firecracker opens it
 /// `O_RDONLY`. Shells out to `mount` (as the tap path shells out to `ip`), keeping the host path
-/// `unsafe`-free. If the remount fails, the half-made bind mount is detached before returning, so a
-/// failure never leaks a mount.
-fn bind_ro(src: &Path, dst: &Path) -> Result<(), VmmError> {
-    match Command::new("mount")
-        .arg("--bind")
-        .arg(src)
-        .arg(dst)
-        .status()
-    {
-        Ok(s) if s.success() => {}
-        Ok(s) => {
+/// `unsafe`-free. Both invocations are bounded by the boot `deadline`, with stdout nulled and
+/// stderr captured into the error:
+/// mount-family syscalls can wedge in D-state (the hazard `unmount_base` already defends against),
+/// and an unbounded one would hang the boot past the `Timeout` the wall promises. If the remount
+/// fails, the half-made bind mount is detached before returning, so a failure never leaks a mount.
+fn bind_ro(src: &Path, dst: &Path, deadline: Instant) -> Result<(), VmmError> {
+    match run_mount(
+        Command::new("mount").arg("--bind").arg(src).arg(dst),
+        "mount --bind",
+        deadline,
+    ) {
+        Ok((status, _)) if status.success() => {}
+        // Detach on *every* failure path, not only the remount's: a deadline kill can land after
+        // the child's `mount(2)` completed, and the caller records the mount for teardown only on
+        // `Ok`, so an undetached one here would EBUSY the scratch reclaim. `unmount_base` is a
+        // lazy-detach no-op when nothing was mounted. One residual stays: a D-state mount child
+        // detached past the reap grace can complete *after* this detach; that leak is bounded by
+        // the orphan sweep's `detach_mounts_under`, which retries the dir.
+        Ok((status, stderr)) => {
+            unmount_base(dst);
             return Err(VmmError::Vmm(format!(
-                "bind-mount {} -> {}: mount exited {s}",
+                "bind-mount {} -> {}: {}",
                 src.display(),
-                dst.display()
-            )))
+                dst.display(),
+                crate::proc::failure_detail(status, &stderr)
+            )));
         }
-        Err(e) => return Err(VmmError::Vmm(format!("spawn `mount --bind`: {e}"))),
+        Err(e) => {
+            unmount_base(dst);
+            return Err(e);
+        }
     }
-    match Command::new("mount")
-        .arg("-o")
-        .arg("remount,ro,bind")
-        .arg(dst)
-        .status()
-    {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => {
+    match run_mount(
+        Command::new("mount")
+            .arg("-o")
+            .arg("remount,ro,bind")
+            .arg(dst),
+        "mount -o remount,ro,bind",
+        deadline,
+    ) {
+        Ok((status, _)) if status.success() => Ok(()),
+        Ok((status, stderr)) => {
             unmount_base(dst);
             Err(VmmError::Vmm(format!(
-                "remount read-only {}: mount exited {s}",
-                dst.display()
+                "remount read-only {}: {}",
+                dst.display(),
+                crate::proc::failure_detail(status, &stderr)
             )))
         }
         Err(e) => {
             unmount_base(dst);
-            Err(VmmError::Vmm(format!(
-                "spawn `mount -o remount,ro,bind`: {e}"
-            )))
+            Err(e)
         }
     }
+}
+
+/// One bounded `mount` invocation: `(exit status, captured stderr)` for the caller's own error
+/// wording. Timeout/spawn failures come back typed (`Timeout`/`Artifact`/`Vmm`) with the child
+/// killed and reaped, per [`crate::drives::wait_bounded`].
+fn run_mount(
+    cmd: &mut Command,
+    what: &str,
+    deadline: Instant,
+) -> Result<(std::process::ExitStatus, String), VmmError> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        // stderr captured, not nulled: `mount`'s own line ("only root can do that", "wrong fs
+        // type", "special device does not exist") is the whole diagnosis, and an exit status
+        // alone leaves a failed bind undebuggable. stdout stays null (pipe-clean result stream).
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| crate::drives::tool_spawn_error("mount", e))?;
+    // A 2ms tick: `mount` completes in ~1ms, and this runs per bind mount on the jailed
+    // boot/restore hot path, where a coarse tick would tax the published restore latency.
+    let status = crate::drives::wait_bounded(
+        &mut child,
+        deadline,
+        what,
+        std::time::Duration::from_millis(2),
+        || None,
+    )?;
+    // Read after exit. This terminates because a bind `mount` execs no filesystem helper and
+    // backgrounds nothing, so reaping the child closed the pipe's last write end.
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        use std::io::Read as _;
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    Ok((status, stderr))
 }
 
 /// Detach a base bind mount (best-effort, **lazy**). `umount -l` never blocks on a busy mount: by

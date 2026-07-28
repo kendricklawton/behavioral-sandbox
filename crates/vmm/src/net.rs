@@ -22,7 +22,6 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::drives::tool_spawn_error;
 use crate::VmmError;
 
 /// The tap name inside every per-VM netns. Fixed (not allocated): the netns makes it unique, and the
@@ -223,16 +222,15 @@ fn netns_add(name: &str) -> Result<(), VmmError> {
 /// The raw `ip netns add <name>` command, mapping a spawn failure or nonzero exit to a typed error.
 /// Split from [`netns_add`] so the reclaim-and-retry policy lives in one place.
 fn ip_netns_add(name: &str) -> Result<(), VmmError> {
-    let out = Command::new("ip")
-        .args(["netns", "add", name])
-        .output()
-        .map_err(|e| tool_spawn_error("ip", e))?;
-    if out.status.success() {
+    let mut cmd = Command::new("ip");
+    cmd.args(["netns", "add", name]);
+    let (status, stderr) = crate::proc::output_bounded(cmd, crate::proc::IP_TIMEOUT, "ip")?;
+    if status.success() {
         return Ok(());
     }
     Err(VmmError::Vmm(format!(
         "ip netns add {name}: {}",
-        String::from_utf8_lossy(&out.stderr).trim()
+        crate::proc::failure_detail(status, &stderr)
     )))
 }
 
@@ -309,19 +307,23 @@ fn add_host_v6(netns: &str) -> bool {
     }
 }
 
-/// Run `ip <args>`, mapping a missing binary or a nonzero exit to a typed error.
+/// Run `ip <args>`, mapping a missing binary, a nonzero exit, or a wedge to a typed error. Bounded
+/// for the same reason `netns_del` is: an `ip` blocked on the rtnl lock would otherwise stall the
+/// boot with no error at all (the boot deadline is only checked *between* steps, so it cannot
+/// interrupt one).
 fn run_ip(args: &[&str]) -> Result<(), VmmError> {
-    let out = Command::new("ip")
-        .args(args)
-        .output()
-        .map_err(|e| tool_spawn_error("ip", e))?;
-    if out.status.success() {
+    let mut cmd = Command::new("ip");
+    cmd.args(args);
+    let (status, stderr) = crate::proc::output_bounded(cmd, crate::proc::IP_TIMEOUT, "ip")?;
+    if status.success() {
         Ok(())
     } else {
         Err(VmmError::Vmm(format!(
             "ip {}: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            // Status as the fallback: `ip` killed by a signal says nothing on stderr, and a
+            // message ending in a bare colon would name no cause at all.
+            crate::proc::failure_detail(status, &stderr)
         )))
     }
 }
