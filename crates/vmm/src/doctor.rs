@@ -25,11 +25,34 @@ use std::path::{Path, PathBuf};
 
 use crate::BootConfig;
 
-/// The **supported host-kernel floor** (`major.minor`), a hard requirement: the engine refuses to
-/// certify a host below a security-maintained LTS, because running untrusted code on an unpatched
-/// kernel is a threat-model hole, not a convenience gap. 5.15 is a maintained LTS that
-/// also guarantees `cgroup.kill` (5.14); bump it here to tighten the floor.
+/// The **version fallback floor** (`major.minor`), used only when the capability probe below cannot
+/// run. Running untrusted code on an unpatched kernel is a threat-model hole, and 5.15 is a
+/// maintained upstream LTS; bump it here to tighten the fallback.
+///
+/// **A version number is a proxy, and on enterprise kernels it is the wrong one.** Red Hat ships
+/// RHEL 9 as `5.14.0-*.el9` and backports security fixes to it for a decade, so a bare
+/// `>= 5.15` test refuses a patched, supported kernel for no safety gain: the same argument
+/// `docs/contributing.md` makes for the Firecracker floor ("reject *unpatched* VMMs, not old
+/// ones"). So the real requirement is probed directly ([`cgroup_kill_under`]) and this floor is
+/// only the fallback for hosts where the probe cannot run.
+///
+/// What neither the probe nor the floor can establish is whether the kernel is actually *patched*.
+/// That is the operator's to know; [`KernelVerdict`] says which signal it used so the note can be
+/// honest about it.
 const MIN_KERNEL: (u64, u64) = (5, 15);
+
+/// How a host's kernel qualified, so the [`Check`] note can name the signal it used rather than
+/// implying a guarantee it does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KernelVerdict {
+    /// `cgroup.kill` was found in a live cgroup, so the teardown primitive this engine needs is
+    /// present, whatever the version string says. Admits RHEL 9's `5.14.0-*.el9`.
+    CapabilityVerified,
+    /// No cgroup v2 hierarchy to probe, but the version is at or above [`MIN_KERNEL`].
+    VersionVerified,
+    /// Neither signal qualified.
+    Unqualified,
+}
 
 /// The **supported CPU architectures** (narrowed to `x86_64`-only: aarch64 has no
 /// hardware or CI lane to test its privileged path on, and an untested isolation boundary is not
@@ -95,15 +118,21 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             "unsupported architecture: the engine is built and tested only for x86_64",
         ),
         Check::new(
+            &match kernel_verdict(Path::new(SYS_CGROUP_ROOT)) {
+                KernelVerdict::CapabilityVerified => "host kernel provides cgroup.kill".to_string(),
+                _ => format!(
+                    "host kernel >= {}.{} (cgroup.kill unprobed)",
+                    MIN_KERNEL.0, MIN_KERNEL.1
+                ),
+            },
+            kernel_verdict(Path::new(SYS_CGROUP_ROOT)) != KernelVerdict::Unqualified,
+            false,
             &format!(
-                "host kernel >= {}.{} (security-maintained LTS floor)",
+                "unsupported kernel: no cgroup.kill (the crash-safe teardown primitive, kernel \
+                 5.14+) and below the {}.{} fallback floor. Note this checks capability, not patch \
+                 level: keeping the kernel patched is the operator's",
                 MIN_KERNEL.0, MIN_KERNEL.1
             ),
-            kernel_at_least(MIN_KERNEL.0, MIN_KERNEL.1),
-            false,
-            "unsupported kernel: below the security-maintained LTS floor the engine requires for \
-             running untrusted code; it also provides cgroup.kill for crash-safe \
-             teardown",
         ),
         // The hardware isolation boundary, never a degradation.
         Check::new(
@@ -191,6 +220,19 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "jailed VMs run WITHOUT cpu/memory caps: a fail-open DoS mitigation",
         ),
+        // Informational, never a warning: a MAC is the normal posture on Ubuntu (AppArmor) and
+        // RHEL (SELinux), so flagging it would cry wolf on most supported hosts. It earns a row
+        // because a MAC denial surfaces as a bare EPERM with nothing naming the LSM, which reads
+        // as an engine bug; `matrix()` carries the "look in the audit log first" pointer.
+        Check::new(
+            &match mac_posture(Path::new(SYS_LSM), Path::new(SYS_SELINUX_ENFORCE)) {
+                Some(active) => format!("mandatory access control: {active}"),
+                None => "mandatory access control: none loaded".to_string(),
+            },
+            true,
+            true,
+            "",
+        ),
         // The jailer mknods /dev/kvm inside its chroot (under the scratch dir), and a `nodev` mount
         // makes that node inert, so an owned-and-readable /dev/kvm still fails to open. The default
         // scratch base is /tmp, which modern systemd hosts mount `nodev`, so this catches a jailed
@@ -263,6 +305,11 @@ pub fn matrix() -> Vec<&'static str> {
         "  scratch dir is nodev         -> jailed /dev/kvm can't open; point EKVM_SCRATCH_DIR off nodev",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
         "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/threat-model.md",
+        "  a MAC LSM is loaded          -> selinux/apparmor denials arrive as a bare EPERM naming",
+        "                                  no LSM, so a jailed boot that fails oddly reads as an",
+        "                                  engine bug. Check the audit log first:",
+        "                                  ausearch -m AVC -ts recent   (selinux)",
+        "                                  dmesg | grep -i apparmor     (apparmor)",
         "  no eBPF caps / BTF           -> --trace/--watch degrade to a gap; --allow enforcement refuses",
         "hard errors (typed, never a silent half-measure):",
         "  unsupported arch / kernel    -> off the supported platform: refused",
@@ -376,23 +423,112 @@ fn file_sha256(path: &Path) -> Option<String> {
 }
 
 /// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.
+/// The mandatory-access-control LSMs named in `lsm_list` (the contents of [`SYS_LSM`]), in the
+/// kernel's own order. Filtered to [`MAC_LSMS`] so the advisory row names only modules that can
+/// deny a jailer operation.
+fn mac_lsms_in(lsm_list: &str) -> Vec<String> {
+    lsm_list
+        .trim()
+        .split(',')
+        .map(str::trim)
+        .filter(|m| MAC_LSMS.contains(m))
+        .map(str::to_string)
+        .collect()
+}
+
+/// A human phrase for the active MAC posture, or `None` when no MAC LSM is loaded.
+///
+/// SELinux additionally distinguishes enforcing from permissive, which changes whether a denial
+/// blocks or is only logged; AppArmor and the others report presence only.
+fn mac_posture(lsm_path: &Path, selinux_enforce_path: &Path) -> Option<String> {
+    let list = std::fs::read_to_string(lsm_path).ok()?;
+    let active = mac_lsms_in(&list);
+    if active.is_empty() {
+        return None;
+    }
+    let mode = if active.iter().any(|m| m == "selinux") {
+        match std::fs::read_to_string(selinux_enforce_path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .as_deref()
+        {
+            Some("1") => " (enforcing)",
+            Some("0") => " (permissive)",
+            _ => "",
+        }
+    } else {
+        ""
+    };
+    Some(format!("{}{mode}", active.join(", ")))
+}
+
+/// `major.minor` from a `/proc/sys/kernel/osrelease` string. Split out from the read so the
+/// enterprise-kernel shapes (`5.14.0-427.el9_4.x86_64`) are testable without that host.
+fn parse_osrelease(s: &str) -> Option<(u64, u64)> {
+    let mut it = s
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|t| !t.is_empty());
+    Some((
+        it.next()?.parse::<u64>().ok()?,
+        it.next()?.parse::<u64>().ok()?,
+    ))
+}
+
 fn kernel_at_least(major: u64, minor: u64) -> bool {
     std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .ok()
-        .and_then(|s| {
-            let mut it = s
-                .split(|c: char| !c.is_ascii_digit())
-                .filter(|t| !t.is_empty());
-            Some((
-                it.next()?.parse::<u64>().ok()?,
-                it.next()?.parse::<u64>().ok()?,
-            ))
-        })
+        .and_then(|s| parse_osrelease(&s))
         .is_some_and(|v| v >= (major, minor))
+}
+
+/// Whether any cgroup under `root` exposes `cgroup.kill`, the crash-safe teardown primitive
+/// `lifetime.rs` depends on (kernel 5.14+).
+///
+/// **The root cgroup does not have it**: `cgroup.kill` is a non-root interface file, so probing
+/// `<root>/cgroup.kill` reports absent on a host that has it (measured on 7.0.11). The scan looks
+/// one level down, where a systemd host always has `init.scope` and the mount scopes.
+fn cgroup_kill_under(root: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|e| e.path().join("cgroup.kill").exists())
+}
+
+/// Which signal, if any, qualifies this host's kernel. Capability first: a probed `cgroup.kill`
+/// beats a version string, which is what admits a patched enterprise kernel below [`MIN_KERNEL`].
+fn kernel_verdict(cgroup_root: &Path) -> KernelVerdict {
+    if cgroup_kill_under(cgroup_root) {
+        KernelVerdict::CapabilityVerified
+    } else if kernel_at_least(MIN_KERNEL.0, MIN_KERNEL.1) {
+        KernelVerdict::VersionVerified
+    } else {
+        KernelVerdict::Unqualified
+    }
 }
 
 /// The sysfs facts behind the host-hardening advisory rows: the per-vulnerability
 /// mitigation files, whether SMT is active, and whether KSM is merging.
+/// The cgroup v2 root, scanned one level down for `cgroup.kill` by [`cgroup_kill_under`].
+const SYS_CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+/// The kernel's list of active LSMs, comma-separated (e.g. `capability,landlock,lockdown,yama,bpf`
+/// here; `capability,selinux` on RHEL; an `apparmor` entry on Ubuntu). Asking the kernel which
+/// modules are loaded is the distro-independent form of "is something going to deny the jailer",
+/// and it needs no `/etc/os-release` parsing.
+const SYS_LSM: &str = "/sys/kernel/security/lsm";
+
+/// SELinux's enforcing toggle: `1` blocks and logs, `0` only logs. Absent when SELinux is not the
+/// active LSM.
+const SYS_SELINUX_ENFORCE: &str = "/sys/fs/selinux/enforce";
+
+/// The LSMs that apply **mandatory access control** to the operations the jailer performs (chroot,
+/// `mknod`, bind mounts, uid drop). The rest of the list the kernel reports (`capability`, `yama`,
+/// `lockdown`, `landlock`, `bpf`) do not arbitrate those, so naming them in the report would be
+/// noise.
+const MAC_LSMS: [&str; 4] = ["selinux", "apparmor", "smack", "tomoyo"];
+
 const SYS_CPU_VULNERABILITIES: &str = "/sys/devices/system/cpu/vulnerabilities";
 const SYS_SMT_ACTIVE: &str = "/sys/devices/system/cpu/smt/active";
 const SYS_KSM_RUN: &str = "/sys/kernel/mm/ksm/run";
@@ -523,6 +659,118 @@ fn unescape_octal(s: &str) -> PathBuf {
 mod tests {
     use super::*;
 
+    /// The kernel reports every loaded LSM, most of which never arbitrate a jailer operation.
+    /// Naming those would make the row noise.
+    #[test]
+    fn only_the_mandatory_access_control_lsms_are_named() {
+        // This host's actual list (measured 2026-07-29): no MAC module at all.
+        assert!(mac_lsms_in("capability,landlock,lockdown,yama,bpf").is_empty());
+        // RHEL and Ubuntu shapes.
+        assert_eq!(mac_lsms_in("capability,selinux"), vec!["selinux"]);
+        assert_eq!(
+            mac_lsms_in("capability,landlock,lockdown,yama,apparmor"),
+            vec!["apparmor"]
+        );
+        assert_eq!(mac_lsms_in(""), Vec::<String>::new());
+    }
+
+    /// SELinux permissive logs without blocking, which is a materially different thing to tell an
+    /// operator staring at a failed boot, so the row distinguishes them.
+    #[test]
+    fn selinux_reports_enforcing_separately_from_permissive() {
+        let tmp = test_support::ScratchDir::created("doctor-lsm");
+        let lsm = tmp.path().join("lsm");
+        let enforce = tmp.path().join("enforce");
+
+        std::fs::write(&lsm, "capability,selinux\n").expect("write");
+        std::fs::write(&enforce, "1\n").expect("write");
+        assert_eq!(
+            mac_posture(&lsm, &enforce).as_deref(),
+            Some("selinux (enforcing)")
+        );
+
+        std::fs::write(&enforce, "0\n").expect("write");
+        assert_eq!(
+            mac_posture(&lsm, &enforce).as_deref(),
+            Some("selinux (permissive)")
+        );
+
+        // AppArmor has no equivalent toggle here, so it reports presence only, and the missing
+        // selinux file must not be read as permissive.
+        std::fs::write(&lsm, "capability,apparmor\n").expect("write");
+        assert_eq!(
+            mac_posture(&lsm, Path::new("/nonexistent")).as_deref(),
+            Some("apparmor")
+        );
+
+        // No MAC loaded is None, not an empty string: the row says "none loaded" rather than
+        // rendering a blank.
+        std::fs::write(&lsm, "capability,yama\n").expect("write");
+        assert_eq!(mac_posture(&lsm, &enforce), None);
+        assert_eq!(mac_posture(Path::new("/nonexistent"), &enforce), None);
+    }
+
+    /// The shapes that motivated the capability probe: RHEL 9 parses *below* the fallback floor,
+    /// so a version-only check refuses a kernel Red Hat patches until 2032.
+    #[test]
+    fn osrelease_parses_the_enterprise_kernel_shapes() {
+        assert_eq!(parse_osrelease("5.14.0-427.el9_4.x86_64"), Some((5, 14)));
+        assert_eq!(parse_osrelease("6.12.0-55.el10_0.x86_64"), Some((6, 12)));
+        assert_eq!(parse_osrelease("4.18.0-553.el8_10.x86_64"), Some((4, 18)));
+        assert_eq!(parse_osrelease("6.8.0-51-generic"), Some((6, 8)));
+        assert_eq!(parse_osrelease("7.0.11-arch1-1"), Some((7, 0)));
+        assert_eq!(parse_osrelease("not-a-version"), None);
+
+        assert!(
+            parse_osrelease("5.14.0-427.el9_4.x86_64").unwrap() < MIN_KERNEL,
+            "RHEL 9 must sit below the fallback floor, else this test guards nothing"
+        );
+    }
+
+    /// `cgroup.kill` is a **non-root** interface file. A probe that looked at `<root>/cgroup.kill`
+    /// would report absent on every host that has it.
+    #[test]
+    fn cgroup_kill_is_found_one_level_down_not_at_the_root() {
+        let tmp = test_support::ScratchDir::created("doctor-cgkill");
+        let root = tmp.path();
+        assert!(!cgroup_kill_under(root), "empty root must not qualify");
+
+        std::fs::write(root.join("cgroup.kill"), "").expect("write");
+        assert!(
+            !cgroup_kill_under(root),
+            "a file at the root is not the probe's subject; the kernel never puts one there"
+        );
+
+        let scope = root.join("init.scope");
+        std::fs::create_dir(&scope).expect("mkdir");
+        std::fs::write(scope.join("cgroup.kill"), "").expect("write");
+        assert!(cgroup_kill_under(root), "a non-root cgroup must qualify");
+    }
+
+    /// A probed capability outranks the version string: that is what admits RHEL 9.
+    #[test]
+    fn a_probed_cgroup_kill_qualifies_a_kernel_below_the_fallback_floor() {
+        let tmp = test_support::ScratchDir::created("doctor-verdict");
+        let scope = tmp.path().join("init.scope");
+        std::fs::create_dir(&scope).expect("mkdir");
+        std::fs::write(scope.join("cgroup.kill"), "").expect("write");
+
+        assert_eq!(
+            kernel_verdict(tmp.path()),
+            KernelVerdict::CapabilityVerified,
+            "cgroup.kill present must qualify without consulting the version"
+        );
+
+        // With nothing to probe, the verdict falls back to the version floor. This host is above
+        // it, so the assertion is that the fallback *ran*, not that any host passes.
+        let empty = test_support::ScratchDir::created("doctor-empty");
+        assert_ne!(
+            kernel_verdict(empty.path()),
+            KernelVerdict::CapabilityVerified,
+            "an unprobeable root must not report a capability it never saw"
+        );
+    }
+
     #[test]
     fn status_classifies_hard_vs_degradation() {
         let hard = Check::new("kvm", false, false, "no boot");
@@ -650,9 +898,25 @@ mod tests {
             CheckStatus::Warn,
             "the platform floor is hard, never a degradation"
         );
+        // The kernel row states whichever signal qualified the host (a probed `cgroup.kill`, or
+        // the version fallback when there was no cgroup hierarchy to probe), so match either
+        // wording rather than pinning the one this host happens to produce.
+        // "host kernel", not "kernel": the latter also matches "guest kernel present", and a
+        // `find` that silently takes the wrong row is how a test passes on something other than
+        // its subject.
+        let kernel = checks
+            .iter()
+            .find(|c| c.label.starts_with("host kernel"))
+            .expect("a host-kernel check");
         assert!(
-            checks.iter().any(|c| c.label.contains("LTS floor")),
-            "the host-kernel LTS floor is a stated check"
+            kernel.label.contains("cgroup.kill") || kernel.label.contains("host kernel >="),
+            "the kernel row must name its signal, got {:?}",
+            kernel.label
+        );
+        assert_ne!(
+            kernel.status,
+            CheckStatus::Warn,
+            "the kernel floor is hard, never a degradation"
         );
         // The host-hardening posture and Firecracker pin are present and advisory:
         // whatever this host's state, those rows never read Fail.

@@ -55,6 +55,64 @@ pub struct DoctorArgs {
     /// aren't `ok` already carry their own fix.
     #[arg(long)]
     pub explain: bool,
+
+    /// Emit the report as JSON instead of the human table.
+    ///
+    /// Exists so a host you do not own can report back: an operator runs one command and sends the
+    /// output, and you have exactly what their kernel offers instead of a screenshot. The exit code
+    /// is unchanged, so `ekvm doctor --json && …` still gates.
+    #[arg(long, conflicts_with = "explain")]
+    pub json: bool,
+}
+
+/// Render `checks` as a JSON object: the verdict, then one entry per row.
+///
+/// Hand-rolled rather than derived: `Check` lives in `vmm`, which has no `serde` dependency, and
+/// adding one to the engine crate to print a diagnostic would be the wrong trade. The only values
+/// interpolated are this binary's own labels and notes, so [`json_escape`] covers the quoting.
+fn checks_as_json(checks: &[Check]) -> String {
+    let rows: Vec<String> = checks
+        .iter()
+        .map(|c| {
+            let status = match c.status {
+                CheckStatus::Ok => "ok",
+                CheckStatus::Warn => "warn",
+                CheckStatus::Fail => "fail",
+            };
+            let note = c
+                .note
+                .as_ref()
+                .map_or_else(|| "null".to_string(), |n| format!("\"{}\"", json_escape(n)));
+            format!(
+                "    {{\"label\": \"{}\", \"status\": \"{status}\", \"note\": {note}}}",
+                json_escape(&c.label)
+            )
+        })
+        .collect();
+    format!(
+        "{{\n  \"schema\": 1,\n  \"can_boot\": {},\n  \"jailed_run_available\": {},\n  \"checks\": [\n{}\n  ]\n}}",
+        doctor::can_boot(checks),
+        doctor::jailed_run_available(),
+        rows.join(",\n")
+    )
+}
+
+/// Escape a string for a JSON double-quoted scalar. Control characters go to `\uXXXX` rather than
+/// through, so a note carrying an escape sequence cannot break the document a recipient parses.
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Print the readiness report for `config` (resolved `flags`-free, i.e. `env > file > defaults`, so
@@ -64,11 +122,22 @@ pub struct DoctorArgs {
 #[must_use]
 pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     let mut out = std::io::stdout();
-    let paint = Paint::for_stream(out.is_terminal());
-    let _ = writeln!(out, "{}\n", paint.wrap("1", "ekvm doctor: host readiness"));
 
     let mut checks = doctor::checks(config);
     checks.push(ebpf_check());
+
+    // The JSON form is the whole stdout result, so it returns before any human framing is written.
+    if args.json {
+        let _ = writeln!(out, "{}", checks_as_json(&checks));
+        return if doctor::can_boot(&checks) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        };
+    }
+
+    let paint = Paint::for_stream(out.is_terminal());
+    let _ = writeln!(out, "{}\n", paint.wrap("1", "ekvm doctor: host readiness"));
 
     for c in &checks {
         // The rows a reader must act on are the ones that aren't `ok`, so those carry the colour;
@@ -227,6 +296,51 @@ mod tests {
             ),
             "1 ok, 1 degraded, 1 missing"
         );
+    }
+
+    /// The point of the JSON form is that a recipient can parse it, so a note carrying a quote or
+    /// a control character must not break the document.
+    #[test]
+    fn json_escapes_what_would_otherwise_break_the_document() {
+        assert_eq!(json_escape(r#"a "quoted" path"#), r#"a \"quoted\" path"#);
+        assert_eq!(json_escape("back\\slash"), "back\\\\slash");
+        assert_eq!(json_escape("two\nlines"), "two\\nlines");
+        // An ANSI escape in a note (a guest-influenced string can reach one) becomes , not a
+        // raw control byte in someone else's parser.
+        assert_eq!(json_escape("\x1b[31mred"), "\\u001b[31mred");
+    }
+
+    #[test]
+    fn json_reports_every_row_with_its_status() {
+        let rows = [
+            Check {
+                label: "kvm".to_string(),
+                status: CheckStatus::Ok,
+                note: None,
+            },
+            Check {
+                label: "jailer".to_string(),
+                status: CheckStatus::Warn,
+                note: Some("needs \"root\"".to_string()),
+            },
+            Check {
+                label: "arch".to_string(),
+                status: CheckStatus::Fail,
+                note: Some("unsupported".to_string()),
+            },
+        ];
+        let json = checks_as_json(&rows);
+
+        assert!(json.contains(r#""schema": 1"#));
+        assert!(
+            json.contains(r#""can_boot": false"#),
+            "a Fail row blocks boot"
+        );
+        assert!(json.contains(r#"{"label": "kvm", "status": "ok", "note": null}"#));
+        assert!(json.contains(r#""status": "warn", "note": "needs \"root\"""#));
+        assert!(json.contains(r#""label": "arch", "status": "fail""#));
+        // One entry per row, no more: the separator count pins it.
+        assert_eq!(json.matches(r#""label":"#).count(), 3);
     }
 
     #[test]
