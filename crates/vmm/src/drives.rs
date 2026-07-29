@@ -38,6 +38,10 @@ const READBACK_POLL: Duration = Duration::from_millis(50);
 /// [`kill_and_reap_briefly`]). Short: a killable child dies at once, and anything slower is the
 /// D-state case, where waiting longer only lengthens the hang.
 const HELPER_REAP_GRACE: Duration = Duration::from_millis(200);
+/// How much of a readback helper's stderr is kept to name a failure. One screenful: enough for
+/// e2fsprogs' one-line causes ("No space left on device"), small enough that a crafted image can't
+/// make the *diagnostic* the expensive part.
+const STDERR_TAIL_CAP: u64 = 4096;
 /// A booted VM's writable output device: the ext4 image the guest mounts at `/output`, and the host
 /// directory its tree is extracted into on [`RunningVm::collect_outputs`].
 #[derive(Debug, Clone)]
@@ -249,15 +253,20 @@ pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<Stri
 /// reboot advised (moot for an image file); `>= 4` means errors left uncorrected or an operational
 /// failure, which is a real error.
 fn fsck_output_image(image: &Path, deadline: Instant) -> Result<(), VmmError> {
+    let (sink, back) = match stderr_capture() {
+        Some((sink, back)) => (sink, Some(back)),
+        None => (Stdio::null(), None),
+    };
     let mut child = Command::new("e2fsck")
         .arg("-fy")
         .arg(image)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(sink)
         .spawn()
         .map_err(|e| tool_spawn_error("e2fsck", e))?;
     let status = wait_bounded(&mut child, deadline, "e2fsck", READBACK_POLL, || None)?;
+    let stderr = captured_stderr(back);
     match status.code() {
         Some(0) => Ok(()),
         // Errors were found and corrected (1) or corrected + reboot-advised (2): the tree is now
@@ -270,11 +279,39 @@ fn fsck_output_image(image: &Path, deadline: Instant) -> Result<(), VmmError> {
             );
             Ok(())
         }
-        Some(code) => Err(VmmError::Vmm(format!(
-            "e2fsck could not repair the output image (exit {code})"
+        Some(_) => Err(VmmError::Vmm(format!(
+            "e2fsck could not repair the output image: {}",
+            crate::proc::failure_detail(status, &stderr)
         ))),
-        None => Err(VmmError::Vmm("e2fsck terminated by a signal".into())),
+        None => Err(VmmError::Vmm(format!(
+            "e2fsck terminated by a signal: {}",
+            crate::proc::failure_detail(status, &stderr)
+        ))),
     }
+}
+
+/// A capture sink for a readback helper's stderr: `(the child's handle, our read-back handle)` onto
+/// one already-unlinked file.
+///
+/// **Not a pipe.** Nothing reads a pipe until the child has exited, so a helper that emits more than
+/// the ~64 KiB pipe buffer blocks on its own write and is only freed by the deadline kill: a
+/// 120-second wedge with no diagnostic, which is worse than the bare exit code this capture replaced.
+/// `debugfs` reports per failed file and the tree is guest-controlled, so that volume is reachable on
+/// purpose, not just in theory. A file has no such limit and the read stays bounded either way.
+///
+/// `None` when the sink can't be made, which degrades to "no stderr" (the exit status becomes the
+/// whole diagnosis) rather than failing a readback over its own diagnostics.
+fn stderr_capture() -> Option<(Stdio, std::fs::File)> {
+    let (sink, back) = crate::proc::scratch_pair("readback").ok()?;
+    Some((Stdio::from(sink), back))
+}
+
+/// The head of a captured stderr, for naming a failure whose cause only the tool knows (a full output
+/// dir, a corrupt image). Bounded: an unbounded read would let a crafted image dictate how much host
+/// memory the *diagnostic* costs.
+fn captured_stderr(back: Option<std::fs::File>) -> String {
+    back.and_then(|f| crate::proc::read_head(f, STDERR_TAIL_CAP).ok())
+        .unwrap_or_default()
 }
 
 /// Extract the image tree into `dest` with `debugfs rdump`, bounded so a hostile guest can't blow up
@@ -282,7 +319,10 @@ fn fsck_output_image(image: &Path, deadline: Instant) -> Result<(), VmmError> {
 /// capped image could still inflate the readback, a poll loop aborts the extraction once `dest`'s
 /// **allocated** bytes pass `byte_cap`, or once it outruns `timeout`. rdump prints benign
 /// "changing ownership" warnings when run non-root (it can't chown to the guest's uids) and still
-/// exits 0; those are ignored, only a non-zero exit or a tripped bound is an error.
+/// exits 0; those are ignored. Its stderr is captured (see [`stderr_capture`]) for two reasons: a
+/// real failure, most plainly a full `dest`, then names its cause instead of reporting a bare exit
+/// code, **and** rdump exits 0 even when it extracted nothing, so stderr is the only place that
+/// failure is visible at all (see [`rdump_failures`]).
 fn rdump_capped(
     image: &Path,
     dest: &Path,
@@ -298,13 +338,17 @@ fn rdump_capped(
             "output dir path must not contain whitespace (debugfs -R limitation): {dest_str}"
         )));
     }
+    let (sink, back) = match stderr_capture() {
+        Some((sink, back)) => (sink, Some(back)),
+        None => (Stdio::null(), None),
+    };
     let mut child = Command::new("debugfs")
         .arg("-R")
         .arg(format!("rdump / {dest_str}"))
         .arg(image)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(sink)
         .spawn()
         .map_err(|e| tool_spawn_error("debugfs", e))?;
 
@@ -316,11 +360,40 @@ fn rdump_capped(
             limit: byte_cap.min(usize::MAX as u64) as usize,
         })
     })?;
+    let stderr = captured_stderr(back);
+    // `debugfs` exits **0 even when every file failed to extract**, reporting each on stderr only
+    // (observed: a whole tree of "Permission denied while opening ..." with status 0). Trusting the
+    // exit code alone therefore hands the caller an empty output dir and calls it a successful
+    // readback, which is the audit-honesty failure of claiming artifacts that were never written.
+    // So a real rdump complaint is an error whatever the status says.
+    let complaints = rdump_failures(&stderr);
+    if !complaints.is_empty() {
+        return Err(VmmError::Vmm(format!(
+            "debugfs rdump could not extract the output image: {complaints}"
+        )));
+    }
     match status.code() {
         Some(0) => Ok(()),
-        Some(code) => Err(VmmError::Vmm(format!("debugfs rdump failed (exit {code})"))),
-        None => Err(VmmError::Vmm("debugfs rdump terminated by a signal".into())),
+        _ => Err(VmmError::Vmm(format!(
+            "debugfs rdump failed: {}",
+            crate::proc::failure_detail(status, &stderr)
+        ))),
     }
+}
+
+/// The `rdump:` lines that report a real extraction failure, joined, or empty when there are none.
+///
+/// Run non-root, rdump cannot chown to the guest's uids and says so per file; that is expected and
+/// must not fail a readback, so it is the one prefix filtered out. Everything else it prefixes with
+/// `rdump:` is a file it did not write.
+fn rdump_failures(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with("rdump:"))
+        .filter(|l| !l.contains("changing ownership"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Poll `child` to exit under `deadline`, killing and reaping it on any exit path so a shelled-out
@@ -668,6 +741,165 @@ mod tests {
         assert!(
             matches!(err, VmmError::Vmm(ref m) if m.contains("whitespace")),
             "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn an_rdump_that_extracted_nothing_is_a_failure_whatever_its_exit_code_said() {
+        // Measured, not assumed: `debugfs -R "rdump / <unwritable>"` prints one line per file it
+        // could not write and **exits 0**. Reading the status alone therefore reports a successful
+        // readback over an empty output dir, which is the engine claiming artifacts it does not
+        // have. This is the pure half of that check.
+        let failed = "debugfs 1.47.4 (6-Mar-2025)\n\
+                      rdump: Permission denied while making directory /out//lost+found\n\
+                      rdump: Permission denied while opening /out//payload-0\n";
+        let complaints = rdump_failures(failed);
+        assert!(
+            complaints.contains("payload-0") && complaints.contains("lost+found"),
+            "every file rdump dropped must survive into the error: {complaints}"
+        );
+
+        // The one prefix that must *not* fail a readback: run non-root, rdump cannot chown to the
+        // guest's uids and says so per file while extracting them perfectly well.
+        let benign = "debugfs 1.47.4 (6-Mar-2025)\n\
+                      rdump: Operation not permitted while changing ownership of /out//payload-0\n";
+        assert_eq!(
+            rdump_failures(benign),
+            "",
+            "an ownership warning is expected non-root and must not fail the readback"
+        );
+        assert_eq!(rdump_failures(""), "", "silence is success");
+    }
+
+    #[test]
+    fn a_readback_that_wrote_nothing_is_never_reported_as_a_successful_one() {
+        // The live counterpart of the pure test above, through the real `collect_output_image`. An
+        // unwritable dest stands in for the full one: both make rdump fail per file and exit 0, and
+        // this one needs no root, so the branch is covered by the everyday gate rather than only by
+        // the privileged run.
+        //
+        // Guarded because it *inverts* under root: root writes through mode 0555, the readback then
+        // genuinely succeeds, and the assertion below would fail on a correct engine. A test whose
+        // meaning flips with privilege has to say so.
+        if test_support::have_real_root() {
+            eprintln!(
+                "skipping a_readback_that_wrote_nothing_is_never_reported_as_a_successful_one: \
+                 root writes through an unwritable dir, so there is no failure to observe"
+            );
+            return;
+        }
+        let dir = test_support::ScratchDir::created("rdump-unwritable");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("seed dir");
+        std::fs::write(tree.join("payload"), b"guest output").expect("seed payload");
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(image) = build_input_image(&tree, dir.path(), deadline) else {
+            eprintln!(
+                "skipping a_readback_that_wrote_nothing_is_never_reported_as_a_successful_one: \
+                 no working mke2fs"
+            );
+            return;
+        };
+
+        use std::os::unix::fs::PermissionsExt as _;
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("dest dir");
+        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o555)).expect("chmod");
+
+        let err = collect_output_image(&image, &dest)
+            .expect_err("a readback that extracted nothing is not a success");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("payload"),
+            "the error must name the file that never made it out: {msg}"
+        );
+
+        // Restore write permission so the scratch guard can reclaim the tree on drop.
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    }
+
+    #[test]
+    #[ignore = "mounts a tmpfs; needs real root (run via `cargo xtask ci-privileged`)"]
+    fn a_full_scratch_names_mke2fs_as_the_cause() {
+        // The case `run_host_tool`'s captured stderr was written for. `truncate` succeeds (a sparse
+        // file costs nothing), then `mke2fs` writes the inode table eagerly and hits ENOSPC. Without
+        // the capture the boot would fail with a bare exit code and the operator would have no way
+        // to tell a full scratch dir from a corrupt image.
+        let Some(fs) = test_support::SmallFs::create(8, "mke2fs-full") else {
+            eprintln!("skipping a_full_scratch_names_mke2fs_as_the_cause: needs real root");
+            return;
+        };
+        fs.fill_leaving(256 * 1024);
+
+        let err = build_output_image(fs.path(), Instant::now() + Duration::from_secs(30))
+            .expect_err("mke2fs cannot build a 256 MiB image on a full filesystem");
+        let msg = err.to_string();
+        assert!(
+            !msg.trim_end().ends_with(':'),
+            "a failed image build must name a cause, not end in a bare colon: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("space"),
+            "the cause must be mke2fs's own words about the full filesystem: {msg}"
+        );
+    }
+
+    #[test]
+    #[ignore = "mounts a tmpfs; needs real root (run via `cargo xtask ci-privileged`)"]
+    fn a_full_output_dir_names_debugfs_as_the_cause() {
+        // `debugfs` and `e2fsck` used to discard their stderr, so a readback into a full output dir
+        // reported `(exit 1)` and nothing else. The image here is legitimate; only the destination
+        // is out of space, which is precisely the failure an exit code cannot distinguish.
+        let Some(fs) = test_support::SmallFs::create(8, "rdump-full") else {
+            eprintln!("skipping a_full_output_dir_names_debugfs_as_the_cause: needs real root");
+            return;
+        };
+        // The image is built on the *host* filesystem and seeded with real content: this test is
+        // about the destination being full, and rdump of an empty image would write nothing at all
+        // and succeed on any headroom.
+        let src = test_support::ScratchDir::created("rdump-src");
+        let tree = src.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("seed dir");
+        for i in 0..4 {
+            std::fs::write(tree.join(format!("payload-{i}")), vec![b'x'; 1024 * 1024])
+                .expect("seed payload");
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(image) = build_input_image(&tree, src.path(), deadline) else {
+            eprintln!("skipping a_full_output_dir_names_debugfs_as_the_cause: no working mke2fs");
+            return;
+        };
+
+        let dest = fs.path().join("out");
+        // Leave enough for the `create_dir_all` and e2fsck's own bookkeeping, but far less than the
+        // extracted tree, so the failure lands inside rdump rather than before it.
+        fs.fill_leaving(128 * 1024);
+        let started = Instant::now();
+        let err =
+            collect_output_image(&image, &dest).expect_err("a full dest cannot hold the readback");
+        let msg = err.to_string();
+
+        // The trap this test would otherwise fall into: a readback that *wedges* also produces an
+        // error with no bare exit code and no trailing colon, so the weaker assertions below would
+        // pass on a 120-second timeout that captured no stderr at all, proving nothing.
+        assert!(
+            !matches!(err, VmmError::Timeout(_)),
+            "the readback must fail on the full disk, not wedge until its deadline: {msg}"
+        );
+        assert!(
+            started.elapsed() < OUTPUT_READBACK_TIMEOUT / 2,
+            "a full dest must fail promptly, not near the readback wall: {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !msg.trim_end().ends_with(':'),
+            "a failed readback must name a cause, not end in a bare colon: {msg}"
+        );
+        // `failure_detail` falls back to the exit status only when stderr was empty, so a message
+        // ending in one is exactly the pre-fix behaviour: the tool spoke and nobody listened.
+        assert!(
+            !msg.contains("exit status:") && !msg.contains("(exit "),
+            "the detail must be the tool's own stderr, not its exit status: {msg}"
         );
     }
 }

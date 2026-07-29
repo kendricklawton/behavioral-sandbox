@@ -54,6 +54,58 @@ fn snapshots_a_running_microvm() {
 }
 
 #[test]
+#[ignore = "mounts a tmpfs + needs /dev/kvm, artifacts, real root (run via `cargo xtask ci-privileged`)"]
+fn a_snapshot_onto_a_full_disk_leaves_a_bundle_or_nothing() {
+    // The bundle's memory file is guest-RAM-sized, the largest single write the host performs, so
+    // disk-full is the realistic way a snapshot fails partway. `PartialBundle` promises the caller's
+    // dir then holds a bundle or nothing; a half-written one is worse than none, because it looks
+    // restorable and fails later, off the code path that made it.
+    //
+    // The second claim is the one a caller actually depends on: the *source VM keeps running*.
+    // `snapshot` pauses, creates, and resumes, and the resume must survive the create failing.
+    let Some(fs) = test_support::SmallFs::create(64, "snap-full") else {
+        eprintln!(
+            "skipping a_snapshot_onto_a_full_disk_leaves_a_bundle_or_nothing: needs real root"
+        );
+        return;
+    };
+    // The guest rootfs (not the CI one): the "still running" half of this test needs the exec
+    // channel, and a VM that only reaches a getty prompt cannot answer.
+    let vm = Vm::boot(guest_rootfs_config()).expect("agent microVM should boot");
+    let bundle = fs.path().join("bundle");
+
+    // Room for the dir and a partial write, far under the memory file's size.
+    fs.fill_leaving(4 * 1024 * 1024);
+    let err = vm
+        .snapshot(&bundle)
+        .expect_err("a 256 MiB memory file cannot fit in 4 MiB");
+    eprintln!("snapshot onto a full disk: {err}");
+
+    let survivors: Vec<_> = std::fs::read_dir(&bundle)
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .map(|e| e.file_name())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        survivors.is_empty(),
+        "a failed snapshot must leave no bundle file behind; found {survivors:?}"
+    );
+
+    // The guest is still there: paused-then-resumed around a failed create, not left paused.
+    let out = vm
+        .exec(&["echo".to_string(), "alive".to_string()], &[])
+        .expect("the source VM must still serve an exec after a failed snapshot");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "alive",
+        "got {out:?}"
+    );
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn restores_a_snapshot_onto_a_fresh_vmm() {
     // Snapshot a VM, throw it away, then restore from the bundle on a fresh VMM and confirm it

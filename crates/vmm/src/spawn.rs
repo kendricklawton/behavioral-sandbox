@@ -1424,7 +1424,7 @@ fn probe_fc_version(firecracker: &Path) -> FcProbe {
     // driver's stdin or write onto an embedder's stderr. What a file costs that a pipe didn't: a
     // wrapper flooding stdout writes to disk for up to the wall instead of blocking at 64 KiB, so
     // the file is unlinked at creation and its space returns the moment the fd closes.
-    let Ok((sink, back)) = scratch_pair() else {
+    let Ok((sink, back)) = crate::proc::scratch_pair("fcver") else {
         return FcProbe::Unavailable;
     };
     let mut cmd = Command::new(firecracker);
@@ -1447,7 +1447,7 @@ fn probe_fc_version(firecracker: &Path) -> FcProbe {
             {
                 FcProbe::Unavailable
             } else {
-                match read_head(back, VERSION_HEAD_CAP) {
+                match crate::proc::read_head(back, VERSION_HEAD_CAP) {
                     Ok(head) => match fc_version_of(&head) {
                         Some(v) => FcProbe::Version(v),
                         None => FcProbe::Unparseable,
@@ -1462,59 +1462,6 @@ fn probe_fc_version(firecracker: &Path) -> FcProbe {
 /// How much of the probe's captured stdout is read back. A version banner is one line; the cap is
 /// what keeps a binary that floods stdout from being read into host RAM.
 const VERSION_HEAD_CAP: u64 = 4096;
-
-/// A private scratch file for a child's stdout: `(the child's write handle, our read-back handle)`,
-/// both onto the same **already-unlinked** file.
-///
-/// `create_new` (`O_CREAT|O_EXCL`) and 0600, not `File::create`: the driver usually runs as root and
-/// the temp dir is world-writable, so a predictable name opened with plain `create` is a symlink
-/// hijack, a local user pre-creating the path aims the truncating open at any file root can write.
-/// `O_EXCL` refuses to follow a symlink at all, and the retry loop covers a name that already
-/// exists. Unlinking straight away means nothing is left behind on any exit path (including a
-/// panic elsewhere) and the read-back can't be pointed at a different file than the one written.
-fn scratch_pair() -> std::io::Result<(std::fs::File, std::fs::File)> {
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let dir = std::env::temp_dir();
-    let mut last = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no unique scratch name");
-    for attempt in 0..8u32 {
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        let path = dir.join(format!(
-            "ekvm-fcver-{}-{stamp}-{attempt}",
-            std::process::id()
-        ));
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-        {
-            Ok(sink) => {
-                // Unlink before the `?`, so even a failed clone (out of fds) leaves nothing on
-                // disk: the file exists on the filesystem only for these two lines.
-                let cloned = sink.try_clone();
-                let _ = std::fs::remove_file(&path);
-                return Ok((sink, cloned?));
-            }
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
-}
-
-/// Read at most `cap` bytes from the start of `file`, lossily as text. `take` before the read, not
-/// a truncation after: `fs::read` would pull a flooding child's whole output into host RAM and only
-/// then throw it away. The seek is required because the handle shares its file offset with the
-/// child's (both are dups of one open file description), so it sits at end-of-write.
-fn read_head(mut file: std::fs::File, cap: u64) -> std::io::Result<String> {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    file.seek(SeekFrom::Start(0))?;
-    let mut buf = Vec::new();
-    file.take(cap).read_to_end(&mut buf)?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
 
 /// A warning rather than a typed error because an embedder may knowingly run a build we have not
 /// tested; a *missing* or unrunnable binary stays silent here ([`FcProbe::Unavailable`]).
@@ -1965,7 +1912,7 @@ mod tests {
         // opened with a following truncating `create`, is a symlink hijack against a driver running
         // as root. Nothing may be left behind for one to be aimed at, on any exit path.
         let before = temp_scratch_files();
-        let (sink, back) = scratch_pair().expect("a scratch pair");
+        let (sink, back) = crate::proc::scratch_pair("fcver").expect("a scratch pair");
         assert_eq!(
             temp_scratch_files(),
             before,
@@ -1975,7 +1922,7 @@ mod tests {
         // other (they share an open file description, hence `read_head`'s seek).
         use std::io::Write as _;
         (&sink).write_all(b"Firecracker v1.16.1\n").expect("write");
-        let head = read_head(back, VERSION_HEAD_CAP).expect("read back");
+        let head = crate::proc::read_head(back, VERSION_HEAD_CAP).expect("read back");
         assert!(head.contains("v1.16.1"), "got {head:?}");
     }
 
@@ -2040,6 +1987,50 @@ mod tests {
     }
 
     #[test]
+    fn a_vmm_that_dies_mid_boot_is_reported_and_reclaimed() {
+        // Distinct from `dead_vmm_fails_fast_with_its_stderr_tail`, which covers a VMM that never
+        // starts: here one comes up, is polled for a while, and *then* dies, which is the shape of
+        // an OOM kill or an operator's `kill -9` landing during boot. What has never been exercised
+        // is the cleanup: this error is the one path that reaches `abort` with a child that died on
+        // its own, and a scratch dir left behind per failed boot is a slow leak nothing sweeps until
+        // the next `sweep_orphans`.
+        let dir = ScratchDir::created("ekvm-dying-fc");
+        let kernel = dir.path().join("vmlinux");
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
+        std::fs::write(&rootfs, b"not a rootfs").expect("fake rootfs");
+        // Outlive at least a few poll ticks (the backoff caps at 5 ms), then die non-zero.
+        let dying = script(&dir, "fc-dying", "sleep 0.2\necho 'gone' 1>&2\nexit 3");
+
+        let cfg = BootConfig {
+            firecracker: dying,
+            kernel,
+            rootfs,
+            scratch_dir: dir.path().to_path_buf(),
+            boot_timeout: Duration::from_secs(10),
+            ..BootConfig::default()
+        };
+        let deadline = boot_deadline(cfg.boot_timeout);
+        let mut spawned = Spawned::launch(&cfg, deadline).expect("launch the dying vmm");
+        let workdir = spawned.workdir.clone();
+        assert!(workdir.is_dir(), "the boot staged a scratch dir to reclaim");
+        let err = spawned
+            .run_boot(&cfg, deadline)
+            .expect_err("a vmm that died cannot boot");
+        let msg = spawned.abort(err).to_string();
+
+        assert!(
+            msg.contains("exited before boot"),
+            "a death before the API socket is reported as such, not as a timeout: {msg}"
+        );
+        assert!(
+            !workdir.exists(),
+            "abort must reclaim the scratch dir of a VMM that died mid-boot: {} survived",
+            workdir.display()
+        );
+    }
+
+    #[test]
     fn workdirs_are_fresh_private_and_distinct() {
         let base = Path::new("/tmp");
         let a = ScratchDir::adopt(create_workdir(base).expect("first workdir"));
@@ -2095,6 +2086,105 @@ mod tests {
         assert!(
             stage_restore_disk(&src, &backing).is_err(),
             "re-staging over an existing disk must fail, not overwrite"
+        );
+    }
+
+    #[test]
+    #[ignore = "mounts a tmpfs; needs real root (run via `cargo xtask ci-privileged`)"]
+    fn a_disk_full_mid_stage_leaves_nothing_behind() {
+        // `stage_restore_disk` promises all-or-nothing staging, and the disk-full case is the whole
+        // reason it does: the copy is rootfs-sized, so it is the one write here that can fail
+        // *partway*, after the path was reserved and the sweep marker written. A partial disk left
+        // at the snapshot's baked-in path is worse than a failed restore: `create_new` would then
+        // refuse every later restore of that snapshot, reporting a concurrent restore that is not
+        // happening.
+        let Some(fs) = test_support::SmallFs::create(8, "stage-full") else {
+            eprintln!("skipping a_disk_full_mid_stage_leaves_nothing_behind: needs real root");
+            return;
+        };
+        // Headroom for the staging dir and the marker, far under the source's size, so the failure
+        // is the copy and not an earlier step.
+        fs.fill_leaving(64 * 1024);
+
+        // The source lives on the host filesystem; only the destination is out of space.
+        let host = ScratchDir::created("stage-full-src");
+        let src = host.path().join("rootfs.ext4");
+        std::fs::write(&src, vec![b'x'; 4 * 1024 * 1024]).expect("write the oversized source");
+
+        let backing = fs.path().join("staging/rootfs.ext4");
+        let err = stage_restore_disk(&src, &backing)
+            .expect_err("a 4 MiB copy cannot fit in 64 KiB of headroom");
+        assert!(
+            matches!(err, VmmError::Vmm(ref m) if m.contains("stage restore disk")),
+            "got {err:?}"
+        );
+
+        let parent = backing.parent().expect("staging dir");
+        assert!(
+            !backing.exists(),
+            "a partial staged disk must not survive: it would make `create_new` refuse every later \
+             restore of this snapshot"
+        );
+        assert!(
+            !parent.join(crate::sweep::RESTORE_STAGING_MARKER).exists(),
+            "the sweep marker must go with the disk it was defending"
+        );
+        assert!(
+            !parent.exists(),
+            "the staging dir this call created must be removed with its contents"
+        );
+    }
+
+    #[test]
+    #[ignore = "mounts a tmpfs; needs real root (run via `cargo xtask ci-privileged`)"]
+    fn a_full_scratch_dir_fails_the_boot_without_stranding_a_partial_rootfs() {
+        // A read-write boot copies the whole rootfs into the scratch dir before Firecracker is
+        // spawned, which is the largest write on the boot path and the one `BootConfig::scratch_dir`
+        // warns about (a tmpfs `/tmp` charges it to host RAM). The copy fails before any spawn, so
+        // this needs no KVM; what must hold is that `WorkdirGuard` reclaims the half-written copy
+        // rather than leaving scratch to accumulate one per failed boot.
+        let Some(fs) = test_support::SmallFs::create(8, "boot-full") else {
+            eprintln!(
+                "skipping a_full_scratch_dir_fails_the_boot_without_stranding_a_partial_rootfs: \
+                 needs real root"
+            );
+            return;
+        };
+        fs.fill_leaving(64 * 1024);
+
+        let host = ScratchDir::created("boot-full-src");
+        let kernel = host.path().join("vmlinux");
+        let rootfs = host.path().join("rootfs.ext4");
+        std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
+        std::fs::write(&rootfs, vec![b'x'; 4 * 1024 * 1024]).expect("oversized fake rootfs");
+
+        let cfg = BootConfig {
+            firecracker: PathBuf::from("sh"),
+            kernel,
+            rootfs,
+            scratch_dir: fs.path().to_path_buf(),
+            boot_timeout: Duration::from_secs(10),
+            ..BootConfig::default()
+        };
+        // `.err()` rather than `expect_err`: `Spawned` holds a live child and is not `Debug`.
+        let err = Spawned::launch(&cfg, boot_deadline(cfg.boot_timeout))
+            .err()
+            .expect("a 4 MiB rootfs cannot be copied into 64 KiB of headroom");
+        assert!(
+            matches!(err, VmmError::Vmm(ref m) if m.contains("copy rootfs")),
+            "got {err:?}"
+        );
+
+        // Everything the failed launch made is gone; only the filler this test wrote remains.
+        let leftovers: Vec<_> = std::fs::read_dir(fs.path())
+            .expect("read the fixture")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .filter(|n| n != "ekvm-filler")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a failed launch must strand no scratch dir; found {leftovers:?}"
         );
     }
 

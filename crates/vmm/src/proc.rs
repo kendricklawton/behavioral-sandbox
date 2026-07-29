@@ -151,6 +151,59 @@ pub(crate) fn run_bounded(mut cmd: Command, timeout: Duration, label: &str) -> B
     }
 }
 
+/// A private scratch file for a child's output: `(the child's write handle, our read-back handle)`,
+/// both onto the same **already-unlinked** file.
+///
+/// `create_new` (`O_CREAT|O_EXCL`) and 0600, not `File::create`: the driver usually runs as root and
+/// the temp dir is world-writable, so a predictable name opened with plain `create` is a symlink
+/// hijack, a local user pre-creating the path aims the truncating open at any file root can write.
+/// `O_EXCL` refuses to follow a symlink at all, and the retry loop covers a name that already
+/// exists. Unlinking straight away means nothing is left behind on any exit path (including a
+/// panic elsewhere) and the read-back can't be pointed at a different file than the one written.
+pub(crate) fn scratch_pair(tag: &str) -> std::io::Result<(std::fs::File, std::fs::File)> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let dir = std::env::temp_dir();
+    let mut last = std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no unique scratch name");
+    for attempt in 0..8u32 {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let path = dir.join(format!(
+            "ekvm-{tag}-{}-{stamp}-{attempt}",
+            std::process::id()
+        ));
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(sink) => {
+                // Unlink before the `?`, so even a failed clone (out of fds) leaves nothing on
+                // disk: the file exists on the filesystem only for these two lines.
+                let cloned = sink.try_clone();
+                let _ = std::fs::remove_file(&path);
+                return Ok((sink, cloned?));
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+/// Read at most `cap` bytes from the start of `file`, lossily as text. `take` before the read, not
+/// a truncation after: `fs::read` would pull a flooding child's whole output into host RAM and only
+/// then throw it away. The seek is required because the handle shares its file offset with the
+/// child's (both are dups of one open file description), so it sits at end-of-write.
+pub(crate) fn read_head(mut file: std::fs::File, cap: u64) -> std::io::Result<String> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    file.seek(SeekFrom::Start(0))?;
+    let mut buf = Vec::new();
+    file.take(cap).read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -185,6 +185,125 @@ impl Drop for LimitCgroup {
     }
 }
 
+/// A size-bounded filesystem a test can fill, the vehicle for the engine's disk-full paths: the
+/// all-or-nothing restore staging, the snapshot bundle's partial-write sweep, the image builders.
+/// Those branches have real prose promises attached and no other way to reach them, since the host's
+/// own scratch filesystem cannot be exhausted safely.
+///
+/// tmpfs rather than a loop-backed ext4: it needs no free loop device and no `mkfs`, mounts
+/// instantly, and gives the same `ENOSPC` on write. The trade is that ext4-specific exhaustion
+/// (inodes, block-group allocation) is out of reach; a test needing that needs a different fixture.
+///
+/// `dev` is not decoration. A tmpfs is mounted `nodev` by default, and the jailer makes device nodes
+/// in a chroot staged on the scratch dir, so a `nodev` fixture would fail a jailed boot for a reason
+/// that has nothing to do with the disk being full.
+///
+/// `None` (skip) without real root, since mounting needs `CAP_SYS_ADMIN`. Unmounts and reclaims on
+/// drop; declare it *before* anything writing into it, so it drops last.
+pub struct SmallFs {
+    // Dropped after the unmount below, which is what makes the reclaim hit the host dir rather than
+    // the tmpfs's contents.
+    dir: ScratchDir,
+}
+
+impl SmallFs {
+    /// Mount a `mib`-megabyte tmpfs on a fresh scratch dir. Panics if the mount reports success but
+    /// did not take: silently handing back the host's own (large) filesystem would let every
+    /// disk-full test pass without ever filling anything, which is the one failure mode this fixture
+    /// must not have.
+    #[must_use]
+    pub fn create(mib: u64, tag: &str) -> Option<Self> {
+        if !have_real_root() {
+            return None;
+        }
+        let dir = ScratchDir::created(tag);
+        let ok = std::process::Command::new("mount")
+            .arg("-t")
+            .arg("tmpfs")
+            .arg("-o")
+            .arg(format!("size={mib}M,dev"))
+            .arg("tmpfs")
+            .arg(dir.path())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return None;
+        }
+        let this = Self { dir };
+        assert!(
+            this.is_mounted(),
+            "mount reported success but {} carries no tmpfs: a fixture that is silently the host \
+             filesystem would green every disk-full test without filling anything",
+            this.path().display()
+        );
+        Some(this)
+    }
+
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.dir.path()
+    }
+
+    /// Fill the filesystem, then hand back `headroom` bytes of it. Writing until `ENOSPC` and
+    /// shrinking is deliberate: it needs no `statvfs` (this crate is pure-std and the host path is
+    /// `unsafe`-free), and it leaves the *actual* remaining space at `headroom` rather than at
+    /// whatever a free-block calculation guessed. The headroom matters because most targets need a
+    /// small write (a `mkdir`, an open) to succeed so the failure lands on the large write under
+    /// test. Panics on an I/O error other than a full disk, the idiomatic test assertion.
+    pub fn fill_leaving(&self, headroom: u64) {
+        use std::io::Write as _;
+        let path = self.path().join("ekvm-filler");
+        let mut file = match std::fs::File::create(&path) {
+            Ok(f) => f,
+            Err(e) => panic!("create the filler in {}: {e}", self.path().display()),
+        };
+        let chunk = vec![0u8; 64 * 1024];
+        let mut written: u64 = 0;
+        loop {
+            match file.write_all(&chunk) {
+                Ok(()) => written += chunk.len() as u64,
+                Err(e) if e.kind() == std::io::ErrorKind::StorageFull => break,
+                Err(e) => panic!("fill {}: {e}", path.display()),
+            }
+        }
+        assert!(
+            written > 0,
+            "the fixture was already full before the filler was written"
+        );
+        if let Err(e) = file.set_len(written.saturating_sub(headroom)) {
+            panic!("shrink the filler to leave {headroom} bytes: {e}");
+        }
+    }
+
+    /// Whether a filesystem is mounted at this fixture's dir, read from `/proc/self/mountinfo`
+    /// (field 5 is the mount point). The fail-closed half of [`create`](Self::create).
+    fn is_mounted(&self) -> bool {
+        let target = self.path().to_string_lossy().to_string();
+        std::fs::read_to_string("/proc/self/mountinfo")
+            .unwrap_or_default()
+            .lines()
+            .any(|l| l.split(' ').nth(4) == Some(&target))
+    }
+}
+
+impl Drop for SmallFs {
+    fn drop(&mut self) {
+        let unmounted = std::process::Command::new("umount")
+            .arg(self.dir.path())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !unmounted {
+            // Something still holds the mount (a helper the test detached rather than reaped). A
+            // lazy unmount detaches it now and lets the kernel free it when the last reference
+            // goes, so a leaked mount can't poison the next run's fixture.
+            let _ = std::process::Command::new("umount")
+                .arg("-l")
+                .arg(self.dir.path())
+                .status();
+        }
+    }
+}
+
 /// `CAP_NET_ADMIN` (capability bit 12): creating a netns/tap needs it, so the network-gated
 /// privileged tests skip without it. Defined beside [`have_cap`] so the bit number and the parse
 /// that reads it live in one audited place.
