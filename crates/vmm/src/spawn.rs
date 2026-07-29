@@ -2066,6 +2066,93 @@ mod tests {
     }
 
     #[test]
+    fn a_squatted_workdir_name_is_skipped_never_adopted() {
+        use std::os::unix::fs::PermissionsExt;
+        // The workdir name is predictable (`ekvm-<pid>-<seq>`: the pid is public, the seq counts
+        // up), and the scratch base is world-writable, so a hostile local user can pre-create the
+        // names a boot is about to mint. The mint must advance past every plant, never adopt one:
+        // the rootfs copy and API socket go into this dir.
+        let base = ScratchDir::created("ekvm-squat");
+        let first = ScratchDir::adopt(create_workdir(base.path()).expect("first workdir"));
+        let name = first
+            .path()
+            .file_name()
+            .expect("workdir has a name")
+            .to_string_lossy()
+            .into_owned();
+        let seq: u64 = name
+            .rsplit('-')
+            .next()
+            .expect("dashed name")
+            .parse()
+            .expect("trailing sequence number");
+        // Plant a window of upcoming names, wide enough that concurrent tests in this binary
+        // (which share the global sequence counter but mint under other bases) cannot step the
+        // counter past it between our two calls.
+        let pid = std::process::id();
+        let planted: Vec<std::path::PathBuf> = (seq + 1..=seq + 8)
+            .map(|n| base.path().join(format!("{VM_DIR_PREFIX}-{pid}-{n}")))
+            .collect();
+        for p in &planted {
+            std::fs::create_dir(p).expect("plant the squatted dir");
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o777))
+                .expect("attacker-open mode");
+            std::fs::write(p.join("attacker-canary"), b"planted").expect("write the canary");
+        }
+        let minted =
+            ScratchDir::adopt(create_workdir(base.path()).expect("mint must advance, not fail"));
+        assert!(
+            !planted.iter().any(|p| p == minted.path()),
+            "the mint adopted a squatted dir: {}",
+            minted.path().display()
+        );
+        let mode = std::fs::metadata(minted.path())
+            .expect("stat the minted workdir")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "the minted dir must be freshly ours");
+        assert_eq!(
+            std::fs::read_dir(minted.path())
+                .expect("read minted")
+                .count(),
+            0,
+            "the minted dir must be empty, not an adopted plant"
+        );
+        // The plants themselves are untouched: skipped, not cleaned, certainly not written into.
+        for p in &planted {
+            assert_eq!(
+                std::fs::read(p.join("attacker-canary")).expect("canary survives"),
+                b"planted",
+                "the mint must not touch a squatted dir's contents"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "chowns a dir to another uid; needs real root (run via `cargo xtask ci-privileged`)"]
+    fn an_attacker_owned_staging_dir_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        // The mode-mismatch refusal is host-safe-tested above; the *ownership* half of the check
+        // needs a dir this euid does not own, which only root can fabricate. Mode stays 0700 so
+        // ownership is the one thing wrong: a squatter who guessed the baked-in staging path and
+        // even matched the expected mode is still refused.
+        if crate::sweep::own_euid() != Some(0) {
+            eprintln!("skipping an_attacker_owned_staging_dir_is_refused: needs real root");
+            return;
+        }
+        let base = ScratchDir::created("ekvm-stage-owner");
+        let dir = base.path().join("ekvm-66666-0");
+        std::fs::create_dir(&dir).expect("create the dir to disown");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .expect("set the expected mode");
+        std::os::unix::fs::chown(&dir, Some(65534), Some(65534)).expect("chown to nobody");
+        assert!(
+            ensure_private_staging_dir(&dir).is_err(),
+            "a staging dir owned by another uid must be refused even at mode 0700"
+        );
+    }
+
+    #[test]
     fn a_staged_restore_disk_is_private_and_never_clobbers() {
         use std::os::unix::fs::PermissionsExt;
         let base = ScratchDir::created("ekvm-stage-disk");
