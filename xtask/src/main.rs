@@ -71,6 +71,7 @@
 
 mod artifacts;
 mod bench;
+mod coverage;
 mod demo;
 mod dist;
 mod drift;
@@ -110,6 +111,18 @@ enum Cmd {
         /// broke.
         #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
         repeat: u32,
+    },
+    /// Line coverage of the **workspace** by the test suite (`cargo llvm-cov`), the number neither
+    /// gate produces: `fuzz-coverage` measures one libFuzzer target against its corpus and says
+    /// nothing about the rest of the engine. Runs the whole suite once, `--include-ignored`, so the
+    /// number is the union of the host-safe and privileged gates. Same host needs as
+    /// `ci-privileged`, plus `cargo install cargo-llvm-cov` and `llvm-tools-preview`. Never gates
+    /// anything; the per-file uncovered regions are the point.
+    Coverage {
+        /// Skip the privileged tests (and the root requirement) for a fast partial number. The
+        /// boot, jailer, and probe paths go unmeasured, so the result is a floor.
+        #[arg(long)]
+        host_only: bool,
     },
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
@@ -339,6 +352,7 @@ fn main() -> Result<()> {
         Cmd::Ci => ci(),
         Cmd::Check => fast_check(),
         Cmd::CiPrivileged { repeat } => ci_privileged(repeat),
+        Cmd::Coverage { host_only } => coverage::coverage(host_only),
         Cmd::Setup => setup(),
         Cmd::SelfHost { prefix, no_run } => selfhost::self_host(prefix, no_run),
         Cmd::Vendor { dir, verify } => {
@@ -708,6 +722,40 @@ fn fast_check() -> Result<()> {
 /// Booting a microVM and loading/attaching eBPF need `/dev/kvm` + elevated caps, so those tests are
 /// `#[ignore]`d and run only here, on a machine that has them.
 fn ci_privileged(repeat: u32) -> Result<()> {
+    privileged_preflight()?;
+    // Serial (`--test-threads=1`): these tests each boot a real microVM and some assert on
+    // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent prewarmed clones). Run
+    // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
+    // leak check. Real-VM integration is I/O-bound on boot anyway, so serial costs little.
+    // `--repeat N` loops only this phase (setup above ran once): the soak that makes "N
+    // consecutive clean runs" a single command, for chasing intermittent failures. Fail fast so
+    // the broken run's logs sit right above the error.
+    for run in 1..=repeat {
+        if repeat > 1 {
+            println!("\n== privileged run {run}/{repeat} ==");
+        }
+        cargo(&[
+            "test",
+            "--workspace",
+            "--locked",
+            "--",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .with_context(|| format!("privileged run {run}/{repeat} failed"))?;
+        if repeat > 1 {
+            println!("privileged run {run}/{repeat}: ok");
+        }
+    }
+    println!("\n✓ privileged integration passed");
+    Ok(())
+}
+
+/// Everything a privileged test run needs before a single test executes: the host refusals, then the
+/// artifacts the tests load. Shared by `ci-privileged` and `coverage` (which runs the same tests
+/// instrumented), so the two can never drift on what they demand of the host, and so a coverage run
+/// can't quietly measure a suite whose privileged half self-skipped.
+fn privileged_preflight() -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
     }
@@ -815,31 +863,6 @@ fn ci_privileged(repeat: u32) -> Result<()> {
             object.display()
         );
     }
-    // Serial (`--test-threads=1`): these tests each boot a real microVM and some assert on
-    // host-global state (no leaked scratch dirs / taps / VMM processes, concurrent prewarmed clones). Run
-    // in parallel they contend for KVM and, worse, one test's live scratch dir trips another's
-    // leak check. Real-VM integration is I/O-bound on boot anyway, so serial costs little.
-    // `--repeat N` loops only this phase (setup above ran once): the soak that makes "N
-    // consecutive clean runs" a single command, for chasing intermittent failures. Fail fast so
-    // the broken run's logs sit right above the error.
-    for run in 1..=repeat {
-        if repeat > 1 {
-            println!("\n== privileged run {run}/{repeat} ==");
-        }
-        cargo(&[
-            "test",
-            "--workspace",
-            "--locked",
-            "--",
-            "--ignored",
-            "--test-threads=1",
-        ])
-        .with_context(|| format!("privileged run {run}/{repeat} failed"))?;
-        if repeat > 1 {
-            println!("privileged run {run}/{repeat}: ok");
-        }
-    }
-    println!("\n✓ privileged integration passed");
     Ok(())
 }
 

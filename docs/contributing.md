@@ -91,6 +91,33 @@ Run seeded fuzzing locally via `cargo fuzz run <target>`.
 
 ---
 
+## 5b. Coverage
+
+`cargo xtask fuzz-coverage <target>` measures one libFuzzer target against its corpus, which says
+nothing about the rest of the engine. For the **workspace's** coverage by its test suite:
+
+```console
+sudo -E env "PATH=$PATH" CARGO_TARGET_DIR="$PWD/target-privileged" cargo xtask coverage
+```
+
+It runs the whole suite once with `--include-ignored`, so the number is the union of the host-safe
+and privileged gates rather than either half. That is the only way to answer "which code do the
+privileged tests never reach", and it is why the run needs the same host as `ci-privileged`: it
+shares that gate's preflight, so a coverage run cannot quietly measure a suite whose privileged half
+self-skipped. `--host-only` gives a fast partial number and says so.
+
+Two opt-in installs, each refused up front with the one-line fix rather than failing at the merge
+step: `cargo install cargo-llvm-cov --locked`, and `rustup component add llvm-tools-preview`
+(deliberately not in `rust-toolchain.toml`, which would push the download onto every dev and CI job
+for a command almost none of them run).
+
+Nothing gates on the number. A coverage threshold that blocks merges gets satisfied with tests
+written for the number; the per-file uncovered regions in the HTML report are the point. Note that
+running as root is how a unit test written for an unprivileged process gets caught: one whose
+meaning changes under `sudo` must say so with an explicit `test_support::have_real_root()` guard.
+
+---
+
 ## 6. Commit & public API conventions
 
 - **Conventional Commits**: Format commit subjects as `type(scope)?: imperative subject` (e.g. `feat: add vsock timeout handling`).
