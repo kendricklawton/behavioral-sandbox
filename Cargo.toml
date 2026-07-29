@@ -33,7 +33,7 @@ edition = "2021"
 # back-support burden this early), never incidental drift; a support window is revisited at v0.1.0.
 rust-version = "1.97"
 license = "Apache-2.0"
-authors = ["K Henry LLC <founder@khenry.dev>"]
+authors = ["PackSixFour LLC <founder@khenry.dev>"]
 repository = "https://github.com/packsixfour/ekvm"
 
 # Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON

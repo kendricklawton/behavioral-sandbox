@@ -988,6 +988,7 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
         "bench-scale: per-event cost vs watched-target-set size, {runs} bursts per size\n\
          (the set is our own cgroup — the watched path — plus dummy cgroups to pad the size)\n"
     );
+    let load_before = loadavg_1m();
 
     // The syscall tracer: cost per watched openat as the trace target set grows.
     let missing =
@@ -1032,6 +1033,28 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     }
     drop(tracer); // detach before the meter (nothing pinned; explicit for legibility)
 
+    // The **control column**: the sweep's first size, measured again at the end. A target set only
+    // grows, so returning to size 1 means a fresh attach. Without this the first-vs-last comparison
+    // cannot tell a size effect from a *time* effect (a CPU still ramping its clock makes every
+    // later column faster), and an inflated first column is exactly the bias the warmup above is
+    // trying to remove: warming is a guess about how long that takes, this is a measurement of
+    // whether it worked.
+    let tracer_control = {
+        let mut control = SyscallTracer::load().context("re-attach the tracer for the control")?;
+        control
+            .add_target(me)
+            .context("register our cgroup for the control")?;
+        control
+            .drain(|_| {})
+            .context("clear the control baseline")?;
+        let mut samples = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            samples.push(ns_per_openat(&missing, BATCH));
+            control.drain(|_| {}).context("drain the control burst")?;
+        }
+        nearest_p50(&mut samples)
+    };
+
     // The resource meter: cost per context switch as the meter target set grows.
     let mut meter = ResourceMeter::load().context("load + attach the resource meter")?;
     meter.add_target(me).context("register our cgroup")?;
@@ -1064,9 +1087,35 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     }
     drop(meter);
 
+    // The meter's control column, same purpose as the tracer's above.
+    let meter_control = {
+        let mut control = ResourceMeter::load().context("re-attach the meter for the control")?;
+        control
+            .add_target(me)
+            .context("register our cgroup for the control")?;
+        control
+            .reset(me)
+            .context("zero the control's CPU baseline")?;
+        let mut samples = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            samples.push(ns_per_switch(ROUNDS)?);
+        }
+        nearest_p50(&mut samples)
+    };
+
     // Derive the O(1)-per-event takeaway from the data instead of asserting it: the cost is flat iff
     // the p50 doesn't grow with the watched set, so compare first vs last and warn on >1.5x drift (a
     // regression would otherwise print a rising table right under a "stays flat" claim).
+    //
+    // Validity comes first, though. First-vs-last only means anything if the *host* held still for
+    // the sweep, so the control column (size 1 again, measured last) has to land back on the opening
+    // column. When it doesn't, the table is a picture of the clock ramping, not of set size, and the
+    // honest verdict is "inconclusive": a decline reads as reassuring and is the one shape that
+    // hides real per-event growth behind an inflated baseline.
+    /// How far the control column may sit from the opening column, in percent, before the sweep is
+    /// called time-confounded. Loose enough for ordinary jitter on a busy desktop, tight enough to
+    /// catch a governor still ramping through the first column.
+    const CONTROL_TOLERANCE_PCT: u64 = 15;
     let last = SIZES[SIZES.len() - 1];
     let ends = |p50s: &[u64]| {
         (
@@ -1074,23 +1123,71 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
             p50s.last().copied().unwrap_or(0),
         )
     };
+    /// The control's distance from the opening column as a percentage of it, in whichever
+    /// direction: the host drifting *faster* is the dangerous case, so this is deliberately
+    /// two-sided where the growth check below is not.
+    fn drift_pct(open: u64, control: u64) -> u64 {
+        if open == 0 {
+            return 0;
+        }
+        open.abs_diff(control).saturating_mul(100) / open
+    }
     let drifted = |(first, last): (u64, u64)| first > 0 && last > first.saturating_mul(3) / 2;
     let (tf, tl) = ends(&tracer_p50s);
     let (mf, ml) = ends(&meter_p50s);
+    let (t_drift, m_drift) = (drift_pct(tf, tracer_control), drift_pct(mf, meter_control));
     println!("\nWatched set 1 → {last}: tracer p50 {tf}→{tl} ns, meter p50 {mf}→{ml} ns.");
-    if drifted((tf, tl)) || drifted((mf, ml)) {
+    // The control column answers "did the host hold still?", which a *uniformly* loaded host does
+    // perfectly, at the wrong number: every column is equally inflated, the ratios all hold, and the
+    // absolute nanoseconds are unpublishable. Load is the part the sweep cannot see about itself, so
+    // record it and let the reader judge rather than quietly printing numbers from a busy host.
+    let load_after = loadavg_1m();
+    println!("Host 1-minute load average: {load_before:.2} before, {load_after:.2} after.");
+    if load_after > BUSY_HOST_LOADAVG {
+        println!(
+            "  NOTE: this run shared the host (a bench of this shape contributes ~1.0 itself), so the\n\
+             absolute ns are inflated and are not publishable without an idle-host re-run. Whether\n\
+             the *shape* still means anything is the control column's call, below."
+        );
+    }
+    println!(
+        "Control (set back to 1, measured last): tracer {tracer_control} ns vs {tf} opening \
+         ({t_drift}%), meter {meter_control} ns vs {mf} opening ({m_drift}%)."
+    );
+    if t_drift > CONTROL_TOLERANCE_PCT || m_drift > CONTROL_TOLERANCE_PCT {
+        println!(
+            "  INCONCLUSIVE: the same set size measured {CONTROL_TOLERANCE_PCT}%+ differently at the\n\
+             end of the sweep than at the start, so this host did not hold still and first-vs-last\n\
+             is a time effect, not a size one. Nothing is claimed about O(1)-per-event from this run;\n\
+             re-run on an idle host (no turbo ramp, no competing load)."
+        );
+    } else if drifted((tf, tl)) || drifted((mf, ml)) {
         println!(
             "  WARNING: a per-event p50 grew >1.5x as the set grew — the O(1)-per-event property does\n\
              not hold on this run (expected flat: one shared program, a single hash lookup per event)."
         );
     } else {
         println!(
-            "  Both stay ~flat: each event is one O(1) hash lookup regardless of set size, so probe\n\
-             overhead scales with the event rate, not the concurrent-sandbox count (one shared\n\
-             program, not one per VM)."
+            "  Both stay ~flat, and the control column confirms the host held still: each event is\n\
+             one O(1) hash lookup regardless of set size, so probe overhead scales with the event\n\
+             rate, not the concurrent-sandbox count (one shared program, not one per VM)."
         );
     }
     Ok(())
+}
+
+/// Above this 1-minute load average, `bench-scale` says its absolute numbers came off a shared host.
+/// A single-threaded bench contributes ~1.0 on its own, so the threshold sits above that: it flags
+/// *competing* work, not the measurement itself.
+const BUSY_HOST_LOADAVG: f64 = 2.0;
+
+/// The host's 1-minute load average, or `0.0` if `/proc/loadavg` can't be read or parsed (a missing
+/// reading must not fail a benchmark; it just means the note below can't be offered).
+fn loadavg_1m() -> f64 {
+    std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse().ok())
+        .unwrap_or(0.0)
 }
 
 /// The **reproducible bench harness**: one command that runs the whole suite in order and prints the
@@ -1147,8 +1244,20 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
         .map(|kib| kib / 1024 / 1024)
         .unwrap_or(0);
 
+    let load = loadavg_1m();
     println!("bench-all: the full benchmark suite, one report.");
-    println!("  host: Linux {kernel_rel}, {cpus} CPUs, {mem_gib} GiB RAM");
+    println!("  host: Linux {kernel_rel}, {cpus} CPUs, {mem_gib} GiB RAM, load average {load:.2}");
+    // Up front, not in the footer: this suite runs for many minutes, and a reader of the published
+    // table has no way to tell a quiet host from a busy one after the fact. The absolute numbers are
+    // the ones at risk; the back-to-back comparisons (restore vs cold boot, Pss vs Rss, probe on vs
+    // off) mostly cancel a uniform tax, which is why this warns rather than refuses.
+    if load > BUSY_HOST_LOADAVG {
+        println!(
+            "  WARNING: the host is already busy (load {load:.2}). Every absolute number below will\n\
+             be inflated by whatever else is running, so this run is not publishable: stop other work\n\
+             (an editor, a browser, a container runtime) and re-run before quoting these figures."
+        );
+    }
     println!(
         "  method: nearest-rank percentiles, never averages; a p99 prints `—` below n=100 (no sample\n\
          above it), so a short run can't pass its max off as a tail. Each section is measured against\n\
