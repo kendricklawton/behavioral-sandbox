@@ -365,10 +365,16 @@ struct BaseMount {
     read_only: bool,
 }
 
-/// The read-only base bind mount a jailed overlay boot stages into its chroot, located in
-/// `/proc/self/mountinfo` by its `.../firecracker/<id>/root/rootfs.ext4` mount point (field 5). The
-/// per-mount options (field 6) carry `ro` for a read-only mount.
+/// The read-only base bind mount **this test's** jailed overlay boot staged into its chroot,
+/// located in `/proc/self/mountinfo` by its `.../firecracker/<id>/root/rootfs.ext4` mount point
+/// (field 5). The per-mount options (field 6) carry `ro` for a read-only mount.
+///
+/// Scoped to this process's own workdir (`/ekvm-<ourpid>-`), not the first shape-matching line
+/// host-wide: mountinfo is host-global, and a bind mount leaked by an earlier killed run satisfies
+/// the shape while pinning the *pre-rebuild* artifact's deleted inode, which failed the inode
+/// assertion against a boot that was doing everything right.
 fn jailed_base_mount() -> Option<BaseMount> {
+    let ours = format!("/ekvm-{}-", std::process::id());
     let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     for line in info.lines() {
         let fields: Vec<&str> = line.split(' ').collect();
@@ -376,7 +382,10 @@ fn jailed_base_mount() -> Option<BaseMount> {
             continue;
         }
         let mount_point = fields[4];
-        if !(mount_point.contains("/firecracker/") && mount_point.ends_with("/root/rootfs.ext4")) {
+        if !(mount_point.contains(&ours)
+            && mount_point.contains("/firecracker/")
+            && mount_point.ends_with("/root/rootfs.ext4"))
+        {
             continue;
         }
         let read_only = fields[5].split(',').any(|o| o == "ro");

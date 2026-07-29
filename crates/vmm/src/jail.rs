@@ -714,28 +714,38 @@ mod tests {
 
     #[test]
     fn a_failed_bind_leaves_no_mount_behind() {
-        // Unprivileged, `mount --bind` fails outright, which is the failure path that must still
-        // detach: a deadline kill can land after the child's `mount(2)` completed, and the caller
-        // records a mount for teardown only on `Ok`, so an undetached one would EBUSY the scratch
-        // reclaim. Root would actually bind here, so the test asserts on the mountinfo either way.
+        // The failure path that must still detach: a deadline kill can land after the child's
+        // `mount(2)` completed, and the caller records a mount for teardown only on `Ok`, so an
+        // undetached one would EBUSY the scratch reclaim.
+        //
+        // The *reason* the bind fails has to differ by privilege, or the test stops testing a
+        // failure. Unprivileged, binding onto a real file is EPERM. As root that bind would
+        // **succeed**, and the leak assertion below would fire on a mount the test itself made, so
+        // root gets a destination that does not exist (ENOENT for everyone). Either way the branch
+        // under test is "mount returned non-zero", and either way nothing may be left mounted.
         let dir = std::env::temp_dir().join(format!("ekvm-bindro-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        let src = dir.join("src");
         std::fs::write(&src, b"base").expect("write src");
-        std::fs::write(&dst, b"").expect("write dst");
+        let dst = if test_support::have_real_root() {
+            dir.join("no-such-dst")
+        } else {
+            let dst = dir.join("dst");
+            std::fs::write(&dst, b"").expect("write dst");
+            dst
+        };
 
-        let result = bind_ro(
+        let err = bind_ro(
             &src,
             &dst,
             Instant::now() + std::time::Duration::from_secs(5),
+        )
+        .expect_err("this bind cannot succeed on either host");
+        let msg = err.to_string();
+        assert!(
+            !msg.trim_end().ends_with(':'),
+            "a failed bind must name a cause, from mount's stderr or its status: {msg}"
         );
-        if let Err(e) = &result {
-            let msg = e.to_string();
-            assert!(
-                !msg.trim_end().ends_with(':'),
-                "a failed bind must name a cause, from mount's stderr or its status: {msg}"
-            );
-        }
         let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
         let leaked = mounts
             .lines()
