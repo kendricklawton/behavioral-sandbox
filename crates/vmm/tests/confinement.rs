@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use vmm::{sweep_orphans, BootConfig, Vm, VMM_PIDS_MAX};
+use vmm::{sweep_orphans, BootConfig, Vm, VmmError, VMM_PIDS_MAX};
 
 use common::{
     cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
@@ -1050,4 +1050,95 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
     attacker
         .shutdown()
         .expect("attacker shutdown should succeed");
+}
+
+/// A private tmpfs mounted with the given options, unmounted and removed on drop, so a failing
+/// assertion can't leak a mount on the host (the no-leak rule applies to the tests too).
+struct FlaggedMount {
+    dir: PathBuf,
+}
+
+impl FlaggedMount {
+    /// Mounting over the point replaces the flags in effect there, so the host's own `/tmp`
+    /// posture (`nodev` on systemd, `noexec` on hardened baselines) is irrelevant underneath.
+    // A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
+    fn tmpfs(name: &str, options: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("ekvm-{name}-{}", std::process::id()));
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            panic!("create the mount point {}: {e}", dir.display());
+        }
+        let status = match std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", options, "tmpfs"])
+            .arg(&dir)
+            .status()
+        {
+            Ok(s) => s,
+            Err(e) => panic!("run mount: {e}"),
+        };
+        assert!(
+            status.success(),
+            "mount -t tmpfs -o {options} at {} must succeed under root",
+            dir.display()
+        );
+        Self { dir }
+    }
+
+    fn path(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for FlaggedMount {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("umount").arg(&self.dir).status();
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
+#[test]
+#[ignore = "needs real root (mounts private tmpfs instances; run via `cargo xtask ci-privileged`)"]
+fn nodev_and_noexec_scratch_mounts_refuse_a_jailed_boot() {
+    // The unit fixtures prove the mountinfo *parse* against strings the test wrote; this proves
+    // the chain against the real kernel: a genuine `nodev` / `noexec` mount, read back from the
+    // live `/proc/self/mountinfo`, refuses the jailed boot with the variant naming that flag,
+    // before any VMM is spawned or the scratch dir is touched.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping nodev_and_noexec_scratch_mounts_refuse_a_jailed_boot: needs real root \
+             (euid 0, initial userns)"
+        );
+        return;
+    }
+    for options in ["nodev", "noexec"] {
+        let mount = FlaggedMount::tmpfs(&format!("scratch-{options}"), options);
+        let mut cfg = jailed_agent_config();
+        cfg.scratch_dir = mount.path().to_path_buf();
+        let err = match Vm::boot(cfg) {
+            Err(e) => e,
+            Ok(_vm) => panic!("a jailed boot on a {options} scratch mount must be refused"),
+        };
+        let named_the_flag = match (options, &err) {
+            ("nodev", VmmError::ScratchDirNodev(p)) | ("noexec", VmmError::ScratchDirNoexec(p)) => {
+                p == mount.path()
+            }
+            _ => false,
+        };
+        assert!(
+            named_the_flag,
+            "a {options} scratch mount must refuse with the variant naming the flag and the \
+             offending path {}; got: {err}",
+            mount.path().display()
+        );
+        // Refused before anything was staged: the scratch mount is still empty, so no VMM, no
+        // rootfs copy, and no chroot ever touched it.
+        let leftovers: Vec<_> = std::fs::read_dir(mount.path())
+            .expect("read the scratch mount back")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "the refusal must precede staging; scratch holds {leftovers:?}"
+        );
+    }
 }
