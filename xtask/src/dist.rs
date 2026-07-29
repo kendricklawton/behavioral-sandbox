@@ -481,6 +481,47 @@ mod tests {
         );
     }
 
+    /// Same drift guard, for the **third** copy of the Firecracker pin: the container image's
+    /// `FC_VERSION` build arg. The install.sh/doctor.rs pair drifted for 21 months before their
+    /// test existed; this file was missed in that sweep and sat on v1.9.1 (below the supported
+    /// floor, so the image bundled a VMM upstream no longer patches) until 2026-07-29.
+    #[test]
+    fn containerfile_firecracker_is_the_pinned_series() {
+        let repo = workspace_root();
+        let container = std::fs::read_to_string(repo.join("Containerfile")).expect("Containerfile");
+        let spawn = std::fs::read_to_string(repo.join("crates/vmm/src/spawn.rs")).unwrap();
+
+        let fc_ver = container
+            .lines()
+            .find_map(|l| l.strip_prefix("ARG FC_VERSION=v"))
+            .expect("Containerfile single-sources its release as ARG FC_VERSION=vX.Y.Z");
+        let pinned_series = spawn
+            .lines()
+            .find(|l| l.contains("PINNED_FC_VERSION: (u64, u64)"))
+            .and_then(|l| l.rsplit('(').next())
+            .map(|t| {
+                t.trim_end_matches(|c: char| !c.is_ascii_digit())
+                    .replace(", ", ".")
+            })
+            .expect("spawn.rs declares PINNED_FC_VERSION: (u64, u64)");
+        assert!(
+            fc_ver == pinned_series || fc_ver.starts_with(&format!("{pinned_series}.")),
+            "Containerfile bundles Firecracker v{fc_ver}, but the engine pins the v{pinned_series} \
+             series: the image would ship a VMM the engine does not test"
+        );
+
+        // The sha is the download's integrity contract; a version bump that forgets it downloads
+        // one release and verifies another, which the build then fails on, but say so here first.
+        let sha = container
+            .lines()
+            .find_map(|l| l.strip_prefix("ARG FC_SHA256="))
+            .expect("Containerfile pins the tarball as ARG FC_SHA256=<64 hex>");
+        assert!(
+            sha.len() == 64 && sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "FC_SHA256 is not a sha256: {sha:?}"
+        );
+    }
+
     /// Same drift guard, for the eBPF build toolchain. Unlike `aya` (a Cargo dependency, pinned by
     /// `Cargo.lock`), the nightly compiler and `bpf-linker` are installed **out of band**, so each
     /// needs its own pin, and each pin has copies a workflow file cannot resolve at runtime: a

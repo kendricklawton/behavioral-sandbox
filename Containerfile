@@ -1,6 +1,8 @@
-# The engine as a container image.: a runtime-only image assembled FROM a `cargo
-# xtask dist` stage (build outside, package inside), bundling the sha-pinned Firecracker v1.9 the
-# engine drives. The KVM boundary cannot come from the image: run it with the host's /dev/kvm.
+# The engine as a container image: a runtime-only image assembled FROM a `cargo
+# xtask dist` stage (build outside, package inside), bundling the sha-pinned Firecracker release
+# the engine drives (the `FC_VERSION` ARG below; a gate test holds it to the engine's own pin,
+# because this file is a third copy of that pin and the other two once drifted for 21 months).
+# The KVM boundary cannot come from the image: run it with the host's /dev/kvm.
 #   cargo xtask dist
 #   docker build -f Containerfile --build-arg DIST=dist/ekvm-<ver>-x86_64-linux -t ekvm:<ver> .
 #   docker run --rm ekvm:<ver>                                # doctor: what this host can do
@@ -12,8 +14,8 @@
 
 FROM ubuntu:24.04 AS firecracker
 # Pinned like every upstream input: the sha256 is the contract, the URL is replaceable.
-ARG FC_VERSION=v1.9.1
-ARG FC_SHA256=88d89221063ee4021b539a4fea4567642f4eecfb5d52eec04cd3390833f7f3de
+ARG FC_VERSION=v1.16.1
+ARG FC_SHA256=382a02a869e4d6d5cb14c40577f9545e8458021ea8b0b2d3fc10ec14d9c242e6
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && curl -fsSL -o /tmp/fc.tgz \
        "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz" \
@@ -22,8 +24,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && install -m 0755 "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker \
     && install -m 0755 "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer
 
-# The runtime base must carry a glibc at least as new as the dist builder's (the binary is
-# glibc-linked); ubuntu:24.04 matches the release builder and the tested-distro line.
+# The ekvm binary is static musl (`cargo xtask dist` verifies it), so the base is not chosen for
+# its libc: it supplies the tool userspace the engine shells out to (iproute2, e2fsprogs,
+# util-linux). Which distro provides those inside the image is a pinned, closed detail of this
+# file, not a host assumption; the engine itself probes capabilities, never distro identity.
 FROM ubuntu:24.04
 # iproute2: the tap/netns shell-outs; e2fsprogs: output-image build + read-after-death recovery.
 RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fsprogs \
