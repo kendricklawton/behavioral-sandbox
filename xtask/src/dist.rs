@@ -20,6 +20,19 @@ use crate::{build_probes, cargo, guest_rootfs_path, kernel_path, workspace_root}
 /// `EKVM_PROBES_OBJECT`, which `install.sh` and the container image point here).
 const PROBES_NAME: &str = "probes";
 
+/// The target the **shipped** binary is built for: static musl, so the package carries no libc
+/// dependency at all.
+///
+/// A glibc build binds to the build host's symbol versions, and glibc is backward but **not
+/// forward** compatible: a binary built on Ubuntu 24.04 (glibc 2.39) will not start on RHEL 9
+/// (2.34) or Ubuntu 22.04 (2.35), failing before `main()` with a loader error that says nothing
+/// about this engine. Building on the oldest supported glibc would fix it by making the CI runner
+/// the compatibility floor; linking musl statically removes the floor instead, which is the same
+/// move `guest-agent` already makes for the same reason (nothing to link against at the far end).
+///
+/// Dev builds stay native: this is the package's target, not the workspace's.
+const DIST_TARGET: &str = "x86_64-unknown-linux-musl";
+
 /// `cargo xtask dist [--version V]`: build binary + artifacts, stage, checksum, tar.
 pub(crate) fn dist(version: Option<String>) -> Result<()> {
     // The supported platform is x86_64; a package assembled elsewhere would carry
@@ -61,14 +74,28 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         );
     }
 
-    println!("\n== 4/5  build the release binary ==");
-    cargo(&["build", "--release", "--locked", "-p", "ekvm"])?;
+    println!("\n== 4/5  build the release binary (static, {DIST_TARGET}) ==");
+    cargo(&[
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "ekvm",
+        "--target",
+        DIST_TARGET,
+    ])
+    .with_context(|| {
+        format!(
+            "static build failed. The target has to be installed: `rustup target add {DIST_TARGET}`"
+        )
+    })?;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace_root().join("target"), PathBuf::from);
-    let bin = target.join("release/ekvm");
+    let bin = target.join(DIST_TARGET).join("release/ekvm");
     if !bin.is_file() {
         bail!("built binary {} not found", bin.display());
     }
+    crate::guest_bins::verify_static(&bin, "ekvm host binary")?;
 
     println!("\n== 5/5  stage + checksum + tar ==");
     let dist_dir = workspace_root().join("dist");

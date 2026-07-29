@@ -124,7 +124,7 @@ fn ensure_guest_target() -> Result<()> {
 /// so the guarantee matches the claim: `readelf -d` finds no `(NEEDED)` shared objects, **and**
 /// `readelf -l` finds no `INTERP` program header, a fully static binary needs no runtime loader, so
 /// a static-PIE (no `NEEDED` but with an interpreter) is also rejected.
-fn verify_static(bin: &Path, what: &str) -> Result<()> {
+pub(crate) fn verify_static(bin: &Path, what: &str) -> Result<()> {
     // `readelf -d` (dynamic section): a static binary lists no `(NEEDED)` shared objects.
     let Some(dynamic) = readelf(bin, "-d")? else {
         // No `readelf` (binutils) on this host: don't fake a guarantee we couldn't check. (A
