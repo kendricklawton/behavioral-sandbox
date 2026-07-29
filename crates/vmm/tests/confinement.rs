@@ -19,9 +19,9 @@ use vmm::{sweep_orphans, BootConfig, Vm, VMM_PIDS_MAX};
 
 use common::{
     cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
-    jailed_agent_config,
+    jailed_agent_config, jailed_overlay_config,
 };
-use test_support::{process_threads, LimitCgroup};
+use test_support::{process_threads, LimitCgroup, ScratchDir as TmpDir};
 
 /// The env var that turns `helper_boot_and_park` from a no-op into the crash-test victim. Without
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
@@ -51,6 +51,333 @@ fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// A unique scratch dir **under the host's configured scratch base**, reclaimed on drop.
+///
+/// Deliberately not [`TmpDir::created`], which uses `std::env::temp_dir()`: `/tmp` is `nodev` on a
+/// systemd host, and the jailer cannot make its chroot's device nodes there. `ci-privileged.sh`
+/// exports `EKVM_SCRATCH_DIR` for exactly this reason, so a test that hard-codes `/tmp` throws that
+/// away and refuses the boot before a VMM ever spawns.
+///
+/// This nesting also puts the dir where the engine's orphan sweep **does not look** (the tag makes
+/// the name miss the `ekvm-<pid>-<seq>` workdir pattern the sweep scans for), so stale residue from
+/// a killed prior run is this helper's own problem: it reclaims every same-tag sibling up front,
+/// detaching any mounts a dead run's chroot left first, since `remove_dir_all` alone would `EBUSY`
+/// on a leaked bind mount and silently leave it to poison mountinfo for every later test.
+// A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
+fn scratch_under(base: &Path, tag: &str) -> TmpDir {
+    let prefix = format!("ekvm-{tag}-");
+    if let Ok(entries) = std::fs::read_dir(base) {
+        for stale in entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with(&prefix))
+            })
+        {
+            detach_mounts_under(&stale);
+            let _ = std::fs::remove_dir_all(&stale);
+        }
+    }
+    let dir = base.join(format!("ekvm-{tag}-{}", std::process::id()));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        panic!("create the test scratch dir {}: {e}", dir.display());
+    }
+    TmpDir::adopt(dir)
+}
+
+/// Lazy-detach every mount under `dir`, deepest first, mirroring the engine's own sweep helper
+/// (`sweep.rs`'s `detach_mounts_under`, which is not public API): a dead run's chroot bind mount
+/// otherwise blocks reclamation and, worse, keeps satisfying mountinfo scans with a stale inode.
+fn detach_mounts_under(dir: &Path) {
+    let Ok(info) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return;
+    };
+    let mut targets: Vec<&str> = info
+        .lines()
+        .filter_map(|l| l.split(' ').nth(4))
+        .filter(|mp| Path::new(mp).starts_with(dir))
+        .collect();
+    targets.sort_by_key(|mp| std::cmp::Reverse(mp.len()));
+    for mp in targets {
+        let _ = std::process::Command::new("umount")
+            .arg("-l")
+            .arg(mp)
+            .status();
+    }
+}
+
+/// The pid of the live VMM belonging to the boot staged under `scratch`, or `None` while none is
+/// running. `Vm::boot` hands back no pid until it returns, so a test that must act *during* a boot
+/// has to find the VMM from outside.
+///
+/// Keyed on the **per-VM cgroup**, the one handle both boot shapes share: unjailed,
+/// `VmLifetime::adopt` enrolls the VMM in a cgroup named after its workdir; jailed, the jailer does
+/// its own placement and the jail id *is* that same workdir name, so the name turns up in
+/// `/proc/<pid>/cgroup` either way.
+///
+/// Every host-path match fails for a jailed VMM, which is what a whole privileged run was spent
+/// learning: the jailer `exec`s Firecracker with its own argv (no `--api-sock`, no host paths), and
+/// its chroot leaves `/proc/<pid>/root` naming nothing this process can match either. The cgroup is
+/// the engine's own bookkeeping and survives all of it. Deliberately not gated on `comm`: a per-VM
+/// cgroup holds nothing else, and the jailed process's name is one more thing not worth assuming.
+fn vmm_pid_under(scratch: &Path) -> Option<u32> {
+    let needle = format!("/{}", per_vm_workdir_name(scratch)?);
+    std::fs::read_dir("/proc")
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|e| e.file_name().to_string_lossy().parse::<u32>().ok())
+        .find(|pid| {
+            std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+                .map(|c| c.contains(&needle))
+                .unwrap_or(false)
+        })
+}
+
+/// The name of the single per-VM workdir the driver laid down under `scratch` (`ekvm-<pid>-<seq>`),
+/// which is both the lifetime-cgroup name and the jail id. `None` before the boot has created it.
+fn per_vm_workdir_name(scratch: &Path) -> Option<String> {
+    std::fs::read_dir(scratch)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|name| name.starts_with("ekvm-"))
+}
+
+/// The API socket of the boot staged under `scratch`, found by walking the tree rather than by
+/// parsing argv: unjailed it is `<workdir>/fc.sock`, jailed it is
+/// `<workdir>/firecracker/<id>/root/run/firecracker.socket`, and only the walk covers both without
+/// re-deriving the jailer's layout here.
+fn api_socket_under(dir: &Path, depth: u32) -> Option<PathBuf> {
+    if depth == 0 {
+        return None;
+    }
+    for entry in std::fs::read_dir(dir).ok()?.filter_map(Result::ok) {
+        let path = entry.path();
+        let name = entry.file_name();
+        if name == "fc.sock" || name == "firecracker.socket" {
+            return Some(path);
+        }
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            if let Some(hit) = api_socket_under(&path, depth - 1) {
+                return Some(hit);
+            }
+        }
+    }
+    None
+}
+
+/// Boot `cfg` on a background thread and `kill -9` its Firecracker while the driver is waiting for
+/// the guest to reach userspace, returning the boot's error.
+///
+/// Landing in that specific wait is made deterministic rather than raced: the caller sets a
+/// userspace marker the guest can never print, so the driver stays in `await_userspace` for its whole
+/// boot deadline. The only timing left is letting the driver finish its API calls, which take
+/// milliseconds over a unix socket.
+/// The boot thread, joined on drop. What that buys: a panic anywhere in the helper (every one of its
+/// diagnostic paths) unwinds through this guard **before** the scratch `TmpDir` drops, so the boot
+/// runs to its own deadline and `abort()` unmounts the chroot's binds. Without it, a panicking test
+/// abandoned the mid-boot thread, the process exited without teardown, and the leaked bind mount
+/// both defeated `TmpDir`'s `remove_dir_all` (EBUSY) and poisoned mountinfo for every later run:
+/// `jailed_overlay_is_dense_and_base_is_untouched` failed against a stale mount pinning a rebuilt
+/// artifact's deleted inode. The cost is that a *failing* run waits out the boot deadline; a leak
+/// that outlives the process is worse than a slow failure.
+struct BootJoin(Option<std::thread::JoinHandle<Result<vmm::RunningVm, vmm::VmmError>>>);
+
+impl BootJoin {
+    fn take(&mut self) -> Option<std::thread::JoinHandle<Result<vmm::RunningVm, vmm::VmmError>>> {
+        self.0.take()
+    }
+    fn is_finished(&self) -> bool {
+        self.0
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+    }
+}
+
+impl Drop for BootJoin {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+// A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
+fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> vmm::VmmError {
+    let scratch = cfg.scratch_dir.clone();
+    let mut booting = BootJoin(Some(std::thread::spawn(move || Vm::boot(cfg))));
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let sock = loop {
+        if let Some(sock) = api_socket_under(&scratch, 8) {
+            break sock;
+        }
+        // A boot that has already finished can never produce the VMM this test is waiting for, and
+        // its error says why. Reporting a bare "nothing came up" here instead cost a 20-second wait
+        // and pointed at the wrong thing (the real cause was a `nodev` scratch dir refused before
+        // any spawn), so surface the boot's own words.
+        if booting.is_finished() {
+            panic_with_boot_outcome(booting.take());
+        }
+        if Instant::now() >= deadline {
+            panic!("no firecracker came up under {}", scratch.display());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    // The API socket answering means the VMM is past process startup; the configuration PUTs and
+    // InstanceStart follow, and only then does the driver begin waiting on the console.
+    while Instant::now() < deadline && std::os::unix::net::UnixStream::connect(&sock).is_err() {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
+    let pid = match vmm_pid_under(&scratch) {
+        Some(pid) => pid,
+        // Two unrelated failures used to wear the same face here ("the VMM died on its own"), which
+        // is a guess dressed as a fact. Separate them: a boot that has already returned says what
+        // went wrong in its own error, while a boot still in progress means this test cannot *see*
+        // its VMM, which is a defect in the `/proc` match and not in the engine at all.
+        None if booting.is_finished() => panic_with_boot_outcome(booting.take()),
+        None => panic!(
+            "the boot is still running, but no firecracker under {} matched: this test cannot \
+             find the VMM it means to kill, so the `/proc` lookup is wrong, not the engine",
+            scratch.display()
+        ),
+    };
+    let _ = std::process::Command::new("sh")
+        .args(["-c", &format!("kill -9 {pid}")])
+        .status();
+    let Some(handle) = booting.take() else {
+        panic!("the boot thread was already joined");
+    };
+
+    match handle.join() {
+        Ok(Ok(_vm)) => panic!("a VMM killed mid-boot must not yield a running VM"),
+        Ok(Err(e)) => e,
+        Err(_) => panic!("the boot thread panicked"),
+    }
+}
+
+/// Panic with what the boot **actually did**, for the points where this test has run out of VMM to
+/// act on. Always more informative than the observation that prompted it: the boot's own typed error
+/// names the cause, where "no VMM here" only names the symptom.
+// A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
+fn panic_with_boot_outcome(
+    booting: Option<std::thread::JoinHandle<Result<vmm::RunningVm, vmm::VmmError>>>,
+) -> ! {
+    match booting.map(std::thread::JoinHandle::join) {
+        Some(Ok(Err(e))) => panic!("the boot failed before a VMM could be killed: {e}"),
+        Some(Ok(Ok(_))) => panic!(
+            "the boot reached userspace on a marker no guest can print, so the driver never \
+             waited where this test kills it"
+        ),
+        Some(Err(_)) => panic!("the boot thread panicked"),
+        None => panic!("the boot thread was already joined"),
+    }
+}
+
+/// A marker no guest prints, so the driver waits out its whole boot deadline in `await_userspace`.
+const UNREACHABLE_MARKER: &str = "ekvm-marker-that-no-guest-will-ever-print";
+
+#[test]
+#[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
+fn a_vmm_killed_while_awaiting_userspace_leaks_nothing() {
+    // The failure branch that has never run against a VMM that died on its own. Both boot-stage
+    // waits check `exited()` before their deadline, and this is the later one: past the API socket,
+    // past InstanceStart, waiting on the guest. It is the path that routes an error through
+    // `Spawned::abort`'s whole cleanup chain, so what matters is not the message but that the
+    // scratch dir goes with it. A leak here is silent and permanent: nothing reclaims it until the
+    // next `sweep_orphans`, and one accumulates per killed boot.
+    let mut cfg = config();
+    // A private dir *under* the configured base, not a replacement for it: the base is what
+    // `EKVM_SCRATCH_DIR` points off a `nodev` `/tmp`, and the per-test dir is only there to make the
+    // `/proc` match below unambiguous.
+    let scratch = scratch_under(&cfg.scratch_dir, "killboot");
+    cfg.scratch_dir = scratch.path().to_path_buf();
+    cfg.userspace_marker = UNREACHABLE_MARKER.to_string();
+    cfg.boot_timeout = Duration::from_secs(60);
+
+    let err = kill_the_vmm_awaiting_userspace(cfg);
+    let msg = err.to_string();
+    assert!(
+        msg.contains("exited before userspace"),
+        "a VMM killed after InstanceStart is reported as a death, not as a boot timeout: {msg}"
+    );
+
+    let leftovers: Vec<_> = std::fs::read_dir(scratch.path())
+        .expect("the scratch base survives; only the per-VM dir under it should go")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "abort must reclaim the killed VM's scratch dir; found {leftovers:?}"
+    );
+    assert!(
+        vmm_pid_under(scratch.path()).is_none(),
+        "no firecracker may survive the boot that failed"
+    );
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
+fn a_jailed_vmm_killed_mid_boot_leaves_no_mounts_behind() {
+    // The jailed half, which is where a mid-boot death can leak something worse than a directory:
+    // the chroot's bind mounts. `remove_dir_all` cannot remove a busy mount point, so an unmounted
+    // leftover would both strand the dir and keep the shared base pinned.
+    //
+    // The mountinfo assertion below is the direct diagnosis but not the load-bearing one: a scratch
+    // base on a non-shared mount takes the copy fallback instead of the bind, and then there is no
+    // mount to leak and that check passes vacuously. The empty-scratch assertion holds either way,
+    // and is what a leaked mount would actually break.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping a_jailed_vmm_killed_mid_boot_leaves_no_mounts_behind: needs real root \
+             (euid 0, initial userns)"
+        );
+        return;
+    }
+    let mut cfg = jailed_overlay_config();
+    // The jailer makes device nodes in its chroot, so this dir must inherit the configured base
+    // (`EKVM_SCRATCH_DIR`, off `nodev`). Hard-coding `/tmp` here is what failed the first run.
+    let scratch = scratch_under(&cfg.scratch_dir, "killjail");
+    cfg.scratch_dir = scratch.path().to_path_buf();
+    cfg.userspace_marker = UNREACHABLE_MARKER.to_string();
+    cfg.boot_timeout = Duration::from_secs(60);
+
+    let err = kill_the_vmm_awaiting_userspace(cfg);
+    assert!(
+        err.to_string().contains("exited before userspace"),
+        "got {err}"
+    );
+
+    let base = scratch.path().to_string_lossy().to_string();
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let leaked: Vec<_> = mounts
+        .lines()
+        .filter(|l| {
+            l.split(' ')
+                .nth(4)
+                .is_some_and(|target| target.starts_with(&base))
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "the chroot's binds must be unmounted when a jailed boot dies: {leaked:?}"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(scratch.path())
+        .expect("the scratch base survives")
+        .filter_map(Result::ok)
+        .map(|e| e.file_name())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "abort must reclaim the killed jailed VM's chroot; found {leftovers:?}"
+    );
 }
 
 /// The crash-test victim, run **as a subprocess** by `driver_death_cannot_leak_a_vm`: boot a VM,
