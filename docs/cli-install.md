@@ -1,5 +1,7 @@
 # Installation
 
+{{#include ./status.md:banner}}
+
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
 install a packaged release (tarball / `install.sh` / container). Pre-rename releases
 are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setup` (or
@@ -151,8 +153,13 @@ this table as orientation.
 
 ## Install from a release package
 
-Every release ships a release package tarball per platform plus `SHA256SUMS` and its detached
-ed25519 signature `SHA256SUMS.sig`, assembled by `cargo xtask dist`:
+> **No release has been published yet.** Version `0.0.0`, no tag, no artifacts: the URLs in this
+> section do not resolve today. It describes the intended install path so it can be reviewed and
+> tested before the first tag; until then, build from source (above). See
+> [Status and verification record](./status.md).
+
+Each release is intended to ship a release package tarball per platform plus `SHA256SUMS` and its
+detached ed25519 signature `SHA256SUMS.sig`, assembled by `cargo xtask dist`:
 the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file `MANIFEST.sha256` inside. Two first-class installation methods are supported:
 
 ### Option A: the installer script (`curl | sh`)

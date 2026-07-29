@@ -1,5 +1,7 @@
 # Security
 
+{{#include ./status.md:banner}}
+
 The engine's whole reason to exist is running code you don't trust and getting a truthful account
 of what it did. This page states what is trusted, what counts as a security bug (and what does
 not), how to report one, and what happens after a report. The reporting mechanism also lives
@@ -54,15 +56,15 @@ The trust boundary of this scheme:
 
 ## What counts as a security bug
 
-Given those guarantees, a security bug is anything that breaks one of them:
+Given those aims, a security bug is anything that breaks one of them:
 
 - A guest escaping or weakening the KVM/jailer isolation boundary.
 - A guest reaching the network past a deny-by-default (or explicitly configured) egress policy.
 - A guest evading, disabling, or forging the host-side observation (the eBPF probes or the records
   they produce).
 - A signed record that verifies **after** being altered, or a forged signature accepted by
-  `ekvm verify` without the host key (the record-integrity guarantee).
-- A hostile guest causing a host panic, hang, or resource leak through the driver's public API.
+  `ekvm verify` without the host key (the record-integrity aim).
+- A hostile guest causing a host panic, hang, or resource leak through the driver's public API. The engine is written against a no-panic rule on the host path; a case that breaks it is a bug worth reporting, not an expected limitation.
 - Injected secrets (`--env` values, injected file contents) appearing in logs, errors, or the
   serial console.
 

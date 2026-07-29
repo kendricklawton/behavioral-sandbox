@@ -1,19 +1,44 @@
 # Architecture and design
 
+{{#include ./status.md:banner}}
+
 ## Scope
 
 ### What this is
 
-`eKVM` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a **Firecracker** microVM (hardware isolation via Linux KVM); **host-side eBPF** (`aya`) observes and enforces what it does, syscalls, network flows, resource accounting, from *outside* the guest, where untrusted code cannot see or subvert it.
+`eKVM` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a
+**Firecracker** microVM (hardware isolation via Linux KVM). **Host-side eBPF** (`aya`) observes and
+enforces what it does, syscalls, network flows, resource accounting, from the host side of the KVM
+boundary: the programs are loaded by a host process and attached to host-kernel hooks. The guest
+drives four crossings, enumerated in the [threat model](./threat-model.md), and none of them names a
+BPF program or map.
 
-Every execution yields a tamper-resistant, host-observed, host-signed **audit log** of execution events.
+Every execution yields a host-observed, host-signed **audit log** of execution events. What a
+signature does and does not establish is stated in
+[Record integrity beyond the guest](./threat-model.md#record-integrity-beyond-the-guest).
 
-### Core properties
+### Design rules
 
-1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM; the security boundary is hardware (CPU/KVM), not guest-side software.
-2. **Observe & enforce from the host.** Visibility and policy live in host-side eBPF that the guest cannot reach. In-guest agents exist for convenience (exec/IO framing), never for security.
-3. **Engine, not platform.** A self-hostable runtime + a clean driver API. Multi-tenancy auth, billing, fleet scheduling, and dashboards belong to the hoster.
-4. **Empirical benchmarks.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are measured via percentiles.
+These are the rules the project holds itself to, stated so a change that breaks one is recognisable
+as a design error rather than a trade-off. They describe intent and the mechanism serving it, not a
+verified outcome.
+
+1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. A change that
+   moves the boundary into guest-side software is a design error, not an optimisation, and a
+   shared-kernel shortcut taken to simplify the engine is the same error.
+2. **Observe and enforce from the host.** Visibility and policy belong in host-side eBPF, attached
+   to host-kernel hooks. The in-guest agent carries exec and IO framing; a change that makes it
+   responsible for containing the guest is a design error.
+3. **Deny by default.** A sandbox with no explicit policy is configured with no network route out
+   and minimal capability, and each allowance is recorded in the audit log.
+4. **Engine, not platform.** A self-hostable runtime and a driver API. Tenancy, auth, billing, fleet
+   scheduling, and dashboards belong to whoever hosts the engine.
+5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
+   broken channel should surface as a typed error. This is what the code is written against and what
+   the confinement suite exercises; it is an aim, not a proven property.
+6. **Measure rather than assert.** Boot, snapshot-restore, memory-sharing, and probe overhead are
+   reported as nearest-rank percentiles with the host and date they were taken on. Where a number
+   cannot be defended, it is withdrawn rather than published; see [Benchmarks](./benchmarks.md).
 
 ## Host integration
 
@@ -141,16 +166,26 @@ One Cargo workspace, split along the isolation/observability/driver boundaries:
 ## Key architectural decisions
 
 ### 1. Hardware isolation over software containers
-Untrusted code goes inside a Firecracker microVM backed by KVM, never behind a shared-kernel sandbox: a guest kernel panic or compromise cannot compromise the host kernel.
+Untrusted code goes inside a Firecracker microVM backed by KVM rather than a shared-kernel sandbox.
+The guest runs against its own kernel, so a guest kernel panic or compromise is contained by the
+CPU's virtualization boundary rather than by host-side software. That boundary is KVM's to enforce;
+the [threat model](./threat-model.md#assumptions-and-residual-risk) lists it as an assumption this
+project depends on rather than a property it establishes.
 
 ### 2. Host-side eBPF observability & policy
-An in-guest monitoring agent falls with the guest. All security-relevant observation and enforcement therefore lives in host-side eBPF, tracepoints and `tc` classifiers attached from the host kernel, out of the guest's reach.
+An in-guest monitoring agent falls with the guest. Security-relevant observation and enforcement
+therefore live in host-side eBPF: tracepoints and `tc` classifiers loaded by a host process and
+attached to host-kernel hooks, outside the guest's address space and outside any namespace the guest
+can enter.
 
 ### 3. Jailed execution by default
 Firecracker instances are launched via the `jailer` helper, which places the process inside a restricted chroot, drops privileges to an unprivileged user/group, applies seccomp filters, and assigns cgroup v2 limits before executing guest code.
 
 ### 4. Ephemeral sandbox sessions & snapshots
-Each execution session maps to an isolated microVM instance. Pre-warmed pools and snapshot restore start a run in milliseconds (measured percentiles in [Benchmarks](./benchmarks.md)) without sacrificing per-run isolation.
+Each execution session maps to its own microVM instance. Pre-warmed pools and snapshot restore
+shorten start-up by reusing a snapshot rather than by sharing a VM between runs, so each run still
+gets its own instance. Latency figures are withdrawn pending a re-measurement on a verified host;
+see [Benchmarks](./benchmarks.md).
 
 ### 5. Host-signed audit records
 Audit records captured by `probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. The host signs each finalized record with a host-held ed25519 key, so alteration after the run is detectable off-host (`ekvm verify`).

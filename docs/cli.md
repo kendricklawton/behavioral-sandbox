@@ -1,5 +1,7 @@
 # Using the `ekvm` CLI
 
+{{#include ./status.md:banner}}
+
 `ekvm` is the reference embedder of the engine: the whole sandbox lifecycle, open (confined by
 default), exec with inputs, collect artifacts, close, in one command. If you haven't set up the
 host and built the guest artifacts yet, do [Installation](./cli-install.md) first.
@@ -35,7 +37,7 @@ ekvm run [FLAGS] -- <cmd> [args…]
 | `--demo-boot` | Just boot a microVM and read its console, no command. |
 | `--unjailed` | Run the VMM without the jailer (see above). Default is confined. |
 | `--require-limits` | Refuse the boot if the cpu/memory cgroup caps can't be applied, instead of the default warn-and-boot-uncapped. Makes the resource envelope load-bearing; needs the jailer (so not with `--unjailed`) and delegated cgroup v2 controllers. Also `EKVM_REQUIRE_LIMITS` / `.ekvm.toml`. |
-| `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the engine never logs them. |
+| `--env KEY=VALUE` | Set an environment variable on the guest command (repeatable). Values are treated as secrets: the code paths that log or render a run omit them. |
 | `--put FILE` | Inject a host file into the run's working directory (repeatable; guest name = basename). |
 | `--get PATH` | Fetch a file from the run's working directory afterwards (repeatable; written under the current directory at the same relative path). Deny-by-default: only what you asked for is written. |
 | `--vcpus N` | Guest vCPUs (default 1). Firecracker's `vcpu_count` domain: **1 or an even number, up to 32**. Zero, an odd count above 1, or an over-cap value is a typed error at parse, never a silent clamp. |
@@ -192,8 +194,8 @@ must not read a security control out of whatever directory it was started in.
 ## Watching a run from the host
 
 `--trace`, `--record`, and `--watch` bind the host-side eBPF probes to the sandbox at launch and
-fuse what they saw into one per-run audit record, observed from *outside* the guest, where the
-code can't forge or disable it.
+fuse what they saw into one per-run audit record, observed from the host side of the KVM boundary:
+the probes are loaded by a host process and attached to host-kernel hooks.
 
 ```console
 # Watch it live, read the trail after, keep the machine record + the model-legible summary:
@@ -244,8 +246,9 @@ ekvm run --unjailed --net \
 ```
 
 Each `--allow` is `IP[/CIDR][:PORT][/PROTO]` (a bare `IP` is a single-host `/32`, any port, any
-protocol). The allowances build a deny-by-default egress policy that is **armed before the tap goes
-live**, so there is no window in which the guest's first packet slips past unpoliced. Every allowance
+protocol). The allowances build a deny-by-default egress policy: the policy maps are populated first, and the
+classifiers are attached to the tap only afterwards, so the programs go live against maps that
+already hold the run's rules. Every allowance
 is explicit on the command line, and what the policy dropped lands in the record's `denials`.
 
 Enforcement is a security control, so it does **not** fail open: `--allow` on a host that can't load

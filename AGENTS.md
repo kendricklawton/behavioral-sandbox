@@ -2,8 +2,19 @@
 
 **A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
-enforces what it does, syscalls, its network, its cgroup, from *outside* the guest, where the
-code can't see or subvert you. Every run yields a tamper-resistant, host-observed **audit log** of exactly what happened (host-signed for off-host detection). This file is the operating manual, read it every session.
+enforces what it does, syscalls, its network, its cgroup, from the host side of the KVM boundary,
+where the programs live outside the guest's address space and outside any namespace it can enter.
+Every run yields a host-observed, host-signed **audit log** of what the host was able to see. This
+file is the operating manual, read it every session.
+
+**Voice: claim nothing the project cannot back.** Pre-release, unaudited, one maintainer, no
+external review. Describe mechanisms (falsifiable by a diff) and state measurements with their date
+and host. Do not write outcome guarantees ("tamper-resistant", "never leaks", "the guest cannot
+subvert it", "guaranteed"), in docs, comments, or commit messages. Where a test backs a statement,
+make the test the subject: "`driver_death_cannot_leak_a_vm` kills a driver mid-boot and asserts no
+VMM, netns, or scratch dir survives." An absolute is fine when the sentence names its enforcer
+(`#![forbid(unsafe_code)]`, a wildcard-free `match`, an ordering inside one function); it is not
+fine when the enforcer is "the implementation being correct". Full rationale: `docs/status.md`.
 
 **Scope: the engine, not the platform.** A runtime + a clean driver API you self-host: the boring,
 embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed
@@ -15,20 +26,31 @@ tenancy/billing/scheduling or a model into this repo, or moves the security boun
 the design is wrong.
 
 **Why this exists.** A self-hostable, embeddable engine for running untrusted code with hardware
-isolation and a trustworthy, host-observed audit log isn't something you can pull off the shelf. This
-fills that gap. Every phase ships a **working demo**, so each capability is proven running end to end,
-not just asserted.
+isolation and a host-observed audit log isn't something you can pull off the shelf. This fills that
+gap. Every phase ships a **working demo**, so each capability is exercised end to end rather than
+only described.
 
-## The core properties (every change protects all four)
+## Design rules (every change holds to all six)
 
-1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM; the trust
-   boundary is the CPU, not guest-side software.
-2. **Observe & enforce from the host.** Visibility and policy live in host-side eBPF the guest
-   cannot reach. In-guest agents exist for convenience (exec/IO), **never** for security.
-3. **Engine, not platform.** A self-hostable runtime + a driver API; tenancy/billing/scheduling/
-   dashboards are the hoster's. (A recorded non-goal.)
-4. **Empirical benchmarks.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
-   benchmarked using percentiles.
+The single source. `docs/design.md` restates these for readers; nothing else should. They state
+intent and the mechanism serving it, so a change that breaks one is recognisable as a design error
+rather than a trade-off.
+
+1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. Moving the
+   boundary into guest-side software is a design error, not an optimisation, and a shared-kernel
+   shortcut taken to "make it simpler" is the same error.
+2. **Observe and enforce from the host.** Visibility and policy belong in host-side eBPF attached to
+   host-kernel hooks. The in-guest agent carries exec and IO framing; making it responsible for
+   containing the guest is a design error.
+3. **Deny by default.** A sandbox with no explicit policy is configured with no route out and
+   minimal capability, and each allowance is recorded in the audit log.
+4. **Engine, not platform.** A self-hostable runtime and a driver API; tenancy, billing, scheduling,
+   and dashboards are the hoster's. A recorded non-goal.
+5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
+   broken channel should surface as a typed error. This is the rule the code is written against and
+   the property the confinement suite exercises; it is an aim, not a proven property.
+6. **Measure rather than assert.** Boot, restore, memory sharing, and overhead are reported as
+   nearest-rank percentiles with the host and date. A number that cannot be defended is withdrawn.
 
 ## Repo layout
 
@@ -36,13 +58,13 @@ not just asserted.
 crates/
   vmm/           the Firecracker driver: microVM lifecycle (boot/exec/shutdown), rootfs and
                  tap networking, snapshots + the pre-warmed pool, jailer/cgroup confinement, and the
-                 `Sandbox` lifecycle API. No `unsafe` on the host path; a hostile guest is a
-                 typed error, never a panic/hang/leak.
+                 `Sandbox` lifecycle API. `#![forbid(unsafe_code)]` on the host path; a hostile
+                 guest is meant to surface as a typed error, not a panic, hang, or leak.
   channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
                  shared by the driver and the guest agent.
   guest-agent/   the in-guest agent (`guest-agent`): runs one command per connection and streams
                  stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs.
-                 Exec/IO convenience only, never the security boundary.
+                 Exec/IO convenience only, not the security boundary.
   probes/        the eBPF programs (`#![no_std]`, built for `bpfel-unknown-none` via
                  `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting.
                  CO-RE/BTF so they're portable across kernels.
@@ -63,21 +85,6 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
                  `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
                  and the rootfs/kernel build. Never shipped.
 ```
-
-## Guardrails (non-negotiable)
-
-1. **Isolation is hardware.** Untrusted code runs in a KVM microVM. Never weaken this to a
-   shared-kernel shortcut to "make it simpler."
-2. **Observe & enforce from the host.** Security-relevant visibility and policy live in
-   host-side eBPF, out of the guest's reach. A guest agent may carry exec/IO, but must never be
-   the thing that *contains* the guest.
-3. **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
-   capability; every allowance is explicit and **recorded** in the audit log.
-4. **Engine, not platform.** No tenancy, auth, billing, fleet scheduler, or dashboard in this
-   repo. Those belong to whatever hosts the engine.
-5. **No-panic on the host path.** A hostile or crashing guest, a failed probe, or a broken
-   channel is a typed error, never a host panic, hang, or leak.
-6. **Empirical benchmarks.** Boot, restore, memory sharing, and overhead are benchmarked with percentiles.
 
 ## Conventions
 

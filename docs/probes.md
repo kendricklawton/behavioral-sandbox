@@ -1,10 +1,13 @@
 # Host-side observability & enforcement
 
+{{#include ./status.md:banner}}
+
 The engine has two halves. [Using the engine API](./embedding.md) documents the Firecracker
 driver: the hardware-isolation boundary that *contains* untrusted code. This document is the
 other half: the host-side eBPF that
-*observes and enforces* what that code does, from outside the guest where it can't be reached (core
-property 2). It starts with the foundation, build, load, attach, and read one program end to
+*observes and enforces* what that code does, from the host side of the KVM boundary: the programs
+are loaded by a host process and attached to host-kernel hooks, outside the guest's address space and
+outside any namespace it can enter (design rule 2). It starts with the foundation, build, load, attach, and read one program end to
 end, then builds out each axis: the syscall trace, network observation and egress enforcement on
 the tap, resource accounting from the cgroup, and the fused per-run audit record.
 
@@ -159,9 +162,8 @@ The userspace schema is `EgressPolicy`, an allow-list built from friendly `Ipv4A
 policy (`EgressPolicy::deny_all()`, the `Default`) allows nothing, so a sandbox launched with no explicit
 allowance reaches nothing, the eBPF, host-observed complement to the driver's no-route-to-the-world
 deny-by-default. `TapMonitor::set_egress_policy` applies a policy to an already-attached
-monitor; `TapMonitor::enforce_in_netns` applies it **at launch**, arming the maps *before* the tc
-programs go live on the tap so there is no window where the tap is up but un-policed (the first guest
-packet is already policed). Rules go in as raw bytes (`PolicyRule::to_bytes`, so the loader needs no
+monitor; `TapMonitor::enforce_in_netns` applies it **at launch**: it populates the policy maps and only then
+attaches the classifiers, so the programs go live against maps that already hold the run's rules. Rules go in as raw bytes (`PolicyRule::to_bytes`, so the loader needs no
 `unsafe` `aya::Pod` binding); `clear_egress_policy` disarms.
 
 Every dropped packet is **recorded** before the drop: the classifier counts it against its destination
@@ -209,8 +211,8 @@ best-effort (every field an `Option`, so a missing controller or older kernel is
 accounting fails open). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all three into a
 `ResourceSummary` for one sandbox. The split is deliberate, "cgroup-bpf **or** cgroup + tracepoints":
 eBPF where per-event timing earns its keep (CPU), the kernel's own counters where they already exist
-(memory, IO). The accounting mechanism in `resource_meter.rs` (ignored/privileged) proves a
-CPU-heavy run reports more CPU than an idle one attributed to the sandbox; `cargo xtask
+(memory, IO). `resource_meter.rs` (ignored/privileged) runs a CPU-heavy sandbox and an idle one and asserts the
+first is attributed more CPU than the second; `cargo xtask
 meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 
 ## The fused audit record
@@ -239,9 +241,10 @@ guest. It lives in
   key order, arrays pre-sorted, integer-nanosecond durations), the machine-readable audit surface the
   language SDKs parse and the CLI's `--trace` pretty-prints. Pinned by a golden test.
 
-The privileged `audit_record.rs` proves it end to end: a guest that touches the network + reads a file
-yields a record whose flows show the network **exactly**, while the in-guest file read correctly never
-appears in the host-syscall axis (below). `SandboxProbes::collect` is finalize-on-close; between attach
+The privileged `audit_record.rs` exercises this end to end: it boots a guest that touches the network
+and reads a file, then asserts the record's flows carry that network activity and that the in-guest
+file read does *not* appear in the host-syscall axis (below), which is the hardware-isolation
+consequence described at the end of this chapter. `SandboxProbes::collect` is finalize-on-close; between attach
 and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** live reading
 (`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far), what the
 CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
@@ -251,7 +254,7 @@ CLI's `--watch` live view redraws from without ever disturbing the record. The C
 
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so
 untrusted code's syscalls are serviced *in-guest* and never trap to a host tracepoint. This is the
-price of core property 1 (isolation is hardware): host-side syscall visibility is inherently coarse
+price of design rule 1 (isolation is hardware): host-side syscall visibility is inherently coarse
 for a microVM. The strong cross-boundary signals are **network** (the tap) and **resources**
 (the cgroup), which the host observes directly. We say this plainly rather than promise in-guest
 syscall introspection the boundary can't deliver.
@@ -286,7 +289,7 @@ cargo xtask bench-meter        # the metering overhead, measured (no KVM needed)
 
 ## Beyond the counter: the per-event syscall trace
 
-The counter proves the load→attach→read→drop path with the smallest possible payload; the tracer
+The counter exercises the load→attach→read→drop path with the smallest possible payload; the tracer
 turns that into a real **stream of per-event records**:
 
 - **A ring buffer, not a counter.** Three tracepoint programs (`trace_execve` / `trace_openat`

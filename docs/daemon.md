@@ -1,5 +1,7 @@
 # Using the `ekvm serve` daemon
 
+{{#include ./status.md:banner}}
+
 `ekvm serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
 lifecycle over a **unix socket**, so a local client drives microVMs without linking the `vmm`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
@@ -50,14 +52,14 @@ warm take hands its clone's charge over to the session's own reservation). Sessi
 ceiling are refused with `at_capacity` before boot.
 
 **Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
-guarantee: a session with no request from its client for this long is dropped, freeing its microVM
-and its `--max-sessions` slot, so a wedged or forgotten connection can't pin capacity forever. It
+bound: a session with no request from its client for this long is dropped, freeing its microVM and
+its `--max-sessions` slot, so a wedged or forgotten connection does not hold capacity indefinitely. It
 covers the wait for the first `open` too; a client that keeps sending requests keeps resetting it.
 `0` disables it.
 
 **Shutdown.** SIGTERM/SIGINT gets a prompt, clean exit: the daemon logs, unlinks its socket, and
 exits `0`. In-flight sessions end crash-consistently, their VMs reaped by the lifetime sentinel,
-the same guarantee as a hard kill; the unlink just spares the next start the stale-socket check.
+the same path a hard kill takes; the unlink just spares the next start the stale-socket check.
 
 **Fast `open` with `--prewarm N`.** The daemon boots one unjailed pre-warmed source, snapshots it,
 and keeps a [pre-warmed pool](./embedding.md) of `N` restored clones. A **bare** `open` (no resource
@@ -78,7 +80,7 @@ because the peer is a **local, trusted-ish client**: the daemon is synchronous w
 [the design notes](./design.md#7-synchronous-engine-no-async-runtime)),
 and hand-debuggability (`socat`, `nc`) plus "any language with a JSON library and a unix socket can
 drive it" matter more than a compact wire. Every decode is bounded and typed, so a
-malformed or oversize line is an error the daemon reports or drops, never a panic.
+malformed or oversize line is a reported error or a drop rather than a parse the daemon acts on.
 
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
 working directory, and closing the connection tears the sandbox down.
@@ -308,8 +310,8 @@ scrape_configs:
 
 `client` is the **reference Rust client**: a `Client` type that drives the whole session
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
-`protocol` and a JSON value **only, never `vmm`**, which is the point: it proves a
-caller drives the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
+`protocol` and a JSON value **only, never `vmm`**, which is the point: it demonstrates that a
+caller can drive the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
 The polyglot SDKs (Go/Python/Node/C#, planned) are this client's method set hardened per language.
 
 ```rust,ignore

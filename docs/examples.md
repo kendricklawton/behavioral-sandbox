@@ -1,5 +1,7 @@
 # Examples
 
+{{#include ./status.md:banner}}
+
 Worked, end-to-end walkthroughs of using the engine. Where [Using the eKVM CLI](./cli.md) is the reference (every flag, the config layering), these are task-shaped walkthroughs: pick the task you want to perform and follow it through, output and all.
 
 All examples assume you have installed the prerequisites ([Installation](./cli-install.md)) and built the eKVM rootfs (`cargo xtask build-rootfs`). For host-side eBPF examples, make sure to build the probes object (`cargo xtask build-probes`).
@@ -41,7 +43,7 @@ $ cat output.txt
 
 ## 2. Observe a run from the host
 
-The other half of a run is its record, observed from where the code cannot forge or disable it.
+The other half of a run is its record, observed from the host side of the KVM boundary.
 
 ### The whole run, fused
 The CLI carries the fused surface: one run, all three host eBPF probes bound to it, one audit record out:
@@ -63,7 +65,7 @@ Each axis also has a standalone live demo; see
 
 ## 3. Contain an agent, and prove what it did
 
-Untrusted AI agents or dynamic scripts may invoke tools or phone home. `ekvm` enforces deny-by-default egress at the virtual TAP interface and produces an out-of-guest audit record that proves what traffic was permitted and what was dropped.
+Untrusted AI agents or dynamic scripts may invoke tools or phone home. `ekvm` enforces deny-by-default egress at the virtual TAP interface and produces an out-of-guest audit record of what traffic the host permitted and what it dropped.
 
 ### An agent that phones home
 Consider an agent attempting two UDP network calls: one to a search index (`10.200.0.1:9000`), one to an exfiltration webhook (`10.200.0.1:9100`).
@@ -82,8 +84,9 @@ print("both calls sent")
 '
 ```
 
-### What the record proves
-Even though the guest transcript reports both calls as sent, `summary.json` proves ground truth:
+### What the record shows
+Even though the guest transcript reports both calls as sent, `summary.json` carries what the host
+observed at the tap:
 
 ```json
 {
@@ -109,6 +112,9 @@ $ ekvm run --unjailed --net --trace \
 ```
 
 Network activity at the TAP interface provides external visibility into binary behavior. Host-side tracepoints observe VMM host syscalls; guest-kernel syscalls are handled inside the VM (see [Threat model](./threat-model.md)). The audit trail shows flow attempts and enforcement results:
+
+Illustrative output (the timings are from one run on the development host, not a benchmark; see
+[Benchmarks](./benchmarks.md)):
 
 ```text
 ── audit record ─────────────────────────────────────────────

@@ -11,7 +11,7 @@ description = "The agent wire protocol: the versioned newline-JSON contract the 
 
 # Deliberately a leaf: serde only, **no `vmm`**. The wire is the contract, not shared Rust
 # internals, so a non-Rust SDK reimplements these JSON shapes without linking the engine. The one
-# adversarial concern is guardrail 5 (bounded, typed decode), which is pure std.
+# adversarial concern is design rule 5 (bounded, typed decode), which is pure std.
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

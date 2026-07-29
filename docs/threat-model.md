@@ -1,26 +1,44 @@
 # Threat model
 
-This is the engine's threat model: the assets it protects, the boundary it trusts, the adversary it
-assumes, and, attack class by attack class, how each is contained and verified. Each claim specifies the enforcing mechanism and test coverage.
+{{#include ./status.md:banner}}
+
+This is the model the engine is *designed against*: the assets it aims to protect, the boundary it
+trusts, the adversary it assumes, and, attack class by attack class, the mechanism intended to
+contain it and the test that exercises that mechanism today.
 
 The core model: **untrusted code runs inside a KVM microVM, and everything that observes or
-constrains it lives on the host, outside the guest's reach.** The trust boundary is CPU-enforced (KVM).
+constrains it runs on the host.** The boundary itself is enforced by the CPU through KVM, which this
+project depends on rather than establishes.
 
-## Assets
+## Status of this model
 
-What the engine is protecting, in priority order:
+Nothing in this document has been reviewed by anyone outside the project. There has been no external
+security audit and no independent adversarial testing. The engine has one maintainer, no tagged
+release, and no production use.
 
-1. **The host.** A run cannot escape its microVM, exhaust the host, or leak host resources, even
-   when its driver process dies without cleanup.
-2. **Every other run.** Runs are contained from each other: no state, memory, network, or resource
-   bleed between two sandboxes on one host. (This is what lets a hoster place mutually-distrusting
-   callers on shared hardware; *whose* run is whose is the hoster's concern, not the engine's.)
-3. **The audit record's integrity.** What the host reports a run did is truthful: the guest can
-   neither forge, evade, nor disable the observation, and once finalized the record is **host-signed**,
-   so a consumer detects any alteration made after it leaves the producing host (see [Record integrity
-   beyond the guest](#record-integrity-beyond-the-guest)).
-4. **Deny-by-default.** A run with no explicit policy reaches no network and holds minimal
-   capability; every allowance is explicit and recorded.
+A threat model is a hypothesis about what an attacker will try. The classes below are the ones
+considered so far, not a demonstration that the list is complete, and the mechanisms below are the
+ones intended to contain them, not mechanisms proven sufficient. The single most likely defect in
+this page is an attack class nobody thought of.
+
+Read [Assumptions and residual risk](#assumptions-and-residual-risk) before relying on anything here.
+
+## Objectives
+
+What the engine is trying to achieve, in priority order. These are the aims the design serves, not
+properties established by this document:
+
+1. **The host.** A run should not be able to escape its microVM, exhaust the host, or leave host
+   resources behind, including when its driver process dies without cleanup.
+2. **Every other run.** Runs should be contained from each other: no state, memory, network, or
+   resource bleed between two sandboxes on one host. (*Whose* run is whose is the hoster's concern,
+   not the engine's.)
+3. **The audit record's integrity.** What the host reports a run did should reflect what the host
+   observed, and once finalized the record is **host-signed**, so a consumer can detect alteration
+   made after it leaves the producing host (see [Record integrity beyond the
+   guest](#record-integrity-beyond-the-guest) for what that does and does not establish).
+4. **Deny-by-default.** A run with no explicit policy is configured to reach no network and hold
+   minimal capability, and each allowance is recorded.
 
 ## The trust boundary
 
@@ -65,25 +83,35 @@ Assumptions), or physical/side-channel attacks.
 
 ## Attack classes and how each is contained
 
-| Attack | Contained by | Proven in |
+Each row names the mechanism intended to contain the attack and the test that exercises it. What
+none of these rows cover is in [Assumptions and residual
+risk](#assumptions-and-residual-risk); a passing test is scoped as described in [Status and
+verification record](./status.md).
+
+| Attack | Contained by | Exercised by |
 |--------|--------------|-----------|
 | Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, seccomp, namespaces) as defense in depth | the jail-escape tests in `vmm`'s `confinement.rs` |
-| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter, so a disk-thrasher can't starve a co-resident run); guest processes never become host threads | the fork-bomb/mem-hog and consolidated exhaustion tests in `confinement.rs` |
+| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter); guest processes run against the guest kernel's scheduler, not as host threads | the fork-bomb/mem-hog and consolidated exhaustion tests in `confinement.rs` |
 | Network exfiltration / flood | Deny-by-default egress policy enforced in-kernel at the tap, armed before the guest's first packet; drops are counted | `net_enforce.rs`; the hostile-guest and flood tests in `confinement.rs` |
-| Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap, the guest has no handle to reach them | `hardening.rs` |
+| Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap; the guest's four crossings (vsock, tap, block devices, cgroup) name no BPF program or map | `hardening.rs` |
 | Leak a run on driver death | A cgroup-owned lifetime + sentinel kills the VM when its driver dies; an own-euid orphan sweep reclaims residue | the sentinel and orphan-sweep tests in `confinement.rs` |
 | State bleed between clones | Each restored clone has its own in-RAM overlay and guest RAM; the shared base is read-only | `snapshot.rs` |
-| Secret disclosure | Injected `--env` values and file contents are never logged or written to the serial console | driver + CLI secret-handling tests |
+| Secret disclosure | The code paths that log or render a run omit injected `--env` values and file contents | driver + CLI secret-handling tests |
 
 **Note on Snapshot CPU Portability:** Firecracker snapshots preserve the producing host's vCPU CPUID state (`cpu_template` is unset by default). Cross-host snapshot restore requires matching CPU models or an explicit CPU template to avoid guest illegal instruction faults.
 
 
-The consolidated suite verifies these controls operate concurrently under hostile workloads. Multi-tenant deployment requires this integration test suite to pass cleanly.
+The consolidated suite runs these controls concurrently against one hostile guest attacking every
+axis at once. Passing it is a floor, not a clearance: it exercises the attacks listed above, on the
+host that ran it. Nothing here has been reviewed outside the project, and the project does not
+recommend placing mutually-distrusting workloads on this engine before `v0.1.0`.
 
 ## Verify it yourself
 
-The table above is only as trustworthy as your ability to re-run it: the integration suite proves
-the containment claims against your own host rather than asking for faith.
+The table above is only as useful as your ability to re-run it: the integration suite re-runs these
+same checks on your own host instead of asking you to take this page's word for it. What each test
+exercises is listed above; what none of them cover is in [Assumptions and residual
+risk](#assumptions-and-residual-risk).
 
 The suite is **privileged**: it boots real microVMs and attaches real probes, so it needs a host with
 `/dev/kvm`, real root, `CAP_BPF` + `CAP_PERFMON`, and kernel BTF. From the repo root:
@@ -164,12 +192,12 @@ Explicitly assumed sound, and therefore *out* of the boundary:
 
 ## Out of scope (engine, not platform)
 
-The engine guarantees **per-run containment**; it is not a multi-tenant platform. Tenant
-authentication, authorization, quotas, billing, fleet scheduling, and a management dashboard are the
-**hoster's** responsibility, not a vulnerability in the engine. The engine's own commitment is
-narrower and testable: its privileged tools cannot be weaponized (euid-scoped, authorship not
-policy), and it self-limits by default (deny-by-default network, a dropped-uid jail, an own-euid
-sweep). Turning that into a safe multi-tenant service is the hoster's job.
+Per-run containment is the engine's concern; tenancy is not. Tenant authentication, authorization,
+quotas, billing, fleet scheduling, and a management dashboard are the **hoster's** responsibility,
+not a gap in the engine. The engine's own scope is narrower and mechanical: its privileged tools are
+euid-scoped, and its defaults self-limit (no network route out, a dropped-uid jail, an own-euid
+sweep). Turning that into a multi-tenant service is the hoster's job, and this project makes no claim
+about whether the result would be safe.
 
 See [Security](./security.md) for what counts as a security bug and how to report one.
 

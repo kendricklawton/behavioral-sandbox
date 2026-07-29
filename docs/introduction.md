@@ -1,15 +1,16 @@
 # Introduction
 
+{{#include ./status.md:banner}}
+
 **ekvm** is a self-hostable engine for running untrusted code in hardware
-isolation, with a tamper-evident record of exactly what it did that you can trust without trusting
-the code. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
+isolation, with a host-observed record of what the host was able to see it do. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
 **host-side eBPF** (**aya**) watches and enforces what it does, syscalls, its network, its
-cgroup, from *outside* the guest, where the code can't see or subvert it.
+cgroup, from the host side of the KVM boundary, outside the guest's address space.
 
 It exists for the usual suspects: a third-party binary, a fork's CI job, a dependency's install
 script, an AI-generated snippet, a sample under analysis. The code stays on your own
 infrastructure (air-gapped or regulated is fine), and the watching and the policy live in the host
-kernel, outside the guest, so the record can't be forged by the code it is recording. The finished record is **host-signed** (`ekvm verify`); the
+kernel, outside the guest, so the record is produced by code the guest does not run. The finished record is **host-signed** (`ekvm verify`); the
 [threat model](./threat-model.md#record-integrity-beyond-the-guest) states exactly what that does
 and does not prove.
 
@@ -26,15 +27,18 @@ untrusted code
       → per-run audit record (network flows · notable syscalls · resources · denials)
 ```
 
-Untrusted code executes within the microVM while the host kernel observes and enforces policy from outside the guest. Four properties every change protects:
+Untrusted code executes within the microVM while the host kernel observes and enforces policy from
+the host side of that boundary. The design rules every change is measured against, stated in full
+with their rationale in the [design specification](./design.md#design-rules):
 
-- **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. The trust
-  boundary is CPU-enforced (KVM).
-- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF out of guest reach. In-guest agents exist for exec/IO framing only.
-- **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal
-  capability; every allowance is explicit and recorded.
-- **Empirical benchmarks.** Boot, snapshot-restore, memory-sharing, and eBPF overhead are
-  benchmarked using percentiles.
+- **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM; the boundary is
+  enforced by the CPU through KVM.
+- **Observe and enforce from the host.** Visibility and policy belong in host-side eBPF attached to
+  host-kernel hooks. The in-guest agent carries exec and IO framing only.
+- **Deny by default.** A sandbox with no explicit policy is configured with no route out and minimal
+  capability, and each allowance is recorded.
+- **Measure rather than assert.** Boot, snapshot-restore, memory-sharing, and probe overhead are
+  reported as percentiles with the host and date they were taken on.
 
 And one scope rule: **engine, not platform.** This is a runtime plus a clean driver API you
 self-host. Multi-tenant auth, billing, fleet scheduling, and dashboards belong to whatever *hosts*

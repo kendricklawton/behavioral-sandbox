@@ -1,17 +1,23 @@
 # Contributing
 
+{{#include ./status.md:banner}}
+
 The canonical operating manual for humans and coding agents alike is [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) at the repo root.
 
 ---
 
-## 1. System invariants (never trade these away)
+## 1. Design rules (never trade these away)
 
-- **Isolation is hardware.** Untrusted code runs in a KVM microVM; the trust boundary is the CPU, not guest software.
-- **Observe & enforce from the host.** Visibility and policy live in host-side eBPF (`aya`) that the guest cannot reach.
-- **Engine, not platform.** A self-hostable runtime + a clean driver API. Auth, billing, scheduling, and dashboards are out of scope.
-- **Deny by default.** A sandbox with no explicit policy reaches no network and holds minimal capabilities.
-- **No-panic on the host path.** A hostile or crashing guest is a typed error (`VmmError`), never a host panic, hang, or leak.
-- **Empirical benchmarks.** Boot, snapshot-restore, and eBPF overhead are benchmarked using percentiles.
+These are the rules a change is measured against. They state intent and the mechanism serving it, so
+a change that breaks one is a design error rather than a trade-off. The full list with rationale is
+in [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md); the summary:
+
+- **Isolation is hardware.** Untrusted code runs in a KVM microVM; the boundary is the CPU, not guest software.
+- **Observe and enforce from the host.** Visibility and policy belong in host-side eBPF (`aya`) attached to host-kernel hooks.
+- **Deny by default.** A sandbox with no explicit policy is configured with no route out and minimal capabilities.
+- **Engine, not platform.** A self-hostable runtime and a driver API. Auth, billing, scheduling, and dashboards are out of scope.
+- **No panic, hang, or leak on the host path.** A hostile or crashing guest should surface as a typed `VmmError`. This is what the code is written against and what the confinement suite exercises; it is an aim, not a proven property.
+- **Measure rather than assert.** Boot, snapshot-restore, and eBPF overhead are reported as percentiles with the host and date. A number that cannot be defended is withdrawn.
 
 ---
 

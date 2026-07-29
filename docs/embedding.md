@@ -1,5 +1,7 @@
 # Using the engine API
 
+{{#include ./status.md:banner}}
+
 The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
 the `vmm` library promises when you pin it and build on it, stated once, against the real
 API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
@@ -10,12 +12,12 @@ The second half draws the line this project refuses to cross, what the engine de
 
 ```
 Sandbox::open(config)            confined by default: KVM + the jailer
-    .exec(argv, stdin)           synchronous; RunResult, never a panic/hang/leak
+    .exec(argv, stdin)           synchronous; a RunResult or a typed VmmError
     .exec_with_files(argv, stdin, files, env, artifacts)
     …repeated execs = one stateful session (the VM is the session)
     .snapshot(dir)               a portable pre-warmed bundle (unjailed sources only)
     .collect_outputs()           the bulk /output tree, back on the host
-    .shutdown()                  guaranteed reclamation (also on Drop, also on SIGKILL)
+    .shutdown()                  releases the VM, scratch dir, tap, cgroup (Drop and the sentinel too)
 ```
 
 ### Open: confined by default
@@ -34,8 +36,8 @@ by a forgotten flag (012). Artifacts (kernel, rootfs, `firecracker`) layer from 
 `exit_code`, `stdout`, `stderr`, requested artifact `files`, and host-measured `metrics`. Three properties are load-bearing:
 
 - **Guest crash handling:** Non-zero exit code or termination by signal (`128 + signal`) returns a valid `RunResult`. Typed `VmmError` variants indicate engine-level failures.
-- **Host-enforced bounds:** Derived wall-clock deadlines (`ExecUnresponsive`) and output limits (`OutputCap`) prevent resource leaks from uncoordinated guests.
-- **Per-exec input security:** `stdin`, injected `files`, and `env` are scoped to the spawned process. Secret values are excluded from logs, error messages, and console output. Bulk file transfers use block-device storage (`input_dir` and `output_dir`).
+- **Host-enforced bounds:** the wall-clock deadline (`ExecUnresponsive`) and output limit (`OutputCap`) are derived on the host and applied by the host, so an uncoordinated guest does not set them.
+- **Per-exec input security:** `stdin`, injected `files`, and `env` are scoped to the spawned process, and the code paths that log or render a run omit secret values. `injected_secrets_never_reach_the_console_or_host_logs` runs a sandbox with a distinctive token and greps the console capture, the host logs, and the record for it. Bulk file transfers use block-device storage (`input_dir` and `output_dir`).
 
 ### Sessions: the VM is the session (016)
 
@@ -43,7 +45,7 @@ Repeated `exec` operations within a sandbox share guest working directory and ov
 
 ### Budgets: resource policy (010)
 
-`Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. Non-zero types ensure valid budget parameters. Network egress is configured separately via policy rules. Cgroup constraints operate on a best-effort basis if host controllers are unassigned, while sandbox isolation remains mandatory.
+`Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. The non-zero types make a zero unrepresentable rather than validated at runtime. Network egress is configured separately via policy rules. Cgroup constraints are best-effort when host controllers are unassigned; the KVM boundary and the jailer are not conditional on them.
 
 ### Errors: three buckets you can branch on
 
@@ -58,14 +60,20 @@ Every failure is a typed `VmmError`; `VmmError::kind()` maps it to a pinned, clo
 The mapping is a tested contract (the wildcard-free match won't compile past a new variant until
 it's deliberately bucketed).
 
-### Lifetime: nothing leaks, even when *you* die
+### Lifetime: the teardown paths, including the ones you don't call
 
-Teardown is layered so no exit path leaks a VMM, a scratch dir, a tap, or a cgroup: `shutdown` is
-the polite form, `Drop` is the guarantee, and a cgroup-owned sentinel (011) reaps the VM even if
-the embedding *process* is SIGKILL'd or OOM-killed. A `KillHandle` (cheap, cloneable, thread-safe)
-force-kills a sandbox whose `exec` some other thread is blocked in, the host-gave-up path.
-Residue from crashed embedders is reclaimed by `sweep_orphans` (ownership keyed on liveness, never
-on names; only your own euid's residue), so a crash-looping host stays serviceable (013).
+Teardown is layered, so that a VMM, scratch dir, tap, and cgroup have an owner on every exit path:
+`shutdown` is the polite form, `Drop` covers an early return or an unwinding panic, and a
+cgroup-owned sentinel (011) reaps the VM if the embedding *process* is SIGKILL'd or OOM-killed. A
+`KillHandle` (cheap, cloneable, thread-safe) force-kills a sandbox whose `exec` some other thread is
+blocked in, the host-gave-up path. Residue from a crashed embedder is reclaimed by `sweep_orphans`,
+with ownership keyed on liveness rather than on names, and scoped to your own euid's residue (013).
+
+`crates/vmm/tests/confinement.rs` exercises these paths: `driver_death_cannot_leak_a_vm` SIGKILLs a
+driver mid-run and asserts the VMM dies with it, `a_vmm_killed_while_awaiting_userspace_leaks_nothing`
+kills a VMM mid-boot and asserts the scratch dir is reclaimed, and
+`sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir` covers the residue path. What a passing test
+does and does not establish is in [Status and verification record](./status.md).
 
 ### Pre-warmed starts: snapshot an unjailed source, restore jailed clones
 
@@ -231,8 +239,9 @@ fail legibly (`xtask setup`'s degradation matrix, the pinned Firecracker probe),
 (fd, boot, restore, memory-sharing), and a wire protocol whose version handshake makes skew a typed error
 instead of a silent misbehavior.
 
-Downstream of the public API, in separate repos, live the language SDKs (Go/Python/Node/C#).
-They pin this crate's git rev; the pinned surface and its movement rules are the
+Downstream of the public API, the language SDKs (Go/Python/Node/C#) are planned to live in separate
+repos. None of them exist yet. The intent is that they pin this crate's git rev; the surface the
+project intends to pin and its movement rules are the
 [Semver section](#semver--api-stability) below.
 
 **The crates are never published to crates.io** (`publish = false` across the workspace), a
@@ -246,7 +255,12 @@ embedders, both of which the support policy in `RELEASES.md` can actually govern
 
 ## Semver & API stability
 
-The `vmm` public library API and the `channel` wire protocol are the engine's pinned stability boundary:
+> **Not yet in force.** No release exists, so nothing below governs anything today. This section
+> describes the boundary the project intends to pin at `v0.1.0`; until that tag, every item on it can
+> change without notice. Pin a git rev.
+
+The `vmm` public library API and the `channel` wire protocol are the surface the project intends to
+pin as its stability boundary:
 - **`Sandbox`**, **`Limits`**, **`RunResult`**
 - **`VmmError`**, including variants and the `kind()` -> `ErrorKind` bucket mapping
 - The **`channel`** wire framing protocol
