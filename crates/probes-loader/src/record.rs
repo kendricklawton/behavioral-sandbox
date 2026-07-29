@@ -388,6 +388,12 @@ pub struct NotableSyscall {
     pub detail: String,
     pub comm: String,
     pub hits: u64,
+    /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix**, not
+    /// the path the guest used (see `SyscallEvent::detail_truncated`). Two consequences a reader
+    /// has to know about: the row names something that was never opened under that name, and rows
+    /// alias, since distinct paths sharing a prefix fold into one entry, making [`hits`](Self::hits)
+    /// a count of events rather than of one path's opens.
+    pub truncated: bool,
 }
 
 /// A streaming accumulator for [`SyscallFootprint`]: [`record`](Self::record) it per event (e.g. from
@@ -415,6 +421,10 @@ struct NotableAccum {
     kind: Syscall,
     comm: String,
     hits: u64,
+    /// Sticky: set by *any* event folded into this entry. A truncated capture and a complete one
+    /// can share a key (a path of exactly the cap length renders identically to a longer path's
+    /// prefix), and the honest merge of "certain" with "cut" is "cut".
+    truncated: bool,
 }
 
 impl SyscallFold {
@@ -458,6 +468,7 @@ impl SyscallFold {
         let inner = self.notable.entry(kind as u32).or_default();
         if let Some(acc) = inner.get_mut(detail.as_ref()) {
             acc.hits += 1;
+            acc.truncated |= ev.detail_truncated();
             // Attribute the lexicographically smallest `comm`, not the first to arrive. The same
             // `(kind, detail)` is commonly produced by more than one process (e.g. many binaries
             // `openat` `/etc/ld.so.cache`), so a first-arrival `comm` would make the record depend on
@@ -477,6 +488,7 @@ impl SyscallFold {
                     kind,
                     comm: ev.comm_lossy().into_owned(),
                     hits: 1,
+                    truncated: ev.detail_truncated(),
                 },
             );
             self.distinct += 1;
@@ -498,6 +510,7 @@ impl SyscallFold {
                 detail,
                 comm: acc.comm,
                 hits: acc.hits,
+                truncated: acc.truncated,
             })
             .collect();
         SyscallFootprint {
@@ -522,6 +535,7 @@ impl SyscallFold {
                 detail: detail.clone(),
                 comm: acc.comm.clone(),
                 hits: acc.hits,
+                truncated: acc.truncated,
             })
             .collect();
         SyscallFootprint {
@@ -590,6 +604,69 @@ mod tests {
     }
 
     const CG: u64 = 0x42;
+
+    #[test]
+    fn a_path_cut_at_the_cap_is_marked_not_passed_off_as_whole() {
+        // The attack this closes: a path longer than the probe's buffer used to be recorded as its
+        // own prefix, in exactly the shape of a path that fit, so the record asserted an open that
+        // never happened. Simulate what the probe produces for an over-long path (a full buffer,
+        // NUL-terminated inside it, so `detail_len` is the cap minus the NUL).
+        let long = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let mut fold = SyscallFold::new(CG);
+        fold.record(&ev(Syscall::Openat as u32, CG, &long, "sh"));
+        let short = fold_one(b"/etc/hostname");
+        let footprint = fold.finish();
+
+        let cut = footprint.notable.first().expect("one notable entry");
+        assert!(
+            cut.truncated,
+            "a path that filled the capture buffer must be flagged, not shown as complete"
+        );
+        assert!(
+            !short.truncated,
+            "a path that fits must not be flagged: over-warning on every row would make the flag \
+             meaningless"
+        );
+        // The renderings are pinned in json.rs and summary.rs, next to their own fixtures.
+    }
+
+    /// The single notable entry produced by folding one `openat` of `path`.
+    fn fold_one(path: &[u8]) -> NotableSyscall {
+        let mut fold = SyscallFold::new(CG);
+        fold.record(&ev(Syscall::Openat as u32, CG, path, "sh"));
+        fold.finish()
+            .notable
+            .into_iter()
+            .next()
+            .expect("one notable entry")
+    }
+
+    #[test]
+    fn a_truncated_row_stays_truncated_when_a_complete_capture_joins_it() {
+        // Distinct paths sharing a prefix fold into one row, so a row can mix a cut capture with an
+        // exactly-fitting one. "Certain" merged with "cut" is "cut": the alternative lets one
+        // complete capture clear the doubt on a row that also stands for something longer.
+        let at_cap = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let mut fold = SyscallFold::new(CG);
+        fold.record(&ev(Syscall::Openat as u32, CG, &at_cap, "sh"));
+        fold.record(&ev(Syscall::Openat as u32, CG, &at_cap, "sh"));
+        let entry = fold.finish().notable.into_iter().next().expect("one entry");
+        assert!(entry.truncated);
+        assert_eq!(entry.hits, 2);
+    }
+
+    #[test]
+    fn a_connect_is_never_reported_as_a_truncated_path() {
+        // `connect` fills `detail_len` from the sockaddr snapshot, not a string read, so the
+        // cap-length test must not apply to it at all.
+        let sockaddr = [2u8, 0, 0, 80, 127, 0, 0, 1];
+        let entry = {
+            let mut fold = SyscallFold::new(CG);
+            fold.record(&ev(Syscall::Connect as u32, CG, &sockaddr, "curl"));
+            fold.finish().notable.into_iter().next().expect("one entry")
+        };
+        assert!(!entry.truncated);
+    }
 
     #[test]
     fn ring_buffer_overflow_honest_truncation() {

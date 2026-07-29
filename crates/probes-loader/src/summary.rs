@@ -220,6 +220,13 @@ fn syscalls_summary(out: &mut String, record: &RunRecord) {
         syscall_name(&mut line, n.kind);
         line.push(' ');
         line.push_str(&n.detail);
+        // The summary has no field to carry the flag, so it goes in the text: a reader skimming
+        // paths must not take a prefix for the whole path. The marker cannot be forged away by a
+        // guest naming a file after it (that only over-states doubt), and the JSON record carries
+        // the machine-readable `truncated` beside it.
+        if n.truncated {
+            line.push_str(" [truncated]");
+        }
         json_str(out, &line);
     }
     out.push(']');
@@ -349,6 +356,20 @@ mod tests {
             },
             vec![AxisGap::Cpu("meter lock poisoned".into())],
         )
+    }
+
+    #[test]
+    fn a_path_cut_at_the_cap_is_marked_in_the_summary() {
+        // The summary is the projection a person skims, and it has no field to carry a flag, so the
+        // marker rides in the text. A prefix shown bare reads as the whole path.
+        let long = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let mut record = sample(vec![]);
+        record.host_syscalls = SyscallFootprint::from_events(0x42, &[ev(1, 0x42, &long, "sh")]);
+        let json = record.to_summary_json();
+        assert!(
+            json.contains("[truncated]"),
+            "a cut path must be marked where a person reads it: {json}"
+        );
     }
 
     #[test]

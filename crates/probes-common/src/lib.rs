@@ -138,6 +138,25 @@ impl SyscallEvent {
         &self.detail[..n]
     }
 
+    /// Whether this event's **path** ran past [`DETAIL_CAP`] and was cut, so a consumer never shows
+    /// a prefix as though it were the whole path. Without this the record states a path the guest
+    /// never opened, in exactly the same shape as one it did.
+    ///
+    /// The probe copies with `bpf_probe_read_user_str`, which NUL-terminates within the buffer: a
+    /// path that fits reports its own length, one that doesn't reports `DETAIL_CAP - 1` (the fill,
+    /// minus the NUL). So a full buffer is the signal, and the one ambiguous case is a path of
+    /// *exactly* `DETAIL_CAP - 1` bytes, which is reported as truncated. That bias is deliberate:
+    /// over-stating doubt about an audit record is safe, understating it is the bug this exists to
+    /// prevent.
+    ///
+    /// Path-like syscalls only. A `connect` sets `detail_len` from the sockaddr snapshot (28 bytes
+    /// at most), so it can never reach the cap, and its detail is not a string to begin with.
+    #[must_use]
+    pub fn detail_truncated(&self) -> bool {
+        matches!(self.kind(), Some(Syscall::Execve | Syscall::Openat))
+            && (self.detail_len as usize) >= DETAIL_CAP - 1
+    }
+
     /// The `comm` as a `&str` up to its first NUL, lossily (non-UTF-8 bytes become replacement
     /// characters); `std`-only, since it allocates on the lossy path.
     #[cfg(any(feature = "std", test))]

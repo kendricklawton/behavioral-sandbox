@@ -254,6 +254,11 @@ fn syscalls_to_json(out: &mut String, s: &SyscallFootprint) {
         out.push_str(",\"comm\":");
         json_str(out, &n.comm);
         field(out, "hits", n.hits, false);
+        // Additive key (schema stays 1), and `false` is the healthy shape: `detail` is a prefix of
+        // the path the guest used, not that path, so a consumer that treats the two alike states
+        // something that never happened. Always emitted, so its absence means an old record rather
+        // than a complete path.
+        let _ = write!(out, ",\"truncated\":{}", n.truncated);
         out.push('}');
     }
     out.push(']');
@@ -439,6 +444,21 @@ mod tests {
     }
 
     #[test]
+    fn a_path_cut_at_the_cap_is_marked_in_the_record() {
+        // A path past the probe's capture buffer is recorded as its own prefix. Unflagged, the
+        // record asserts an open that never happened, in the same shape as one that did, so the
+        // SDKs parsing this format need the flag beside the path, not a marker inside it.
+        let long = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let mut record = sample(vec![]);
+        record.host_syscalls = SyscallFootprint::from_events(0x42, &[ev(1, 0x42, &long, "sh")]);
+        let json = record.to_json();
+        assert!(
+            json.contains("\"truncated\":true"),
+            "a cut path must be flagged in the machine-readable record: {json}"
+        );
+    }
+
+    #[test]
     fn json_is_the_expected_golden_bytes() {
         let record = sample(vec![
             flow([10, 200, 0, 2], 40000, [1, 1, 1, 1], 53, IPPROTO_UDP),
@@ -462,8 +482,8 @@ mod tests {
             "\"memory_current\":1024,\"memory_peak\":4096,\"io_rbytes\":null,\"io_wbytes\":512}}",
             ",\"host_syscalls\":{\"total\":3,\"by_kind\":{\"execve\":1,\"openat\":2,\"connect\":0,",
             "\"unknown\":0},\"notable\":[",
-            "{\"kind\":\"execve\",\"detail\":\"/bin/sh\",\"comm\":\"sh\",\"hits\":1},",
-            "{\"kind\":\"openat\",\"detail\":\"/etc/hosts\",\"comm\":\"sh\",\"hits\":2}],",
+            "{\"kind\":\"execve\",\"detail\":\"/bin/sh\",\"comm\":\"sh\",\"hits\":1,\"truncated\":false},",
+            "{\"kind\":\"openat\",\"detail\":\"/etc/hosts\",\"comm\":\"sh\",\"hits\":2,\"truncated\":false}],",
             "\"notable_truncated\":false,\"overflow_events\":0}",
             ",\"coverage\":[{\"axis\":\"cpu\",\"reason\":\"meter lock poisoned\"}]}",
         );
