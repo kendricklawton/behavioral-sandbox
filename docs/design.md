@@ -191,7 +191,7 @@ than on taste:
   event subscriptions, or a network-facing (rather than local-socket) protocol.
 - A profile showing thread-per-session as a **measured** bottleneck under realistic workloads.
 
-None of these are on the roadmap, so the engine stays synchronous.
+None of these are planned, so the engine stays synchronous.
 
 **This does not constrain downstream.** Async is the right choice in plenty of places that consume
 this engine, and the architecture keeps them outside this repo: the polyglot SDKs (a Python SDK

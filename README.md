@@ -90,11 +90,12 @@ only supported architecture: nothing untestable is claimed, and aarch64 returns 
 and a privileged CI lane behind it. `ekvm doctor` reports your own host's
 readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).
 
-## Roadmap
+## Scope and releases
 
-Direction is recorded, not promised. [Roadmap: deferred capabilities](docs/roadmap.md) lists
-where the engine is headed; every entry is engine-scoped, and an entry becomes a feature only
-when it ships with a working demo and empirical benchmarks. Release mechanics, host requirements, and the support policy live in
+There is no published roadmap. What the engine will never do is recorded in the
+[non-goals](docs/embedding.md); what it does today is this documentation. A capability becomes a
+feature when it ships with a working demo and empirical benchmarks, and is not announced before
+that. Release mechanics, host requirements, and the support policy live in
 [RELEASES.md](RELEASES.md).
 
 ## How it fits together

@@ -9,7 +9,6 @@
 - [Examples](./examples.md)
 - [Host-side observability & enforcement](./probes.md)
 - [Benchmarks](./benchmarks.md)
-- [Roadmap: deferred capabilities](./roadmap.md)
 - [Security](./security.md)
   - [Threat model](./threat-model.md)
 - [Contributing](./contributing.md)
