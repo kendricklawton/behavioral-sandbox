@@ -24,9 +24,9 @@ Two consequences worth stating plainly:
 
 - **Evidence expires.** A gate that passed in July is evidence about July's revision on July's host.
   Nothing here is settled until it is re-run against whatever revision is eventually tagged.
-- **A test is only as good as its assertions.** Commit `c4a05e2` in this repo exists because two
-  tests were passing on something other than their subject. Where a chapter cites a test, the useful
-  move is to read the test.
+- **A test is only as good as its assertions.** A commit titled "stop two tests from passing on
+  something other than their subject" exists in this history because two of them were. Where a
+  chapter cites a test, the useful move is to read the test.
 
 ## Verified on
 
@@ -42,31 +42,25 @@ integration tests) runs nightly on a GitHub-hosted Ubuntu 24.04 `x86_64` runner 
 **Firecracker**: v1.16.1 pinned. `x86_64` only.
 <!-- ANCHOR_END: verified-on -->
 
-## Last full verification: 2026-07-29
+## Measurements are produced on demand, not published here
 
-Both gates green, three consecutive clean privileged runs, on the development host above.
+Pre-release, this page records **how to verify**, not what some past run measured. A gate result or a
+coverage percentage is evidence about one revision on one host, so a figure written here is stale by
+the next commit, and a stale figure invites more confidence than it earns. That is the same reasoning
+that withdrew the benchmark tables (see [Benchmarks](./benchmarks.md)); it applies to coverage for
+the same reason. Run the commands below and read your own output.
 
-**Test coverage**: 81.95% of lines, 81.98% of regions, 78.86% of functions, over the shipped crates
-(`xtask` and `test-support` excluded, since neither ships). Measured by `cargo xtask coverage`, which
-runs the whole suite once with `--include-ignored`, so the figure is the union of both gates rather
-than either half.
+Two things are worth knowing when you do, because a percentage invites over-reading:
 
-Scope of that number, since a percentage invites over-reading:
+- Coverage measures which lines **executed**, not whether anything asserted they behaved correctly.
+  The per-file uncovered regions in the report are the useful part, not the total.
+- Nothing gates on a coverage threshold. A threshold that blocks merges gets satisfied by tests
+  written for the number.
 
-- One kernel, one machine, one revision.
-- It measures which lines *executed*, not whether anything asserted they behaved correctly.
-- Nothing gates on it. A coverage threshold that blocks merges gets satisfied by tests written for
-  the number; the per-file uncovered regions are the point.
-
-Files where coverage is low, and why:
-
-| File | Lines | Reason |
-|---|---|---|
-| `crates/guest-agent/src/main.rs` | 24% | Measurement artifact. This loop runs *inside the guest*, where no host profile is collected. Its logic lives in `lib.rs` (85%). |
-| `crates/cli/src/watch.rs` | 31% | The `--watch` TUI render loop. The timeline logic beneath it is unit-tested; interactive rendering has no test vehicle. |
-| `crates/cli/src/session.rs` | 42% | The daemon's per-message dispatch arms, mostly error-reply formatting. |
-| `crates/cli/src/serve.rs` | 48% | As above. |
-| `crates/probes-loader/src/observer.rs` | 46% | The live-stream half of the loader. The projections it feeds are at 94-97%. |
+Some files read low for structural reasons rather than missing tests: the guest agent's `main.rs`
+loop runs *inside the guest*, where no host profile is collected (its logic lives in `lib.rs`,
+exercised by the fake-vsock tests), and the `--watch` TUI's render loop has no test vehicle, though
+the timeline logic beneath it is unit-tested.
 
 ## What has not been done
 
