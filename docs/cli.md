@@ -140,7 +140,7 @@ unknown key is a typed error, never a silent no-op.
 | `EKVM_KERNEL` | `kernel` | the guest kernel image | `artifacts/vmlinux` |
 | `EKVM_ROOTFS` | `rootfs` | the guest rootfs image | `artifacts/rootfs-guest.ext4` |
 | `EKVM_MARKER` | `marker` | the console line that means "userspace is up" | `GUEST-READY` (the guest rootfs image's ready sentinel; a foreign rootfs needs its own, e.g. its `login:` prompt) |
-| `EKVM_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts; a jailed boot needs it off a `nodev` mount (the systemd `/tmp` default), which the guided install pins for you | `/tmp` |
+| `EKVM_SCRATCH_DIR` | `scratch_dir` | base dir for per-VM scratch (rootfs copies, chroots, sockets). `/tmp` is often tmpfs (host RAM), point at real disk on small hosts; a jailed boot needs it off `nodev`/`noexec` mounts (systemd mounts `/tmp` `nodev`; hardened hosts add `noexec`), which the guided install pins for you | `/tmp` |
 | `EKVM_LOG` | `log` | the stderr log filter (`tracing` syntax) | `warn` |
 | `EKVM_REQUIRE_LIMITS` | `require_limits` | fail closed when the cpu/memory cgroup caps can't be applied, instead of booting uncapped; a host posture, needs the jailer | `false` |
 | `EKVM_PROBES_OBJECT` | — | the built eBPF object (env only, no `.ekvm.toml` key); an override, rarely needed | the `cargo xtask build-probes` output, else the installed copy under the data dir |

@@ -233,15 +233,16 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             true,
             "",
         ),
-        // The jailer mknods /dev/kvm inside its chroot (under the scratch dir), and a `nodev` mount
-        // makes that node inert, so an owned-and-readable /dev/kvm still fails to open. The default
-        // scratch base is /tmp, which modern systemd hosts mount `nodev`, so this catches a jailed
-        // boot that would otherwise fail at InstanceStart with a misleading "/dev/kvm ACL" error.
+        // The jailer builds its chroot under the scratch dir: it mknods /dev/kvm there (inert on a
+        // `nodev` mount, so an owned-and-readable /dev/kvm still fails to open) and copies + execs
+        // the firecracker binary there (refused on a `noexec` mount). Modern systemd hosts mount
+        // /tmp `nodev`, hardened ones (CIS, RHEL baselines) add `noexec`, so this catches a jailed
+        // boot that would otherwise fail deep in InstanceStart with a misleading error.
         Check::new(
-            "scratch dir is not nodev (the jailer's /dev/kvm lives there)",
-            !scratch_is_nodev(&config.scratch_dir).unwrap_or(false),
+            "scratch dir is not nodev/noexec (the jailer's chroot /dev/kvm and VMM binary live there)",
+            !scratch_mount_flags(&config.scratch_dir).is_some_and(MountFlags::blocks_jail),
             true,
-            "jailed boot fails: scratch filesystem is mounted `nodev`; use default `/var/tmp` or `--unjailed`",
+            "jailed boot fails: scratch filesystem is mounted `nodev` or `noexec`; use default `/var/tmp` or `--unjailed`",
         ),
         // Networking + bulk-I/O tooling, fails open: only the runs that use them need them.
         Check::new(
@@ -302,7 +303,7 @@ pub fn matrix() -> Vec<&'static str> {
         "  firecracker sha256 unpinned  -> boots continue; verify custom binary out of band",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps",
-        "  scratch dir is nodev         -> jailed /dev/kvm can't open; point EKVM_SCRATCH_DIR off nodev",
+        "  scratch dir nodev/noexec     -> jailed chroot can't open /dev/kvm or exec the VMM; repoint EKVM_SCRATCH_DIR",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
         "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/threat-model.md",
         "  a MAC LSM is loaded          -> selinux/apparmor denials arrive as a bare EPERM naming",
@@ -535,7 +536,7 @@ const SYS_KSM_RUN: &str = "/sys/kernel/mm/ksm/run";
 
 /// The entries under `dir` (one file per CPU vulnerability) whose content reports `Vulnerable`,
 /// sorted so the advisory note is stable. A missing or unreadable dir reads as no exposure: an
-/// absent fact never raises a guessed warning (the [`scratch_is_nodev`] posture).
+/// absent fact never raises a guessed warning (the [`scratch_mount_flags`] posture).
 fn vulnerable_entries(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -579,27 +580,44 @@ fn cgroup_controllers_delegated() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether the filesystem holding `dir` is mounted `nodev` (so device nodes there are inert and the
-/// jailer's chroot `/dev/kvm` cannot be opened). `None` when it can't be determined (no readable
-/// `/proc/self/mountinfo`, or the path doesn't resolve), so the check reads "unknown" as "assume
-/// fine" rather than raising a false alarm.
+/// The two mount flags that make a scratch filesystem unusable for a **jailed** boot: `nodev`
+/// makes the `/dev/kvm` node the jailer mknods in its chroot inert, and `noexec` makes the
+/// firecracker copy the jailer places (and execs) there unrunnable. One probe for both, since they
+/// come from the same mountinfo options field and fail the same boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MountFlags {
+    pub nodev: bool,
+    pub noexec: bool,
+}
+
+impl MountFlags {
+    /// Whether either flag would fail a jailed boot.
+    #[must_use]
+    pub fn blocks_jail(self) -> bool {
+        self.nodev || self.noexec
+    }
+}
+
+/// The jail-relevant mount flags ([`MountFlags`]) of the filesystem holding `dir`. `None` when it
+/// can't be determined (no readable `/proc/self/mountinfo`, or the path doesn't resolve), so the
+/// check reads "unknown" as "assume fine" rather than raising a false alarm.
 /// Public so the guided install (`install.sh`, `cargo xtask self-host`) can pre-empt the failure by
-/// writing a non-`nodev` `scratch_dir` instead of the operator hitting it (P20.16a): a diagnostic
+/// writing a usable `scratch_dir` instead of the operator hitting it (P20.16a): a diagnostic
 /// helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.
-pub fn scratch_is_nodev(dir: &Path) -> Option<bool> {
+pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
     // The scratch dir may not exist yet; its nearest existing ancestor is on the same filesystem the
     // jailer's chroot will be created on (mkdir does not cross a mount), so that is what to classify.
     let target = nearest_existing(dir)?.canonicalize().ok()?;
     let mountinfo = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    mount_nodev_in(&mountinfo, &target)
+    mount_flags_in(&mountinfo, &target)
 }
 
-/// The `nodev` flag of the longest mount point in `mountinfo` that is an ancestor of `target` (the
-/// filesystem that actually holds it). Pure, so the `/proc/self/mountinfo` parse is unit-tested
-/// without a real `/proc`. `None` if no line covers `target` (an absolute path is always covered by
-/// `/`, so this only happens on malformed input).
-fn mount_nodev_in(mountinfo: &str, target: &Path) -> Option<bool> {
-    let mut best: Option<(usize, bool)> = None;
+/// The [`MountFlags`] of the longest mount point in `mountinfo` that is an ancestor of `target`
+/// (the filesystem that actually holds it). Pure, so the `/proc/self/mountinfo` parse is
+/// unit-tested without a real `/proc`. `None` if no line covers `target` (an absolute path is
+/// always covered by `/`, so this only happens on malformed input).
+fn mount_flags_in(mountinfo: &str, target: &Path) -> Option<MountFlags> {
+    let mut best: Option<(usize, MountFlags)> = None;
     for line in mountinfo.lines() {
         // mountinfo fields: id parent major:minor root MOUNT_POINT OPTIONS <optional...> - fstype ...
         // Mount point (index 4) and the per-mount VFS options (index 5) sit before the variable
@@ -614,11 +632,17 @@ fn mount_nodev_in(mountinfo: &str, target: &Path) -> Option<bool> {
         if target.starts_with(&mount_point) {
             let len = mount_point.as_os_str().len();
             if best.is_none_or(|(best_len, _)| len > best_len) {
-                best = Some((len, options.split(',').any(|opt| opt == "nodev")));
+                best = Some((
+                    len,
+                    MountFlags {
+                        nodev: options.split(',').any(|opt| opt == "nodev"),
+                        noexec: options.split(',').any(|opt| opt == "noexec"),
+                    },
+                ));
             }
         }
     }
-    best.map(|(_, nodev)| nodev)
+    best.map(|(_, flags)| flags)
 }
 
 /// The nearest existing ancestor of `dir` (possibly `dir` itself), walking up until one exists.
@@ -841,24 +865,50 @@ mod tests {
     }
 
     #[test]
-    fn nodev_scratch_is_detected_from_mountinfo() {
+    fn jail_blocking_mount_flags_are_detected_from_mountinfo() {
+        const CLEAR: MountFlags = MountFlags {
+            nodev: false,
+            noexec: false,
+        };
         // A minimal mountinfo: `/` is a normal fs, `/tmp` is tmpfs mounted `nodev` (the modern
-        // systemd default that breaks a jailed boot), and `/home` allows device nodes.
+        // systemd default), `/home` allows everything, and `/srv` is a hardened-baseline
+        // `nodev,noexec` while `/opt` is `noexec` alone (each flag must read independently).
         let mi = "\
 21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw
 30 21 0:21 / /tmp rw,nosuid,nodev shared:2 - tmpfs tmpfs rw
-40 21 0:22 / /home rw,relatime shared:3 - btrfs /dev/sda2 rw";
+40 21 0:22 / /home rw,relatime shared:3 - btrfs /dev/sda2 rw
+41 21 0:23 / /srv rw,nosuid,nodev,noexec shared:4 - ext4 /dev/sda3 rw
+42 21 0:24 / /opt rw,nosuid,noexec shared:5 - ext4 /dev/sda4 rw";
         // The jailer's chroot /dev/kvm under /tmp is on the nodev fs, the exact failure case.
         assert_eq!(
-            mount_nodev_in(mi, Path::new("/tmp/ekvm-1/root/dev/kvm")),
-            Some(true)
+            mount_flags_in(mi, Path::new("/tmp/ekvm-1/root/dev/kvm")),
+            Some(MountFlags {
+                nodev: true,
+                noexec: false
+            })
         );
-        // A scratch dir under $HOME is not nodev, the recommended fix.
-        assert_eq!(mount_nodev_in(mi, Path::new("/home/k/.ekvm")), Some(false));
+        // A scratch dir under $HOME carries neither flag, the recommended fix.
+        assert_eq!(mount_flags_in(mi, Path::new("/home/k/.ekvm")), Some(CLEAR));
         // Longest-prefix wins: `/tmp` (nodev), not the `/` root it also sits under.
-        assert_eq!(mount_nodev_in(mi, Path::new("/tmp")), Some(true));
-        // An `nodev`-free path falls through to the non-nodev root.
-        assert_eq!(mount_nodev_in(mi, Path::new("/var/lib/ekvm")), Some(false));
+        assert!(mount_flags_in(mi, Path::new("/tmp")).is_some_and(MountFlags::blocks_jail));
+        // A flag-free path falls through to the unrestricted root.
+        assert_eq!(mount_flags_in(mi, Path::new("/var/lib/ekvm")), Some(CLEAR));
+        // `noexec` alone blocks a jail (the chrooted firecracker copy can't exec), and both
+        // flags together read as both.
+        assert_eq!(
+            mount_flags_in(mi, Path::new("/opt/ekvm")),
+            Some(MountFlags {
+                nodev: false,
+                noexec: true
+            })
+        );
+        assert_eq!(
+            mount_flags_in(mi, Path::new("/srv/ekvm")),
+            Some(MountFlags {
+                nodev: true,
+                noexec: true
+            })
+        );
     }
 
     #[test]
@@ -866,10 +916,8 @@ mod tests {
         // A mount point with a space is octal-escaped in mountinfo; it must still prefix-match.
         let mi = "50 21 0:23 / /mnt/my\\040scratch rw,nodev shared:4 - ext4 /dev/sdb rw\n\
                   21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw";
-        assert_eq!(
-            mount_nodev_in(mi, Path::new("/mnt/my scratch/ekvm-1")),
-            Some(true)
-        );
+        assert!(mount_flags_in(mi, Path::new("/mnt/my scratch/ekvm-1"))
+            .is_some_and(|f| f.nodev && !f.noexec));
     }
 
     #[test]

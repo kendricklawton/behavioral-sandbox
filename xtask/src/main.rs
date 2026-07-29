@@ -788,17 +788,25 @@ fn privileged_preflight() -> Result<()> {
              BTF, and a skipped test looks like a pass (need a CONFIG_DEBUG_INFO_BTF=y kernel)"
         );
     }
-    // The jailed-boot tests mknod /dev/kvm inside a chroot under the scratch dir; on a `nodev` mount
-    // (every systemd `/tmp` default) those nodes are inert and the tests fail *deep in the run* with
-    // `ScratchDirNodev`, reading like an engine bug rather than the one-line host fix it is (P19.9e is
-    // the engine's own boot-time refusal; this is the gate's up-front one). Same loud-up-front
-    // discipline as the checks above, reusing the doctor's tested detector against the exact scratch
-    // dir the tests will resolve (`BootConfig::from_env`, so an `EKVM_SCRATCH_DIR` override clears it).
+    // The jailed-boot tests build a chroot under the scratch dir (mknod'd /dev/kvm, an exec'd
+    // firecracker copy); on a `nodev` mount (every systemd `/tmp` default) or a `noexec` one
+    // (hardened baselines) they fail *deep in the run* with `ScratchDirNodev`/`ScratchDirNoexec`,
+    // reading like an engine bug rather than the one-line host fix it is (P19.9e is the engine's
+    // own boot-time refusal; this is the gate's up-front one). Same loud-up-front discipline as the
+    // checks above, reusing the doctor's tested detector against the exact scratch dir the tests
+    // will resolve (`BootConfig::from_env`, so an `EKVM_SCRATCH_DIR` override clears it).
     let scratch = vmm::BootConfig::from_env().scratch_dir;
-    if vmm::doctor::scratch_is_nodev(&scratch).unwrap_or(false) {
+    let flags = vmm::doctor::scratch_mount_flags(&scratch);
+    if flags.is_some_and(vmm::doctor::MountFlags::blocks_jail) {
+        let flag = if flags.is_some_and(|f| f.nodev) {
+            "nodev"
+        } else {
+            "noexec"
+        };
         bail!(
-            "scratch dir {} is on a `nodev` mount: the jailer's chroot /dev/kvm can't be opened, so \
-             the jailed-boot tests fail deep in the run.\n  Point it off nodev (e.g. /var/tmp) — or \
+            "scratch dir {} is on a `{flag}` mount: the jailer's chroot can't open its /dev/kvm or \
+             exec its firecracker copy there, so the jailed-boot tests fail deep in the run.\n  \
+             Point it off {flag} (e.g. /var/tmp) — or \
              use ./ci-privileged.sh, which sets all three env concerns:\n    \
              sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" \
              EKVM_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged",

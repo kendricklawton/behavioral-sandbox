@@ -124,7 +124,7 @@ other could not).
 |---|---|---|
 | Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the fallback floor | rolling, comfortably above the floor |
 | `/dev/kvm` | `0660 root:kvm`, so you must join the group | `0666`, usually usable already |
-| `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default needs a non-`nodev` `scratch_dir` (the guided install sets one; see below) |
+| `/tmp` | varies by release, check it | tmpfs **`nodev` by default** (hardened baselines add `noexec`), so the jailed default needs a `scratch_dir` off both (the guided install sets one; see below) |
 | `e2fsprogs` | 24.04 ships **1.47.0**, below the 1.47.1 floor where `mke2fs` honours `SOURCE_DATE_EPOCH`, so `cargo xtask build-rootfs --verify` fails (normal builds are fine) | current, above the floor |
 | AppArmor | **enabled by default**, and can deny the jailer in ways that look like an engine bug | not installed by default |
 | Build toolchain | `build-essential` | `base-devel` |
@@ -153,10 +153,11 @@ needs bare metal or nested virt on any of them.
 Test the `/tmp` question rather than trusting the table, since it depends on your own mount setup:
 
 ```console
-findmnt -no OPTIONS -T /tmp | tr , '\n' | grep nodev   # prints nodev if you are affected
+findmnt -no OPTIONS -T /tmp | tr , '\n' | grep -E 'nodev|noexec'   # prints the flags that affect you
 ```
 
-If it prints `nodev`, point the engine at a scratch dir that is not, once, in `~/.ekvm.toml`.
+If it prints `nodev` or `noexec`, point the engine at a scratch dir carrying neither, once, in
+`~/.ekvm.toml`.
 Keep the path **short**: a jailed boot nests this dir name twice inside its API socket path, which the
 kernel caps at ~108 bytes (`ekvm doctor` and the boot error flag an over-long one), so a
 short dir like `~/.ekvm` beats a long one:
@@ -166,8 +167,8 @@ scratch_dir = "/home/you/.ekvm"
 ```
 
 The packaged `install.sh` and `cargo xtask self-host` **write this line for you** (as `~/.ekvm`) when
-they detect a `nodev` `/tmp`, so a guided install already boots jailed; the manual form above is for a
-from-source run, or a config you wrote yourself.
+they detect a `nodev` or `noexec` `/tmp`, so a guided install already boots jailed; the manual form
+above is for a from-source run, or a config you wrote yourself.
 
 `ekvm doctor` flags every one of these against your actual host, so treat it as the authority and
 this table as orientation.
@@ -283,8 +284,8 @@ It installs the `ekvm` binary into `~/.local/bin` (override with `--prefix DIR`)
 on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
 KVM box. `--no-run` skips the boot proof (build + install only). Like `install.sh`, it writes a starter
-`~/.ekvm.toml` (absolute kernel/rootfs paths, and a non-`nodev` `scratch_dir` when your `/tmp`
-is `nodev`) unless one already exists; `EKVM_NO_TOML=1` skips it.
+`~/.ekvm.toml` (absolute kernel/rootfs paths, and a `scratch_dir` off `nodev`/`noexec` when your
+`/tmp` carries either flag) unless one already exists; `EKVM_NO_TOML=1` skips it.
 
 To build **offline**, no Firecracker S3 bucket, no Alpine CDN, point it at a vendored mirror first
 (see [Vendoring for offline builds](#vendoring-for-offline-builds)):
@@ -329,8 +330,8 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
   hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
   carried untested. A contribution that brings tested arm artifacts plus a privileged CI lane
   reopens it.
-- One distro-specific gotcha already surfaced: a `nodev` `/tmp` makes a raw jailed run fail;
-  [Distro differences](#distro-differences-that-bite) owns the test and the fix.
+- One distro-specific gotcha already surfaced: a `nodev` (or `noexec`) `/tmp` makes a raw jailed
+  run fail; [Distro differences](#distro-differences-that-bite) owns the test and the fix.
 - On distros that enable **AppArmor** by default (Ubuntu and Debian), a confinement profile can deny
   the jailer or Firecracker in ways that look like an engine bug. If a jailed boot fails for a reason
   none of the checks above explain, read `dmesg | grep -i apparmor` before chasing it further.
@@ -342,8 +343,9 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
 - **cgroup v2** controllers not delegated → jailed VMs run without CPU/memory caps (a fail-open DoS
   mitigation, not the isolation boundary).
 - No real root / no jailer → the jailed default fails; `--unjailed` still runs behind KVM.
-- **Scratch dir on a `nodev` mount** → the jailed default fails to open KVM
-  ([Distro differences](#distro-differences-that-bite) has the fix); `--unjailed` still runs.
+- **Scratch dir on a `nodev` or `noexec` mount** → the jailed default can't open KVM or exec its
+  chrooted VMM copy ([Distro differences](#distro-differences-that-bite) has the fix); `--unjailed`
+  still runs.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
 
 ## Troubleshooting
@@ -352,6 +354,7 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
 |---|---|---|
 | **`/dev/kvm` missing or permission denied** | No virtualization exposed (stock cloud VMs lack nested virt), or the user is not in the `kvm` group. | Check nested virtualization on cloud VMs. Add user to `kvm` group:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
 | **`ScratchDirNodev` (jailed boot fails at KVM open)** | `/tmp` is mounted with the `nodev` mount option, making the jailer's chrooted `/dev/kvm` inert. | Set scratch dir to a non-`nodev` filesystem:<br>`export EKVM_SCRATCH_DIR=/var/tmp`<br>or set `scratch_dir = "/var/tmp"` in `.ekvm.toml`. |
+| **`ScratchDirNoexec` (jailed boot fails at the VMM exec)** | `/tmp` is mounted with the `noexec` mount option, so the firecracker copy in the jailer's chroot cannot be exec'd. | Same fix: a scratch dir off `noexec`, e.g. `EKVM_SCRATCH_DIR=/var/tmp`. |
 | **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged users space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
 | **`unix socket path is too long (> 108 bytes)`** | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export EKVM_SCRATCH_DIR=/var/tmp` |
 | **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v ekvm)`<br>or run with `sudo -E`. |
@@ -389,7 +392,7 @@ lack either names itself in `ekvm doctor` or produces a typed refusal.
 | What you want | What it needs | Without it |
 |---|---|---|
 | Run code, VMM unconfined | membership in the `kvm` group | this *is* the fallback: `--unjailed` |
-| **Jailed run** (the default, the supported posture) | **real root**, so `sudo`, plus a scratch dir that is not on a `nodev` mount | the boot fails; ask for `--unjailed` explicitly |
+| **Jailed run** (the default, the supported posture) | **real root**, so `sudo`, plus a scratch dir that is not on a `nodev` or `noexec` mount | the boot fails; ask for `--unjailed` explicitly |
 | `--net`, a guest NIC | `CAP_NET_ADMIN`, to create the per-VM tap | only networked runs fail; the rest are unaffected |
 | `--trace` / `--record` / `--watch` | `CAP_BPF` + `CAP_PERFMON` + kernel BTF | the run still happens and reports its coverage gap |
 | `--allow` egress **enforcement** | the same eBPF capabilities | **refused**, rather than running unenforced |
@@ -403,7 +406,7 @@ sudo setcap cap_bpf,cap_perfmon+ep "$(command -v ekvm)"
 The jailer's requirement cannot be narrowed the same way: it needs **real root** (euid 0) because it
 builds a chroot with device nodes in it and then drops privileges itself, so no capability subset
 substitutes. A jailed run therefore looks like this, with `-E` to keep your environment and an
-explicit scratch dir if `/tmp` is `nodev`:
+explicit scratch dir if `/tmp` is `nodev` or `noexec`:
 
 ```console
 mkdir -p ~/.ekvm
@@ -458,7 +461,7 @@ The engine's whole footprint is four paths, so removal is four commands, no tool
 rm ~/.local/bin/ekvm            # the binary (or your EKVM_INSTALL_PREFIX)
 rm -rf ~/.local/share/ekvm      # kernel, rootfs, probes object (or your EKVM_DATA_DIR)
 rm ~/.ekvm.toml                 # the starter config, if the install wrote one
-rm -rf ~/.ekvm                  # the non-nodev scratch dir, if the install set one up
+rm -rf ~/.ekvm                  # the jail-usable scratch dir, if the install set one up
 ```
 
 Nothing else outlives the runs: per-VM scratch under `scratch_dir` is reclaimed at teardown, and a

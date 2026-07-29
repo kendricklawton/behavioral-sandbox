@@ -184,6 +184,14 @@ pub enum VmmError {
     /// in boot. A host-configuration fault (repoint the scratch dir), so it buckets
     /// [`Infra`](ErrorKind::Infra); unjailed boots have no jailer chroot and are never affected.
     ScratchDirNodev(std::path::PathBuf),
+    /// A **jailed** boot was asked for, but the scratch dir (`EKVM_SCRATCH_DIR`) is on a `noexec`
+    /// mount, so the firecracker copy the jailer places inside its chroot cannot be exec'd: the
+    /// same jailed-boot killer as [`ScratchDirNodev`](Self::ScratchDirNodev), one mount flag over
+    /// (a hardened-baseline `/tmp` carries both). Caught **before** the spawn, a
+    /// host-configuration fault (repoint the scratch dir), so it buckets
+    /// [`Infra`](ErrorKind::Infra); unjailed boots exec firecracker from `PATH` and are never
+    /// affected.
+    ScratchDirNoexec(std::path::PathBuf),
     /// [`Limits::vcpus`] is outside what the pinned Firecracker accepts: its `vcpu_count` is
     /// documented `[1, 32]` and must be **1 or an even number**. Caught **before** the spawn, so the
     /// refusal names the constraint instead of a cryptic `PUT /machine-config` fault arriving
@@ -219,6 +227,13 @@ impl std::fmt::Display for VmmError {
                 f,
                 "scratch dir {} is on a nodev mount: the jailer's chroot /dev/kvm can't be opened \
                  there, so a jailed boot fails; set EKVM_SCRATCH_DIR to a path off a nodev mount",
+                dir.display()
+            ),
+            VmmError::ScratchDirNoexec(dir) => write!(
+                f,
+                "scratch dir {} is on a noexec mount: the firecracker copy in the jailer's chroot \
+                 can't be exec'd there, so a jailed boot fails; set EKVM_SCRATCH_DIR to a path off \
+                 a noexec mount",
                 dir.display()
             ),
             VmmError::UnsupportedVcpus(n) => write!(
@@ -281,11 +296,12 @@ impl VmmError {
             | VmmError::GuestUnavailable(_)
             | VmmError::Vmm(_)
             // Host- or caller-configuration faults (caps can't be applied; the scratch dir is
-            // nodev; the vCPU count isn't one the VMM accepts), not the guest's: retry after fixing
-            // the delegation, the jail posture, the scratch path, or the count, exactly Infra's
-            // "fix the host" contract.
+            // nodev or noexec; the vCPU count isn't one the VMM accepts), not the guest's: retry
+            // after fixing the delegation, the jail posture, the scratch path, or the count,
+            // exactly Infra's "fix the host" contract.
             | VmmError::LimitsUnavailable(_)
             | VmmError::ScratchDirNodev(_)
+            | VmmError::ScratchDirNoexec(_)
             | VmmError::UnsupportedVcpus(_) => ErrorKind::Infra,
             // `ExecUnresponsive` is a *liveness* fault (the guest went silent/hostile mid-exec), so
             // it buckets with `Channel` as Transport: its own contract is "retire the VM, not blame

@@ -60,8 +60,9 @@ cargo xtask build-probes     # Build eBPF object (target: bpfel-unknown-none)
 
 The privileged wrapper sets the three env concerns a `sudo` run otherwise stacks by hand: a
 throwaway `CARGO_TARGET_DIR` (the gate *refuses* to run as root without it, so a root build cannot
-leave root-owned artifacts in `./target` that block later non-root builds), a non-`nodev`
-`EKVM_SCRATCH_DIR` (pre-checked, since the jailer cannot make device nodes on a `nodev` mount), and
+leave root-owned artifacts in `./target` that block later non-root builds), an `EKVM_SCRATCH_DIR`
+off `nodev`/`noexec` mounts (pre-checked, since the jailer's chroot needs working device nodes and
+an executable firecracker copy there), and
 rustup's `cargo` back on `PATH`. The gate also refuses outright without root, BTF, or the eBPF
 object, rather than letting the capability-gated tests skip themselves into a hollow green (a
 skipped test is a pass to cargo).

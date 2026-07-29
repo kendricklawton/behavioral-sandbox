@@ -7,7 +7,7 @@
 # `nodev` on a systemd host. This collapses them into `sudo -E ./ci-privileged.sh`.
 #
 #   - CARGO_TARGET_DIR keeps root-owned build artifacts out of ./target (they block later non-root builds)
-#   - EKVM_SCRATCH_DIR points scratch off a `nodev` /tmp so the jailed-boot tests can open /dev/kvm
+#   - EKVM_SCRATCH_DIR points scratch off a `nodev`/`noexec` /tmp so the jailed-boot tests' chroot works
 #   - PATH restores rustup's cargo, which sudo strips from a root shell
 #
 # xtask cannot do this itself: the outer `cargo run` that builds xtask writes to ./target as root

@@ -77,10 +77,11 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
 /// `/tmp`) pass the paths by env or flag. Never overwrites an existing file (your config is yours),
 /// and `EKVM_NO_TOML=1` skips it, the same escape hatch `install.sh` offers.
 ///
-/// On a host whose default scratch base (`/tmp`) is mounted `nodev` (every systemd default: Arch,
-/// Ubuntu), the jailer's chroot `/dev/kvm` there is inert and the jailed default fails
-/// `ScratchDirNodev`; so when the detector flags it, a `scratch_dir` on a non-`nodev` path is written
-/// too, so the first `sudo ekvm run` works rather than needing a hand-edit (P20.16a).
+/// On a host whose default scratch base (`/tmp`) is mounted `nodev` (every systemd default) or
+/// `noexec` (hardened baselines), the jailer's chroot there can't open its `/dev/kvm` or exec its
+/// firecracker copy and the jailed default fails `ScratchDirNodev`/`ScratchDirNoexec`; so when the
+/// detector flags it, a `scratch_dir` on an unrestricted path is written too, so the first
+/// `sudo ekvm run` works rather than needing a hand-edit (P20.16a).
 fn write_starter_config() -> Result<()> {
     if std::env::var_os("EKVM_NO_TOML").is_some() {
         return Ok(());
@@ -109,8 +110,9 @@ fn write_starter_config() -> Result<()> {
         std::fs::create_dir_all(scratch)
             .with_context(|| format!("create scratch dir {}", scratch.display()))?;
         body.push_str(&format!(
-            "# /tmp is mounted `nodev` on this host, so the jailer's chroot /dev/kvm there is inert; a\n\
-             # non-nodev scratch dir so the jailed default boots (the check in crates/vmm/src/doctor.rs).\n\
+            "# /tmp is mounted nodev/noexec on this host, so the jailer's chroot there can't open its\n\
+             # /dev/kvm or exec its firecracker copy; an unrestricted scratch dir so the jailed\n\
+             # default boots (the check in crates/vmm/src/doctor.rs).\n\
              scratch_dir = \"{}\"\n",
             scratch.display()
         ));
@@ -119,7 +121,7 @@ fn write_starter_config() -> Result<()> {
     std::fs::write(&dest, body).with_context(|| format!("write {}", dest.display()))?;
     if wrote_scratch {
         println!(
-            "  wrote {} (kernel + rootfs paths, and scratch_dir: /tmp is nodev here)",
+            "  wrote {} (kernel + rootfs paths, and scratch_dir: /tmp is nodev/noexec here)",
             dest.display()
         );
     } else {
@@ -128,18 +130,22 @@ fn write_starter_config() -> Result<()> {
     Ok(())
 }
 
-/// The non-`nodev` scratch dir to pin for a jailed boot, or `None` when the default `/tmp` base is
-/// already fine (or `$HOME` is also `nodev`, since pinning one nodev dir over another fixes nothing).
-/// `~/.ekvm`, deliberately **short**: the jailer nests the per-VM dir name twice in the API socket
-/// path, which must fit `sun_path` (~108 bytes), so a deep dir under the data dir would overflow it.
+/// The jail-usable scratch dir to pin for a jailed boot, or `None` when the default `/tmp` base is
+/// already fine (or `$HOME` is also nodev/noexec, since pinning one restricted dir over another
+/// fixes nothing). `~/.ekvm`, deliberately **short**: the jailer nests the per-VM dir name twice in
+/// the API socket path, which must fit `sun_path` (~108 bytes), so a deep dir under the data dir
+/// would overflow it.
 fn starter_scratch_dir(home: &Path) -> Option<PathBuf> {
-    if !vmm::doctor::scratch_is_nodev(Path::new("/tmp")).unwrap_or(false) {
+    let blocked = |p: &Path| {
+        vmm::doctor::scratch_mount_flags(p).is_some_and(vmm::doctor::MountFlags::blocks_jail)
+    };
+    if !blocked(Path::new("/tmp")) {
         return None;
     }
     let scratch = home.join(".ekvm");
-    if vmm::doctor::scratch_is_nodev(&scratch).unwrap_or(false) {
+    if blocked(&scratch) {
         println!(
-            "  note: /tmp is nodev and so is {}; set EKVM_SCRATCH_DIR to a non-nodev path",
+            "  note: /tmp is nodev/noexec and so is {}; set EKVM_SCRATCH_DIR to a path off both",
             scratch.display()
         );
         return None;

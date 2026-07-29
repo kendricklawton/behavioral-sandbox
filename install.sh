@@ -50,16 +50,22 @@ warn() { printf '%b  !%b %s\n' "$YELLOW" "$RESET" "$*"; }
 fail() { printf '%binstall.sh: error:%b %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 
-# Whether the filesystem holding $1 is mounted `nodev` (device nodes there are inert, so the jailer's
-# chroot /dev/kvm can't be opened), mirroring the detector in crates/vmm/src/doctor.rs. Uses findmnt
-# (util-linux, present on every systemd host); a missing findmnt reads as "not nodev" so we never
-# guess wrong and pin a scratch dir the operator didn't ask for.
-is_nodev() {
+# Whether the filesystem holding $2 is mounted with flag $1 (`nodev` makes the jailer's chroot
+# /dev/kvm inert; `noexec` refuses the exec of its firecracker copy), mirroring the detector in
+# crates/vmm/src/doctor.rs. Uses findmnt (util-linux, present on every systemd host); a missing
+# findmnt reads as "flag absent" so we never guess wrong and pin a scratch dir the operator didn't
+# ask for.
+has_mount_flag() {
     command -v findmnt >/dev/null 2>&1 || return 1
-    case ",$(findmnt -no OPTIONS -T "$1" 2>/dev/null)," in
-        *,nodev,*) return 0 ;;
-        *)         return 1 ;;
+    case ",$(findmnt -no OPTIONS -T "$2" 2>/dev/null)," in
+        *,"$1",*) return 0 ;;
+        *)        return 1 ;;
     esac
+}
+
+# Either flag that makes a jailed boot fail from a chroot under $1.
+blocks_jail() {
+    has_mount_flag nodev "$1" || has_mount_flag noexec "$1"
 }
 
 [ "$(uname -s)" = "Linux" ]  || fail "the engine is Linux-only (it needs KVM)"
@@ -199,14 +205,15 @@ done
 # A starter config, written only if none exists (the engine's own nearest-up-from-cwd discovery
 # finds ~/.ekvm.toml for anything under $HOME). Never overwrites: your config is yours.
 if [ -z "${EKVM_NO_TOML:-}" ] && [ ! -e "$HOME/.ekvm.toml" ]; then
-    # The jailed default (real root) mknods /dev/kvm inside a chroot under the scratch dir; on a host
-    # whose default base (/tmp) is `nodev` (every systemd default) those nodes are inert and the boot
-    # fails ScratchDirNodev. Pin scratch_dir off nodev so the first `sudo ekvm run` works
-    # (P20.16a); skipped when $HOME is also nodev, which pinning wouldn't fix. Kept short (~/.ekvm, not
-    # a deep dir under the data dir): the jailer nests the per-VM dir name twice in the API socket
-    # path, which must fit sun_path (~108 bytes).
+    # The jailed default (real root) builds a chroot under the scratch dir (a mknod'd /dev/kvm, an
+    # exec'd firecracker copy); on a host whose default base (/tmp) is `nodev` (every systemd
+    # default) or `noexec` (hardened baselines) the boot fails ScratchDirNodev/ScratchDirNoexec.
+    # Pin scratch_dir off both so the first `sudo ekvm run` works (P20.16a); skipped when $HOME is
+    # also restricted, which pinning wouldn't fix. Kept short (~/.ekvm, not a deep dir under the
+    # data dir): the jailer nests the per-VM dir name twice in the API socket path, which must fit
+    # sun_path (~108 bytes).
     SCRATCH=""
-    if is_nodev /tmp && ! is_nodev "$HOME"; then
+    if blocks_jail /tmp && ! blocks_jail "$HOME"; then
         SCRATCH="$HOME/.ekvm"
         mkdir -p "$SCRATCH"
     fi
@@ -215,11 +222,11 @@ if [ -z "${EKVM_NO_TOML:-}" ] && [ ! -e "$HOME/.ekvm.toml" ]; then
         printf 'kernel = "%s"\n' "$DATA/vmlinux"
         printf 'rootfs = "%s"\n' "$DATA/rootfs-guest.ext4"
         if [ -n "$SCRATCH" ]; then
-            printf '# /tmp is nodev on this host; a non-nodev scratch dir so the jailed default boots.\nscratch_dir = "%s"\n' "$SCRATCH"
+            printf '# /tmp is nodev/noexec on this host; a scratch dir off both so the jailed default boots.\nscratch_dir = "%s"\n' "$SCRATCH"
         fi
     } > "$HOME/.ekvm.toml"
     if [ -n "$SCRATCH" ]; then
-        ok "wrote $HOME/.ekvm.toml (kernel + rootfs paths, and scratch_dir: /tmp is nodev here)"
+        ok "wrote $HOME/.ekvm.toml (kernel + rootfs paths, and scratch_dir: /tmp is nodev/noexec here)"
     else
         ok "wrote $HOME/.ekvm.toml (kernel + rootfs paths)"
     fi

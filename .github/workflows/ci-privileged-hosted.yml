@@ -75,7 +75,7 @@ jobs:
           test -e /sys/kernel/btf/vmlinux \
             || { echo "::error::no BTF (/sys/kernel/btf/vmlinux); CO-RE eBPF cannot load here"; exit 1; }
 
-      - name: Scratch dir off any nodev mount (the jailer's chroot /dev/kvm lives under it)
+      - name: Scratch dir off any nodev/noexec mount (the jailer's chroot lives under it)
         # Short by design, matching ci-privileged.sh's default: the jailer nests the per-VM dir name
         # twice in the API socket path, which must fit sun_path (~108 bytes).
         run: |
