@@ -230,6 +230,56 @@ fn markdown_links(text: &str) -> Vec<(usize, String)> {
 mod tests {
     use super::*;
 
+    /// The engine targets kernels, not distributions (`docs/design.md`, decision 8): a host
+    /// difference is probed as a capability, never read off the host's identity papers. This is
+    /// the enforcer for that sentence. It scans every tracked source file in the shipped crates
+    /// (plus `install.sh`, which runs before the engine exists to probe anything) for the files
+    /// and commands that answer "which distro is this": if one appears outside a comment, either
+    /// a capability probe exists that should replace it, or this test's list is teaching you what
+    /// it is. The `Containerfile` is exempt: package manager use *inside* the image is that
+    /// image's own pinned userspace, not host detection.
+    #[test]
+    fn shipped_code_probes_capabilities_never_distro_identity() {
+        let root = crate::workspace_root();
+        let tracked = tracked_files(root).expect("a git checkout");
+        let needles = [
+            "os-release",
+            "lsb_release",
+            "lsb-release",
+            "/etc/debian_version",
+            "/etc/redhat-release",
+            "/etc/arch-release",
+            "/etc/fedora-release",
+            "/etc/SuSE-release",
+            "ID_LIKE",
+        ];
+
+        let mut hits = Vec::new();
+        for rel in tracked
+            .iter()
+            .filter(|p| (p.starts_with("crates/") && p.ends_with(".rs")) || *p == "install.sh")
+        {
+            let text = std::fs::read_to_string(root.join(rel)).unwrap_or_default();
+            for (i, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                // A comment may *say* "no /etc/os-release parsing"; only code may not do it.
+                if code.starts_with("//") || code.starts_with('#') {
+                    continue;
+                }
+                for needle in needles {
+                    if code.contains(needle) {
+                        hits.push(format!("{rel}:{}: {needle}", i + 1));
+                    }
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "shipped code reads distro identity instead of probing a capability:\n{}",
+            hits.join("\n")
+        );
+    }
+
     #[test]
     fn path_candidates_skip_fenced_code_blocks() {
         let anchors = path_anchors(&BTreeSet::new());
