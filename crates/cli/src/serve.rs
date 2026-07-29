@@ -1009,6 +1009,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_mistyped_socket_path_is_refused_not_deleted() {
+        // The daemon reclaims a stale socket by removing it, and it often runs as root, so a
+        // `--socket` naming a real file (a config, a database) would have been a deletion of
+        // whatever root can write. What matters here is not the error, it is the survival.
+        let dir = std::env::temp_dir().join(format!("ekvm-bind-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let victim = dir.join("precious.toml");
+        std::fs::write(&victim, b"do not delete me").expect("write the victim");
+
+        let err = bind(&victim).expect_err("a non-socket path must be refused");
+        assert!(err.contains("not a socket"), "got {err}");
+        assert_eq!(
+            std::fs::read(&victim).expect("the file must still be there"),
+            b"do not delete me",
+            "refusing must never remove the file it refused"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn only_exhaustion_accept_errors_are_paced() {
         // The predicate is what keeps the backoff off the routine path, so pin both halves: a
         // bare errno list drifts silently (nothing else in the tree names these numbers), and a

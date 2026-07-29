@@ -208,6 +208,40 @@ fn run_via_daemon(client: &mut Client, argv: &[String], stdin: &str) -> RunOutco
 }
 
 #[test]
+#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
+    // `ekvm run … 0<&-` closes fd 0 outright, which reads back as EBADF, not as an empty pipe.
+    // A failed stdin read is otherwise a hard error (running the guest on silently truncated input
+    // and calling the record complete is the bug that made it one), so this one errno has to stay
+    // the "no stdin" case a terminal already is. Closing fd 0 needs a shell: `Stdio::null()` opens
+    // /dev/null, which is a perfectly readable fd and would not exercise this at all.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping a_closed_stdin_is_no_stdin_not_a_failed_run: {why}");
+        return;
+    }
+    let root = workspace_root();
+    let mut cmd = Command::new("sh");
+    cmd.current_dir(&root).arg("-c").arg(format!(
+        "exec 0<&-; exec {} run --unjailed -- echo closed-stdin-ok",
+        env!("CARGO_BIN_EXE_ekvm")
+    ));
+    shared_env(&mut cmd, &root);
+    let out = cmd.output().unwrap_or_else(|e| panic!("spawn sh: {e}"));
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "a closed fd 0 must not fail the run ({}): {stderr}",
+        out.status
+    );
+    assert!(
+        stdout.contains("closed-stdin-ok"),
+        "the guest still ran and its output came back: {stdout}"
+    );
+}
+
+#[test]
 #[ignore = "spawns ekvm + ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_cli_and_the_daemon_render_a_run_identically() {
     if let Some(why) = skip_reason() {

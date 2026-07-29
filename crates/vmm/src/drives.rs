@@ -589,6 +589,55 @@ mod tests {
     }
 
     #[test]
+    fn a_signal_killed_host_tool_is_named_by_its_status_not_a_bare_colon() {
+        // `run_host_tool`'s live failure path. A tool killed by a signal writes no stderr, and the
+        // error used to be built from stderr alone, so it ended at the colon and named no cause.
+        // `sh -c 'kill -9 $$'` stands in for the OOM killer or a deadline kill reaching `mke2fs`.
+        let err = run_host_tool(
+            "sh",
+            &[OsStr::new("-c"), OsStr::new("kill -9 $$")],
+            Instant::now() + Duration::from_secs(5),
+        )
+        .expect_err("a signal-killed tool must be an error");
+        let msg = err.to_string();
+        assert!(
+            !msg.trim_end().ends_with(':'),
+            "a silent tool must still be described: {msg}"
+        );
+        assert!(
+            msg.contains("signal"),
+            "the status is the only fact a signal-killed tool leaves: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_unreapable_child_is_detached_rather_than_waited_on() {
+        // The `false` return of `kill_and_reap_briefly`, which teardown uses to decide whether to
+        // skip `console.join()`. A real D-state child needs a wedged FUSE/NFS mount; a zero grace
+        // reaches the same arm, since the reap loop gives up before its first sleep. The race (the
+        // kernel delivering SIGKILL *and* the process being reaped between `kill` and one
+        // `try_wait`) is vanishingly small, and a flake here would itself be worth knowing about.
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let started = Instant::now();
+        let reaped = kill_and_reap_briefly(&mut child, "sleep", Duration::ZERO);
+        assert!(
+            !reaped,
+            "a zero grace cannot reap: it must report the detach"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "detaching must be prompt, never a wait on the child"
+        );
+        let _ = child.wait(); // this test's own cleanup, not the code under test
+    }
+
+    #[test]
     fn wait_bounded_returns_a_quick_child_status() {
         let mut child = Command::new("true")
             .stdin(Stdio::null())

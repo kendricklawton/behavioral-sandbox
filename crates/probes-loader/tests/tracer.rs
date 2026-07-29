@@ -77,6 +77,71 @@ fn tracer_captures_this_process_openat_with_its_path() {
 
 #[test]
 #[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
+fn an_over_long_path_is_captured_as_truncated_not_as_a_shorter_path() {
+    // The one test that checks what the *kernel* does with an over-long read, rather than what the
+    // helper's documentation says it does. `detail_truncated` reads a full buffer as "there was
+    // more", which is only correct if `bpf_probe_read_user_str` fills the buffer and reports
+    // `DETAIL_CAP - 1`. If that reasoning is wrong the flag silently never fires and every
+    // host-safe test still passes, so this is the assertion the rest of them rest on.
+    if let Some(why) = skip_reason() {
+        eprintln!(
+            "skipping an_over_long_path_is_captured_as_truncated_not_as_a_shorter_path: {why}"
+        );
+        return;
+    }
+    let mut tracer = SyscallTracer::load().expect("load + attach the syscall tracer");
+    let me = std::process::id();
+    tracer.watch_pid(me).expect("filter to this pid");
+    tracer.drain(|_| {}).expect("clear the baseline");
+
+    // Comfortably past the 128-byte capture buffer, and a distinct prefix so the event is findable
+    // by what *was* captured. The file need not exist: `sys_enter_openat` fires regardless.
+    let prefix = format!("/tmp/ekvm-longpath-{me}-");
+    let long = format!("{prefix}{}", "a".repeat(400));
+    assert!(long.len() > probes_common::DETAIL_CAP * 2);
+    let _ = std::fs::File::open(&long);
+    sleep(Duration::from_millis(50));
+
+    let mut events = Vec::new();
+    tracer.drain(|ev| events.push(ev)).expect("drain the ring");
+    let ev = events
+        .iter()
+        .find(|e| e.kind() == Some(Syscall::Openat) && e.detail().starts_with(prefix.as_bytes()))
+        .expect("our over-long openat must be in the stream");
+
+    assert!(
+        ev.detail_truncated(),
+        "a path past the buffer must be flagged; captured {} of {} bytes",
+        ev.detail_len,
+        long.len()
+    );
+    assert!(
+        ev.detail().len() < long.len(),
+        "the capture really is a prefix, which is why the flag has to exist"
+    );
+
+    // And the flag must not fire for a path that fits, or it would mean nothing.
+    tracer.drain(|_| {}).expect("clear before the short probe");
+    let short = format!("{prefix}short");
+    let _ = std::fs::File::open(&short);
+    sleep(Duration::from_millis(50));
+    let mut short_events = Vec::new();
+    tracer
+        .drain(|ev| short_events.push(ev))
+        .expect("drain the ring");
+    let short_ev = short_events
+        .iter()
+        .find(|e| e.kind() == Some(Syscall::Openat) && e.detail() == short.as_bytes())
+        .expect("the short openat must be in the stream");
+    assert!(
+        !short_ev.detail_truncated(),
+        "a path that fits must not be flagged: {}",
+        String::from_utf8_lossy(short_ev.detail())
+    );
+}
+
+#[test]
+#[ignore = "needs CAP_BPF/root + BTF + the built object (run via `cargo xtask ci-privileged`)"]
 fn filter_hides_other_pids_then_watch_all_reveals_a_child_execve() {
     // A pid filter drops a child's events; clearing it reveals them. Spawn `/bin/true` (one
     // execve, in a child with a different tgid) under our-pid filter → not seen; then `watch_all` and

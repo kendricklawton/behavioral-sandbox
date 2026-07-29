@@ -1915,6 +1915,81 @@ mod tests {
     use super::*;
     use test_support::ScratchDir;
 
+    /// Write an executable shell script into the scratch dir and hand back its path. Stands in for
+    /// an `EKVM_FIRECRACKER` pointed at a wrapper, which is the whole reason the probe is bounded.
+    fn script(dir: &ScratchDir, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write script");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    }
+
+    #[test]
+    fn a_firecracker_that_hangs_on_version_does_not_hang_the_boot() {
+        // This probe runs before any boot deadline exists, so an unbounded one hung *every* boot
+        // with nothing to report. A wedged probe is `Unavailable` (the silent case): the spawn that
+        // follows produces the legible typed error.
+        let dir = ScratchDir::created("fcver-hang");
+        let hang = script(&dir, "fc-hang", "sleep 60");
+        let started = Instant::now();
+        let probed = probe_fc_version(&hang);
+        assert!(matches!(probed, FcProbe::Unavailable), "got {probed:?}");
+        assert!(
+            started.elapsed() < crate::proc::VERSION_PROBE_TIMEOUT + Duration::from_secs(3),
+            "the probe must give up at its wall: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_flooding_firecracker_is_read_back_bounded() {
+        // The read used to pull the whole file into host RAM and only then cut it to 4 KiB. A
+        // wrapper that floods stdout is the case that made that a real cost rather than a nitpick;
+        // the version line still parses out of the head of the flood.
+        let dir = ScratchDir::created("fcver-flood");
+        let flood = script(
+            &dir,
+            "fc-flood",
+            "echo 'Firecracker v1.16.1'\nyes ekvm-flood | head -c 3000000",
+        );
+        assert!(
+            matches!(probe_fc_version(&flood), FcProbe::Version((1, 16))),
+            "the version is in the head of the output, and the tail is not read"
+        );
+    }
+
+    #[test]
+    fn the_version_probes_scratch_file_never_exists_on_disk() {
+        // `create_new` + an immediate unlink: a predictable name in a world-writable temp dir,
+        // opened with a following truncating `create`, is a symlink hijack against a driver running
+        // as root. Nothing may be left behind for one to be aimed at, on any exit path.
+        let before = temp_scratch_files();
+        let (sink, back) = scratch_pair().expect("a scratch pair");
+        assert_eq!(
+            temp_scratch_files(),
+            before,
+            "the file is unlinked at creation, so it is never visible by name"
+        );
+        // Still a working pair despite having no name: written through one handle, read via the
+        // other (they share an open file description, hence `read_head`'s seek).
+        use std::io::Write as _;
+        (&sink).write_all(b"Firecracker v1.16.1\n").expect("write");
+        let head = read_head(back, VERSION_HEAD_CAP).expect("read back");
+        assert!(head.contains("v1.16.1"), "got {head:?}");
+    }
+
+    /// How many of the probe's scratch files are visible in the temp dir right now.
+    fn temp_scratch_files() -> usize {
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|d| {
+                d.filter_map(Result::ok)
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("ekvm-fcver-"))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     #[test]
     fn poll_backoff_starts_tight_and_caps() {
         // Starts at 1 ms so near-immediate readiness is caught almost at once, doubles, and never

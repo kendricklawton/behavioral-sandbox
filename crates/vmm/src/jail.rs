@@ -691,6 +691,63 @@ mod tests {
 ";
 
     #[test]
+    fn a_wedged_mount_is_a_timeout_not_a_hung_boot() {
+        // The branch bounding the mounts exists for: a mount-family syscall wedged in D-state used
+        // to hang `Vm::boot` forever, past the wall the caller was promised. `sleep` stands in for
+        // the wedge (the same stand-in `wait_bounded`'s own test uses), since a real one needs a
+        // busy or broken filesystem.
+        let started = Instant::now();
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let err = run_mount(
+            &mut cmd,
+            "mount --bind",
+            started + std::time::Duration::from_millis(100),
+        )
+        .expect_err("a mount past its deadline must not return a status");
+        assert!(matches!(err, VmmError::Timeout(_)), "got {err:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the boot must fail at its wall, not wait the wedged mount out"
+        );
+    }
+
+    #[test]
+    fn a_failed_bind_leaves_no_mount_behind() {
+        // Unprivileged, `mount --bind` fails outright, which is the failure path that must still
+        // detach: a deadline kill can land after the child's `mount(2)` completed, and the caller
+        // records a mount for teardown only on `Ok`, so an undetached one would EBUSY the scratch
+        // reclaim. Root would actually bind here, so the test asserts on the mountinfo either way.
+        let dir = std::env::temp_dir().join(format!("ekvm-bindro-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (src, dst) = (dir.join("src"), dir.join("dst"));
+        std::fs::write(&src, b"base").expect("write src");
+        std::fs::write(&dst, b"").expect("write dst");
+
+        let result = bind_ro(
+            &src,
+            &dst,
+            Instant::now() + std::time::Duration::from_secs(5),
+        );
+        if let Err(e) = &result {
+            let msg = e.to_string();
+            assert!(
+                !msg.trim_end().ends_with(':'),
+                "a failed bind must name a cause, from mount's stderr or its status: {msg}"
+            );
+        }
+        let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+        let leaked = mounts
+            .lines()
+            .any(|l| l.split(' ').nth(4) == Some(&dst.to_string_lossy()));
+        assert!(
+            !leaked,
+            "a bind that did not fully succeed must leave nothing mounted at {dst:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn shared_mount_gates_the_shared_base_path() {
         // A scratch dir on a shared mount (`/tmp`, or nested under it) takes the bind-mount memory-sharing
         // path; the longest matching mount point wins, so a file under `/tmp` reads `/tmp`'s tag.
