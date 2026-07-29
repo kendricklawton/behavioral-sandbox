@@ -22,7 +22,7 @@ diverge.
 
 ```console
 uname -m                      # must print x86_64
-uname -r                      # must be 5.15 or newer
+uname -r                      # 5.15+, or any kernel with cgroup.kill (RHEL 9's 5.14 qualifies)
 ls -l /dev/kvm                # must exist
 ls /sys/kernel/btf/vmlinux    # needed for the eBPF half; most distro kernels ship it
 ```
@@ -122,12 +122,33 @@ other could not).
 
 | | Ubuntu | Arch |
 |---|---|---|
-| Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the supported floor | rolling, comfortably above the floor |
+| Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the fallback floor | rolling, comfortably above the floor |
 | `/dev/kvm` | `0660 root:kvm`, so you must join the group | `0666`, usually usable already |
 | `/tmp` | varies by release, check it | tmpfs **`nodev` by default**, so the jailed default needs a non-`nodev` `scratch_dir` (the guided install sets one; see below) |
 | `e2fsprogs` | 24.04 ships **1.47.0**, below the 1.47.1 floor where `mke2fs` honours `SOURCE_DATE_EPOCH`, so `cargo xtask build-rootfs --verify` fails (normal builds are fine) | current, above the floor |
 | AppArmor | **enabled by default**, and can deny the jailer in ways that look like an engine bug | not installed by default |
 | Build toolchain | `build-essential` | `base-devel` |
+
+### Red Hat (RHEL 9, RHEL 10): a target, not yet verified
+
+> **Nothing on this host family has been run yet.** RHEL 9 and 10 are intended targets; no boot,
+> gate, or probe attach has been exercised on either. What follows is what the mechanism implies,
+> not a report. Treat every row as a hypothesis until the privileged gate runs there.
+
+| | RHEL 9 | RHEL 10 |
+|---|---|---|
+| Host kernel | `5.14.0-*.el9`, **below the 5.15 fallback floor**, so it qualifies via the probed `cgroup.kill` (present since 5.14) rather than by version | `6.12.0-*.el10`, above the fallback floor either way |
+| cgroup | v2 unified by default | v2 unified by default |
+| Kernel BTF | ships `/sys/kernel/btf/vmlinux`, so the eBPF half's CO-RE requirement is met | as RHEL 9 |
+| **SELinux** | **enforcing by default, and the largest unknown.** The jailer chroots, `mknod`s `/dev/kvm`, bind-mounts, and drops uid: each is something targeted policy has opinions about. Expect denials before expecting success | as RHEL 9 |
+| Secure Boot | with lockdown active, some BPF operations can be restricted; unverified here | as RHEL 9 |
+| Containers | `podman`, not `docker`, for the [container recipe](#run-it-as-a-container) | as RHEL 9 |
+
+RHEL 8 (`4.18.0-*.el8`, cgroup v1 hybrid by default) is **not** a target.
+
+For CI without a subscription, **CentOS Stream 9**, **Rocky 9**, and **AlmaLinux 9** are
+kernel-compatible with RHEL 9. The privileged gate still needs `/dev/kvm` and real root, so it
+needs bare metal or nested virt on any of them.
 
 Test the `/tmp` question rather than trusting the table, since it depends on your own mount setup:
 
@@ -286,7 +307,7 @@ exits non-zero if a hard requirement is missing.
 |---|---|---|
 | **OS** | Linux | KVM is the isolation boundary |
 | **Architecture** | `x86_64` | the one architecture with tested artifacts and a privileged CI lane; aarch64 support returns only with hardware to test it on. |
-| **Host kernel** | **≥ 5.15** (a security-maintained LTS) | untrusted code on an unpatched kernel is a threat-model hole, KVM CVEs land here |
+| **Host kernel** | `cgroup.kill` present (kernel 5.14+, includes RHEL 9); **≥ 5.15** where there is no cgroup v2 to probe | `cgroup.kill` is the crash-safe teardown primitive the engine needs. A version floor alone would refuse RHEL 9's patched `5.14.0-*.el9` for no safety gain. Neither signal establishes that the kernel is *patched*: that is the operator's |
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
 | **Firecracker + jailer** | present on `PATH` | no VMM to launch (the jailer's absence degrades to `--unjailed`) |
 
@@ -343,7 +364,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
 **building from source** additionally needs (the Rust toolchain, `bpf-linker`), see
 [Contributing](./contributing.md#2-prerequisites--quickstart).
 
-- **A Linux host with `/dev/kvm`** (kernel ≥ 5.15, see [Supported platforms](#supported-platforms))
+- **A Linux host with `/dev/kvm`** (a kernel with `cgroup.kill`, see [Supported platforms](#supported-platforms))
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
   for CO-RE eBPF, most modern distros ship it.
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on

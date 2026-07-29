@@ -26,8 +26,9 @@ Built in the open, milestone by milestone, each one shipping as a working demo.
 
 ## Getting started
 
-**Requirements:** Linux with `/dev/kvm`, an `x86_64` host, kernel
-**≥ 5.15**, and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) on
+**Requirements:** Linux with `/dev/kvm`, an `x86_64` host, a kernel providing `cgroup.kill`
+(5.14+, so RHEL 9 qualifies; `ekvm doctor` probes for it rather than trusting a version string,
+and falls back to **≥ 5.15** where there is no cgroup v2 hierarchy to probe), and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) on
 `PATH` (v1.15 through v1.16 supported, v1.16.1 pinned and tested; the engine drives it, it
 doesn't bundle it). Starting from a bare machine,
 [Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version of all of

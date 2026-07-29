@@ -80,8 +80,8 @@ The mirror list, so reports stay signal:
 - **Anything that starts from a compromised host.** The host kernel, KVM, and the engine's own
   uid are trusted; an attacker who already has them has everything, no sandbox can claim
   otherwise.
-- **Hosts below the supported floor.** An unsupported architecture or a host kernel older than the
-  LTS floor is refused by `ekvm doctor`; weaknesses that require running there
+- **Hosts below the supported floor.** An unsupported architecture, or a host kernel with neither
+  `cgroup.kill` nor a version above the fallback floor, is refused by `ekvm doctor`; weaknesses that require running there
   anyway are the operator's acceptance, not an engine bug. The same goes for an *unpatched* host
   kernel within the floor: patching the substrate is the operator's half of the contract.
 - **`--unjailed` weakening the VMM's own confinement.** That flag is the documented dev-box

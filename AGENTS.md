@@ -89,8 +89,10 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
 ## Conventions
 
 - **Rust**, stable, one workspace. Linux-only (it needs KVM), `x86_64` only; host kernel
-  **≥ 5.15** (a security-maintained LTS floor, untrusted code on an unpatched kernel is a
-  threat-model hole; `ekvm doctor` enforces it). The eBPF programs build for their
+  providing `cgroup.kill` (5.14+, so RHEL 9 qualifies), else **≥ 5.15** as a fallback where there
+  is no cgroup v2 to probe. Untrusted code on an unpatched kernel is a threat-model hole, but a
+  version number is the wrong proxy for it on enterprise kernels; `ekvm doctor` probes the
+  primitive. The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
   build · unit tests · docs · `deny` · eBPF object build) and runs everywhere.
@@ -104,6 +106,14 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
   `ekvm run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`EKVM_*`) >
   file (`.ekvm.toml`, the nearest one walking up from the cwd) > defaults**.
+- **Target kernels, not distros.** Never read `/etc/os-release`, branch on a distro name, or add a
+  per-distro code path. Ask the kernel what it can *do*: `cgroup.kill` rather than `>= 5.15`,
+  `/sys/kernel/security/lsm` rather than "is this RHEL". A capability probe is bounded (a distro
+  list is not: Rocky, Alma, CentOS Stream, Oracle and Amazon Linux are all RHEL), and it is testable
+  on a host that lacks the capability, since the probe takes a path. Host variance lives in
+  `doctor.rs` preflight, never in the boot path: a conditional in `spawn.rs`/`jail.rs` creates N
+  boot paths and leaves N-1 untested. The shipped binary is static musl for the same reason, no host
+  libc to mismatch. Full rationale: `docs/design.md`, decision 8.
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
 - **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
   show, in the fewest sentences that carry it; it never restates what the next lines visibly do.

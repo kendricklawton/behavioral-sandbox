@@ -46,7 +46,7 @@ Where the pieces sit, and which boundaries a run crosses:
 
 ```mermaid
 flowchart TB
-    subgraph Host["Linux Host (Kernel >= 5.15)"]
+    subgraph Host["Linux Host (cgroup.kill, else Kernel >= 5.15)"]
         subgraph Userspace["Host Userspace"]
             Client["ekvm CLI / Client SDK"]
             Daemon["ekvm serve Daemon"]
@@ -86,7 +86,7 @@ flowchart TB
 
 ### Host requirements
 
-- **OS & Kernel**: Linux host with kernel `>= 5.15` (enforcing `cgroup.kill` and security-maintained LTS APIs).
+- **OS & Kernel**: Linux host with a kernel providing `cgroup.kill` (5.14+, so RHEL 9 qualifies). `ekvm doctor` probes for the primitive rather than trusting a version string, falling back to `>= 5.15` only where there is no cgroup v2 hierarchy to probe.
 - **Architecture**: `x86_64` with hardware virtualization extensions (`/dev/kvm`).
 - **Permissions**: Root or delegated capabilities (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_BPF`) for jailing, network namespace management, and eBPF loading.
 
@@ -233,3 +233,41 @@ this engine, and the architecture keeps them outside this repo: the polyglot SDK
 should ship an `async` variant, since the agent frameworks calling it are async) and any hoster's
 platform layer multiplexing many daemons. They speak the wire protocol, which is transport-agnostic
 and says nothing about how either side schedules its work.
+
+### 8. Portability is a capability question, not a distro question
+
+The engine targets **Linux kernels, not Linux distributions**. Nothing in this repo reads
+`/etc/os-release`, branches on a distro name, or carries a per-distro code path. When a host
+difference matters, the engine asks the kernel what it can *do* and reports the answer.
+
+The worked example is the host-kernel floor. It began as `>= 5.15`, a version number standing in for
+"a security-maintained LTS". That proxy fails on enterprise kernels: RHEL 9 ships `5.14.0-*.el9` and
+Red Hat backports security fixes to it for a decade, so a version test refuses a patched, supported
+kernel for no safety gain. `ekvm doctor` now probes for `cgroup.kill` (the crash-safe teardown
+primitive `lifetime.rs` needs, kernel 5.14+) and keeps the version only as a fallback for hosts with
+no cgroup v2 hierarchy to probe. Same argument as the Firecracker floor in
+[Contributing](./contributing.md#a-new-api-field-may-not-raise-the-floor): reject *unpatched*, not
+*old*.
+
+Three properties follow, and they are the reason this is a rule rather than a preference:
+
+- **A capability probe is bounded; a distro list is not.** Rocky, Alma, CentOS Stream, Oracle Linux,
+  and Amazon Linux are all RHEL, and each distro varies again by point release. The set of things
+  the engine actually needs is short and stable.
+- **A capability probe is testable without the host.** `cgroup_kill_under` and `mac_posture` take a
+  path, so their tests construct the shapes an enterprise kernel presents on a laptop that has never
+  seen one. A distro branch can only be tested on that distro.
+- **The variance stays in preflight.** `doctor.rs` absorbs host differences and either passes or
+  refuses with a named fix; `spawn.rs` and `jail.rs` stay uniform. A conditional in the boot path
+  would create N boot paths and leave N-1 of them untested.
+
+The same rule decides how the engine is *shipped*. A glibc-linked binary carries the build host's
+symbol versions, and glibc is backward but not forward compatible, so a package built on the newest
+CI runner fails to start on an older host before reaching `main()`. `cargo xtask dist` therefore
+builds the shipped binary static against musl and calls `verify_static` on the result, so the
+package depends on no host libc at all. Dev builds stay native.
+
+**What this does not claim.** Probing a capability says nothing about whether the kernel is
+*patched*, which is the operator's to know and is stated as such in the check's own note. Nor is it
+a portability claim: see [Status](./status.md) for which hosts have actually been run, which as of
+this writing does not include any Red Hat host.

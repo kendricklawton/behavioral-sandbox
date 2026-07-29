@@ -16,7 +16,7 @@ The first supported release of eKVM: a self-hostable engine that boots a hardwar
 - **Audit Records**: Host-observed, Ed25519-signed JSON audit logs (`RunRecord`) with a hash-chained `trace`. What a signature establishes is in [docs/threat-model.md](docs/threat-model.md#record-integrity-beyond-the-guest).
 - **Reference Rust Client (`crates/client`)**: Dependency-light reference client driving `ekvm serve` over Unix sockets.
 - **Pre-warmed Sandbox Pool**: Snapshot-restore pool for warm sandbox starts. Latency figures are withdrawn pending a re-measurement on a verified host; see [docs/benchmarks.md](docs/benchmarks.md).
-- **Host Diagnostics (`ekvm doctor`)**: Pre-flight host verification for `/dev/kvm`, Linux kernel floor >= 5.15, cgroup v2, and BTF eBPF support.
+- **Host Diagnostics (`ekvm doctor`)**: Pre-flight host verification for `/dev/kvm`, the host-kernel floor (a probed `cgroup.kill`, else >= 5.15), cgroup v2, and BTF eBPF support.
 - **Distribution Tooling (`xtask`)**: Release packaging (`cargo xtask dist`) producing release tarballs (`ekvm-0.1.0-x86_64-linux.tar.gz`), a signed `SHA256SUMS` manifest, and single-command installer (`install.sh`).
 
 ### Planned pinned API surface (v0.1.0)
@@ -24,7 +24,8 @@ The first supported release of eKVM: a self-hostable engine that boots a hardwar
 - **Wire Protocol**: Line-delimited JSON format (`schema: 1`).
 
 ### Planned host requirements (v0.1.0)
-- **Host**: Linux `x86_64`, kernel >= 5.15, with `/dev/kvm`, cgroup v2, and kernel BTF
+- **Host**: Linux `x86_64` with `/dev/kvm`, cgroup v2, and kernel BTF; a kernel providing
+  `cgroup.kill` (5.14+, so RHEL 9 and 10 qualify), else >= 5.15
   (`/sys/kernel/btf/vmlinux`). `ekvm doctor` verifies all of it and prints the fix for
   whatever is missing.
 - **Firecracker**: v1.15 through v1.16 supported (upstream's current support window);
