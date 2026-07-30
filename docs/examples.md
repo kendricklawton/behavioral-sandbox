@@ -97,7 +97,7 @@ observed at the tap:
 }
 ```
 
-`ekvm verify record.json` checks the host signature; [`ekvm verify`](./cli.md#ekvm-verify) states exactly what that does and does not prove.
+`ekvm verify record.json` checks the host signature; [`ekvm verify`](./cli-commands.md#ekvm-verify) states exactly what that does and does not prove.
 
 ---
 

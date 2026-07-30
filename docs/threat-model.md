@@ -169,7 +169,7 @@ library `verify`, and the daemon's signed `trace` reply).
   record hash or run count tracked by the consumer, which is the hoster's, the same custody line as
   the signing key.
 
-See [`ekvm verify`](./cli.md#ekvm-verify) for the verify path.
+See [`ekvm verify`](./cli-commands.md#ekvm-verify) for the verify path.
 
 ## Assumptions and residual risk
 
