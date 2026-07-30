@@ -27,7 +27,9 @@ the design is wrong.
 
 ## Design rules (every change holds to all six)
 
-The single source. `docs/design.md` restates these for readers; nothing else should. They state
+The single source. Exactly two places restate them for readers: `docs/design.md` for the book, and
+`README.md` for someone who never clones. Nothing else should, and a third copy is a third thing to
+drift. They state
 intent and the mechanism serving it, so a change that breaks one is recognisable as a design error
 rather than a trade-off.
 

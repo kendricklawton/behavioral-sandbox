@@ -26,14 +26,10 @@ maintained.
 
 ## Design rules (never trade these away)
 
-These are the rules a change is measured against. They state intent and the mechanism serving it, so a
-change that breaks one is a design error rather than a trade-off. The full list with rationale is in
-[`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) and restated for readers in the
-[design specification](./design.md); the summary:
+Every change is measured against six design rules. They state intent and the mechanism serving it, so
+a change that breaks one is a design error rather than a trade-off, and the first question in review
+is which rule a change touches.
 
-- **Isolation is hardware.** Untrusted code runs in a KVM microVM; the boundary is the CPU, not guest software.
-- **Observe and enforce from the host.** Visibility and policy belong in host-side eBPF (`aya`) attached to host-kernel hooks.
-- **Deny by default.** A sandbox with no explicit policy is configured with no route out and minimal capabilities.
-- **Engine, not platform.** A self-hostable runtime and a driver API. Auth, billing, scheduling, and dashboards are out of scope.
-- **No panic, hang, or leak on the host path.** A hostile or crashing guest should surface as a typed `VmmError`. This is what the code is written against and what the confinement suite exercises; it is an aim, not a proven property.
-- **Measure rather than assert.** Boot, snapshot-restore, and eBPF overhead are reported as percentiles with the host and date. A number that cannot be defended is withdrawn.
+They are single-sourced in [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) and
+restated for readers in the [design specification](./design.md#design-rules). Deliberately not
+restated here: a third copy is a third thing to drift.

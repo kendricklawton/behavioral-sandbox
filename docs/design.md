@@ -146,18 +146,9 @@ flowchart TB
 
 ## Internal architecture
 
-### Repo layout
-
-One Cargo workspace, split along the isolation/observability/driver boundaries:
-
-- `crates/vmm`: The Firecracker VMM driver. Manages microVM lifecycles (boot, exec, shutdown), rootfs/TAP networking setup, snapshots, pre-warmed VM pools, jailer/cgroup confinement, and the public `Sandbox` API.
-- `crates/channel`: Host↔guest wire framing protocol over stream sockets (`vsock` / Unix sockets). Dependency-free, `no_std`-compatible framing with zeroize memory hygiene.
-- `crates/guest-agent`: Statically linked in-guest binary (`guest-agent`) compiled for `x86_64-unknown-linux-musl`. Executes commands inside the guest and streams `stdout`, `stderr`, and exit codes over `channel`.
-- `crates/probes`: eBPF programs (`bpfel-unknown-none`) compiled via `bpf-linker`. Contains raw kernel tracepoint handlers, `tc` egress policy enforcers, and cgroup accounting hooks.
-- `crates/probes-common`: Zero-dependency, `#![no_std]` `#[repr(C)]` POD struct definitions shared between eBPF kernel programs and userspace loaders.
-- `crates/probes-loader`: the userspace loader, built on `aya`: load the eBPF objects, attach tracepoints/tc filters to a sandbox, read the maps, stream audit events.
-- `crates/cli`: the `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `ekvm serve` daemon.
-- `xtask`: dev orchestration: the host-safe gate (`cargo xtask ci`), the privileged gate (`ci-privileged`), the rootfs/kernel builds, vendoring. Never shipped.
+One Cargo workspace, split along the isolation, observability, and driver boundaries. The crate index,
+the types worth knowing before reading code, and the order things happen in during a run are in
+[Architecture](./contributing-architecture.md).
 
 ---
 
