@@ -91,8 +91,10 @@ default. Before adding a dependency, consider whether the needed slice is small 
 of the eBPF boundary cannot drift.
 
 `cargo deny` runs in the host-safe gate and checks licenses, advisories, and duplicate versions. Every
-out-of-band input (the guest kernel, the Alpine rootfs, `apk-tools`, the Firecracker release) is
-**sha256-pinned**, and `cargo xtask vendor` mirrors all of them locally for offline builds. Pins that
+out-of-band input (the guest kernel, the Alpine base rootfs, `apk-tools`, the Firecracker release) is
+**sha256-pinned**. The guest package closure installed on top of that base is the exception: it floats
+within the pinned Alpine branch and is held by a recorded lockfile plus a weekly rebuild, not a hash.
+`cargo xtask vendor` mirrors every input locally for offline builds, closure included. Pins that
 appear in more than one file are held together by gate tests rather than vigilance, which is what
 caught a Firecracker pin that had drifted below its own support floor.
 

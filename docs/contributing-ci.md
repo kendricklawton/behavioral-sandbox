@@ -53,6 +53,10 @@ Never gate the everyday loop on a privileged runner.
 
 - `firecracker-pin.yml` runs weekly and watches upstream's support table, per
   [Firecracker version policy](./contributing-firecracker-policy.md).
+- `rootfs-packages.yml` runs weekly and watches the other upstream no advisory database covers: the
+  Alpine package closure baked into the guest image. It rebuilds, re-pins
+  `xtask/rootfs-packages.lock`, and fails with the diff if Alpine moved a package. Without it, drift
+  surfaces as an artifact-stage failure the next time someone runs the privileged gate.
 - `fuzz-smoke.yml` and `fuzz.yml` are the two fuzzing tiers, per
   [Fuzzing](./contributing-fuzzing.md).
 - `ci-privileged-hosted.yml` runs the privileged gate nightly on a hosted runner under nested KVM.

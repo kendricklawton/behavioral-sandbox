@@ -53,6 +53,8 @@ it is the one command to run first on a new machine.
 
 ## Vendoring for offline builds
 
-Every out-of-band input is sha256-pinned, and `cargo xtask vendor` mirrors all of them locally, so a
-self-hoster can build with no network. See [Installation](./cli-install.md) for the operator-facing
-side of the same mirror.
+Every out-of-band input is sha256-pinned except the guest's Alpine package closure, which floats
+within the pinned branch and is recorded in `xtask/rootfs-packages.lock` rather than hashed (see
+[Supply chain & provenance](./security-threat-model.md) for why). `cargo xtask vendor` mirrors all of
+them locally, pinning the closure as it goes, so a self-hoster can build with no network. See
+[Installation](./cli-install.md) for the operator-facing side of the same mirror.
