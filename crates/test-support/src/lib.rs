@@ -289,6 +289,20 @@ impl SmallFs {
              filesystem would green every disk-full test without filling anything",
             this.path().display()
         );
+        // `is_mounted` alone only proves *something* is mounted. If the size option were ever
+        // dropped or misparsed, tmpfs falls back to half of RAM, the mount check still passes, and
+        // the fixture is silently gigabytes: the same hollow-green failure one layer down. Assert
+        // the size the caller asked for actually took, with slack for tmpfs rounding.
+        if let Some((total, _)) = this.size_bytes() {
+            let asked = mib * 1024 * 1024;
+            assert!(
+                total <= asked * 2,
+                "asked for a {mib} MiB fixture at {} but got {total} bytes: the size option did \
+                 not take, so this filesystem cannot be filled and every disk-full test built on \
+                 it would pass without testing anything",
+                this.path().display()
+            );
+        }
         Some(this)
     }
 
@@ -328,9 +342,47 @@ impl SmallFs {
         }
     }
 
+    /// This fixture's `(total, available)` bytes, via `df` (pure-std: no `statvfs` without libc).
+    /// `None` if `df` is missing or its output does not parse, so a diagnostic can never be the
+    /// thing that fails a test.
+    #[must_use]
+    pub fn size_bytes(&self) -> Option<(u64, u64)> {
+        let out = std::process::Command::new("df")
+            .args(["-B1", "--output=size,avail"])
+            .arg(self.path())
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut fields = text.lines().nth(1)?.split_whitespace();
+        let total = fields.next()?.parse().ok()?;
+        let avail = fields.next()?.parse().ok()?;
+        Some((total, avail))
+    }
+
+    /// A one-line dump of what this fixture actually is right now, for a failure message.
+    ///
+    /// A disk-full test that fails says the tool "unexpectedly succeeded", which is a symptom of the
+    /// *fixture*, not of the tool: the useful questions are whether the small filesystem is still
+    /// mounted and how much room it really had. Answering them in the panic is the difference
+    /// between a one-line diagnosis and a debugging session, since these tests only fail on hosts
+    /// (a CI runner) where nobody can attach a shell afterwards.
+    #[must_use]
+    pub fn state(&self) -> String {
+        let size = self.size_bytes().map_or_else(
+            || "size unknown (df failed)".to_string(),
+            |(total, avail)| format!("{total} bytes total, {avail} available"),
+        );
+        format!(
+            "{}: mounted={}, {size}",
+            self.path().display(),
+            self.is_mounted()
+        )
+    }
+
     /// Whether a filesystem is mounted at this fixture's dir, read from `/proc/self/mountinfo`
     /// (field 5 is the mount point). The fail-closed half of [`create`](Self::create).
-    fn is_mounted(&self) -> bool {
+    #[must_use]
+    pub fn is_mounted(&self) -> bool {
         let target = self.path().to_string_lossy().to_string();
         std::fs::read_to_string("/proc/self/mountinfo")
             .unwrap_or_default()

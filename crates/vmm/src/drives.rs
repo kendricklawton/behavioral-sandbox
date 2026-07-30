@@ -831,8 +831,15 @@ mod tests {
         };
         fs.fill_leaving(256 * 1024);
 
+        // Report the fixture's real state on failure rather than only "it succeeded": if this ever
+        // trips, the questions are whether the small filesystem was still mounted and how much room
+        // it actually had, and these tests fail on hosts where nobody can attach a shell after. The
+        // message is built after the call, so it describes the filesystem as mke2fs left it.
         let err = build_output_image(fs.path(), Instant::now() + Duration::from_secs(30))
-            .expect_err("mke2fs cannot build a 256 MiB image on a full filesystem");
+            .expect_err(&format!(
+                "mke2fs built a 256 MiB image on a filesystem that cannot hold one. Fixture {}",
+                fs.state()
+            ));
         let msg = err.to_string();
         assert!(
             !msg.trim_end().ends_with(':'),
