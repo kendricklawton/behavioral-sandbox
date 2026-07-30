@@ -28,10 +28,9 @@ the design is wrong.
 ## Design rules (every change holds to all six)
 
 The single source. Exactly two places restate them for readers: `docs/design.md` for the book, and
-`README.md` for someone who never clones. Nothing else should, and a third copy is a third thing to
-drift. They state
-intent and the mechanism serving it, so a change that breaks one is recognisable as a design error
-rather than a trade-off.
+`README.md` for someone who never clones. Nothing else should, since a third copy is a third thing to
+drift. They state intent and the mechanism serving it, so a change that breaks one is recognisable as
+a design error rather than a trade-off.
 
 1. **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. Moving the
    boundary into guest-side software is a design error, not an optimisation, and a shared-kernel
@@ -51,46 +50,29 @@ rather than a trade-off.
 
 ## Repo layout
 
-```
-crates/
-  vmm/           the Firecracker driver: microVM lifecycle (boot/exec/shutdown), rootfs and
-                 tap networking, snapshots + the pre-warmed pool, jailer/cgroup confinement, and the
-                 `Sandbox` lifecycle API. `#![forbid(unsafe_code)]` on the host path; a hostile
-                 guest is meant to surface as a typed error, not a panic, hang, or leak.
-  channel/       the host↔guest wire protocol (dependency-free framing over `Read`/`Write`),
-                 shared by the driver and the guest agent.
-  guest-agent/   the in-guest agent (`guest-agent`): runs one command per connection and streams
-                 stdout/stderr/exit over `channel`. Built static (musl), baked into the rootfs.
-                 Exec/IO convenience only, not the security boundary.
-  probes/        the eBPF programs (`#![no_std]`, built for `bpfel-unknown-none` via
-                 `bpf-linker`): syscall tracepoints, tc/XDP on the VM's tap, cgroup accounting.
-                 CO-RE/BTF so they're portable across kernels.
-  probes-common/ the plain-old-data types shared across the eBPF boundary (`#![no_std]`, zero deps):
-                 the `#[repr(C)]` event records the kernel writes and the loader reads, single-sourced
-                 so the two sides can't drift.
-  probes-loader/ the userspace loader (aya): attach probes to a specific sandbox, read their
-                 maps, stream events into the audit log.
-  cli/           one entrypoint, the `ekvm` CLI (also installed as `ekvm`): (`run`,
-                 `shell`, `doctor`; the audit record on
-                 `--trace`/`--record`/`--record-summary`/`--watch`) plus `ekvm serve`, the driver
-                 daemon (the versioned newline-JSON wire API over a unix socket).
-docs/            the documentation, as an mdBook (`SUMMARY.md` is the index): design spec
-                 (`design.md`), running the engine (`cli*.md`), the embedder contract
-                 (`embedding.md`), the eBPF half (`probes.md`), and the contributing chapters.
-                 Root keeps only the standard meta files (README/CONTRIBUTING/SECURITY/…).
-xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF build at P8),
-                 `ci-privileged` (VM-boot + probe-attach integration), `setup` (host check),
-                 and the rootfs/kernel build. Never shipped.
-```
+One workspace. For the types worth knowing before editing, the boot sequence, and the teardown
+layers, read `docs/contributing-architecture.md` before a non-trivial change to `vmm`.
+
+| Path | What it is |
+|---|---|
+| `crates/vmm` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
+| `crates/channel` | Host↔guest framing. Zero dependencies, shared verbatim by driver and agent, so the two can't drift. |
+| `crates/guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. |
+| `crates/probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. |
+| `crates/probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero deps, single-sourced. |
+| `crates/probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble and sign the record. |
+| `crates/protocol` | The daemon's wire types, versioned. |
+| `crates/client` | Rust reference client for `ekvm serve`. |
+| `crates/cli` | The `ekvm` binary (`run`/`shell`/`doctor`/`verify`) plus `ekvm serve`. Package name `ekvm`, directory `cli`. |
+| `crates/test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
+| `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped. |
+| `docs/` | mdBook, `SUMMARY.md` is the index. Flat `topic-subtopic.md` names; the hierarchy lives in `SUMMARY.md`, not in directories. |
 
 ## Conventions
 
-- **Rust**, stable, one workspace. Linux-only (it needs KVM), `x86_64` only; host kernel
-  providing `cgroup.kill`, else **≥ 5.15** as a fallback where there
-  is no cgroup v2 to probe. Untrusted code on an unpatched kernel is a threat-model hole, but a
-  version number is the wrong proxy for it on enterprise kernels; `ekvm doctor` probes the
-  primitive. State the requirement as the capability, never as a distro that happens to satisfy it. The eBPF programs build for their
-  own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
+- **Rust**, stable, one workspace, pinned exactly in `rust-toolchain.toml` so a lint can't pass
+  locally and fail CI. Linux-only (it needs KVM), `x86_64` only. Keep the host path `unsafe`-free;
+  the eBPF crate builds for its own target (`bpfel-unknown-none`, `bpf-linker`).
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
   build · unit tests · docs · `deny` · eBPF object build) and runs everywhere.
 
@@ -104,20 +86,25 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   `ekvm run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`EKVM_*`) >
   file (`.ekvm.toml`, the nearest one walking up from the cwd) > defaults**.
 - **Target kernels, not distros.** Never read `/etc/os-release`, branch on a distro name, or add a
-  per-distro code path. Ask the kernel what it can *do*: `cgroup.kill` rather than `>= 5.15`,
-  `/sys/kernel/security/lsm` rather than "is this RHEL". A capability probe is bounded (a distro
-  list is not: Rocky, Alma, CentOS Stream, Oracle and Amazon Linux are all RHEL), and it is testable
-  on a host that lacks the capability, since the probe takes a path. Host variance lives in
-  `doctor.rs` preflight, never in the boot path: a conditional in `spawn.rs`/`jail.rs` creates N
+  per-distro code path (a gate test greps for this). Ask the kernel what it can *do*: `cgroup.kill`
+  rather than `>= 5.15`, `/sys/kernel/security/lsm` rather than "is this RHEL". A capability probe is
+  bounded (a distro list is not: Rocky, Alma, CentOS Stream, Oracle and Amazon Linux are all RHEL),
+  and it is testable on a host that lacks the capability, since the probe takes a path. **State a
+  requirement as the capability, never as a distro that happens to satisfy it.** Host variance lives
+  in `doctor.rs` preflight, never in the boot path: a conditional in `spawn.rs`/`jail.rs` creates N
   boot paths and leaves N-1 untested. The shipped binary is static musl for the same reason, no host
   libc to mismatch. Full rationale: `docs/design.md`, decision 8.
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
+- **A test must be shown to fail.** Break the behavior under test, watch the new assertion fail, then
+  revert. A test never seen failing is not yet evidence, and this repo has a commit whose whole
+  purpose was two tests that passed on something other than their subject.
 - **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
   show, in the fewest sentences that carry it; it never restates what the next lines visibly do.
   A prose *promise* ("can't drift", "never logged") belongs in a type or a test, with the comment
-  pointing at it; a mechanical claim (a repo path, a Markdown link)
-  is checked by the gate's prose-drift lint. State the threat-model framing once per module
-  (rustdoc on the item that owns it), not at every call site.
+  pointing at it; a mechanical claim (a repo path, a Markdown link) is checked by the gate's
+  prose-drift lint, which covers paths and links but **not anchors**, so a `#section` link is yours
+  to verify. State the threat-model framing once per module (rustdoc on the item that owns it), not
+  at every call site.
 - **No em-dashes in prose.** Repo docs, code comments, and commit messages use
   colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
@@ -145,9 +132,3 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
   Verify Rust API stability with `cargo semver-checks check-release --baseline-rev v0.1.0` post-launch.
 - **External Client SDKs Live In Separate Repos.** Non-Rust SDKs (`ekvm-python`, `ekvm-node`, `ekvm-go`)
   live in external companion repositories; do not pull Python, Node, or Go build tooling into this workspace.
-- **Release Branching Strategy.** Production releases land on `main` and are tagged. Patch fixes for a
-  released minor series are backported to a dedicated release branch (e.g. `release-v0.1` for `v0.1.1`).
-
-## Build order
-
-Development proceeds iteratively with every capability proven running end to end.
