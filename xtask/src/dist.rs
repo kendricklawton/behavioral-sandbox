@@ -454,7 +454,8 @@ mod tests {
     fn install_sh_firecracker_version_is_in_the_pinned_series() {
         let repo = workspace_root();
         let install = std::fs::read_to_string(repo.join("install.sh")).unwrap();
-        let spawn = std::fs::read_to_string(repo.join("crates/vmm/src/spawn.rs")).unwrap();
+        let spawn =
+            std::fs::read_to_string(repo.join("crates/vmm/src/spawn/fcversion.rs")).unwrap();
 
         let fc_ver = install
             .lines()
@@ -469,10 +470,10 @@ mod tests {
                 t.trim_end_matches(|c: char| !c.is_ascii_digit())
                     .replace(", ", ".")
             })
-            .expect("spawn.rs declares PINNED_FC_VERSION: (u64, u64)");
+            .expect("spawn/fcversion.rs declares PINNED_FC_VERSION: (u64, u64)");
         assert!(
             !pinned_series.is_empty() && pinned_series.contains('.'),
-            "parsed an empty series out of spawn.rs: the declaration's shape moved"
+            "parsed an empty series out of spawn/fcversion.rs: the declaration's shape moved"
         );
         assert!(
             fc_ver == pinned_series || fc_ver.starts_with(&format!("{pinned_series}.")),
@@ -489,7 +490,8 @@ mod tests {
     fn containerfile_firecracker_is_the_pinned_series() {
         let repo = workspace_root();
         let container = std::fs::read_to_string(repo.join("Containerfile")).expect("Containerfile");
-        let spawn = std::fs::read_to_string(repo.join("crates/vmm/src/spawn.rs")).unwrap();
+        let spawn =
+            std::fs::read_to_string(repo.join("crates/vmm/src/spawn/fcversion.rs")).unwrap();
 
         let fc_ver = container
             .lines()
@@ -503,7 +505,7 @@ mod tests {
                 t.trim_end_matches(|c: char| !c.is_ascii_digit())
                     .replace(", ", ".")
             })
-            .expect("spawn.rs declares PINNED_FC_VERSION: (u64, u64)");
+            .expect("spawn/fcversion.rs declares PINNED_FC_VERSION: (u64, u64)");
         assert!(
             fc_ver == pinned_series || fc_ver.starts_with(&format!("{pinned_series}.")),
             "Containerfile bundles Firecracker v{fc_ver}, but the engine pins the v{pinned_series} \
