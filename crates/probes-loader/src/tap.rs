@@ -1,8 +1,20 @@
 //! The per-VM tap monitor: the tc classifiers on the VM's network device, the flow and denial
 //! maps they populate, and the netns join needed to attach inside the VM's namespace.
 
-use super::*;
+use std::fs::File;
+use std::path::Path;
+
+use aya::maps::{Array, HashMap as AyaHashMap};
+use aya::programs::{tc, SchedClassifier, TcAttachType};
+use aya::Ebpf;
+use probes_common::{
+    FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, FLOW_COUNTS_SIZE, FLOW_KEY6_SIZE,
+    FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE6_SIZE, POLICY_RULE_SIZE,
+};
+
+use crate::egress::{EgressPolicy, PolicyError};
 use crate::tracer::per_cpu_sum;
+use crate::{check_support, load_object, ProbeError};
 
 /// The two `tc` classifier programs [`TapMonitor`] attaches (their `#[classifier] fn` symbols in
 /// `crates/probes`), one per clsact hook.

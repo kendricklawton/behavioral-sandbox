@@ -1,7 +1,14 @@
 //! The syscall tracepoints: a single-syscall counter and the multi-syscall tracer.
 
-use super::*;
+use std::time::Duration;
+
+use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
+use aya::programs::TracePoint;
+use aya::Ebpf;
+use probes_common::SyscallEvent;
+
 use crate::meter::TARGET_PRESENT;
+use crate::{check_support, load_object, ProbeError};
 
 /// The tracepoint program's name (its ELF section symbol, set by `#[tracepoint] fn count_execve`).
 const PROGRAM: &str = "count_execve";
@@ -233,7 +240,7 @@ impl SyscallTracer {
     /// Switch to **set mode**: the tracepoints now pass an event iff its cgroup is a registered
     /// [`add_target`](Self::add_target) member, ignoring the single-target [`watch_pid`](Self::watch_pid)
     /// / [`watch_cgroup`](Self::watch_cgroup) filter. This is what the shared multi-sandbox tracer
-    /// ([`SharedTracer`]) drives; a single-sandbox caller stays on the default `FILTER` path and never
+    /// ([`crate::SharedTracer`]) drives; a single-sandbox caller stays on the default `FILTER` path and never
     /// calls this. Symmetric with the `watch_*` setters, which switch back, the mode always matches
     /// the last setter used, so neither filter model can silently no-op. Idempotent.
     ///

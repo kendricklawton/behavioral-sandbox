@@ -3,7 +3,11 @@
 //! Pure version logic with no VM state: probe once, cache it, and gate any request field newer
 //! than the support floor on a `_SINCE` constant so a new field cannot silently raise the floor.
 
-use super::*;
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
+
+use super::deadline_after;
 
 /// The **oldest** Firecracker this engine supports, deliberately tracking upstream's own support
 /// window rather than a number of our choosing. Upstream's own release-status table (their release

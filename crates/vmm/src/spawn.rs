@@ -12,7 +12,6 @@ use std::num::NonZeroU32;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use channel::VSOCK_PORT;
@@ -21,20 +20,18 @@ use crate::console::{last_lines, Console};
 use crate::drives::{build_input_image, build_output_image, OutputDevice};
 use crate::exec::connect_agent_at;
 use crate::firecracker::{
-    snapshot_api_timeout, Action, ApiClient, BootSource, Drive, MachineConfig, MemBackend,
-    MemBackendType, NetworkInterface, RateLimiter, SnapshotLoad, Vsock,
+    Action, ApiClient, BootSource, Drive, MachineConfig, NetworkInterface, RateLimiter, Vsock,
 };
 use crate::jail::{
     cgroup_limit_args, give_to_jail, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup,
-    restore_mem_mib, spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, Chroot, Jail,
-    JAILED_VSOCK_UDS,
+    spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, Chroot, Jail, JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::Tap;
 use crate::paths::{absolute, path_str, require_file};
 use crate::vm::{
-    reclaim_scratch, reclaim_scratch_after_tap_failure, teardown, BootConfig, RunningVm, Snapshot,
-    FC_STDERR, IFACE_ID, VM_SEQ, VSOCK_UDS,
+    reclaim_scratch, reclaim_scratch_after_tap_failure, teardown, BootConfig, RunningVm, FC_STDERR,
+    IFACE_ID, VSOCK_UDS,
 };
 use crate::VmmError;
 
@@ -42,9 +39,9 @@ mod fcversion;
 mod restore;
 mod workdir;
 
+use fcversion::warn_on_unpinned_firecracker;
 #[cfg(test)]
 use fcversion::FC_CLOCK_REALTIME_SINCE;
-use fcversion::{clock_realtime_arg, warn_on_unpinned_firecracker};
 pub(crate) use fcversion::{fc_version_of, MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION};
 #[cfg(test)]
 use fcversion::{probe_fc_version, FcProbe, VERSION_HEAD_CAP};

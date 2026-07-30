@@ -4,7 +4,12 @@
 //! fit `sun_path`; the dir is created fail-if-exists at `0700` because the scratch base is
 //! world-writable and the name is predictable. Both live here so the constraints sit together.
 
-use super::*;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+
+use crate::vm::VM_SEQ;
+use crate::VmmError;
 
 /// Linux caps `sockaddr_un.sun_path` at 108 bytes including the trailing NUL. Firecracker binds the
 /// API and vsock sockets *inside* the scratch dir, so a long scratch base (a relocated

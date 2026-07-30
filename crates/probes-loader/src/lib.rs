@@ -78,29 +78,26 @@
 //! guards).
 #![forbid(unsafe_code)]
 
-use std::fs::File;
-use std::net::{Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
-use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
-use aya::programs::{tc, SchedClassifier, TcAttachType, TracePoint};
 use aya::Ebpf;
 
 pub use probes_common::{
     FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol, Syscall, SyscallEvent,
     COMM_CAP, DETAIL_CAP, MAX_POLICY_RULES,
 };
-use probes_common::{
-    FLOW_COUNTS_SIZE, FLOW_KEY6_SIZE, FLOW_KEY_SIZE, POLICY_RULE6_SIZE, POLICY_RULE_SIZE,
-};
 
-/// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
-/// dependency-free (`RunRecord::to_json`). Pure, unit-tested host-safe against a golden.
+/// The egress policy and its address types: what an `--allow` string parses into, before any map
+/// is touched. No aya, so the policy vocabulary is unit-tested and fuzzed host-safe.
 mod egress;
+/// Per-sandbox resource accounting: the shared `sched_switch` CPU meter and the cgroup v2 counters
+/// read alongside it.
 mod meter;
+/// The per-VM tap monitor: the tc classifiers on the VM's network device, the flow and denial maps
+/// they populate, and the netns join needed to attach inside the VM's namespace.
 mod tap;
+/// The syscall tracepoints: a single-syscall counter and the multi-syscall tracer.
 mod tracer;
 
 pub use egress::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, PolicyError};
@@ -108,6 +105,8 @@ pub use meter::{CgroupStats, ResourceMeter, ResourceSummary};
 pub use tap::{NetStats, TapMonitor};
 pub use tracer::{ExecveCounter, SyscallTracer};
 
+/// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
+/// dependency-free (`RunRecord::to_json`). Pure, unit-tested host-safe against a golden.
 mod json;
 /// The attach bundle: bind the three probes to one sandbox at launch (shared tracer +
 /// shared meter, per-VM tap) and roll up a record; detach + finalize on close.

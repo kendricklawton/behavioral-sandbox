@@ -1,7 +1,14 @@
 //! Per-sandbox resource accounting: the shared `sched_switch` CPU meter and the cgroup v2
 //! counters read alongside it.
 
-use super::*;
+use std::path::Path;
+use std::time::Duration;
+
+use aya::maps::{Array, HashMap as AyaHashMap, MapData};
+use aya::programs::TracePoint;
+use aya::Ebpf;
+
+use crate::{cgroup_dir_of_pid, cgroup_id_of_dir, check_support, load_object, ProbeError};
 
 /// The `account_sched_switch` program's name (its `#[tracepoint] fn` symbol in `crates/probes`).
 const PROG_SCHED_SWITCH: &str = "account_sched_switch";
@@ -32,7 +39,7 @@ pub(crate) const TARGET_PRESENT: u8 = 1;
 /// [`remove_target`](Self::remove_target) unregisters it, and the hot path stays a single hash lookup no
 /// matter how many sandboxes are metered (a program-per-sandbox would run every attached program on every
 /// switch). Hold one `ResourceMeter` for the process and register each sandbox's cgroup id (what
-/// [`cgroup_id_of_pid`] resolves from its VMM pid).
+/// [`crate::cgroup_id_of_pid`] resolves from its VMM pid).
 ///
 /// **CPU here, memory/IO from cgroup v2.** CPU is where per-event timing earns its keep, so it rides
 /// eBPF; a cgroup's memory high-water mark and IO bytes are already maintained by the kernel's native
@@ -85,7 +92,7 @@ impl ResourceMeter {
 
     /// Register `cgroup_id` for metering: from here the tracepoint charges its on-CPU time into the
     /// `CPU_NS` map. The multi-sandbox path, register each sandbox's cgroup (via
-    /// [`cgroup_id_of_pid`]) with one shared meter, and the per-switch cost stays a single hash lookup
+    /// [`crate::cgroup_id_of_pid`]) with one shared meter, and the per-switch cost stays a single hash lookup
     ///. Idempotent (re-registering is harmless). Does **not** zero any prior total for this
     /// cgroup; [`reset`](Self::reset) does that if a caller wants a clean per-run baseline.
     ///

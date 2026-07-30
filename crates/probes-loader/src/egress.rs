@@ -2,13 +2,17 @@
 //!
 //! Deliberately **no eBPF here**: these are the plain data types an `--allow` string parses into,
 //! which `tap` then writes into the policy maps. They carry their own fuzz target (`egress_rule`),
-//! and keeping them out of the loader is what lets that stay true.
+//! and keeping them out of the loader is what lets that stay true. The import list below is what
+//! makes that first sentence checkable: `std::net` and the `#[repr(C)]` records, no `aya` and no
+//! loader item, so a change that reaches for either has to add the import here to compile.
 
-use super::*;
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+use probes_common::{PolicyRule, PolicyRule6, Protocol};
 
 /// A rejected egress-policy input, caught by construction (`parse, don't validate`) so an illegal policy
 /// can't reach the kernel map: an out-of-range CIDR prefix, or more rules than the map holds. Distinct
-/// from [`ProbeError`]'s eBPF-runtime failures. `#[non_exhaustive]`: a richer policy vocabulary adds
+/// from [`crate::ProbeError`]'s eBPF-runtime failures. `#[non_exhaustive]`: a richer policy vocabulary adds
 /// new rejection classes as new variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -20,7 +24,7 @@ pub enum PolicyError {
     TooManyRules {
         /// The number of rules the caller supplied.
         got: usize,
-        /// The fixed cap ([`MAX_POLICY_RULES`]).
+        /// The fixed cap ([`crate::MAX_POLICY_RULES`]).
         max: usize,
     },
 }
