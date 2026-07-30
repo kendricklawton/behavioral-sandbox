@@ -656,7 +656,12 @@ mod tests {
         let mut missing: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&dir).expect(".github/workflows") {
             let path = entry.expect("workflow dir entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            // Both spellings: a `.yaml` file GitHub runs but this scan skipped would be a
+            // silent hole in exactly the coverage the test claims.
+            if !matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("yml" | "yaml")
+            ) {
                 continue;
             }
             let wf = path.file_name().unwrap().to_string_lossy().to_string();
@@ -707,9 +712,15 @@ mod tests {
         let repo = workspace_root();
         let dir = repo.join(".github/workflows");
         let mut checked = 0usize;
+        let mut unreadable: Vec<String> = Vec::new();
         for entry in std::fs::read_dir(&dir).expect(".github/workflows") {
             let path = entry.expect("workflow dir entry").path();
-            if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            // Both spellings: a `.yaml` file GitHub runs but this scan skipped would be a
+            // silent hole in exactly the coverage the test claims.
+            if !matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("yml" | "yaml")
+            ) {
                 continue;
             }
             let wf = path.file_name().unwrap().to_string_lossy().to_string();
@@ -719,11 +730,6 @@ mod tests {
                 let Some(after) = line.split_once("grep -oE ").map(|(_, r)| r) else {
                     continue;
                 };
-                // Shell single-quoting, so the pattern ends at the next `'`.
-                let Some(pattern) = after.strip_prefix('\'').and_then(|r| r.split('\'').next())
-                else {
-                    continue;
-                };
                 // The target follows the pattern, on this line or (line-continued) the next. A
                 // grep reading a pipe rather than a file has no such token and is skipped.
                 let target = [after, lines.get(idx + 1).copied().unwrap_or("")]
@@ -731,6 +737,14 @@ mod tests {
                     .flat_map(|l| l.split_ascii_whitespace())
                     .find(|t| t.starts_with("crates/") || t.starts_with("xtask/"));
                 let Some(target) = target else { continue };
+                // Shell single-quoting, so the pattern ends at the next `'`. Silently skipping an
+                // unreadable one would be the hole: this grep reads one of our files, so dropping
+                // it loses real coverage while the count below still looks healthy.
+                let Some(pattern) = after.strip_prefix('\'').and_then(|r| r.split('\'').next())
+                else {
+                    unreadable.push(format!("{wf}:{}: {target}", idx + 1));
+                    continue;
+                };
                 let out = std::process::Command::new("grep")
                     .arg("-oE")
                     .arg(pattern)
@@ -746,6 +760,12 @@ mod tests {
                 checked += 1;
             }
         }
+        assert!(
+            unreadable.is_empty(),
+            "workflow grep(s) read one of our source files with a pattern this scan cannot parse \
+             (expected single quotes). Widen the parser rather than losing the check:\n  {}",
+            unreadable.join("\n  ")
+        );
         assert!(
             checked > 0,
             "no source-file grep matched in {}: the workflows no longer parse constants this way, \
