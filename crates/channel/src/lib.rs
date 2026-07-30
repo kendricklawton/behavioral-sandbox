@@ -98,10 +98,19 @@ pub const INPUT_LABEL: &str = "ekvm-input";
 /// See [`INPUT_LABEL`]. The output device is writable; the guest mounts it read-write at `/output`.
 pub const OUTPUT_LABEL: &str = "ekvm-output";
 
+/// The guest path of the **overlay init**, the PID 1 a read-only-root boot hands off to (it stacks
+/// a per-run tmpfs over the shared read-only base, then execs the real init). Like the vsock port
+/// above, this is a pre-connection host↔guest contract with two writers: the driver appends
+/// `init=<this>` to the kernel command line (`crates/vmm/src/spawn.rs`), and the rootfs build writes
+/// the script there (`xtask/src/rootfs.rs`). A drifted copy is worse than a mismatched port, since
+/// the kernel would boot into a path nothing occupies and the failure arrives as a boot timeout
+/// rather than as a build error.
+pub const GUEST_OVERLAY_INIT: &str = "/sbin/overlay-init";
+
 /// The kernel-cmdline token key the driver uses to hand the guest its static IPv6 address, as
 /// `guest_ip6=<addr>/<plen>`. The kernel `ip=`/`CONFIG_IP_PNP` param configures the guest's v4
 /// `eth0` before userspace but has no IPv6 form, so v6 rides this token instead: the driver appends
-/// it to the boot args and the guest's `/sbin/net-up` reads it back from `/proc/cmdline` and assigns
+/// it to the boot args and the guest's net-up script reads it back from `/proc/cmdline` and assigns
 /// it. Like the labels and the vsock port above, this is a host↔guest contract single-sourced here so
 /// the driver's writer and the guest's reader can't drift.
 pub const GUEST_IP6_CMDLINE_KEY: &str = "guest_ip6";

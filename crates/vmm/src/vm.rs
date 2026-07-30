@@ -144,9 +144,9 @@ pub struct BootConfig {
     pub guest_cid: Option<u32>,
     /// Boot the base rootfs **read-only and shared** (no per-VM copy) under a per-run **tmpfs
     /// overlay**, so `/` is writable but the base is never mutated and many VMs share one
-    /// page-cache-deduped base. Requires a rootfs whose `/sbin/overlay-init` builds the overlay
-    /// (the agent image from `cargo xtask build-rootfs`); the driver appends
-    /// `init=/sbin/overlay-init overlay_size=<mem/2>M` to the kernel command line. `false` (the
+    /// page-cache-deduped base. Requires a rootfs whose [`channel::GUEST_OVERLAY_INIT`] builds the
+    /// overlay (the agent image from `cargo xtask build-rootfs`); the driver appends
+    /// `init=<that path> overlay_size=<mem/2>M` to the kernel command line. `false` (the
     /// default) keeps the copy-then-boot-read-write path. One concept, not two knobs: a read-only
     /// base *implies* the overlay (without it a read-only `/` would break the agent's `/tmp` workdir).
     pub read_only_root: bool,

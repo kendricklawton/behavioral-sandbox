@@ -543,19 +543,7 @@ impl Spawned {
         }
         let kernel = kernel_arg.as_str();
         let rootfs = rootfs_arg.as_str();
-        // A read-only root hands off to the overlay init, which stacks a size-capped tmpfs over the
-        // RO base so `/` is writable per-run (the cap's derivation lives in `overlay_size_mib`). It
-        // rides the kernel command line as a `key=value` token, which the kernel routes into PID 1's
-        // environment (so `overlay-init` reads `$overlay_size` without mounting `/proc` first).
-        let mut boot_args = if config.read_only_root {
-            format!(
-                "{} init=/sbin/overlay-init overlay_size={}M",
-                config.boot_args,
-                overlay_size_mib(config.mem_mib)
-            )
-        } else {
-            config.boot_args.clone()
-        };
+        let mut boot_args = overlay_boot_args(config);
         // Static guest addressing when a NIC is attached: the kernel configures `eth0` before
         // userspace via `CONFIG_IP_PNP`. The gateway field is **empty**, so the kernel installs only
         // the connected /30 route (guest ⇄ host over the tap) and **no default route**, the guest
@@ -931,6 +919,28 @@ fn spawn_fc(
 /// Pure, so the arithmetic is unit-tested without a boot.
 fn overlay_size_mib(mem_mib: NonZeroU32) -> u32 {
     (mem_mib.get() / 2).max(1)
+}
+
+/// The caller's boot args, plus the overlay hand-off when the root is read-only. A read-only root
+/// hands off to the overlay init, which stacks a size-capped tmpfs over the RO base so `/` is
+/// writable per-run (the cap's derivation lives in [`overlay_size_mib`]). Both ride the kernel
+/// command line as `key=value` tokens, which the kernel routes into PID 1's environment, so
+/// `overlay-init` reads `$overlay_size` without mounting `/proc` first.
+///
+/// Split out of the boot sequence so the one line naming a *guest* path is testable without a VM:
+/// [`channel::GUEST_OVERLAY_INIT`] is written here and by the rootfs build, and a boot into a path
+/// nothing occupies reads as a kernel panic rather than as a mismatch.
+fn overlay_boot_args(config: &BootConfig) -> String {
+    if config.read_only_root {
+        format!(
+            "{} init={} overlay_size={}M",
+            config.boot_args,
+            channel::GUEST_OVERLAY_INIT,
+            overlay_size_mib(config.mem_mib)
+        )
+    } else {
+        config.boot_args.clone()
+    }
 }
 
 /// A readiness-poll interval that starts tight and backs off to a cap. A wait that resolves quickly (a
@@ -1621,6 +1631,35 @@ mod tests {
         // The degenerate edge the floor exists for: `1 / 2` must not hand the overlay `0M` (a
         // zero-sized tmpfs would leave `/` read-only and unwritable).
         assert_eq!(overlay_size_mib(mib(1)), 1);
+    }
+
+    /// The one boot-arg that names a **guest** path. The rootfs build writes the file at
+    /// `channel::GUEST_OVERLAY_INIT` and this puts `init=` on the command line, so the two are one
+    /// constant; a boot into a path nothing occupies reads as a kernel panic, not as a mismatch.
+    /// Host-safe, since the overlay itself is only reachable through a jailed boot (real root).
+    #[test]
+    fn a_read_only_root_hands_off_to_the_shared_overlay_init_path() {
+        let mut config = BootConfig {
+            boot_args: "console=ttyS0".to_string(),
+            mem_mib: NonZeroU32::new(256).expect("nonzero test value"),
+            ..Default::default()
+        };
+
+        // Off by default: nothing is appended, so a plain boot's args are the caller's verbatim.
+        assert_eq!(overlay_boot_args(&config), "console=ttyS0");
+
+        config.read_only_root = true;
+        let args = overlay_boot_args(&config);
+        assert_eq!(
+            args,
+            format!(
+                "console=ttyS0 init={} overlay_size=128M",
+                channel::GUEST_OVERLAY_INIT
+            )
+        );
+        // Spelled out too: the assertion above would still pass if the constant became empty or
+        // relative, and the kernel needs an absolute path to an executable.
+        assert!(channel::GUEST_OVERLAY_INIT.starts_with('/'));
     }
 
     #[test]
