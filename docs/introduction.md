@@ -1,7 +1,5 @@
 # Introduction
 
-{{#include ./status.md:banner}}
-
 **ekvm** is a self-hostable engine for running untrusted code in hardware
 isolation, with a host-observed record of what the host was able to see it do. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
 **host-side eBPF** (**aya**) watches and enforces what it does, syscalls, its network, its
@@ -68,9 +66,43 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Status
 
-Early, under active development, nothing here is production yet. Every
-completed milestone ships a working demo, so each capability documented in this book is proven
-running end to end, not just asserted.
+**Pre-release, unreleased, unaudited.** Version `0.0.0`, no tag, no published artifact. One
+maintainer, and nothing here has been reviewed by anyone outside the project. Nothing in this book is
+a promise: it describes how the engine is built and what has been exercised. Anything can change
+without notice, so if you build on this, pin a git rev. Release mechanics and the planned support
+policy are in [RELEASES.md](../RELEASES.md), none of which is in force yet.
+
+Every completed milestone ships a working demo, so each capability documented here is exercised end
+to end rather than only asserted. Which is worth being precise about:
+
+**What a passing test is worth.** A passing test shows that the case it constructs behaved as
+described, on the host that ran it, at the revision it ran against. It does not show that the
+property holds for cases the test does not construct. Throughout this book, a named test is a pointer
+to a scenario you can read and re-run, not a proof of a general property. Two consequences: evidence
+expires, so a gate that passed in July is evidence about July's revision on July's host; and a test
+is only as good as its assertions, which is why a commit titled "stop two tests from passing on
+something other than their subject" exists in this history.
+
+### What has not been done
+
+Stated because their absence is the honest counterweight to everything else in this book:
+
+- **No external security review or audit.** The threat model is the author's own reasoning about the
+  author's own code. See [Threat model](./threat-model.md).
+- **One kernel.** The CO-RE/BTF portability described in [Host-side observability &
+  enforcement](./probes.md) is a property of the mechanism, not a tested claim: the probes have been
+  loaded on exactly one kernel version.
+- **No Red Hat host has been run.** RHEL 9 and 10 are intended targets, and `ekvm doctor` probes for
+  `cgroup.kill` rather than a version number, which is what admits a patched kernel whose version
+  string sits below the fallback floor. But nothing has booted, gated, or attached a probe there, and
+  SELinux in particular is unexercised.
+- **No published benchmark numbers.** See [Benchmarks](./benchmarks.md) for why they were withdrawn
+  and what has to happen before they return.
+- **No fuzzing at scale.** Ten libFuzzer targets exist and run nightly, but not continuously (no
+  OSS-Fuzz or equivalent), and two targets have thin corpora.
+- **No outside users.** Nobody has installed or run this who did not build it.
+- **`x86_64` only.** aarch64 needs hardware and a privileged CI lane before anything about it could
+  be claimed.
 
 The source for this book lives in the repository's
 [`docs/` directory](https://github.com/packsixfour/ekvm/tree/main/docs) and contributions are

@@ -1,7 +1,5 @@
 # Commands and options
 
-{{#include ./status.md:banner}}
-
 The four verbs: [`ekvm run`](#ekvm-run) for one sandbox and one command, [`ekvm shell`](#ekvm-shell)
 for a stateful session, [`ekvm doctor`](#ekvm-doctor) to check a host before the first sandbox, and
 [`ekvm verify`](#ekvm-verify) to check a signed audit record. The daemon,

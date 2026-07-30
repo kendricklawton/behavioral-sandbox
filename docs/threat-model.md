@@ -1,7 +1,5 @@
 # Threat model
 
-{{#include ./status.md:banner}}
-
 This is the model the engine is *designed against*: the assets it aims to protect, the boundary it
 trusts, the adversary it assumes, and, attack class by attack class, the mechanism intended to
 contain it and the test that exercises that mechanism today.
@@ -86,7 +84,7 @@ Assumptions), or physical/side-channel attacks.
 Each row names the mechanism intended to contain the attack and the test that exercises it. What
 none of these rows cover is in [Assumptions and residual
 risk](#assumptions-and-residual-risk); a passing test is scoped as described in [Status and
-verification record](./status.md).
+Status](./introduction.md#status).
 
 | Attack | Contained by | Exercised by |
 |--------|--------------|-----------|

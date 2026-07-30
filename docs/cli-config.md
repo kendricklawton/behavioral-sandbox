@@ -1,7 +1,5 @@
 # Configuration of `ekvm`
 
-{{#include ./status.md:banner}}
-
 Configuration layers **flags > environment (`EKVM_*`) > file (`.ekvm.toml`) > defaults**. The file
 layer is the nearest `.ekvm.toml` walking up from the current directory (the `.gitignore` convention),
 so a project pins its engine config beside its code.

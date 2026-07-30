@@ -1,7 +1,5 @@
 # Examples
 
-{{#include ./status.md:banner}}
-
 Worked, end-to-end walkthroughs of using the engine. Where [Using the eKVM CLI](./cli.md) is the reference (every flag, the config layering), these are task-shaped walkthroughs: pick the task you want to perform and follow it through, output and all.
 
 All examples assume you have installed the prerequisites ([Installation](./cli-install.md)) and built the eKVM rootfs (`cargo xtask build-rootfs`). For host-side eBPF examples, make sure to build the probes object (`cargo xtask build-probes`).

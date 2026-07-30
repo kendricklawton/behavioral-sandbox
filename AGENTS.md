@@ -14,7 +14,7 @@ subvert it", "guaranteed"), in docs, comments, or commit messages. Where a test 
 make the test the subject: "`driver_death_cannot_leak_a_vm` kills a driver mid-boot and asserts no
 VMM, netns, or scratch dir survives." An absolute is fine when the sentence names its enforcer
 (`#![forbid(unsafe_code)]`, a wildcard-free `match`, an ordering inside one function); it is not
-fine when the enforcer is "the implementation being correct". Full rationale: `docs/status.md`.
+fine when the enforcer is "the implementation being correct". Full rationale: `docs/introduction.md`.
 
 **Scope: the engine, not the platform.** A runtime + a clean driver API you self-host: the boring,
 embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed

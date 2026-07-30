@@ -1,7 +1,5 @@
 # Using the `ekvm serve` daemon
 
-{{#include ./status.md:banner}}
-
 `ekvm serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
 lifecycle over a **unix socket**, so a local client drives microVMs without linking the `vmm`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)

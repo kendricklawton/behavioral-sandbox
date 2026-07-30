@@ -1,7 +1,5 @@
 # Host-side observability & enforcement
 
-{{#include ./status.md:banner}}
-
 The engine has two halves. [Using the engine API](./embedding.md) documents the Firecracker
 driver: the hardware-isolation boundary that *contains* untrusted code. This document is the
 other half: the host-side eBPF that

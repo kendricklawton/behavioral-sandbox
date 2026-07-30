@@ -1,7 +1,5 @@
 # Using the engine API
 
-{{#include ./status.md:banner}}
-
 The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
 the `vmm` library promises when you pin it and build on it, stated once, against the real
 API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
@@ -73,7 +71,7 @@ with ownership keyed on liveness rather than on names, and scoped to your own eu
 driver mid-run and asserts the VMM dies with it, `a_vmm_killed_while_awaiting_userspace_leaks_nothing`
 kills a VMM mid-boot and asserts the scratch dir is reclaimed, and
 `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir` covers the residue path. What a passing test
-does and does not establish is in [Status and verification record](./status.md).
+does and does not establish is in [Status](./introduction.md#status).
 
 ### Pre-warmed starts: snapshot an unjailed source, restore jailed clones
 

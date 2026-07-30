@@ -1,7 +1,5 @@
 # Security
 
-{{#include ./status.md:banner}}
-
 The engine's whole reason to exist is running code you don't trust and getting a truthful account
 of what it did. This page states what is trusted, what counts as a security bug (and what does
 not), how to report one, and what happens after a report. The reporting mechanism also lives

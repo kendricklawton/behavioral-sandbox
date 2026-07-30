@@ -1,7 +1,6 @@
 # Summary
 
 - [Introduction](./introduction.md)
-- [Status and verification record](./status.md)
 - [Design specification](./design.md)
 - [Using the eKVM CLI](./cli.md)
   - [Installation](./cli-install.md)

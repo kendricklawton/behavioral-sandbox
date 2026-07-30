@@ -19,7 +19,7 @@
     <span> | </span>
     <a href="docs/design.md">Design</a>
     <span> | </span>
-    <a href="docs/status.md">Status</a>
+    <a href="docs/introduction.md#status">Status</a>
     <span> | </span>
     <a href="CONTRIBUTING.md">Contributing</a>
   </h3>
@@ -28,7 +28,7 @@
 > **Pre-release, unreleased, unaudited.** Version `0.0.0`, no tag, no published artifact, one
 > maintainer, no external review. Nothing here carries a compatibility guarantee: if you build on it,
 > pin a git rev. The full verification record, including what has *not* been done, is
-> [docs/status.md](docs/status.md).
+> [docs/introduction.md#status](docs/introduction.md#status).
 
 ## What it is
 
@@ -134,7 +134,8 @@ recognisable as a design error rather than a trade-off. The full text is
 
 The host path is `#![forbid(unsafe_code)]`. The eBPF programs build for their own target
 (`bpfel-unknown-none`) and use CO-RE/BTF, which is a portability *mechanism*; the claim that it is
-portable across kernels is tested on one kernel so far, and [docs/status.md](docs/status.md) says so.
+portable across kernels is tested on one kernel so far, and
+[what has not been done](docs/introduction.md#what-has-not-been-done) says so.
 
 [probes]: docs/probes.md
 [embedding]: docs/embedding.md
@@ -161,7 +162,6 @@ The guide is an mdBook in [`docs/`](docs/SUMMARY.md). Run `mdbook serve docs`, o
 in place. It is not published as a site until the first release.
 
 - **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
-- **[Status and verification record](docs/status.md)**, what has been verified, and what has not.
 - **[Design specification](docs/design.md)**, architecture, component model, host integration, and
   the key decisions with their rationale.
 - **[Using the eKVM CLI](docs/cli.md)**, including [installation](docs/cli-install.md).

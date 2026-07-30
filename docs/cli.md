@@ -1,7 +1,5 @@
 # Using the `ekvm` CLI
 
-{{#include ./status.md:banner}}
-
 In addition to the [embedding API](./embedding.md), which lets you use the engine as a library, the
 project provides an `ekvm` CLI to run untrusted code in a hardware-isolated microVM from the command
 line. It is the engine's **reference embedder**: the whole sandbox lifecycle, open (confined by

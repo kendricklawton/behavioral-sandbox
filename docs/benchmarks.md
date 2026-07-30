@@ -1,7 +1,5 @@
 # Benchmarks
 
-{{#include ./status.md:banner}}
-
 **No benchmark numbers are published at present.** This page documents the methodology and how to
 run the suite yourself; the result tables were withdrawn on 2026-07-29 and will return once they can
 be defended.
@@ -35,8 +33,19 @@ thing a benchmark ever tells you.
   on and skips any section it can't run, with the reason, so a report says exactly what it measured.
 
 The withdrawn figures were taken on the development host, with the guest at 256 MiB and 1 vCPU on a
-132 MiB rootfs. That host is described once, in [Verified on](./status.md#verified-on); when numbers
-return, they return with the machine and date they were taken on.
+132 MiB rootfs. When numbers return, they return with the machine and date they were taken on.
+
+### The reference host
+
+Local measurements and the privileged suite run on a laptop, not a server: Linux 7.0.11, Intel
+i5-10310U (8 vCPUs at 1.70 GHz), 15 GiB RAM, Arch Linux, Firecracker v1.16.1, `x86_64`. It is also the
+only kernel the engine has been exercised on, which is why the portability claim in
+[Host-side observability & enforcement](./probes.md) is described as a mechanism rather than a tested
+property.
+
+CI runs the host-safe gate on Ubuntu 24.04 `x86_64` on every change, and the privileged suite nightly
+on a GitHub-hosted Ubuntu 24.04 `x86_64` runner with nested KVM. Nested KVM makes timing
+unrepresentative, so benchmarks are never gated there.
 
 ## What the suite measures
 

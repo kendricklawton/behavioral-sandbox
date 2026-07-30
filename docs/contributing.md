@@ -1,7 +1,5 @@
 # Contributing
 
-{{#include ./status.md:banner}}
-
 The canonical operating manual for humans and coding agents alike is [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) at the repo root.
 
 ---

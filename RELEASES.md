@@ -3,7 +3,7 @@
 > **Nothing in this file is in force.** No release has been tagged and no artifact published, so
 > the API surface, host requirements, support policy, and Rust policy below describe what is
 > *planned* for the first release, not commitments that apply today. See
-> [docs/status.md](docs/status.md).
+> [docs/introduction.md#status](docs/introduction.md#status).
 
 ## v0.1.0 (Unreleased, planned)
 
