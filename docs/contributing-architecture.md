@@ -7,6 +7,11 @@ comments are the authority, and they carry the reasoning this page summarizes.
 The reading order that works: this page, then `crates/channel/src/lib.rs` (small, self-contained, and
 it defines the host/guest contract), then `crates/vmm/src/vm.rs` and `spawn.rs`, then the eBPF half.
 
+`spawn.rs` keeps the launch, boot, and abort state machine; its separable parts sit alongside it in
+`spawn/restore.rs` (the restore path and its disk staging), `spawn/fcversion.rs` (what release is on
+this host and what the driver may therefore send it), and `spawn/workdir.rs` (minting the per-VM dir
+and the two path constraints on it).
+
 ## The `vmm` crate
 
 `vmm` is the engine. It is the crate an embedder depends on, and the only one whose public API
@@ -105,7 +110,7 @@ even starts.
 
 **4. `Spawned::launch`** does the host-side staging, all of it under that deadline:
 
-- `create_workdir` mints `<scratch>/ekvm-<pid>-<seq>` **fail-if-exists at mode 0700**, advancing the
+- `create_workdir` (in `spawn/workdir.rs`) mints `<scratch>/ekvm-<pid>-<seq>` **fail-if-exists at mode 0700**, advancing the
   sequence on collision. Both properties matter: the scratch base is world-writable and the name is
   predictable, so a pre-existing directory must never be adopted. The name is also deliberately
   *short*, because the jailer nests it **twice** inside the API socket path, which must fit
@@ -203,6 +208,18 @@ Three crates, split by what can depend on what:
   reading it cannot disagree about layout.
 - **`probes-loader`** is the userspace half, on `aya`: attach to a specific sandbox, read the maps,
   fold events, and assemble the signed `RunRecord`.
+
+`probes-loader` is one module per subsystem, which is the map to read it by:
+
+| Module | What it owns |
+|---|---|
+| `tracer.rs` | `ExecveCounter`, `SyscallTracer`: the syscall tracepoints |
+| `tap.rs` | `TapMonitor`, `NetStats`: the tc classifiers, the flow and denial maps, the netns join |
+| `egress.rs` | `EgressPolicy`, `Ipv4Cidr`, `Ipv6Cidr`: **no eBPF**, just what an `--allow` string parses into, separately fuzzed |
+| `meter.rs` | `ResourceMeter`, `CgroupStats`: the shared CPU meter and cgroup counters |
+| `observer.rs` | the per-sandbox bundle over the three probes, and the `AxisGap` machinery |
+| `record.rs`, `summary.rs`, `json.rs`, `signing.rs` | the record, its projections, and its signature |
+| `lib.rs` | the error types, object-path resolution, cgroup id helpers, the capability check |
 
 Three design decisions in `observer.rs` are worth understanding before changing anything there:
 

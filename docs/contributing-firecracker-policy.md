@@ -6,7 +6,7 @@ watches it.
 
 ## Two constants, two different questions
 
-Both live in `crates/vmm/src/spawn.rs`:
+Both live in `crates/vmm/src/spawn/fcversion.rs`, which holds the version probe and nothing else:
 
 | Constant | Question it answers | Moves when |
 |---|---|---|
@@ -27,7 +27,7 @@ was later found shipping a release below the engine's own floor.
 
 A request field newer than the floor is sent **conditionally**, gated on the probed binary's version,
 with a `_SINCE` constant recording where it arrived (see `clock_realtime` in
-`crates/vmm/src/spawn.rs`). Sending it unconditionally silently drags the real floor up to that field's
+`crates/vmm/src/spawn/fcversion.rs`). Sending it unconditionally silently drags the real floor up to that field's
 release: that exact mistake broke restore on supported releases once.
 
 Each gate carries a test asserting its `_SINCE` sits above the floor, so when the floor later rises past
