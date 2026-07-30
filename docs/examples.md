@@ -109,7 +109,7 @@ $ ekvm run --unjailed --net --trace \
     --put analyze-me -- /bin/sh -c 'chmod +x analyze-me && ./analyze-me'
 ```
 
-Network activity at the TAP interface provides external visibility into binary behavior. Host-side tracepoints observe VMM host syscalls; guest-kernel syscalls are handled inside the VM (see [Threat model](./threat-model.md)). The audit trail shows flow attempts and enforcement results:
+Network activity at the TAP interface provides external visibility into binary behavior. Host-side tracepoints observe VMM host syscalls; guest-kernel syscalls are handled inside the VM (see [Threat model](./security-threat-model.md)). The audit trail shows flow attempts and enforcement results:
 
 Illustrative output (the timings are from one run on the development host, not a benchmark; see
 [Benchmarks](./benchmarks.md)):

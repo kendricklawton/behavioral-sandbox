@@ -2,6 +2,10 @@
 
 The canonical operating manual for humans and coding agents alike is [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) at the repo root.
 
+This page covers the workflow: prerequisites, the two gates, testing, fuzzing, and commit conventions.
+For the code itself (rustfmt, the denied Clippy lints and why, MSRV pinning, dependencies, crate
+organization, and the `unsafe` policy) see [Coding guidelines](./contributing-coding-guidelines.md).
+
 ---
 
 ## 1. Design rules (never trade these away)

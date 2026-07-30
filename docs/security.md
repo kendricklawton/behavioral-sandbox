@@ -10,7 +10,7 @@ in [`SECURITY.md`](https://github.com/packsixfour/ekvm/blob/main/SECURITY.md) at
 
 Until the first tagged release (`v0.1.0`), every version is a development snapshot: no version
 receives backported fixes, and nothing here should be treated as production-ready. This page states
-the current stance, not a finished audit; the full **[threat model](./threat-model.md)** is its
+the current stance, not a finished audit; the full **[threat model](./security-threat-model.md)** is its
 companion.
 
 ## What is trusted, and what is not
@@ -18,13 +18,13 @@ companion.
 The trust boundary is the CPU, not any software inside the guest: KVM, the host kernel, and the
 driver running on the host (the VMM process, the jailer, the eBPF probes) are trusted; everything
 inside the guest, including the in-guest agent, is not. The full boundary, its consequences, and
-the attack-class-by-attack-class containment are the [threat model](./threat-model.md)'s, stated
+the attack-class-by-attack-class containment are the [threat model](./security-threat-model.md)'s, stated
 once there. The posture that follows it everywhere: a sandbox with no explicit policy reaches no
 network and holds minimal capability, and every allowance is explicit and recorded.
 
 ## Record integrity (host-signed)
 
-The finalized audit record is signed with an Ed25519 host key. Verification via `ekvm verify <record>` validates signature validity against the host key. The threat model details [record verification boundaries](./threat-model.md#record-integrity-beyond-the-guest).
+The finalized audit record is signed with an Ed25519 host key. Verification via `ekvm verify <record>` validates signature validity against the host key. The threat model details [record verification boundaries](./security-threat-model.md#record-integrity-beyond-the-guest).
 
 Each record includes `sandbox_id` and `started_unix_ns` in the signed payload to correlate the audit event with host execution state.
 
@@ -69,7 +69,7 @@ Given those aims, a security bug is anything that breaks one of them:
 Because this is an **engine, not a platform**, multi-tenant concerns it deliberately does not own
 (tenant authentication, quotas, billing) are the hoster's responsibility, not a bug here; the full
 line is the threat model's
-[out-of-scope section](./threat-model.md#out-of-scope-engine-not-platform).
+[out-of-scope section](./security-threat-model.md#out-of-scope-engine-not-platform).
 
 ## What is not a security bug
 

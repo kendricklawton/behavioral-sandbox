@@ -171,7 +171,7 @@ in place. It is not published as a site until the first release.
 - **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
 - **[Benchmarks](docs/benchmarks.md)**, the methodology and how to run it yourself.
-- **[Security](docs/security.md)** and the **[threat model](docs/threat-model.md)**.
+- **[Security](docs/security.md)** and the **[threat model](docs/security-threat-model.md)**.
 - **[Contributing](docs/contributing.md)**, invariants, developer tools, CI gates, testing, fuzzing.
 
 ## How it fits together

@@ -13,7 +13,7 @@ The first supported release of eKVM: a self-hostable engine that boots a hardwar
 - **Hardware Isolation Driver (`crates/vmm`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
 - **Host eBPF Observability (`crates/probes` & `crates/probes-loader`)**: `aya`-based eBPF probes for out-of-guest syscall tracing, TAP network flow monitoring, and cgroup v2 resource accounting.
 - **Daemon Wire Interface (`crates/protocol` & `crates/cli`)**: Versioned newline-delimited JSON wire API (`schema: 1`) served by `ekvm serve` over Unix domain sockets.
-- **Audit Records**: Host-observed, Ed25519-signed JSON audit logs (`RunRecord`) with a hash-chained `trace`. What a signature establishes is in [docs/threat-model.md](docs/threat-model.md#record-integrity-beyond-the-guest).
+- **Audit Records**: Host-observed, Ed25519-signed JSON audit logs (`RunRecord`) with a hash-chained `trace`. What a signature establishes is in [docs/security-threat-model.md](docs/security-threat-model.md#record-integrity-beyond-the-guest).
 - **Reference Rust Client (`crates/client`)**: Dependency-light reference client driving `ekvm serve` over Unix sockets.
 - **Pre-warmed Sandbox Pool**: Snapshot-restore pool for warm sandbox starts. Latency figures are withdrawn pending a re-measurement on a verified host; see [docs/benchmarks.md](docs/benchmarks.md).
 - **Host Diagnostics (`ekvm doctor`)**: Pre-flight host verification for `/dev/kvm`, the host-kernel floor (a probed `cgroup.kill`, else >= 5.15), cgroup v2, and BTF eBPF support.

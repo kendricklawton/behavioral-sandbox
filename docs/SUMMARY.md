@@ -13,5 +13,6 @@
 - [Host-side observability & enforcement](./probes.md)
 - [Benchmarks](./benchmarks.md)
 - [Security](./security.md)
-  - [Threat model](./threat-model.md)
+  - [Threat model](./security-threat-model.md)
 - [Contributing](./contributing.md)
+  - [Coding guidelines](./contributing-coding-guidelines.md)

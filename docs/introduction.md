@@ -9,7 +9,7 @@ It exists for the usual suspects: a third-party binary, a fork's CI job, a depen
 script, an AI-generated snippet, a sample under analysis. The code stays on your own
 infrastructure (air-gapped or regulated is fine), and the watching and the policy live in the host
 kernel, outside the guest, so the record is produced by code the guest does not run. The finished record is **host-signed** (`ekvm verify`); the
-[threat model](./threat-model.md#record-integrity-beyond-the-guest) states exactly what that does
+[threat model](./security-threat-model.md#record-integrity-beyond-the-guest) states exactly what that does
 and does not prove.
 
 The engine can be driven three ways: as the **`ekvm` CLI** (one sandbox per command), as a
@@ -59,7 +59,7 @@ full non-goals list is in [Using the engine API](./embedding.md).
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each with a live demo.
-- **[Threat model](./threat-model.md)**, what is trusted, host hardening baseline, supply-chain provenance, and residual risk.
+- **[Threat model](./security-threat-model.md)**, what is trusted, host hardening baseline, supply-chain provenance, and residual risk.
 - **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
   report one.
 - **[Contributing](./contributing.md)**, invariants, developer tools, CI gates, testing, and fuzzing.
@@ -88,7 +88,7 @@ something other than their subject" exists in this history.
 Stated because their absence is the honest counterweight to everything else in this book:
 
 - **No external security review or audit.** The threat model is the author's own reasoning about the
-  author's own code. See [Threat model](./threat-model.md).
+  author's own code. See [Threat model](./security-threat-model.md).
 - **One kernel.** The CO-RE/BTF portability described in [Host-side observability &
   enforcement](./probes.md) is a property of the mechanism, not a tested claim: the probes have been
   loaded on exactly one kernel version.

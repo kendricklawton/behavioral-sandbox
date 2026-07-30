@@ -13,7 +13,7 @@
 //! The host-hardening posture rows reuse [`Warn`](CheckStatus::Warn) for a second kind
 //! of advice: not a capability the engine loses, but a side-channel exposure the layer *beneath*
 //! the engine carries when mutually-distrusting tenants share the hardware. Advisory by design, a
-//! single-tenant dev box tripping them is fine (`docs/threat-model.md` is the baseline).
+//! single-tenant dev box tripping them is fine (`docs/security-threat-model.md` is the baseline).
 //!
 //! The eBPF-observability capability check (`CAP_BPF`/`CAP_PERFMON` + kernel BTF) lives in the probe
 //! loader, out of this crate; each entry point appends it. This module is
@@ -265,7 +265,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         ),
         // Host hardening, advisory: micro-architectural side channels between
         // co-resident guests live in the layer beneath the engine, so doctor advises the
-        // multi-tenant baseline (`docs/threat-model.md`) and never refuses.
+        // multi-tenant baseline (`docs/security-threat-model.md`) and never refuses.
         Check::new(
             "CPU vulnerability mitigations in effect",
             exposed.is_empty(),
@@ -305,7 +305,7 @@ pub fn matrix() -> Vec<&'static str> {
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps",
         "  scratch dir nodev/noexec     -> jailed chroot can't open /dev/kvm or exec the VMM; repoint EKVM_SCRATCH_DIR",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
-        "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/threat-model.md",
+        "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/security-threat-model.md",
         "  a MAC LSM is loaded          -> selinux/apparmor denials arrive as a bare EPERM naming",
         "                                  no LSM, so a jailed boot that fails oddly reads as an",
         "                                  engine bug. Check the audit log first:",

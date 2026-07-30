@@ -8,12 +8,12 @@
 **Firecracker** microVM (hardware isolation via Linux KVM). **Host-side eBPF** (`aya`) observes and
 enforces what it does, syscalls, network flows, resource accounting, from the host side of the KVM
 boundary: the programs are loaded by a host process and attached to host-kernel hooks. The guest
-drives four crossings, enumerated in the [threat model](./threat-model.md), and none of them names a
+drives four crossings, enumerated in the [threat model](./security-threat-model.md), and none of them names a
 BPF program or map.
 
 Every execution yields a host-observed, host-signed **audit log** of execution events. What a
 signature does and does not establish is stated in
-[Record integrity beyond the guest](./threat-model.md#record-integrity-beyond-the-guest).
+[Record integrity beyond the guest](./security-threat-model.md#record-integrity-beyond-the-guest).
 
 ### Design rules
 
@@ -167,7 +167,7 @@ One Cargo workspace, split along the isolation/observability/driver boundaries:
 Untrusted code goes inside a Firecracker microVM backed by KVM rather than a shared-kernel sandbox.
 The guest runs against its own kernel, so a guest kernel panic or compromise is contained by the
 CPU's virtualization boundary rather than by host-side software. That boundary is KVM's to enforce;
-the [threat model](./threat-model.md#assumptions-and-residual-risk) lists it as an assumption this
+the [threat model](./security-threat-model.md#assumptions-and-residual-risk) lists it as an assumption this
 project depends on rather than a property it establishes.
 
 ### 2. Host-side eBPF observability & policy
