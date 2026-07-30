@@ -365,6 +365,11 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     std::fs::write(&net_up, net_up_script()).with_context(|| format!("write {NET_UP_PATH}"))?;
     set_mode_0755(&net_up)?;
 
+    // Last gate before the tree becomes an image: everything the driver and the init line depend on
+    // is present, at the mode it needs. Fails the build rather than shipping an image that boots
+    // into a missing helper.
+    verify_guest_contract(&staging)?;
+
     // Build the ext4 from the staging dir, rootless, via `mke2fs -d`, and **deterministic**:
     // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` (honoured from e2fsprogs
     // 1.47.1, probed in `build_rootfs`), which stamps the superblock create/write/check times and
@@ -429,6 +434,90 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
         image_sha256: sha256_of(out_image)?,
         packages,
     })
+}
+
+/// The guest-image contract, checked against the staged tree before `mke2fs` turns it into an image.
+/// Reads back the same constants the writes above use, so a rename applied to only one of a path's
+/// two places (the file, and the init line or command line naming it) fails the build here instead
+/// of producing an image that boots into something absent.
+///
+/// **What this proves, and what it doesn't.** It proves the tree handed to `mke2fs` carries what the
+/// constants promise, at the modes the guest needs. It does not prove the image *boots*: nothing here
+/// runs a kernel, and a script can satisfy every check and still be wrong. Booting is the privileged
+/// suite's job (`crates/vmm/tests/boot.rs`).
+fn verify_guest_contract(staging: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Each path with the consequence of its absence, so a failure explains itself to whoever renamed
+    // something rather than just naming a file.
+    for (path, consequence) in [
+        (
+            GUEST_AGENT_PATH,
+            "the init line respawns it, so the VM would boot with no exec channel and every run \
+             would time out waiting for the readiness marker",
+        ),
+        (
+            channel::GUEST_OVERLAY_INIT,
+            "the driver puts `init=<this>` on the kernel command line for a read-only-root boot, so \
+             the kernel would panic on a missing init",
+        ),
+        (
+            MOUNT_DRIVES_PATH,
+            "an inittab sysinit line runs it, so --input/--output would silently never mount",
+        ),
+        (
+            NET_UP_PATH,
+            "an inittab sysinit line runs it, so a networked guest would come up with no IPv6",
+        ),
+    ] {
+        let staged = in_staging(staging, path);
+        let meta = std::fs::metadata(&staged).with_context(|| {
+            format!("guest-image contract: {path} is missing from the staged rootfs ({consequence})")
+        })?;
+        if !meta.is_file() {
+            bail!("guest-image contract: {path} is not a regular file ({consequence})");
+        }
+        let mode = meta.permissions().mode() & 0o777;
+        if mode != 0o755 {
+            bail!(
+                "guest-image contract: {path} is mode {mode:04o}, not 0755, so the guest cannot \
+                 execute it ({consequence})"
+            );
+        }
+    }
+
+    // Mountpoints have to be baked: the guest cannot create them. `/` is read-only when the overlay
+    // init runs, and the bulk mounts happen before anything writable exists.
+    for dir in [OVERLAY_DIR, INPUT_DIR, OUTPUT_DIR] {
+        if !in_staging(staging, dir).is_dir() {
+            bail!(
+                "guest-image contract: {dir} is missing from the staged rootfs, and the guest \
+                 cannot create it (the root is read-only under the overlay init, and the bulk \
+                 mounts run before anything writable exists)"
+            );
+        }
+    }
+
+    // The init file has to actually start the agent on the port the host dials. Checked as content,
+    // not as "the file exists": an inittab that parses fine but never spawns the agent is the one
+    // failure that looks healthy right up until a run hangs.
+    let inittab = std::fs::read_to_string(in_staging(staging, INITTAB_PATH))
+        .with_context(|| format!("guest-image contract: read {INITTAB_PATH}"))?;
+    let vsock_arg = format!("vsock:{}", channel::VSOCK_PORT);
+    for needle in [
+        GUEST_AGENT_PATH,
+        MOUNT_DRIVES_PATH,
+        NET_UP_PATH,
+        vsock_arg.as_str(),
+    ] {
+        if !inittab.contains(needle) {
+            bail!(
+                "guest-image contract: {INITTAB_PATH} never mentions `{needle}`, so the staged init \
+                 does not match the paths this build wrote"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The result of one rootfs assembly: the image's content hash and the exact resolved package
@@ -814,7 +903,120 @@ fn set_mode_0755(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{net_up_script, parse_mke2fs_version, MKE2FS_SOURCE_DATE_EPOCH_MIN};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        in_staging, net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
+        GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, MKE2FS_SOURCE_DATE_EPOCH_MIN, MOUNT_DRIVES_PATH,
+        NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR,
+    };
+
+    /// A scratch dir removed on drop, so a failing assertion can't leave one behind. Per-test name
+    /// plus pid, so concurrent tests (libtest runs them in parallel) don't share a tree.
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn temp_dir(name: &str) -> TempDir {
+        let path =
+            std::env::temp_dir().join(format!("ekvm_contract_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("create temp staging");
+        TempDir(path)
+    }
+
+    /// A staging tree that satisfies the contract: the four executables at 0755, the three
+    /// mountpoints, and the real inittab. Each negative test breaks exactly one thing from here, so
+    /// what it proves is that *that* fault is what the check catches.
+    fn good_staging(root: &Path) {
+        for path in [
+            GUEST_AGENT_PATH,
+            channel::GUEST_OVERLAY_INIT,
+            MOUNT_DRIVES_PATH,
+            NET_UP_PATH,
+        ] {
+            let staged = in_staging(root, path);
+            std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+            std::fs::write(&staged, "#!/bin/sh\n").unwrap();
+            let mut perms = std::fs::metadata(&staged).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&staged, perms).unwrap();
+        }
+        for dir in [OVERLAY_DIR, INPUT_DIR, OUTPUT_DIR] {
+            std::fs::create_dir_all(in_staging(root, dir)).unwrap();
+        }
+        let inittab = in_staging(root, INITTAB_PATH);
+        std::fs::create_dir_all(inittab.parent().unwrap()).unwrap();
+        std::fs::write(&inittab, rootfs_inittab()).unwrap();
+    }
+
+    #[test]
+    fn a_complete_staging_tree_satisfies_the_contract() {
+        let tmp = temp_dir("ok");
+        good_staging(&tmp.0);
+        verify_guest_contract(&tmp.0).expect("a fully staged tree satisfies the contract");
+    }
+
+    #[test]
+    fn a_missing_executable_names_itself_and_its_consequence() {
+        let tmp = temp_dir("missing");
+        good_staging(&tmp.0);
+        std::fs::remove_file(in_staging(&tmp.0, NET_UP_PATH)).unwrap();
+        let err = verify_guest_contract(&tmp.0)
+            .expect_err("a missing net-up must fail the build")
+            .to_string();
+        assert!(err.contains(NET_UP_PATH), "{err}");
+        assert!(err.contains("no IPv6"), "{err}");
+    }
+
+    #[test]
+    fn an_unexecutable_helper_is_caught_before_it_ships() {
+        let tmp = temp_dir("mode");
+        good_staging(&tmp.0);
+        // The exact fault a forgotten `set_mode_0755` produces: the file is there, so an
+        // existence-only check would pass it, and the guest would fail at exec time instead.
+        let staged = in_staging(&tmp.0, MOUNT_DRIVES_PATH);
+        let mut perms = std::fs::metadata(&staged).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&staged, perms).unwrap();
+        let err = verify_guest_contract(&tmp.0)
+            .expect_err("a non-executable helper must fail the build")
+            .to_string();
+        assert!(err.contains("0644"), "{err}");
+        assert!(err.contains(MOUNT_DRIVES_PATH), "{err}");
+    }
+
+    #[test]
+    fn a_missing_mountpoint_is_caught() {
+        let tmp = temp_dir("mountpoint");
+        good_staging(&tmp.0);
+        std::fs::remove_dir_all(in_staging(&tmp.0, OVERLAY_DIR)).unwrap();
+        let err = verify_guest_contract(&tmp.0)
+            .expect_err("a missing overlay mountpoint must fail the build")
+            .to_string();
+        assert!(err.contains(OVERLAY_DIR), "{err}");
+        assert!(err.contains("cannot create it"), "{err}");
+    }
+
+    #[test]
+    fn an_inittab_that_never_starts_the_agent_is_caught() {
+        let tmp = temp_dir("inittab");
+        good_staging(&tmp.0);
+        // Syntactically fine, and it would boot. It just never spawns the agent, which is the
+        // failure that looks healthy until a run hangs waiting for the readiness marker.
+        std::fs::write(
+            in_staging(&tmp.0, INITTAB_PATH),
+            "::sysinit:/bin/mount -t proc proc /proc\n",
+        )
+        .unwrap();
+        let err = verify_guest_contract(&tmp.0)
+            .expect_err("an inittab that never starts the agent must fail the build")
+            .to_string();
+        assert!(err.contains(GUEST_AGENT_PATH), "{err}");
+    }
 
     #[test]
     fn net_up_reads_the_shared_cmdline_key() {
