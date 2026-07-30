@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn arbitrary_mutations_of_an_envelope_never_panic_the_verifier() {
         // The cheap in-gate tier of the envelope fuzzing (the deep tier is the `signing_envelope`
-        // libFuzzer target, docs/contributing.md): deterministic mutations of a valid
+        // libFuzzer target, docs/contributing-fuzzing.md): deterministic mutations of a valid
         // chained envelope must always land in Ok/Err, never a panic.
         let key = test_key();
         let trusted = [key.verifying_key()];

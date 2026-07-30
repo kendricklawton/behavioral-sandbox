@@ -32,7 +32,7 @@ use crate::BootConfig;
 /// **A version number is a proxy, and on enterprise kernels it is the wrong one.** Red Hat ships
 /// RHEL 9 as `5.14.0-*.el9` and backports security fixes to it for a decade, so a bare
 /// `>= 5.15` test refuses a patched, supported kernel for no safety gain: the same argument
-/// `docs/contributing.md` makes for the Firecracker floor ("reject *unpatched* VMMs, not old
+/// `docs/contributing-firecracker-policy.md` makes for the Firecracker floor ("reject *unpatched* VMMs, not old
 /// ones"). So the real requirement is probed directly ([`cgroup_kill_under`]) and this floor is
 /// only the fallback for hosts where the probe cannot run.
 ///

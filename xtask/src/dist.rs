@@ -69,7 +69,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         // host-safe; a *package* without the observability half is not the product, so hard-fail.
         bail!(
             "eBPF object not built ({}) — a dist ships the audit half; install bpf-linker + the \
-             nightly toolchain (see docs/contributing.md)",
+             nightly toolchain (see docs/contributing-building.md)",
             object.display()
         );
     }
@@ -612,18 +612,28 @@ mod tests {
 
         // The contributor-facing docs hand out the same commands; a reader who follows them must
         // land on the pinned versions, not on whatever is newest.
-        let contributing = std::fs::read_to_string(repo.join("docs/contributing.md"))
-            .expect("docs/contributing.md");
+        const BUILDING_DOC: &str = "docs/contributing-building.md";
+        let contributing = std::fs::read_to_string(repo.join(BUILDING_DOC)).expect(BUILDING_DOC);
+        let mut doc_checked = 0usize;
         for line in contributing.lines() {
             for (tool, version) in [("bpf-linker", BPF_LINKER_VERSION)] {
                 if line.contains(&format!("cargo install {tool}")) {
+                    doc_checked += 1;
                     assert!(
                         line.contains(&format!("--version {version}")),
-                        "docs/contributing.md tells contributors to install {tool} unpinned: {line}"
+                        "{BUILDING_DOC} tells contributors to install {tool} unpinned: {line}"
                     );
                 }
             }
         }
+        // Same non-vacuity guard as the workflow scan above: moving the install command to another
+        // page (or rewording it) would otherwise leave this loop matching nothing and passing green,
+        // which is how an unpinned `cargo install` gets back into the docs unnoticed.
+        assert!(
+            doc_checked > 0,
+            "no `cargo install` line matched in {BUILDING_DOC}: the setup commands moved, so this \
+             test is asserting nothing. Point it at the page that now hands them out."
+        );
     }
 
     /// The two pins can never drift: the PEM `install.sh` embeds (what installers trust) must be

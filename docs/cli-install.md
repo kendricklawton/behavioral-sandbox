@@ -270,7 +270,7 @@ hoster call the image documents rather than makes (see the `Containerfile` heade
 ## Self-host in one command
 
 From a clone of the repo with a Rust toolchain installed (see
-[Contributing](./contributing.md#2-prerequisites--quickstart)), plus the
+[Building](./contributing-building.md)), plus the
 [prerequisites](#prerequisites), the whole stand-up is a single command:
 
 ```console
@@ -363,7 +363,7 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
 What the **engine** needs at runtime: what each dependency is for, and which are optional. For the
 commands that install them on a fresh box, see [Preparing the host](#preparing-the-host); for what
 **building from source** additionally needs (the Rust toolchain, `bpf-linker`), see
-[Contributing](./contributing.md#2-prerequisites--quickstart).
+[Building](./contributing-building.md).
 
 - **A Linux host with `/dev/kvm`** (a kernel with `cgroup.kill`, see [Supported platforms](#supported-platforms))
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
@@ -419,7 +419,7 @@ sudo -E env EKVM_SCRATCH_DIR="$HOME/.ekvm" "$(command -v ekvm)" run -- echo hell
 [Self-host in one command](#self-host-in-one-command) is the short path.
 
 To drive the individual steps instead, or to work on the engine itself, consult
-[Contributing](./contributing.md), which owns the build toolchain (the Rust version policy, the
+[Building](./contributing-building.md), which owns the build toolchain (the Rust version policy, the
 probes crate's pinned nightly and `bpf-linker`), the artifact commands, and the two test gates.
 
 Once you have a binary, head to [Using the eKVM CLI](./cli.md) to run something.

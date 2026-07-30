@@ -121,7 +121,7 @@ sudo -E ./ci-privileged.sh
 The wrapper handles the environment a `sudo` run otherwise stacks by hand, and the gate *refuses*
 to run misconfigured rather than letting capability-gated tests skip themselves into a hollow
 green. The mechanics live in
-[Contributing](./contributing.md#3-developer-workflows--ci-gates).
+[CI gates](./contributing-ci.md).
 
 This runs the VM-boot and probe-attach integration tests, including the containment suite. The
 everyday `cargo xtask ci` gate is host-safe
