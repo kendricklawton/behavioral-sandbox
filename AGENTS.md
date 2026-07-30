@@ -14,7 +14,8 @@ subvert it", "guaranteed"), in docs, comments, or commit messages. Where a test 
 make the test the subject: "`driver_death_cannot_leak_a_vm` kills a driver mid-boot and asserts no
 VMM, netns, or scratch dir survives." An absolute is fine when the sentence names its enforcer
 (`#![forbid(unsafe_code)]`, a wildcard-free `match`, an ordering inside one function); it is not
-fine when the enforcer is "the implementation being correct". Full rationale: `docs/introduction.md`.
+fine when the enforcer is "the implementation being correct". Full rationale:
+`docs/contributing-development-process.md`.
 
 **Scope: the engine, not the platform.** A runtime + a clean driver API you self-host: the boring,
 embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed
@@ -95,6 +96,8 @@ layers, read `docs/contributing-architecture.md` before a non-trivial change to 
   boot paths and leaves N-1 untested. The shipped binary is static musl for the same reason, no host
   libc to mismatch. Full rationale: `docs/design.md`, decision 8.
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
+- **On a panicking test, re-run it with `RUST_BACKTRACE=1`** rather than reasoning about the failure
+  from the assertion line alone. The frame that panicked is often several calls below the test.
 - **A test must be shown to fail.** Break the behavior under test, watch the new assertion fail, then
   revert. A test never seen failing is not yet evidence, and this repo has a commit whose whole
   purpose was two tests that passed on something other than their subject.
@@ -110,7 +113,7 @@ layers, read `docs/contributing-architecture.md` before a non-trivial change to 
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
   are a separate call, not covered here.
 - **Git is human-driven.** The user makes every commit, push, and **pull request**; the **coding
-  agent** (Claude, Gemini, Codex, as opposed to `ekvm`/ekvm, this project) never runs `git commit` /
+  agent** (Claude, Gemini, Codex, as opposed to the `ekvm` binary this repo builds) never runs `git commit` /
   `git push`, never opens, approves, or merges a PR (`gh pr create` / `gh pr merge` / review
   approvals included), and never takes any other CI-triggering action. The coding agent's job ends
   at: changes made, demo working, and, **only when asked**, a commit message or PR description
@@ -122,8 +125,9 @@ layers, read `docs/contributing-architecture.md` before a non-trivial change to 
   rather than splitting hairs.
 - **Public-API changes carry the `api` scope.** The engine is embedded downstream at the `vmm`
   library's public API, pinned by git rev, so a change to that API (`Sandbox`, `Limits`,
-  `RunResult`, `VmmError` including its variants *or* the `kind()` bucket mapping, or the `channel`
-  wire protocol) is committed as `feat(api):` / `fix(api):` (with `!` appended when the change is
+  `RunResult`, `VmmError` including its variants *or* the `kind()` bucket mapping, the `channel`
+  wire protocol, or the daemon's `protocol` wire types) is committed as
+  `feat(api):` / `fix(api):` (with `!` appended when the change is
   incompatible), so a downstream pin bump is auditable from the log alone. Internal-only changes
   don't use the scope. This is about legibility, not a new process: still one imperative subject,
   still human-committed.
