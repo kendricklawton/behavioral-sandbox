@@ -12,6 +12,52 @@
 
 use std::path::{Path, PathBuf};
 
+/// Refuse to run a test that measures **process-global** state beside its siblings.
+///
+/// libtest runs tests **in parallel by default**, one thread per CPU, and `--test-threads=1` is the
+/// override that turns that off. A test asserting on open fds, thread count, mounts, or every
+/// `ekvm-<pid>-*` scratch dir is measuring the whole test *binary*: `std::process::id()` is shared
+/// by every test in the process, so a concurrent sibling's live VM is indistinguishable from a leak
+/// and its open sockets are indistinguishable from an fd leak.
+///
+/// That makes such a test's correctness depend on a flag its *caller* passes, which is a footgun
+/// with no feedback: run without it, the failure arrives later wearing an unrelated face (a build
+/// that "unexpectedly succeeded", an fd count off by two) and costs a debugging session to trace
+/// back to threading. So refuse up front and name the fix, the same posture
+/// `cargo xtask ci-privileged` takes on a host with no root or BTF.
+///
+/// Call it first in such a test, or in the fixture that makes it global (see [`SmallFs::create`]).
+pub fn require_serial(what: &str) {
+    let args: Vec<String> = std::env::args().collect();
+    let env = std::env::var("RUST_TEST_THREADS").ok();
+    if serial_requested(&args, env.as_deref()) {
+        return;
+    }
+    panic!(
+        "{what} asserts on process-global state (fds, threads, mounts, or every ekvm-<pid>-* dir), \
+         so it cannot run beside another test in this binary, and libtest runs tests in parallel by \
+         default. Re-run with `--test-threads=1`, or use `cargo xtask ci-privileged`, which passes \
+         it for you."
+    );
+}
+
+/// Whether the harness was told to run one test at a time, by flag or by environment. Pure, so the
+/// spellings libtest accepts (`--test-threads=1`, `--test-threads 1`, `RUST_TEST_THREADS`) are
+/// unit-tested rather than assumed.
+fn serial_requested(args: &[String], env: Option<&str>) -> bool {
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if let Some(v) = arg.strip_prefix("--test-threads=") {
+            return v.trim() == "1";
+        }
+        if arg == "--test-threads" {
+            return it.next().map(|v| v.trim()) == Some("1");
+        }
+    }
+    // The flag wins where both are given, which is why the env is only consulted here.
+    env.map(str::trim) == Some("1")
+}
+
 /// A host scratch dir reclaimed on drop, so a panicking assertion or an early `?` return can't leak
 /// it. Unique per (pid, tag, sequence) so parallel tests in one process never collide (the
 /// collision the CLI copy had to fix). [`new`](Self::new) only *reserves* the path (clearing any
@@ -213,9 +259,16 @@ impl SmallFs {
     /// must not have.
     #[must_use]
     pub fn create(mib: u64, tag: &str) -> Option<Self> {
+        // Root first: without it this fixture skips, so refusing a parallel run here would nag a
+        // dev about an invocation for a test they cannot run either way.
         if !have_real_root() {
             return None;
         }
+        // Mounting is a process-wide operation, and this fixture's whole premise is a filesystem of
+        // a known size at a known path. A sibling test mounting and unmounting concurrently breaks
+        // that premise, and the symptom lands somewhere else entirely: the tool under test simply
+        // succeeds where the test required it to fail.
+        require_serial(&format!("the SmallFs fixture ({tag})"));
         let dir = ScratchDir::created(tag);
         let ok = std::process::Command::new("mount")
             .arg("-t")
@@ -374,7 +427,47 @@ pub fn process_threads(pid: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cap_eff, CAP_NET_ADMIN};
+    use super::{parse_cap_eff, serial_requested, CAP_NET_ADMIN};
+
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn every_spelling_of_the_serial_flag_is_recognised() {
+        // Both command-line forms libtest accepts. Missing one would refuse a correctly-invoked
+        // run, which is the failure mode that would get this guard deleted rather than fixed.
+        assert!(serial_requested(
+            &args(&["bin", "--ignored", "--test-threads=1"]),
+            None
+        ));
+        assert!(serial_requested(
+            &args(&["bin", "--test-threads", "1"]),
+            None
+        ));
+        // The environment fallback libtest reads when no flag is given.
+        assert!(serial_requested(&args(&["bin"]), Some("1")));
+
+        // Parallel: libtest's default, and the case this guard exists to catch.
+        assert!(!serial_requested(&args(&["bin", "--ignored"]), None));
+        assert!(!serial_requested(&args(&["bin", "--test-threads=8"]), None));
+        assert!(!serial_requested(
+            &args(&["bin", "--test-threads", "8"]),
+            None
+        ));
+        assert!(!serial_requested(&args(&["bin"]), Some("8")));
+        // A trailing `--test-threads` with no value is not a serial run.
+        assert!(!serial_requested(&args(&["bin", "--test-threads"]), None));
+        // The flag wins over the environment, in both directions.
+        assert!(serial_requested(
+            &args(&["bin", "--test-threads=1"]),
+            Some("8")
+        ));
+        assert!(!serial_requested(
+            &args(&["bin", "--test-threads=8"]),
+            Some("1")
+        ));
+    }
 
     #[test]
     fn cap_eff_parses_the_effective_line_only() {

@@ -470,6 +470,9 @@ const CHURN_EVERY: usize = 8;
 #[test]
 #[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn repeated_boots_leave_no_leaks() {
+    // Counts this *process's* fds, threads, and ekvm-<pid>-* dirs, all of which a concurrent
+    // sibling test would contribute to. Refuse rather than measure it.
+    test_support::require_serial("repeated_boots_leave_no_leaks");
     // The endurance form of the no-leak claim: after N boot/exec/teardown cycles under periodic
     // concurrent churn, nothing this test spawned may survive, no per-VM scratch dir, no orphaned
     // firecracker VMM process, and (with CAP_NET_ADMIN) no per-VM netns. The netns is the one
@@ -710,6 +713,8 @@ fn open_fds() -> usize {
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
+    // The fd baseline is the process's, so a sibling test's open socket reads as this test's leak.
+    test_support::require_serial("fd_footprint_per_vm_stays_within_budget_and_never_leaks");
     // Each live VM costs the embedder driver-side fds; at the default 1024 soft ulimit an
     // unstated budget fails as an illegible mid-boot EMFILE a few hundred VMs in. This pins the
     // budget (`FDS_PER_VM`) per start path, cold, networked, prewarmed restore, and, just as
