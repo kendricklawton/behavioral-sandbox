@@ -426,10 +426,12 @@ Once you have a binary, head to [Using the eKVM CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 
-A build otherwise fetches four sha-pinned inputs from two upstreams: the guest kernel + boot rootfs
-from Firecracker's CI S3 bucket, and the Alpine minirootfs + the guest package (`.apk`) closure from
-the Alpine CDN. `cargo xtask vendor` snapshots **all** of them into a local mirror so a fresh host
-builds without either upstream staying alive:
+A build otherwise fetches from two upstreams: three sha-pinned inputs (the guest kernel + boot rootfs
+from Firecracker's CI S3 bucket, the Alpine minirootfs from the Alpine CDN), plus the guest package
+(`.apk`) closure, which floats within the pinned Alpine branch and is recorded rather than hash-pinned
+(see [Supply chain & provenance](./security-threat-model.md)). `cargo xtask vendor` snapshots **all**
+of them into a local mirror, pinning the closure in the process, so a fresh host builds without either
+upstream staying alive:
 
 ```console
 cargo xtask vendor                    # download every pinned input into ./vendor, sha-verified,

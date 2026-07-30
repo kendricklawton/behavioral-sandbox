@@ -214,9 +214,24 @@ it can check.
 
 ## Supply chain & provenance
 
-Every upstream input the guest is built from is pinned by sha256 and verified on fetch: the guest
-kernel and base rootfs (`xtask/src/artifacts.rs`), and the Alpine package closure, which makes the
-rootfs build byte-for-byte reproducible (`xtask/src/rootfs.rs`). `cargo xtask vendor` snapshots
-the whole pinned input set into an offline mirror, so an air-gapped host can rebuild the guest
-without trusting a network path at build time.
+The guest kernel and the Alpine base rootfs are pinned by sha256 and verified on fetch
+(`xtask/src/artifacts.rs`). The package closure installed on top of that base is **not** hash-pinned
+on the live-CDN path: it floats within one Alpine branch, because branch repos carry only the latest
+revision per package, so an exact `pkg=ver-rN` pin would fail the build the day upstream bumps rather
+than reproduce it (`GUEST_PACKAGES` in `xtask/src/rootfs.rs`). What holds instead is a record and two
+checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, `build-rootfs --verify` (run
+by the privileged gate) fails on any drift from it, and `.github/workflows/rootfs-packages.yml`
+rebuilds weekly so a bump arrives on a schedule. `--verify` also builds the image twice and compares
+hashes, so one host reproduces its own build; across hosts the image hash still follows the mke2fs
+version.
+
+`cargo xtask vendor` snapshots the whole input set, the resolved `.apk` closure included, into an
+offline mirror with a sha256 manifest. That is where the packages do get pinned by hash, so an
+air-gapped rebuild is both independent of the network and more reproducible than the live-CDN one.
+
+A guest package is on the untrusted side of the KVM boundary: a compromised interpreter in the guest
+is what the sandbox is built to contain, not a break of it. The exposure it does carry is
+distribution. `cargo xtask dist` bakes `rootfs-guest.ext4` into the signed release tarball, so
+operators run the image from the last release until the next one, and nothing here scans that closure
+against Alpine's security database.
 - **Dependency Auditing**: CI runs `cargo deny` to check for security advisories and enforce license policy across the dependency tree.

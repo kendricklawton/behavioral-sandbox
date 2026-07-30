@@ -1,0 +1,73 @@
+# The guest userland is the other upstream nothing in this repo watches. `cargo deny` and
+# audit.yml's RustSec sweep read `Cargo.lock`, and the Alpine packages baked into the guest image
+# are not in it. The install floats within one Alpine branch deliberately (branch repos carry only
+# the latest revision per package, so an exact `pkg=ver-rN` pin would *fail* the build the day
+# upstream bumps, not reproduce it, see `GUEST_PACKAGES` in `xtask/src/rootfs.rs`), and
+# `xtask/rootfs-packages.lock` records what the last build actually resolved.
+#
+# Without this job, drift surfaces the next time someone runs the privileged gate, which builds the
+# rootfs with `--verify` and dies in the artifact stage before a single test runs. That happened on
+# 2026-07-30 (nodejs 24.17.0-r0 -> 24.18.1-r0) and cost a gate run. Weekly, rebuild and diff the
+# lockfile, so the bump arrives as a scheduled notification instead of an ambush.
+#
+# Failing rather than opening a PR, for the same reason as firecracker-pin.yml: the lockfile is a
+# record of the image this project signs and ships, so re-pinning is a human deciding to ship a new
+# guest userland. What moved matters (a runtime security fix reads differently from a patch bump),
+# and the privileged gate should run against the new image before it goes anywhere.
+#
+# Unprivileged on purpose: `apk.static` installs a closure into `--root` without root and without
+# running maintainer scripts, so this needs no KVM box and no privileged runner.
+name: rootfs-packages
+
+on:
+  schedule:
+    # Wednesdays 06:45 UTC, after firecracker-pin.yml's 06:15 and audit.yml's 05:30, so the three
+    # upstream watchers stay three separate signals.
+    - cron: "45 6 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  closure-is-current:
+    name: guest package closure vs the Alpine branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Toolchain (musl, for the static guest agent baked into the image)
+        run: rustup target add x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rebuild the guest image and re-pin the closure
+        # `--update-lock` rewrites the lockfile from what this build resolved; the diff below is
+        # then the answer. Asking the build to *check* instead would only reprint the warning the
+        # gate already prints, without naming which package moved.
+        run: cargo xtask build-rootfs --update-lock
+
+      - name: Did the closure move?
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- xtask/rootfs-packages.lock; then
+            echo "The guest package closure still matches the lockfile."
+            exit 0
+          fi
+
+          echo "The resolved closure differs from the committed lockfile:"
+          echo ""
+          git --no-pager diff -- xtask/rootfs-packages.lock
+          echo ""
+          echo "::error::Alpine moved a package in the guest image's closure."
+          echo ""
+          echo "Re-pinning is a human step, not a bot PR. It means:"
+          echo "  1. read the diff above: which package moved, and is it a security fix?"
+          echo "  2. run 'cargo xtask build-rootfs --update-lock' locally and commit the lockfile"
+          echo "  3. run 'cargo xtask ci-privileged' against the rebuilt image"
+          echo "  4. remember that released tarballs carry the OLD image until the next release"
+          exit 1

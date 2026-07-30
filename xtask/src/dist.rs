@@ -638,6 +638,122 @@ mod tests {
         );
     }
 
+    /// Workflows name repo files as bare shell text: a parser's target (`grep … crates/…`), an
+    /// error message telling a human which file to edit. Nothing checked those paths. The
+    /// prose-drift lint reads `.rs` and `.md` only, and even there it wants a backticked span,
+    /// so a rename lands green and the weekly job fails days later on a path that no longer
+    /// exists: splitting `spawn.rs` into `spawn/fcversion.rs` broke `firecracker-pin.yml`'s floor
+    /// parser exactly that way, and only its own non-vacuity guard would have reported it.
+    ///
+    /// Scoped to the `crates/` and `xtask/` prefixes, which are ours. A workflow also fetches a
+    /// path out of upstream Firecracker's repo by URL, and `dist/` is build output; neither is a
+    /// file this tree can be asked to hold.
+    #[test]
+    fn workflow_repo_paths_exist() {
+        let repo = workspace_root();
+        let dir = repo.join(".github/workflows");
+        let mut checked = 0usize;
+        let mut missing: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect(".github/workflows") {
+            let path = entry.expect("workflow dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+                continue;
+            }
+            let wf = path.file_name().unwrap().to_string_lossy().to_string();
+            let text = std::fs::read_to_string(&path).expect("read workflow");
+            for (idx, line) in text.lines().enumerate() {
+                for token in line.split(|c: char| c.is_ascii_whitespace() || "\"'`(),".contains(c))
+                {
+                    if !(token.starts_with("crates/") || token.starts_with("xtask/")) {
+                        continue;
+                    }
+                    // `crates/vmm/**` is a path *filter*, not a file: check the dir it roots.
+                    // Trailing sentence punctuation is not part of the path either.
+                    let target = token
+                        .trim_end_matches("/**")
+                        .trim_end_matches(['.', ':', ';']);
+                    checked += 1;
+                    if !repo.join(target).exists() {
+                        missing.push(format!("{wf}:{}: {target}", idx + 1));
+                    }
+                }
+            }
+        }
+        // Without this, a workflow rename (or a move to composite actions) leaves the scan
+        // matching nothing and passing green, which is the failure mode this whole test exists
+        // to prevent.
+        assert!(
+            checked > 0,
+            "no crates/ or xtask/ path reference matched in {}: the workflows no longer name repo \
+             files the way this scan looks for, so it is asserting nothing",
+            dir.display()
+        );
+        assert!(
+            missing.is_empty(),
+            "workflow(s) reference repo paths that no longer exist:\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    /// The sharper half of the question above. A workflow that greps a constant out of a source
+    /// file depends on two things: the file existing (checked above) *and* the pattern still
+    /// matching inside it. Only the second one caught the real case. Splitting `spawn.rs` left the
+    /// file in place and moved `MIN_SUPPORTED_FC_VERSION` out of it, so a path check stayed green
+    /// while the parser matched nothing. Runs each workflow's own `grep -oE` against its own
+    /// target and requires a hit, which is the parser's contract stated as a test rather than
+    /// discovered on a Wednesday.
+    #[test]
+    fn workflow_source_parsers_still_match() {
+        let repo = workspace_root();
+        let dir = repo.join(".github/workflows");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect(".github/workflows") {
+            let path = entry.expect("workflow dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+                continue;
+            }
+            let wf = path.file_name().unwrap().to_string_lossy().to_string();
+            let text = std::fs::read_to_string(&path).expect("read workflow");
+            let lines: Vec<&str> = text.lines().collect();
+            for (idx, line) in lines.iter().enumerate() {
+                let Some(after) = line.split_once("grep -oE ").map(|(_, r)| r) else {
+                    continue;
+                };
+                // Shell single-quoting, so the pattern ends at the next `'`.
+                let Some(pattern) = after.strip_prefix('\'').and_then(|r| r.split('\'').next())
+                else {
+                    continue;
+                };
+                // The target follows the pattern, on this line or (line-continued) the next. A
+                // grep reading a pipe rather than a file has no such token and is skipped.
+                let target = [after, lines.get(idx + 1).copied().unwrap_or("")]
+                    .iter()
+                    .flat_map(|l| l.split_ascii_whitespace())
+                    .find(|t| t.starts_with("crates/") || t.starts_with("xtask/"));
+                let Some(target) = target else { continue };
+                let out = std::process::Command::new("grep")
+                    .arg("-oE")
+                    .arg(pattern)
+                    .arg(repo.join(target))
+                    .output()
+                    .expect("run grep");
+                assert!(
+                    !out.stdout.is_empty(),
+                    "{wf}:{} greps /{pattern}/ out of {target} and matches nothing. The workflow \
+                     will fail on its next run; point it at wherever that moved.",
+                    idx + 1
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no source-file grep matched in {}: the workflows no longer parse constants this way, \
+             so this test is asserting nothing",
+            dir.display()
+        );
+    }
+
     /// The two pins can never drift: the PEM `install.sh` embeds (what installers trust) must be
     /// byte-identical to `release-key.pem` (what `sign_release_manifest` asserts the signing key
     /// against). Extracts the heredoc between the `PIN_EOF` markers.

@@ -40,7 +40,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Must match spawn.rs's PINNED_FC_VERSION (major.minor) and doctor.rs's pinned sha256: the
+  # Must match spawn/fcversion.rs's PINNED_FC_VERSION (major.minor) and doctor.rs's pinned sha256: the
   # privileged gate is the only place the driver meets a real VMM, so testing a different release
   # than the one shipped would validate nothing. firecracker-pin.yml watches for a newer one.
   FC_VERSION: v1.16.1
