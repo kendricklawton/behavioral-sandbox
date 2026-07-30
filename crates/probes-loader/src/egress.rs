@@ -279,6 +279,7 @@ impl EgressPolicy {
 
 #[cfg(test)]
 mod tests {
+    // The userspace schema, host-testable without a live map.
     use super::*;
     use probes_common::egress_allowed;
 
