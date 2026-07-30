@@ -8,6 +8,8 @@ The repository **is not open to outside pull requests yet**; only project collab
 The pages below are written for them, and for anyone reading to understand how the project is
 maintained.
 
+- **[Architecture](./contributing-architecture.md)**, what the crates are for, the types worth knowing
+  before reading code, and the order things happen in during a run. Start here.
 - **[Building](./contributing-building.md)**, prerequisites, the pinned toolchains, and the commands
   that produce the guest artifacts and the eBPF object.
 - **[Coding guidelines](./contributing-coding-guidelines.md)**, rustfmt, the denied Clippy lints and

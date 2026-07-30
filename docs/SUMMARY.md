@@ -15,6 +15,7 @@
 - [Security](./security.md)
   - [Threat model](./security-threat-model.md)
 - [Contributing](./contributing.md)
+  - [Architecture](./contributing-architecture.md)
   - [Building](./contributing-building.md)
   - [Coding guidelines](./contributing-coding-guidelines.md)
   - [CI gates](./contributing-ci.md)
