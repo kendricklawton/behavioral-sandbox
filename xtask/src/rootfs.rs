@@ -74,6 +74,30 @@ const ROOTFS_SIZE_MIB: u32 = 256;
 /// the base is still "small."
 const ROOTFS_BUDGET_MIB: u64 = 160;
 
+/// The guest paths this builder bakes in, each named once. Every one is written from **two** places
+/// below (a file at the path, and an init or script line naming it), so a literal spelled twice is a
+/// rename away from a guest that boots into a missing helper. `verify_guest_contract` reads these
+/// same constants back off the staged tree, so a half-applied rename fails the build rather than
+/// shipping. The one path the *driver* also writes lives in `channel` instead
+/// ([`channel::GUEST_OVERLAY_INIT`]), where both sides consume the one definition.
+const GUEST_AGENT_PATH: &str = "/usr/local/bin/guest-agent";
+const MOUNT_DRIVES_PATH: &str = "/sbin/mount-drives";
+const NET_UP_PATH: &str = "/sbin/net-up";
+/// Where the init lines above land. Alpine's own OpenRC file is replaced wholesale.
+const INITTAB_PATH: &str = "/etc/inittab";
+/// The overlay init's own mountpoint, and the two bulk-data mountpoints. Baked as directories
+/// because the guest cannot `mkdir` them: `/` is read-only when `overlay-init` runs, and the bulk
+/// mounts happen before anything writable exists.
+const OVERLAY_DIR: &str = "/overlay";
+const INPUT_DIR: &str = "/input";
+const OUTPUT_DIR: &str = "/output";
+
+/// An absolute *guest* path resolved inside the staging tree. The leading `/` has to go, or
+/// `Path::join` would discard the staging root and address the build host's own filesystem.
+fn in_staging(staging: &Path, guest_path: &str) -> PathBuf {
+    staging.join(guest_path.trim_start_matches('/'))
+}
+
 /// The init the image ships, replacing Alpine's OpenRC `inittab`. busybox is PID 1 (it reaps
 /// orphans and a crashed child is respawned, neither of which the `forbid(unsafe_code)` agent should
 /// own). `sysinit` mounts the pseudo-filesystems a fresh ext4 lacks, a rootless `mke2fs -d` seeds
@@ -96,20 +120,23 @@ fn rootfs_inittab() -> String {
 # Bulk input/output block devices: mount whichever the driver attached, by label — so
 # their /dev/vdX order doesn't matter. Best-effort: a missing device is skipped, so plain boots are
 # unaffected. Runs after devtmpfs/proc are up (findfs needs the device nodes + /proc/partitions).
-::sysinit:/sbin/mount-drives
+::sysinit:{mount_drives}
 # Static IPv6 on the guest NIC: the kernel `ip=` param configures v4 but has no v6 form, so the
-# driver passes the v6 address as a cmdline token and `/sbin/net-up` applies it. Best-effort (a
+# driver passes the v6 address as a cmdline token and `{net_up}` applies it. Best-effort (a
 # plain no-NIC boot is a clean no-op). Runs after /proc is mounted (it reads /proc/cmdline).
-::sysinit:/sbin/net-up
-ttyS0::respawn:/usr/local/bin/guest-agent vsock:{port}
+::sysinit:{net_up}
+ttyS0::respawn:{agent} vsock:{port}
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r
 ",
+        mount_drives = MOUNT_DRIVES_PATH,
+        net_up = NET_UP_PATH,
+        agent = GUEST_AGENT_PATH,
         port = channel::VSOCK_PORT
     )
 }
 
-/// `/sbin/mount-drives`, mounts the driver-attached data block devices (input + output) by
+/// [`MOUNT_DRIVES_PATH`], mounts the driver-attached data block devices (input + output) by
 /// **filesystem label**, so their `/dev/vdX` enumeration order is irrelevant (a boot may attach
 /// input, output, both, or neither). `findfs LABEL=…` resolves each label from the superblock via
 /// busybox's volume_id (no udev / `/dev/disk/by-label` needed); a label with no matching device
@@ -122,15 +149,17 @@ fn mount_drives_script() -> String {
         "\
 #!/bin/sh
 # Mount driver-attached data block devices by label (order-independent, best-effort).
-in=$(findfs LABEL={input} 2>/dev/null) && [ -n \"$in\" ] && /bin/mount -t ext4 -o ro \"$in\" /input
-out=$(findfs LABEL={output} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext4 -o sync \"$out\" /output
+in=$(findfs LABEL={in_label} 2>/dev/null) && [ -n \"$in\" ] && /bin/mount -t ext4 -o ro \"$in\" {in_dir}
+out=$(findfs LABEL={out_label} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext4 -o sync \"$out\" {out_dir}
 ",
-        input = channel::INPUT_LABEL,
-        output = channel::OUTPUT_LABEL,
+        in_label = channel::INPUT_LABEL,
+        out_label = channel::OUTPUT_LABEL,
+        in_dir = INPUT_DIR,
+        out_dir = OUTPUT_DIR,
     )
 }
 
-/// `/sbin/net-up`, the guest's static-IPv6 step (run from the inittab sysinit line). The kernel
+/// [`NET_UP_PATH`], the guest's static-IPv6 step (run from the inittab sysinit line). The kernel
 /// `ip=`/`CONFIG_IP_PNP` param configures the guest's v4 `eth0` before userspace but has **no** IPv6
 /// form, so the driver passes the guest v6 address as an `<key>=<addr>/<plen>` kernel cmdline token
 /// (`spawn.rs`) and this reads it back from `/proc/cmdline` and assigns it. The key is
@@ -180,25 +209,33 @@ const ALPINE_BRANCH: &str = "v3.24";
 /// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
 const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
 
-/// The overlay init (`/sbin/overlay-init`), run as PID 1 when the driver boots this image
+/// The overlay init ([`channel::GUEST_OVERLAY_INIT`]), run as PID 1 when the driver boots this image
 /// **read-only** (`BootConfig::read_only_root`). It stacks a per-run tmpfs over the read-only base
 /// so `/` is writable but the base is never mutated, then `pivot_root`s in and `exec`s the real
 /// init. `pivot_root` (not `switch_root`): the base stays mounted as the overlay lowerdir, shadowed
 /// at `/rom`, `switch_root` would try to free a root that's still in use. PATH is set explicitly
 /// because the kernel gives PID 1 no PATH; `$overlay_size` arrives from the kernel command line (the
 /// driver appends `overlay_size=<N>M`, which the kernel routes into PID 1's environment).
-const OVERLAY_INIT: &str = "\
+///
+/// The tmpfs mountpoint comes from [`OVERLAY_DIR`], the same constant that bakes the directory into
+/// the image; the shell's own `${...}` braces are doubled for `format!`.
+fn overlay_init_script() -> String {
+    format!(
+        "\
 #!/bin/sh
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
-size=\"${overlay_size:-64m}\"
-mount -t tmpfs -o \"size=$size\" tmpfs /overlay
-mkdir -p /overlay/up /overlay/work /overlay/root
-mount -t overlay overlay -o lowerdir=/,upperdir=/overlay/up,workdir=/overlay/work /overlay/root
-mkdir -p /overlay/root/rom
-cd /overlay/root
+size=\"${{overlay_size:-64m}}\"
+mount -t tmpfs -o \"size=$size\" tmpfs {dir}
+mkdir -p {dir}/up {dir}/work {dir}/root
+mount -t overlay overlay -o lowerdir=/,upperdir={dir}/up,workdir={dir}/work {dir}/root
+mkdir -p {dir}/root/rom
+cd {dir}/root
 pivot_root . rom
 exec chroot . /sbin/init
-";
+",
+        dir = OVERLAY_DIR,
+    )
+}
 
 /// The pinned Alpine minirootfs, a real musl+busybox userland (so init and a shell just work, and
 /// `apk` adds the [`GUEST_PACKAGES`] runtimes). A *build input*, deliberately separate from
@@ -284,40 +321,48 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     // (root); the runtime packages are file payloads, and the in-VM exec test proves they run.
     install_guest_packages(&staging)?;
 
-    // Bake the static agent in at /usr/local/bin/guest-agent.
-    let bindir = staging.join("usr/local/bin");
-    std::fs::create_dir_all(&bindir)?;
-    let agent_dest = bindir.join("guest-agent");
+    // Bake the static agent in at the path the init line respawns.
+    let agent_dest = in_staging(&staging, GUEST_AGENT_PATH);
+    if let Some(bindir) = agent_dest.parent() {
+        std::fs::create_dir_all(bindir)?;
+    }
     std::fs::copy(&agent, &agent_dest)
         .with_context(|| format!("copy agent into {}", agent_dest.display()))?;
     set_mode_0755(&agent_dest)?;
 
     // Replace Alpine's OpenRC inittab with our minimal vsock init.
-    std::fs::write(staging.join("etc/inittab"), rootfs_inittab()).context("write /etc/inittab")?;
+    std::fs::write(in_staging(&staging, INITTAB_PATH), rootfs_inittab())
+        .with_context(|| format!("write {INITTAB_PATH}"))?;
 
     // Bake the overlay init + its mountpoint: when the driver boots this image read-only, the
-    // kernel runs `/sbin/overlay-init` (PID 1), which stacks a per-run tmpfs over the RO base so `/`
-    // is writable, then hands off to the real init. `/overlay` must exist in the image because the
-    // root is read-only at that point, you can't `mkdir` a mountpoint on a read-only `/`.
-    let overlay_init = staging.join("sbin/overlay-init");
-    std::fs::write(&overlay_init, OVERLAY_INIT).context("write /sbin/overlay-init")?;
+    // kernel runs the overlay init (PID 1) at the path it put on the command line, which stacks a
+    // per-run tmpfs over the RO base so `/` is writable, then hands off to the real init. The
+    // mountpoint must exist in the image because the root is read-only at that point, you can't
+    // `mkdir` a mountpoint on a read-only `/`.
+    let overlay_init = in_staging(&staging, channel::GUEST_OVERLAY_INIT);
+    std::fs::write(&overlay_init, overlay_init_script())
+        .with_context(|| format!("write {}", channel::GUEST_OVERLAY_INIT))?;
     set_mode_0755(&overlay_init)?;
-    std::fs::create_dir_all(staging.join("overlay")).context("create /overlay mountpoint")?;
+    std::fs::create_dir_all(in_staging(&staging, OVERLAY_DIR))
+        .with_context(|| format!("create {OVERLAY_DIR} mountpoint"))?;
 
     // The by-label mount helper (input + output) + its mountpoints. Baked, not `mkdir`'d at
     // runtime, so they're image properties that hold regardless of whether `/` is the writable
-    // overlay or a base. `/sbin/mount-drives` is run from the inittab sysinit line.
-    let mount_drives = staging.join("sbin/mount-drives");
-    std::fs::write(&mount_drives, mount_drives_script()).context("write /sbin/mount-drives")?;
+    // overlay or a base. The helper is run from the inittab sysinit line.
+    let mount_drives = in_staging(&staging, MOUNT_DRIVES_PATH);
+    std::fs::write(&mount_drives, mount_drives_script())
+        .with_context(|| format!("write {MOUNT_DRIVES_PATH}"))?;
     set_mode_0755(&mount_drives)?;
-    std::fs::create_dir_all(staging.join("input")).context("create /input mountpoint")?;
-    std::fs::create_dir_all(staging.join("output")).context("create /output mountpoint")?;
+    for dir in [INPUT_DIR, OUTPUT_DIR] {
+        std::fs::create_dir_all(in_staging(&staging, dir))
+            .with_context(|| format!("create {dir} mountpoint"))?;
+    }
 
     // The static-IPv6 step: the kernel `ip=` param configures v4 but has no v6 form, so the driver
-    // passes the guest v6 address as a cmdline token and `/sbin/net-up` (an inittab sysinit line)
-    // applies it. Best-effort, so a non-networked boot is unaffected.
-    let net_up = staging.join("sbin/net-up");
-    std::fs::write(&net_up, net_up_script()).context("write /sbin/net-up")?;
+    // passes the guest v6 address as a cmdline token and the net-up script (an inittab sysinit
+    // line) applies it. Best-effort, so a non-networked boot is unaffected.
+    let net_up = in_staging(&staging, NET_UP_PATH);
+    std::fs::write(&net_up, net_up_script()).with_context(|| format!("write {NET_UP_PATH}"))?;
     set_mode_0755(&net_up)?;
 
     // Build the ext4 from the staging dir, rootless, via `mke2fs -d`, and **deterministic**:
