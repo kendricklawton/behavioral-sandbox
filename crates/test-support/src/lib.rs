@@ -345,18 +345,25 @@ impl SmallFs {
     /// This fixture's `(total, available)` bytes, via `df` (pure-std: no `statvfs` without libc).
     /// `None` if `df` is missing or its output does not parse, so a diagnostic can never be the
     /// thing that fails a test.
+    ///
+    /// **`-k -P`, not `--output=`**: the latter is a GNU coreutils extension that busybox `df` does
+    /// not have, and this helper backs the size assertion in [`create`](Self::create). A flag the
+    /// host might not support would make that assertion silently skip rather than fail, which is
+    /// the hollow green the assertion exists to prevent. `-P` is POSIX and also pins the column
+    /// layout, so a long device name cannot wrap the row and shift the fields.
     #[must_use]
     pub fn size_bytes(&self) -> Option<(u64, u64)> {
         let out = std::process::Command::new("df")
-            .args(["-B1", "--output=size,avail"])
+            .args(["-k", "-P"])
             .arg(self.path())
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
-        let mut fields = text.lines().nth(1)?.split_whitespace();
-        let total = fields.next()?.parse().ok()?;
-        let avail = fields.next()?.parse().ok()?;
-        Some((total, avail))
+        // POSIX columns: Filesystem, 1024-blocks, Used, Available, Capacity, Mounted-on.
+        let fields: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
+        let kb =
+            |i: usize| -> Option<u64> { fields.get(i)?.parse::<u64>().ok()?.checked_mul(1024) };
+        Some((kb(1)?, kb(3)?))
     }
 
     /// A one-line dump of what this fixture actually is right now, for a failure message.
