@@ -72,7 +72,8 @@ Stated because their absence is the honest counterweight to everything else in t
   enforcement](./probes.md) is a property of the mechanism, not a tested claim: the probes have been
   loaded on exactly one kernel version.
 - **No Red Hat host has been run.** RHEL 9 and 10 are intended targets and `ekvm doctor` now probes
-  for `cgroup.kill` rather than a version number so RHEL 9's `5.14` can qualify, but nothing has
+  for `cgroup.kill` rather than a version number, which is what admits a patched kernel whose
+  version string sits below the fallback floor, but nothing has
   booted, gated, or attached a probe there. SELinux in particular is unexercised. See
   [Red Hat](./cli-install.md#red-hat-rhel-9-rhel-10-a-target-not-yet-verified).
 - **No published benchmark numbers.** See [Benchmarks](./benchmarks.md) for why they were withdrawn

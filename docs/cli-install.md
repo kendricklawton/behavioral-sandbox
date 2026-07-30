@@ -22,7 +22,7 @@ diverge.
 
 ```console
 uname -m                      # must print x86_64
-uname -r                      # 5.15+, or any kernel with cgroup.kill (RHEL 9's 5.14 qualifies)
+uname -r                      # informational only: `ekvm doctor` probes for cgroup.kill itself
 ls -l /dev/kvm                # must exist
 ls /sys/kernel/btf/vmlinux    # needed for the eBPF half; most distro kernels ship it
 ```
@@ -308,7 +308,7 @@ exits non-zero if a hard requirement is missing.
 |---|---|---|
 | **OS** | Linux | KVM is the isolation boundary |
 | **Architecture** | `x86_64` | the one architecture with tested artifacts and a privileged CI lane; aarch64 support returns only with hardware to test it on. |
-| **Host kernel** | `cgroup.kill` present (kernel 5.14+, includes RHEL 9); **≥ 5.15** where there is no cgroup v2 to probe | `cgroup.kill` is the crash-safe teardown primitive the engine needs. A version floor alone would refuse RHEL 9's patched `5.14.0-*.el9` for no safety gain. Neither signal establishes that the kernel is *patched*: that is the operator's |
+| **Host kernel** | `cgroup.kill` present; **≥ 5.15** only where there is no cgroup v2 to probe | `cgroup.kill` is the crash-safe teardown primitive the engine needs, so the engine asks for it directly instead of inferring it from a version. Neither signal establishes that the kernel is *patched*: that is the operator's |
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
 | **Firecracker + jailer** | present on `PATH` | no VMM to launch (the jailer's absence degrades to `--unjailed`) |
 

@@ -25,7 +25,7 @@ The first supported release of eKVM: a self-hostable engine that boots a hardwar
 
 ### Planned host requirements (v0.1.0)
 - **Host**: Linux `x86_64` with `/dev/kvm`, cgroup v2, and kernel BTF; a kernel providing
-  `cgroup.kill` (5.14+, so RHEL 9 and 10 qualify), else >= 5.15
+  `cgroup.kill`, else >= 5.15 where there is no cgroup v2 hierarchy to probe
   (`/sys/kernel/btf/vmlinux`). `ekvm doctor` verifies all of it and prints the fix for
   whatever is missing.
 - **Firecracker**: v1.15 through v1.16 supported (upstream's current support window);

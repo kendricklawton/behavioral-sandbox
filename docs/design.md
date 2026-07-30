@@ -86,7 +86,7 @@ flowchart TB
 
 ### Host requirements
 
-- **OS & Kernel**: Linux host with a kernel providing `cgroup.kill` (5.14+, so RHEL 9 qualifies). `ekvm doctor` probes for the primitive rather than trusting a version string, falling back to `>= 5.15` only where there is no cgroup v2 hierarchy to probe.
+- **OS & Kernel**: Linux host with a kernel providing `cgroup.kill`. `ekvm doctor` probes for the primitive rather than trusting a version string, falling back to `>= 5.15` only where there is no cgroup v2 hierarchy to probe.
 - **Architecture**: `x86_64` with hardware virtualization extensions (`/dev/kvm`).
 - **Permissions**: Root or delegated capabilities (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_BPF`) for jailing, network namespace management, and eBPF loading.
 

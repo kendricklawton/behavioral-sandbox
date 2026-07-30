@@ -25,11 +25,6 @@ engine's job is to contain what the model's code does and hand back the record. 
 tenancy/billing/scheduling or a model into this repo, or moves the security boundary into the guest,
 the design is wrong.
 
-**Why this exists.** A self-hostable, embeddable engine for running untrusted code with hardware
-isolation and a host-observed audit log isn't something you can pull off the shelf. This fills that
-gap. Every phase ships a **working demo**, so each capability is exercised end to end rather than
-only described.
-
 ## Design rules (every change holds to all six)
 
 The single source. `docs/design.md` restates these for readers; nothing else should. They state
@@ -89,10 +84,10 @@ xtask/           dev orchestration, `cargo xtask ci` (host-safe gate; + eBPF bui
 ## Conventions
 
 - **Rust**, stable, one workspace. Linux-only (it needs KVM), `x86_64` only; host kernel
-  providing `cgroup.kill` (5.14+, so RHEL 9 qualifies), else **≥ 5.15** as a fallback where there
+  providing `cgroup.kill`, else **≥ 5.15** as a fallback where there
   is no cgroup v2 to probe. Untrusted code on an unpatched kernel is a threat-model hole, but a
   version number is the wrong proxy for it on enterprise kernels; `ekvm doctor` probes the
-  primitive. The eBPF programs build for their
+  primitive. State the requirement as the capability, never as a distro that happens to satisfy it. The eBPF programs build for their
   own target (`bpfel-unknown-none`, `bpf-linker`); keep the host path `unsafe`-free.
 - **Two gates.** `cargo xtask ci` is host-safe (fmt · the prose-drift lint · clippy `-D warnings` ·
   build · unit tests · docs · `deny` · eBPF object build) and runs everywhere.
