@@ -1,107 +1,178 @@
-# eKVM
+<div align="center">
+  <h1><code>ekvm</code></h1>
 
-[![CI](https://github.com/packsixfour/ekvm/actions/workflows/ci.yml/badge.svg)](https://github.com/packsixfour/ekvm/actions/workflows/ci.yml)
-[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+  <p>
+    <strong>A self-hostable engine for running untrusted code in a hardware-isolated
+    <a href="https://github.com/firecracker-microvm/firecracker">Firecracker</a> microVM,
+    with a host-observed record of exactly what it did</strong>
+  </p>
 
-**A self-hostable engine for running untrusted code in a hardware-isolated microVM, with a
-host-observed record of exactly what it did.**
+  <p>
+    <a href="https://github.com/packsixfour/ekvm/actions/workflows/ci.yml"><img src="https://github.com/packsixfour/ekvm/actions/workflows/ci.yml/badge.svg" alt="build status" /></a>
+    <img src="https://img.shields.io/badge/status-pre--release-orange.svg" alt="pre-release" />
+    <img src="https://img.shields.io/badge/rustc-1.97%2B-green.svg" alt="supported rustc 1.97+" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache-2.0" /></a>
+  </p>
 
-## What is eKVM?
+  <h3>
+    <a href="docs/SUMMARY.md">Guide</a>
+    <span> | </span>
+    <a href="docs/design.md">Design</a>
+    <span> | </span>
+    <a href="docs/status.md">Status</a>
+    <span> | </span>
+    <a href="CONTRIBUTING.md">Contributing</a>
+  </h3>
+</div>
 
-eKVM runs untrusted code inside a **Firecracker** microVM, so the boundary is enforced by the CPU
-through KVM rather than by guest-side software. Around that microVM, **host-side eBPF** (via
-**aya**) watches and enforces what the code does, its syscalls, its network, its cgroup, from the
-host side of that boundary: the programs are loaded by a host process and attached to host-kernel
-hooks. Every run yields a host-observed, **host-signed** **audit record** (verify with
-`ekvm verify`) of what the host was able to see: the network flows, the notable syscalls, the
-resources used, and any egress that was denied.
+> **Pre-release, unreleased, unaudited.** Version `0.0.0`, no tag, no published artifact, one
+> maintainer, no external review. Nothing here carries a compatibility guarantee: if you build on it,
+> pin a git rev. The full verification record, including what has *not* been done, is
+> [docs/status.md](docs/status.md).
 
-It is an **engine, not a platform**: a runtime plus a driver API you self-host, with no
-multi-tenant auth, billing, fleet scheduling, or dashboard. A sandbox with no explicit policy is
-configured with no route out and minimal capability, and each allowance is recorded. Boot,
-snapshot-restore, memory-sharing, and probe overhead are reported as nearest-rank percentiles with
-the host and date; numbers that cannot be defended are withdrawn rather than published.
+## What it is
 
-Built in the open, milestone by milestone, each one shipping as a working demo.
+eKVM runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU
+through KVM rather than by guest-side software. Around that microVM, host-side eBPF (via
+[aya](https://aya-rs.dev/)) observes and enforces what the code does, its syscalls, its network, and
+its cgroup, from the host side of that boundary: the programs are loaded by a host process and
+attached to host-kernel hooks, where they sit outside the guest's address space and outside any
+namespace it can enter.
 
-## Getting started
+Every run yields a host-observed, host-signed audit record of what the host was able to see: the
+network flows, the notable syscalls, the resources used, and any egress that was denied. That record
+is the product, and `ekvm verify` checks its signature.
 
-**Requirements:** Linux with `/dev/kvm`, an `x86_64` host, a kernel providing `cgroup.kill`
-(5.14+, so RHEL 9 qualifies; `ekvm doctor` probes for it rather than trusting a version string,
-and falls back to **≥ 5.15** where there is no cgroup v2 hierarchy to probe), and [Firecracker](https://github.com/firecracker-microvm/firecracker/releases) on
-`PATH` (v1.15 through v1.16 supported, v1.16.1 pinned and tested; the engine drives it, it
-doesn't bundle it). Starting from a bare machine,
-[Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version of all of
-that; `cargo xtask setup` (or `ekvm doctor` once built) then reports exactly what your host is still
-missing before the first sandbox.
+## Installation
+
+Today the supported path is from source. The engine drives Firecracker, it does not bundle it, so
+you supply that binary and an upstream security patch never waits on a release of this engine.
 
 ```console
 git clone https://github.com/packsixfour/ekvm && cd ekvm
-cargo xtask self-host                                   # build + install ekvm, boot a proof sandbox
-ekvm run --unjailed -- python3 -c 'print(2 ** 100)'    # run untrusted code in a microVM
+cargo xtask self-host       # build + install ekvm, then boot a proof sandbox
 ```
 
-`--unjailed` is the explicit opt-out from the default jailer for a dev box without real root; the
-guest still sits behind the KVM boundary. [Installation](docs/cli-install.md) walks the same path
-in full, and [the CLI chapter](docs/cli.md) shows how to ask for the host-observed record of what
-the code actually did.
+**Requirements:** Linux on `x86_64` with `/dev/kvm`, a kernel providing `cgroup.kill`, and
+Firecracker v1.15 through v1.16 on `PATH` (v1.16.1 is pinned and tested).
+`ekvm doctor` probes for each capability rather than trusting a version string or a distro name, and
+prints the fix for whatever your host is missing. Starting from a bare machine,
+[Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version.
+
+The release tarball, `install.sh`, and container image are built by `cargo xtask dist` and described
+in [Installation](docs/cli-install.md), but **no release has been published yet**, so those paths do
+not resolve until the first tag.
+
+## Example
+
+Run some untrusted code. The default is **jailed**, the supported posture:
+
+```console
+sudo -E ekvm run -- python3 -c 'print(2 ** 100)'
+```
+
+On a dev box without real root, `--unjailed` is the explicit opt-out:
+
+```console
+ekvm run --unjailed -- python3 -c 'print(2 ** 100)'
+```
+
+Either way:
+
+```text
+1267650600228229401496703205376
+```
+
+The difference is what confines the **VMM process**, not what confines the guest. Jailed, Firecracker
+itself runs under its jailer: a chroot, dropped uid/gid, its own namespaces, seccomp, and a cgroup,
+which is why it needs real root and the `jailer` binary. Unjailed, that process runs unconfined on the
+host. In both cases the untrusted code stays behind the same KVM boundary, because that boundary is
+the CPU's, not the jailer's. A host can withdraw the opt-out entirely with `require_jail`
+([configuration](docs/cli-config.md#setting-require_jail)).
+
+The output is the boring half. Ask instead what the code *did*:
+
+```console
+sudo -E ekvm run --trace --record run.json -- python3 untrusted.py
+```
+
+`--trace` renders the run's audit trail on stdout; `--record` writes the signed machine-readable
+record for later inspection or `ekvm verify`. Both attach the host-side probes and fail open: a host
+without eBPF capabilities still runs the sandbox and annotates the coverage gap in the record rather
+than presenting a thinner record as a complete one. [The CLI chapter](docs/cli.md) has the full
+surface, including `--record-summary` for an agent loop and `--watch` for a live view.
+
+## Design rules
+
+Six rules, each stating an intent and the mechanism serving it, so a change that breaks one is
+recognisable as a design error rather than a trade-off. The full text is
+[docs/design.md](docs/design.md).
+
+* **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. Moving the boundary
+  into guest-side software is a design error, not an optimisation, and a shared-kernel shortcut taken
+  to make things simpler is the same error.
+
+* **[Observe and enforce from the host][probes].** Visibility and policy belong in host-side eBPF
+  attached to host-kernel hooks. The in-guest agent carries exec and IO framing; making it
+  responsible for containing the guest is a design error.
+
+* **Deny by default.** A sandbox with no explicit policy is configured with no route out and minimal
+  capability, and each allowance is recorded in the audit record.
+
+* **Engine, not platform.** A self-hostable runtime and a driver API. Multi-tenant auth, billing,
+  fleet scheduling, and dashboards belong to whatever *hosts* the engine: a recorded non-goal, not a
+  gap. The [non-goals list][embedding] is explicit about it.
+
+* **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
+  broken channel should surface as a typed error. This is the rule the code is written against and
+  the property the confinement suite exercises; it is an aim, not a proven property.
+
+* **[Measure rather than assert][benchmarks].** Boot, restore, memory sharing, and overhead are
+  reported as nearest-rank percentiles with the host and date. A number that cannot be defended is
+  withdrawn, which is why the result tables are currently withdrawn pending a re-measurement on a
+  verified host.
+
+The host path is `#![forbid(unsafe_code)]`. The eBPF programs build for their own target
+(`bpfel-unknown-none`) and use CO-RE/BTF, which is a portability *mechanism*; the claim that it is
+portable across kernels is tested on one kernel so far, and [docs/status.md](docs/status.md) says so.
+
+[probes]: docs/probes.md
+[embedding]: docs/embedding.md
+[benchmarks]: docs/benchmarks.md
+
+## Embedding
+
+The engine is consumed in three shapes, one of which exists today:
+
+* **Rust**, the `vmm` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`). Not on
+  crates.io yet, so depend on it by git rev. A change to that API is committed with an `api` scope,
+  so a pin bump is auditable from the log alone. The contract is [docs/embedding.md][embedding].
+
+* **Any language**, over the `ekvm serve` daemon: a versioned newline-delimited JSON wire protocol
+  on a unix socket, documented in [docs/daemon.md](docs/daemon.md). `crates/client` is a
+  dependency-light Rust reference client for it.
+
+* **Language SDKs** (`ekvm-python`, `ekvm-node`, `ekvm-go`), planned in separate companion
+  repositories so their build tooling stays out of this workspace. **None are built yet.**
 
 ## Documentation
 
-The guide lives in [`docs/`](docs/SUMMARY.md) (an mdBook, `mdbook serve docs`, or read the
-Markdown in place):
+The guide is an mdBook in [`docs/`](docs/SUMMARY.md). Run `mdbook serve docs`, or read the Markdown
+in place. It is not published as a site until the first release.
 
 - **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
-- **[Design specification](docs/design.md)**, full architectural design, component model, host integration, and system properties.
-- **[Using the eKVM CLI](docs/cli.md)**, how to run the engine:
-  [installation](docs/cli-install.md), building the guest artifacts, `ekvm run`, `ekvm shell`.
-- **[Using the engine API](docs/embedding.md)**, the embedder's contract: the `Sandbox`
-  lifecycle, budgets, typed errors, snapshots/pool, and semver stability rules.
+- **[Status and verification record](docs/status.md)**, what has been verified, and what has not.
+- **[Design specification](docs/design.md)**, architecture, component model, host integration, and
+  the key decisions with their rationale.
+- **[Using the eKVM CLI](docs/cli.md)**, including [installation](docs/cli-install.md).
+- **[Using the `ekvm serve` daemon](docs/daemon.md)**, the wire API.
+- **[Using the engine API](docs/embedding.md)**, the embedder's contract and the non-goals.
 - **[Examples](docs/examples.md)**, worked end-to-end walkthroughs.
 - **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
-- **[Security](docs/security.md)**, the security model: threat model, host hardening baseline, and supply chain provenance.
-- **[Contributing](docs/contributing.md)**, invariants, developer tools, CI gates, testing, and fuzzing.
-
-## Status
-
-**Early, under active development, nothing here is production yet.** Version `0.0.0`, no tag, no
-release, no external review. The full verification record, including what has *not* been done, is
-[docs/status.md](docs/status.md). So far: a microVM boots
-to userspace and runs real Python, Node, and static binaries from a purpose-built rootfs with
-captured stdout/stderr/exit; gets a per-VM deny-by-default network; snapshots and restores from a
-pre-warmed pool; runs confined under the jailer (chroot, dropped privileges,
-cgroup limits, seccomp); and is wrapped in the embedder-facing `Sandbox` lifecycle
-([docs/embedding.md](docs/embedding.md)). The host-side eBPF track observes a running sandbox's
-host syscall footprint and its per-VM network flows, enforces deny-by-default egress in the
-kernel at its tap, and meters its CPU/memory/IO ([docs/probes.md](docs/probes.md)), each with a
-live demo. Benchmark result tables are currently withdrawn pending a re-measurement on a verified
-host ([docs/benchmarks.md](docs/benchmarks.md)). The audit log that fuses these into one host-observed per-run
-record is surfaced through the CLI (`--trace`/`--record`/`--watch`) and the `ekvm serve` daemon.
-
-**Pre-1.0, expect breaking changes.** Until the first tagged release, nothing here
-carries a compatibility guarantee: the `Sandbox`/`vmm` API, the `ekvm serve` wire protocol (and its
-`protocol` crate), the audit-log/record format, and the crate names can all change without
-notice. If you build on it, pin to a specific git rev. The first tagged release, `v0.1.0`, will pin
-the driver API and wire protocol under the support policy in [RELEASES.md](RELEASES.md); no date is
-promised. The project is developed by a small group: **only project collaborators commit code**
-(the repo is not open to outside pull requests yet, see [CONTRIBUTING](CONTRIBUTING.md)).
-
-**Verified on:** the host-safe gate (build, tests, lints) runs in CI on **Ubuntu 24.04** `x86_64`
-on every change; the privileged path (microVM boot, the jailer, the eBPF probes, the integration
-suite) runs nightly in CI on a GitHub-hosted **Ubuntu 24.04** `x86_64` runner (nested KVM) and is
-hand-verified on **Arch Linux** during development, both with **Firecracker v1.16**. `x86_64` is the
-only supported architecture: nothing untestable is claimed, and aarch64 returns only with hardware
-and a privileged CI lane behind it. `ekvm doctor` reports your own host's
-readiness. See [Supported platforms](docs/cli-install.md#supported-platforms).
-
-## Scope and releases
-
-There is no published roadmap. What the engine will never do is recorded in the
-[non-goals](docs/embedding.md); what it does today is this documentation. A capability becomes a
-feature when it ships with a working demo and defensible measurements, and is not announced before
-that. Release mechanics, host requirements, and the support policy live in
-[RELEASES.md](RELEASES.md).
+- **[Benchmarks](docs/benchmarks.md)**, the methodology and how to run it yourself.
+- **[Security](docs/security.md)** and the **[threat model](docs/threat-model.md)**.
+- **[Contributing](docs/contributing.md)**, invariants, developer tools, CI gates, testing, fuzzing.
 
 ## How it fits together
 
@@ -109,41 +180,51 @@ that. Release mechanics, host requirements, and the support policy live in
 untrusted code
       → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
       → host-side eBPF (aya): syscalls · the VM's tap device (tc/XDP) · its cgroup
-      → per-run audit log (network flows · notable syscalls · resources · denials)
+      → per-run audit record (network flows · notable syscalls · resources · denials)
 ```
 
-Untrusted code executes within the microVM while the host kernel observes and enforces policy from the host side of that boundary.
-
-## Layout
+Untrusted code executes inside the microVM while the host kernel observes and enforces policy from
+the host side of that boundary.
 
 | Path | Role |
 |------|------|
 | `crates/vmm` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
 | `crates/channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
-| `crates/guest-agent` | The in-guest agent (`guest-agent`): runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
+| `crates/guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
 | `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
-| `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events. |
-| `crates/cli` | The `ekvm` CLI (also installed as `ekvm`): `run`, `shell`, `doctor` plus the `ekvm serve` driver daemon. |
+| `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
+| `crates/protocol` | The daemon wire types, versioned. |
+| `crates/client` | The Rust reference client for `ekvm serve`. |
+| `crates/cli` | The `ekvm` CLI: `run`, `shell`, `doctor`, plus the `ekvm serve` daemon. |
 | `docs` | This documentation, as an mdBook. |
-| `xtask` | Dev orchestration, `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
+| `xtask` | Dev orchestration: `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 
-## Scope, engine, not platform
+## Verified on
 
-**In scope:** the sandbox runtime (Firecracker), host-side observability + enforcement (eBPF),
-the sandbox lifecycle API, a self-hostable driver daemon, and the benchmark methodology behind the
-claims. **Out of scope, by design:** multi-tenant auth, billing, fleet scheduling, and a web
-dashboard, that's whatever *hosts* the engine. The lifecycle
-contract and the full non-goals list live in [docs/embedding.md](docs/embedding.md).
+The host-safe gate (`cargo xtask ci`: build, tests, lints, docs, dependency audit, eBPF object
+build) runs in CI on Ubuntu 24.04 `x86_64` on every change. The privileged path (microVM boot, the
+jailer, the eBPF probes, the integration suite) needs `/dev/kvm` and real root: it runs nightly on a
+GitHub-hosted Ubuntu 24.04 runner under nested KVM, and is hand-verified on Arch Linux during
+development. `x86_64` is the only supported architecture; aarch64 returns only with hardware and a
+privileged CI lane behind it. `ekvm doctor` reports your own host's readiness, and
+[Supported platforms](docs/cli-install.md#supported-platforms) records which hosts have actually
+been run.
 
-**Adjacent (planned, none built yet):** the language SDKs, which would pin this engine's public API and wire
-protocol rather than living inside its trust boundary.
+## Releases and scope
 
-## Contributing
+There is no published roadmap and no promised date. A capability becomes a feature when it ships
+with a working demo, and is not announced before that. The first tagged release, `v0.1.0`, will pin
+the driver API and the wire protocol under the support policy in [RELEASES.md](RELEASES.md); until
+then the `Sandbox`/`vmm` API, the daemon protocol, the record format, and the crate names can all
+change without notice.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the contributing chapters of the
-[documentation](docs/contributing.md). The operating manual for agents is [`AGENTS.md`](AGENTS.md).
+The project is developed by a small group and **is not open to outside pull requests yet**; only
+project collaborators commit code. See [`CONTRIBUTING.md`](CONTRIBUTING.md), the
+[contributing chapters](docs/contributing.md), and [`AGENTS.md`](AGENTS.md), which is the operating
+manual for coding agents working in this repo.
 
+Security issues: [`SECURITY.md`](SECURITY.md).
 
 ## License
 
