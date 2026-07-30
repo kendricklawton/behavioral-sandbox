@@ -112,12 +112,14 @@ layers, read `docs/contributing-architecture.md` before a non-trivial change to 
   colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
   are a separate call, not covered here.
-- **Git is human-driven.** The user makes every commit, push, and **pull request**; the **coding
-  agent** (Claude, Gemini, Codex, as opposed to the `ekvm` binary this repo builds) never runs `git commit` /
-  `git push`, never opens, approves, or merges a PR (`gh pr create` / `gh pr merge` / review
-  approvals included), and never takes any other CI-triggering action. The coding agent's job ends
-  at: changes made, demo working, and, **only when asked**, a commit message or PR description
-  drafted (Conventional Commits per the next bullet; never an AI co-author/attribution trailer).
+- **Pull requests are human-owned. Commits and pushes are the operator's call.** A **coding agent**
+  (Claude, Gemini, Codex, as opposed to the `ekvm` binary this repo builds) **never** opens,
+  approves, or merges a pull request (`gh pr create` / `gh pr merge` / review approvals included).
+  Asking another human to accept work, and reviewing it, are human steps, and that part is not
+  configurable. Whether an agent runs `git commit` and `git push` is up to whoever is running it, so
+  do it when asked and not otherwise. When committing: one logical change per commit, Conventional
+  Commits per the next bullet, **never an AI co-author or attribution trailer**, and branch first if
+  the checkout is on the default branch. Release tags stay a human step (`RELEASES.md`).
 - **Commit messages follow Conventional Commits.** `type(scope)?: subject` with the standard types
   (`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `chore`, `ci`, `build`). The subject stays
   imperative and describes **what was done** ("fix: bound session reads by a deadline", not "fixed

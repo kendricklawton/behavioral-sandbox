@@ -36,14 +36,23 @@ and `kind()`'s match is wildcard-free, so the compiler forces the new variant in
 - After the first tag, verify with
   `cargo semver-checks check-release --baseline-rev v0.1.0`.
 
-## Git is human-driven
+## Pull requests are human-owned
 
-The **maintainer** performs every commit, push, and pull request. A **coding agent** (Claude, Gemini,
-Codex, as opposed to this project's own `ekvm` binary) never runs `git commit` or `git push`, never
-opens, approves, or merges a pull request, and never takes any other CI-triggering action. An agent's
-job ends at: changes made, demo working, and, when asked, a commit message or PR description drafted.
+A **coding agent** (Claude, Gemini, Codex, as opposed to this project's own `ekvm` binary) never
+opens, approves, or merges a pull request. Asking another human to accept work, and reviewing it, are
+human steps. That part is not configurable: an agent that can approve its own change has removed the
+only review the change was going to get.
 
-Release tags are a human step too. See [RELEASES.md](../RELEASES.md).
+**Whether an agent commits and pushes is the operator's call.** Nothing in the project forbids it, so
+it comes down to how the person running the agent wants to work. When an agent does commit:
+
+- One logical change per commit, so the log stays bisectable.
+- [Conventional Commits](#commit-conventions), with the [`api` scope](#the-api-scope) where it applies.
+- **Never an AI co-author or attribution trailer.**
+- Branch first if the checkout is on the default branch. A commit is cheap to amend; a push to `main`
+  is the one that is awkward to undo.
+
+Release tags remain a human step. See [RELEASES.md](../RELEASES.md).
 
 ## Documentation conventions
 
