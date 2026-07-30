@@ -183,7 +183,7 @@ fn install_binaries(prefix: &Path) -> Result<PathBuf> {
         let src = release.join(name);
         if !src.is_file() {
             bail!(
-                "built binary {} not found — did `cargo build --release -p cli` succeed?",
+                "built binary {} not found — did `cargo build --release -p ekvm` succeed?",
                 src.display()
             );
         }

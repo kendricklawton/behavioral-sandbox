@@ -14,7 +14,7 @@
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the guest-agent
-//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p cli -- --ignored`. Unjailed
+//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root, except [`a_jailed_daemon_serves_prewarmed_opens`], which exists precisely
 //! because the jailed daemon composes pieces no other suite drives together (it self-skips

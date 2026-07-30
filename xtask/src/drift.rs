@@ -1,11 +1,14 @@
 //! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else
-//! compiles or tests, and two kinds are mechanically checkable, so this pass checks them:
+//! compiles or tests, and three kinds are mechanically checkable, so this pass checks them:
 //!
 //! 1. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
 //!    something in the tree; a rename otherwise leaves the comment lying about where things live.
 //! 2. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
 //!    silently *creates* missing `SUMMARY.md` chapters as empty stubs, so a deleted page would
 //!    otherwise ship as a blank one.
+//! 3. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
+//!    package. A crate's directory is not always its package (`crates/cli` builds `ekvm`), so this
+//!    is invisible to check 1: the path resolves while the command it appears in does not run.
 //!
 //! This lint checks that pointers point at something, not that the prose around them is still
 //! *true*; the meaning half stays with review, and the standing rule is to promote a checkable
@@ -22,10 +25,12 @@ type Violation = String;
 pub fn check(root: &Path) -> Result<()> {
     let tracked = tracked_files(root)?;
     let anchors = path_anchors(&tracked);
+    let packages = package_names(root, &tracked)?;
 
     let mut violations: Vec<Violation> = Vec::new();
     let mut path_refs = 0usize;
     let mut links = 0usize;
+    let mut pkg_refs = 0usize;
 
     for rel in &tracked {
         let is_rs = rel.ends_with(".rs");
@@ -53,6 +58,20 @@ pub fn check(root: &Path) -> Result<()> {
                 ));
             }
         }
+        // A `cargo … -p <name>` a reader is told to run must name a real workspace package. The
+        // directory and the package name are allowed to differ here (`crates/cli` builds `ekvm`),
+        // which is how five copies of a `-p cli` invocation came to be printed at people, in the
+        // docs, in two test headers, and in xtask's own output. Every one errored with
+        // "package(s) not found in workspace".
+        for (line_no, pkg) in cargo_package_refs(&text) {
+            pkg_refs += 1;
+            if !packages.contains(&pkg) {
+                violations.push(format!(
+                    "{rel}:{line_no}: `cargo … -p {pkg}`, which is not a workspace package \
+                     (a crate's directory name is not always its package name)"
+                ));
+            }
+        }
         if is_md {
             let dir = Path::new(rel).parent().unwrap_or(Path::new(""));
             for (line_no, target) in markdown_links(&text) {
@@ -72,10 +91,79 @@ pub fn check(root: &Path) -> Result<()> {
         bail!("prose drift: {} broken reference(s)", violations.len());
     }
     println!(
-        "· prose drift: {path_refs} path reference(s), \
-         {links} markdown link(s) all resolve"
+        "· prose drift: {path_refs} path reference(s), {links} markdown link(s), \
+         {pkg_refs} cargo package reference(s) all resolve"
     );
     Ok(())
+}
+
+/// Every package name in the workspace, read from the tracked `Cargo.toml` files rather than from
+/// directory names: the two differ (`crates/cli` builds `ekvm`), and it is the name `-p` takes.
+fn package_names(root: &Path, tracked: &BTreeSet<String>) -> Result<BTreeSet<String>> {
+    let mut names = BTreeSet::new();
+    for rel in tracked.iter().filter(|p| p.ends_with("Cargo.toml")) {
+        let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
+            continue;
+        };
+        // The first `name = "..."` after a `[package]` header. Later `[[bin]]`/`[lib]` sections
+        // carry their own `name`, which `-p` does not accept.
+        let mut in_package = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_package = line == "[package]";
+                continue;
+            }
+            if in_package {
+                if let Some(name) = line
+                    .strip_prefix("name")
+                    .and_then(|r| r.trim_start().strip_prefix('='))
+                    .and_then(|r| r.trim().strip_prefix('"'))
+                    .and_then(|r| r.split('"').next())
+                {
+                    names.insert(name.to_string());
+                    in_package = false;
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        bail!("no workspace package names found: the Cargo.toml parse in drift.rs has gone stale");
+    }
+    Ok(names)
+}
+
+/// `-p <name>` arguments on lines that invoke `cargo`, with their 1-based line. Scoped to `cargo`
+/// lines so an unrelated `-p` (`mkdir -p`, `install -p`) is never read as a package; a line that
+/// does both would be reported, which is the safe direction for a lint.
+fn cargo_package_refs(text: &str) -> Vec<(usize, String)> {
+    let mut found = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        if !line.contains("cargo ") {
+            continue;
+        }
+        let mut tokens = line.split_ascii_whitespace();
+        while let Some(token) = tokens.next() {
+            if token != "-p" {
+                continue;
+            }
+            let Some(pkg) = tokens.next() else { continue };
+            // A placeholder or a shell interpolation names no package this lint can resolve, and it
+            // must not guess: `-p <name>` in a doc comment, `-p {pkg}` in a format string, `-p $PKG`
+            // in a script. Checked before trimming, since trimming is what would hide them.
+            if pkg.starts_with(['<', '{', '$', '"']) {
+                continue;
+            }
+            // Trailing shell/prose punctuation (`-p vmm,` `-p vmm`.) is not part of the name.
+            let pkg =
+                pkg.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
+            if pkg.is_empty() || pkg.starts_with('-') {
+                continue;
+            }
+            found.push((idx + 1, pkg.to_string()));
+        }
+    }
+    found
 }
 
 /// The tracked file list (`git ls-files`), the definition of "in the tree". Requires a git

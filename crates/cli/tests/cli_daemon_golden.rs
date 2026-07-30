@@ -12,7 +12,7 @@
 //! faithful renderings of a non-result, not a golden mismatch.
 //!
 //! `#[ignore]`d: boots real microVMs (needs `/dev/kvm` + the guest rootfs). Run via
-//! `cargo xtask ci-privileged` or `cargo test -p cli -- --ignored`. Both faces run
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Both faces run
 //! **unjailed**, the golden is the run-result rendering, not the jailer (that has its own suite),
 //! and unjailed needs no root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
