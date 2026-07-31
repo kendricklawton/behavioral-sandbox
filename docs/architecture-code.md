@@ -30,13 +30,18 @@ structurally, because the BPF target requires raw map dereferences. See
 The public surface is deliberately narrow. From `lib.rs`:
 
 ```rust
-pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT};
+pub use channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
 pub use net::GuestLink;
 pub use pool::Pool;
 pub use sweep::{sweep_orphans, SweepReport};
+pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT};
 ```
+
+Note the first line: `channel`'s wire types are re-exported through `vmm`, so an embedder reaches
+them without adding a second dependency, and they are part of the surface
+[the stability boundary](./embedding-scope.md#semver--api-stability) names.
 
 Everything else (`console`, `drives`, `exec`, `firecracker`, `jail`'s internals, `paths`, `proc`,
 `snapshot`, `spawn`, `sweep`'s internals) is a private module. `doctor` is public because the CLI and

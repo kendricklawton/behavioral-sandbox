@@ -136,7 +136,8 @@ See [`ekvm verify`](./cli-commands.md#ekvm-verify).
 ## Setting `trusted_keys`
 
 - **env**: `EKVM_TRUSTED_KEYS`
-- **type**: string (comma-separated list of 64-hex public keys)
+- **type**: array of 64-hex public keys in the file (`trusted_keys = ["aa..", "bb.."]`);
+  comma-separated in the environment variable
 - **default**: empty
 
 Additional public keys `ekvm verify` should trust, alongside the current signing key and any `--key`

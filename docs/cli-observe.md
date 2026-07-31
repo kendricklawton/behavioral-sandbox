@@ -35,8 +35,9 @@ Check a `--record` file with [`ekvm verify`](./cli-commands.md#ekvm-verify).
 ## Schema versioning
 
 Each machine JSON surface carries a leading integer **`schema`** field, and the `--json` run result,
-the `--record` audit record, and the `--record-summary` projection version **independently**, each
-starting at `1`. The compatibility policy: **within a version, changes are additive only**, a new field
+the `--record` audit record, and the `--record-summary` projection version **independently**. The
+`--json` result and the summary are at `1`; a `--record` file's outer object is the signing envelope
+at `2`, wrapping a record that is itself `1`, so read the `schema` at the level you are parsing. The compatibility policy: **within a version, changes are additive only**, a new field
 a consumer can ignore; **renaming or removing a field, or changing a value's meaning, bumps the
 version.**
 

@@ -83,8 +83,7 @@ Assumptions), or physical/side-channel attacks.
 
 Each row names the mechanism intended to contain the attack and the test that exercises it. What
 none of these rows cover is in [Assumptions and residual
-risk](#assumptions-and-residual-risk); a passing test is scoped as described in [Status and
-Status](./introduction.md#status).
+risk](#assumptions-and-residual-risk); a passing test is scoped as described in [Status](./introduction.md#status).
 
 | Attack | Contained by | Exercised by |
 |--------|--------------|-----------|

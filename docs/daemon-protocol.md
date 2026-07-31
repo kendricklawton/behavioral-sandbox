@@ -163,16 +163,16 @@ The round trip a caller uses to collect what a run *produced*, not just what it 
   "reply": "trace_summary",
   "summary": {
     "schema": 1,
-    "wall_ms": 142,
-    "exit_code": 0,
-    "egress_allowed": [],
-    "egress_denied": [],
+    "timing": {"boot_ns": 128000000, "exec_ns": 14000000},
+    "network": null,
+    "host_syscalls": {"execve": 3, "openat": 41, "connect": 0, "notable": []},
     "resources": {
-      "user_cpu_us": 12000,
-      "system_cpu_us": 4000,
-      "max_rss_bytes": 28432000
+      "cpu_ns": 16000000,
+      "mem_peak_bytes": 28432000,
+      "io_read_bytes": 1310720,
+      "io_write_bytes": 0
     },
-    "coverage_gaps": []
+    "gaps": []
   }
 }
 ```

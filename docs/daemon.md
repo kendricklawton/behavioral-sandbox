@@ -86,6 +86,21 @@ let record = client.trace()?;                       // the host-observed audit r
 client.close()?;                                    // tear the sandbox down
 ```
 
+## What the wire does not carry yet
+
+Two capabilities the CLI and the library have are not reachable over the daemon today, and a client
+written against the protocol will not find them:
+
+- **No network.** A session never gets a NIC, so `trace` and `trace_summary` report `"network":
+  null` for every run and the tap-level flow record is empty. The deny-by-default posture holds
+  trivially, but the observation
+  [the probes chapter](./probes.md) describes is not available over the wire.
+- **No egress policy.** Probes attach observe-only, so `--allow`-style enforcement has no wire
+  equivalent. It is not that a policy is ignored: there is no field to send one in.
+
+Both are additive protocol changes when they arrive, which is what the `schema` handshake exists
+for. Until then, a run that must be network-observed is a CLI or library run.
+
 ## Non-goals: where a PaaS would begin
 
 The canonical engine/PaaS line, tenancy, auth, billing, scheduling, dashboards, is drawn in

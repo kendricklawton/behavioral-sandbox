@@ -32,13 +32,13 @@ use std::time::Duration;
 use vmm::{BootConfig, Limits, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
-    // Define a 2 vCPU, 512 MiB RAM, 60s wall budget limit
-    let limits = Limits {
-        vcpus: NonZeroU8::new(2).unwrap(),
-        mem_mib: NonZeroU32::new(512).unwrap(),
-        wall: Duration::from_secs(60),
-        output_cap: 16 * 1024 * 1024, // 16 MiB output cap
-    };
+    // 2 vCPU, 512 MiB RAM, 60s wall. `Limits` is `#[non_exhaustive]`, so a downstream crate
+    // starts from `default()` and assigns rather than writing a struct literal.
+    let mut limits = Limits::default();
+    limits.vcpus = NonZeroU8::new(2).expect("nonzero");
+    limits.mem_mib = NonZeroU32::new(512).expect("nonzero");
+    limits.wall = Duration::from_secs(60);
+    limits.output_cap = 16 * 1024 * 1024;
 
     // Apply limits onto boot config
     let config = BootConfig::from_env().with_limits(limits);
@@ -76,7 +76,7 @@ fn main() -> Result<(), VmmError> {
     let pool_cfg = BootConfig::from_env();
     let mut pool = Pool::new(snapshot, pool_cfg, 4)?;
 
-    // 3. Take a warm clone from the pool (milliseconds; measured in docs/benchmarks.md)
+    // 3. Take a warm clone from the pool: a restore rather than a cold boot
     let warm_vm = pool.take()?;
     let result = warm_vm.exec(&["echo".into(), "warm start".into()], b"")?;
     println!("Execution completed: {}", String::from_utf8_lossy(&result.stdout));
@@ -84,7 +84,7 @@ fn main() -> Result<(), VmmError> {
     // 4. Refill pool back to target count
     pool.refill()?;
 
-    pool.shutdown()?;
+    pool.shutdown();
     Ok(())
 }
 ```

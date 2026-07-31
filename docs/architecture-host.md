@@ -83,7 +83,8 @@ flowchart LR
 The guest root is a read-only base image (Alpine, with the static `guest-agent` baked in), shared
 across sandboxes, with a writable `tmpfs` overlay per run, so nothing a run changes outlives it
 unless explicitly collected. Bulk data rides block devices instead: a read-only ext4 built from
-`--input-dir`, and a writable one extracted after teardown for `--output-dir`.
+`input_dir`, and a writable one extracted after teardown for `output_dir`. Both are embedding-API
+fields rather than CLI flags.
 
 ```mermaid
 flowchart TB
@@ -92,8 +93,8 @@ flowchart TB
         TmpfsOverlay["Per-Run Writable tmpfs Overlay\n(Size capped at 50% RAM)"]
         MergedRoot["Merged Guest Root (/)\noverlay-init"]
         
-        InputBlock["/dev/vdb Block Device\n(ReadOnly ext4 from --input-dir)"]
-        OutputBlock["/dev/vdc Block Device\n(Writable ext4 for --output-dir)"]
+        InputBlock["/dev/vdb Block Device\n(ReadOnly ext4 from input_dir)"]
+        OutputBlock["/dev/vdc Block Device\n(Writable ext4 for output_dir)"]
     end
 
     BaseFS -->|Lower Layer| MergedRoot
