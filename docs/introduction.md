@@ -45,7 +45,10 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Reading this book
 
-- **[Design specification](./design.md)**, full architectural design, Firecracker VMM integration, host eBPF containment barriers, and system properties.
+- **[Design specification](./design.md)**, the six design rules, the numbered decisions with their
+  rationale, and how the engine integrates with the host: Firecracker, the per-VM network, and
+  storage. For the crates, the types, and the order things happen in during a run, see
+  [Architecture](./contributing-architecture.md).
 - **[Using the eKVM CLI](./cli.md)**, how to run the engine: [install the
   prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
   untrusted code with `ekvm run` and hold interactive sessions with `ekvm shell`. Start here.

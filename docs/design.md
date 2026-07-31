@@ -1,4 +1,4 @@
-# Architecture and design
+# Design specification
 
 ## Scope
 
