@@ -76,7 +76,7 @@ does and does not establish is in [Status](./introduction.md#status).
 ### Pre-warmed starts: snapshot an unjailed source, restore jailed clones
 
 `snapshot(dir)` pauses the VM and writes a portable bundle; `Vm::restore` (and the `Pool` built on
-it) brings up exec-ready clones in milliseconds, sharing the base disk and memory file read-only
+it) brings up exec-ready clones by restore rather than cold boot, sharing the base disk and memory file read-only
 across concurrent sandboxes. (`Vm` is the driver's lower layer: `Vm::boot`/`Vm::restore` yield a
 running microVM handle, and a `Sandbox` wraps exactly one of them with the jailed-by-default
 posture; the snapshot and pool [recipes](./embedding-recipes.md) work at the `Vm` layer.) Snapshotting is restricted

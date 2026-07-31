@@ -1,8 +1,8 @@
 # Installation
 
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
-install a packaged release (tarball / `install.sh` / container). Pre-rename releases
-are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setup` (or
+install a packaged release (tarball / `install.sh` / container), which is the path the tooling is
+built for but which has no published artifact behind it yet; `cargo xtask setup` (or
 `ekvm doctor` once installed) tells you what your host is missing at every step.
 
 ## Preparing the host
@@ -10,8 +10,8 @@ are disposable `v0.0.x` checkpoints with no stability promise; `cargo xtask setu
 Every install path below assumes a host that can already boot a microVM. On a fresh machine that
 means four things, in this order.
 
-Commands are given for **Ubuntu/Debian** and **Arch**, the two distros this engine is continuously
-tested on (Ubuntu 24.04 in CI, Arch by hand during development, see
+Commands are given for **Ubuntu/Debian** and **Arch**, the two distros this engine is developed and
+tested against (Ubuntu 24.04 in CI, Arch by hand during development, see
 [Verified on](#supported-platforms)). Any other distro follows the same four steps with its own
 package manager; [Distro differences](#distro-differences-that-bite) collects where the two
 diverge.

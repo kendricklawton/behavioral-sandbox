@@ -62,7 +62,7 @@ the same path a hard kill takes; the unlink just spares the next start the stale
 **Fast `open` with `--prewarm N`.** The daemon boots one unjailed pre-warmed source, snapshots it,
 and keeps a [pre-warmed pool](./embedding.md) of `N` restored clones. A **bare** `open` (no resource
 knobs) pops a warm
-clone in milliseconds and answers `"pooled": true`; an `open` with a custom profile (or a daemon
+clone by restore rather than cold boot and answers `"pooled": true`; an `open` with a custom profile (or a daemon
 without `--prewarm`) cold-boots. Building the pool needs KVM (and root, for jailed clones) and is
 **fail-open**: a host that can't build it logs one warning and every session cold-boots.
 
@@ -125,8 +125,9 @@ client can never weaken it.
 ## Teardown
 
 Teardown is crash-only, like the rest of the engine. A session's sandbox drops when its connection
-ends; and losing the whole daemon process (a supervisor's `SIGTERM`, `SIGKILL`, OOM) can't leak a VM
-either, the lifetime sentinel reaps it, and the next start clears a stale socket file. A graceful
+ends; and when the whole daemon process is lost (a supervisor's `SIGTERM`, `SIGKILL`, OOM) the
+lifetime sentinel reaps the VM, which `driver_death_cannot_leak_a_vm` exercises by SIGKILLing a
+driver mid-run, and the next start clears a stale socket file. A graceful
 drain of in-flight sessions on shutdown is a later operational concern.
 
 ## The rest of this chapter

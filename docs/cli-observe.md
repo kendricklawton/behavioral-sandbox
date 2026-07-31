@@ -21,7 +21,7 @@ ekvm run --unjailed --net --watch --trace --record run.json --record-summary run
 
 - **`--record FILE`**, the machine surface: the record as one line of deterministic, byte-stable JSON
   (integer nanoseconds, no floats; addresses and protocols by name). This is the format downstream
-  SDKs parse. The pretty trail makes no stability promise.
+  SDKs will parse. The pretty trail makes no stability promise.
 
 - **`--record-summary FILE`**, the **model-legible** face: a compact projection of the same record for
   an agent's observe-then-act loop. What it *reached* (distinct destinations, flows collapsed to their

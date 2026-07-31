@@ -26,22 +26,16 @@ untrusted code
 ```
 
 Untrusted code executes within the microVM while the host kernel observes and enforces policy from
-the host side of that boundary. The design rules every change is measured against, stated in full
-with their rationale in [Architecture and design](./architecture.md#design-rules):
+the host side of that boundary. Six design rules govern every change, and a change that breaks one
+is treated as a design error rather than a trade-off; they are stated in full, with the mechanism
+serving each, in [Architecture and design](./architecture.md#design-rules). They are deliberately
+not repeated here, because a third copy is a third thing to drift.
 
-- **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM; the boundary is
-  enforced by the CPU through KVM.
-- **Observe and enforce from the host.** Visibility and policy belong in host-side eBPF attached to
-  host-kernel hooks. The in-guest agent carries exec and IO framing only.
-- **Deny by default.** A sandbox with no explicit policy is configured with no route out and minimal
-  capability, and each allowance is recorded.
-- **Measure rather than assert.** Boot, snapshot-restore, memory-sharing, and probe overhead are
-  reported as percentiles with the host and date they were taken on.
-
-And one scope rule: **engine, not platform.** This is a runtime plus a clean driver API you
-self-host. Multi-tenant auth, billing, fleet scheduling, and dashboards belong to whatever *hosts*
-the engine, and the model driving an agent is always the *caller*, never an engine component; the
-full non-goals list is in [Using the engine API](./embedding.md).
+One of them sets the project's scope and is worth stating up front: **engine, not platform.** This
+is a runtime plus a clean driver API you self-host. Multi-tenant auth, billing, fleet scheduling,
+and dashboards belong to whatever *hosts* the engine, and the model driving an agent is always the
+*caller*, never an engine component; the full non-goals list is in
+[Where the engine ends](./embedding-scope.md).
 
 ## Reading this book
 
@@ -74,8 +68,9 @@ a promise: it describes how the engine is built and what has been exercised. Any
 without notice, so if you build on this, pin a git rev. Release mechanics and the planned support
 policy are in [RELEASES.md](../RELEASES.md), none of which is in force yet.
 
-Every completed milestone ships a working demo, so each capability documented here is exercised end
-to end rather than only asserted. Which is worth being precise about:
+Each milestone ships with a demo that exercises it, so most of what this book describes has been run
+rather than only reasoned about. "Most" is load-bearing there: the release install path, the Red Hat
+rows, and aarch64 are described here and have not been run. Which is worth being precise about:
 
 **What a passing test is worth.** A passing test shows that the case it constructs behaved as
 described, on the host that ran it, at the revision it ran against. It does not show that the

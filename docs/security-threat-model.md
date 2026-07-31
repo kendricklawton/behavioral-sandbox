@@ -124,7 +124,7 @@ green. The mechanics live in
 
 This runs the VM-boot and probe-attach integration tests, including the containment suite. The
 everyday `cargo xtask ci` gate is host-safe
-and runs everywhere, but it does **not** include this suite; the containment proof lives behind the
+and runs everywhere, but it does **not** include this suite; the containment suite lives behind the
 privileged lane.
 
 What each claim maps to:

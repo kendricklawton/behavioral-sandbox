@@ -237,7 +237,7 @@ guest. It lives in
   unavailable. Its core is network + resources + denials, the signals host eBPF observes strongly.
 - **Deterministic JSON.** `RunRecord::to_json` is a hand-rolled, compact, byte-stable serializer (fixed
   key order, arrays pre-sorted, integer-nanosecond durations), the machine-readable audit surface the
-  language SDKs parse and the CLI's `--trace` pretty-prints. Pinned by a golden test.
+  planned language SDKs will parse and the CLI's `--trace` pretty-prints today. Pinned by a golden test.
 
 The privileged `audit_record.rs` exercises this end to end: it boots a guest that touches the network
 and reads a file, then asserts the record's flows carry that network activity and that the in-guest
