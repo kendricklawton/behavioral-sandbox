@@ -28,7 +28,7 @@ the design is wrong.
 
 ## Design rules (every change holds to all six)
 
-The single source. Exactly two places restate them for readers: `docs/design.md` for the book, and
+The single source. Exactly two places restate them for readers: `docs/architecture.md` for the book, and
 `README.md` for someone who never clones. Nothing else should, since a third copy is a third thing to
 drift. They state intent and the mechanism serving it, so a change that breaks one is recognisable as
 a design error rather than a trade-off.
@@ -52,7 +52,7 @@ a design error rather than a trade-off.
 ## Repo layout
 
 One workspace. For the types worth knowing before editing, the boot sequence, and the teardown
-layers, read `docs/contributing-architecture.md` before a non-trivial change to `vmm`.
+layers, read `docs/architecture.md` before a non-trivial change to `vmm`.
 
 | Path | What it is |
 |---|---|
@@ -94,7 +94,7 @@ layers, read `docs/contributing-architecture.md` before a non-trivial change to 
   requirement as the capability, never as a distro that happens to satisfy it.** Host variance lives
   in `doctor.rs` preflight, never in the boot path: a conditional in `spawn.rs`/`jail.rs` creates N
   boot paths and leaves N-1 untested. The shipped binary is static musl for the same reason, no host
-  libc to mismatch. Full rationale: `docs/design.md`, decision 8.
+  libc to mismatch. Full rationale: `docs/architecture.md`, decision 8.
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
 - **On a panicking test, re-run it with `RUST_BACKTRACE=1`** rather than reasoning about the failure
   from the assertion line alone. The frame that panicked is often several calls below the test.

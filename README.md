@@ -17,7 +17,7 @@
   <h3>
     <a href="docs/SUMMARY.md">Guide</a>
     <span> | </span>
-    <a href="docs/design.md">Design</a>
+    <a href="docs/architecture.md">Design</a>
     <span> | </span>
     <a href="docs/introduction.md#status">Status</a>
     <span> | </span>
@@ -113,7 +113,7 @@ surface, including `--record-summary` for an agent loop and `--watch` for a live
 
 Six rules, each stating an intent and the mechanism serving it, so a change that breaks one is
 recognisable as a design error rather than a trade-off. The full text is
-[docs/design.md](docs/design.md).
+[docs/architecture.md](docs/architecture.md).
 
 * **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. Moving the boundary
   into guest-side software is a design error, not an optimisation, and a shared-kernel shortcut taken
@@ -169,8 +169,9 @@ The guide is an mdBook in [`docs/`](docs/SUMMARY.md). Run `mdbook serve docs`, o
 in place. It is not published as a site until the first release.
 
 - **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
-- **[Design specification](docs/design.md)**, the six design rules, the numbered decisions with
-  their rationale, and how the engine integrates with the host.
+- **[Architecture and design](docs/architecture.md)**, the six design rules, how the engine
+  integrates with the host, what the crates are for, and the numbered decisions with their
+  rationale.
 - **[Using the eKVM CLI](docs/cli.md)**, including [installation](docs/cli-install.md).
 - **[Using the `ekvm serve` daemon](docs/daemon.md)**, the wire API.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract and the non-goals.

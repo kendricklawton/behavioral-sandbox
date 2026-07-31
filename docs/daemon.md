@@ -75,7 +75,7 @@ number gets a fatal, session-ending error before its body is trusted.
 Line-delimited JSON (not the length-prefixed binary framing of the host↔guest channel), and not gRPC,
 because the peer is a **local, trusted-ish client**: the daemon is synchronous with no async runtime
 (a recorded decision with its own re-open conditions, see
-[the design notes](./design.md#7-synchronous-engine-no-async-runtime)),
+[the design notes](./architecture.md#7-synchronous-engine-no-async-runtime)),
 and hand-debuggability (`socat`, `nc`) plus "any language with a JSON library and a unix socket can
 drive it" matter more than a compact wire. Every decode is bounded and typed, so a
 malformed or oversize line is a reported error or a drop rather than a parse the daemon acts on.

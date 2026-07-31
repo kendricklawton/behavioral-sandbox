@@ -13,8 +13,8 @@ settled before you build against a pre-1.0 surface that is still moving. CONTRIB
 ## Which design rule it touches
 
 <!--
-The six rules are in docs/design.md. Name the one this change is closest to and why it holds, or
-write "none" if it is a bug fix or a docs change. This is the first question in review either way.
+The six rules are in docs/architecture.md. Name the one this change is closest to and why it holds,
+or write "none" if it is a bug fix or a docs change. This is the first question in review either way.
 -->
 
 ## Checklist

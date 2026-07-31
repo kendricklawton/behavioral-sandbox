@@ -27,7 +27,7 @@ untrusted code
 
 Untrusted code executes within the microVM while the host kernel observes and enforces policy from
 the host side of that boundary. The design rules every change is measured against, stated in full
-with their rationale in the [design specification](./design.md#design-rules):
+with their rationale in [Architecture and design](./architecture.md#design-rules):
 
 - **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM; the boundary is
   enforced by the CPU through KVM.
@@ -45,10 +45,9 @@ full non-goals list is in [Using the engine API](./embedding.md).
 
 ## Reading this book
 
-- **[Design specification](./design.md)**, the six design rules, the numbered decisions with their
-  rationale, and how the engine integrates with the host: Firecracker, the per-VM network, and
-  storage. For the crates, the types, and the order things happen in during a run, see
-  [Architecture](./contributing-architecture.md).
+- **[Architecture and design](./architecture.md)**, the six design rules, how the engine integrates
+  with the host, what the crates are for and the order things happen in during a run, and the
+  numbered decisions with their rationale.
 - **[Using the eKVM CLI](./cli.md)**, how to run the engine: [install the
   prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
   untrusted code with `ekvm run` and hold interactive sessions with `ekvm shell`. Start here.

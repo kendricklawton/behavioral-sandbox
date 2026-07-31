@@ -97,7 +97,7 @@ build-toolchain rows.
 
 Every check is a **capability probe**, never a distro or version test: `cgroup.kill` rather than a
 kernel version, `/sys/kernel/security/lsm` rather than a distro name. The rationale is
-[design decision 8](./design.md).
+[design decision 8](./architecture.md).
 
 ## `ekvm verify`
 
