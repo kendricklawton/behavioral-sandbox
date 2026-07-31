@@ -121,7 +121,6 @@ The confinement suite (`crates/vmm/tests/confinement.rs`) is where these are exe
 `open` can be served by a restore rather than a cold boot. A restore runs the **same** preflight guards
 as a boot, which is why `refuse_unusable_scratch` is called from both.
 
-Two constraints fall out of the design and are enforced rather than documented: a VM produced by
-`restore` refuses to be re-snapshotted (its live disk is an anonymous inode with no host path), and a VM
-with a bulk input device refuses to be snapshotted at all, because the snapshot would bake in a scratch
-path that will not exist after teardown.
+Three snapshots are refused outright rather than half-supported, each because the bundle would
+record something unrestorable. [The VMM and its jail](./architecture-firecracker.md) has them with
+the API-level reasoning.

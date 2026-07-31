@@ -1,6 +1,6 @@
 # Host-side observability & enforcement
 
-The engine has two halves. [Using the engine API](./embedding.md) documents the Firecracker
+The engine has two halves. [The VMM and its jail](./architecture-firecracker.md) documents the Firecracker
 driver: the hardware-isolation boundary that *contains* untrusted code. This document is the
 other half: the host-side eBPF that
 *observes and enforces* what that code does, from the host side of the KVM boundary: the programs
@@ -246,7 +246,7 @@ consequence described at the end of this chapter. `SandboxProbes::collect` is fi
 and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** live reading
 (`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far), what the
 CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
-(`ekvm run --net --trace --record --watch`) is documented in [Using the eKVM CLI](./cli.md).
+(`ekvm run --net --trace --record --watch`) is documented in [Observing a run](./cli-observe.md).
 
 ## The hardware-isolation consequence (the honest limit)
 

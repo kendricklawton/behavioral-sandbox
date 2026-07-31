@@ -86,9 +86,10 @@ Stated because their absence is the honest counterweight to everything else in t
 
 - **No external security review or audit.** The threat model is the author's own reasoning about the
   author's own code. See [Threat model](./security-threat-model.md).
-- **One kernel.** The CO-RE/BTF portability described in [Host-side observability &
-  enforcement](./probes.md) is a property of the mechanism, not a tested claim: the probes have been
-  loaded on exactly one kernel version.
+- **Two kernels.** The CO-RE/BTF portability described in [Host-side observability &
+  enforcement](./probes.md) is a property of the mechanism rather than a broadly tested claim: the
+  probes have been loaded on the Arch development box and on the Ubuntu 24.04 runner the privileged
+  suite uses nightly. Two is not a matrix, and no enterprise kernel is among them.
 - **No Red Hat host has been run.** RHEL 9 and 10 are intended targets, and `ekvm doctor` probes for
   `cgroup.kill` rather than a version number, which is what admits a patched kernel whose version
   string sits below the fallback floor. But nothing has booted, gated, or attached a probe there, and

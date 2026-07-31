@@ -1,8 +1,8 @@
 # Architecture and design
 
 What the engine is, the rules it holds itself to, and how it is put together. This page carries the
-scope and the design rules; the pages under it carry the host integration, the code, a run from boot
-to teardown, the eBPF half, and the numbered decisions with their reasoning.
+scope and the design rules; the pages under it carry the host integration, the VMM and its jail,
+the code, a run from boot to teardown, the eBPF half, and the numbered decisions.
 
 ## Scope
 

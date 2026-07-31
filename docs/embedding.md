@@ -3,8 +3,8 @@
 The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
 the `vmm` library promises when you pin it and build on it, stated once, against the real
 API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
-The second half draws the line this project refuses to cross, what the engine deliberately is
-**not**, because a runtime that quietly grows platform features stops being embeddable.
+[Where the engine ends](./embedding-scope.md) draws the line this project refuses to cross, and
+[Recipes](./embedding-recipes.md) is the same lifecycle in runnable code.
 
 ## The lifecycle
 

@@ -4,9 +4,9 @@ What the crates are for, the types worth knowing before reading code, and the or
 
 ## Reading the code
 
-This document gives an overview of the implementation: what the crates are for, the types worth
-knowing before reading code, and the order things happen in during a run. For finer detail, the code
-comments are the authority, and they carry the reasoning this page summarizes.
+For finer detail than this page carries, the code comments are the authority, and they hold the
+reasoning this page summarizes. The order things happen in during a run is
+[the next page](./architecture-lifecycle.md).
 
 The reading order that works: this page, then `crates/channel/src/lib.rs` (small, self-contained, and
 it defines the host/guest contract), then `crates/vmm/src/vm.rs` and `spawn.rs`, then the eBPF half.

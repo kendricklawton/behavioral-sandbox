@@ -3,8 +3,9 @@
 This section of the book is the developer manual: what the crates are for, how to build them, the
 gates a change passes, and the conventions it is held to.
 
-[Architecture and design](./architecture.md) is where a contributor starts: what the crates are
-for, the types worth knowing before reading code, and the order things happen in during a run.
+[Architecture and design](./architecture.md) is where a contributor starts. [The
+code](./architecture-code.md) has what the crates are for and the types worth knowing before reading
+code; [A run, start to finish](./architecture-lifecycle.md) has the order things happen in.
 
 The repository is **open to outside pull requests**. Bug fixes, tests, and documentation can go
 straight to one; anything larger starts with an issue, because the pre-1.0 surface still moves.
