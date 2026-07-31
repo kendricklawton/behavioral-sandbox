@@ -3,6 +3,7 @@
 - [Introduction](./introduction.md)
 - [Architecture and design](./architecture.md)
   - [Host integration](./architecture-host.md)
+  - [The VMM and its jail](./architecture-firecracker.md)
   - [The code](./architecture-code.md)
   - [A run, start to finish](./architecture-lifecycle.md)
   - [The eBPF half](./architecture-ebpf.md)

@@ -62,6 +62,8 @@ verified outcome.
 
 - **[Host integration](./architecture-host.md)**, where the pieces sit on a host, what the host must
   provide, and how networking and storage are laid out.
+- **[The VMM and its jail](./architecture-firecracker.md)**, how the driver talks to Firecracker,
+  what the guest ends up holding, and what confines the VMM process itself.
 - **[The code](./architecture-code.md)**, what the crates are for, the types worth knowing before
   reading code, and the reading order that works.
 - **[A run, start to finish](./architecture-lifecycle.md)**, boot, exec, the four teardown layers,
