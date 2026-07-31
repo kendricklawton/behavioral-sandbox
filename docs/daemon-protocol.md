@@ -16,7 +16,7 @@ One connection is one sandbox **session**: the VM *is* the session, so repeated 
 working directory, and closing the connection tears the sandbox down.
 
 The shared wire contract lives in the `protocol` crate (serde-only, no `vmm`), so the
-daemon, the [reference client](#the-reference-client), and the future polyglot SDKs all speak exactly
+daemon, the [reference client](./daemon.md#the-reference-client), and the future polyglot SDKs all speak exactly
 the same shapes.
 
 ## Requests
@@ -91,7 +91,7 @@ a hard error and must be surfaced, not skipped. This is deliberate, and it is th
 rule 1: the protocol is strict request/response, so a reply you cannot interpret means you have lost
 track of what the daemon is answering. Skipping it would silently desynchronize the session and
 misattribute every later reply to the wrong request. Growing the reply set is therefore a
-[`schema`](#the-wire-protocol-versioned-json-schema-1) bump, not an additive change, and a bump is
+`schema` bump, not an additive change, and a bump is
 rejected up front by both sides.
 
 **3. Degrade on an unrecognized enumerated *value*.** Where a field carries a value from a named set

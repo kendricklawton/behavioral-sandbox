@@ -86,7 +86,7 @@ Some types to have in the back of your head before reading further.
   until someone gives it a deliberate bucket. That is the mechanism keeping the contract honest.
 
 * **`SandboxProbes` and `RunRecord`** (`probes-loader`) are the observation half: the attach bundle for
-  one sandbox, and the record it finalizes. See [the eBPF half](./architecture-ebpf.md) below.
+  one sandbox, and the record it finalizes. See [the eBPF half](./architecture-ebpf.md).
 
 ## The daemon
 

@@ -79,7 +79,7 @@ does and does not establish is in [Status](./introduction.md#status).
 it) brings up exec-ready clones in milliseconds, sharing the base disk and memory file read-only
 across concurrent sandboxes. (`Vm` is the driver's lower layer: `Vm::boot`/`Vm::restore` yield a
 running microVM handle, and a `Sandbox` wraps exactly one of them with the jailed-by-default
-posture; the snapshot and pool recipes below work at the `Vm` layer.) Snapshotting is restricted
+posture; the snapshot and pool [recipes](./embedding-recipes.md) work at the `Vm` layer.) Snapshotting is restricted
 to *unjailed* sources (their disk lives on a fixed host path); restoring into *jailed* clones is
 where the untrusted code runs confined.
 

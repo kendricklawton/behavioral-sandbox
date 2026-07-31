@@ -100,7 +100,8 @@ N_live × FDS_PER_VM + headroom (≈64, process baseline)  ≤  ulimit -n (soft)
 ```
 
 `Pool::new` checks this and logs one warning naming the numbers when a target oversubscribes the
-budget, a warning, not a refusal, per the fail-open posture above. The measured steady state is 2
+budget, a warning, not a refusal, matching how the engine treats every other best-effort host
+resource. The measured steady state is 2
 fds per VM on every start path, pinned by test; the constant is deliberately above it so growth is
 a visible bump, never drift.
 

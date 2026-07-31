@@ -47,7 +47,8 @@ even starts.
 readiness marker on the console. That marker is configurable, because it is a property of the rootfs
 image rather than of the engine.
 
-**6. The probes attach after boot**, not before. See below for why that ordering is a deliberate trade.
+**6. The probes attach after boot**, not before. [The eBPF half](./architecture-ebpf.md) has why
+that ordering is a deliberate trade.
 
 ## Executing a command
 

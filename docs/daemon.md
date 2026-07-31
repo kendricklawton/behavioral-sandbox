@@ -98,7 +98,7 @@ nothing that crosses it. Its wire-level consequences:
 - **The socket is the whole auth surface.** No handshake: whoever can reach the socket is trusted.
   Access control is the filesystem permissions on the socket and its directory (see
   [Run it](#run-it)).
-- **The daemon measures, never charges.** The [metrics endpoint](#metrics-prometheus) exposes
+- **The daemon measures, never charges.** The [metrics endpoint](./daemon-observability.md#metrics-prometheus) exposes
   host-observed numbers; bills, quotas, and per-tenant caps are built above them.
 - **One daemon, one host.** Bin-packing, queues, and autoscaling live in the hoster's scheduler;
   the daemon has no notion of another host, and its surface stays a local unix socket, never a
