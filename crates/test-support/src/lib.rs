@@ -314,9 +314,14 @@ impl SmallFs {
     /// Fill the filesystem, then hand back `headroom` bytes of it. Writing until `ENOSPC` and
     /// shrinking is deliberate: it needs no `statvfs` (this crate is pure-std and the host path is
     /// `unsafe`-free), and it leaves the *actual* remaining space at `headroom` rather than at
-    /// whatever a free-block calculation guessed. The headroom matters because most targets need a
-    /// small write (a `mkdir`, an open) to succeed so the failure lands on the large write under
-    /// test. Panics on an I/O error other than a full disk, the idiomatic test assertion.
+    /// whatever a free-block calculation guessed. The headroom exists for targets that need a small
+    /// write (a `mkdir`, an open) to succeed so the failure lands on the large write under test.
+    ///
+    /// **Any non-zero headroom is a wager that the target allocates more than that**, and the tools
+    /// here are sparse enough that the wager can be lost quietly: the caller keeps passing, having
+    /// stopped testing anything. Pass `0` unless a small write genuinely has to succeed first, and
+    /// where it does, leave far less than the write under test needs. Panics on an I/O error other
+    /// than a full disk, the idiomatic test assertion.
     pub fn fill_leaving(&self, headroom: u64) {
         use std::io::Write as _;
         let path = self.path().join("ekvm-filler");

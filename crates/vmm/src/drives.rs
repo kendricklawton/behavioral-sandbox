@@ -822,14 +822,21 @@ mod tests {
     #[ignore = "mounts a tmpfs; needs real root (run via `cargo xtask ci-privileged`)"]
     fn a_full_scratch_names_mke2fs_as_the_cause() {
         // The case `run_host_tool`'s captured stderr was written for. `truncate` succeeds (a sparse
-        // file costs nothing), then `mke2fs` writes the inode table eagerly and hits ENOSPC. Without
-        // the capture the boot would fail with a bare exit code and the operator would have no way
-        // to tell a full scratch dir from a corrupt image.
+        // file costs nothing), then `mke2fs` writes real metadata and hits ENOSPC. Without the
+        // capture the boot would fail with a bare exit code and the operator would have no way to
+        // tell a full scratch dir from a corrupt image.
         let Some(fs) = test_support::SmallFs::create(8, "mke2fs-full") else {
             eprintln!("skipping a_full_scratch_names_mke2fs_as_the_cause: needs real root");
             return;
         };
-        fs.fill_leaving(256 * 1024);
+        // Zero headroom, not a comfortable margin. What a 256 MiB ext4 costs on disk is an
+        // e2fsprogs question, not a constant: recent versions punch holes where they used to write
+        // the zeroed inode table and journal, so the image's *allocated* size is metadata only and
+        // has been shrinking. This test left 256 KiB and passed here (e2fsprogs 1.47.4 needs
+        // exactly that much) while mke2fs finished inside it on the hosted privileged runner,
+        // failing the gate on the version difference. A full filesystem is the one precondition no
+        // version can satisfy, and `truncate` is sparse, so it still gets as far as mke2fs.
+        fs.fill_leaving(0);
 
         // Report the fixture's real state on failure rather than only "it succeeded": if this ever
         // trips, the questions are whether the small filesystem was still mounted and how much room
@@ -844,6 +851,13 @@ mod tests {
         assert!(
             !msg.trim_end().ends_with(':'),
             "a failed image build must name a cause, not end in a bare colon: {msg}"
+        );
+        // Which tool failed, not just that one did. With the filesystem completely full, `truncate`
+        // is the other candidate, and its ENOSPC would satisfy the "space" assertion below while
+        // testing something this test does not claim to cover.
+        assert!(
+            msg.contains("mke2fs"),
+            "the failure under test is mke2fs's, not another tool's: {msg}"
         );
         assert!(
             msg.to_lowercase().contains("space"),
