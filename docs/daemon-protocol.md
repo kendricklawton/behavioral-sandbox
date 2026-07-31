@@ -1,0 +1,178 @@
+# The daemon wire protocol
+
+Newline-delimited JSON: the client sends one request object per line, the daemon answers with
+response lines. **Every message carries a leading `schema` field**; a peer that sends a different
+number gets a fatal, session-ending error before its body is trusted.
+
+Line-delimited JSON (not the length-prefixed binary framing of the host↔guest channel), and not gRPC,
+because the peer is a **local, trusted-ish client**: the daemon is synchronous with no async runtime
+(a recorded decision with its own re-open conditions, see
+[the design notes](./architecture-decisions.md#7-synchronous-engine-no-async-runtime)),
+and hand-debuggability (`socat`, `nc`) plus "any language with a JSON library and a unix socket can
+drive it" matter more than a compact wire. Every decode is bounded and typed, so a
+malformed or oversize line is a reported error or a drop rather than a parse the daemon acts on.
+
+One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
+working directory, and closing the connection tears the sandbox down.
+
+The shared wire contract lives in the `protocol` crate (serde-only, no `vmm`), so the
+daemon, the [reference client](#the-reference-client), and the future polyglot SDKs all speak exactly
+the same shapes.
+
+## Requests
+
+| Request | Meaning |
+|---|---|
+| `{"schema":1,"op":"open","vcpus":2,"mem_mib":512,"wall_secs":60,"output_cap":16777216}` | Boot the session's sandbox (all knobs optional; omitted keeps the conservative default). **First message.** A knobbed `open` is never served from the pool. |
+| `{"schema":1,"op":"exec","argv":["echo","hi"],"stdin":"text\n"}` | Run a command, feeding `stdin` (UTF-8 text). |
+| `{"schema":1,"op":"put","path":"in.txt","content":"data\n"}` | Write a UTF-8 file into the working directory, for a later `exec`/`get`. |
+| `{"schema":1,"op":"get","path":"out.txt"}` | Read a working-directory file back. A missing file is `present:false`, not an error. |
+| `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle. A **jailed** session is a typed refusal, deliberately (not a gap): a jailed VM's disk lives at a chroot-relative path torn down with the VM, so a bundle would record an unrestorable backing. Snapshot an unjailed source and restore jailed clones. |
+| `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. Sampled **live** (repeatable mid-session): its coverage reflects attach time, and an absent axis may be a transient read, not a finalized gap (unlike the CLI's `--record`). |
+| `{"schema":1,"op":"trace_summary"}` | Return the **model-legible summary** so far, the compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied, its resource envelope, any coverage gap), sampled live like `trace`. The face an agent reads between turns. |
+| `{"schema":1,"op":"cancel"}` | Abandon an **in-flight** request and end the session, answered `cancelled`. The one verb legal while another request is outstanding: it exists because a client blocked on a long `exec` has no other way to reach the daemon. **It ends the session, it does not abort one command**: the engine cancels a running exec by killing the sandbox, so session state dies with it (snapshot first if it matters). Hanging up has the same end state, but the daemon cannot notice until the in-flight request finishes on its own, so the sandbox holds its `--max-sessions` slot and guest RAM for up to the remaining wall budget; `cancel` reclaims both immediately. |
+| `{"schema":1,"op":"close"}` | End the session and tear the sandbox down (a hung-up connection does the same). |
+
+`put`/`get` carry **UTF-8 text**; bulk or binary I/O is the block-device path
+(`BootConfig::input_dir`/`output_dir`), not this per-message line.
+
+## Responses
+
+| Response | Meaning |
+|---|---|
+| `{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}` | The sandbox booted; `pooled` says whether it came from the pre-warmed pool. |
+| `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `ekvm run --json`; a non-zero `exit_code` is a *result*, not an error). |
+| `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
+| `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
+| `{"schema":1,"reply":"snapshotted","dir":"/tmp/ekvm-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
+| `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
+| `{"schema":1,"reply":"cancelled"}` | The in-flight request was abandoned and the sandbox torn down, acknowledging `cancel`. Always the connection's last message; whatever the cancelled request had produced is discarded. |
+| `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
+| `{"schema":1,"reply":"error","message":"…","fatal":false,"kind":"guest"}` | The request could not be served. `fatal:true` means the session is gone (reconnect); `fatal:false` is a per-request fault (a command that couldn't spawn, a schema-valid but malformed line) the session survives. A wrong `schema` is `fatal:true`. `kind` says **whose fault** it is, so a client branches on a value instead of parsing `message`: see below. |
+| `{"schema":1,"reply":"at_capacity","retry_after_ms":1000}` | The daemon is **at capacity** (the `--max-sessions` count or an aggregate resource ceiling is full) and refused the `open` before booting anything. A distinct backpressure signal (not an `error`) a dispatcher fails over on; `retry_after_ms` is a backoff hint. Always session-ending. |
+
+## Error kinds
+
+`fatal` answers "is this session over?"; `kind` answers "whose fault, and what should I do?". They
+are independent: a guest fault is non-fatal but retrying the same command changes nothing, while a
+failed boot is fatal yet nothing about the caller's request was wrong.
+
+| `kind` | Meaning | What a client should do |
+|---|---|---|
+| `infra` | The host couldn't stand the sandbox up, or a bounded wait expired. | Retry, or try another host. |
+| `transport` | A framing/IO fault on an established exec channel, or a guest silent past its deadline. | Retire the sandbox; don't blame the command. |
+| `guest` | The run is at fault: couldn't spawn, outran its budget, flooded output. | Fix the command; an identical retry fails identically. |
+| `protocol` | The client's own message: wrong `schema`, undecodable, oversize, or out of order. | Fix the client. |
+| `refused` | Understood and declined: an operator-chosen posture (snapshotting a jailed session) or a capability this session lacks (no probes attached). | Don't retry as-is. |
+
+`infra` / `transport` / `guest` are the wire form of the engine's own pinned error taxonomy
+(`vmm::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same way.
+
+**Treat an unrecognized `kind` as `infra`.** The set may grow; a value your client predates means
+"unclassified", and assuming the host rather than the caller is the conservative read. An absent
+`kind` (a daemon older than the field) reads the same way.
+
+## Compatibility rules (what an SDK must do)
+
+The engine's own client is written in Rust with serde, but nothing here depends on that: an SDK in
+any language faces these questions independently, so the answers are the protocol's, not the
+implementation's. Three rules, in decreasing order of how often you will hit them.
+
+**1. Ignore fields you do not recognize.** Messages may grow fields within a `schema`, so a decoder
+must not reject an object because it carries something extra. This is how the wire evolves without a
+version bump: a new optional field is invisible to older clients and meaningful to newer ones. An
+SDK that rejects unknown fields (a strict struct decoder, a `deny_unknown_fields`-style setting)
+will break on a routine daemon upgrade. Note the direction: **omitted** optional fields keep the
+documented default, so absence and unfamiliarity are both safe.
+
+**2. Reject a `reply` you do not recognize, loudly.** Unlike fields, an unrecognized *reply kind* is
+a hard error and must be surfaced, not skipped. This is deliberate, and it is the opposite of
+rule 1: the protocol is strict request/response, so a reply you cannot interpret means you have lost
+track of what the daemon is answering. Skipping it would silently desynchronize the session and
+misattribute every later reply to the wrong request. Growing the reply set is therefore a
+[`schema`](#the-wire-protocol-versioned-json-schema-1) bump, not an additive change, and a bump is
+rejected up front by both sides.
+
+**3. Degrade on an unrecognized enumerated *value*.** Where a field carries a value from a named set
+rather than free text, the set may grow, and an unfamiliar value must map to a documented
+conservative default rather than failing. `kind` is the case that exists today: treat anything you
+do not recognize (or an absent `kind`) as `infra`. Values are not replies; they carry no framing, so
+degrading loses information rather than synchronization.
+
+The short version: **fields grow, values grow, replies do not.** A `schema` mismatch is always
+fatal and always reported before a body is trusted, so a client built against a future revision
+fails immediately instead of half-understanding a session.
+
+## Protocol examples
+
+A whole session, driven by hand (an `open` with no fields takes the defaults):
+
+```console
+$ printf '%s\n' \
+    '{"schema":1,"op":"open"}' \
+    '{"schema":1,"op":"exec","argv":["echo","hi"]}' \
+    '{"schema":1,"op":"close"}' \
+  | socat - UNIX-CONNECT:./ekvm.sock
+{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}
+{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}
+{"schema":1,"reply":"closed"}
+```
+
+#### Inject, run, extract (`put` → `exec` → `get`)
+
+The round trip a caller uses to collect what a run *produced*, not just what it printed:
+
+**Request 1 (`put` the input):**
+```json
+{"schema":1,"op":"put","path":"app.py","content":"with open('out.txt', 'w') as f:\n    f.write('generated in the guest\\n')\n"}
+```
+**Response 1:**
+```json
+{"schema":1,"reply":"put","path":"app.py"}
+```
+
+**Request 2 (`exec` it):**
+```json
+{"schema":1,"op":"exec","argv":["python3","app.py"],"stdin":""}
+```
+**Response 2:**
+```json
+{"schema":1,"reply":"result","exit_code":0,"stdout":"","stderr":"","exec_wall_ms":8}
+```
+
+**Request 3 (`get` the file the run wrote):**
+```json
+{"schema":1,"op":"get","path":"out.txt"}
+```
+**Response 3:**
+```json
+{"schema":1,"reply":"got","path":"out.txt","content":"generated in the guest\n","present":true}
+```
+
+#### Live audit inspection (`trace_summary`)
+
+**Request:**
+```json
+{"schema":1,"op":"trace_summary"}
+```
+**Response:**
+```json
+{
+  "schema": 1,
+  "reply": "trace_summary",
+  "summary": {
+    "schema": 1,
+    "wall_ms": 142,
+    "exit_code": 0,
+    "egress_allowed": [],
+    "egress_denied": [],
+    "resources": {
+      "user_cpu_us": 12000,
+      "system_cpu_us": 4000,
+      "max_rss_bytes": 28432000
+    },
+    "coverage_gaps": []
+  }
+}
+```

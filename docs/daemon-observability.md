@@ -1,0 +1,58 @@
+# Observability for the hoster
+
+The daemon exposes its own numbers; dashboards, alerting, and retention are the hoster's, above the
+engine.
+
+## Structured logs
+
+Operational logs are structured `tracing` events on **stderr**, human-readable text by default,
+or one JSON object per line with `--log-json` (or `EKVM_LOG_FORMAT=json`) for a log shipper. The
+events and their fields (`vmm_pid`, `boot_ms`, `pooled`, …) are identical in both encodings; the flag
+changes only the framing. The filter is `--log` / `EKVM_LOG` (default `info`, the per-session
+open/close lines are the daemon's operational trace).
+
+```console
+ekvm serve --socket ./ekvm.sock --log-json --log info 2>> /var/log/ekvm.jsonl
+```
+
+## Metrics (Prometheus)
+
+`--metrics ADDR` serves the Prometheus text-exposition format at `GET /metrics`:
+
+```console
+ekvm serve --socket ./ekvm.sock --metrics 127.0.0.1:9920
+curl -s http://127.0.0.1:9920/metrics
+```
+
+The endpoint is **off by default**, and it serves plain HTTP with **no auth** (the same posture as
+the unix socket: access control is the hoster's), bind it to loopback or a private scrape network,
+never a public interface. If the requested address can't be bound, the daemon **refuses to start**
+(an operational surface you asked for must not silently be absent). Durations follow the Prometheus
+convention of base units: **seconds**, never milliseconds.
+
+| Metric | Type | Meaning |
+|---|---|---|
+| `ekvm_build_info{version=…}` | gauge | Build metadata (value always 1). |
+| `ekvm_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
+| `ekvm_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
+| `ekvm_open_refusals_total{reason=…}` | counter | `at_capacity` refusals, by which ceiling refused: `sessions` (`--max-sessions`) vs `resources` (`--max-committed-*`). A flat zero here plus flat opens means saturation, not calm. |
+| `ekvm_sessions_active` | gauge | Sessions currently open (one live microVM each). |
+| `ekvm_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
+| `ekvm_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
+| `ekvm_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
+| `ekvm_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
+| `ekvm_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
+| `ekvm_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
+| `ekvm_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
+| `ekvm_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
+| `ekvm_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions and pre-warmed pool clones: the RAM actually spoken for. |
+| `ekvm_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
+
+A minimal scrape config:
+
+```yaml
+scrape_configs:
+  - job_name: ekvm
+    static_configs:
+      - targets: ["127.0.0.1:9920"]
+```

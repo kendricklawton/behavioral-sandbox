@@ -59,7 +59,7 @@ Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, n
 - **Snapshots and the pre-warmed pool.** A pre-warmed pool is a long-lived-process concern, so it
   lives in the [`ekvm serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
 - **The wire API.** The programmatic driver surface is
-  [the daemon's](./daemon.md#the-wire-protocol-versioned-json-schema-1), not a subcommand.
+  [the daemon's](./daemon-protocol.md), not a subcommand.
 - **Bulk block-device I/O** (`BootConfig::input_dir`/`output_dir`, whole directories or large files as
   ext4 devices) and **out-of-band control** (`KillHandle`, force-killing a blocked exec from another
   thread) are *embedding-API* capabilities. The CLI's file path is per-frame `--put`/`--get` (small,

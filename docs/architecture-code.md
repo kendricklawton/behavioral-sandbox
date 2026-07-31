@@ -1,0 +1,100 @@
+# The code
+
+What the crates are for, the types worth knowing before reading code, and the order to read them in.
+
+## Reading the code
+
+This document gives an overview of the implementation: what the crates are for, the types worth
+knowing before reading code, and the order things happen in during a run. For finer detail, the code
+comments are the authority, and they carry the reasoning this page summarizes.
+
+The reading order that works: this page, then `crates/channel/src/lib.rs` (small, self-contained, and
+it defines the host/guest contract), then `crates/vmm/src/vm.rs` and `spawn.rs`, then the eBPF half.
+
+`spawn.rs` keeps the launch, boot, and abort state machine; its separable parts sit alongside it in
+`spawn/restore.rs` (the restore path and its disk staging), `spawn/fcversion.rs` (what release is on
+this host and what the driver may therefore send it), and `spawn/workdir.rs` (minting the per-VM dir
+and the two path constraints on it).
+
+## The `vmm` crate
+
+`vmm` is the engine. It is the crate an embedder depends on, and the only one whose public API
+carries the [`api` commit scope](./contributing-development-process.md#the-api-scope).
+
+Its safety posture is the inverse of most VMM projects: **the host path forbids `unsafe` outright**.
+`vmm`, `cli`, `channel`, `guest-agent`, and `probes-loader` each carry `#![forbid(unsafe_code)]`, so
+that is a compiler error rather than a review convention. `crates/probes` is the single exception,
+structurally, because the BPF target requires raw map dereferences. See
+[Coding guidelines](./contributing-coding-guidelines.md#use-of-unsafe).
+
+The public surface is deliberately narrow. From `lib.rs`:
+
+```rust
+pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT};
+pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
+pub use lifetime::KillHandle;
+pub use net::GuestLink;
+pub use pool::Pool;
+pub use sweep::{sweep_orphans, SweepReport};
+```
+
+Everything else (`console`, `drives`, `exec`, `firecracker`, `jail`'s internals, `paths`, `proc`,
+`snapshot`, `spawn`, `sweep`'s internals) is a private module. `doctor` is public because the CLI and
+`xtask setup` both render its checks, and it is documented as a diagnostic helper rather than part of
+the pinned surface.
+
+## Important concepts
+
+Some types to have in the back of your head before reading further.
+
+* **`Sandbox`** (`lib.rs`) is what an embedder holds. It is a thin wrapper over `RunningVm` whose job
+  is to make the right thing the default: `Sandbox::open` **jails unconditionally** (an unset
+  `config.jail` becomes `Jail::default()`) and turns the vsock exec channel on, because a `Sandbox`
+  exists to run code.
+
+  The opt-out is a *constructor name*, `Sandbox::open_unjailed`, not a boolean flag. That is
+  deliberate: a name is greppable and cannot be reached by accident or by a config file, and any
+  `jail` set on the config is cleared by it (the name wins). The type is
+  `#[must_use = "dropping a Sandbox kills its microVM"]`.
+
+* **`BootConfig`** is the whole boot request: artifact paths, resource knobs, `input_dir`/`output_dir`
+  for bulk I/O, networking, the jail. `BootConfig::from_env` applies the
+  [layered configuration](./cli-config.md), and the CLI is otherwise a thin translation of flags into
+  this struct. If you are adding a boot-time capability, it almost certainly starts here.
+
+* **`RunningVm`** (`vm.rs`) is the booted microVM: the `firecracker` child, its API socket, the scratch
+  dir, the captured console, and, importantly, **everything that must be reclaimed**. Its fields are a
+  good map of what a VM owns: the active rootfs backing file, the vsock socket, the output device and
+  where it extracts to, the per-VM tap (which lives *outside* the workdir, so teardown must delete it
+  explicitly), the chroot (whose cgroup is likewise outside), and the lifetime machinery below.
+
+* **`VmLifetime` and `KillHandle`** (`lifetime.rs`) are how a VM dies. `KillHandle` is a cloneable,
+  `Send + Sync` handle that force-kills one VM from outside its owning borrow: the host-gave-up path.
+  **The kill is the cgroup**, writing `1` to the VM's `cgroup.kill`, which SIGKILLs the whole VMM tree
+  with no pid arithmetic, which is why the handle is safe to fire from any thread at any time. On a
+  host with no cgroup it falls back to signalling the VMM's pid, which is safe while the VM exists
+  because an unreaped child's pid cannot be recycled.
+
+  Note the distinction the code is careful about: **killing is not tearing down.** Host residue is
+  still reclaimed by the owner's `Drop` or `shutdown`, which is unblocked by exactly the death the
+  handle causes.
+
+* **`VmmError` and `ErrorKind`** (`lib.rs`) are the typed-error contract. `VmmError` is
+  `#[non_exhaustive]` and its `kind()` maps every variant into one of three buckets an embedder can
+  branch on: `Infra` (retry or fix the host), `Transport` (retire this VM), `Guest` (surface to the
+  user). **The match in `kind()` is deliberately wildcard-free**, so adding a variant fails to compile
+  until someone gives it a deliberate bucket. That is the mechanism keeping the contract honest.
+
+* **`SandboxProbes` and `RunRecord`** (`probes-loader`) are the observation half: the attach bundle for
+  one sandbox, and the record it finalizes. See [the eBPF half](./architecture-ebpf.md) below.
+
+## The daemon
+
+`ekvm serve` is the same engine behind a versioned newline-JSON protocol on a unix socket. `protocol`
+holds the wire types, `client` is a dependency-light reference client, and `cli`'s `serve.rs` and
+`session.rs` are the server.
+
+The security-relevant difference from the CLI: a daemon's clients control neither its config file nor
+its environment, so it takes its resource ceilings as **explicit flags** rather than from a discovered
+`.ekvm.toml`. A daemon must not read a security control out of whatever directory it happened to be
+started in.
