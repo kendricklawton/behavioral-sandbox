@@ -1,12 +1,13 @@
 # Contributing
 
-The canonical operating manual for humans and coding agents alike is
-[`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) at the repo root. This section
-of the book expands on it.
+This section of the book is the developer manual: what the crates are for, how to build them, the
+gates a change passes, and the conventions it is held to.
 
-The repository **is not open to outside pull requests yet**; only project collaborators commit code.
-The pages below are written for them, and for anyone reading to understand how the project is
-maintained.
+The repository is **open to outside pull requests**. Bug fixes, tests, and documentation can go
+straight to one; anything larger starts with an issue, because the pre-1.0 surface still moves.
+[`CONTRIBUTING.md`](https://github.com/packsixfour/ekvm/blob/main/CONTRIBUTING.md) has the terms,
+including the `Signed-off-by` requirement and why the privileged gate cannot run on a fork's pull
+request. The pages below are the developer instructions themselves.
 
 - **[Architecture](./contributing-architecture.md)**, what the crates are for, the types worth knowing
   before reading code, and the order things happen in during a run. Start here.
@@ -30,6 +31,8 @@ Every change is measured against six design rules. They state intent and the mec
 a change that breaks one is a design error rather than a trade-off, and the first question in review
 is which rule a change touches.
 
-They are single-sourced in [`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md) and
-restated for readers in the [design specification](./design.md#design-rules). Deliberately not
-restated here: a third copy is a third thing to drift.
+Read them in the [design specification](./design.md#design-rules), which carries the reasoning
+behind each. They are single-sourced in
+[`AGENTS.md`](https://github.com/packsixfour/ekvm/blob/main/AGENTS.md), the standing instructions
+coding agents in this repo are held to, and deliberately not restated here: a third copy is a third
+thing to drift.

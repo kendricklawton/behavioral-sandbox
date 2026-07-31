@@ -216,10 +216,11 @@ the driver API and the wire protocol under the support policy in [RELEASES.md](R
 then the `Sandbox`/`vmm` API, the daemon protocol, the record format, and the crate names can all
 change without notice.
 
-The project is developed by a small group and **is not open to outside pull requests yet**; only
-project collaborators commit code. See [`CONTRIBUTING.md`](CONTRIBUTING.md), the
-[contributing chapters](docs/contributing.md), and [`AGENTS.md`](AGENTS.md), which is the operating
-manual for coding agents working in this repo.
+The project is **open to outside pull requests**. Bug fixes, tests, and documentation can go
+straight to one; anything larger starts with an issue, since the surface above is still moving.
+Commits carry a `Signed-off-by` line. The terms are in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+developer manual is the [contributing chapters](docs/contributing.md). Coding agents working in this
+repo follow [`AGENTS.md`](AGENTS.md).
 
 Security issues: [`SECURITY.md`](SECURITY.md).
 
