@@ -32,6 +32,13 @@
 
 ## What it is
 
+```
+untrusted code
+      → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
+      → host-side eBPF (aya): syscalls · the VM's tap device (tc/XDP) · its cgroup
+      → per-run audit record (network flows · notable syscalls · resources · denials)
+```
+
 eKVM runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU
 through KVM rather than by guest-side software. Around that microVM, host-side eBPF (via
 [aya](https://aya-rs.dev/)) observes and enforces what the code does, its syscalls, its network, and
@@ -174,17 +181,7 @@ in place. It is not published as a site until the first release.
 - **[Security](docs/security.md)** and the **[threat model](docs/security-threat-model.md)**.
 - **[Contributing](docs/contributing.md)**, invariants, developer tools, CI gates, testing, fuzzing.
 
-## How it fits together
-
-```
-untrusted code
-      → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
-      → host-side eBPF (aya): syscalls · the VM's tap device (tc/XDP) · its cgroup
-      → per-run audit record (network flows · notable syscalls · resources · denials)
-```
-
-Untrusted code executes inside the microVM while the host kernel observes and enforces policy from
-the host side of that boundary.
+## Repo layout
 
 | Path | Role |
 |------|------|
