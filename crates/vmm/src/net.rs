@@ -99,6 +99,22 @@ impl<A> GuestLink<A> {
     }
 }
 
+impl GuestLink<Ipv4Addr> {
+    /// The link's netmask in dotted-quad form, the only shape the kernel's `ip=` boot parameter
+    /// takes (`CONFIG_IP_PNP` has no prefix-length form). Rendered from `prefix_len` so the guest's
+    /// mask and the host tap's prefix stay one value.
+    ///
+    /// A `prefix_len` past 32 saturates to `/32`, the tightest mask: a link that reaches nothing
+    /// fails visibly on the first packet, where saturating the other way would quietly widen what
+    /// the guest treats as on-link.
+    pub(crate) fn netmask(&self) -> Ipv4Addr {
+        // `u32::MAX << 32` is an overflowing shift, and design rule 5 leaves no room for a panic on
+        // the boot path, so /0 is `checked_shl`'s `None` rather than a branch.
+        let host_bits = 32u32.saturating_sub(u32::from(self.prefix_len));
+        Ipv4Addr::from(u32::MAX.checked_shl(host_bits).unwrap_or(0))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Tap {
     /// The network namespace name (the VM's scratch-dir name), also the `/run/netns/<name>` handle.
