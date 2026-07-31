@@ -64,6 +64,15 @@ static FC_VERSION: std::sync::OnceLock<FcProbe> = std::sync::OnceLock::new();
 /// probe is [`FcProbe::Unavailable`], the silent case, since the spawn that follows produces the
 /// legible typed error.
 pub(crate) fn probe_fc_version(firecracker: &Path) -> FcProbe {
+    probe_fc_version_within(firecracker, crate::proc::VERSION_PROBE_TIMEOUT)
+}
+
+/// [`probe_fc_version`] with the wall as an argument, so the wedged-binary case can be tested
+/// against a short one. The production wall is named once, in the wrapper above; nothing else picks
+/// its own. This is a parameter rather than a `#[cfg(test)]` constant deliberately: a compile-time
+/// swap would leave the shipped path and the tested path as two different paths, and the whole
+/// point of the test is to exercise the shipped one.
+pub(super) fn probe_fc_version_within(firecracker: &Path, wall: Duration) -> FcProbe {
     // stdout goes to a **file**, not a pipe. `EKVM_FIRECRACKER` may point at a wrapper script, and
     // a wrapper that backgrounds anything inheriting stdout keeps a pipe's write end open forever:
     // reading it after the child is reaped would then block inside this `OnceLock`, hanging every
@@ -83,7 +92,7 @@ pub(crate) fn probe_fc_version(firecracker: &Path) -> FcProbe {
     match cmd.spawn() {
         Err(_) => FcProbe::Unavailable,
         Ok(mut child) => {
-            let deadline = deadline_after(crate::proc::VERSION_PROBE_TIMEOUT);
+            let deadline = deadline_after(wall);
             if crate::drives::wait_bounded(
                 &mut child,
                 deadline,

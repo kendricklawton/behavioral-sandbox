@@ -44,7 +44,7 @@ use fcversion::warn_on_unpinned_firecracker;
 use fcversion::FC_CLOCK_REALTIME_SINCE;
 pub(crate) use fcversion::{fc_version_of, MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION};
 #[cfg(test)]
-use fcversion::{probe_fc_version, FcProbe, VERSION_HEAD_CAP};
+use fcversion::{probe_fc_version, probe_fc_version_within, FcProbe, VERSION_HEAD_CAP};
 #[cfg(test)]
 use restore::{ensure_private_staging_dir, stage_restore_disk, StagedDisk};
 #[cfg(test)]
@@ -1103,13 +1103,23 @@ mod tests {
         // This probe runs before any boot deadline exists, so an unbounded one hung *every* boot
         // with nothing to report. A wedged probe is `Unavailable` (the silent case): the spawn that
         // follows produces the legible typed error.
+        //
+        // Run against a short injected wall, not the production five seconds. What is under test is
+        // that the probe gives up *at its wall*, which a 100 ms wall demonstrates exactly as well
+        // and in 1/50th the time: this one test used to be the entire unit suite's wall clock. The
+        // shipped default is the wrapper's business, and it is named in exactly one place.
         let dir = ScratchDir::created("fcver-hang");
         let hang = script(&dir, "fc-hang", "sleep 60");
+        let wall = Duration::from_millis(100);
         let started = Instant::now();
-        let probed = probe_fc_version(&hang);
+        let probed = probe_fc_version_within(&hang, wall);
         assert!(matches!(probed, FcProbe::Unavailable), "got {probed:?}");
+        // Generous slack over the wall, since what would make this flake is a slow spawn or a
+        // descheduled poll, neither of which is the property under test. It still fails loudly if
+        // the wall stops being honoured at all, which is the regression that matters: `sleep 60`
+        // would take a full minute.
         assert!(
-            started.elapsed() < crate::proc::VERSION_PROBE_TIMEOUT + Duration::from_secs(3),
+            started.elapsed() < wall + Duration::from_secs(3),
             "the probe must give up at its wall: {:?}",
             started.elapsed()
         );
