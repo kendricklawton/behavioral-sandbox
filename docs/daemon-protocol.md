@@ -119,7 +119,7 @@ $ printf '%s\n' \
 {"schema":1,"reply":"closed"}
 ```
 
-#### Inject, run, extract (`put` → `exec` → `get`)
+### Inject, run, extract (`put` → `exec` → `get`)
 
 The round trip a caller uses to collect what a run *produced*, not just what it printed:
 
@@ -150,7 +150,7 @@ The round trip a caller uses to collect what a run *produced*, not just what it 
 {"schema":1,"reply":"got","path":"out.txt","content":"generated in the guest\n","present":true}
 ```
 
-#### Live audit inspection (`trace_summary`)
+### Live audit inspection (`trace_summary`)
 
 **Request:**
 ```json

@@ -158,7 +158,7 @@ rather than project configuration.
 
 ---
 
-# Operator policy
+## Operator policy
 
 A second group of `.ekvm.toml` keys sets the **host's** posture rather than a per-run knob. These have
 **no `EKVM_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling whose

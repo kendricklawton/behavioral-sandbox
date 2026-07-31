@@ -4,7 +4,7 @@ For the most part this project follows common Rust conventions, though there are
 things to be aware of. The workflow and gate mechanics are in [Contributing](./contributing.md); this
 page is about the code itself.
 
-### `rustfmt`
+## `rustfmt`
 
 All code is formatted according to rustfmt, checked by the host-safe gate. Format locally with:
 
@@ -15,7 +15,7 @@ cargo fmt --all
 at the root of the repository. `cargo xtask check` runs the same check in about four seconds, along
 with the prose-drift lint and Clippy, which is the intended inner loop.
 
-### Compiler warnings and lints
+## Compiler warnings and lints
 
 The gate promotes all compiler warnings to errors, so `main` never has warnings for the pinned
 compiler. Unlike a project that floats on `stable`, this one **pins the toolchain exactly** in
@@ -26,7 +26,7 @@ a class of surprise this project chose to design out.
 During local development warnings are just warnings, and a build or test run still succeeds. This is
 useful mid-refactor. By the time a change lands, the gate requires them resolved.
 
-### Clippy
+## Clippy
 
 The gate runs Clippy with `-D warnings` across the workspace. On top of the default set, this project
 **opts additional lints into `deny`** through `[workspace.lints.clippy]` in the root `Cargo.toml`:
@@ -65,7 +65,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 Contributors are welcome to propose new lints. Enabling one for the workspace means fixing it
 everywhere in the same change.
 
-### Minimum supported `rustc` version (MSRV)
+## Minimum supported `rustc` version (MSRV)
 
 Supported Rust is **current stable**, pinned exactly in `rust-toolchain.toml` and mirrored at minor
 granularity in the workspace `rust-version`. There is no back-support window for older toolchains yet;
@@ -83,7 +83,7 @@ links against that nightly's LLVM, so the two move together. A gate test
 (`ebpf_toolchain_pins_are_single_sourced`) fails if any copy of either pin drifts from its single
 source.
 
-### Dependencies
+## Dependencies
 
 This project is **dependency-light by design**, and the threshold for adding one is higher than
 default. Before adding a dependency, consider whether the needed slice is small enough to write. The
@@ -101,7 +101,7 @@ caught a Firecracker pin that had drifted below its own support floor.
 Non-Rust SDKs live in separate companion repositories, so Python, Node, and Go build tooling never
 enters this workspace.
 
-### Crate organization
+## Crate organization
 
 Crates live flat under `crates/<name>`, and the **package name is usually the directory name**. The
 CLI is the deliberate exception: `crates/cli` declares `name = "ekvm"`, because a package's default
@@ -119,7 +119,7 @@ Two boundaries decide where new code belongs:
 `vmm` is the library downstream embedders pin, so its public surface is the API that carries the `api`
 commit scope. Keep new public items out of it unless an embedder needs them.
 
-### Use of `unsafe`
+## Use of `unsafe`
 
 **The host path forbids it outright.** Every shipped host crate carries `#![forbid(unsafe_code)]`:
 `vmm`, `cli`, `channel`, `guest-agent`, and `probes-loader`. This is not an aspiration policed by
