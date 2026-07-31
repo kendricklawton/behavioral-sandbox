@@ -208,6 +208,54 @@ pub(crate) fn read_head(mut file: std::fs::File, cap: u64) -> std::io::Result<St
 mod tests {
     use super::*;
 
+    /// The bound the version probe and the stderr tail both rely on, asserted where it lives.
+    /// `spawn`'s flooding-wrapper test names this property but cannot observe it: it checks that a
+    /// version still parses, which holds whether 4 KiB or 3 MB was read. This is the assertion that
+    /// fails if the `take(cap)` is dropped, and it needs no subprocess, so it cannot flake.
+    #[test]
+    fn read_head_stops_at_the_cap_however_long_the_file_is() {
+        use std::io::Write as _;
+
+        let (sink, back) = scratch_pair("readhead").expect("a scratch pair");
+        let cap = 4096u64;
+        (&sink).write_all(b"Firecracker v1.16.1\n").expect("head");
+        // Well past the cap, and past any plausible buffer: a read that ignores the cap returns
+        // this whole thing.
+        let filler = vec![b'x'; 64 * 1024];
+        for _ in 0..16 {
+            (&sink).write_all(&filler).expect("flood");
+        }
+        let on_disk = sink.metadata().expect("stat").len();
+        assert!(
+            on_disk > cap * 100,
+            "the file must dwarf the cap: {on_disk}"
+        );
+
+        let head = read_head(back, cap).expect("read back");
+        assert_eq!(
+            head.len() as u64,
+            cap,
+            "a file larger than the cap must read back at exactly the cap"
+        );
+        assert!(
+            head.starts_with("Firecracker v1.16.1"),
+            "the cap takes the head, not an arbitrary window: {:?}",
+            &head[..head.len().min(40)]
+        );
+    }
+
+    /// The other side of the same bound: a file *under* the cap is not padded or truncated, so the
+    /// cap is a ceiling rather than a fixed-size read.
+    #[test]
+    fn read_head_returns_a_short_file_whole() {
+        use std::io::Write as _;
+
+        let (sink, back) = scratch_pair("readhead-short").expect("a scratch pair");
+        (&sink).write_all(b"Firecracker v1.16.1\n").expect("write");
+        let head = read_head(back, 4096).expect("read back");
+        assert_eq!(head, "Firecracker v1.16.1\n");
+    }
+
     #[test]
     fn a_silent_failure_is_described_by_its_status() {
         // The regression this exists to hold: a helper killed by a signal writes no stderr, and

@@ -1116,19 +1116,25 @@ mod tests {
     }
 
     #[test]
-    fn a_flooding_firecracker_is_read_back_bounded() {
-        // The read used to pull the whole file into host RAM and only then cut it to 4 KiB. A
-        // wrapper that floods stdout is the case that made that a real cost rather than a nitpick;
-        // the version line still parses out of the head of the flood.
+    fn a_flooding_firecracker_still_parses_from_the_head() {
+        // The end-to-end half: a wrapper that floods stdout still yields its version, spawn and
+        // wait and read included. The *bound* itself is asserted in `proc`
+        // (`read_head_stops_at_the_cap_however_long_the_file_is`), because this test cannot see it:
+        // it would pass just as well if the whole 3 MB were pulled into host RAM first.
         let dir = ScratchDir::created("fcver-flood");
         let flood = script(
             &dir,
             "fc-flood",
             "echo 'Firecracker v1.16.1'\nyes ekvm-flood | head -c 3000000",
         );
+        // Bound and printed, like the hang test above. This assertion failed once during a gate run
+        // and reported nothing but "assertion failed", so the variant is what the next occurrence
+        // needs to say: `Unparseable` means the parse broke, `Unavailable` means the spawn or wait
+        // did (a fork under a loaded gate can fail with EAGAIN, which is not this code's fault).
+        let probed = probe_fc_version(&flood);
         assert!(
-            matches!(probe_fc_version(&flood), FcProbe::Version((1, 16))),
-            "the version is in the head of the output, and the tail is not read"
+            matches!(probed, FcProbe::Version((1, 16))),
+            "got {probed:?}"
         );
     }
 
