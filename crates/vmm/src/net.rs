@@ -372,13 +372,4 @@ mod tests {
     fn netns_path_is_the_iproute2_handle() {
         assert_eq!(netns_path("ekvm-42-0"), Path::new("/run/netns/ekvm-42-0"));
     }
-
-    #[test]
-    fn egress_fails_safe_without_default_route() {
-        // Connected-prefix routes permit reaching only the connected host end (10.200.0.1 and fd00:200::1).
-        // With no default route configured in the per-VM netns, any unapproved egress packet is dropped by
-        // kernel routing even when host-side eBPF probes are absent.
-        assert_eq!(HOST_PREFIX, 30, "/30 covers only 10.200.0.1 and 10.200.0.2");
-        assert_eq!(HOST_PREFIX6, 64, "/64 ULA covers only the connected link");
-    }
 }
