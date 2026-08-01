@@ -401,8 +401,11 @@ fn fuzz_target_parser() -> clap::builder::PossibleValuesParser {
 }
 
 /// Every libFuzzer target in `fuzz/`, ordered by value (outermost untrusted boundary first). The
-/// single source of truth: the smoke run iterates it, `--help` is generated from it, and the
-/// nightly matrix in `.github/workflows/fuzz.yml` mirrors it.
+/// single source of truth: the smoke run iterates it and `--help` is generated from it, so neither
+/// can drift by construction. Three copies can, because neither a workflow file nor a cargo manifest
+/// can resolve a Rust constant: `fuzz/Cargo.toml`'s `[[bin]]` entries, the sources in
+/// `fuzz/fuzz_targets/`, and the nightly matrix in `.github/workflows/fuzz.yml`.
+/// `fuzz_targets_are_single_sourced` is what holds those three to this list.
 const FUZZ_TARGETS: &[&str] = &[
     "protocol_message",
     "channel_response",
@@ -1476,5 +1479,75 @@ mod tests {
         assert!(!elf_has_section(&tiny_elf(".text"), ".BTF")); // real sections, none named .BTF
         assert!(!elf_has_section(b"not an elf at all", ".BTF"));
         assert!(!elf_has_section(&[], ".BTF"));
+    }
+
+    /// The three copies of [`FUZZ_TARGETS`] that no constant can reach: a cargo manifest and a
+    /// workflow file cannot read a Rust `const`, and a target's source file is named by the
+    /// filesystem. Each drifts in its own direction and each failure is silent. A target in the
+    /// constant but not the workflow never runs its nightly 15 minutes, so a boundary reads as
+    /// fuzzed while nothing fuzzes it; one in the workflow but not `fuzz/Cargo.toml` fails the
+    /// nightly run on a target cargo-fuzz cannot build.
+    ///
+    /// Compared as sorted sets, since [`FUZZ_TARGETS`] is ordered by value and the others are not.
+    #[test]
+    fn fuzz_targets_are_single_sourced() {
+        let root = workspace_root();
+        let sorted = |mut v: Vec<String>| {
+            v.sort();
+            v
+        };
+        let expected = sorted(FUZZ_TARGETS.iter().map(|t| (*t).to_string()).collect());
+
+        // `fuzz/Cargo.toml`: the `name` of each `[[bin]]`, skipping the package's own `[package]`
+        // name. Section-tracked rather than grepped for `name = `, which would take both.
+        let manifest = std::fs::read_to_string(root.join("fuzz/Cargo.toml")).unwrap();
+        let mut in_bin = false;
+        let mut bins = Vec::new();
+        for line in manifest.lines().map(str::trim) {
+            if line.starts_with('[') {
+                in_bin = line == "[[bin]]";
+            } else if in_bin {
+                if let Some(name) = line
+                    .strip_prefix("name = \"")
+                    .and_then(|n| n.strip_suffix('"'))
+                {
+                    bins.push(name.to_string());
+                }
+            }
+        }
+        assert_eq!(
+            sorted(bins),
+            expected,
+            "fuzz/Cargo.toml's [[bin]] targets drifted from FUZZ_TARGETS"
+        );
+
+        // The sources on disk.
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(root.join("fuzz/fuzz_targets")).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    files.push(stem.to_string());
+                }
+            }
+        }
+        assert_eq!(
+            sorted(files),
+            expected,
+            "fuzz/fuzz_targets/*.rs drifted from FUZZ_TARGETS"
+        );
+
+        // The nightly matrix: a single-line YAML flow sequence, `target: [a, b, c]`.
+        let workflow = std::fs::read_to_string(root.join(".github/workflows/fuzz.yml")).unwrap();
+        let matrix = workflow
+            .lines()
+            .map(str::trim)
+            .find_map(|l| l.strip_prefix("target: [")?.strip_suffix(']'))
+            .expect("fuzz.yml declares the matrix as a one-line `target: [...]` flow sequence");
+        assert_eq!(
+            sorted(matrix.split(',').map(|t| t.trim().to_string()).collect()),
+            expected,
+            ".github/workflows/fuzz.yml's matrix drifted from FUZZ_TARGETS"
+        );
     }
 }
