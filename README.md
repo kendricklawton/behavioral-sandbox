@@ -146,19 +146,24 @@ portable across kernels is tested on one kernel so far, and
 
 [probes]: docs/probes.md
 [embedding]: docs/embedding.md
+[embedding-scope]: docs/embedding-scope.md
 [benchmarks]: docs/benchmarks.md
 
 ## Embedding
 
 The engine is consumed in three shapes, one of which exists today:
 
-* **Rust**, the `ekvm` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`). Not on
-  crates.io yet, so depend on it by git rev. A change to that API is committed with an `api` scope,
-  so a pin bump is auditable from the log alone. The contract is [docs/embedding.md][embedding].
+* **Rust**, the `ekvm` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`), depended
+  on by git rev:
+  `ekvm = { git = "https://github.com/packsixfour/ekvm", rev = "…" }`. It is not on crates.io **by
+  decision, not pending**: an immutable registry version would outlive this engine's support window,
+  which is computed from Firecracker's ([the reasoning][embedding-scope]). A change to that API is
+  committed with an `api` scope, so a pin bump is auditable from the log alone. The contract is
+  [docs/embedding.md][embedding].
 
 * **Any language**, over the `ekvm serve` daemon: a versioned newline-delimited JSON wire protocol
-  on a unix socket, documented in [docs/daemon.md](docs/daemon.md). `crates/client` is a
-  dependency-light Rust reference client for it.
+  on a unix socket, documented in [docs/daemon.md](docs/daemon.md). `ekvm-client` (in
+  `crates/client`) is a dependency-light Rust reference client for it.
 
 * **Language SDKs** (`ekvm-python`, `ekvm-node`, `ekvm-go`), planned in separate companion
   repositories so their build tooling stays out of this workspace. **None are built yet.**
@@ -184,19 +189,22 @@ in place. It is not published as a site until the first release.
 
 ## Repo layout
 
-| Path | Role |
-|------|------|
-| `crates/vmm` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
-| `crates/channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
-| `crates/guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
-| `crates/probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
-| `crates/probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
-| `crates/probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
-| `crates/protocol` | The daemon wire types, versioned. |
-| `crates/client` | The Rust reference client for `ekvm serve`. |
-| `crates/cli` | The `ekvm` CLI: `run`, `shell`, `doctor`, plus the `ekvm serve` daemon. |
-| `docs` | This documentation, as an mdBook. |
-| `xtask` | Dev orchestration: `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
+Directories stay short and packages carry the `ekvm-` prefix, so `cargo … -p` takes the package
+while a path takes the directory.
+
+| Path | Package | Role |
+|------|---------|------|
+| `crates/vmm` | `ekvm` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
+| `crates/channel` | `ekvm-channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
+| `crates/guest-agent` | `ekvm-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
+| `crates/probes` | `ekvm-probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
+| `crates/probes-common` | `ekvm-probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
+| `crates/probes-loader` | `ekvm-probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
+| `crates/protocol` | `ekvm-protocol` | The daemon wire types, versioned. |
+| `crates/client` | `ekvm-client` | The Rust reference client for `ekvm serve`. |
+| `crates/cli` | `ekvm-cli` | The `ekvm` CLI: `run`, `shell`, `doctor`, plus the `ekvm serve` daemon. The binary on `PATH` is `ekvm`. |
+| `docs` | | This documentation, as an mdBook. |
+| `xtask` | `xtask` | Dev orchestration: `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 
 ## Verified on
 

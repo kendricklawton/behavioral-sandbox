@@ -63,11 +63,15 @@ embedders, both of which the support policy in `RELEASES.md` can actually govern
 > describes the boundary the project intends to pin at `v0.1.0`; until that tag, every item on it can
 > change without notice. Pin a git rev.
 
-The `ekvm` public library API and the `ekvm-channel` wire protocol are the surface the project intends to
-pin as its stability boundary:
+The `ekvm` public library API and the two wire protocols are the surface the project intends to pin
+as its stability boundary. This list, `AGENTS.md`'s `api`-scope rule, and
+[RELEASES.md](../RELEASES.md) name the same surface, since a commit scope that does not match the
+policy it audits is worse than no scope at all:
 - **`Sandbox`**, **`Limits`**, **`RunResult`**
 - **`VmmError`**, including variants and the `kind()` -> `ErrorKind` bucket mapping
-- The **`ekvm-channel`** wire framing protocol
+- The **`ekvm-channel`** host↔guest wire framing protocol
+- The daemon's **`ekvm-protocol`** wire types, the newline-JSON contract at `schema: 1`
+  ([Wire protocol](./daemon-protocol.md)), which a non-Rust SDK couples to instead of the library
 
 ### Versioning rules
 - **MAJOR**: Breaking changes to the pinned surface (removed/renamed `VmmError` variants, changed `kind()` bucket mappings, breaking channel wire protocol changes, or raising `Limits` defaults).
