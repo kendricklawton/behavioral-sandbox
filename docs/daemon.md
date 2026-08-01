@@ -20,7 +20,9 @@ ekvm serve --socket ./ekvm.sock --prewarm 4             # a pre-warmed pool of 4
 
 Logs go to **stderr** (`--log` / `EKVM_LOG`, default `info`); the socket carries only the protocol.
 The guest kernel/rootfs come from the environment (`EKVM_KERNEL` / `EKVM_ROOTFS` / `EKVM_MARKER`),
-the same `EKVM_*` layer the CLI reads, a daemon has no `.ekvm.toml` cwd discovery.
+the same `EKVM_*` layer the CLI reads, a daemon has no `.ekvm.toml` cwd discovery. That last part
+matters for `EKVM_GATEWAY` / `EKVM_RESOLVER`: the environment is the *only* way to give a daemon's
+sessions a route, since the file layer the CLI would read is not consulted here.
 
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
 jail posture is fixed when the daemon launches, so a caller can never weaken it. The same holds for

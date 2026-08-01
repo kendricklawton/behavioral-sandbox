@@ -179,7 +179,14 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         wire_kind(e.kind()),
                     ),
                 );
-                end_session(server, vm, None, pooled);
+                // Shut the VM down directly rather than through `end_session`, which decrements the
+                // active-session gauge this path never incremented (`session_opened` is below).
+                // Nothing else of `end_session`'s work applies: a session that reached enforcement
+                // asked for a NIC, and a NIC request is never pool-eligible, so no clone was taken
+                // and there is nothing to refill.
+                if let Err(e) = vm.shutdown() {
+                    tracing::debug!(error = %e, "shutdown after a failed enforcement attach");
+                }
                 return;
             }
             tracing::warn!(error = %e, "probe attach failed; `trace` will report an empty record");
