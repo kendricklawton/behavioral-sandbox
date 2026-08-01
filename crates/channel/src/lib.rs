@@ -83,6 +83,14 @@ pub const GUEST_READY_MARKER: &str = "GUEST-READY";
 /// one definition, a drifted copy would strand the host dialing a port nobody binds.
 pub const VSOCK_PORT: u32 = 1024;
 
+/// The scheme half of the agent's listen spec, so the init line the rootfs build writes
+/// (`vsock:<port>`) and the spec the agent parses are one definition rather than two spellings.
+/// [`VSOCK_PORT`] alone was not enough: the port was shared while the word in front of it was a
+/// literal on the build side and a private const in the agent, so a rename on either side left the
+/// guest booting into an agent that refuses its own command line, and the first thing to notice
+/// would have been a boot timeout under the privileged gate.
+pub const VSOCK_SCHEME: &str = "vsock";
+
 /// Filesystem labels the driver stamps on the data block devices it attaches, and the guest mounts
 /// by. A boot may attach a bulk-input device, a bulk-output device, both, or neither, which shifts
 /// the `/dev/vdX` letters, so the guest resolves each device by **label** (`findfs LABEL=…`) rather

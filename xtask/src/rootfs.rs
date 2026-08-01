@@ -133,13 +133,14 @@ fn rootfs_inittab() -> String {
 # driver passes the v6 address as a cmdline token and `{net_up}` applies it. Best-effort (a
 # plain no-NIC boot is a clean no-op). Runs after /proc is mounted (it reads /proc/cmdline).
 ::sysinit:{net_up}
-ttyS0::respawn:{agent} vsock:{port}
+ttyS0::respawn:{agent} {scheme}:{port}
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/bin/umount -a -r
 ",
         mount_drives = MOUNT_DRIVES_PATH,
         net_up = NET_UP_PATH,
         agent = GUEST_AGENT_PATH,
+        scheme = ekvm_channel::VSOCK_SCHEME,
         port = ekvm_channel::VSOCK_PORT
     )
 }
@@ -548,7 +549,13 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
     // failure that looks healthy right up until a run hangs.
     let inittab = std::fs::read_to_string(in_staging(staging, INITTAB_PATH))
         .with_context(|| format!("guest-image contract: read {INITTAB_PATH}"))?;
-    let vsock_arg = format!("vsock:{}", ekvm_channel::VSOCK_PORT);
+    // Both halves from `ekvm-channel`: the port was already shared, the scheme used to be a literal
+    // here and a private const in the agent.
+    let vsock_arg = format!(
+        "{}:{}",
+        ekvm_channel::VSOCK_SCHEME,
+        ekvm_channel::VSOCK_PORT
+    );
     for needle in [
         GUEST_AGENT_PATH,
         MOUNT_DRIVES_PATH,

@@ -34,8 +34,11 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The listen-spec scheme tokens, shared by the parser and the readiness announcement so the
-/// `vsock:<port>` the host scans for can't drift from what [`parse_listen`] accepts.
-const VSOCK_SCHEME: &str = "vsock";
+/// `vsock:<port>` the host scans for is one definition, not a spelling on each side. The vsock one
+/// comes from [`ekvm_channel`] because the *rootfs build* writes it into the guest's init line too,
+/// which is a third side this crate cannot reach; `unix:` is host-side dev transport only, so it
+/// stays local.
+use ekvm_channel::VSOCK_SCHEME;
 const UNIX_SCHEME: &str = "unix";
 
 fn main() -> ExitCode {
