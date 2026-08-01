@@ -132,6 +132,7 @@ enum Cmd {
     // `ekvm --help` lists) and the detail follows after a blank line (what `ekvm <cmd> --help`
     // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
     /// Run one command in a microVM.
+    ///
     /// Boots a sandbox, runs the command inside it, and tears it down. Jailed by default,
     /// with `--unjailed` as the explicit opt-out. The run's host-observed audit surface rides on
     /// `--trace`, `--record`, `--record-summary`, and `--watch`.
@@ -148,23 +149,28 @@ Examples:
 Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
     /// Open an interactive session in a microVM.
+    ///
     /// One command per line. State persists on the session's filesystem until you exit; shell
     /// process state (a `cd`, a variable) does not, because each line is its own exec.
+    ///
     /// The operator policy (`.ekvm.toml` ceilings, `require_jail`, `require_record`) binds
     /// exactly as it does for `run`.
     Shell(ShellArgs),
     /// Check whether this host can run the engine.
+    ///
     /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
     /// will work, degrade, or refuse before the first sandbox, and names a first command that works
     /// on this host. Exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm
     /// run …` gates correctly.
     Doctor(doctor::DoctorArgs),
     /// Verify a signed audit record.
+    ///
     /// Checks a `--record` file's `ed25519` signature against a trusted key (the host's own, or
     /// `--key <hex>`), so alteration after the producing host is caught. Exits non-zero
     /// if the record was altered or signed by an untrusted key.
     Verify(verify::VerifyArgs),
     /// Run the driver daemon.
+    ///
     /// Exposes the sandbox lifecycle over a unix socket (the versioned newline-JSON wire API), so a local client drives microVMs without linking the engine. Access control is
     /// the socket directory's permissions (no auth, a recorded non-goal).
     Serve(Box<serve::ServeArgs>),
