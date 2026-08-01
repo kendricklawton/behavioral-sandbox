@@ -288,7 +288,12 @@ fn parse_v6_cidr(s: &str) -> Result<Ipv6Cidr, String> {
 }
 
 /// The operator policy for this process: the nearest `.ekvm.toml`'s, or the permissive default when
-/// there is no file. One call site so the CLI and the daemon can't drift on how policy is sourced.
+/// there is no file. `run` and `shell` both source policy through here, so the two CLI paths agree.
+///
+/// The daemon deliberately does **not**: `serve` builds its [`Policy`] from its own flags, because a
+/// daemon must not read a security control out of whatever directory it happened to be started in.
+/// That divergence is the design, not drift, so this function is the CLI's single source and not the
+/// process's.
 #[must_use]
 pub fn policy_of(file: Option<&EkvmToml>) -> Policy {
     file.map(EkvmToml::policy).unwrap_or_default()

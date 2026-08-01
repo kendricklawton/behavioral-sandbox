@@ -94,9 +94,10 @@ impl ExecveCounter {
 }
 
 /// Read a kernel-side single-slot **per-CPU** `u64` counter (the `EVENT_DROPS` shape) and sum its
-/// slots into one total. The one read every drop/count surface shares ([`ExecveCounter::count`],
-/// [`SyscallTracer::dropped_events`], [`TapMonitor::dropped_flows`]/[`dropped_denials`](TapMonitor::dropped_denials)),
-/// so the map-open/read error story can't drift between them.
+/// slots into one total. Every drop/count surface in this crate reads through here, and the
+/// mechanism is that this holds the crate's only `PerCpuArray::try_from`, so the map-open/read error
+/// story is one story rather than one per counter. Deliberately not a list of the callers: this
+/// comment carried one, and it had already gone stale (it named four of the five).
 pub(crate) fn per_cpu_sum(ebpf: &Ebpf, name: &str) -> Result<u64, ProbeError> {
     let map = ebpf
         .map(name)

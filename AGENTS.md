@@ -112,8 +112,12 @@ layers, read `docs/architecture.md` before a non-trivial change to `ekvm`.
   A prose *promise* ("can't drift", "never logged") belongs in a type or a test, with the comment
   pointing at it; a mechanical claim (a repo path, a Markdown link, a `#section` anchor, a
   `cargo … -p` package) is checked by the gate's prose-drift lint, so it fails the gate rather
-  than a reader. Wording and numbers are still yours. State the threat-model framing once per
-  module (rustdoc on the item that owns it), not at every call site.
+  than a reader. A drift claim that *enumerates* what it covers ("shared by A, B and C") has made
+  one more copy, the list, and it drifts the way every copy does: a sweep on 2026-08-01 found four
+  such lists already stale, each in a comment asserting nothing could drift. Name the mechanism a
+  reader can grep instead (the crate's only `PerCpuArray` open, the one constructor) and let the
+  set be whatever that admits. Wording and numbers are still yours. State the threat-model framing
+  once per module (rustdoc on the item that owns it), not at every call site.
 - **No em-dashes in prose.** Repo docs, code comments, and commit messages use
   colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*

@@ -1241,9 +1241,10 @@ fn vendor_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-/// The artifact filenames under [`artifacts_dir`], defined once so the many readers/writers
-/// (`build-rootfs`, `bench-boot`, `setup`, `fetch-artifacts`) can't drift apart: the pinned guest
-/// kernel, the minimal boot rootfs (fetched), and the guest rootfs (`build-rootfs` output).
+/// The artifact filenames under [`artifacts_dir`], defined once so every reader and writer resolves
+/// the same path: the pinned guest kernel, the minimal boot rootfs (fetched), and the guest rootfs
+/// (`build-rootfs` output). Deliberately not a list of the callers, which is a copy that goes stale:
+/// this comment carried one naming four subcommands when seven modules already called these.
 fn kernel_path() -> PathBuf {
     artifacts_dir().join("vmlinux")
 }

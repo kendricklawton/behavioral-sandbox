@@ -1,7 +1,13 @@
 //! Host readiness check: does this machine have what the engine needs to boot and confine a
-//! sandbox? The **single implementation** behind two entry points, the `ekvm doctor` subcommand an
-//! operator runs on a fresh host, and `cargo xtask setup` for a dev box, so the two can't drift on
-//! what "ready" means.
+//! sandbox? [`checks`] is the **single implementation** behind two entry points, the `ekvm doctor`
+//! subcommand an operator runs on a fresh host and `cargo xtask setup` for a dev box, so the two ask
+//! the host the same questions and get the same per-row [`CheckStatus`] back.
+//!
+//! What each does with those rows is its own, and the shared list does not make them agree on it:
+//! only `ekvm doctor` renders the three states apart, calls [`can_boot`], and exits non-zero when a
+//! hard requirement is missing; `setup` prints a flat checklist in which a [`Warn`](CheckStatus::Warn)
+//! is indistinguishable from a [`Fail`](CheckStatus::Fail), and never fails. Each also appends the
+//! eBPF row itself, since that check lives in the probe loader rather than here.
 //!
 //! Each [`Check`] is one prerequisite with a [`CheckStatus`]: [`Ok`](CheckStatus::Ok) present,
 //! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
