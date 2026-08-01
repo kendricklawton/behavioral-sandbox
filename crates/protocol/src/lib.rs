@@ -345,7 +345,7 @@ pub enum Response {
         dir: String,
     },
     /// The session's audit record (answering [`Request::Trace`]), as the **signed record envelope**,
-    /// carried opaquely here so this crate stays free of the probes-loader types.
+    /// carried opaquely here so this crate stays free of the `ekvm-probes-loader` types.
     Trace {
         /// The signed envelope as a JSON object: `{schema, key_id, signature, record}`, where its
         /// `schema` is the *delivery-surface* version and `record` is the canonical `RunRecord` JSON

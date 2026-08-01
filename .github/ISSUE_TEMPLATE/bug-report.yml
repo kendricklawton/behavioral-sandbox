@@ -59,7 +59,7 @@ body:
         - CLI, jailed (the default)
         - CLI, --unjailed
         - ekvm serve (daemon)
-        - embedded (the vmm library API)
+        - embedded (the `ekvm` library API)
       multiple: true
     validations:
       required: true

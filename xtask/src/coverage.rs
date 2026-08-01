@@ -105,7 +105,7 @@ pub fn coverage(host_only: bool) -> Result<()> {
     } else {
         "host-safe + privileged tests"
     };
-    println!("\n✓ coverage measured: {scope}, over the shipped crates (xtask and test-support are excluded)");
+    println!("\n✓ coverage measured: {scope}, over the shipped crates (xtask/ and crates/test-support/ are excluded)");
     println!(
         "  the per-file uncovered regions are the point, not the percentage: {}",
         html_dir.join("index.html").display()

@@ -26,7 +26,7 @@ body:
       label: Proposed shape (optional)
       description: >-
         If you have a concrete API/CLI/wire shape in mind, sketch it. If it touches the pinned
-        public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`, the channel wire protocol) or the
+        public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`, the `ekvm-channel` wire protocol) or the
         audit-record format, say so — those change deliberately.
     validations:
       required: false
@@ -38,7 +38,7 @@ body:
       options:
         - CLI (ekvm run / shell / doctor)
         - ekvm serve (daemon) + wire API
-        - engine API (the vmm library)
+        - engine API (the `ekvm` library)
         - probes / audit record
         - benchmarks / docs / tooling
         - not sure

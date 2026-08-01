@@ -280,7 +280,8 @@ impl ResourceMeter {
     /// A whole [`ResourceSummary`] for the sandbox whose VMM is `pid`: resolve its cgroup
     /// once (id **and** dir, from `/proc/<pid>/cgroup`), read the eBPF CPU total for that cgroup id, and
     /// read the native cgroup v2 memory/IO counters from that cgroup dir. The per-run summary a caller
-    /// ships alongside the run's [`RunResult`](https://docs.rs/vmm), the CPU figure is meaningful
+    /// ships alongside the run's `RunResult` (no link: this crate is deliberately free of `ekvm`,
+    /// and nothing here is on docs.rs), the CPU figure is meaningful
     /// only if this cgroup was [`add_target`](Self::add_target)ed (or [`meter_all`](Self::meter_all) is on)
     /// while the run executed; the memory/IO figures are the kernel's regardless.
     ///

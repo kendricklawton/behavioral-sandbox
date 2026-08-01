@@ -596,7 +596,7 @@ fn a_jailed_daemon_serves_prewarmed_opens() {
     // The composition the rest of this (deliberately unjailed) suite never drives: `serve
     // --prewarm` under the jailer. The daemon's pool source is a Sandbox, so its bundle carries a
     // private disk, and every jailed clone stages that disk into its chroot; a staging regression
-    // there once killed every jailed pool build while the unjailed suite and the vmm-level
+    // there once killed every jailed pool build while the unjailed suite and the `ekvm`-level
     // shared-base pool test both stayed green. This is the missing gate.
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_jailed_daemon_serves_prewarmed_opens: {why}");

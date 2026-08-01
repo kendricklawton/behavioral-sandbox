@@ -298,7 +298,7 @@ impl Client {
     }
 
     /// Fetch the session's host-observed audit record so far, as the `RunRecord` JSON object. Carried
-    /// opaquely so this client stays free of the probes-loader types; parse it with `serde_json`.
+    /// opaquely so this client stays free of the `ekvm-probes-loader` types; parse it with `serde_json`.
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn trace(&mut self) -> Result<serde_json::Value, ClientError> {

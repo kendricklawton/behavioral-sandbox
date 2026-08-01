@@ -9,7 +9,7 @@
 //! `CARGO_BIN_EXE_ekvm`), so what's tested is exactly what an operator runs.
 
 // A test binary: `expect`/`panic!` in non-`#[test]` helpers are the idiomatic assertions, which the
-// workspace's deny doesn't auto-exempt outside `#[test]` fns (same note as the vmm suites).
+// workspace's deny doesn't auto-exempt outside `#[test]` fns (same note as the `ekvm` suites).
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};

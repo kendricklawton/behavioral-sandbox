@@ -536,7 +536,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
 
     // The audit surface, when a flag asked for it (a plain `ekvm run` pays nothing): load the shared
     // probes and bind them to this sandbox by the plain values it exposes, the launch sequence the
-    // probes-loader documents, composed here in the caller. `--allow` enforces (arming the tap before
+    // `ekvm-probes-loader` documents, composed here in the caller. `--allow` enforces (arming the tap before
     // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
     // enforcement is a typed refusal (`attach`).
     let observing = args.trace

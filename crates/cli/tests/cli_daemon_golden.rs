@@ -6,7 +6,7 @@
 //! stream captured differently, an exit code mapped differently, a default limit that diverged).
 //!
 //! It compares only what is a *run result* on both faces: a command that **runs** and returns a
-//! [`RunResult`](vmm), exit code (zero or not), stdout, stderr. A guest fault that never
+//! [`RunResult`](ekvm), exit code (zero or not), stdout, stderr. A guest fault that never
 //! produces a result (an unspawnable binary) is deliberately *out* of scope: the CLI renders it as an
 //! operational error (exit 2, a stderr diagnostic), the daemon as a non-fatal `error` reply, two
 //! faithful renderings of a non-result, not a golden mismatch.
