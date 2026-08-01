@@ -106,3 +106,59 @@ package depends on no host libc at all. Dev builds stay native.
 *patched*, which is the operator's to know and is stated as such in the check's own note. Nor is it
 a portability claim: see [what has not been done](./introduction.md#what-has-not-been-done) for which hosts have actually been run, which as of
 this writing does not include any Red Hat host.
+
+## 9. Egress is enabled by the engine, constructed by the hoster
+
+A sandbox that cannot reach a package index cannot `pip install`, so "how does the guest get out"
+is a real question rather than a hypothetical one. The answer splits the work in two, and this
+decision exists because the split was not written down until a `--allow` invocation was tested
+against a real host and reached nothing.
+
+| The engine | The hoster |
+|---|---|
+| The gateway and resolver addresses in the guest's boot args | The veth, bridge, or macvlan into the netns |
+| The per-VM netns and its lifetime | Address allocation |
+| The eBPF policy at the tap, starting deny-all | NAT, forwarding, firewall rules |
+| Recording the resulting posture in the signed record | The resolver, package mirrors, proxies, hostname policy |
+
+**The test is whether the work needs an allocator or a long-lived shared service.** If it does, it
+is the hoster's. That is not a taste argument; a constant in `net.rs` forces it. Every per-VM netns
+carries the *same* `10.200.0.1/30`, which is what let the netns model retire the finite-address-pool
+exhaustion an earlier tap-in-the-host-netns design risked (`sweep.rs` states the trade in its module
+doc). N sandboxes sharing one uplink therefore cannot be told apart by address, so any uplink the
+engine built would need a per-sandbox address, which is the pool the design deleted on purpose. The
+hoster already has a fleet-wide allocator, because allocating addresses across hosts is the same
+problem as scheduling across them, which [Where the engine ends](./embedding-scope.md) already
+assigns to the hoster.
+
+**What the engine hands the guest is two constants.** A `BootConfig` may name a default gateway and
+a resolver, and they land in the kernel `ip=` boot parameter's gateway and DNS fields. Both are
+operator-supplied and identical for every sandbox on the host, which is what keeps them compatible
+with snapshots: a restored clone does no in-guest re-addressing, so anything varying per sandbox
+would restore wrong. Unset (the default) leaves both fields empty, which is the posture every
+release so far has shipped.
+
+**Deny-by-default is unchanged, because a route is not a permission.** The eBPF policy still starts
+deny-all and still refuses to fail open. A gateway names where the guest should send packets; it
+does not create a path, and on a host whose netns nothing has furnished the packets reach nothing.
+The two controls compose in the order you would want: the hoster decides whether a path exists at
+all, and the policy at the tap decides what may cross it.
+
+**A gateway makes the record less blind, not more.** Without one, an off-link destination fails at
+the guest's own routing table and no packet is emitted, so the classifier never sees the attempt and
+the audit record cannot show it. With one, the attempt crosses the tap, is classified, and a refusal
+lands in the record's denial trail. The reachable set does not widen; the observable set does.
+
+**IPv4 only, for a reason that is not effort.** `--allow` parses IPv4 addresses only, while the
+classifier is dual-stack. A v6 default route would therefore be a path no CLI invocation can write a
+policy for. An empty `POLICY6` denies everything, so it fails closed rather than open, but a route
+whose policy layer is unreachable from the interface operators actually use is a trap. v6 egress
+waits on a v6 `--allow`.
+
+**Known limits this leaves in place.** Each is a consequence of where the line falls, not an
+oversight: destination matching is address, port, and protocol, so hostname policy is the hoster's
+proxy and DNS tunnelling is not addressed here; the classifier's rule table is a fixed size, since
+its loop bound has to be a compile-time constant; the tap's world-to-guest direction passes
+unconditionally, so what can reach a guest is whatever the hoster's uplink exposes; and two
+sandboxes sharing a hoster's bridge are separated by that bridge's configuration plus each
+sandbox's own egress policy, not by anything the engine does.

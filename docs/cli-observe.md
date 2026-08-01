@@ -70,10 +70,11 @@ ekvm run --net \
 classifiers to the tap, so it decides which flows may cross. It does not create a path. The per-VM
 network namespace holds exactly two interfaces, `lo` and the tap, so the only address the guest can
 reach is the host end of its /30; a destination beyond that is refused by the guest's own routing
-with `ENETUNREACH` before a packet is ever emitted, whether or not an allowance names it. Attaching
-an uplink to that namespace (a veth pair, forwarding, NAT) is the hoster's to build and deliberately
-not the engine's, the same line drawn in [Where the engine ends](./embedding-scope.md). Where an
-uplink exists, `--allow` is what bounds what leaves through it.
+with `ENETUNREACH` before a packet is ever emitted, whether or not an allowance names it. Where an
+uplink exists, `--allow` is what bounds what leaves through it. Which half of that is whose is
+[decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster):
+the engine names a gateway and enforces at the tap, the hoster builds the uplink and allocates the
+addresses it needs.
 
 Each `--allow` is `IP[/CIDR][:PORT][/PROTO]`; a bare `IP` is a single-host `/32`, any port, any
 protocol. The allowances build a deny-by-default egress policy: the policy maps are populated first and
