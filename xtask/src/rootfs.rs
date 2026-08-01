@@ -91,6 +91,14 @@ const INITTAB_PATH: &str = "/etc/inittab";
 const OVERLAY_DIR: &str = "/overlay";
 const INPUT_DIR: &str = "/input";
 const OUTPUT_DIR: &str = "/output";
+/// The guest resolver config, and the kernel file it is a symlink to. `ip=`'s DNS fields are read
+/// back by the kernel's own `pnp_seq_show`, which prints `nameserver <addr>` lines in resolv.conf
+/// syntax under a `#MANUAL` comment, so pointing the libc's resolver at it needs a link and no
+/// parsing. Baked as a link rather than written at boot for the reason the mountpoints are: `/` is
+/// read-only under the overlay init. A boot with no NIC leaves the target empty, which reads as
+/// "no nameservers" rather than as an error.
+const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
+const KERNEL_PNP_PATH: &str = "/proc/net/pnp";
 
 /// An absolute *guest* path resolved inside the staging tree. The leading `/` has to go, or
 /// `Path::join` would discard the staging root and address the build host's own filesystem.
@@ -365,6 +373,16 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     std::fs::write(&net_up, net_up_script()).with_context(|| format!("write {NET_UP_PATH}"))?;
     set_mode_0755(&net_up)?;
 
+    // Point the resolver at the kernel's own record of the `ip=` DNS fields. Dangling in the staging
+    // tree (its target is a runtime procfs file), which `mke2fs -d` stores as the symlink it is.
+    let resolv_conf = in_staging(&staging, RESOLV_CONF_PATH);
+    if let Some(parent) = resolv_conf.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create the parent of {RESOLV_CONF_PATH}"))?;
+    }
+    std::os::unix::fs::symlink(KERNEL_PNP_PATH, &resolv_conf)
+        .with_context(|| format!("link {RESOLV_CONF_PATH} -> {KERNEL_PNP_PATH}"))?;
+
     // Last gate before the tree becomes an image: everything the driver and the init line depend on
     // is present, at the mode it needs. Fails the build rather than shipping an image that boots
     // into a missing helper.
@@ -484,6 +502,32 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
                  execute it ({consequence})"
             );
         }
+    }
+
+    // The resolver link, checked with `symlink_metadata` and by target: it dangles here on purpose
+    // (procfs exists only at runtime), so following it would fail, and a link pointing somewhere
+    // else would leave a networked guest resolving nothing while every other check passed.
+    let staged_resolv = in_staging(staging, RESOLV_CONF_PATH);
+    let link = std::fs::symlink_metadata(&staged_resolv).with_context(|| {
+        format!(
+            "guest-image contract: {RESOLV_CONF_PATH} is missing from the staged rootfs, so a \
+             networked guest would resolve no names even with a resolver on its command line"
+        )
+    })?;
+    if !link.file_type().is_symlink() {
+        bail!(
+            "guest-image contract: {RESOLV_CONF_PATH} is not a symlink, so it cannot track the \
+             kernel's record of the `ip=` DNS fields"
+        );
+    }
+    let target = std::fs::read_link(&staged_resolv)
+        .with_context(|| format!("guest-image contract: read {RESOLV_CONF_PATH}"))?;
+    if target != Path::new(KERNEL_PNP_PATH) {
+        bail!(
+            "guest-image contract: {RESOLV_CONF_PATH} points at {}, not {KERNEL_PNP_PATH}, so the \
+             resolver the driver puts on the command line would never be read",
+            target.display()
+        );
     }
 
     // Mountpoints have to be baked: the guest cannot create them. `/` is read-only when the overlay
@@ -908,8 +952,8 @@ mod tests {
 
     use super::{
         in_staging, net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
-        GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, MKE2FS_SOURCE_DATE_EPOCH_MIN, MOUNT_DRIVES_PATH,
-        NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR,
+        GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, KERNEL_PNP_PATH, MKE2FS_SOURCE_DATE_EPOCH_MIN,
+        MOUNT_DRIVES_PATH, NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR, RESOLV_CONF_PATH,
     };
 
     /// A scratch dir removed on drop, so a failing assertion can't leave one behind. Per-test name
@@ -929,9 +973,12 @@ mod tests {
     }
 
     /// A staging tree that satisfies the contract: the four executables at 0755, the three
-    /// mountpoints, and the real inittab. Each negative test breaks exactly one thing from here, so
-    /// what it proves is that *that* fault is what the check catches.
+    /// mountpoints, the resolver link, and the real inittab. Each negative test breaks exactly one
+    /// thing from here, so what it proves is that *that* fault is what the check catches.
     fn good_staging(root: &Path) {
+        let resolv = in_staging(root, RESOLV_CONF_PATH);
+        std::fs::create_dir_all(resolv.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(KERNEL_PNP_PATH, &resolv).unwrap();
         for path in [
             GUEST_AGENT_PATH,
             channel::GUEST_OVERLAY_INIT,
@@ -1016,6 +1063,49 @@ mod tests {
             .expect_err("an inittab that never starts the agent must fail the build")
             .to_string();
         assert!(err.contains(GUEST_AGENT_PATH), "{err}");
+    }
+
+    #[test]
+    fn a_missing_resolver_link_is_caught() {
+        let tmp = temp_dir("resolv_missing");
+        good_staging(&tmp.0);
+        std::fs::remove_file(in_staging(&tmp.0, RESOLV_CONF_PATH)).unwrap();
+        let err = verify_guest_contract(&tmp.0)
+            .expect_err("a missing resolver link must fail the build")
+            .to_string();
+        assert!(err.contains(RESOLV_CONF_PATH), "{err}");
+        assert!(err.contains("resolve no names"), "{err}");
+    }
+
+    #[test]
+    fn a_baked_resolver_file_is_caught_where_a_link_belongs() {
+        let tmp = temp_dir("resolv_file");
+        good_staging(&tmp.0);
+        // The fault an "obvious" cleanup produces: a real file with sensible-looking contents. It
+        // exists and it parses, so an existence-only check passes it, and every guest then resolves
+        // against a frozen address regardless of what the driver put on its command line.
+        let staged = in_staging(&tmp.0, RESOLV_CONF_PATH);
+        std::fs::remove_file(&staged).unwrap();
+        std::fs::write(&staged, "nameserver 1.1.1.1\n").unwrap();
+        let err = verify_guest_contract(&tmp.0)
+            .expect_err("a baked resolver file must fail the build")
+            .to_string();
+        assert!(err.contains("not a symlink"), "{err}");
+    }
+
+    #[test]
+    fn a_resolver_link_aimed_elsewhere_is_caught() {
+        let tmp = temp_dir("resolv_target");
+        good_staging(&tmp.0);
+        // A link, so the symlink check passes; it just points somewhere the kernel never writes.
+        let staged = in_staging(&tmp.0, RESOLV_CONF_PATH);
+        std::fs::remove_file(&staged).unwrap();
+        std::os::unix::fs::symlink("/etc/resolv.conf.static", &staged).unwrap();
+        let err = verify_guest_contract(&tmp.0)
+            .expect_err("a resolver link aimed elsewhere must fail the build")
+            .to_string();
+        assert!(err.contains(KERNEL_PNP_PATH), "{err}");
+        assert!(err.contains("never be read"), "{err}");
     }
 
     #[test]
