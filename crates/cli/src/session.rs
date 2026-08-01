@@ -650,8 +650,8 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
 struct SessionNet {
     /// Whether to boot with a tap.
     nic: bool,
-    /// The egress policy to arm, or `None` for observe-only (which is what a NIC with no `allow`
-    /// gets: the guest still reaches nothing past the host end of its /30).
+    /// The egress policy to arm. `Some` whenever [`nic`](Self::nic) is set, deny-all at minimum, so
+    /// a wire client can never obtain an unpoliced tap; `None` only when there is no NIC to police.
     egress: Option<EgressPolicy>,
 }
 
@@ -672,10 +672,16 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, String> {
     if !nic {
         return Ok(SessionNet::default());
     }
+    // **A NIC over the wire is always policed**, deny-all at minimum. The CLI treats a bare `--net`
+    // as observe-only, which is safe there because the caller is local and owns the config file; a
+    // wire client is neither. Left observe-only, a client could ask for a NIC with no allowances and
+    // get an unpoliced tap, which on a host that configured a gateway and furnished an uplink is
+    // unrestricted egress, and `max_egress_v4` would never be consulted because it is only checked
+    // against rules that were asked for. Deny-all costs the same attach and keeps design rule 3.
     if allows.is_empty() {
         return Ok(SessionNet {
             nic: true,
-            egress: None,
+            egress: Some(EgressPolicy::deny_all()),
         });
     }
     if allows.len() > MAX_POLICY_RULES {
@@ -1107,11 +1113,19 @@ mod tests {
         assert!(!sealed.nic);
         assert!(sealed.egress.is_none());
 
-        // A NIC with no allowance is observe-only, not an error: the guest still reaches nothing
-        // past the host end of its /30, so there is nothing to refuse.
+        // A NIC with no allowance is deny-all, **not** observe-only. This is the one place the
+        // daemon is deliberately stricter than the CLI: a local caller owns the config file, a wire
+        // client does not, so handing one an unpoliced tap would be unrestricted egress on any host
+        // that furnished an uplink, with `max_egress_v4` never consulted.
         let observed = open(&Policy::default(), &open_net(Some(true), &[])).expect("a bare NIC");
         assert!(observed.nic);
-        assert!(observed.egress.is_none());
+        let bare_policy = observed
+            .egress
+            .expect("a NIC over the wire is always policed");
+        assert!(
+            bare_policy.is_deny_all(),
+            "no allowances must mean deny-all, never accept-all"
+        );
 
         // A NIC plus allowances builds a deny-by-default policy carrying exactly those rules.
         let policed = open(

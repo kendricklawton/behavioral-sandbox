@@ -97,6 +97,14 @@ that withdrew guest networking (`allow_net = false`) refuses the NIC outright, a
 kernel map's fixed count is caught with the cap named, and a rule outside `max_egress_v4` is
 refused rather than trimmed to fit.
 
+**A NIC over the wire is always policed, deny-all at minimum**, which is the one place the daemon is
+deliberately stricter than the CLI. A bare `ekvm run --net` attaches observe-only, and that is safe
+there because the caller is local and owns the config file. A wire client is neither, so leaving it
+observe-only would mean a session could ask for a NIC with no allowances and get an unpoliced tap:
+unrestricted egress on any host that configured a gateway and furnished an uplink, with
+`max_egress_v4` never consulted, because a ceiling is only checked against rules that were asked
+for.
+
 Two things stay the daemon's:
 
 - **Whether a route out exists.** The gateway is the daemon's launch-time `BootConfig`, like the

@@ -179,8 +179,16 @@ pub struct BootConfig {
     /// Setting it names a path rather than building one: the engine adds no veth, bridge,
     /// forwarding, or NAT, and on a host whose netns nothing has furnished the reachable set is
     /// unchanged. What does change is what the host can see, since an attempt now crosses the tap
-    /// and lands in the record's denial trail instead of dying inside the guest. Requires
-    /// [`enable_network`](BootConfig::enable_network); see [`GuestEgress`] and design decision 9.
+    /// and lands in the record's denial trail instead of dying inside the guest. See [`GuestEgress`]
+    /// and design decision 9.
+    ///
+    /// **Read only when [`enable_network`](BootConfig::enable_network) is set**, and ignored
+    /// otherwise rather than refused. A gateway is a *host* fact (`EKVM_GATEWAY`, `.ekvm.toml`),
+    /// so it is normally set once for every sandbox on a host; refusing the combination would mean
+    /// an operator who configures an uplink breaks every run that does not ask for a NIC. Whether a
+    /// caller *explicitly* asked for a gateway on a NIC-less run is visible only to the layer that
+    /// parsed the request, and both refuse it there: `--gateway` requires `--net` at the CLI, and
+    /// the daemon refuses `allow` without `net`.
     ///
     /// **Applies at cold boot only.** The addressing rides the kernel command line, which a restored
     /// clone inherits from the snapshot rather than re-deriving, so a clone carries whatever the boot
@@ -340,22 +348,6 @@ pub(crate) fn refuse_uncappable_boot(config: &BootConfig) -> Result<(), VmmError
         return Err(VmmError::LimitsUnavailable(
             "require_limits is set but this boot is unjailed; the cgroup cpu/memory caps live on the \
              jailed VMM, so an unjailed run cannot be capped (jail the run, or unset require_limits)"
-                .to_string(),
-        ));
-    }
-    Ok(())
-}
-
-/// Refuse a boot that configures [`egress`](BootConfig::egress) with no NIC to configure it on. The
-/// gateway rides the guest's `ip=` parameter, which is emitted only when a tap exists, so the
-/// combination would otherwise be accepted and then silently dropped: the caller asks for a route
-/// out and gets a sealed VM with no indication why. Same shape as `--allow` requiring `--net` at the
-/// CLI, and host-safe (a field comparison, no KVM), so it covers cold boot and restore alike.
-pub(crate) fn refuse_egress_without_nic(config: &BootConfig) -> Result<(), VmmError> {
-    if config.egress.is_some() && !config.enable_network {
-        return Err(VmmError::Vmm(
-            "egress names a gateway but this boot has no NIC; the gateway rides the guest's ip= \
-             parameter, which only a tap emits (set enable_network, or unset egress)"
                 .to_string(),
         ));
     }
@@ -607,9 +599,6 @@ impl Vm {
         // Same shape for a vCPU count the pinned VMM won't take: name the rule here rather than
         // spawn a VMM only to have `PUT /machine-config` reject it.
         refuse_unsupported_vcpus(&config)?;
-        // And an egress config with no NIC to put it on, which would otherwise be accepted and then
-        // dropped on the floor when the boot emits no `ip=` token at all.
-        refuse_egress_without_nic(&config)?;
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
@@ -1164,26 +1153,37 @@ mod tests {
     }
 
     #[test]
-    fn a_gateway_with_no_nic_is_refused_rather_than_dropped_on_the_floor() {
-        use crate::net::GuestEgress;
-        let mut cfg = BootConfig::default();
+    fn a_host_wide_gateway_does_not_break_a_boot_that_wants_no_nic() {
+        // The regression this guards. A gateway is a host fact: `EKVM_GATEWAY` and `.ekvm.toml`
+        // exist so an operator sets it once for the whole host. If that made a NIC-less boot fail,
+        // configuring an uplink would break `ekvm run` with no `--net`, every `ekvm shell`, and
+        // every daemon session from a client that predates the network fields, which is to say
+        // nearly everything on a host that followed its own documentation.
+        let mut cfg = BootConfig::from_env_with(|key| match key {
+            "EKVM_GATEWAY" => Some(std::ffi::OsString::from("10.200.0.1")),
+            _ => None,
+        });
+        assert!(cfg.egress.is_some(), "the host layer sets a gateway");
+        assert!(!cfg.enable_network, "and this boot asked for no NIC");
 
-        // The shipped default asks for neither, so the guard is silent.
-        assert!(refuse_egress_without_nic(&cfg).is_ok());
+        // Boot far enough to prove no *config* guard rejects the pair. `/dev/kvm` is the first thing
+        // past the guards, so its absence (or a missing artifact) is the expected stopping point;
+        // what must never appear is a complaint about the gateway itself.
+        if let Err(e) = Vm::boot(cfg.clone()) {
+            let msg = e.to_string();
+            assert!(
+                !msg.contains("gateway"),
+                "a host-wide gateway must be inert on a NIC-less boot, not fatal: {msg}"
+            );
+        }
 
-        // A gateway with no NIC is the contradiction: the `ip=` token a tap emits is the only thing
-        // that would carry it, so accepting this would hand back a sealed VM and say nothing.
-        cfg.egress = Some(GuestEgress::via(Ipv4Addr::new(10, 200, 0, 1)));
-        let err = refuse_egress_without_nic(&cfg)
-            .expect_err("a gateway with no NIC should be refused")
-            .to_string();
-        assert!(err.contains("enable_network"), "names the fix: {err}");
-
-        // Both set is the coherent posture, and so is a NIC with no gateway (the sealed default).
+        // And it is inert, not silently dropped: the field survives for the boot that does want a
+        // NIC, which is what `network_boot_args` reads.
         cfg.enable_network = true;
-        assert!(refuse_egress_without_nic(&cfg).is_ok());
-        cfg.egress = None;
-        assert!(refuse_egress_without_nic(&cfg).is_ok());
+        assert_eq!(
+            cfg.egress.map(|e| e.gateway()),
+            Some(Ipv4Addr::new(10, 200, 0, 1))
+        );
     }
 
     #[test]
