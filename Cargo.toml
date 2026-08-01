@@ -1,6 +1,8 @@
-# Every member is `publish = false` on purpose: this project is never published to crates.io.
+# Every member is `publish = false` on purpose: the engine is not distributed through crates.io.
 # The support window is computed from Firecracker's and ends; an immutable registry version would
-# outlive it, looking usable on an unpatched VMM. See docs/embedding.md.
+# outlive it, looking usable on an unpatched VMM. A name held there under this project is a `0.0.0`
+# placeholder with no code in it, which is why holding one does not contradict this line. Reasoning:
+# docs/embedding-scope.md.
 [workspace]
 resolver = "2"
 members = [

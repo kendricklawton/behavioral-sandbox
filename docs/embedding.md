@@ -8,8 +8,8 @@ API. The rustdoc on each item is the reference; this is the contract's shape and
 
 ## Pinning it
 
-Nothing here is on crates.io and [nothing is meant to be](./embedding-scope.md), so the dependency
-is a git rev:
+The engine is not distributed through crates.io and
+[is not meant to be](./embedding-scope.md), so the dependency is a git rev:
 
 ```toml
 [dependencies]

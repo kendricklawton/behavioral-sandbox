@@ -155,9 +155,10 @@ The engine is consumed in three shapes, one of which exists today:
 
 * **Rust**, the `ekvm` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`), depended
   on by git rev:
-  `ekvm = { git = "https://github.com/packsixfour/ekvm", rev = "…" }`. It is not on crates.io **by
-  decision, not pending**: an immutable registry version would outlive this engine's support window,
-  which is computed from Firecracker's ([the reasoning][embedding-scope]). A change to that API is
+  `ekvm = { git = "https://github.com/packsixfour/ekvm", rev = "…" }`. It is not distributed through
+  crates.io **by decision, not pending**: an immutable registry version would outlive this engine's
+  support window, which is computed from Firecracker's, so a name held there is a `0.0.0` placeholder
+  rather than a release ([the reasoning][embedding-scope]). A change to that API is
   committed with an `api` scope, so a pin bump is auditable from the log alone. The contract is
   [docs/embedding.md][embedding].
 

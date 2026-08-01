@@ -48,12 +48,20 @@ installed the engine on their own machine and wants to drive it from that langua
 machine. A hosted product's customers are not that person. They call whatever API the hoster exposes,
 and the engine's socket is deliberately local, so an SDK for it never reaches them.
 
-**The crates are never published to crates.io** (`publish = false` across the workspace), a
+**Nothing here is distributed through crates.io** (`publish = false` across the workspace), a
 decision, not a gap. A crates.io version is immutable and available forever, but this engine's
 support window is computed from Firecracker's and deliberately ends: an old published version
 would sit on the registry looking usable long after every VMM it can drive stopped receiving
 patches. Distribution stays the signed release package for operators and the git-rev pin for
 embedders, both of which the support policy in `RELEASES.md` can actually govern.
+
+Holding a name and shipping through it are separate things, and this project does the first and not
+the second. Where `ekvm`, `ekvm-client`, or `ekvm-protocol` appears on crates.io under this project,
+it is a **reserved placeholder**: version `0.0.0`, no dependencies, no code, and a description saying
+so. It exists because the registry is a flat namespace and the alternative to holding the name is
+someone else holding it. Finding one is not evidence that this paragraph is stale. A real release
+would arrive as a version that is not `0.0.0`, and it would arrive with a decision recorded here
+first.
 
 ---
 
