@@ -100,8 +100,10 @@ pub struct Envelope<T> {
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Request {
-    /// Open the connection's sandbox, the first message of a session (the VM *is* the session). Carries only **resource** knobs; the confinement posture (jailed vs unjailed)
-    /// is the daemon's launch-time choice, never a client's, so a caller can't downgrade the jail.
+    /// Open the connection's sandbox, the first message of a session (the VM *is* the session).
+    /// Carries **resource** knobs and the session's network request; the confinement posture (jailed
+    /// vs unjailed, and whether a route out exists at all) is the daemon's launch-time choice, never
+    /// a client's, so a caller can't downgrade the jail or route itself out of the sandbox.
     /// Any omitted field keeps the conservative `vmm::Limits` default.
     Open {
         /// Guest vCPUs (1..=32); omitted keeps the default 1.
@@ -121,6 +123,29 @@ pub enum Request {
         /// to its own `usize` on the way in.
         #[serde(default)]
         output_cap: Option<u64>,
+        /// Give the session's guest a NIC (a per-VM tap the host-side probes observe); omitted is
+        /// no NIC, which is the posture every release so far shipped over the wire.
+        ///
+        /// A NIC on its own reaches nothing beyond the host end of its /30. Whether a route out
+        /// exists is the **daemon's** launch-time choice, like the jail: a client can ask for a
+        /// NIC and bound what crosses it, never conjure a path. The daemon may refuse this outright
+        /// (its `allow_net` posture).
+        ///
+        /// Additive, so no `WIRE_SCHEMA` bump: a daemon that predates the field ignores it, and a
+        /// client that predates it simply omits it.
+        #[serde(default)]
+        net: Option<bool>,
+        /// Egress allowances for the session, each `IP[/CIDR][:PORT][/PROTO]`, building a
+        /// deny-by-default policy armed before the tap goes live; omitted is deny-all.
+        ///
+        /// Requires [`net`](Self::Open::net). Strings rather than a structured type so the wire
+        /// spells a rule exactly as `ekvm run --allow` does, and one parser serves both. The daemon
+        /// validates each against its own operator ceilings and refuses the session if enforcement
+        /// cannot be armed, since egress policy is a security control and does not fail open.
+        ///
+        /// Additive, like [`net`](Self::Open::net).
+        #[serde(default)]
+        allow: Option<Vec<String>>,
     },
     /// Run one command in the open sandbox, feeding `stdin` (UTF-8 text) to it. Repeated `exec`s
     /// share the session's working directory.
@@ -243,12 +268,18 @@ impl std::fmt::Debug for Request {
                 mem_mib,
                 wall_secs,
                 output_cap,
+                net,
+                allow,
             } => f
                 .debug_struct("Open")
                 .field("vcpus", vcpus)
                 .field("mem_mib", mem_mib)
                 .field("wall_secs", wall_secs)
                 .field("output_cap", output_cap)
+                .field("net", net)
+                // Destinations, not secrets: an operator reading a log needs to see which egress a
+                // session asked for, and the same values are already on the audit record.
+                .field("allow", allow)
                 .finish(),
             Self::Get { path } => f.debug_struct("Get").field("path", path).finish(),
             Self::Snapshot => f.write_str("Snapshot"),
@@ -717,12 +748,16 @@ mod tests {
                 mem_mib: Some(512),
                 wall_secs: Some(60),
                 output_cap: None,
+                net: None,
+                allow: None,
             },
             Request::Open {
                 vcpus: None,
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
+                net: None,
+                allow: None,
             },
             Request::Exec {
                 argv: vec!["echo".into(), "hi".into()],
@@ -832,7 +867,9 @@ mod tests {
 
     #[test]
     fn omitted_open_fields_default_to_none() {
-        // A minimal `open` (no knobs) decodes, so a client can take every default.
+        // A minimal `open` (no knobs) decodes, so a client can take every default. This is also what
+        // makes each new `open` field additive: a client written before `net`/`allow` existed sends
+        // exactly these bytes, and they still decode to the conservative posture.
         let req: Request = read_message(&mut b"{\"schema\":1,\"op\":\"open\"}\n".as_slice())
             .expect("decode")
             .expect("a message");
@@ -843,6 +880,8 @@ mod tests {
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
+                net: None,
+                allow: None,
             }
         );
     }
@@ -1028,6 +1067,8 @@ mod tests {
             mem_mib: None,
             wall_secs: None,
             output_cap: Some(over_32_bits),
+            net: None,
+            allow: None,
         };
         let mut wire = Vec::new();
         write_message(&mut wire, &req).expect("an open serializes");
@@ -1126,6 +1167,8 @@ mod tests {
             mem_mib: Some(512),
             wall_secs: None,
             output_cap: None,
+            net: None,
+            allow: None,
         };
         let rendered = format!("{open:?}");
         assert!(rendered.contains("vcpus"), "{rendered}");

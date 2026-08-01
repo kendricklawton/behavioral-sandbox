@@ -78,6 +78,12 @@ fn rand_request(rng: &mut Rng) -> Request {
             mem_mib: Some(rng.next_u64() as u32),
             wall_secs: Some(rng.next_u64()),
             output_cap: None,
+            net: Some(rng.below(2) == 0),
+            allow: if rng.below(2) == 0 {
+                Some((0..rng.below(4)).map(|_| rand_string(rng)).collect())
+            } else {
+                None
+            },
         },
         1 => Request::Exec {
             argv: (0..rng.below(6)).map(|_| rand_string(rng)).collect(),

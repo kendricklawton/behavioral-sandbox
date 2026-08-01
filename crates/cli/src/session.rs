@@ -27,9 +27,9 @@ use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
 use ekvm::audit::RunProbes;
-use ekvm::policy::{Policy, Requested};
+use ekvm::policy::{parse_allow, Policy, Requested};
 use ekvm::{vcpus_supported, MAX_VCPUS};
-use probes_loader::Timing;
+use probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
 use protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
 use vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
 
@@ -94,6 +94,14 @@ pub fn serve(stream: UnixStream, server: &Server) {
             return;
         }
     };
+    let net = match open_network(&open, &server.policy) {
+        Ok(resolved) => resolved,
+        Err(message) => {
+            server.metrics.open_failed();
+            let _ = write_response(&mut writer, &fatal(message, FaultKind::Protocol));
+            return;
+        }
+    };
 
     // Resource-aware admission: the count ticket (acquired at accept) bounds *how many*
     // sessions; this reservation bounds *how much* they commit, so a memory-heterogeneous fleet can't
@@ -126,7 +134,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // Boot the session's VM: a warm clone from the pool when this is a bare-default `open`, else a
     // cold boot with the requested envelope. A boot failure is fatal to the session (there is no
     // sandbox), reported and then done.
-    let (vm, pooled) = match boot_session_vm(server, limits, bare) {
+    let (vm, pooled) = match boot_session_vm(server, limits, bare, net.nic) {
         Ok(booted) => booted,
         Err(e) => {
             server.metrics.open_failed();
@@ -140,22 +148,40 @@ pub fn serve(stream: UnixStream, server: &Server) {
     let boot = vm.boot_latency();
     let boot_ms = ms(boot);
 
-    // Attach the host-side probes so `trace` has something to report. Observe-only (no egress policy
-    // over the wire yet), so this is pure fail-open: a host without the eBPF caps yields a
-    // coverage-gapped record, never a refused session. `egress = None` means `attach` cannot return
-    // the enforcement refusal, but stay defensive and treat any error as "no probes".
+    // Attach the host-side probes so `trace` has something to report. Observation is fail-open (a
+    // host without the eBPF caps yields a coverage-gapped record, never a refused session), but
+    // **enforcement is not**: when the session asked for an egress policy, an attach that could not
+    // police the tap is a fatal refusal below, never a session running unenforced.
+    //
+    // The gateway comes from the daemon's own `BootConfig`, not from the wire: whether a route out
+    // exists is the operator's posture, like the jail.
+    let gateway = server.base.egress.map(|e| e.gateway());
+    let enforcing = net.egress.is_some();
     let probes = match server.observ.attach(
         vm.name(),
         vm.vmm_pid(),
         vm.netns(),
         vm.tap_name(),
-        None,
-        // No gateway either: the daemon fixes the boot posture and its `BootConfig` sets no egress,
-        // so every session is sealed and the record says so rather than leaving it unstated.
-        None,
+        net.egress.as_ref(),
+        gateway,
     ) {
         Ok(p) => Some(p),
         Err(e) => {
+            // Enforcement does not fail open. If the session asked for an egress policy and the tap
+            // could not be policed, ending the session is the only honest answer: the alternative is
+            // a running sandbox whose caller believes its allow-list is in force.
+            if enforcing {
+                server.metrics.open_failed();
+                let _ = write_response(
+                    &mut writer,
+                    &fatal(
+                        format!("open sandbox: egress enforcement could not be armed: {e}"),
+                        wire_kind(e.kind()),
+                    ),
+                );
+                end_session(server, vm, None, pooled);
+                return;
+            }
             tracing::warn!(error = %e, "probe attach failed; `trace` will report an empty record");
             None
         }
@@ -484,6 +510,7 @@ fn boot_session_vm(
     server: &Server,
     limits: Limits,
     bare: bool,
+    nic: bool,
 ) -> Result<(RunningVm, bool), VmmError> {
     // Pool-eligible only when the resolved limits equal the clones' actual profile, not merely
     // when the request was bare: with operator defaults set, a bare open resolves to a different
@@ -523,7 +550,8 @@ fn boot_session_vm(
             }
         }
     }
-    let config = server.base.clone().with_limits(limits);
+    let mut config = server.base.clone().with_limits(limits);
+    config.enable_network = nic;
     Ok((cold_boot(config, server.jailed)?, false))
 }
 
@@ -612,6 +640,65 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
     }
 }
 
+/// What an `open` asked for on the network axis, resolved against the operator's policy: whether the
+/// session gets a NIC, and the egress policy to arm on its tap.
+///
+/// The daemon's own posture is untouched by this. A client can ask for a NIC and bound what crosses
+/// it; whether a route out exists is the daemon's launch-time `BootConfig`, the same way the jail is,
+/// so no wire message can route a session out of its sandbox (design decision 9).
+#[derive(Debug, Default)]
+struct SessionNet {
+    /// Whether to boot with a tap.
+    nic: bool,
+    /// The egress policy to arm, or `None` for observe-only (which is what a NIC with no `allow`
+    /// gets: the guest still reaches nothing past the host end of its /30).
+    egress: Option<EgressPolicy>,
+}
+
+/// Resolve an [`Request::Open`]'s network request against the operator's `policy`. Refuses rather
+/// than clamping, like [`open_limits`]: a session that asked for egress it cannot have is an error,
+/// never a quietly narrowed run.
+fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, String> {
+    let Request::Open { net, allow, .. } = req else {
+        return Err("first message must be `open`".to_string());
+    };
+    let nic = net.unwrap_or(false);
+    let allows = allow.as_deref().unwrap_or(&[]);
+    if !allows.is_empty() && !nic {
+        return Err("allow requires net: an egress policy needs a tap to be armed on".to_string());
+    }
+    // The operator's withdrawal of guest networking, checked before anything is parsed.
+    policy.check_net(nic).map_err(|e| e.to_string())?;
+    if !nic {
+        return Ok(SessionNet::default());
+    }
+    if allows.is_empty() {
+        return Ok(SessionNet {
+            nic: true,
+            egress: None,
+        });
+    }
+    if allows.len() > MAX_POLICY_RULES {
+        return Err(format!(
+            "too many allow rules: {} given, but the kernel egress policy holds at most              {MAX_POLICY_RULES}",
+            allows.len()
+        ));
+    }
+    let mut egress = EgressPolicy::deny_all();
+    for spec in allows {
+        let rule = parse_allow(spec)?;
+        egress = egress.allow(rule.cidr, rule.port, rule.proto);
+    }
+    // Containment against the operator's ceilings (`max_egress_v4`/`max_egress_v6`), the check that
+    // makes a ceiling real for a caller who controls neither this process's environment nor its
+    // config file.
+    policy.check_egress(&egress).map_err(|e| e.to_string())?;
+    Ok(SessionNet {
+        nic: true,
+        egress: Some(egress),
+    })
+}
+
 /// Fold an [`Request::Open`]'s optional knobs onto the [`Limits`] the operator's `policy` allows,
 /// validating each as a typed message (never a panic): a vCPU count the VMM accepts (1 or an even
 /// number up to 32), memory and wall nonzero.
@@ -627,11 +714,21 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String>
         mem_mib,
         wall_secs,
         output_cap,
+        net,
+        allow,
     } = req
     else {
         return Err("first message must be `open`".to_string());
     };
-    let bare = vcpus.is_none() && mem_mib.is_none() && wall_secs.is_none() && output_cap.is_none();
+    // `net`/`allow` count toward bareness even though they are not resource knobs: a pooled clone
+    // restores a snapshot whose NIC presence is baked in, so a session that asked for a NIC cannot
+    // be served from a pool built without one.
+    let bare = vcpus.is_none()
+        && mem_mib.is_none()
+        && wall_secs.is_none()
+        && output_cap.is_none()
+        && net.is_none_or(|n| !n)
+        && allow.is_none();
 
     // Shape errors first (a vCPU count the VMM would refuse is malformed regardless of policy), so
     // the caller gets the specific complaint rather than a ceiling message about a nonsense value.
@@ -871,6 +968,8 @@ mod tests {
                 mem_mib: Some(1024),
                 wall_secs: Some(60),
                 output_cap: Some(4096),
+                net: None,
+                allow: None,
             },
             &Policy::default(),
         )
@@ -888,6 +987,8 @@ mod tests {
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
+                net: None,
+                allow: None,
             },
             &Policy::default(),
         )
@@ -915,6 +1016,8 @@ mod tests {
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
+                net: None,
+                allow: None,
             },
             &policy,
         )
@@ -931,6 +1034,8 @@ mod tests {
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
+                net: None,
+                allow: None,
             },
             &policy,
         )
@@ -953,6 +1058,8 @@ mod tests {
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
+                net: None,
+                allow: None,
             },
             &policy,
         )
@@ -970,11 +1077,97 @@ mod tests {
                 mem_mib: Some(512),
                 wall_secs: None,
                 output_cap: None,
+                net: None,
+                allow: None,
             },
             &Policy::default(),
         )
         .expect("valid open");
         assert!(!bare);
+    }
+
+    /// An `open` asking for a NIC and the given allowances.
+    fn open_net(net: Option<bool>, allow: &[&str]) -> Request {
+        Request::Open {
+            vcpus: None,
+            mem_mib: None,
+            wall_secs: None,
+            output_cap: None,
+            net,
+            allow: Some(allow.iter().map(|s| (*s).to_string()).collect()),
+        }
+    }
+
+    #[test]
+    fn open_network_resolves_the_wire_request_against_the_operators_ceilings() {
+        let open = |policy: &Policy, req: &Request| open_network(req, policy);
+
+        // The shipped default: no NIC asked for, none given.
+        let sealed = open(&Policy::default(), &open_net(None, &[])).expect("no NIC is valid");
+        assert!(!sealed.nic);
+        assert!(sealed.egress.is_none());
+
+        // A NIC with no allowance is observe-only, not an error: the guest still reaches nothing
+        // past the host end of its /30, so there is nothing to refuse.
+        let observed = open(&Policy::default(), &open_net(Some(true), &[])).expect("a bare NIC");
+        assert!(observed.nic);
+        assert!(observed.egress.is_none());
+
+        // A NIC plus allowances builds a deny-by-default policy carrying exactly those rules.
+        let policed = open(
+            &Policy::default(),
+            &open_net(Some(true), &["1.1.1.1:443/tcp", "10.0.0.0/8"]),
+        )
+        .expect("a policed NIC");
+        assert!(policed.nic);
+        assert_eq!(policed.egress.expect("a policy was built").rules().len(), 2);
+    }
+
+    #[test]
+    fn open_network_refuses_rather_than_narrowing() {
+        // Allowances without a NIC: nothing to arm them on. Caught before any parsing, so the
+        // message names the contradiction rather than complaining about a rule.
+        let err = open_network(&open_net(None, &["1.1.1.1"]), &Policy::default())
+            .expect_err("allow without net must refuse");
+        assert!(err.contains("requires net"), "{err}");
+
+        // A host that has withdrawn guest networking refuses the NIC outright.
+        let no_net = Policy {
+            allow_net: Some(false),
+            ..Policy::default()
+        };
+        let err = open_network(&open_net(Some(true), &[]), &no_net)
+            .expect_err("a withdrawn NIC must refuse");
+        assert!(!err.is_empty(), "the refusal carries a reason");
+
+        // A malformed rule is a typed message, not a panic and not a silently dropped rule.
+        let err = open_network(&open_net(Some(true), &["not-an-ip"]), &Policy::default())
+            .expect_err("a malformed rule must refuse");
+        assert!(!err.is_empty(), "the refusal carries a reason");
+
+        // Past the kernel map's fixed rule count, refused here with the cap named rather than
+        // failing cryptically at attach time.
+        let many: Vec<&str> =
+            std::iter::repeat_n("1.1.1.1:443/tcp", MAX_POLICY_RULES + 1).collect();
+        let err = open_network(&open_net(Some(true), &many), &Policy::default())
+            .expect_err("over the cap must refuse");
+        assert!(err.contains(&MAX_POLICY_RULES.to_string()), "{err}");
+    }
+
+    #[test]
+    fn a_networked_open_is_never_served_from_the_pool() {
+        // Pooled clones restore a snapshot whose NIC presence is baked in, so a session that asked
+        // for one cannot be served from a pool built without one. `bare` is what gates that.
+        let (_, bare) = open_limits(&open_net(Some(true), &[]), &Policy::default()).expect("valid");
+        assert!(!bare, "a NIC request must not be pool-eligible");
+
+        // Explicitly declining a NIC stays bare: it is the same VM the pool already holds.
+        let (_, bare) =
+            open_limits(&open_net(Some(false), &[]), &Policy::default()).expect("valid");
+        assert!(
+            !bare,
+            "an explicit allow list (even empty) is a stated request, not a bare open"
+        );
     }
 
     #[test]
@@ -986,6 +1179,8 @@ mod tests {
                     mem_mib: None,
                     wall_secs: None,
                     output_cap: None,
+                    net: None,
+                    allow: None,
                 },
                 "vcpus",
             ),
@@ -995,6 +1190,8 @@ mod tests {
                     mem_mib: None,
                     wall_secs: None,
                     output_cap: None,
+                    net: None,
+                    allow: None,
                 },
                 "vcpus",
             ),
@@ -1004,6 +1201,8 @@ mod tests {
                     mem_mib: Some(0),
                     wall_secs: None,
                     output_cap: None,
+                    net: None,
+                    allow: None,
                 },
                 "mem_mib",
             ),
@@ -1013,6 +1212,8 @@ mod tests {
                     mem_mib: None,
                     wall_secs: Some(0),
                     output_cap: None,
+                    net: None,
+                    allow: None,
                 },
                 "wall_secs",
             ),

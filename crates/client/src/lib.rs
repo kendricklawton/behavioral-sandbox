@@ -96,9 +96,14 @@ impl From<ProtocolError> for ClientError {
     }
 }
 
-/// The session's resource envelope, sent with [`Client::open`]. Every field is optional; `None`
-/// keeps the daemon's conservative default. Mirrors [`Request::Open`]'s knobs.
+/// What the session asks for, sent with [`Client::open`]: its resource envelope and its network
+/// request. Every field is optional; `None` keeps the daemon's conservative default. Mirrors
+/// [`Request::Open`]'s knobs.
+///
+/// `#[non_exhaustive]`: build it from [`default`](Default::default) and set the fields you want, so
+/// a new knob is not a source break the way adding one to a struct literal would be.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct OpenOptions {
     /// Guest vCPUs (1..=32); `None` keeps the default 1.
     pub vcpus: Option<u8>,
@@ -109,6 +114,14 @@ pub struct OpenOptions {
     /// Aggregate captured-output cap in bytes; `None` keeps the default 16 MiB. `u64` to match
     /// the wire, whose width cannot depend on the caller's pointer size.
     pub output_cap: Option<u64>,
+    /// Give the guest a NIC; `None` (or `Some(false)`) is no NIC. A NIC alone reaches nothing past
+    /// the host end of its /30, and whether a route out exists is the daemon's choice, not this
+    /// one's. The daemon may refuse it outright.
+    pub net: Option<bool>,
+    /// Egress allowances, each `IP[/CIDR][:PORT][/PROTO]`, building a deny-by-default policy;
+    /// `None` is deny-all. Requires [`net`](Self::net). The daemon validates each against its own
+    /// ceilings and refuses the session rather than running it unenforced.
+    pub allow: Option<Vec<String>>,
 }
 
 /// What [`Client::open`] returns: the sandbox booted.
@@ -187,6 +200,8 @@ impl Client {
             mem_mib: opts.mem_mib,
             wall_secs: opts.wall_secs,
             output_cap: opts.output_cap,
+            net: opts.net,
+            allow: opts.allow,
         })?;
         match self.recv()? {
             Response::Opened { boot_ms, pooled } => Ok(Opened { boot_ms, pooled }),
