@@ -9,14 +9,23 @@ The boundaries with targets today:
 - The daemon's newline-JSON wire protocol.
 - Signed audit-record envelopes, including the verifier's behavior on arbitrary mutations.
 - The eBPF ring-buffer event deserializers.
-- Config and policy parsing (`.ekvm.toml`, egress rules, agent config).
+- Config and policy parsing (`.ekvm.toml` and `--allow` egress rules).
 
-Run one locally against its corpus:
+Run one locally against its corpus. `cargo xtask fuzz`, not a bare `cargo fuzz run`: the wrapper
+selects the **pinned** nightly (`cargo +nightly-<date> fuzz`) and folds in `fuzz/seeds/<target>/`,
+and a floating `nightly` is whatever the last `rustup update` fetched, which is how a crash found
+here becomes unreproducible on the next machine.
 
 ```console
-cargo fuzz run <target>
-cargo xtask fuzz-coverage <target>   # what that corpus actually reaches
+cargo xtask fuzz <target> --seconds 300
+cargo xtask fuzz-smoke                # every target briefly; what the per-PR job runs
+cargo xtask fuzz-coverage <target>    # what that corpus actually reaches
+cargo xtask fuzz-cmin <target>        # drop corpus inputs that add no coverage
 ```
+
+`--help` lists the targets. It is generated from `FUZZ_TARGETS` in `xtask/src/main.rs`, which the
+smoke run and the nightly matrix also read, so the four cannot disagree; an unknown target is
+refused by the argument parser rather than several steps into cargo-fuzz.
 
 ## Two tiers in CI
 
@@ -30,9 +39,11 @@ in the [introduction](./introduction.md#what-has-not-been-done).
 ## Corpus health
 
 Corpus size is worth checking before trusting a target: a corpus of a handful of inputs means the
-fuzzer has barely explored the input space, whatever the target's age suggests. Two targets are
-currently thin, and the `ekvm-channel` handshake is one of them, which matters because it is the first thing
-a compromised guest agent talks to on the host.
+fuzzer has barely explored the input space, whatever the target's age suggests. Counted on
+2026-08-01, two are thin against a median of about 400: `channel_handshake` at 4 inputs and
+`channel_frame` at 7, with the next smallest at 40. The handshake one matters most, because it is
+the first thing a compromised guest agent talks to on the host. Recount with
+`ls fuzz/corpus/<target> | wc -l` rather than trusting this paragraph.
 
 A crash reproducer belongs in the corpus permanently, alongside a unit test that pins the same case,
 so the fix is protected by something cheaper than a fuzz run.
