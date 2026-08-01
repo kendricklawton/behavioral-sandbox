@@ -31,7 +31,7 @@ use crate::exec::{
 use crate::firecracker::{Action, ApiClient};
 use crate::jail::{remove_cgroup, Chroot, Jail};
 use crate::lifetime::{KillHandle, VmLifetime};
-use crate::net::{GuestLink, Tap};
+use crate::net::{GuestEgress, GuestLink, Tap};
 use crate::spawn::Spawned;
 use crate::{Limits, RunResult, VmmError};
 
@@ -171,6 +171,22 @@ pub struct BootConfig {
     /// adds no address, route, or masquerade, so the guest reaches nothing until
     /// addressing lands. Needs `ip` (iproute2) on the host.
     pub enable_network: bool,
+    /// Hand the guest a default route (and optionally a resolver) so it can address traffic beyond
+    /// the host end of its /30. `None` (the default) leaves the gateway field of the guest's `ip=`
+    /// parameter empty, so the guest installs its connected route and nothing else and an off-link
+    /// destination fails with `ENETUNREACH` before a packet is emitted.
+    ///
+    /// Setting it names a path rather than building one: the engine adds no veth, bridge,
+    /// forwarding, or NAT, and on a host whose netns nothing has furnished the reachable set is
+    /// unchanged. What does change is what the host can see, since an attempt now crosses the tap
+    /// and lands in the record's denial trail instead of dying inside the guest. Requires
+    /// [`enable_network`](BootConfig::enable_network); see [`GuestEgress`] and design decision 9.
+    ///
+    /// **Applies at cold boot only.** The addressing rides the kernel command line, which a restored
+    /// clone inherits from the snapshot rather than re-deriving, so a clone carries whatever the boot
+    /// that took the snapshot configured and this field is inert on [`Vm::restore`]. Set it on the
+    /// config that boots the snapshot source, which is the same config a pool uses for both.
+    pub egress: Option<GuestEgress>,
     /// Run Firecracker under its **jailer**: a chroot, a uid/gid drop, and the jailer's mount
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
     /// Firecracker directly. Setting it needs **real root** (the jailer `mknod`s device nodes, which
@@ -297,6 +313,22 @@ pub(crate) fn refuse_uncappable_boot(config: &BootConfig) -> Result<(), VmmError
     Ok(())
 }
 
+/// Refuse a boot that configures [`egress`](BootConfig::egress) with no NIC to configure it on. The
+/// gateway rides the guest's `ip=` parameter, which is emitted only when a tap exists, so the
+/// combination would otherwise be accepted and then silently dropped: the caller asks for a route
+/// out and gets a sealed VM with no indication why. Same shape as `--allow` requiring `--net` at the
+/// CLI, and host-safe (a field comparison, no KVM), so it covers cold boot and restore alike.
+pub(crate) fn refuse_egress_without_nic(config: &BootConfig) -> Result<(), VmmError> {
+    if config.egress.is_some() && !config.enable_network {
+        return Err(VmmError::Vmm(
+            "egress names a gateway but this boot has no NIC; the gateway rides the guest's ip= \
+             parameter, which only a tap emits (set enable_network, or unset egress)"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Refuse a **jailed** boot or restore whose scratch dir is on a mount the jailer's chroot cannot
 /// work from: `nodev` makes the `/dev/kvm` node it mknods there inert (Firecracker fails deep in
 /// boot with a raw "creating KVM object: Permission denied"), and `noexec` refuses the exec of the
@@ -357,6 +389,7 @@ impl Default for BootConfig {
             input_dir: None,
             output_dir: None,
             enable_network: false,
+            egress: None,
             jail: None,
             require_limits: false,
             scratch_dir: default_scratch_dir(),
@@ -541,6 +574,9 @@ impl Vm {
         // Same shape for a vCPU count the pinned VMM won't take: name the rule here rather than
         // spawn a VMM only to have `PUT /machine-config` reject it.
         refuse_unsupported_vcpus(&config)?;
+        // And an egress config with no NIC to put it on, which would otherwise be accepted and then
+        // dropped on the floor when the boot emits no `ip=` token at all.
+        refuse_egress_without_nic(&config)?;
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
@@ -1092,6 +1128,29 @@ mod tests {
         cfg.require_limits = true;
         cfg.jail = Some(Jail::default());
         assert!(refuse_uncappable_boot(&cfg).is_ok());
+    }
+
+    #[test]
+    fn a_gateway_with_no_nic_is_refused_rather_than_dropped_on_the_floor() {
+        use crate::net::GuestEgress;
+        let mut cfg = BootConfig::default();
+
+        // The shipped default asks for neither, so the guard is silent.
+        assert!(refuse_egress_without_nic(&cfg).is_ok());
+
+        // A gateway with no NIC is the contradiction: the `ip=` token a tap emits is the only thing
+        // that would carry it, so accepting this would hand back a sealed VM and say nothing.
+        cfg.egress = Some(GuestEgress::via(Ipv4Addr::new(10, 200, 0, 1)));
+        let err = refuse_egress_without_nic(&cfg)
+            .expect_err("a gateway with no NIC should be refused")
+            .to_string();
+        assert!(err.contains("enable_network"), "names the fix: {err}");
+
+        // Both set is the coherent posture, and so is a NIC with no gateway (the sealed default).
+        cfg.enable_network = true;
+        assert!(refuse_egress_without_nic(&cfg).is_ok());
+        cfg.egress = None;
+        assert!(refuse_egress_without_nic(&cfg).is_ok());
     }
 
     #[test]

@@ -115,6 +115,65 @@ impl GuestLink<Ipv4Addr> {
     }
 }
 
+/// Where a guest should send traffic bound past its own /30, and who it should ask for names. Set
+/// it on [`BootConfig::egress`](crate::BootConfig::egress); unset (the default) leaves the guest
+/// with its connected route only.
+///
+/// **This names a path; it does not build one.** The engine puts these two addresses in the guest's
+/// `ip=` boot parameter and does nothing else: no veth, no bridge, no forwarding, no NAT. Furnishing
+/// the netns so the gateway leads somewhere is the hoster's, and so is allocating whatever addresses
+/// that takes; the split and the reason for it are design decision 9. On a host that has furnished
+/// nothing, a guest configured this way reaches exactly what it reached before, and its attempts
+/// become visible at the tap instead of failing inside the guest.
+///
+/// **Both are host constants, not per-sandbox values**, which is what keeps them snapshot-safe: a
+/// restored clone re-uses the addressing baked into the snapshot and does no in-guest
+/// re-addressing, so a field that varied per sandbox would restore wrong.
+///
+/// Egress policy is unaffected: the eBPF classifier still starts deny-all, so a gateway widens what
+/// the guest can *attempt*, never what it is permitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestEgress {
+    gateway: Ipv4Addr,
+    resolver: Option<Ipv4Addr>,
+}
+
+impl GuestEgress {
+    /// Route the guest's off-link traffic at `gateway`, with no resolver configured. The gateway is
+    /// normally the host end of the tap ([`RunningVm::ipv4`](crate::RunningVm::ipv4)'s `host`),
+    /// since that is the only address the guest can reach without one.
+    #[must_use]
+    pub fn via(gateway: Ipv4Addr) -> Self {
+        Self {
+            gateway,
+            resolver: None,
+        }
+    }
+
+    /// Also tell the guest to resolve names at `resolver`. Reaching it still needs an allowance like
+    /// any other destination, and the engine runs no resolver of its own.
+    ///
+    /// A resolver is only settable alongside a gateway because an unroutable one would be inert; the
+    /// builder shape is what rules that combination out rather than a runtime check.
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Ipv4Addr) -> Self {
+        self.resolver = Some(resolver);
+        self
+    }
+
+    /// The configured default route.
+    #[must_use]
+    pub fn gateway(&self) -> Ipv4Addr {
+        self.gateway
+    }
+
+    /// The configured resolver, if any.
+    #[must_use]
+    pub fn resolver(&self) -> Option<Ipv4Addr> {
+        self.resolver
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct Tap {
     /// The network namespace name (the VM's scratch-dir name), also the `/run/netns/<name>` handle.

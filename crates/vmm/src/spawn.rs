@@ -28,7 +28,7 @@ use crate::jail::{
     spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, Chroot, Jail, JAILED_VSOCK_UDS,
 };
 use crate::lifetime::VmLifetime;
-use crate::net::{GuestLink, Tap};
+use crate::net::{GuestEgress, GuestLink, Tap};
 use crate::paths::{absolute, path_str, require_file};
 use crate::vm::{
     reclaim_scratch, reclaim_scratch_after_tap_failure, teardown, BootConfig, RunningVm, FC_STDERR,
@@ -546,7 +546,10 @@ impl Spawned {
         let rootfs = rootfs_arg.as_str();
         let mut boot_args = overlay_boot_args(config);
         if let Some(tap) = self.tap.as_ref() {
-            boot_args = format!("{boot_args} {}", network_boot_args(&tap.v4, tap.v6));
+            boot_args = format!(
+                "{boot_args} {}",
+                network_boot_args(&tap.v4, tap.v6, config.egress)
+            );
         }
         still_before(deadline, "PUT /boot-source")?;
         self.api.put(
@@ -924,23 +927,41 @@ fn overlay_boot_args(config: &BootConfig) -> String {
 }
 
 /// The guest's addressing tokens for the kernel command line, rendered from the link the host just
-/// configured on the tap. The kernel brings `eth0` up before userspace from `ip=` (`CONFIG_IP_PNP`);
-/// the gateway field is **empty**, so it installs the connected route (guest to host over the tap)
-/// and **no default route**, and `off` is the autoconf method, so the guest never probes DHCP. The
-/// guest reaches the host end and nothing else (deny-by-default).
+/// configured on the tap. The kernel brings `eth0` up before userspace from `ip=` (`CONFIG_IP_PNP`),
+/// and `off` is the autoconf method, so the guest never probes DHCP.
 ///
 /// The mask comes from the link's own prefix ([`GuestLink::netmask`]) rather than being written
 /// out, so the guest's mask and the host tap's prefix cannot disagree.
 ///
+/// **The gateway and DNS fields are empty unless `egress` names them.** Empty is the shipped
+/// default: the guest installs the connected route (guest to host over the tap) and no default
+/// route, so an off-link destination fails with `ENETUNREACH` inside the guest. A
+/// [`GuestEgress`] fills them, which lets the guest *emit* those packets so the tap's classifier can
+/// see and police them; it does not make them arrive, since nothing here builds a path (decision 9).
+/// A resolver is unrepresentable without a gateway, so the DNS field can never name a host the
+/// guest has no route to.
+///
 /// IPv6 rides alongside as the `guest_ip6=<addr>/<plen>` token, since `ip=` has no v6 form: the
 /// guest's `/sbin/net-up` sysinit reads it and applies it to `eth0`. It is emitted only when the v6
 /// link is live (host assignment is best-effort), so an IPv6-disabled host leaves no dangling guest
-/// address. Same deny-by-default shape, a connected `/64` and no v6 default route.
+/// address. v6 gets a connected `/64` and no default route in every case: `--allow` parses v4 only,
+/// so a v6 route would be one no CLI-authored policy could bound.
 ///
 /// Split out of the boot sequence for the reason [`overlay_boot_args`] was: the rendering is then
 /// exercised without a VM.
-fn network_boot_args(v4: &GuestLink<Ipv4Addr>, v6: Option<GuestLink<Ipv6Addr>>) -> String {
-    let args = format!("ip={}:::{}::eth0:off", v4.guest, v4.netmask());
+fn network_boot_args(
+    v4: &GuestLink<Ipv4Addr>,
+    v6: Option<GuestLink<Ipv6Addr>>,
+    egress: Option<GuestEgress>,
+) -> String {
+    // Both render empty when unset, which is what keeps the sealed string byte-identical to the one
+    // every release so far has booted.
+    let gateway = egress.map(|e| e.gateway().to_string()).unwrap_or_default();
+    let dns = egress
+        .and_then(|e| e.resolver())
+        .map(|r| format!(":{r}"))
+        .unwrap_or_default();
+    let args = format!("ip={}::{gateway}:{}::eth0:off{dns}", v4.guest, v4.netmask());
     match v6 {
         Some(v6) => format!(
             "{args} {}={}/{}",
@@ -1702,15 +1723,15 @@ mod tests {
         };
         // The shipped /30, unchanged: guest end, mask, empty gateway field, static autoconf.
         assert_eq!(
-            network_boot_args(&link(30), None),
+            network_boot_args(&link(30), None, None),
             "ip=10.200.0.2:::255.255.255.252::eth0:off"
         );
         assert_eq!(
-            network_boot_args(&link(24), None),
+            network_boot_args(&link(24), None, None),
             "ip=10.200.0.2:::255.255.255.0::eth0:off"
         );
         assert_eq!(
-            network_boot_args(&link(0), None),
+            network_boot_args(&link(0), None, None),
             "ip=10.200.0.2:::0.0.0.0::eth0:off"
         );
 
@@ -1721,9 +1742,52 @@ mod tests {
             64,
         );
         assert_eq!(
-            network_boot_args(&link(30), Some(v6)),
+            network_boot_args(&link(30), Some(v6), None),
             format!(
                 "ip=10.200.0.2:::255.255.255.252::eth0:off {}=fd00:200::2/64",
+                channel::GUEST_IP6_CMDLINE_KEY
+            )
+        );
+    }
+
+    #[test]
+    fn egress_fills_the_gateway_and_dns_fields_the_sealed_boot_leaves_empty() {
+        let link = GuestLink::new(
+            Ipv4Addr::new(10, 200, 0, 1),
+            Ipv4Addr::new(10, 200, 0, 2),
+            30,
+        );
+        let gw = Ipv4Addr::new(10, 200, 0, 1);
+
+        // A gateway fills the third `ip=` field, which is what installs a default route. The DNS
+        // field stays empty, so the guest is routed but told no resolver.
+        assert_eq!(
+            network_boot_args(&link, None, Some(GuestEgress::via(gw))),
+            "ip=10.200.0.2::10.200.0.1:255.255.255.252::eth0:off"
+        );
+
+        // A resolver appends the DNS field. Unrepresentable without a gateway (the builder starts
+        // from `via`), so the guest is never told to resolve at a host it has no route to.
+        assert_eq!(
+            network_boot_args(
+                &link,
+                None,
+                Some(GuestEgress::via(gw).with_resolver(Ipv4Addr::new(1, 1, 1, 1)))
+            ),
+            "ip=10.200.0.2::10.200.0.1:255.255.255.252::eth0:off:1.1.1.1"
+        );
+
+        // v6 is unaffected: it rides its own token and gets no gateway either way, since `--allow`
+        // parses v4 only and a v6 route would be one no CLI-authored policy could bound.
+        let v6 = GuestLink::new(
+            Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, 1),
+            Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, 2),
+            64,
+        );
+        assert_eq!(
+            network_boot_args(&link, Some(v6), Some(GuestEgress::via(gw))),
+            format!(
+                "ip=10.200.0.2::10.200.0.1:255.255.255.252::eth0:off {}=fd00:200::2/64",
                 channel::GUEST_IP6_CMDLINE_KEY
             )
         );

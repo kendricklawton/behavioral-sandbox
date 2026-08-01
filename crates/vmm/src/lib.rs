@@ -35,7 +35,7 @@ use channel::ChannelError;
 pub use channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
-pub use net::GuestLink;
+pub use net::{GuestEgress, GuestLink};
 pub use pool::Pool;
 pub use sweep::{sweep_orphans, SweepReport};
 pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT};
