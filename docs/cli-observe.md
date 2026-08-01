@@ -64,9 +64,10 @@ kernel, so their absence from a host tracepoint is the isolation working, not a 
 
 ## Enforcing egress with `--allow`
 
-`--net` alone is observe-only: the guest reaches nothing past the host end of its /30 (the driver's
-deny-by-default routing), and the tap records what crosses it. To bound what may cross that tap, list
-each destination with a repeatable `--allow`, which requires `--net`:
+`--net` alone is observe-only: the tap records what crosses it, but no policy is armed. It is also
+sealed unless you add [`--gateway`](#giving-the-guest-a-route-to-be-policed-on), so the guest reaches
+nothing past the host end of its /30. To bound what may cross that tap, list each destination with a
+repeatable `--allow`, which requires `--net`:
 
 ```console
 # Allow one port on the host end; everything else is dropped at the tap and recorded.
@@ -75,10 +76,11 @@ ekvm run --net \
 ```
 
 **What `--allow` does, and what it does not.** It populates the policy maps and attaches the
-classifiers to the tap, so it decides which flows may cross. It does not create a path. The per-VM
-network namespace holds exactly two interfaces, `lo` and the tap, so the only address the guest can
-reach is the host end of its /30. Where an uplink exists, `--allow` is what bounds what leaves
-through it. Which half of that is whose is
+classifiers to the tap, so it decides which flows may cross. It does not create a path, and neither
+does `--gateway`: the per-VM network namespace holds exactly two interfaces, `lo` and the tap, so
+until something furnishes it the only address the guest can reach is the host end of its /30, no
+matter what an allowance names. Where an uplink exists, `--allow` is what bounds what leaves through
+it. Which half of that is whose is
 [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster):
 the engine names a gateway and enforces at the tap, the hoster builds the uplink and allocates the
 addresses it needs.
@@ -91,10 +93,19 @@ the shipped default, and it means an off-link attempt never reaches the tap, so 
 appears in the record**.
 
 ```console
-# Give the guest a default route and a resolver, and bound what may cross the tap.
+# A route, a resolver, and allowances for both things a fetch touches: the resolver, and the
+# index itself. Each is named by address, because the tap policy matches addresses, not names.
 ekvm run --net --gateway 10.200.0.1 --resolver 10.200.0.53 \
-    --allow 10.200.0.53:53/udp --record run.json -- pip install ...
+    --allow 10.200.0.53:53/udp \
+    --allow 10.0.0.0/8:443/tcp \
+    --record run.json -- pip install --index-url https://pypi.internal/simple somepkg
 ```
+
+Note what that example does *not* do: reach a public index. A hostname behind a CDN resolves to
+addresses that rotate, so it cannot be allow-listed here at all, and widening the rule until it
+happens to match defeats the point. Fetching by name belongs in a proxy the hoster runs, which is
+the same line [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster)
+draws for the uplink.
 
 `--gateway` fills the field the kernel `ip=` parameter otherwise leaves empty. It names a path
 rather than building one: the engine adds no veth, bridge, forwarding, or NAT, so on a host whose

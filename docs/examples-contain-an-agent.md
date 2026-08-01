@@ -34,11 +34,20 @@ succeeds locally either way. `summary.json` carries what the host actually obser
 ```json
 {
   "network": {
-    "reached": ["10.200.0.1:9000/udp"],
-    "denied":  ["10.200.0.1:9100/udp"]
+    "reached":   ["10.200.0.1:9000/udp"],
+    "denied":    ["10.200.0.1:9100/udp"],
+    "allowed":   ["10.200.0.1/32:9000/udp"],
+    "routed":    false,
+    "enforcing": true
   }
 }
 ```
+
+`reached` and `denied` are both backward-looking, so an agent planning its next turn cannot tell an
+endpoint it may retry from one it may not. `allowed` is what the classifier actually holds (read back
+from the kernel, not restated from the request), `enforcing` says the policy was armed rather than
+observed, and `routed` says whether the run had a default route at all: `false` here, so nothing off
+the /30 was reachable no matter what the allow-list named.
 
 `ekvm verify record.json` checks the host signature.
 [`ekvm verify`](./cli-commands.md#ekvm-verify) states exactly what that does and does not prove: it

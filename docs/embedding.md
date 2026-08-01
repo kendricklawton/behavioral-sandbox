@@ -28,6 +28,14 @@ jail (no real root, no `jailer` binary) is the *differently named constructor*
 by a forgotten flag (012). Artifacts (kernel, rootfs, `firecracker`) layer from the environment
 (`EKVM_KERNEL`, `EKVM_ROOTFS`, …) under explicit `BootConfig` fields.
 
+Networking is off by default. `enable_network` gives the guest a tap whose only reachable address is
+the host end of its /30; `egress` additionally hands it a default route and a resolver, which is read
+only when `enable_network` is set and ignored otherwise. Neither builds a path: no veth, bridge,
+forwarding, or NAT, so on a netns nothing has furnished the reachable set is unchanged and only what
+the host can *observe* widens. Attaching an uplink is the embedder's, per
+[decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster);
+bounding what crosses the tap is the eBPF policy in [`probes-loader`](./probes.md).
+
 ### Exec: synchronous, bounded, faithful
 
 `exec` connects to the in-guest agent over vsock, runs one command, and returns a `RunResult`:

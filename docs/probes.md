@@ -158,8 +158,8 @@ observe-only (both hooks accept, exactly the observe-only behavior above).
 The userspace schema is `EgressPolicy`, an allow-list built from friendly `Ipv4Addr`/`Ipv6Addr` CIDRs
 (`Ipv4Cidr`/`Ipv6Cidr`) and ports, lowered to the `PolicyRule`/`PolicyRule6`s the maps hold. Its **deny-by-default** is the safe default: the empty
 policy (`EgressPolicy::deny_all()`, the `Default`) allows nothing, so a sandbox launched with no explicit
-allowance reaches nothing, the eBPF, host-observed complement to the driver's no-route-to-the-world
-deny-by-default. `TapMonitor::set_egress_policy` applies a policy to an already-attached
+allowance reaches nothing, the eBPF, host-observed complement to the driver's own deny-by-default
+(no route out of the guest unless one is configured, and no uplink built for it either). `TapMonitor::set_egress_policy` applies a policy to an already-attached
 monitor; `TapMonitor::enforce_in_netns` applies it **at launch**: it populates the policy maps and only then
 attaches the classifiers, so the programs go live against maps that already hold the run's rules. Rules go in as raw bytes (`PolicyRule::to_bytes`, so the loader needs no
 `unsafe` `aya::Pod` binding); `clear_egress_policy` disarms.
