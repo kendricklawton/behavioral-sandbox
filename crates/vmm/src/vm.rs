@@ -371,7 +371,9 @@ pub(crate) fn refuse_offlink_gateway(config: &BootConfig) -> Result<(), VmmError
     let link = crate::net::v4_link();
     if !link.on_link(egress.gateway()) {
         return Err(VmmError::Vmm(format!(
-            "gateway {} is not on the guest's /{} link ({} .. {}); the guest cannot reach it, so              the kernel would refuse the default route and the sandbox would come up sealed              (use {})",
+            "gateway {} is not on the guest's /{} link ({} .. {}); the guest cannot ARP it, so \
+             the kernel would refuse the default route and the sandbox would come up sealed \
+             (use {})",
             egress.gateway(),
             link.prefix_len,
             link.host,
@@ -1238,6 +1240,13 @@ mod tests {
             .to_string();
         assert!(err.contains("192.168.1.1"), "names the bad value: {err}");
         assert!(err.contains("10.200.0.1"), "names the working one: {err}");
+        // The operator reads this string. A multi-line `format!` without trailing `\` bakes the
+        // source indentation into it, which is how this message shipped with 14-space runs in the
+        // middle of two sentences and nothing noticed: the assertions above still passed.
+        assert!(
+            !err.contains("  "),
+            "no run of source indentation in an operator-facing message: {err:?}"
+        );
 
         // Even an address one bit outside the /30, the near-miss a hand-edited config produces.
         cfg.egress = Some(GuestEgress::via(Ipv4Addr::new(10, 200, 0, 5)));
