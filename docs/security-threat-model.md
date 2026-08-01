@@ -181,6 +181,17 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   scheduling layer it owns.
 - **Availability of a co-resident run under contention** is bounded (cgroup + egress caps), but the
   engine does not promise fair scheduling across runs, that is the hoster's scheduler.
+- **What a configured egress path does not bound.** A run given a gateway
+  ([decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster))
+  is policed at the tap by destination address, port, and protocol, which leaves four things to
+  whatever built the uplink. Hostnames are not expressible at that layer, so a CDN behind rotating
+  addresses cannot be allow-listed by name and **DNS tunnelling through an allowed resolver is not
+  addressed**; hostname policy belongs in a hoster's proxy. The rule table is a fixed size, because
+  the classifier's loop bound must be a compile-time constant. Non-first IP fragments arrive with no
+  port, so a port-qualified rule denies them (closed, but surprising). And the tap's world-to-guest
+  direction passes unconditionally, so what can reach a guest is whatever the uplink exposes. Two
+  sandboxes sharing a hoster's bridge are separated by that bridge's configuration and by each
+  sandbox's own egress policy, not by anything the engine does.
 - **The e2fsprogs output-extraction tools.** Bulk outputs come back by running `e2fsck` and
   `debugfs` over a guest-written ext4 image: complex C parsers fed attacker-controlled bytes, with
   the driver's own privileges. The calls are bounded in wall time and output bytes, and the
@@ -192,8 +203,8 @@ Explicitly assumed sound, and therefore *out* of the boundary:
 Per-run containment is the engine's concern; tenancy is not. Tenant authentication, authorization,
 quotas, billing, fleet scheduling, and a management dashboard are the **hoster's** responsibility,
 not a gap in the engine. The engine's own scope is narrower and mechanical: its privileged tools are
-euid-scoped, and its defaults self-limit (no network route out, a dropped-uid jail, an own-euid
-sweep). Turning that into a multi-tenant service is the hoster's job, and this project makes no claim
+euid-scoped, and its defaults self-limit (no network route out unless one is configured, a
+dropped-uid jail, an own-euid sweep). Turning that into a multi-tenant service is the hoster's job, and this project makes no claim
 about whether the result would be safe.
 
 See [Security](./security.md) for what counts as a security bug and how to report one.

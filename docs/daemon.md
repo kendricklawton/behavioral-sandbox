@@ -86,20 +86,29 @@ let record = client.trace()?;                       // the host-observed audit r
 client.close()?;                                    // tear the sandbox down
 ```
 
-## What the wire does not carry yet
+## What a session may ask for, and what it may not
 
-Two capabilities the CLI and the library have are not reachable over the daemon today, and a client
-written against the protocol will not find them:
+`open` carries the session's resource envelope, whether it wants a NIC (`net`), and the egress
+allowances to arm on its tap (`allow`, each `IP[/CIDR][:PORT][/PROTO]`). Both default to the sealed
+posture, so a client written before they existed sends bytes that still decode to no NIC at all.
 
-- **No network.** A session never gets a NIC, so `trace` and `trace_summary` report `"network":
-  null` for every run and the tap-level flow record is empty. The deny-by-default posture holds
-  trivially, but the observation
-  [the probes chapter](./probes.md) describes is not available over the wire.
-- **No egress policy.** Probes attach observe-only, so `--allow`-style enforcement has no wire
-  equivalent. It is not that a policy is ignored: there is no field to send one in.
+The daemon refuses rather than narrowing. An `allow` without `net` names the contradiction, a host
+that withdrew guest networking (`allow_net = false`) refuses the NIC outright, a rule past the
+kernel map's fixed count is caught with the cap named, and a rule outside `max_egress_v4` is
+refused rather than trimmed to fit.
 
-Both are additive protocol changes when they arrive, which is what the `schema` handshake exists
-for. Until then, a run that must be network-observed is a CLI or library run.
+Two things stay the daemon's:
+
+- **Whether a route out exists.** The gateway is the daemon's launch-time `BootConfig`, like the
+  jail, so no wire message can route a session out of its sandbox. A client can ask for a NIC and
+  bound what crosses it; it cannot create a path. The division of labour is
+  [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster).
+- **That enforcement does not fail open.** A session whose tap could not be policed is ended, never
+  run with its caller believing an allow-list is in force. Observation still fails open: a host
+  without the eBPF caps yields a coverage-gapped record, not a refused session.
+
+A networked `open` is never served from the pre-warmed pool, since a pooled clone restores a
+snapshot with its NIC presence baked in.
 
 ## Non-goals: where a PaaS would begin
 

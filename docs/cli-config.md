@@ -121,6 +121,30 @@ The `--require-limits` flag sets it per run.
 
 [`require_limits`]: #setting-require_limits
 
+## Setting `gateway` and `resolver`
+
+- **env**: `EKVM_GATEWAY`, `EKVM_RESOLVER`
+- **type**: IPv4 address
+- **default**: unset (the guest gets no default route and no nameserver)
+
+The default route this host hands its guests, and the resolver it tells them to use. Which uplink a
+host has is a host fact rather than a per-run one, which is why these live here; `--gateway` and
+`--resolver` override them per run.
+
+Setting a gateway does not build a path. The engine adds no veth, bridge, forwarding, or NAT, so
+where nothing has furnished the per-VM netns the guest still reaches nothing. What it changes is
+that the guest can emit those packets, so `--allow` can bound them and the audit record can show
+them: the observable set widens even where the reachable set does not. Building the uplink and
+allocating the addresses it needs is the hoster's, per
+[decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster).
+
+`resolver` is only read when a gateway is set, since a resolver the guest cannot route to is inert,
+and reaching it still needs its own `--allow`. A value that is not an IPv4 address is ignored with a
+warning naming the key, so a typo reads as a misconfiguration rather than as a broken engine.
+
+[`gateway`]: #setting-gateway-and-resolver
+[`resolver`]: #setting-gateway-and-resolver
+
 ## Setting `signing_key`
 
 - **env**: `EKVM_SIGNING_KEY`

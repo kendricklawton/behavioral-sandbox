@@ -174,9 +174,10 @@ out=$(findfs LABEL={out_label} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t 
 /// `channel::GUEST_IP6_CMDLINE_KEY`, the one host↔guest definition the driver's writer and this
 /// reader share, so they can't drift (the address itself is never baked into the image, the host owns
 /// it). Best-effort by construction: a plain (no-NIC) boot has no `eth0` and exits cleanly, and a
-/// missing token is a clean no-op, so a non-networked boot is unaffected. Deny-by-default holds for
-/// v6 exactly as for v4: only the connected `/64` route is added, never a v6 default
-/// route, so the guest reaches the host end and nothing else. `ip` first, `ifconfig` as the fallback,
+/// missing token is a clean no-op, so a non-networked boot is unaffected. v6 gets only the connected
+/// `/64` and **never** a default route, where v4's is configurable (`BootConfig::egress`): `--allow`
+/// parses v4 addresses only, so a v6 route would be one no CLI-authored policy could bound. `ip`
+/// first, `ifconfig` as the fallback,
 /// so it works whether or not busybox's `ip` applet carries v6 address support.
 /// DAD is disabled (`accept_dad=0`) before the address is added, mirroring the host tap end's
 /// `nodad` (`crates/vmm/src/net.rs`): the point-to-point `/64` has exactly one other endpoint,

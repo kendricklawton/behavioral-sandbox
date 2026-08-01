@@ -32,6 +32,14 @@ ekvm run --unjailed --net --watch --trace --record run.json --record-summary run
 
 Check a `--record` file with [`ekvm verify`](./cli-commands.md#ekvm-verify).
 
+**The record says what was permitted, not only what was refused.** The network section's `posture`
+carries the rules the classifier actually holds (read back from the kernel after attach, so it
+reports what is in force rather than what was requested), whether enforcement was armed, and the
+configured gateway. Without it a run with no traffic and no denials looks the same whether the
+sandbox reached nothing or was allowed everything and stayed quiet. The summary projects the same
+three as `allowed`, `routed`, and `enforcing`, since `reached` and `denied` are both backward-looking
+and an agent planning its next turn needs to know what it may retry.
+
 ## Schema versioning
 
 Each machine JSON surface carries a leading integer **`schema`** field, and the `--json` run result,
@@ -69,12 +77,36 @@ ekvm run --net \
 **What `--allow` does, and what it does not.** It populates the policy maps and attaches the
 classifiers to the tap, so it decides which flows may cross. It does not create a path. The per-VM
 network namespace holds exactly two interfaces, `lo` and the tap, so the only address the guest can
-reach is the host end of its /30; a destination beyond that is refused by the guest's own routing
-with `ENETUNREACH` before a packet is ever emitted, whether or not an allowance names it. Where an
-uplink exists, `--allow` is what bounds what leaves through it. Which half of that is whose is
+reach is the host end of its /30. Where an uplink exists, `--allow` is what bounds what leaves
+through it. Which half of that is whose is
 [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster):
 the engine names a gateway and enforces at the tap, the hoster builds the uplink and allocates the
 addresses it needs.
+
+## Giving the guest a route to be policed on
+
+Without `--gateway` the guest installs its connected /30 and nothing else, so a destination beyond
+that is refused by the guest's own routing with `ENETUNREACH` before a packet is emitted. That is
+the shipped default, and it means an off-link attempt never reaches the tap, so **nothing about it
+appears in the record**.
+
+```console
+# Give the guest a default route and a resolver, and bound what may cross the tap.
+ekvm run --net --gateway 10.200.0.1 --resolver 10.200.0.53 \
+    --allow 10.200.0.53:53/udp --record run.json -- pip install ...
+```
+
+`--gateway` fills the field the kernel `ip=` parameter otherwise leaves empty. It names a path
+rather than building one: the engine adds no veth, bridge, forwarding, or NAT, so on a host whose
+per-VM netns nothing has furnished the reachable set is unchanged. What changes is that the guest
+can now *emit* those packets, so the classifier judges them and a refusal lands in `denials`. The
+observable set widens even where the reachable set does not.
+
+`--resolver` rides the same parameter's DNS field; the guest image links `/etc/resolv.conf` to the
+kernel's record of it. Reaching that resolver still needs an allowance like any other destination,
+and the engine runs no resolver of its own. Both are host constants, so they are normally set once
+in [configuration](./cli-config.md) rather than on every command line. IPv4 only: `--allow` parses
+v4 addresses, so a v6 route would be one no policy you can write here could bound.
 
 Each `--allow` is `IP[/CIDR][:PORT][/PROTO]`; a bare `IP` is a single-host `/32`, any port, any
 protocol. The allowances build a deny-by-default egress policy: the policy maps are populated first and

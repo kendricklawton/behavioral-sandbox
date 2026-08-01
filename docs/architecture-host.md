@@ -55,6 +55,13 @@ only path out. By default that path leads nowhere (deny-by-default); with `--net
 host-side eBPF `tc` programs inspect every packet at the tap and enforce the destination
 allow-list.
 
+The namespace holds exactly `lo` and the tap, so a guest with no `--gateway` reaches only the host
+end of its /30 and an off-link destination fails at its own routing table before a packet is
+emitted. `--gateway` fills the field the kernel `ip=` parameter otherwise leaves empty, which lets
+the guest emit those packets so the classifier can judge them; it builds nothing. Attaching an
+uplink to the namespace and allocating the addresses that takes is the hoster's, per
+[decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster).
+
 ```mermaid
 flowchart LR
     subgraph GuestNetns["Per-VM Network Namespace"]
