@@ -32,10 +32,21 @@ fail legibly (`xtask setup`'s degradation matrix, the pinned Firecracker probe),
 (fd, boot, restore, memory-sharing), and a wire protocol whose version handshake makes skew a typed error
 instead of a silent misbehavior.
 
-Downstream of the public API, the language SDKs (Go/Python/Node/C#) are planned to live in separate
-repos. None of them exist yet. The intent is that they pin this crate's git rev; the surface the
-project intends to pin and its movement rules are the
-[Semver section](#semver--api-stability) below.
+Downstream of the public API there are two consumers, and they couple to this repo in different ways.
+
+An **embedder** is a Rust program that links `vmm` and drives sandboxes in its own process. It pins
+this crate's git rev, so it is coupled to the library surface the [Semver
+section](#semver--api-stability) below describes.
+
+A **language SDK** (Go/Python/Node/C#, planned, none written) is not, and cannot be: a Python or Node
+package has no way to pin a Rust crate. It drives the [daemon's wire
+protocol](./daemon-protocol.md) over a unix socket and never links anything here, which is what
+`client` exists to demonstrate. Its whole coupling is the `schema` handshake.
+
+Who an SDK serves is worth naming, because it bounds how much of one is worth building: someone who
+installed the engine on their own machine and wants to drive it from that language on that same
+machine. A hosted product's customers are not that person. They call whatever API the hoster exposes,
+and the engine's socket is deliberately local, so an SDK for it never reaches them.
 
 **The crates are never published to crates.io** (`publish = false` across the workspace), a
 decision, not a gap. A crates.io version is immutable and available forever, but this engine's
