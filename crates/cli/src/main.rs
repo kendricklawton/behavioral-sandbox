@@ -483,6 +483,9 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     if args.require_limits {
         config.require_limits = true;
     }
+    // Captured before `config` moves into the boot: the record needs it, and an allowance means
+    // something different with a route behind it than without.
+    let gateway = config.egress.map(|e| e.gateway());
     let sandbox = open(config, args.unjailed)?;
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
@@ -516,6 +519,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
             sandbox.netns(),
             sandbox.tap_name(),
             egress.as_ref(),
+            gateway,
         )?)
     } else {
         None

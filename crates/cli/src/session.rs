@@ -150,6 +150,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
         vm.netns(),
         vm.tap_name(),
         None,
+        // No gateway either: the daemon fixes the boot posture and its `BootConfig` sets no egress,
+        // so every session is sealed and the record says so rather than leaving it unstated.
+        None,
     ) {
         Ok(p) => Some(p),
         Err(e) => {

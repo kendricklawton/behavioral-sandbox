@@ -16,9 +16,12 @@
 
 use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use probes_common::{FlowCounts, FlowKey, FlowKey6, Syscall, SyscallEvent};
+use probes_common::{
+    FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Syscall, SyscallEvent,
+};
 
 use crate::{NetStats, ResourceSummary};
 
@@ -138,6 +141,36 @@ pub struct NetSection {
     /// destination row a full map could not record (the packets were still dropped at the tap;
     /// only the audit row is missing).
     pub dropped_denials: u64,
+    /// The egress policy in force, read back from the kernel, and the route the guest was given.
+    /// `None` when the posture was not read, which is what a section built without
+    /// [`with_posture`](Self::with_posture) reports.
+    ///
+    /// Without this a record cannot distinguish an unpoliced run from a policed one: zero flows and
+    /// zero denials is the same shape whether every destination was allowed or none was. The denial
+    /// trail says what was refused, never what was permitted.
+    pub posture: Option<EgressPosture>,
+}
+
+/// What the tap was actually enforcing, and whether the guest had a route to test it with.
+///
+/// Read back from the kernel maps after attach rather than restated from the caller's request, so
+/// it reports the rules the classifier will consult. The distinction is the point: a policy that
+/// never reached the map reads as absent here instead of as applied.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct EgressPosture {
+    /// Whether the classifier is armed. `false` is observe-only, in which case every packet passes
+    /// no matter what [`allowed`](Self::allowed) holds, which is why this rides alongside the rules
+    /// rather than being inferred from a non-empty list.
+    pub enforcing: bool,
+    /// The live IPv4 rules the kernel holds, in slot order.
+    pub allowed: Vec<PolicyRule>,
+    /// The live IPv6 rules, in slot order.
+    pub allowed6: Vec<PolicyRule6>,
+    /// The default route the driver configured for the guest, when it configured one. `None` is the
+    /// sealed posture: the guest can address nothing beyond the host end of its link, so an
+    /// allowance naming anything further has nothing to act on.
+    pub gateway: Option<Ipv4Addr>,
 }
 
 impl NetSection {
@@ -193,7 +226,17 @@ impl NetSection {
             denials6: Vec::new(),
             dropped_flows,
             dropped_denials,
+            posture: None,
         }
+    }
+
+    /// Attach the egress posture read back from the kernel maps. A builder for the reason
+    /// [`with_v6`](Self::with_v6) is one: every caller that does not read the posture is untouched
+    /// and reports `None`, which says "not read" rather than implying an unpoliced run.
+    #[must_use]
+    pub fn with_posture(mut self, posture: EgressPosture) -> Self {
+        self.posture = Some(posture);
+        self
     }
 
     /// Fold the IPv6 half of the tap reads into a section built by [`from_tap`](Self::from_tap): the v6

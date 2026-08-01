@@ -76,6 +76,7 @@ impl Observability {
         netns: Option<&str>,
         tap: Option<&str>,
         egress: Option<&EgressPolicy>,
+        gateway: Option<std::net::Ipv4Addr>,
     ) -> Result<RunProbes, VmmError> {
         // Stamped here, not at collect: attaching the probes *is* the start of observation, so this
         // is when the run began. A host with an unreadable clock yields 0, the same fail-open
@@ -83,7 +84,8 @@ impl Observability {
         let subject = RecordSubject::new(sandbox_id.to_string(), unix_nanos_now());
         match (&self.tracer, &self.meter) {
             (Some(tracer), Some(meter)) => {
-                let probes = SandboxProbes::attach(vmm_pid, netns, tap, egress, tracer, meter);
+                let probes =
+                    SandboxProbes::attach(vmm_pid, netns, tap, egress, gateway, tracer, meter);
                 // Enforcement is all-or-nothing: a policed tap that gapped (missing CAP_NET_ADMIN,
                 // a tc attach failure) must refuse, not degrade to an unenforced run.
                 if egress.is_some() {

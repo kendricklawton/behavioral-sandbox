@@ -198,7 +198,66 @@ fn net_summary(out: &mut String, net: &NetSection) {
     // exhaustive (the kernel's flow/denial tables saturated); the counts ride the full record.
     out.push_str(",\"truncated\":");
     out.push_str(if net.truncated() { "true" } else { "false" });
+    // What the sandbox *may* reach, next to what it did. `reached`/`denied` are both backward-looking,
+    // so an agent planning its next turn cannot tell "this endpoint failed, retrying is pointless"
+    // from "I never tried it". `allowed` + `routed` answer that before it spends a turn finding out.
+    // All three are `null` when the posture could not be read, which is not the same claim as an
+    // empty allow-list.
+    match &net.posture {
+        Some(p) => {
+            out.push_str(",\"allowed\":[");
+            let mut wrote = false;
+            for rule in &p.allowed {
+                if wrote {
+                    out.push(',');
+                }
+                let b = rule.addr.to_be_bytes();
+                let _ = write!(
+                    out,
+                    "\"{}.{}.{}.{}/{}:",
+                    b[0], b[1], b[2], b[3], rule.prefix_len
+                );
+                rule_port_proto(out, rule.port, rule.proto);
+                wrote = true;
+            }
+            for rule in &p.allowed6 {
+                if wrote {
+                    out.push(',');
+                }
+                let _ = write!(
+                    out,
+                    "\"[{}]/{}:",
+                    std::net::Ipv6Addr::from(rule.addr),
+                    rule.prefix_len
+                );
+                rule_port_proto(out, rule.port, rule.proto);
+                wrote = true;
+            }
+            out.push_str("],\"routed\":");
+            out.push_str(if p.gateway.is_some() { "true" } else { "false" });
+            out.push_str(",\"enforcing\":");
+            out.push_str(if p.enforcing { "true" } else { "false" });
+        }
+        None => out.push_str(",\"allowed\":null,\"routed\":null,\"enforcing\":null"),
+    }
     out.push('}');
+}
+
+/// The `port/proto` tail of a summary allow-rule, closing the string. A `0` is the kernel record's
+/// "any", rendered `*` so it reads as a wildcard rather than as port zero / protocol zero.
+fn rule_port_proto(out: &mut String, port: u16, proto: u8) {
+    if port == 0 {
+        out.push('*');
+    } else {
+        let _ = write!(out, "{port}");
+    }
+    out.push('/');
+    if proto == 0 {
+        out.push('*');
+    } else {
+        proto_name(out, proto);
+    }
+    out.push('"');
 }
 
 /// The host-syscall summary: the by-kind counts, a bounded `notable` sample as `"kind detail"` strings
@@ -383,7 +442,7 @@ mod tests {
             "{\"schema\":1,\"timing\":{\"boot_ns\":120000000,\"exec_ns\":42000000}",
             ",\"network\":{\"reached\":[\"1.1.1.1:53/udp\",\"8.8.8.8:443/tcp\"],",
             "\"denied\":[\"9.9.9.9:443/tcp\"],\"sent_bytes\":120,\"recv_bytes\":200,",
-            "\"truncated\":false}",
+            "\"truncated\":false,\"allowed\":null,\"routed\":null,\"enforcing\":null}",
             ",\"host_syscalls\":{\"execve\":1,\"openat\":2,\"connect\":0,",
             "\"notable\":[\"execve /bin/sh\",\"openat /etc/hosts\"],\"truncated\":false}",
             ",\"resources\":{\"cpu_ns\":5000,\"mem_peak_bytes\":4096,\"io_read_bytes\":null,",
@@ -404,6 +463,52 @@ mod tests {
             flow([10, 200, 0, 2], 40000, [1, 1, 1, 1], 53, IPPROTO_UDP),
         ]);
         assert_eq!(a.to_summary_json(), b.to_summary_json());
+    }
+
+    #[test]
+    fn the_summary_says_what_the_sandbox_may_reach_not_only_what_it_did() {
+        use crate::record::EgressPosture;
+        use crate::summary::net_summary;
+        use probes_common::{PolicyRule, PolicyRule6};
+
+        let net = NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0).with_posture(
+            EgressPosture {
+                enforcing: true,
+                allowed: vec![
+                    PolicyRule::allow(0x0AC8_0001, 32, 9000, IPPROTO_UDP),
+                    // Any port, any protocol: the wildcard shape.
+                    PolicyRule::allow(0x0A00_0000, 8, 0, 0),
+                ],
+                allowed6: vec![PolicyRule6::allow([0xfd; 16], 64, 443, IPPROTO_TCP)],
+                gateway: Some(std::net::Ipv4Addr::new(10, 200, 0, 1)),
+            },
+        );
+        let mut out = String::new();
+        net_summary(&mut out, &net);
+
+        // `reached` and `denied` are both empty: this run did nothing. Without `allowed` an agent
+        // reading that cannot tell an endpoint it may retry from one it may not.
+        assert!(out.contains("\"reached\":[],\"denied\":[]"), "{out}");
+        assert!(
+            out.contains(
+                "\"allowed\":[\"10.200.0.1/32:9000/udp\",\"10.0.0.0/8:*/*\",\
+                 \"[fdfd:fdfd:fdfd:fdfd:fdfd:fdfd:fdfd:fdfd]/64:443/tcp\"]"
+            ),
+            "wildcards read as `*`, never as port 0 / proto 0: {out}"
+        );
+        assert!(out.contains("\"routed\":true"), "{out}");
+        assert!(out.contains("\"enforcing\":true"), "{out}");
+
+        // A section whose posture was never read says so, rather than implying an empty allow-list.
+        let mut unread = String::new();
+        net_summary(
+            &mut unread,
+            &NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0),
+        );
+        assert!(
+            unread.contains("\"allowed\":null,\"routed\":null,\"enforcing\":null"),
+            "{unread}"
+        );
     }
 
     #[test]

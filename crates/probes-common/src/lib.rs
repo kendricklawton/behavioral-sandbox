@@ -745,6 +745,26 @@ impl PolicyRule6 {
         b[20] = self.active;
         b
     }
+
+    /// Reconstruct from a map value's raw native bytes, the read-side twin of
+    /// [`to_bytes`](Self::to_bytes), defined next to the fields so the two can't drift. `None` for a
+    /// short slice, so a map whose value size no longer matches the record fails loudly.
+    #[must_use]
+    pub fn from_bytes(b: &[u8]) -> Option<Self> {
+        if b.len() < POLICY_RULE6_SIZE {
+            return None;
+        }
+        let mut addr = [0u8; 16];
+        addr.copy_from_slice(&b[0..16]);
+        Some(Self {
+            addr,
+            port: u16::from_ne_bytes([b[16], b[17]]),
+            prefix_len: b[18],
+            proto: b[19],
+            active: b[20],
+            _pad: [0; 3],
+        })
+    }
 }
 
 /// Whether IPv6 address `addr` lies in `net/prefix_len`, compared **byte-wise** (no `u128`, so this

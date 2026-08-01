@@ -204,6 +204,9 @@ pub struct SandboxProbes {
     /// The kernel's cumulative ring-buffer drop count at attach time; `collect` reports a nonzero
     /// delta as a coverage gap (the footprint may undercount). `None` if unreadable at attach.
     drops_at_attach: Option<u64>,
+    /// The default route the driver configured, carried through to the record. The tap cannot see
+    /// it, so it rides as a plain value rather than being observed.
+    gateway: Option<std::net::Ipv4Addr>,
     gaps: Vec<AxisGap>,
     /// Set once [`collect`](Self::collect) has read + detached everything, so `Drop` is a no-op.
     finalized: bool,
@@ -217,12 +220,18 @@ impl SandboxProbes {
     ///   the tc programs go live) when given, else observe-only;
     /// - register the cgroup as a target on the shared meter.
     ///
+    /// `gateway` is the default route the driver gave the guest, or `None` for the sealed posture.
+    /// A plain value like `vmm_pid`/`netns`/`tap`, for the same reason: the loader stays independent
+    /// of `vmm`. The tap cannot observe it (it is on the guest's command line, not on the wire), and
+    /// the record needs it because an allowance means something different with a route than without.
+    ///
     /// Each sub-attach degrades to a recorded [`AxisGap`]; the returned bundle is always valid.
     pub fn attach(
         vmm_pid: u32,
         netns: Option<&str>,
         tap: Option<&str>,
         egress: Option<&EgressPolicy>,
+        gateway: Option<std::net::Ipv4Addr>,
         tracer: &SharedTracer,
         meter: &SharedMeter,
     ) -> SandboxProbes {
@@ -293,6 +302,7 @@ impl SandboxProbes {
 
         SandboxProbes {
             vmm_pid,
+            gateway,
             cgroup_id,
             tracer: tracer.clone(),
             traced,
@@ -437,16 +447,26 @@ impl SandboxProbes {
                             .push(AxisGap::Network(format!("read tap v6 denials: {e}").into()));
                         Vec::new()
                     });
-                    Some(
-                        NetSection::from_tap(
-                            flows,
-                            totals,
-                            denials,
-                            dropped_flows,
-                            dropped_denials,
-                        )
-                        .with_v6(flows6, denials6),
+                    // What the classifier was actually enforcing, read back from its own maps. A
+                    // failed read is a gap rather than an empty posture: "no rules" and "could not
+                    // tell" are the two readings a record must never conflate, since one of them
+                    // says the run was unrestricted.
+                    let posture = monitor.posture(self.gateway).map_err(|e| {
+                        self.gaps
+                            .push(AxisGap::Network(format!("read egress posture: {e}").into()));
+                    });
+                    let section = NetSection::from_tap(
+                        flows,
+                        totals,
+                        denials,
+                        dropped_flows,
+                        dropped_denials,
                     )
+                    .with_v6(flows6, denials6);
+                    Some(match posture {
+                        Ok(p) => section.with_posture(p),
+                        Err(()) => section,
+                    })
                 }
             },
             None => None,

@@ -104,6 +104,8 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
         vm.netns(),
         vm.tap_name(),
         None,
+        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
+        None,
         &tracer,
         &meter,
     );
@@ -235,6 +237,8 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
         vm.netns(),
         vm.tap_name(),
         Some(&policy),
+        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
+        None,
         &tracer,
         &meter,
     );

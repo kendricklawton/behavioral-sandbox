@@ -2,6 +2,7 @@
 //! maps they populate, and the netns join needed to attach inside the VM's namespace.
 
 use std::fs::File;
+use std::net::Ipv4Addr;
 use std::path::Path;
 
 use aya::maps::{Array, HashMap as AyaHashMap};
@@ -13,6 +14,7 @@ use probes_common::{
 };
 
 use crate::egress::{EgressPolicy, PolicyError};
+use crate::record::EgressPosture;
 use crate::tracer::per_cpu_sum;
 use crate::{check_support, load_object, ProbeError};
 
@@ -359,6 +361,101 @@ impl TapMonitor {
         with_netns(&handle, || attach_classifiers(&mut ebpf, interface, true))?;
         Ok(Self { ebpf })
     }
+}
+
+impl TapMonitor {
+    /// The egress posture **as the kernel holds it**, read back from `POLICY`, `POLICY6`, and
+    /// `ENFORCE` after attach, plus the `gateway` the driver configured (a plain value the caller
+    /// supplies, since the tap cannot see the guest's command line).
+    ///
+    /// Read rather than restated so the record stays a record of observation: it reports the rules
+    /// the classifier will actually consult, not the ones a caller believes it requested. That
+    /// distinction is the point of the field. A rule the kernel dropped, a map written by something
+    /// else, or a policy that never reached the map all show up here as themselves.
+    ///
+    /// Inactive slots are skipped (an all-zero slot is `active == 0`, the shape the policy writer
+    /// leaves in the tail), so the result is the live rules in slot order.
+    ///
+    /// # Errors
+    /// [`ProbeError::Map`] if a map is missing, cannot be opened as an array, or holds a slot whose
+    /// bytes do not decode as the shared record (which would mean the kernel struct drifted).
+    pub fn posture(&self, gateway: Option<Ipv4Addr>) -> Result<EgressPosture, ProbeError> {
+        Ok(EgressPosture {
+            enforcing: self.enforcing()?,
+            allowed: read_policy(&self.ebpf)?,
+            allowed6: read_policy6(&self.ebpf)?,
+            gateway,
+        })
+    }
+
+    /// Whether the classifier is armed (`ENFORCE` slot 0). `false` is observe-only: every packet
+    /// passes regardless of what `POLICY` holds, which is why the record carries this alongside the
+    /// rules rather than letting a reader infer enforcement from a non-empty rule list.
+    fn enforcing(&self) -> Result<bool, ProbeError> {
+        let map = self
+            .ebpf
+            .map(ENFORCE_MAP)
+            .ok_or_else(|| ProbeError::Map(format!("map `{ENFORCE_MAP}` not found")))?;
+        let enforce: Array<_, u32> = Array::try_from(map)
+            .map_err(|e| ProbeError::Map(format!("open `{ENFORCE_MAP}` as an array: {e}")))?;
+        let on = enforce
+            .get(&0, 0)
+            .map_err(|e| ProbeError::Map(format!("read `{ENFORCE_MAP}`: {e}")))?;
+        Ok(on != 0)
+    }
+}
+
+/// Read the live rules out of `POLICY`, the read-side twin of [`write_policy`]. Inactive slots are
+/// skipped; a slot whose bytes don't decode is a hard error rather than a silent skip, for the
+/// reason [`TapMonitor::flows`] treats an undecodable entry that way: a record that quietly omits a
+/// rule would understate the policy in force.
+fn read_policy(ebpf: &Ebpf) -> Result<Vec<PolicyRule>, ProbeError> {
+    let map = ebpf
+        .map(POLICY_MAP)
+        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY_MAP}` not found")))?;
+    let policy: Array<_, [u8; POLICY_RULE_SIZE]> = Array::try_from(map)
+        .map_err(|e| ProbeError::Map(format!("open `{POLICY_MAP}` as an array: {e}")))?;
+    let mut out = Vec::new();
+    for i in 0..MAX_POLICY_RULES {
+        let bytes = policy
+            .get(&(i as u32), 0)
+            .map_err(|e| ProbeError::Map(format!("read `{POLICY_MAP}`[{i}]: {e}")))?;
+        let rule = PolicyRule::from_bytes(&bytes).ok_or_else(|| {
+            ProbeError::Map(format!(
+                "decode `{POLICY_MAP}`[{i}]: {} bytes don't match the shared record",
+                bytes.len()
+            ))
+        })?;
+        if rule.active != 0 {
+            out.push(rule);
+        }
+    }
+    Ok(out)
+}
+
+/// The IPv6 twin of [`read_policy`], over `POLICY6`.
+fn read_policy6(ebpf: &Ebpf) -> Result<Vec<PolicyRule6>, ProbeError> {
+    let map = ebpf
+        .map(POLICY6_MAP)
+        .ok_or_else(|| ProbeError::Map(format!("map `{POLICY6_MAP}` not found")))?;
+    let policy: Array<_, [u8; POLICY_RULE6_SIZE]> = Array::try_from(map)
+        .map_err(|e| ProbeError::Map(format!("open `{POLICY6_MAP}` as an array: {e}")))?;
+    let mut out = Vec::new();
+    for i in 0..MAX_POLICY_RULES {
+        let bytes = policy
+            .get(&(i as u32), 0)
+            .map_err(|e| ProbeError::Map(format!("read `{POLICY6_MAP}`[{i}]: {e}")))?;
+        let rule = PolicyRule6::from_bytes(&bytes).ok_or_else(|| {
+            ProbeError::Map(format!(
+                "decode `{POLICY6_MAP}`[{i}]: {} bytes don't match the shared record",
+                bytes.len()
+            ))
+        })?;
+        if rule.active != 0 {
+            out.push(rule);
+        }
+    }
+    Ok(out)
 }
 
 /// Write `policy` into an [`Ebpf`]'s `POLICY` map and arm `ENFORCE`. Works on a loaded object whether or

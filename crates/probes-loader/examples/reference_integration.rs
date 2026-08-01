@@ -66,6 +66,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         sandbox.netns(),
         sandbox.tap_name(),
         None,
+        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
+        None,
         &tracer,
         &meter,
     );

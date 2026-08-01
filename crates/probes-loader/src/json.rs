@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use probes_common::{FlowKey, FlowKey6, Syscall};
 
-use crate::record::{AxisGap, NetSection, RunRecord, SyscallFootprint};
+use crate::record::{AxisGap, EgressPosture, NetSection, RunRecord, SyscallFootprint};
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
 
 /// The version of the audit-record JSON schema, emitted as the leading `schema` field of
@@ -162,6 +162,77 @@ fn net_to_json(out: &mut String, net: &NetSection) {
     field(out, "dropped_denials", net.dropped_denials, false);
     out.push_str(",\"truncated\":");
     out.push_str(if net.truncated() { "true" } else { "false" });
+    // What was being enforced, and whether the guest had a route to test it with. Additive key
+    // (schema stays 1). `null` says the posture was not read, which is not the same claim as an
+    // empty rule list, so the two render differently on purpose.
+    out.push_str(",\"posture\":");
+    match &net.posture {
+        Some(p) => posture_to_json(out, p),
+        None => out.push_str("null"),
+    }
+    out.push('}');
+}
+
+/// The egress posture: whether the classifier was armed, the rules it holds, and the configured
+/// default route. Rules render in slot order (the kernel's own), which is already deterministic.
+fn posture_to_json(out: &mut String, p: &EgressPosture) {
+    out.push_str("{\"enforcing\":");
+    out.push_str(if p.enforcing { "true" } else { "false" });
+    out.push_str(",\"gateway\":");
+    match p.gateway {
+        Some(gw) => {
+            let _ = write!(out, "\"{gw}\"");
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"allowed\":[");
+    for (i, rule) in p.allowed.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let a = rule.addr.to_be_bytes();
+        let _ = write!(
+            out,
+            "{{\"dst\":\"{}.{}.{}.{}/{}\"",
+            a[0], a[1], a[2], a[3], rule.prefix_len
+        );
+        // Port and proto are `0` for "any" in the kernel record; render that as null rather than as
+        // port zero, which is a real (and different) thing on the wire.
+        rule_port_proto(out, rule.port, rule.proto);
+    }
+    out.push_str("],\"allowed6\":[");
+    for (i, rule) in p.allowed6.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            "{{\"dst\":\"{}/{}\"",
+            std::net::Ipv6Addr::from(rule.addr),
+            rule.prefix_len
+        );
+        rule_port_proto(out, rule.port, rule.proto);
+    }
+    out.push_str("]}");
+}
+
+/// The `port`/`proto` tail shared by both rule renderers, closing the object. `0` means "any" in the
+/// kernel record and renders as `null`, since port 0 and protocol 0 are otherwise real values.
+fn rule_port_proto(out: &mut String, port: u16, proto: u8) {
+    out.push_str(",\"dst_port\":");
+    if port == 0 {
+        out.push_str("null");
+    } else {
+        let _ = write!(out, "{port}");
+    }
+    out.push_str(",\"proto\":");
+    if proto == 0 {
+        out.push_str("null");
+    } else {
+        out.push('"');
+        proto_name(out, proto);
+        out.push('"');
+    }
     out.push('}');
 }
 
@@ -477,7 +548,7 @@ mod tests {
             "\"egress_bytes\":200}],",
             "\"denials\":[{\"dst\":\"9.9.9.9\",\"dst_port\":443,\"proto\":\"tcp\",\"packets\":4}],",
             "\"flows6\":[],\"denials6\":[],",
-            "\"dropped_flows\":0,\"dropped_denials\":0,\"truncated\":false}",
+            "\"dropped_flows\":0,\"dropped_denials\":0,\"truncated\":false,\"posture\":null}",
             ",\"resources\":{\"cpu_time_ns\":5000,\"cgroup\":{\"cpu_usage_usec\":6,",
             "\"memory_current\":1024,\"memory_peak\":4096,\"io_rbytes\":null,\"io_wbytes\":512}}",
             ",\"host_syscalls\":{\"total\":3,\"by_kind\":{\"execve\":1,\"openat\":2,\"connect\":0,",
@@ -619,6 +690,83 @@ mod tests {
         assert!(
             json.contains("\"reason\":\"tab\\tand \\\"quote\\\" and \\\\slash\""),
             "{json}"
+        );
+    }
+
+    #[test]
+    fn the_posture_distinguishes_a_sealed_run_from_a_routed_one() {
+        use crate::json::net_to_json;
+        use crate::record::EgressPosture;
+        use probes_common::{PolicyRule, PolicyRule6};
+
+        // Two runs whose *observations* are identical: no traffic, no denials. Before the posture
+        // field these rendered the same bytes, so a reader could not tell a sandbox that reached
+        // nothing from one that was allowed everything and simply stayed quiet.
+        let quiet = || NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0);
+
+        let sealed = quiet().with_posture(EgressPosture {
+            enforcing: true,
+            allowed: vec![],
+            allowed6: vec![],
+            gateway: None,
+        });
+        let routed = quiet().with_posture(EgressPosture {
+            enforcing: true,
+            // `0.0.0.0/0`, any port, any protocol: the widest rule expressible.
+            allowed: vec![PolicyRule::allow(0, 0, 0, 0)],
+            allowed6: vec![],
+            gateway: Some(std::net::Ipv4Addr::new(10, 200, 0, 1)),
+        });
+
+        let render = |net: NetSection| {
+            let mut out = String::new();
+            net_to_json(&mut out, &net);
+            out
+        };
+        let sealed = render(sealed);
+        let routed = render(routed);
+        assert_ne!(
+            sealed, routed,
+            "the whole point of the field: these two runs must not render identically"
+        );
+
+        assert!(
+            sealed.contains("\"posture\":{\"enforcing\":true,\"gateway\":null,\"allowed\":[]"),
+            "a sealed run names no route and no allowance: {sealed}"
+        );
+        assert!(
+            routed.contains("\"gateway\":\"10.200.0.1\""),
+            "a routed run names its gateway: {routed}"
+        );
+        // "any port" and "any protocol" are `0` in the kernel record and must not render as port 0
+        // and protocol 0, which are real and much narrower claims.
+        assert!(
+            routed
+                .contains("\"allowed\":[{\"dst\":\"0.0.0.0/0\",\"dst_port\":null,\"proto\":null}]"),
+            "an allow-all rule renders its wildcards as null: {routed}"
+        );
+
+        // The v6 half renders in the same shape, and a named port/proto is not nulled.
+        let v6 = render(quiet().with_posture(EgressPosture {
+            enforcing: false,
+            allowed: vec![PolicyRule::allow(0x0101_0101, 32, 53, 17)],
+            allowed6: vec![PolicyRule6::allow([0xfd; 16], 64, 443, 6)],
+            gateway: None,
+        }));
+        assert!(
+            v6.contains("\"enforcing\":false"),
+            "observe-only is stated, not inferred from a rule list: {v6}"
+        );
+        assert!(
+            v6.contains("{\"dst\":\"1.1.1.1/32\",\"dst_port\":53,\"proto\":\"udp\"}"),
+            "{v6}"
+        );
+        assert!(
+            v6.contains(
+                "\"allowed6\":[{\"dst\":\"fdfd:fdfd:fdfd:fdfd:fdfd:fdfd:fdfd:fdfd/64\",\
+                 \"dst_port\":443,\"proto\":\"tcp\"}]"
+            ),
+            "{v6}"
         );
     }
 

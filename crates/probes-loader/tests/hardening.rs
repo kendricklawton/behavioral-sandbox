@@ -115,6 +115,8 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
         vm.netns(),
         vm.tap_name(),
         Some(&egress),
+        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
+        None,
         &tracer,
         &meter,
     );
@@ -278,6 +280,8 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
         vm.netns(),
         vm.tap_name(),
         None,
+        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
+        None,
         &tracer,
         &meter,
     );
@@ -398,6 +402,8 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         vm.netns(),
         vm.tap_name(),
         Some(&egress),
+        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
+        None,
         &tracer,
         &meter,
     );
