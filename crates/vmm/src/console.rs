@@ -9,8 +9,10 @@ use std::thread::JoinHandle;
 use crate::VmmError;
 
 /// Cap on the captured console (the most recent bytes are kept). A guest that floods its serial
-/// port must not grow host memory without bound, a hostile guest never causes a leak. Boot output
-/// is tens of KiB, so the userspace marker is never dropped while it still matters.
+/// port would otherwise grow host memory without bound, so the buffer is capped rather than
+/// trusted to stay small: the compaction below holds it at `CONSOLE_CAP + CONSOLE_SLACK`. Boot
+/// output is tens of KiB, three orders of magnitude inside the cap, so the userspace marker is
+/// still in the buffer when the boot path looks for it.
 const CONSOLE_CAP: usize = 1 << 20; // 1 MiB
 /// Slack the buffer may overshoot [`CONSOLE_CAP`] before it compacts. Draining on every 4 KiB chunk
 /// once at the cap memmoves the whole buffer per chunk (O(n) per chunk, ~256x write amplification
