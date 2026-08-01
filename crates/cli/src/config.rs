@@ -48,6 +48,12 @@ pub struct EkvmToml {
     scratch_dir: Option<PathBuf>,
     /// Mirrors `EKVM_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied).
     require_limits: Option<bool>,
+    /// Mirrors `EKVM_GATEWAY`: the default route this host hands its guests. A host fact, so it
+    /// belongs in the file rather than on every command line; `--gateway` overrides it.
+    gateway: Option<Ipv4Addr>,
+    /// Mirrors `EKVM_RESOLVER`: the resolver this host's guests are told to use. Read only when a
+    /// gateway resolved, since a resolver the guest cannot route to is inert.
+    resolver: Option<Ipv4Addr>,
     /// Mirrors `EKVM_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
     /// Mirrors `EKVM_SIGNING_KEY` (the host record-signing key path). No `BootConfig`
@@ -173,6 +179,10 @@ impl EkvmToml {
             "EKVM_REQUIRE_LIMITS" => self
                 .require_limits
                 .map(|b| OsString::from(if b { "true" } else { "false" })),
+            // Rendered back to the dotted-quad text `from_env_with` parses, so the file slots under
+            // the env in the same composed lookup rather than needing a second path into the config.
+            "EKVM_GATEWAY" => self.gateway.map(|a| OsString::from(a.to_string())),
+            "EKVM_RESOLVER" => self.resolver.map(|a| OsString::from(a.to_string())),
             _ => None,
         }
     }

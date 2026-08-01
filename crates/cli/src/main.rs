@@ -224,6 +224,25 @@ struct RunArgs {
     /// unenforced run.
     #[arg(long, value_name = "IP[:PORT]", value_parser = parse_allow, requires = "net", help_heading = "Network")]
     allow: Vec<AllowRule>,
+    /// Give the guest a default route via this address.
+    ///
+    /// Names a path rather than creating one: the engine builds no uplink, so on a host whose per-VM
+    /// netns nothing has furnished the guest still reaches nothing. What it changes is that the
+    /// attempt now crosses the tap, so `--allow` can bound it and the record can show it. Normally
+    /// the host end of the guest's /30. Requires `--net`; see design decision 9.
+    #[arg(long, value_name = "IP", requires = "net", help_heading = "Network")]
+    gateway: Option<std::net::Ipv4Addr>,
+    /// Tell the guest to resolve names at this address.
+    ///
+    /// Reaching it needs an allowance like any other destination, and the engine runs no resolver.
+    /// Requires `--gateway`, since a resolver the guest cannot route to is inert.
+    #[arg(
+        long,
+        value_name = "IP",
+        requires = "gateway",
+        help_heading = "Network"
+    )]
+    resolver: Option<std::net::Ipv4Addr>,
     /// Set an environment variable on the guest command (repeatable).
     /// Values are treated as secrets: the engine never logs them.
     #[arg(long = "env", value_name = "KEY=VALUE", value_parser = parse_env_pair, help_heading = "Files and environment")]
@@ -478,6 +497,15 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     }
     let mut config = base_config(file).with_limits(limits);
     config.enable_network = args.net;
+    // Flags win over the `EKVM_GATEWAY`/`EKVM_RESOLVER` + file layers `base_config` already resolved,
+    // so a run can override the host's uplink without editing its config.
+    if let Some(gateway) = args.gateway {
+        let mut egress = vmm::GuestEgress::via(gateway);
+        if let Some(resolver) = args.resolver {
+            egress = egress.with_resolver(resolver);
+        }
+        config.egress = Some(egress);
+    }
     // Flag layer over env/file (both folded by `base_config`): the flag only strengthens the
     // posture, so an env/file `true` survives an absent flag.
     if args.require_limits {

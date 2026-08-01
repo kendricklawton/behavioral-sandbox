@@ -220,7 +220,8 @@ pub struct BootConfig {
 
 impl BootConfig {
     /// Layer the environment overrides, `EKVM_FIRECRACKER`, `EKVM_KERNEL`, `EKVM_ROOTFS`,
-    /// `EKVM_MARKER`, `EKVM_SCRATCH_DIR`, `EKVM_REQUIRE_LIMITS`, onto [`BootConfig::default`]. The
+    /// `EKVM_MARKER`, `EKVM_SCRATCH_DIR`, `EKVM_REQUIRE_LIMITS`, `EKVM_GATEWAY`, `EKVM_RESOLVER`,
+    /// onto [`BootConfig::default`]. The
     /// resource *quantities* (`vcpus`, `mem_mib`, `boot_timeout`) have no env key; they come from
     /// [`Limits`] via [`with_limits`](BootConfig::with_limits). `require_limits` is a host **posture**,
     /// not a quantity, so it does take an env key here.
@@ -255,6 +256,20 @@ impl BootConfig {
         if let Some(v) = lookup("EKVM_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
             cfg.require_limits = v;
         }
+        // A host posture like `require_limits`, not a per-run quantity: which uplink this host has
+        // is the operator's fact, the same for every sandbox on it. The resolver is only read when a
+        // gateway resolved, so a resolver the guest could not route to is unreachable here too.
+        if let Some(gateway) =
+            lookup("EKVM_GATEWAY").and_then(|v| parse_env_ipv4(&v, "EKVM_GATEWAY"))
+        {
+            let mut egress = GuestEgress::via(gateway);
+            if let Some(resolver) =
+                lookup("EKVM_RESOLVER").and_then(|v| parse_env_ipv4(&v, "EKVM_RESOLVER"))
+            {
+                egress = egress.with_resolver(resolver);
+            }
+            cfg.egress = Some(egress);
+        }
         cfg
     }
 
@@ -269,6 +284,24 @@ impl BootConfig {
         self.exec_wall = limits.wall;
         self.output_cap = limits.output_cap;
         self
+    }
+}
+
+/// Parse an `EKVM_*` IPv4 env value. An unparseable value is `None` **and a warning**: falling back
+/// to the sealed default is the safe direction, but a typo'd gateway that silently produces a
+/// sandbox with no route out is the kind of quiet misconfiguration that reads as a broken engine.
+/// `key` rides the warning so the operator is told which value to fix.
+fn parse_env_ipv4(v: &std::ffi::OsStr, key: &str) -> Option<Ipv4Addr> {
+    match v.to_str().and_then(|s| s.trim().parse::<Ipv4Addr>().ok()) {
+        Some(addr) => Some(addr),
+        None => {
+            tracing::warn!(
+                %key,
+                value = %v.to_string_lossy(),
+                "not an IPv4 address; ignoring it (the guest gets no route from this key)"
+            );
+            None
+        }
     }
 }
 
