@@ -74,9 +74,9 @@ without `--prewarm`) cold-boots. Building the pool needs KVM (and root, for jail
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
 `ekvm-protocol` and a JSON value **only, never `ekvm`**, which is the point: it demonstrates that a
 caller can drive the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
-A language SDK is this client's method set hardened per language. Python is the one the project
-intends to write, since the caller driving a sandbox is usually an agent loop; the wire protocol is
-documented so any language can drive it without one.
+A language SDK is this client's method set hardened per language. Python first, since the caller
+driving a sandbox is usually an agent loop, then Go and Node; **none is written**. The wire protocol
+is documented so any language can drive it without one.
 
 It pins the same way the engine does (`ekvm-client = { git = "https://github.com/packsixfour/ekvm",
 rev = "…" }`, directory `crates/client`), and unlike the engine it *could* publish: the
