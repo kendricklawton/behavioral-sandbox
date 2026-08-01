@@ -158,3 +158,107 @@ fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
     drop(monitor);
     vm.shutdown().expect("shut the sandbox down");
 }
+
+/// An off-link destination the guest can only *attempt* once it has a default route. RFC 5737
+/// TEST-NET-1, so nothing real is contacted even where an uplink exists.
+const OFF_LINK: &str = "192.0.2.1";
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail() {
+    if let Some(why) = skip_reason() {
+        eprintln!(
+            "skipping a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail: {why}"
+        );
+        return;
+    }
+
+    // The claim design decision 9 makes, tested where it is falsifiable. Without a gateway an
+    // off-link destination fails at the guest's own routing table, so no packet is emitted, the
+    // classifier never sees it, and the audit record cannot show the attempt at all. With one, the
+    // guest emits the packet, it crosses the tap, and the deny-all policy records the refusal.
+    //
+    // The reachable set is unchanged either way: nothing here builds an uplink, so the packet dies
+    // in the netns. What changes is that the host can now see it was tried.
+    let mut cfg = networked_agent_config();
+    let host_end = vmm::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
+    cfg.egress = Some(host_end);
+    let vm = Vm::boot(cfg).expect("a networked agent microVM with a gateway should boot");
+    let netns = vm
+        .netns()
+        .expect("a networked VM exposes its netns")
+        .to_string();
+    let tap = vm
+        .tap_name()
+        .expect("a networked VM exposes its tap")
+        .to_string();
+
+    // Deny everything. The point is not which rule matches but that the packet arrives to be judged.
+    let monitor = TapMonitor::enforce_in_netns(&netns, &tap, &EgressPolicy::deny_all())
+        .expect("attach + enforce a deny-all policy in the VM netns");
+
+    // The posture read back from the kernel: deny-all is armed, and the record names the gateway that
+    // makes the attempt below possible. Read, not restated, so it reports what the classifier holds.
+    let posture = monitor
+        .posture(Some(host_end.gateway()))
+        .expect("read the egress posture back from the kernel");
+    assert!(posture.enforcing, "the classifier must be armed");
+    assert!(
+        posture.allowed.is_empty(),
+        "deny-all holds no allow rules; got {:?}",
+        posture.allowed
+    );
+    assert_eq!(
+        posture.gateway,
+        Some(host_end.gateway()),
+        "the record must name the configured gateway"
+    );
+
+    // UDP rather than TCP: a connect() would block on a handshake that cannot complete, while a
+    // datagram is emitted immediately and is what the classifier judges.
+    let sender = format!(
+        "import socket, time\n\
+         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n\
+         for _ in range(5):\n\
+        \x20   try:\n\
+        \x20       s.sendto(b'probe', ('{OFF_LINK}', 9000))\n\
+        \x20   except OSError as e:\n\
+        \x20       print('send failed:', e)\n\
+        \x20   time.sleep(0.02)\n"
+    );
+    let out = vm
+        .exec(&["python3".into(), "-c".into(), sender], b"")
+        .expect("run the guest UDP sender");
+    let sender_output = String::from_utf8_lossy(&out.stdout).to_string();
+    // The discriminator. Sealed, this prints ENETUNREACH five times and nothing reaches the tap.
+    assert!(
+        !sender_output.contains("send failed"),
+        "with a default route the guest must be able to emit the packet, not fail at its own \
+         routing table; sender said:\n{sender_output}\nconsole:\n{}",
+        vm.console()
+    );
+    std::thread::sleep(Duration::from_millis(100));
+
+    // And the refusal is in the audit trail, keyed by the destination the guest actually aimed at.
+    let want: u32 = OFF_LINK
+        .parse::<std::net::Ipv4Addr>()
+        .expect("a valid v4")
+        .into();
+    let denials = monitor.denials().expect("read the denials map");
+    let hit = denials
+        .iter()
+        .find(|(k, _)| k.dst_addr == want && k.dst_port == 9000 && k.proto == IPPROTO_UDP);
+    match hit {
+        Some((_, count)) => assert!(
+            *count > 0,
+            "the denial row must carry a dropped-packet count"
+        ),
+        None => panic!(
+            "an off-link attempt must reach the tap and be recorded; denials held {} row(s): {:?}",
+            denials.len(),
+            denials
+        ),
+    }
+
+    vm.shutdown().expect("shutdown should succeed");
+}

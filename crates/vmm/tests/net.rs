@@ -11,9 +11,18 @@ mod common;
 
 use std::process::Command;
 
-use vmm::Vm;
+use std::net::Ipv4Addr;
+
+use vmm::{GuestEgress, Vm};
 
 use common::{guest_rootfs_config, have_net_admin};
+
+/// The host end of every guest's /30 (`net.rs` keeps it constant across netns), which is the only
+/// address a guest can reach without a gateway and therefore the only sensible gateway to configure.
+const HOST_END: Ipv4Addr = Ipv4Addr::new(10, 200, 0, 1);
+/// A resolver address deliberately *off* the guest's link: a resolver is meant to be reachable
+/// through the gateway, so an on-link one would prove nothing about the gateway being configured.
+const RESOLVER: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 1);
 
 /// Run `ip netns exec <netns> <args...>` and return the completed output (for host-side checks that
 /// must happen *inside* the VM's network namespace, where its tap lives).
@@ -86,6 +95,61 @@ fn attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic() {
         !String::from_utf8_lossy(&routes.stdout).contains("default"),
         "deny-by-default: guest must have no default route; got {:?}",
         String::from_utf8_lossy(&routes.stdout)
+    );
+
+    vm.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_gateway_gives_the_guest_a_default_route_and_a_resolver() {
+    // The other side of `attaches_a_tap_and_the_guest_sees_a_deny_by_default_nic`, which pins the
+    // sealed default (no `default` in `ip route`). With `BootConfig::egress` the two `ip=` fields the
+    // driver otherwise leaves empty are filled, so the guest installs a default route and reads its
+    // nameserver from the kernel's own record of the boot parameter.
+    //
+    // This does not claim the guest can *reach* anything: nothing here builds an uplink, and on this
+    // host the netns still holds only `lo` and the tap (decision 9). What it pins is that the
+    // configuration lands in the guest at all, which is the engine's whole half of the job.
+    if !have_net_admin() {
+        eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
+        return;
+    }
+    let mut cfg = guest_rootfs_config();
+    cfg.enable_network = true;
+    // The gateway is the host end of the guest's own /30, the only address it can reach without one.
+    // The resolver is deliberately *not* on-link, since a resolver's whole point is to be reachable
+    // through the gateway rather than beside it.
+    cfg.egress = Some(GuestEgress::via(HOST_END).with_resolver(RESOLVER));
+    let vm = Vm::boot(cfg).expect("a microVM with a gateway should boot to readiness");
+
+    // The default route exists and points at the configured gateway. `ip=`'s third field is what
+    // installs it, so this failing means the boot parameter never carried it.
+    let routes = vm
+        .exec(&["ip".into(), "route".into()], b"")
+        .expect("list guest routes");
+    let routes = String::from_utf8_lossy(&routes.stdout).to_string();
+    assert!(
+        routes.contains("default"),
+        "a configured gateway must install a default route; got:\n{routes}\nconsole:\n{}",
+        vm.console()
+    );
+    assert!(
+        routes.contains(&HOST_END.to_string()),
+        "the default route must be via the configured gateway {HOST_END}; got:\n{routes}"
+    );
+
+    // The resolver reaches the guest's libc through `/etc/resolv.conf`, which the image bakes as a
+    // symlink to the kernel's `/proc/net/pnp`. This is the end-to-end check on that link: the driver
+    // wrote the DNS field, the kernel parsed it, and the guest reads it where a resolver looks.
+    let resolv = vm
+        .exec(&["cat".into(), "/etc/resolv.conf".into()], b"")
+        .expect("read the guest resolver config");
+    let resolv = String::from_utf8_lossy(&resolv.stdout).to_string();
+    assert!(
+        resolv.contains(&format!("nameserver {RESOLVER}")),
+        "the guest must resolve at the configured resolver; /etc/resolv.conf held:\n{resolv}\nconsole:\n{}",
+        vm.console()
     );
 
     vm.shutdown().expect("shutdown should succeed");
