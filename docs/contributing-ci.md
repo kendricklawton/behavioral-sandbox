@@ -21,9 +21,10 @@ Runs everywhere, with no root and no KVM: rustfmt, the prose-drift lint, Clippy 
 unit tests, doc build, `cargo deny`, and the eBPF object build. This is what CI runs on every change,
 and a change is not ready until it passes.
 
-The prose-drift lint is worth knowing about: it checks that backticked repo paths and relative
-Markdown links in the docs actually resolve. It does **not** check anchors, wording, or numbers, so a
-cross-page `#anchor` link is on the author to verify.
+The prose-drift lint is worth knowing about: it checks that backticked repo paths, relative
+Markdown links, the `#section` anchor on those links, and any `cargo … -p` package name actually
+resolve. It does **not** check wording or numbers, so a claim about *what* something does is still
+read by a human.
 
 ## The privileged gate
 

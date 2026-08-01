@@ -61,9 +61,9 @@ parent's prefix (`cli-install.md`, `contributing-testing.md`). The hierarchy liv
 rather than in directories, which keeps every cross-link a bare `./sibling.md` and keeps a chapter's
 published URL stable when its place in the reading order changes.
 
-Two things the [prose-drift lint](./contributing-ci.md#the-host-safe-gate) enforces, and one it does
-not: backticked repo paths and relative Markdown links must resolve; **anchors are unchecked**, so a
-`#section` link is on the author to verify.
+What the [prose-drift lint](./contributing-ci.md#the-host-safe-gate) enforces: backticked repo
+paths, relative Markdown links, the `#section` anchor on those links, and any `cargo … -p` package
+name must all resolve. What it does not: whether the prose around a working pointer is still true.
 
 On voice, the rule is to claim nothing the project cannot back. Describe mechanisms, which a diff can
 falsify. Where a test backs a statement, make the test the grammatical subject. An absolute is fine

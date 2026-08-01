@@ -1,15 +1,18 @@
 //! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else
-//! compiles or tests, and three kinds are mechanically checkable, so this pass checks them:
+//! compiles or tests, and four kinds are mechanically checkable, so this pass checks them:
 //!
 //! 1. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
 //!    something in the tree; a rename otherwise leaves the comment lying about where things live.
 //! 2. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
 //!    silently *creates* missing `SUMMARY.md` chapters as empty stubs, so a deleted page would
 //!    otherwise ship as a blank one.
-//! 3. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
+//! 3. **The `#fragment` on those links.** It must name a heading on the page it points at. A moved
+//!    section leaves the file resolving and the anchor dead, which check 2 cannot see, and
+//!    `RELEASES.md` pointed at a relocated Semver section for months on exactly that blind spot.
+//! 4. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
 //!    package. A crate's directory is not always its package (`crates/cli` builds `ekvm-cli`), so
 //!    this is invisible to check 1: the path resolves while the command it appears in does not run.
-//!    Unlike checks 1 and 2 this one reads **every** tracked text file, not just `.rs` and `.md`:
+//!    Unlike checks 1 to 3 this one reads **every** tracked text file, not just `.rs` and `.md`:
 //!    a copy-pasteable command is a command wherever it is printed, and two dead `-p cli`
 //!    invocations sat in `.env.example` precisely because the check skipped the file.
 //!
@@ -17,8 +20,8 @@
 //! *true*; the meaning half stays with review, and the standing rule is to promote a checkable
 //! prose promise into a type or test.
 
-use std::collections::BTreeSet;
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -34,6 +37,8 @@ pub fn check(root: &Path) -> Result<()> {
     let mut path_refs = 0usize;
     let mut links = 0usize;
     let mut pkg_refs = 0usize;
+    let mut anchor_links = 0usize;
+    let mut anchor_cache: BTreeMap<PathBuf, BTreeSet<String>> = BTreeMap::new();
 
     for rel in &tracked {
         let is_rs = rel.ends_with(".rs");
@@ -89,6 +94,38 @@ pub fn check(root: &Path) -> Result<()> {
                     violations.push(format!("{rel}:{line_no}: links to missing file {target}"));
                 }
             }
+            // A `#fragment` has to name a heading that exists. This is the one prose pointer the
+            // lint used to leave to review, and `RELEASES.md` spent from 8f2df03 to a0be144
+            // pointing at a Semver section that had moved to another page: the file resolved, so
+            // the link check above was satisfied and nothing looked at the rest of the URL.
+            for (line_no, target, frag) in markdown_anchor_links(&text) {
+                let page = if target.is_empty() {
+                    root.join(rel)
+                } else {
+                    root.join(dir).join(&target)
+                };
+                if page.extension().is_none_or(|e| e != "md") {
+                    continue;
+                }
+                // A target that does not resolve at all is the link check's finding, not this one.
+                let Ok(page_text) = std::fs::read_to_string(&page) else {
+                    continue;
+                };
+                anchor_links += 1;
+                let known = anchor_cache
+                    .entry(page.clone())
+                    .or_insert_with(|| heading_anchors(&page_text));
+                if !known.contains(&frag) {
+                    let where_ = if target.is_empty() {
+                        "this page"
+                    } else {
+                        &target
+                    };
+                    violations.push(format!(
+                        "{rel}:{line_no}: links to `#{frag}`, which is not a heading in {where_}"
+                    ));
+                }
+            }
         }
     }
 
@@ -101,7 +138,7 @@ pub fn check(root: &Path) -> Result<()> {
     }
     println!(
         "· prose drift: {path_refs} path reference(s), {links} markdown link(s), \
-         {pkg_refs} cargo package reference(s) all resolve"
+         {anchor_links} anchor(s), {pkg_refs} cargo package reference(s) all resolve"
     );
     Ok(())
 }
@@ -289,6 +326,111 @@ fn strip_inline_code(line: &str) -> String {
     out
 }
 
+/// Markdown links that carry a `#fragment`, as `(line, target, fragment)`. Same fence and
+/// code-span handling as [`markdown_links`], but the fragment is kept rather than split off, and an
+/// empty target is kept too: `[x](#same-page)` points at the file it appears in.
+fn markdown_anchor_links(text: &str) -> Vec<(usize, String, String)> {
+    let mut found = Vec::new();
+    let mut in_fence = false;
+    for (idx, line) in text.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let stripped = strip_inline_code(line);
+        let mut rest = stripped.as_str();
+        while let Some(pos) = rest.find("](") {
+            rest = &rest[pos + 2..];
+            let Some(end) = rest.find(')') else { break };
+            let whole = &rest[..end];
+            rest = &rest[end..];
+            let Some((target, frag)) = whole.split_once('#') else {
+                continue;
+            };
+            if frag.is_empty()
+                || target.contains("://")
+                || target.starts_with("mailto:")
+                || whole.contains(char::is_whitespace)
+            {
+                continue;
+            }
+            found.push((idx + 1, target.to_owned(), frag.to_owned()));
+        }
+    }
+    found
+}
+
+/// The anchors a Markdown file offers, derived from its headings the way mdbook and GitHub derive
+/// them: strip code spans and link syntax, lowercase, drop everything that is not alphanumeric,
+/// `-`, `_`, or a space, then spaces to `-`. A repeated slug takes a `-1`, `-2`, … suffix, which is
+/// how a second `## Setting` would be reachable at all.
+///
+/// Kept deliberately close to the two generators rather than exhaustive: a rule this misses shows
+/// up as a false positive on a link that works, which is loud, not as a missed broken link.
+fn heading_anchors(text: &str) -> BTreeSet<String> {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out = BTreeSet::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        let title = trimmed.trim_start_matches('#');
+        if !title.starts_with(' ') {
+            continue;
+        }
+        // `[text](url)` renders as `text`, so the anchor is built from the text alone. Note this
+        // does *not* use `strip_inline_code`: that blanks a code span's contents, which is right
+        // for a link target and wrong here, since `## Setting `require_jail`` is reached at
+        // `#setting-require_jail`. Only the backticks come out.
+        let chars: Vec<char> = title.trim().chars().collect();
+        let mut plain = String::new();
+        let mut i = 0;
+        while i < chars.len() {
+            // Only a `(` that follows a `]` opens a link target. A parenthetical carries real
+            // heading text: `## Minimum supported `rustc` version (MSRV)` is `…-version-msrv`.
+            if chars[i] == '(' && i > 0 && chars[i - 1] == ']' {
+                let mut depth = 1usize;
+                i += 1;
+                while i < chars.len() && depth > 0 {
+                    match chars[i] {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if !matches!(chars[i], '`' | '[' | ']' | '*') {
+                plain.push(chars[i]);
+            }
+            i += 1;
+        }
+        let slug: String = plain
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_' || *c == ' ')
+            .map(|c| if c == ' ' { '-' } else { c })
+            .collect();
+        let n = seen.iter().filter(|s| **s == slug).count();
+        seen.push(slug.clone());
+        out.insert(if n == 0 { slug } else { format!("{slug}-{n}") });
+    }
+    out
+}
+
 fn markdown_links(text: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     let mut in_fence = false;
@@ -460,5 +602,66 @@ mod tests {
         let text = "the form `[text](x.md)` is a link; see [real](embedding.md) for one";
         let got = markdown_links(text);
         assert_eq!(got, vec![(1, "embedding.md".into())], "{got:?}");
+    }
+
+    /// Every rule the anchor check depends on, each taken from a heading that exists in `docs/`
+    /// and is linked to by name. Getting one wrong is a false positive on a link that works, so
+    /// these are the cases that decide whether the check can be trusted to block the gate.
+    #[test]
+    fn heading_anchors_match_how_mdbook_slugs_them() {
+        let text = "\
+# Configuration of `ekvm`
+## Setting `require_jail`
+## Semver & API stability
+## Minimum supported `rustc` version (MSRV)
+## Enforcing egress with `--allow`
+## 9. Egress is enabled by the engine, constructed by the hoster
+## See [the recipes](./embedding-recipes.md) first
+```
+## Inside a fence, not a heading
+```
+## Setting `log`
+## Setting `log`
+";
+        let got = heading_anchors(text);
+        for want in [
+            "configuration-of-ekvm",
+            // A code span's *contents* are part of the anchor; only the backticks come out.
+            "setting-require_jail",
+            // `&` drops out and leaves the two spaces around it, so the slug doubles its hyphen.
+            "semver--api-stability",
+            // A parenthetical is heading text. Only a `](…)` link target is dropped.
+            "minimum-supported-rustc-version-msrv",
+            "enforcing-egress-with---allow",
+            "9-egress-is-enabled-by-the-engine-constructed-by-the-hoster",
+            "see-the-recipes-first",
+            // A repeat is reachable at `-1`, which is the only way to link the second one.
+            "setting-log",
+            "setting-log-1",
+        ] {
+            assert!(got.contains(want), "missing {want}: {got:?}");
+        }
+        assert!(
+            !got.contains("inside-a-fence-not-a-heading"),
+            "a `#` inside a fence is a comment or a shell prompt, not a heading: {got:?}"
+        );
+    }
+
+    #[test]
+    fn anchor_links_keep_the_fragment_and_the_same_page_form() {
+        let text = "\
+see [a](./cli-config.md#setting-log) and [b](#same-page) and [c](./x.md) and
+[d](https://example.com/y#frag) and `[e](./z.md#shown-as-code)`
+";
+        let got = markdown_anchor_links(text);
+        assert_eq!(
+            got,
+            vec![
+                (1, "./cli-config.md".into(), "setting-log".into()),
+                // An empty target is the file the link is written in, not a missing target.
+                (1, String::new(), "same-page".into()),
+            ],
+            "{got:?}"
+        );
     }
 }

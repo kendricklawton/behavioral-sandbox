@@ -110,10 +110,10 @@ layers, read `docs/architecture.md` before a non-trivial change to `ekvm`.
 - **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
   show, in the fewest sentences that carry it; it never restates what the next lines visibly do.
   A prose *promise* ("can't drift", "never logged") belongs in a type or a test, with the comment
-  pointing at it; a mechanical claim (a repo path, a Markdown link) is checked by the gate's
-  prose-drift lint, which covers paths and links but **not anchors**, so a `#section` link is yours
-  to verify. State the threat-model framing once per module (rustdoc on the item that owns it), not
-  at every call site.
+  pointing at it; a mechanical claim (a repo path, a Markdown link, a `#section` anchor, a
+  `cargo … -p` package) is checked by the gate's prose-drift lint, so it fails the gate rather
+  than a reader. Wording and numbers are still yours. State the threat-model framing once per
+  module (rustdoc on the item that owns it), not at every call site.
 - **No em-dashes in prose.** Repo docs, code comments, and commit messages use
   colons, commas, or parentheses instead of em-dashes (`—`). A genuine separator or placeholder
   inside a code block or shown output (e.g. `—` for "no data") stays; user-facing output *strings*
