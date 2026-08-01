@@ -46,7 +46,8 @@ hardware) and Firecracker's jailer (chroot, uid/gid drop, seccomp, its own mount
 namespaces, a cgroup). An unset `jail` becomes `Jail::default()`; the opt-out for hosts that can't
 jail (no real root, no `jailer` binary) is the *differently named constructor*
 `Sandbox::open_unjailed`, so an unconfined sandbox is greppable in your source and can never happen
-by a forgotten flag (012). Artifacts (kernel, rootfs, `firecracker`) layer from the environment
+by a forgotten flag ([decision 3](./architecture-decisions.md#3-jailed-execution-by-default)).
+Artifacts (kernel, rootfs, `firecracker`) layer from the environment
 (`EKVM_KERNEL`, `EKVM_ROOTFS`, …) under explicit `BootConfig` fields.
 
 Networking is off by default. `enable_network` gives the guest a tap whose only reachable address is
@@ -66,11 +67,13 @@ bounding what crosses the tap is the eBPF policy in [`ekvm-probes-loader`](./pro
 - **Host-enforced bounds:** the wall-clock deadline (`ExecUnresponsive`) and output limit (`OutputCap`) are derived on the host and applied by the host, so an uncoordinated guest does not set them.
 - **Per-exec input security:** `stdin`, injected `files`, and `env` are scoped to the spawned process, and the code paths that log or render a run omit secret values. `injected_secrets_never_reach_the_console_or_host_logs` runs a sandbox with a distinctive token and greps the console capture, the host logs, and the record for it. Bulk file transfers use block-device storage (`input_dir` and `output_dir`).
 
-### Sessions: the VM is the session (016)
+### Sessions: the VM is the session
 
-Repeated `exec` operations within a sandbox share guest working directory and overlay filesystem state. Session state persists for the VM lifetime and is cleared upon `shutdown`.
+Repeated `exec` operations within a sandbox share guest working directory and overlay filesystem
+state, per [decision 4](./architecture-decisions.md#4-ephemeral-sandbox-sessions--snapshots).
+Session state persists for the VM lifetime and is cleared upon `shutdown`.
 
-### Budgets: resource policy (010)
+### Budgets: resource policy
 
 `Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. The non-zero types make a zero unrepresentable rather than validated at runtime. Network egress is configured separately via policy rules. Cgroup constraints are best-effort when host controllers are unassigned; the KVM boundary and the jailer are not conditional on them.
 
@@ -91,10 +94,10 @@ it's deliberately bucketed).
 
 Teardown is layered, so that a VMM, scratch dir, tap, and cgroup have an owner on every exit path:
 `shutdown` is the polite form, `Drop` covers an early return or an unwinding panic, and a
-cgroup-owned sentinel (011) reaps the VM if the embedding *process* is SIGKILL'd or OOM-killed. A
+cgroup-owned sentinel reaps the VM if the embedding *process* is SIGKILL'd or OOM-killed. A
 `KillHandle` (cheap, cloneable, thread-safe) force-kills a sandbox whose `exec` some other thread is
 blocked in, the host-gave-up path. Residue from a crashed embedder is reclaimed by `sweep_orphans`,
-with ownership keyed on liveness rather than on names, and scoped to your own euid's residue (013).
+with ownership keyed on liveness rather than on names, and scoped to your own euid's residue.
 
 `crates/vmm/tests/confinement.rs` exercises these paths: `driver_death_cannot_leak_a_vm` SIGKILLs a
 driver mid-run and asserts the VMM dies with it, `a_vmm_killed_while_awaiting_userspace_leaks_nothing`

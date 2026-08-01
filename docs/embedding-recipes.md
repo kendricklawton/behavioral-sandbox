@@ -90,7 +90,7 @@ fn main() -> Result<(), VmmError> {
 ```
 
 A pooled clone is a pre-warmed session; entropy is reseeded per clone (VMGenID), and networked clones each
-recreate their tap in a private netns (014), so any number coexist.
+recreate their tap in a private netns, so any number coexist.
 
 **Sizing rule** (stated here so you never meet it as `EMFILE`): each live VM holds up to
 `FDS_PER_VM` (8) driver-side fds, so keep

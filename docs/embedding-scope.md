@@ -22,7 +22,7 @@ non-goals, these belong to whatever hosts the engine, and PRs adding them are wr
   directory's permissions). A daemon that grows multi-tenant identity or a public HTTP surface is
   a *hoster*, not this repo.
 
-The line is a security boundary too (013): everything the engine ships is inert without host
+The line is a security boundary too: everything the engine ships is inert without host
 privileges the *hoster* grants, it self-limits (deny-by-default network, dropped-uid jail,
 own-euid sweep), and turning its tools into a multi-tenant service safely is the hoster's job.
 
