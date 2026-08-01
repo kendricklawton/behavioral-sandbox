@@ -9,6 +9,9 @@
 //! 3. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
 //!    package. A crate's directory is not always its package (`crates/cli` builds `ekvm-cli`), so
 //!    this is invisible to check 1: the path resolves while the command it appears in does not run.
+//!    Unlike checks 1 and 2 this one reads **every** tracked text file, not just `.rs` and `.md`:
+//!    a copy-pasteable command is a command wherever it is printed, and two dead `-p cli`
+//!    invocations sat in `.env.example` precisely because the check skipped the file.
 //!
 //! This lint checks that pointers point at something, not that the prose around them is still
 //! *true*; the meaning half stays with review, and the standing rule is to promote a checkable
@@ -36,18 +39,38 @@ pub fn check(root: &Path) -> Result<()> {
         let is_rs = rel.ends_with(".rs");
         let is_md = rel.ends_with(".md");
         // Prose lives in `.rs` (comments) and `.md` (docs, incl. the `AGENTS.md` operating manual).
-        if !is_rs && !is_md {
-            continue;
-        }
-        // A tracked-but-unreadable file (for example deleted in the working tree) is itself
-        // drift: the tree no longer matches what git says it holds.
+        // A `cargo … -p` command is read out of any tracked text file, so the read is unconditional
+        // and the *prose* checks below are the ones gated on the extension.
         let Ok(text) = std::fs::read_to_string(root.join(rel)) else {
-            violations.push(format!(
-                "{rel}: tracked but missing/unreadable in the working tree"
-            ));
+            // A tracked-but-unreadable prose file (for example deleted in the working tree) is
+            // itself drift: the tree no longer matches what git says it holds. Anything else that
+            // does not decode as UTF-8 is a binary fixture (`fuzz/seeds/`), not a claim.
+            if is_rs || is_md {
+                violations.push(format!(
+                    "{rel}: tracked but missing/unreadable in the working tree"
+                ));
+            }
             continue;
         };
 
+        // A `cargo … -p <name>` a reader is told to run must name a real workspace package. The
+        // directory and the package name are allowed to differ here (`crates/cli` builds
+        // `ekvm-cli`), which is how five copies of a `-p cli` invocation came to be printed at
+        // people, in the docs, in two test headers, and in xtask's own output. Every one errored
+        // with "package(s) not found in workspace". Scoping this to `.rs`/`.md` is what let two
+        // more of them survive in `.env.example`, so it runs over every tracked text file.
+        for (line_no, pkg) in cargo_package_refs(&text) {
+            pkg_refs += 1;
+            if !packages.contains(&pkg) {
+                violations.push(format!(
+                    "{rel}:{line_no}: `cargo … -p {pkg}`, which is not a workspace package \
+                     (a crate's directory name is not always its package name)"
+                ));
+            }
+        }
+        if !is_rs && !is_md {
+            continue;
+        }
         // Backticked repo-path claims are checked in every prose file, `.rs` and `.md`
         // (a rename rots a `docs/*.md` path just as it does a comment's).
         for (line_no, cand) in path_candidates(&text, &anchors) {
@@ -55,20 +78,6 @@ pub fn check(root: &Path) -> Result<()> {
             if !path_exists(&tracked, &cand) {
                 violations.push(format!(
                     "{rel}:{line_no}: references `{cand}`, which matches nothing in the tree"
-                ));
-            }
-        }
-        // A `cargo … -p <name>` a reader is told to run must name a real workspace package. The
-        // directory and the package name are allowed to differ here (`crates/cli` builds
-        // `ekvm-cli`), which is how five copies of a `-p cli` invocation came to be printed at
-        // people, in the docs, in two test headers, and in xtask's own output. Every one errored
-        // with "package(s) not found in workspace".
-        for (line_no, pkg) in cargo_package_refs(&text) {
-            pkg_refs += 1;
-            if !packages.contains(&pkg) {
-                violations.push(format!(
-                    "{rel}:{line_no}: `cargo … -p {pkg}`, which is not a workspace package \
-                     (a crate's directory name is not always its package name)"
                 ));
             }
         }
