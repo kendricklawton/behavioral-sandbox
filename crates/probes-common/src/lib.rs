@@ -255,6 +255,32 @@ fn describe_sockaddr(bytes: &[u8]) -> String {
 pub const ETH_HLEN: usize = 14;
 /// Byte offset of the EtherType in an Ethernet frame.
 pub const ETHERTYPE_OFFSET: usize = 12;
+
+/// Field offsets **within** the IPv4 header (which starts at [`ETH_HLEN`]), and the smallest
+/// header the parsers accept. Here for the same reason [`ETH_HLEN`] is: the tc program reads them
+/// with `ctx.load` at absolute offsets and [`parse_ipv4_5tuple`] reads them through a slice, so
+/// naming them once is what makes "the same shared offsets" a fact about the code rather than
+/// something a reader has to check by eye across two crates.
+pub const IPV4_FRAG_OFFSET: usize = 6;
+/// Offset of the protocol byte in an IPv4 header. See [`IPV4_FRAG_OFFSET`].
+pub const IPV4_PROTO_OFFSET: usize = 9;
+/// Offset of the source address in an IPv4 header. See [`IPV4_FRAG_OFFSET`].
+pub const IPV4_SRC_OFFSET: usize = 12;
+/// Offset of the destination address in an IPv4 header. See [`IPV4_FRAG_OFFSET`].
+pub const IPV4_DST_OFFSET: usize = 16;
+/// Smallest valid IPv4 header (no options). A shorter `ihl` is a malformed packet, and both
+/// parsers refuse it rather than reading an L4 header that would fall inside the IP header.
+pub const IPV4_MIN_IHL: usize = 20;
+
+/// Field offsets within the fixed IPv6 header, and its length. IPv6 has no `ihl`: the header is
+/// always [`IPV6_HLEN`] bytes and extension headers chain after it (neither parser walks them).
+pub const IPV6_NEXT_HEADER_OFFSET: usize = 6;
+/// Offset of the source address in an IPv6 header. See [`IPV6_NEXT_HEADER_OFFSET`].
+pub const IPV6_SRC_OFFSET: usize = 8;
+/// Offset of the destination address in an IPv6 header. See [`IPV6_NEXT_HEADER_OFFSET`].
+pub const IPV6_DST_OFFSET: usize = 24;
+/// The fixed IPv6 header length, so the L4 header starts at `ETH_HLEN + IPV6_HLEN`.
+pub const IPV6_HLEN: usize = 40;
 /// EtherType for IPv4.
 pub const ETH_P_IP: u16 = 0x0800;
 /// EtherType for ARP. Egress enforcement lets ARP through even under deny-by-default: the guest must
@@ -441,16 +467,17 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     }
     let ip = frame.get(ETH_HLEN..)?;
     let ihl = ((*ip.first()? & 0x0f) as usize) * 4;
-    if ihl < 20 {
+    if ihl < IPV4_MIN_IHL {
         return None;
     }
-    let proto = *ip.get(9)?;
-    let src = u32::from_be_bytes(ip.get(12..16)?.try_into().ok()?);
-    let dst = u32::from_be_bytes(ip.get(16..20)?.try_into().ok()?);
+    let proto = *ip.get(IPV4_PROTO_OFFSET)?;
+    let src = u32::from_be_bytes(ip.get(IPV4_SRC_OFFSET..IPV4_DST_OFFSET)?.try_into().ok()?);
+    let dst = u32::from_be_bytes(ip.get(IPV4_DST_OFFSET..IPV4_MIN_IHL)?.try_into().ok()?);
     // The low 13 bits of the flags/fragment-offset field (bytes 6..8) are the fragment offset. A
     // non-first fragment (offset != 0) carries no L4 header, so reading "ports" there would just
     // interpret payload bytes, letting a guest mint bogus 5-tuples. Leave the ports zero for it.
-    let frag_off = u16::from_be_bytes([*ip.get(6)?, *ip.get(7)?]) & 0x1fff;
+    let frag_off =
+        u16::from_be_bytes([*ip.get(IPV4_FRAG_OFFSET)?, *ip.get(IPV4_FRAG_OFFSET + 1)?]) & 0x1fff;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
     if frag_off == 0 && (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
         let l4 = ip.get(ihl..)?;
@@ -680,14 +707,14 @@ pub fn parse_ipv6_5tuple(frame: &[u8]) -> Option<FlowKey6> {
     }
     let ip = frame.get(ETH_HLEN..)?;
     // The fixed IPv6 header is 40 bytes: next-header at offset 6, src at 8..24, dst at 24..40.
-    let next_header = *ip.get(6)?;
+    let next_header = *ip.get(IPV6_NEXT_HEADER_OFFSET)?;
     let mut src = [0u8; 16];
     let mut dst = [0u8; 16];
-    src.copy_from_slice(ip.get(8..24)?);
-    dst.copy_from_slice(ip.get(24..40)?);
+    src.copy_from_slice(ip.get(IPV6_SRC_OFFSET..IPV6_DST_OFFSET)?);
+    dst.copy_from_slice(ip.get(IPV6_DST_OFFSET..IPV6_HLEN)?);
     let (mut src_port, mut dst_port) = (0u16, 0u16);
     if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
-        let l4 = ip.get(40..)?;
+        let l4 = ip.get(IPV6_HLEN..)?;
         src_port = u16::from_be_bytes([*l4.first()?, *l4.get(1)?]);
         dst_port = u16::from_be_bytes([*l4.get(2)?, *l4.get(3)?]);
     }

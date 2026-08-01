@@ -82,8 +82,9 @@ use aya_ebpf::{
 use ekvm_probes_common::{
     icmp6_dst_on_link, rule_matches, rule_matches6, FlowCounts, FlowKey, FlowKey6, PolicyRule,
     PolicyRule6, Syscall, SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q,
-    ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, MAX_POLICY_RULES,
-    SOCKADDR_SNAP, SOCKADDR_SNAP_V4,
+    ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV4_DST_OFFSET,
+    IPV4_FRAG_OFFSET, IPV4_MIN_IHL, IPV4_PROTO_OFFSET, IPV4_SRC_OFFSET, IPV6_DST_OFFSET, IPV6_HLEN,
+    IPV6_NEXT_HEADER_OFFSET, IPV6_SRC_OFFSET, MAX_POLICY_RULES, SOCKADDR_SNAP, SOCKADDR_SNAP_V4,
 };
 
 /// The object's kernel `license` section. Without it every program loads as **non-GPL-compatible**,
@@ -747,8 +748,11 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
 
 /// Read the frame's IPv4 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes` at a
 /// constant, or `ihl`-bounded, offset), or `None` if it is not IPv4-over-Ethernet or a read runs off
-/// the packet. Mirrors [`ekvm_probes_common::parse_ipv4_5tuple`] at the same shared offsets, so the
-/// in-kernel reader and the host-tested pure parser can't drift.
+/// the packet. Every byte position it reads is a `const` from [`ekvm_probes_common`], the same ones
+/// [`ekvm_probes_common::parse_ipv4_5tuple`] reads through its slice, so the two cannot disagree on
+/// where a field lives. The surrounding *logic* (the fragment gate, the protocol check) is still
+/// mirrored by hand: this half runs only under the verifier and cannot be unit-tested on the host,
+/// so the pure parser is the tested one and this is read against it.
 #[inline(always)]
 fn parse(ctx: &TcContext) -> Option<FlowKey> {
     let ethertype = u16::from_be(ctx.load::<u16>(ETHERTYPE_OFFSET).ok()?);
@@ -757,17 +761,17 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
     }
     let version_ihl: u8 = ctx.load(ETH_HLEN).ok()?;
     let ihl = ((version_ihl & 0x0f) as usize) * 4;
-    if ihl < 20 {
+    if ihl < IPV4_MIN_IHL {
         return None;
     }
-    let proto: u8 = ctx.load(ETH_HLEN + 9).ok()?;
-    let src = u32::from_be(ctx.load::<u32>(ETH_HLEN + 12).ok()?);
-    let dst = u32::from_be(ctx.load::<u32>(ETH_HLEN + 16).ok()?);
+    let proto: u8 = ctx.load(ETH_HLEN + IPV4_PROTO_OFFSET).ok()?;
+    let src = u32::from_be(ctx.load::<u32>(ETH_HLEN + IPV4_SRC_OFFSET).ok()?);
+    let dst = u32::from_be(ctx.load::<u32>(ETH_HLEN + IPV4_DST_OFFSET).ok()?);
     // The low 13 bits of the flags/fragment-offset field (IP header bytes 6..8) are the fragment
     // offset. A non-first fragment (offset != 0) has no L4 header, so reading "ports" there would
     // interpret payload bytes; leave them zero so a guest can't mint bogus 5-tuples with fragments
     // (mirrors `ekvm_probes_common::parse_ipv4_5tuple`).
-    let frag_off = u16::from_be(ctx.load::<u16>(ETH_HLEN + 6).ok()?) & 0x1fff;
+    let frag_off = u16::from_be(ctx.load::<u16>(ETH_HLEN + IPV4_FRAG_OFFSET).ok()?) & 0x1fff;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
     if frag_off == 0 && (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
         let l4 = ETH_HLEN + ihl;
@@ -779,8 +783,8 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
 
 /// Read the frame's IPv6 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes`), or
 /// `None` if it is not IPv6-over-Ethernet or a read runs off the packet. Mirrors
-/// [`ekvm_probes_common::parse_ipv6_5tuple`] at the same offsets, so the in-kernel reader and the
-/// host-tested pure parser can't drift. Extension headers are not walked (a first cut): a next-header
+/// [`ekvm_probes_common::parse_ipv6_5tuple`], reading the same offset consts so neither can move a
+/// field without the other. Extension headers are not walked (a first cut): a next-header
 /// that isn't TCP/UDP directly after the fixed 40-byte header leaves the ports 0, the same honest
 /// shape as the v4 parser's fragment handling.
 #[inline(always)]
@@ -790,12 +794,12 @@ fn parse6(ctx: &TcContext) -> Option<FlowKey6> {
         return None;
     }
     // The fixed IPv6 header (from the L3 start `ETH_HLEN`): next-header at +6, src at +8, dst at +24.
-    let next_header: u8 = ctx.load(ETH_HLEN + 6).ok()?;
-    let src: [u8; 16] = ctx.load(ETH_HLEN + 8).ok()?;
-    let dst: [u8; 16] = ctx.load(ETH_HLEN + 24).ok()?;
+    let next_header: u8 = ctx.load(ETH_HLEN + IPV6_NEXT_HEADER_OFFSET).ok()?;
+    let src: [u8; 16] = ctx.load(ETH_HLEN + IPV6_SRC_OFFSET).ok()?;
+    let dst: [u8; 16] = ctx.load(ETH_HLEN + IPV6_DST_OFFSET).ok()?;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
     if next_header == IPPROTO_TCP || next_header == IPPROTO_UDP {
-        let l4 = ETH_HLEN + 40;
+        let l4 = ETH_HLEN + IPV6_HLEN;
         src_port = u16::from_be(ctx.load::<u16>(l4).ok()?);
         dst_port = u16::from_be(ctx.load::<u16>(l4 + 2).ok()?);
     }
