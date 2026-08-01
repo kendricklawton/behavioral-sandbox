@@ -38,8 +38,8 @@ An **embedder** is a Rust program that links `vmm` and drives sandboxes in its o
 this crate's git rev, so it is coupled to the library surface the [Semver
 section](#semver--api-stability) below describes.
 
-A **language SDK** (Go/Python/Node/C#, planned, none written) is not, and cannot be: a Python or Node
-package has no way to pin a Rust crate. It drives the [daemon's wire
+A **language SDK** (Python first; Go and Node under consideration, none written) is not, and cannot
+be: a Python or Node package has no way to pin a Rust crate. It drives the [daemon's wire
 protocol](./daemon-protocol.md) over a unix socket and never links anything here, which is what
 `client` exists to demonstrate. Its whole coupling is the `schema` handshake.
 

@@ -74,7 +74,9 @@ without `--prewarm`) cold-boots. Building the pool needs KVM (and root, for jail
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
 `protocol` and a JSON value **only, never `vmm`**, which is the point: it demonstrates that a
 caller can drive the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
-The polyglot SDKs (Go/Python/Node/C#, planned) are this client's method set hardened per language.
+A language SDK is this client's method set hardened per language. Python is the one the project
+intends to write, since the caller driving a sandbox is usually an agent loop; the wire protocol is
+documented so any language can drive it without one.
 
 ```rust,ignore
 use client::{Client, OpenOptions};
