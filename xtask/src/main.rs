@@ -313,11 +313,11 @@ enum Cmd {
     /// signed-record envelope, the eBPF-boundary parsers) with `cargo fuzz` (libFuzzer), the deep,
     /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
     /// `fuzz/seeds/<target>/`. Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of
-    /// `ci`. Targets: `channel_response` (default), `channel_request`, `channel_frame`,
-    /// `channel_handshake`, `signing_envelope`, `protocol_message`, `syscall_event`.
+    /// `ci`. `--help` lists the targets, generated from [`FUZZ_TARGETS`]: this comment used to
+    /// restate them and was three short by the time anyone noticed.
     Fuzz {
         /// The libFuzzer target to run.
-        #[arg(default_value = "channel_response")]
+        #[arg(default_value = "channel_response", value_parser = fuzz_target_parser())]
         target: String,
         /// Wall-clock seconds to fuzz before stopping (`0` runs until it finds a crash or you Ctrl-C).
         #[arg(long, default_value_t = 60)]
@@ -336,13 +336,13 @@ enum Cmd {
     /// stuck bouncing off an early check shows as low coverage instead of a hollow green. Prints where
     /// the profile landed and how to render a report.
     FuzzCoverage {
-        #[arg(default_value = "channel_response")]
+        #[arg(default_value = "channel_response", value_parser = fuzz_target_parser())]
         target: String,
     },
     /// Minimize a target's on-disk corpus (`cargo fuzz cmin`): drop inputs that add no coverage so the
     /// corpus (and each run's replay) stays small. A periodic maintenance step, not part of a run.
     FuzzCmin {
-        #[arg(default_value = "channel_response")]
+        #[arg(default_value = "channel_response", value_parser = fuzz_target_parser())]
         target: String,
     },
 }
@@ -392,8 +392,17 @@ fn main() -> Result<()> {
     }
 }
 
+/// Accept only a real target, and let clap print the list in `--help` rather than a doc comment
+/// restating it. The three fuzz subcommands share this so [`FUZZ_TARGETS`] is the only place a
+/// target is named in this file, and an unknown one is an error at the edge instead of a
+/// cargo-fuzz failure several steps in.
+fn fuzz_target_parser() -> clap::builder::PossibleValuesParser {
+    clap::builder::PossibleValuesParser::new(FUZZ_TARGETS)
+}
+
 /// Every libFuzzer target in `fuzz/`, ordered by value (outermost untrusted boundary first). The
-/// single source of truth the smoke run iterates; the nightly matrix and the docs mirror it.
+/// single source of truth: the smoke run iterates it, `--help` is generated from it, and the
+/// nightly matrix in `.github/workflows/fuzz.yml` mirrors it.
 const FUZZ_TARGETS: &[&str] = &[
     "protocol_message",
     "channel_response",
