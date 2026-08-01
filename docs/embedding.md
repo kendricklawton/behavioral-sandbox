@@ -6,6 +6,27 @@ API. The rustdoc on each item is the reference; this is the contract's shape and
 [Where the engine ends](./embedding-scope.md) draws the line this project refuses to cross, and
 [Recipes](./embedding-recipes.md) is the same lifecycle in runnable code.
 
+## Pinning it
+
+Nothing here is on crates.io and [nothing is meant to be](./embedding-scope.md), so the dependency
+is a git rev:
+
+```toml
+[dependencies]
+ekvm = { git = "https://github.com/packsixfour/ekvm", rev = "<40-char sha>" }
+```
+
+The package is `ekvm`; its directory is `crates/vmm`, and a git dependency resolves by **package
+name**, so the path never appears. Take the rev from a tag or a commit you have read, not from a
+branch: a moving `branch = "main"` re-resolves on every `cargo update`, which is the opposite of a
+pin. The rev you choose is what the [Semver section](./embedding-scope.md#semver--api-stability)
+governs.
+
+The key was `vmm` before `167dd80` (2026-08-01), which renamed every package under the `ekvm-`
+prefix. A rev bump across that commit is the one change that needs an edit here rather than only in
+`Cargo.lock`; commits touching the pinned surface carry the `api` scope so the log alone says which
+those are.
+
 ## The lifecycle
 
 ```

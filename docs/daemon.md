@@ -78,6 +78,12 @@ A language SDK is this client's method set hardened per language. Python is the 
 intends to write, since the caller driving a sandbox is usually an agent loop; the wire protocol is
 documented so any language can drive it without one.
 
+It pins the same way the engine does (`ekvm-client = { git = "https://github.com/packsixfour/ekvm",
+rev = "…" }`, directory `crates/client`), and unlike the engine it *could* publish: the
+support-window argument in [Where the engine ends](./embedding-scope.md) is computed from
+Firecracker's, and this crate's whole dependency list is `ekvm-protocol` and `serde_json`. Whether
+it does is a question for the version sweep, not a promise here.
+
 ```rust,ignore
 use ekvm_client::{Client, OpenOptions};
 
