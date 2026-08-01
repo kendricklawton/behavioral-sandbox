@@ -324,7 +324,7 @@ fn endpoint6(out: &mut String, addr: [u8; 16], port: u16, proto: u8) {
 mod tests {
     use std::time::Duration;
 
-    use probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
+    use ekvm_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
 
     use super::SUMMARY_NOTABLE_CAP;
     use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
@@ -332,10 +332,10 @@ mod tests {
 
     /// A synthetic `SyscallEvent` from public fields (no eBPF), matching the other modules' helper.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; probes_common::DETAIL_CAP];
+        let mut d = [0u8; ekvm_probes_common::DETAIL_CAP];
         let n = detail.len().min(d.len());
         d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; probes_common::COMM_CAP];
+        let mut c = [0u8; ekvm_probes_common::COMM_CAP];
         let m = comm.len().min(c.len());
         c[..m].copy_from_slice(&comm.as_bytes()[..m]);
         SyscallEvent {
@@ -421,7 +421,7 @@ mod tests {
     fn a_path_cut_at_the_cap_is_marked_in_the_summary() {
         // The summary is the projection a person skims, and it has no field to carry a flag, so the
         // marker rides in the text. A prefix shown bare reads as the whole path.
-        let long = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
         let mut record = sample(vec![]);
         record.host_syscalls = SyscallFootprint::from_events(0x42, &[ev(1, 0x42, &long, "sh")]);
         let json = record.to_summary_json();
@@ -469,7 +469,7 @@ mod tests {
     fn the_summary_says_what_the_sandbox_may_reach_not_only_what_it_did() {
         use crate::record::EgressPosture;
         use crate::summary::net_summary;
-        use probes_common::{PolicyRule, PolicyRule6};
+        use ekvm_probes_common::{PolicyRule, PolicyRule6};
 
         let net = NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0).with_posture(
             EgressPosture {

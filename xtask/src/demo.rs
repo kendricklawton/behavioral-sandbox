@@ -1,7 +1,7 @@
 //! The syscall-trace demo (`trace-sandbox`): a **live syscall trace of a running sandbox**.
 //!
 //! Binds the two tracks an embedder binds, boot a real microVM sandbox (the Firecracker driver,
-//! `vmm`) and watch its host footprint with the eBPF syscall tracer (`probes-loader`),
+//! `ekvm`) and watch its host footprint with the eBPF syscall tracer (`ekvm-probes-loader`),
 //! attributed to the sandbox's cgroup. It is deliberately the *VMM's host footprint* (the
 //! jailer/Firecracker `execve`, the drive/tap/socket `openat`s), not the guest's own syscalls: a
 //! microVM services those in-guest and they never trap to the host (the hardware-isolation
@@ -13,10 +13,10 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use probes_loader::{
+use ekvm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_probes_loader::{
     cgroup_id_of_pid, EgressPolicy, Protocol, ResourceMeter, SyscallTracer, TapMonitor,
 };
-use vmm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 use crate::{guest_rootfs_path, kernel_path};
 
@@ -36,10 +36,10 @@ fn effective_uid() -> Option<u32> {
 /// demo. `seconds` is the length of the live tail after the boot+exec window is printed.
 pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
     crate::require_kvm("trace-sandbox")?;
-    if let Err(e) = probes_loader::check_support() {
+    if let Err(e) = ekvm_probes_loader::check_support() {
         bail!("trace-sandbox needs eBPF support: {e}");
     }
-    let object = probes_loader::object_path();
+    let object = ekvm_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "trace-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -166,10 +166,10 @@ pub(crate) fn trace_sandbox(seconds: u64) -> Result<()> {
 /// (watching the counters climb each one).
 pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
     crate::require_kvm("watch-sandbox")?;
-    if let Err(e) = probes_loader::check_support() {
+    if let Err(e) = ekvm_probes_loader::check_support() {
         bail!("watch-sandbox needs eBPF support: {e}");
     }
-    let object = probes_loader::object_path();
+    let object = ekvm_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "watch-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -278,10 +278,10 @@ pub(crate) fn watch_sandbox(rounds: u64) -> Result<()> {
 /// privileged, user-run demo like `watch-sandbox`.
 pub(crate) fn enforce_sandbox() -> Result<()> {
     crate::require_kvm("enforce-sandbox")?;
-    if let Err(e) = probes_loader::check_support() {
+    if let Err(e) = ekvm_probes_loader::check_support() {
         bail!("enforce-sandbox needs eBPF support: {e}");
     }
-    let object = probes_loader::object_path();
+    let object = ekvm_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "enforce-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -410,10 +410,10 @@ pub(crate) fn enforce_sandbox() -> Result<()> {
 /// privileged, user-run demo like `trace-sandbox`.
 pub(crate) fn meter_sandbox() -> Result<()> {
     crate::require_kvm("meter-sandbox")?;
-    if let Err(e) = probes_loader::check_support() {
+    if let Err(e) = ekvm_probes_loader::check_support() {
         bail!("meter-sandbox needs eBPF support: {e}");
     }
-    let object = probes_loader::object_path();
+    let object = ekvm_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "meter-sandbox needs the built probe object ({}) — run `cargo xtask build-probes`",

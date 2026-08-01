@@ -16,7 +16,7 @@ use crate::{
     build_probes, cargo, guest_rootfs_path, kernel_path, run_tool_env, vendor_dir, workspace_root,
 };
 
-/// The binaries a self-host installs: the CLI and the driver daemon, both from the `cli` crate.
+/// The binaries a self-host installs: the CLI and the driver daemon, both from the `ekvm-cli` crate.
 const BINARIES: &[&str] = &["ekvm"];
 
 /// `cargo xtask self-host [--prefix DIR] [--no-run]`: build the artifacts + binaries and prove one
@@ -50,7 +50,7 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
     build_probes()?;
 
     println!("\n== 4/5  build + install the ekvm binary ==");
-    cargo(&["build", "--release", "--locked", "-p", "ekvm"])?;
+    cargo(&["build", "--release", "--locked", "-p", "ekvm-cli"])?;
     let prefix = resolve_prefix(prefix)?;
     let engine_bin = install_binaries(&prefix)?;
 
@@ -137,7 +137,7 @@ fn write_starter_config() -> Result<()> {
 /// would overflow it.
 fn starter_scratch_dir(home: &Path) -> Option<PathBuf> {
     let blocked = |p: &Path| {
-        vmm::doctor::scratch_mount_flags(p).is_some_and(vmm::doctor::MountFlags::blocks_jail)
+        ekvm::doctor::scratch_mount_flags(p).is_some_and(ekvm::doctor::MountFlags::blocks_jail)
     };
     if !blocked(Path::new("/tmp")) {
         return None;
@@ -183,7 +183,7 @@ fn install_binaries(prefix: &Path) -> Result<PathBuf> {
         let src = release.join(name);
         if !src.is_file() {
             bail!(
-                "built binary {} not found — did `cargo build --release -p ekvm` succeed?",
+                "built binary {} not found — did `cargo build --release -p ekvm-cli` succeed?",
                 src.display()
             );
         }

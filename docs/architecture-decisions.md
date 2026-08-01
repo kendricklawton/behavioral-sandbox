@@ -23,14 +23,14 @@ gets its own instance. Latency figures are withdrawn pending a re-measurement on
 see [Benchmarks](./benchmarks.md).
 
 ## 5. Host-signed audit records
-Audit records captured by `probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. The host signs each finalized record with a host-held ed25519 key, so alteration after the run is detectable off-host (`ekvm verify`).
+Audit records captured by `ekvm-probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. The host signs each finalized record with a host-held ed25519 key, so alteration after the run is detectable off-host (`ekvm verify`).
 
 ## 6. Versioned newline-JSON daemon protocol
 The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals; polyglot SDKs drive the wire, not the crate.
 
 ## 7. Synchronous engine, no async runtime
 The driver and the daemon are **synchronous**: blocking I/O, one thread per session, no `tokio` or
-other executor anywhere in `vmm`, `channel`, or `ekvm serve`. This is a decision, not an accident of
+other executor anywhere in `ekvm`, `ekvm-channel`, or `ekvm serve`. This is a decision, not an accident of
 how the code grew, and it rests on three arguments.
 
 **Concurrency here is bounded by microVMs, not by sockets.** A session's real cost
@@ -40,7 +40,7 @@ before thread stacks are worth a thought. Thread-per-session at this scale is fr
 stack trace readable end to end.
 
 **The dependency surface is a security property.** This engine's pitch is that a hoster can audit
-what runs untrusted code. `vmm` is `#![forbid(unsafe_code)]` with a deliberately small dependency
+what runs untrusted code. `ekvm` is `#![forbid(unsafe_code)]` with a deliberately small dependency
 graph gated by `cargo deny`; pulling an executor and its ecosystem into that crate would enlarge
 the supply-chain surface of exactly the component whose minimalism is the point.
 

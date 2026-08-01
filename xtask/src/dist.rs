@@ -80,7 +80,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         "--release",
         "--locked",
         "-p",
-        "ekvm",
+        "ekvm-cli",
         "--target",
         DIST_TARGET,
     ])
@@ -284,7 +284,7 @@ fn sign_release_manifest(dist_dir: &Path) -> Result<Option<String>> {
         return Ok(None);
     };
     let key_path = PathBuf::from(key_path);
-    let key = probes_loader::HostKey::open(&key_path)
+    let key = ekvm_probes_loader::HostKey::open(&key_path)
         .with_context(|| format!("load release signing key from {}", key_path.display()))?;
 
     // The signing key must be the pinned release identity, not merely *a* key: a dist signed by
@@ -292,7 +292,7 @@ fn sign_release_manifest(dist_dir: &Path) -> Result<Option<String>> {
     let pin_path = release_pubkey_path();
     let pin_pem = std::fs::read_to_string(&pin_path)
         .with_context(|| format!("read the pinned release public key {}", pin_path.display()))?;
-    let pin = probes_loader::TrustedKey::from_spki_pem(&pin_pem)
+    let pin = ekvm_probes_loader::TrustedKey::from_spki_pem(&pin_pem)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", pin_path.display()))?;
     if pin.key_id() != key.key_id() {
         bail!(
@@ -310,7 +310,7 @@ fn sign_release_manifest(dist_dir: &Path) -> Result<Option<String>> {
 /// The env-free signing core (what the tests call directly): a raw detached signature over the
 /// manifest's exact bytes, nothing re-serialized in between, so the bytes `sha256sum -c` reads
 /// are the bytes the signature covers.
-fn sign_manifest_bytes(dist_dir: &Path, key: &probes_loader::HostKey) -> Result<()> {
+fn sign_manifest_bytes(dist_dir: &Path, key: &ekvm_probes_loader::HostKey) -> Result<()> {
     let sums_path = dist_dir.join("SHA256SUMS");
     let content =
         std::fs::read(&sums_path).with_context(|| format!("read {}", sums_path.display()))?;
@@ -331,7 +331,7 @@ pub(crate) fn release_key(path: &Path) -> Result<()> {
             dist_dir.display()
         );
     }
-    let key = probes_loader::HostKey::load_or_generate(path)
+    let key = ekvm_probes_loader::HostKey::load_or_generate(path)
         .map_err(|e| anyhow::anyhow!("load or generate {}: {e}", path.display()))?;
     let pem = key
         .verifying_key()
@@ -376,7 +376,7 @@ mod tests {
             "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef  test.tar.gz\n";
         std::fs::write(path.join("SHA256SUMS"), sample_manifest).unwrap();
 
-        let key = probes_loader::HostKey::from_seed([7u8; 32]);
+        let key = ekvm_probes_loader::HostKey::from_seed([7u8; 32]);
         sign_manifest_bytes(&path, &key).unwrap();
 
         let sig = std::fs::read(path.join("SHA256SUMS.sig")).unwrap();
@@ -397,7 +397,7 @@ mod tests {
     }
 
     /// Same drift guard, for the Firecracker pin. `install.sh` carries its own copy of the pinned
-    /// release sha256 (installers run it before this repo is built, so it cannot call into `vmm`),
+    /// release sha256 (installers run it before this repo is built, so it cannot call into `ekvm`),
     /// and `doctor.rs` carries the one the engine checks at runtime. Two copies of a security-
     /// relevant hash drift silently: the pair sat on v1.9 for 21 months, about a year past
     /// upstream's support window, and nothing compared them.
@@ -805,6 +805,6 @@ mod tests {
             "install.sh's embedded key must be byte-identical to release-key.pem"
         );
         // And the pin is a real ed25519 SPKI key, not a placeholder.
-        probes_loader::TrustedKey::from_spki_pem(&pinned).expect("release-key.pem parses");
+        ekvm_probes_loader::TrustedKey::from_spki_pem(&pinned).expect("release-key.pem parses");
     }
 }

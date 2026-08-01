@@ -8,13 +8,13 @@
 //!    (parsed with `serde_json::Value`, no access to the daemon's Rust types), the proof the wire is
 //!    hand-debuggable and every message carries its `schema`.
 //! 2. [`the_reference_client_drives_a_full_session`] drives the same daemon through the **reference
-//!    client** ([`client::Client`]), the proof a caller needs only the wire contract
-//!    (the client links no `vmm`).
+//!    client** ([`ekvm_client::Client`]), the proof a caller needs only the wire contract
+//!    (the client links no `ekvm`).
 //! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agent --prewarm 1` and asserts a bare
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the guest-agent
-//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Unjailed
+//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p ekvm-cli -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root, except [`a_jailed_daemon_serves_prewarmed_opens`], which exists precisely
 //! because the jailed daemon composes pieces no other suite drives together (it self-skips
@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use client::{Client, OpenOptions};
+use ekvm_client::{Client, OpenOptions};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -135,7 +135,7 @@ fn launch_daemon_opts(
     }
     cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("EKVM_MARKER", vmm::GUEST_READY_MARKER)
+        .env("EKVM_MARKER", ekvm::GUEST_READY_MARKER)
         // Keep the daemon's generated record-signing key inside the test's socket dir.
         .env("EKVM_SIGNING_KEY", dir.join("signing.key"))
         .env("EKVM_LOG", "warn")
@@ -323,11 +323,11 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     // the shape check). Envelope-level field order doesn't matter to `verify`; the signed bytes are
     // the embedded record string, which survives the reply's serde round-trip.
     let envelope = serde_json::to_string(&traced["record"]).expect("re-serialize envelope");
-    let signer = probes_loader::TrustedKey::from_hex(
+    let signer = ekvm_probes_loader::TrustedKey::from_hex(
         traced["record"]["key_id"].as_str().expect("key_id string"),
     )
     .expect("key_id parses as an ed25519 public key");
-    probes_loader::verify(&envelope, &[signer])
+    ekvm_probes_loader::verify(&envelope, &[signer])
         .expect("the daemon's signed record verifies against the key it names");
     let inner: serde_json::Value =
         serde_json::from_str(traced["record"]["record"].as_str().expect("record string"))
@@ -352,7 +352,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let traced2 = client.recv();
     assert_eq!(
         traced2["record"]["prev"].as_str(),
-        Some(probes_loader::record_hash(&first_record).as_str()),
+        Some(ekvm_probes_loader::record_hash(&first_record).as_str()),
         "the second trace commits to the first record's hash: {traced2}"
     );
 
@@ -602,7 +602,7 @@ fn a_jailed_daemon_serves_prewarmed_opens() {
         eprintln!("skipping a_jailed_daemon_serves_prewarmed_opens: {why}");
         return;
     }
-    if !test_support::have_real_root() {
+    if !ekvm_test_support::have_real_root() {
         eprintln!(
             "skipping a_jailed_daemon_serves_prewarmed_opens: needs real root (the jailer mknods \
              device nodes)"

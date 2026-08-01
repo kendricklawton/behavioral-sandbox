@@ -2,15 +2,15 @@
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches a `tc`
 //! program inside the VM's netns (needs `CAP_BPF`+`CAP_NET_ADMIN` + BTF + the built object). Run via
-//! `cargo xtask ci-privileged`. Uses `vmm` as a **dev-dependency only**, so the loader library
+//! `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a netns name and a tap name).
 #![allow(clippy::panic)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use probes_loader::{check_support, object_path, TapMonitor};
-use vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_probes_loader::{check_support, object_path, TapMonitor};
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
 const IPPROTO_UDP: u8 = 17;

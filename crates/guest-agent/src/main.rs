@@ -1,4 +1,4 @@
-//! The `guest-agent` binary: listen for connections and [`serve`](guest_agent::serve) one command
+//! The `guest-agent` binary: listen for connections and [`serve`](ekvm_guest_agent::serve) one command
 //! each.
 //!
 //! **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`), the in-VM
@@ -7,7 +7,7 @@
 //! with no VM. `serve` is transport-agnostic (any `Read`+`Write`); only the listener differs.
 //!
 //! `tracing` goes to stderr. The agent writes exactly one line to **stdout**, the readiness
-//! sentinel ([`GUEST_READY_MARKER`](channel::GUEST_READY_MARKER)) emitted once its vsock
+//! sentinel ([`GUEST_READY_MARKER`](ekvm_channel::GUEST_READY_MARKER)) emitted once its vsock
 //! listener is bound, because the guest's stdout is the serial console the host scans to learn the
 //! agent is up. One connection = one command, so the loop just accepts, serves, logs, and continues;
 //! every connection serves from the same working directory ([`session_dir`]), so repeated execs
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use vsock::{VsockListener, VMADDR_CID_ANY};
 
-use guest_agent::serve_session;
+use ekvm_guest_agent::serve_session;
 
 /// Read/write deadline on each served connection. Liveness is the transport's job: with a deadline
 /// set, a dead-or-stalled host surfaces as a typed timeout in `serve` instead of hanging the agent.
@@ -84,7 +84,7 @@ fn run_vsock(port: u32) -> Result<(), String> {
     for conn in listener.incoming() {
         match conn {
             // Refuse a connection we can't bound, the no-hang guarantee depends on the deadline
-            // (see `guest_agent::serve`). `VsockStream`'s setters return `nix::Error`.
+            // (see `ekvm_guest_agent::serve`). `VsockStream`'s setters return `nix::Error`.
             Ok(stream) => match stream
                 .set_read_timeout(Some(IO_TIMEOUT))
                 .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
@@ -157,11 +157,15 @@ fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
 }
 
 /// Print the readiness sentinel to stdout (the serial console) and flush, so the host's console scan
-/// fires exactly once the vsock listener is accepting. See [`channel::GUEST_READY_MARKER`].
+/// fires exactly once the vsock listener is accepting. See [`ekvm_channel::GUEST_READY_MARKER`].
 /// `writeln!` (not `println!`) so a closed console is ignored, never a panic.
 fn announce_ready(port: u32) {
     let mut out = std::io::stdout();
-    let _ = writeln!(out, "{} {VSOCK_SCHEME}:{port}", channel::GUEST_READY_MARKER);
+    let _ = writeln!(
+        out,
+        "{} {VSOCK_SCHEME}:{port}",
+        ekvm_channel::GUEST_READY_MARKER
+    );
     let _ = out.flush();
 }
 

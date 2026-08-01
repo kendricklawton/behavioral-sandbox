@@ -345,7 +345,7 @@ pub(crate) struct MachineConfig {
 
 /// `PUT /actions`, an instance action. The closed set of actions the driver issues, modelled as an
 /// enum so the wire discriminant can't be mistyped; serializes to `{"action_type": "<PascalCase>"}`,
-/// matching Firecracker's schema (mirrors how `channel` centralizes its `TAG_*` wire discriminants).
+/// matching Firecracker's schema (mirrors how `ekvm-channel` centralizes its `TAG_*` wire discriminants).
 #[derive(Serialize)]
 #[serde(tag = "action_type")]
 pub(crate) enum Action {
@@ -544,7 +544,7 @@ mod tests {
             bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, UnixAddr,
         };
         use std::os::fd::AsRawFd as _;
-        let dir = test_support::ScratchDir::created("fc-connect-wedged");
+        let dir = ekvm_test_support::ScratchDir::created("fc-connect-wedged");
 
         // No listener at all: callers classify `ConnectionRefused` as "nothing is accepting", so
         // the non-blocking dial must still surface exactly that, not a timeout.

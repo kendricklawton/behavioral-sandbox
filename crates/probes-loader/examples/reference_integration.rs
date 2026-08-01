@@ -3,7 +3,7 @@
 //! The smallest complete host application that runs untrusted code the way an embedder should:
 //! configure a sandbox, load the host-side observers, boot it (hardware-isolated, jailed), run the
 //! code, then read back **both** what the code produced and the host-observed audit record, and
-//! close. This is the launch sequence the driver (`vmm`) and the loader (`probes-loader`)
+//! close. This is the launch sequence the driver (`ekvm`) and the loader (`ekvm-probes-loader`)
 //! document, composed **by the caller**. The model/agent, if any, is always the caller here, never
 //! in the host path.
 //!
@@ -18,7 +18,7 @@
 //!
 //! ```console
 //! cargo xtask self-host                     # guest kernel + rootfs + eBPF object, one command
-//! cargo build -p probes-loader --example reference_integration
+//! cargo build -p ekvm-probes-loader --example reference_integration
 //! sudo ./target/debug/examples/reference_integration -- python3 -c 'print(2 ** 100)'
 //! ```
 //!
@@ -28,8 +28,8 @@
 use std::error::Error;
 use std::time::Duration;
 
-use probes_loader::{RecordSubject, SandboxProbes, SharedMeter, SharedTracer, Timing};
-use vmm::{BootConfig, Limits, Sandbox};
+use ekvm::{BootConfig, Limits, Sandbox};
+use ekvm_probes_loader::{RecordSubject, SandboxProbes, SharedMeter, SharedTracer, Timing};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // The untrusted workload: the tokens after a `--`, or a small default.

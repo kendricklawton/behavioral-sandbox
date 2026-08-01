@@ -218,7 +218,7 @@ meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
 The sections above each drive one probe standalone; the fused record binds all three to a launched
 sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
 guest. It lives in
-`probes-loader` (not `vmm`), bridged to the driver only by plain values:
+`ekvm-probes-loader` (not `ekvm`), bridged to the driver only by plain values:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
   global, so each is loaded **once** for the host, as `SharedMeter` and `SharedTracer` (the share-one-
@@ -261,7 +261,7 @@ syscall introspection the boundary can't deliver.
 
 ```console
 cargo xtask build-probes                       # builds the object (with BTF); asserts .BTF present
-cargo build -p probes-loader --example count_execve
+cargo build -p ekvm-probes-loader --example count_execve
 sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/count_execve
 target/debug/examples/count_execve             # unprivileged, with just the two caps
 ```
@@ -270,7 +270,7 @@ Or the privileged test, which spawns processes and asserts the counter moved and
 leaves no pinned residue:
 
 ```console
-cargo test -p probes-loader --test counter --no-run
+cargo test -p ekvm-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
 ```
 
@@ -314,14 +314,14 @@ turns that into a real **stream of per-event records**:
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop
   with the Firecracker track: it resolves a VMM pid to its cgroup id (the inode of the cgroup dir,
   which equals `bpf_get_current_cgroup_id`), so `watch_cgroup(cgroup_id_of_pid(vmm_pid)?)` scopes the
-  trace to exactly one sandbox. The bridge is plain values, so `probes-loader` never depends on `vmm`.
+  trace to exactly one sandbox. The bridge is plain values, so `ekvm-probes-loader` never depends on `ekvm`.
 
 The honest limit from
 [the hardware-isolation consequence](#the-hardware-isolation-consequence-the-honest-limit)
 holds here unchanged: these are the **host's** syscalls, never the guest's.
 
 ```console
-cargo build -p probes-loader --example trace_syscalls
+cargo build -p ekvm-probes-loader --example trace_syscalls
 sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/trace_syscalls
 target/debug/examples/trace_syscalls           # a filtered trace, then an unfiltered one
 ```

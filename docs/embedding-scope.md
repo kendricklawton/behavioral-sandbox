@@ -34,14 +34,14 @@ instead of a silent misbehavior.
 
 Downstream of the public API there are two consumers, and they couple to this repo in different ways.
 
-An **embedder** is a Rust program that links `vmm` and drives sandboxes in its own process. It pins
+An **embedder** is a Rust program that links `ekvm` and drives sandboxes in its own process. It pins
 this crate's git rev, so it is coupled to the library surface the [Semver
 section](#semver--api-stability) below describes.
 
 A **language SDK** (Python first; Go and Node under consideration, none written) is not, and cannot
 be: a Python or Node package has no way to pin a Rust crate. It drives the [daemon's wire
 protocol](./daemon-protocol.md) over a unix socket and never links anything here, which is what
-`client` exists to demonstrate. Its whole coupling is the `schema` handshake.
+`ekvm-client` exists to demonstrate. Its whole coupling is the `schema` handshake.
 
 Who an SDK serves is worth naming, because it bounds how much of one is worth building: someone who
 installed the engine on their own machine and wants to drive it from that language on that same
@@ -63,11 +63,11 @@ embedders, both of which the support policy in `RELEASES.md` can actually govern
 > describes the boundary the project intends to pin at `v0.1.0`; until that tag, every item on it can
 > change without notice. Pin a git rev.
 
-The `vmm` public library API and the `channel` wire protocol are the surface the project intends to
+The `ekvm` public library API and the `ekvm-channel` wire protocol are the surface the project intends to
 pin as its stability boundary:
 - **`Sandbox`**, **`Limits`**, **`RunResult`**
 - **`VmmError`**, including variants and the `kind()` -> `ErrorKind` bucket mapping
-- The **`channel`** wire framing protocol
+- The **`ekvm-channel`** wire framing protocol
 
 ### Versioning rules
 - **MAJOR**: Breaking changes to the pinned surface (removed/renamed `VmmError` variants, changed `kind()` bucket mappings, breaking channel wire protocol changes, or raising `Limits` defaults).

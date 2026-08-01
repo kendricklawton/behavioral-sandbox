@@ -1,6 +1,6 @@
 //! The host side of the guest-agent exec channel: dial Firecracker's vsock Unix socket, speak its
 //! `CONNECT <port>` handshake, and drive one bounded exec (output cap, guest budget, host wall
-//! deadline) over the `channel` protocol. Every bound exists so a hostile guest is a typed
+//! deadline) over the `ekvm-channel` protocol. Every bound exists so a hostile guest is a typed
 //! error, never a host hang or leak.
 
 use std::io::{Read, Write};
@@ -8,7 +8,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
-use channel::{ChannelError, ClientConnection, Response};
+use ekvm_channel::{ChannelError, ClientConnection, Response};
 
 use crate::{Artifact, ExecMetrics, RunResult, VmmError};
 
@@ -439,10 +439,10 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
 mod tests {
     use super::*;
     use crate::vm::VSOCK_UDS;
-    use channel::VSOCK_PORT;
-    use guest_agent::serve_session;
+    use ekvm_channel::VSOCK_PORT;
+    use ekvm_guest_agent::serve_session;
+    use ekvm_test_support::ScratchDir;
     use std::path::PathBuf;
-    use test_support::ScratchDir;
 
     /// Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake, then
     /// hand the same stream to the *real* guest agent. Lets us exercise the entire host exec path
@@ -764,7 +764,7 @@ mod tests {
         // speaks the channel protocol directly and returns a `File` whose path climbs out of the
         // working tree. The public API must reject it as a `GuestProtocol` fault (bucket `Guest`) rather
         // than pass the escaping path up in `RunResult.files` for an embedder to write to disk.
-        use channel::ServerConnection;
+        use ekvm_channel::ServerConnection;
         let (client, server) = UnixStream::pair().expect("socketpair");
         let hostile = std::thread::spawn(move || {
             let mut srv = ServerConnection::accept(server).expect("accept");
@@ -986,14 +986,14 @@ mod tests {
     }
 
     /// A fake vsock peer that answers `CONNECT`, does the channel handshake, then hands the
-    /// [`ServerConnection`](channel::ServerConnection) to `handler`, so a test can craft the
+    /// [`ServerConnection`](ekvm_channel::ServerConnection) to `handler`, so a test can craft the
     /// exact response stream (unlike `fake_vsock_agent`, which runs the real agent).
     fn fake_vsock_server<F>(
         tag: &str,
         handler: F,
     ) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>)
     where
-        F: FnOnce(channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
+        F: FnOnce(ekvm_channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
     {
         use std::os::unix::net::UnixListener;
         let dir = ScratchDir::created(tag);
@@ -1009,7 +1009,7 @@ mod tests {
                 }
             }
             stream.write_all(b"OK 10000\n").expect("write ack");
-            let conn = channel::ServerConnection::accept(stream).expect("server handshake");
+            let conn = ekvm_channel::ServerConnection::accept(stream).expect("server handshake");
             handler(conn);
         });
         (dir, uds, handle)

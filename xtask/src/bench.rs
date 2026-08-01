@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use probes_loader::{ResourceMeter, SyscallTracer};
-use vmm::{
+use ekvm::{
     BootConfig, Pool, RunningVm, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID, GUEST_READY_MARKER,
 };
+use ekvm_probes_loader::{ResourceMeter, SyscallTracer};
 
 use crate::{guest_rootfs_path, kernel_path};
 
@@ -704,10 +704,10 @@ fn ns_per_openat(path: &Path, batch: usize) -> u64 {
 /// The delta of (2)/(3) over (1) is the honest, measured overhead. Needs
 /// `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM), so it runs on any eBPF-capable host.
 pub(crate) fn bench_trace(runs: usize) -> Result<()> {
-    if let Err(e) = probes_loader::check_support() {
+    if let Err(e) = ekvm_probes_loader::check_support() {
         bail!("bench-trace needs eBPF support: {e}");
     }
-    let object = probes_loader::object_path();
+    let object = ekvm_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "bench-trace needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -849,10 +849,10 @@ fn ns_per_switch(rounds: usize) -> Result<u64> {
 /// switch, independent of how many cgroups are metered. Needs `CAP_BPF`+`CAP_PERFMON` and the built
 /// object (not KVM), so it runs on any eBPF-capable host.
 pub(crate) fn bench_meter(runs: usize) -> Result<()> {
-    if let Err(e) = probes_loader::check_support() {
+    if let Err(e) = ekvm_probes_loader::check_support() {
         bail!("bench-meter needs eBPF support: {e}");
     }
-    let object = probes_loader::object_path();
+    let object = ekvm_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "bench-meter needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -897,7 +897,7 @@ pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     }
 
     // 3. Attached and metering us: add our own cgroup, so every one of our switches accumulates.
-    let me = probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
+    let me = ekvm_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
     meter.add_target(me).context("register our cgroup")?;
     meter.reset(me).context("zero our CPU baseline")?;
     let mut targeted = Vec::with_capacity(runs);
@@ -959,10 +959,10 @@ fn nearest_p50(samples: &mut [u64]) -> u64 {
 /// for the `sched_switch` meter. A rising column would mean the lookup is not O(1); a flat one is the
 /// evidence. Needs `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM).
 pub(crate) fn bench_scale(runs: usize) -> Result<()> {
-    if let Err(e) = probes_loader::check_support() {
+    if let Err(e) = ekvm_probes_loader::check_support() {
         bail!("bench-scale needs eBPF support: {e}");
     }
-    let object = probes_loader::object_path();
+    let object = ekvm_probes_loader::object_path();
     if !object.is_file() {
         bail!(
             "bench-scale needs the built probe object ({}) — run `cargo xtask build-probes`",
@@ -983,7 +983,7 @@ pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     // to pad the target set to a size, they never match, so they only enlarge the map.
     const DUMMY_BASE: u64 = 0xDEAD_0000_0000_0000;
 
-    let me = probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
+    let me = ekvm_probes_loader::cgroup_id_of_self().context("resolve our cgroup id")?;
     println!(
         "bench-scale: per-event cost vs watched-target-set size, {runs} bursts per size\n\
          (the set is our own cgroup — the watched path — plus dummy cgroups to pad the size)\n"
@@ -1221,8 +1221,8 @@ pub(crate) fn bench_all(runs: usize) -> Result<()> {
                 )
             })
     };
-    let object = probes_loader::object_path();
-    let ebpf_skip: Option<String> = match probes_loader::check_support() {
+    let object = ekvm_probes_loader::object_path();
+    let ebpf_skip: Option<String> = match ekvm_probes_loader::check_support() {
         Err(e) => Some(e.to_string()),
         Ok(()) if !object.is_file() => Some(format!(
             "missing the built probe object ({}) — run `cargo xtask build-probes`",
@@ -1352,9 +1352,9 @@ pub(crate) fn bench_sign(runs: usize) -> Result<()> {
     if runs == 0 {
         bail!("--runs must be >= 1");
     }
-    let key = probes_loader::HostKey::from_seed([0x5a; 32]);
+    let key = ekvm_probes_loader::HostKey::from_seed([0x5a; 32]);
     let trusted = [key.verifying_key()];
-    let prev = probes_loader::record_hash(SAMPLE_RECORD);
+    let prev = ekvm_probes_loader::record_hash(SAMPLE_RECORD);
     let envelope = key.sign_canonical(SAMPLE_RECORD);
 
     println!(
@@ -1381,11 +1381,11 @@ pub(crate) fn bench_sign(runs: usize) -> Result<()> {
         chain_ns.push(t.elapsed().as_nanos() as u64);
 
         let t = Instant::now();
-        let _ = std::hint::black_box(probes_loader::verify(&envelope, &trusted));
+        let _ = std::hint::black_box(ekvm_probes_loader::verify(&envelope, &trusted));
         verify_ns.push(t.elapsed().as_nanos() as u64);
 
         let t = Instant::now();
-        std::hint::black_box(probes_loader::record_hash(SAMPLE_RECORD));
+        std::hint::black_box(ekvm_probes_loader::record_hash(SAMPLE_RECORD));
         hash_ns.push(t.elapsed().as_nanos() as u64);
     }
 

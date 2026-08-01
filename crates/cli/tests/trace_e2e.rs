@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use probes_loader::{check_support, object_path};
-use test_support::ScratchDir;
+use ekvm_probes_loader::{check_support, object_path};
+use ekvm_test_support::ScratchDir;
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {

@@ -20,7 +20,7 @@ use std::process::Child;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
-use channel::ClientConnection;
+use ekvm_channel::ClientConnection;
 
 use crate::console::Console;
 use crate::drives::{collect_output_image, OutputDevice};
@@ -59,7 +59,7 @@ const DEFAULT_BOOT_ARGS: &str =
 /// path boots, so the default must match it, a caller pointing at it must not need to also know a
 /// marker. The exception is the pinned Ubuntu CI rootfs (raw boot tests only), whose readiness is
 /// its getty prompt: those callers set `login:` explicitly (or via `EKVM_MARKER`).
-const DEFAULT_USERSPACE_MARKER: &str = channel::GUEST_READY_MARKER;
+const DEFAULT_USERSPACE_MARKER: &str = ekvm_channel::GUEST_READY_MARKER;
 
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
 pub(crate) static VM_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -71,10 +71,10 @@ pub(crate) const FC_STDERR: &str = "fc.stderr";
 /// the exec channel; overridable per-VM via [`BootConfig::guest_cid`].
 pub const DEFAULT_GUEST_CID: u32 = 3;
 
-/// The vsock port the in-guest agent listens on for exec connections, defined in `channel`
+/// The vsock port the in-guest agent listens on for exec connections, defined in `ekvm-channel`
 /// (it's a host↔guest contract value: the rootfs build writes it into the guest's init line, and
 /// the host dials it through Firecracker's vsock unix socket). Re-exported here for callers.
-pub use channel::VSOCK_PORT;
+pub use ekvm_channel::VSOCK_PORT;
 
 /// The vsock unix socket Firecracker creates in the scratch dir; the host connects here and speaks
 /// the `CONNECT <port>` handshake to reach a guest port.
@@ -144,7 +144,7 @@ pub struct BootConfig {
     pub guest_cid: Option<u32>,
     /// Boot the base rootfs **read-only and shared** (no per-VM copy) under a per-run **tmpfs
     /// overlay**, so `/` is writable but the base is never mutated and many VMs share one
-    /// page-cache-deduped base. Requires a rootfs whose [`channel::GUEST_OVERLAY_INIT`] builds the
+    /// page-cache-deduped base. Requires a rootfs whose [`ekvm_channel::GUEST_OVERLAY_INIT`] builds the
     /// overlay (the agent image from `cargo xtask build-rootfs`); the driver appends
     /// `init=<that path> overlay_size=<mem/2>M` to the kernel command line. `false` (the
     /// default) keeps the copy-then-boot-read-write path. One concept, not two knobs: a read-only
@@ -153,14 +153,14 @@ pub struct BootConfig {
     /// A host directory to inject as **bulk read-only input**: the driver builds an ext4 from
     /// it and attaches it as a second block device (`/dev/vdb`, `O_RDONLY`); the guest rootfs mounts
     /// it at `/input`, so a command reads it as `/input/...`. This is the whole-working-dir /
-    /// large-file path, the vsock channel's [`Request::PutFile`](channel::Request::PutFile) carries only small per-frame files.
+    /// large-file path, the vsock channel's [`Request::PutFile`](ekvm_channel::Request::PutFile) carries only small per-frame files.
     /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
     pub input_dir: Option<PathBuf>,
     /// A host directory to receive **bulk output**: the driver attaches a blank, **writable**
     /// ext4 as a third block device (`/dev/vd?`, labelled `ekvm-output`); the guest rootfs mounts it
     /// read-write at `/output`, so a command's files under `/output/...` are pulled back here by
     /// [`RunningVm::collect_outputs`]. This is the whole-working-dir / large-file counterpart to the
-    /// vsock channel's per-frame [`Response::File`](channel::Response::File) artifacts. `None` (the default) attaches no output
+    /// vsock channel's per-frame [`Response::File`](ekvm_channel::Response::File) artifacts. `None` (the default) attaches no output
     /// device. Readback needs `e2fsck` + `debugfs` (e2fsprogs) on the host; the directory is created
     /// if missing and receives the guest's `/output` tree (host-escaping symlinks are dropped).
     pub output_dir: Option<PathBuf>,
@@ -1086,7 +1086,7 @@ pub(crate) fn reclaim_scratch_after_tap_failure(workdir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::ScratchDir;
+    use ekvm_test_support::ScratchDir;
 
     #[test]
     fn reclaim_scratch_removes_the_dir_when_there_is_no_netns() {

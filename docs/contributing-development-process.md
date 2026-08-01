@@ -13,13 +13,13 @@ not "fixed timeouts". A mixed change takes its most significant type (`fix` over
 
 ## The `api` scope
 
-The engine is embedded downstream at the `vmm` library's public API, pinned by git rev, so a change to
+The engine is embedded downstream at the `ekvm` library's public API, pinned by git rev, so a change to
 that surface is committed with the `api` scope:
 
 - `Sandbox`, `Limits`, `RunResult`
 - `VmmError`, including its variants *and* the `kind()` bucket mapping
-- the `channel` wire protocol
-- the daemon's `protocol` wire types
+- the `ekvm-channel` wire protocol
+- the daemon's `ekvm-protocol` wire types
 
 Use `feat(api):` or `fix(api):`, with `!` appended when the change is incompatible. The point is
 legibility: a downstream pin bump should be auditable from the log alone, without reading diffs.

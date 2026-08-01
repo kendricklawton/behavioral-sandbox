@@ -8,7 +8,7 @@
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use probes_common::{PolicyRule, PolicyRule6, Protocol};
+use ekvm_probes_common::{PolicyRule, PolicyRule6, Protocol};
 
 /// A rejected egress-policy input, caught by construction (`parse, don't validate`) so an illegal policy
 /// can't reach the kernel map: an out-of-range CIDR prefix, or more rules than the map holds. Distinct
@@ -285,7 +285,7 @@ impl EgressPolicy {
 mod tests {
     // The userspace schema, host-testable without a live map.
     use super::*;
-    use probes_common::egress_allowed;
+    use ekvm_probes_common::egress_allowed;
 
     /// A dotted-quad as the host-order `u32` the matcher takes.
     fn ip(a: u8, b: u8, c: u8, d: u8) -> u32 {
@@ -376,14 +376,14 @@ mod tests {
         assert_eq!(rule.addr, host.octets());
         assert_eq!(rule.port, 9999);
         // Only that exact v6 host/port/proto is admitted; another v6 host is denied.
-        assert!(probes_common::egress_allowed6(
+        assert!(ekvm_probes_common::egress_allowed6(
             p.rules6(),
             host.octets(),
             9999,
             Protocol::Udp.as_u8()
         ));
         let other: Ipv6Addr = "fd00:200::2".parse().unwrap();
-        assert!(!probes_common::egress_allowed6(
+        assert!(!ekvm_probes_common::egress_allowed6(
             p.rules6(),
             other.octets(),
             9999,

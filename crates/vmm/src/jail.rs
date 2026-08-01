@@ -727,7 +727,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let src = dir.join("src");
         std::fs::write(&src, b"base").expect("write src");
-        let dst = if test_support::have_real_root() {
+        let dst = if ekvm_test_support::have_real_root() {
             dir.join("no-such-dst")
         } else {
             let dst = dir.join("dst");

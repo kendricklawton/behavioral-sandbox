@@ -2,7 +2,7 @@
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches an enforcing
 //! `tc` program inside the VM's netns (needs `CAP_BPF`+`CAP_NET_ADMIN` + BTF + the built object). Run via
-//! `cargo xtask ci-privileged`. Uses `vmm` as a **dev-dependency only**, so the loader library
+//! `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a netns name and a tap name).
 //!
 //! The proof is at the enforcement point (the tap): the guest sends UDP to two ports of its host end, one
@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use probes_loader::{check_support, object_path, EgressPolicy, Protocol, TapMonitor};
-use vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_probes_loader::{check_support, object_path, EgressPolicy, Protocol, TapMonitor};
 
 /// IP protocol number for UDP, for the raw flow-key comparisons the loader doesn't re-export a const for.
 const IPPROTO_UDP: u8 = Protocol::Udp as u8;
@@ -181,7 +181,7 @@ fn a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail() {
     // The reachable set is unchanged either way: nothing here builds an uplink, so the packet dies
     // in the netns. What changes is that the host can now see it was tried.
     let mut cfg = networked_agent_config();
-    let host_end = vmm::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
+    let host_end = ekvm::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
     cfg.egress = Some(host_end);
     let vm = Vm::boot(cfg).expect("a networked agent microVM with a gateway should boot");
     let netns = vm

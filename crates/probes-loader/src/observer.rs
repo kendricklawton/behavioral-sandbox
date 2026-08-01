@@ -1,7 +1,7 @@
 //! The attach bundle: bind the three host-side probes to one sandbox and roll their
 //! output into a [`RunRecord`], and detach + finalize on close.
 //!
-//! `vmm` stays independent of this crate, so the bundle takes **plain
+//! `ekvm` stays independent of this crate, so the bundle takes **plain
 //! values** the driver already exposes, the VMM pid (→ its cgroup, for the syscall tracer and the CPU
 //! meter) and the netns + tap names (for the network monitor), never a `Sandbox`. The composition is
 //! the caller's (the CLI/daemon later): a short launch sequence around `Sandbox::open`.
@@ -27,7 +27,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use probes_common::SyscallEvent;
+use ekvm_probes_common::SyscallEvent;
 
 use crate::record::{
     AxisGap, NetSection, RecordSubject, RunRecord, SyscallFold, SyscallFootprint, Timing,
@@ -222,7 +222,7 @@ impl SandboxProbes {
     ///
     /// `gateway` is the default route the driver gave the guest, or `None` for the sealed posture.
     /// A plain value like `vmm_pid`/`netns`/`tap`, for the same reason: the loader stays independent
-    /// of `vmm`. The tap cannot observe it (it is on the guest's command line, not on the wire), and
+    /// of `ekvm`. The tap cannot observe it (it is on the guest's command line, not on the wire), and
     /// the record needs it because an allowance means something different with a route than without.
     ///
     /// Each sub-attach degrades to a recorded [`AxisGap`]; the returned bundle is always valid.
@@ -318,7 +318,7 @@ impl SandboxProbes {
     /// **Finalize + detach on close**: read the three probes into a [`RunRecord`] and
     /// unregister this run's cgroup from the shared tracer + meter. **Must run while the sandbox is still
     /// alive**, the cgroup dir and map fds must be live. `timing` comes from the caller
-    /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `vmm`.
+    /// (`Sandbox::boot_latency` + `RunResult::metrics.wall`), so the record never depends on `ekvm`.
     /// Each axis degrades to a recorded gap on a read error.
     pub fn collect(mut self, subject: RecordSubject, timing: Timing) -> RunRecord {
         // Host syscalls: drain + finish this cgroup's fold on the shared tracer (also unregisters it).

@@ -20,7 +20,7 @@ ekvm run --demo-boot
 
 The defaults point at the guest rootfs (built by `cargo xtask build-rootfs` or `self-host`), which
 carries `python3`, `node`, and the in-guest exec agent. From a source checkout without installing,
-the same commands are `cargo run -p ekvm -- run …`.
+the same commands are `cargo run -p ekvm-cli -- run …`.
 
 `ekvm run` is **jailed by default**: the VMM runs under Firecracker's jailer (chroot, uid/gid drop,
 seccomp, its own namespaces, a cgroup), which needs real root and the `jailer` binary. On a dev box

@@ -1,7 +1,7 @@
 //! The `.ekvm.toml` **file layer** of the config precedence `flags > env (EKVM_*) > file >
 //! defaults`.
 //!
-//! The env layer already lives in [`vmm::BootConfig::from_env`], and the flags layer is the
+//! The env layer already lives in [`ekvm::BootConfig::from_env`], and the flags layer is the
 //! CLI's own arguments; this module inserts a file between env and defaults. **One vocabulary:** the
 //! file's keys mirror the `EKVM_*` env names 1:1 (minus the prefix, lowercased), so a value is
 //! spelled the same whether it comes from a flag, the environment, or the file. Discovery is the
@@ -11,7 +11,7 @@
 //! **Typos are a typed error, never a silent no-op:** the file is parsed with
 //! `deny_unknown_fields`, so a misspelled key (`kernal = …`) fails loudly rather than being ignored.
 //!
-//! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](vmm::BootConfig::from_env_with): return the
+//! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](ekvm::BootConfig::from_env_with): return the
 //! real env var if set, else the file's value, which resolves `env > file > defaults` for the
 //! artifact/scratch keys with zero duplication of the engine's env-key logic or defaults. The `log`
 //! key has no `BootConfig` field (it drives `tracing`), so the CLI reads it from here directly.
@@ -21,9 +21,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Path, PathBuf};
 
-use probes_loader::{Ipv4Cidr, Ipv6Cidr};
+use ekvm::VmmError;
+use ekvm_probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
-use vmm::VmmError;
 
 use crate::policy::Policy;
 
@@ -157,7 +157,7 @@ impl EkvmToml {
     }
 
     /// The file's value for an `EKVM_*` env key, as an [`OsString`], or `None` if the key is unset
-    /// in the file, the shape [`from_env_with`](vmm::BootConfig::from_env_with) consumes, so
+    /// in the file, the shape [`from_env_with`](ekvm::BootConfig::from_env_with) consumes, so
     /// the file slots in *under* the environment in one composed lookup.
     #[must_use]
     pub fn env_value(&self, key: &str) -> Option<OsString> {
@@ -296,13 +296,13 @@ pub fn policy_of(file: Option<&EkvmToml>) -> Policy {
 
 /// Resolve the host record-signing key path with `env (EKVM_SIGNING_KEY) > file > default`
 /// Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
-/// The default is [`probes_loader::default_key_path`] (a data-dir path, generated on first use).
+/// The default is [`ekvm_probes_loader::default_key_path`] (a data-dir path, generated on first use).
 #[must_use]
 pub fn signing_key_path(file: Option<&EkvmToml>) -> PathBuf {
     std::env::var_os("EKVM_SIGNING_KEY")
         .map(PathBuf::from)
         .or_else(|| file.and_then(EkvmToml::signing_key).map(Path::to_path_buf))
-        .unwrap_or_else(probes_loader::default_key_path)
+        .unwrap_or_else(ekvm_probes_loader::default_key_path)
 }
 
 /// The configured set of extra trusted public keys (`key_id` hex) for `ekvm verify`, the **union**
@@ -383,14 +383,14 @@ mod tests {
             on.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("true"))
         );
-        assert!(vmm::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
+        assert!(ekvm::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
 
         let off = EkvmToml::parse("require_limits = false\n").expect("valid toml parses");
         assert_eq!(
             off.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("false"))
         );
-        assert!(!vmm::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
+        assert!(!ekvm::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
 
         // Unset in the file falls through to the default.
         let bare = EkvmToml::parse("marker = \"UP\"\n").expect("valid toml parses");
@@ -479,14 +479,14 @@ mod tests {
         assert_eq!(
             policy.max_egress_v4,
             vec![
-                probes_loader::Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap(),
-                probes_loader::Ipv4Cidr::host("192.0.2.7".parse().unwrap()),
+                ekvm_probes_loader::Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap(),
+                ekvm_probes_loader::Ipv4Cidr::host("192.0.2.7".parse().unwrap()),
             ],
             "every entry reaches the policy: a bare host reads as /32"
         );
         assert_eq!(
             policy.max_egress_v6,
-            vec![probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
+            vec![ekvm_probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
         );
         // Absent keys stay "no restriction": the permissive default, explicitly chosen.
         let bare = EkvmToml::parse("marker = \"UP\"\n").expect("valid");

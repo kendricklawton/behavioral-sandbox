@@ -1,4 +1,4 @@
-//! `probes-loader`, the userspace side of the eBPF story: load and attach the probes from
+//! `ekvm-probes-loader`, the userspace side of the eBPF story: load and attach the probes from
 //! `crates/probes`, read their maps, and stream events into the audit log. The first probe attaches the
 //! one host-global `sys_enter_execve` tracepoint (scoped to nothing); binding a program to a
 //! *specific* sandbox (its cgroup, its tap device) arrives with the per-VM taps.
@@ -83,7 +83,7 @@ use std::path::{Path, PathBuf};
 
 use aya::Ebpf;
 
-pub use probes_common::{
+pub use ekvm_probes_common::{
     FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol, Syscall, SyscallEvent,
     COMM_CAP, DETAIL_CAP, MAX_POLICY_RULES,
 };

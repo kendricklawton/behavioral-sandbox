@@ -8,7 +8,7 @@ use std::path::Path;
 use aya::maps::{Array, HashMap as AyaHashMap};
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::Ebpf;
-use probes_common::{
+use ekvm_probes_common::{
     FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, FLOW_COUNTS_SIZE, FLOW_KEY6_SIZE,
     FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE6_SIZE, POLICY_RULE_SIZE,
 };

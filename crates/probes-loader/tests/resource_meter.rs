@@ -3,7 +3,7 @@
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches the
 //! `sched_switch` accounting probe (needs `CAP_BPF`+`CAP_PERFMON` + kernel BTF + the built object). Run
-//! via `cargo xtask ci-privileged`. Uses `vmm` as a **dev-dependency only**, so the loader library
+//! via `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a VMM pid → its cgroup).
 //!
 //! The proof is the metering primitive doing its job: with the meter targeting the VMM's cgroup, an idle
@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use probes_loader::{cgroup_id_of_pid, check_support, object_path, ResourceMeter};
-use vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_probes_loader::{cgroup_id_of_pid, check_support, object_path, ResourceMeter};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {

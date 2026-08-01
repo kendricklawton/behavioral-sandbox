@@ -1,13 +1,13 @@
 //! `ekvm`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
-//! [wire API](protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
-//! socket**, so a local client drives microVMs without linking the `vmm` library itself. This
+//! [wire API](ekvm_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
+//! socket**, so a local client drives microVMs without linking the `ekvm` library itself. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
 //! use: no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
 //! **Shape.** One connection is one sandbox **session** (the VM *is* the session),
 //! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`protocol`] crate;
+//! is the versioned newline-JSON contract in the shared [`ekvm_protocol`] crate;
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
@@ -52,9 +52,9 @@ use std::sync::{Arc, Mutex};
 
 use std::num::{NonZeroU32, NonZeroU8};
 
-use ekvm::audit::Observability;
-use ekvm::policy::Policy;
-use vmm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
+use ekvm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
+use ekvm_cli::audit::Observability;
+use ekvm_cli::policy::Policy;
 
 use crate::metrics::Metrics;
 
@@ -181,7 +181,7 @@ pub(crate) struct Server {
     pub(crate) observ: Observability,
     /// The host record-signing key: the `trace` reply signs the finalized record with
     /// it so a client detects post-hoc alteration. Host-side; the guest never sees it.
-    pub(crate) signing_key: probes_loader::HostKey,
+    pub(crate) signing_key: ekvm_probes_loader::HostKey,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
     /// pool could not be built. Behind a `Mutex`: `take`/`refill` need `&mut`, and sessions run on
     /// many threads.
@@ -311,7 +311,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // signed envelope. Fail-closed like the metrics bind: refuse to start rather than
     // serve records that claim to be verifiable but aren't signed. The daemon has no `.ekvm.toml`
     // layer (env + flags only), so the path resolves from `EKVM_SIGNING_KEY` or the default.
-    let signing_key = match probes_loader::HostKey::load_or_generate(
+    let signing_key = match ekvm_probes_loader::HostKey::load_or_generate(
         &crate::config::signing_key_path(None),
     ) {
         Ok(k) => k,
@@ -624,13 +624,13 @@ pub(crate) fn release_pool_clones(server: &Server, n: usize, clone: &Limits) {
         .fetch_sub(n * u64::from(clone.vcpus.get()), Ordering::Relaxed);
 }
 
-/// Backoff hint sent with an [`protocol::Response::AtCapacity`] refusal. A hint only: the daemon
+/// Backoff hint sent with an [`ekvm_protocol::Response::AtCapacity`] refusal. A hint only: the daemon
 /// cannot know when a slot frees, and a fleet dispatcher typically fails over to another host rather
 /// than waiting, so this is a modest "come back shortly" value, not a promise.
 pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
 
 /// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed
-/// [`protocol::Response::AtCapacity`] (the client's `open` reads it as the reply, a distinct
+/// [`ekvm_protocol::Response::AtCapacity`] (the client's `open` reads it as the reply, a distinct
 /// backpressure signal a dispatcher fails over on), then the connection drops. The
 /// write is timeout-bounded so a stalled client can't park the accept loop, and best-effort, the
 /// refusal itself must never take the daemon down.
@@ -642,10 +642,10 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     );
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     let mut stream = stream;
-    let refusal = protocol::Response::AtCapacity {
+    let refusal = ekvm_protocol::Response::AtCapacity {
         retry_after_ms: AT_CAPACITY_RETRY_MS,
     };
-    let _ = protocol::write_message(&mut stream, &refusal);
+    let _ = ekvm_protocol::write_message(&mut stream, &refusal);
 }
 
 /// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
@@ -673,7 +673,7 @@ fn own_euid() -> Option<u32> {
 /// daemon of the same user). A dead daemon's pid is genuinely absent from `/proc` (it's not our
 /// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
 /// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
-/// ([`vmm::sweep_orphans`]), logging what it reclaimed. The complement of
+/// ([`ekvm::sweep_orphans`]), logging what it reclaimed. The complement of
 /// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
 fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
@@ -1074,11 +1074,11 @@ mod tests {
         max_committed_vcpus: u64,
     ) -> Arc<Server> {
         Arc::new(Server {
-            base: vmm::BootConfig::default(),
+            base: ekvm::BootConfig::default(),
             jailed: false,
             policy: Policy::default(),
             observ: Observability::load(),
-            signing_key: probes_loader::HostKey::from_seed([7u8; 32]),
+            signing_key: ekvm_probes_loader::HostKey::from_seed([7u8; 32]),
             pool: None,
             snapshot_base: std::env::temp_dir(),
             snapshot_seq: AtomicU64::new(0),
@@ -1284,11 +1284,11 @@ mod tests {
         let started = Instant::now();
         refuse_at_capacity(daemon_end, &server);
         let mut reader = std::io::BufReader::new(client);
-        let reply = protocol::read_message::<protocol::Response>(&mut reader)
+        let reply = ekvm_protocol::read_message::<ekvm_protocol::Response>(&mut reader)
             .expect("the refusal parses")
             .expect("the refusal is a message, not EOF");
         assert!(
-            matches!(&reply, protocol::Response::AtCapacity { retry_after_ms } if *retry_after_ms > 0),
+            matches!(&reply, ekvm_protocol::Response::AtCapacity { retry_after_ms } if *retry_after_ms > 0),
             "expected the typed at-capacity refusal, got {reply:?}"
         );
         assert!(

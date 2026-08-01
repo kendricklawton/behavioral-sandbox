@@ -2,7 +2,7 @@
 //! addressing/reachability, per-VM isolation, and allowed-vs-blocked endpoints.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` + `CAP_NET_ADMIN` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p vmm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -13,7 +13,7 @@ use std::process::Command;
 
 use std::net::Ipv4Addr;
 
-use vmm::{GuestEgress, Vm};
+use ekvm::{GuestEgress, Vm};
 
 use common::{guest_rootfs_config, have_net_admin};
 

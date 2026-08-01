@@ -4,14 +4,14 @@
 //!
 //! `#[ignore]`d: each boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches all
 //! three host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
-//! object). Run via `cargo xtask ci-privileged`. Uses `vmm` as a **dev-dependency only**, so
+//! object). Run via `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so
 //! the loader library stays independent of the driver: the two tracks bridge by plain values.
 //!
 //! These fuse constituents that already pass individually, deny-by-default egress with an
 //! allow-listed exception (`net_enforce.rs`), a fork storm that creates no host threads (hardware
 //! isolation), and the faithful record (`audit_record.rs`), into **one hostile guest**, and add the
 //! part those pieces don't: the record is the evidence. Full VM/jail escape and the cgroup
-//! cpu/mem/pid caps are proven under real root by the `vmm` confinement suite (a mem-hog /
+//! cpu/mem/pid caps are proven under real root by the `ekvm` confinement suite (a mem-hog /
 //! fork-bomb bounded by `memory.max`/`cpu.max`); this suite runs on the probe-capability path and
 //! consolidates the *observed and recorded* dimensions of containment.
 #![allow(clippy::panic)]
@@ -19,12 +19,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use probes_loader::{
+use ekvm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_probes_loader::{
     check_support, object_path, AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes,
     SharedMeter, SharedTracer, Timing,
 };
-use test_support::{have_real_root, process_threads, LimitCgroup};
-use vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_test_support::{have_real_root, process_threads, LimitCgroup};
 
 /// IP protocol number for UDP, for the raw flow/denial-key comparisons the loader doesn't re-export
 /// a const for.

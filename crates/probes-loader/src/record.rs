@@ -1,6 +1,6 @@
 //! The fused per-run **audit record** and its pure builders.
 //!
-//! This module is deliberately dependency-light: no aya, no `vmm`. It defines the shape of
+//! This module is deliberately dependency-light: no aya, no `ekvm`. It defines the shape of
 //! "what a run did" as observed from *outside* the guest, and the aggregation that folds the three
 //! probes' raw output into it. The attach machinery that produces those inputs lives next door in
 //! [`observer`](crate::observer); keeping the record pure means its whole aggregation is unit-tested
@@ -11,7 +11,7 @@
 //! host footprint**, explicitly *not* the guest's syscalls (a microVM services those in-guest).
 //! Every collection is deterministically sorted, so a record built from the same
 //! observations is byte-stable regardless of map-iteration order, the property the JSON
-//! output will rely on. Kept here, out of `vmm`, so the driver stays independent of the eBPF
+//! output will rely on. Kept here, out of `ekvm`, so the driver stays independent of the eBPF
 //! loader; the two tracks bridge only by plain values.
 
 use std::borrow::Cow;
@@ -19,7 +19,7 @@ use std::collections::btree_map::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use probes_common::{
+use ekvm_probes_common::{
     FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Syscall, SyscallEvent,
 };
 
@@ -83,7 +83,7 @@ pub struct RunRecord {
     /// The VMM's **host** syscall footprint, not in-guest syscalls. Bounded.
     pub host_syscalls: SyscallFootprint,
     /// Boot + exec wall time, supplied by the caller as plain [`Duration`]s (the record never depends
-    /// on `vmm` to learn them).
+    /// on `ekvm` to learn them).
     pub timing: Timing,
     /// Which axes were unavailable, and why, fail-open honesty, so a partial record is legible rather
     /// than silently thin.
@@ -91,7 +91,7 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
-    /// Assemble a record from already-collected parts. Pure, no eBPF, no `vmm`. This is what
+    /// Assemble a record from already-collected parts. Pure, no eBPF, no `ekvm`. This is what
     /// [`SandboxProbes::collect`](crate::observer::SandboxProbes::collect) calls after reading the
     /// probes, and what the unit tests exercise directly.
     #[must_use]
@@ -592,7 +592,7 @@ impl SyscallFold {
 }
 
 /// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from
-/// `Sandbox::boot_latency` and `RunResult::metrics.wall`, so the record never depends on `vmm`.
+/// `Sandbox::boot_latency` and `RunResult::metrics.wall`, so the record never depends on `ekvm`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timing {
     pub boot: Duration,
@@ -629,10 +629,10 @@ mod tests {
     /// Build a synthetic event: a syscall kind (or a raw discriminant), a cgroup, a detail blob, and a
     /// comm. Fields are `pub` on `SyscallEvent`, so no eBPF is involved.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; probes_common::DETAIL_CAP];
+        let mut d = [0u8; ekvm_probes_common::DETAIL_CAP];
         let n = detail.len().min(d.len());
         d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; probes_common::COMM_CAP];
+        let mut c = [0u8; ekvm_probes_common::COMM_CAP];
         let m = comm.len().min(c.len());
         c[..m].copy_from_slice(&comm.as_bytes()[..m]);
         SyscallEvent {
@@ -654,7 +654,7 @@ mod tests {
         // own prefix, in exactly the shape of a path that fit, so the record asserted an open that
         // never happened. Simulate what the probe produces for an over-long path (a full buffer,
         // NUL-terminated inside it, so `detail_len` is the cap minus the NUL).
-        let long = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
         let mut fold = SyscallFold::new(CG);
         fold.record(&ev(Syscall::Openat as u32, CG, &long, "sh"));
         let short = fold_one(b"/etc/hostname");
@@ -689,7 +689,7 @@ mod tests {
         // Distinct paths sharing a prefix fold into one row, so a row can mix a cut capture with an
         // exactly-fitting one. "Certain" merged with "cut" is "cut": the alternative lets one
         // complete capture clear the doubt on a row that also stands for something longer.
-        let at_cap = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let at_cap = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
         let mut fold = SyscallFold::new(CG);
         fold.record(&ev(Syscall::Openat as u32, CG, &at_cap, "sh"));
         fold.record(&ev(Syscall::Openat as u32, CG, &at_cap, "sh"));
@@ -870,7 +870,7 @@ mod tests {
                     dst,
                     sport,
                     443,
-                    probes_common::IPPROTO_TCP,
+                    ekvm_probes_common::IPPROTO_TCP,
                 ),
                 count,
             )
@@ -898,7 +898,7 @@ mod tests {
                     dst,
                     sport,
                     443,
-                    probes_common::IPPROTO_TCP,
+                    ekvm_probes_common::IPPROTO_TCP,
                 ),
                 count,
             )
@@ -920,7 +920,7 @@ mod tests {
 
     #[test]
     fn with_v6_folds_totals_sorts_flows_and_aggregates_denials() {
-        use probes_common::IPPROTO_TCP;
+        use ekvm_probes_common::IPPROTO_TCP;
         let ula = |n: u8| {
             let mut a = [0u8; 16];
             a[0] = 0xfd;
@@ -1012,7 +1012,7 @@ mod tests {
                 u32::from_be_bytes(dst),
                 40000,
                 dport,
-                probes_common::IPPROTO_TCP,
+                ekvm_probes_common::IPPROTO_TCP,
             ),
             FlowCounts {
                 ingress_packets: 1,

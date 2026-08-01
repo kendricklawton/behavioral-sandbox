@@ -227,13 +227,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
-name = "channel"
-version = "0.0.0"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
 name = "clap"
 version = "4.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -272,14 +265,6 @@ name = "clap_lex"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
-
-[[package]]
-name = "client"
-version = "0.0.0"
-dependencies = [
- "protocol",
- "serde_json",
-]
 
 [[package]]
 name = "colorchoice"
@@ -546,21 +531,92 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 name = "ekvm"
 version = "0.0.0"
 dependencies = [
- "clap",
- "client",
+ "ekvm-channel",
+ "ekvm-guest-agent",
+ "ekvm-test-support",
  "nix 0.31.3",
- "probes-loader",
- "protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "ekvm-channel"
+version = "0.0.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "ekvm-cli"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "ekvm",
+ "ekvm-client",
+ "ekvm-probes-loader",
+ "ekvm-protocol",
+ "ekvm-test-support",
+ "nix 0.31.3",
  "ratatui",
  "serde",
  "serde_json",
  "signal-hook",
- "test-support",
  "toml",
  "tracing",
  "tracing-subscriber",
- "vmm",
 ]
+
+[[package]]
+name = "ekvm-client"
+version = "0.0.0"
+dependencies = [
+ "ekvm-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "ekvm-guest-agent"
+version = "0.0.0"
+dependencies = [
+ "ekvm-channel",
+ "tracing",
+ "tracing-subscriber",
+ "vsock",
+]
+
+[[package]]
+name = "ekvm-probes-common"
+version = "0.0.0"
+
+[[package]]
+name = "ekvm-probes-loader"
+version = "0.0.0"
+dependencies = [
+ "aya",
+ "ed25519-dalek",
+ "ekvm",
+ "ekvm-probes-common",
+ "ekvm-test-support",
+ "nix 0.31.3",
+ "serde_json",
+ "sha2",
+ "zeroize",
+]
+
+[[package]]
+name = "ekvm-protocol"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ekvm-test-support"
+version = "0.0.0"
 
 [[package]]
 name = "equivalent"
@@ -710,16 +766,6 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
-]
-
-[[package]]
-name = "guest-agent"
-version = "0.0.0"
-dependencies = [
- "channel",
- "tracing",
- "tracing-subscriber",
- "vsock",
 ]
 
 [[package]]
@@ -1256,39 +1302,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
-name = "probes-common"
-version = "0.0.0"
-
-[[package]]
-name = "probes-loader"
-version = "0.0.0"
-dependencies = [
- "aya",
- "ed25519-dalek",
- "nix 0.31.3",
- "probes-common",
- "serde_json",
- "sha2",
- "test-support",
- "vmm",
- "zeroize",
-]
-
-[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "protocol"
-version = "0.0.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1804,10 +1823,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "test-support"
-version = "0.0.0"
-
-[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2064,21 +2079,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "vmm"
-version = "0.0.0"
-dependencies = [
- "channel",
- "guest-agent",
- "nix 0.31.3",
- "serde",
- "serde_json",
- "sha2",
- "test-support",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "vsock"
 version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2286,10 +2286,10 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "channel",
  "clap",
- "probes-loader",
- "vmm",
+ "ekvm",
+ "ekvm-channel",
+ "ekvm-probes-loader",
 ]
 
 [[package]]

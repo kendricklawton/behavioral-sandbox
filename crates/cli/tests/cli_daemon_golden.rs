@@ -1,7 +1,7 @@
 //! CLI/daemon parity golden (the wire API): the **CLI** (`ekvm run --json`) and the
 //! **daemon wire API** (`ekvm serve`, driven
-//! through the reference [`client::Client`]) render the *same* command **identically**, same
-//! exit code, same stdout, same stderr. The two faces are thin hosts of one `vmm` lifecycle, so
+//! through the reference [`ekvm_client::Client`]) render the *same* command **identically**, same
+//! exit code, same stdout, same stderr. The two faces are thin hosts of one `ekvm` lifecycle, so
 //! a run must never depend on which door it came through; this pins that invariant against drift (a
 //! stream captured differently, an exit code mapped differently, a default limit that diverged).
 //!
@@ -12,7 +12,7 @@
 //! faithful renderings of a non-result, not a golden mismatch.
 //!
 //! `#[ignore]`d: boots real microVMs (needs `/dev/kvm` + the guest rootfs). Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Both faces run
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm-cli -- --ignored`. Both faces run
 //! **unjailed**, the golden is the run-result rendering, not the jailer (that has its own suite),
 //! and unjailed needs no root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use client::{Client, OpenOptions};
+use ekvm_client::{Client, OpenOptions};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -111,7 +111,7 @@ impl Drop for Daemon {
 fn shared_env(cmd: &mut Command, root: &std::path::Path) {
     cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("EKVM_MARKER", vmm::GUEST_READY_MARKER)
+        .env("EKVM_MARKER", ekvm::GUEST_READY_MARKER)
         .env("EKVM_LOG", "warn");
     if std::env::var_os("EKVM_KERNEL").is_none() {
         cmd.env("EKVM_KERNEL", root.join("artifacts/vmlinux"));

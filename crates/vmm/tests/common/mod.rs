@@ -10,11 +10,11 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use vmm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID};
+use ekvm::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID};
 
 /// The shared scratch-dir guard (removed on drop). `new` reserves the path without creating it, the
 /// semantics these integration tests rely on (a snapshot bundle / output dir the driver creates).
-pub use test_support::ScratchDir as TmpDir;
+pub use ekvm_test_support::ScratchDir as TmpDir;
 
 /// The hex sha256 of `bytes`, via the host `sha256sum` (no crate dep, mirrors the input test's
 /// host-side hash of the injected payload). A free helper (not a `#[test]` fn), so it uses explicit
@@ -111,7 +111,7 @@ pub fn jailed_overlay_config() -> BootConfig {
 /// latency alongside the bundle so callers can compare it to restore.
 // A free helper (not a `#[test]` fn), so it uses explicit `panic!` rather than `.expect()`, which the
 // workspace lints only re-allow inside test functions.
-pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (vmm::Snapshot, Duration) {
+pub fn prewarmed_python_snapshot(bundle: &TmpDir) -> (ekvm::Snapshot, Duration) {
     let source = match Vm::boot(guest_rootfs_config()) {
         Ok(vm) => vm,
         Err(e) => panic!("agent microVM should boot: {e}"),
@@ -149,11 +149,11 @@ pub fn cgroup_of(pid: u32) -> Option<PathBuf> {
 
 /// Whether this process holds `CAP_NET_ADMIN` (effective), needed to create a tap. Creating a tap
 /// is privileged (unlike the rootless block-device builds), so the NIC tests skip without it rather
-/// than fail on a box that can do KVM but not net-admin. Delegates to `test-support`'s
+/// than fail on a box that can do KVM but not net-admin. Delegates to `ekvm-test-support`'s
 /// audited `CapEff` parse (which reads only the low 64 bits, so a wider future field can't read a
 /// capable host as incapable and silently skip these tests).
 pub fn have_net_admin() -> bool {
-    test_support::have_cap(test_support::CAP_NET_ADMIN)
+    ekvm_test_support::have_cap(ekvm_test_support::CAP_NET_ADMIN)
 }
 
 /// Whether this process can run the **jailer**: effective uid 0 **in the initial user namespace**.
@@ -167,5 +167,5 @@ pub fn have_jailer_privileges() -> bool {
     let init_userns = std::fs::read_to_string("/proc/self/uid_map")
         .ok()
         .is_some_and(|m| m.split_whitespace().collect::<Vec<_>>() == ["0", "0", "4294967295"]);
-    test_support::have_real_root() && init_userns
+    ekvm_test_support::have_real_root() && init_userns
 }

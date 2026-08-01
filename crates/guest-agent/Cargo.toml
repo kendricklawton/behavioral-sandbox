@@ -1,5 +1,5 @@
 [package]
-name = "guest-agent"
+name = "ekvm-guest-agent"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,10 +9,8 @@ authors.workspace = true
 publish = false
 description = "The in-guest agent: runs one command per connection and streams its output over the channel."
 
-[lib]
-name = "guest_agent"
-path = "src/lib.rs"
-
+# The bin name stays `guest-agent` while the package is `ekvm-guest-agent`: it is the path the
+# rootfs build bakes into the guest image (`GUEST_AGENT_PATH` in `xtask/src/rootfs.rs`).
 [[bin]]
 name = "guest-agent"
 path = "src/main.rs"
@@ -20,7 +18,7 @@ path = "src/main.rs"
 [dependencies]
 # The wire protocol is shared with the host driver; tracing is the guest agent's stderr log.
 # `serve` is transport-agnostic (any `Read`+`Write`); `main` binds the concrete listener.
-channel = { path = "../channel" }
+ekvm-channel = { path = "../channel" }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # The in-VM transport: a static `AF_VSOCK` listener. Guest-agent-only: the host reaches Firecracker's

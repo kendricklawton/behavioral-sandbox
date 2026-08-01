@@ -302,7 +302,7 @@ impl ResourceMeter {
 /// native cgroup v2 memory/IO counters, the two halves of the primitive rolled into one value a
 /// caller ships with the run. Assembled by [`ResourceMeter::summary_for_pid`] from a VMM pid. The engine
 /// *measures* this; folding it into the persisted per-run audit record (fused with the network denials
-/// and the syscall trace) is the audit record's convergence, kept here, out of `vmm`, so the driver stays
+/// and the syscall trace) is the audit record's convergence, kept here, out of `ekvm`, so the driver stays
 /// independent of the eBPF loader (they bridge only by plain values).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]

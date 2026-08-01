@@ -2,7 +2,7 @@
 //! its network flows and denials, its resources, the VMM's host-syscall footprint, and a running
 //! timeline of what changed. Drawn on **stderr** (stdout stays reserved for the run's result, the
 //! pipe-clean convention), redrawn from non-destructive [`LiveSnapshot`] polls, so watching never
-//! disturbs the record that [`collect`](probes_loader::SandboxProbes::collect) finalizes.
+//! disturbs the record that [`collect`](ekvm_probes_loader::SandboxProbes::collect) finalizes.
 //!
 //! The guest command runs on a worker thread the whole time; this view is a *reader*. `q`/`Esc`
 //! closes the view (the run continues headless), it never cancels the run.
@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use probes_loader::LiveSnapshot;
+use ekvm::VmmError;
+use ekvm_probes_loader::LiveSnapshot;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -22,10 +23,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
-use vmm::VmmError;
 
 use crate::trace::{human_bytes, human_duration, proto_name, syscall_name};
-use ekvm::audit::RunProbes;
+use ekvm_cli::audit::RunProbes;
 
 /// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.
@@ -502,7 +502,9 @@ fn draw_timeline(f: &mut Frame, area: Rect, timeline: &Timeline) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use probes_loader::{FlowCounts, FlowKey, NetSection, NetStats, SyscallFootprint, DETAIL_CAP};
+    use ekvm_probes_loader::{
+        FlowCounts, FlowKey, NetSection, NetStats, SyscallFootprint, DETAIL_CAP,
+    };
 
     fn net(flows: Vec<(FlowKey, FlowCounts)>, denials: Vec<(FlowKey, u64)>) -> NetSection {
         NetSection::from_tap(flows, NetStats::default(), denials, 0, 0)
@@ -553,7 +555,7 @@ mod tests {
 
     #[test]
     fn timeline_emits_new_notable_syscalls_once() {
-        use probes_loader::{Syscall, SyscallEvent};
+        use ekvm_probes_loader::{Syscall, SyscallEvent};
         let mk = |detail: &[u8]| {
             let mut d = [0u8; DETAIL_CAP];
             d[..detail.len()].copy_from_slice(detail);
@@ -563,7 +565,7 @@ mod tests {
                 tid: 1,
                 syscall: Syscall::Openat as u32,
                 detail_len: detail.len() as u32,
-                comm: [0; probes_loader::COMM_CAP],
+                comm: [0; ekvm_probes_loader::COMM_CAP],
                 detail: d,
             }
         };

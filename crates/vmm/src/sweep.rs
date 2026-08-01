@@ -299,7 +299,7 @@ fn protected_identities(dir: &Path) -> BTreeSet<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::ScratchDir;
+    use ekvm_test_support::ScratchDir;
 
     /// A pid guaranteed dead: spawn a short-lived child and reap it. Immediate recycling of a
     /// just-freed pid is effectively impossible (the kernel allocates pids cyclically).

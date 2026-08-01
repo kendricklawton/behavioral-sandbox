@@ -3,7 +3,7 @@
 ## One shot: open, run, read the result
 
 ```rust,no_run
-use vmm::{BootConfig, Sandbox, VmmError};
+use ekvm::{BootConfig, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
     // 1. Resolve boot configuration from environment (EKVM_KERNEL, EKVM_ROOTFS, etc.)
@@ -29,7 +29,7 @@ fn main() -> Result<(), VmmError> {
 ```rust,no_run
 use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
-use vmm::{BootConfig, Limits, Sandbox, VmmError};
+use ekvm::{BootConfig, Limits, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
     // 2 vCPU, 512 MiB RAM, 60s wall. `Limits` is `#[non_exhaustive]`, so a downstream crate
@@ -62,7 +62,7 @@ fn main() -> Result<(), VmmError> {
 ## The pre-warmed pool
 
 ```rust,no_run
-use vmm::{BootConfig, Pool, Snapshot, Vm, VmmError};
+use ekvm::{BootConfig, Pool, Snapshot, Vm, VmmError};
 
 fn main() -> Result<(), VmmError> {
     // 1. Boot an unjailed source VM to prepare a pre-warmed snapshot
@@ -119,4 +119,4 @@ It composes the driver and the loader the way a downstream host application woul
 `--output-cap`, `--json` (the structured result as one JSON object on stdout, stderr carries the
 logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `ekvm shell` holds one sandbox
 open as an interactive stateful session. If you're writing an SDK, start from the daemon's
-[reference client](./daemon.md#the-reference-client) (`client`), which exists for exactly that.
+[reference client](./daemon.md#the-reference-client) (`ekvm-client`), which exists for exactly that.

@@ -1,7 +1,7 @@
 # Using the `ekvm serve` daemon
 
 `ekvm serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
-lifecycle over a **unix socket**, so a local client drives microVMs without linking the `vmm`
+lifecycle over a **unix socket**, so a local client drives microVMs without linking the `ekvm`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
 use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
 the hoster's, above the engine, and are a recorded non-goal).
@@ -70,16 +70,16 @@ without `--prewarm`) cold-boots. Building the pool needs KVM (and root, for jail
 
 ## The reference client
 
-`client` is the **reference Rust client**: a `Client` type that drives the whole session
+`ekvm-client` is the **reference Rust client**: a `Client` type that drives the whole session
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
-`protocol` and a JSON value **only, never `vmm`**, which is the point: it demonstrates that a
+`ekvm-protocol` and a JSON value **only, never `ekvm`**, which is the point: it demonstrates that a
 caller can drive the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
 A language SDK is this client's method set hardened per language. Python is the one the project
 intends to write, since the caller driving a sandbox is usually an agent loop; the wire protocol is
 documented so any language can drive it without one.
 
 ```rust,ignore
-use client::{Client, OpenOptions};
+use ekvm_client::{Client, OpenOptions};
 
 let mut client = Client::connect("/run/ekvm/ekvm.sock")?;
 client.open(OpenOptions::default())?;               // boot the session's sandbox

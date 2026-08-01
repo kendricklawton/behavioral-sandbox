@@ -20,7 +20,7 @@ use std::fmt::Display;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use probes_common::{FlowKey, FlowKey6, Syscall};
+use ekvm_probes_common::{FlowKey, FlowKey6, Syscall};
 
 use crate::record::{AxisGap, EgressPosture, NetSection, RunRecord, SyscallFootprint};
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
@@ -351,8 +351,8 @@ fn gap_to_json(out: &mut String, gap: &AxisGap) {
 
 pub(crate) fn proto_name(out: &mut String, proto: u8) {
     match proto {
-        probes_common::IPPROTO_TCP => out.push_str("tcp"),
-        probes_common::IPPROTO_UDP => out.push_str("udp"),
+        ekvm_probes_common::IPPROTO_TCP => out.push_str("tcp"),
+        ekvm_probes_common::IPPROTO_UDP => out.push_str("udp"),
         p => {
             let _ = write!(out, "proto {p}");
         }
@@ -422,17 +422,17 @@ pub(crate) fn json_str(out: &mut String, s: &str) {
 mod tests {
     use std::time::Duration;
 
-    use probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
+    use ekvm_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
 
     use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
     use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
 
     /// Build a synthetic `SyscallEvent` from public fields (no eBPF), matching `record.rs`'s helper.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; probes_common::DETAIL_CAP];
+        let mut d = [0u8; ekvm_probes_common::DETAIL_CAP];
         let n = detail.len().min(d.len());
         d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; probes_common::COMM_CAP];
+        let mut c = [0u8; ekvm_probes_common::COMM_CAP];
         let m = comm.len().min(c.len());
         c[..m].copy_from_slice(&comm.as_bytes()[..m]);
         SyscallEvent {
@@ -519,7 +519,7 @@ mod tests {
         // A path past the probe's capture buffer is recorded as its own prefix. Unflagged, the
         // record asserts an open that never happened, in the same shape as one that did, so the
         // SDKs parsing this format need the flag beside the path, not a marker inside it.
-        let long = vec![b'a'; probes_common::DETAIL_CAP - 1];
+        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
         let mut record = sample(vec![]);
         record.host_syscalls = SyscallFootprint::from_events(0x42, &[ev(1, 0x42, &long, "sh")]);
         let json = record.to_json();
@@ -697,7 +697,7 @@ mod tests {
     fn the_posture_distinguishes_a_sealed_run_from_a_routed_one() {
         use crate::json::net_to_json;
         use crate::record::EgressPosture;
-        use probes_common::{PolicyRule, PolicyRule6};
+        use ekvm_probes_common::{PolicyRule, PolicyRule6};
 
         // Two runs whose *observations* are identical: no traffic, no denials. Before the posture
         // field these rendered the same bytes, so a reader could not tell a sandbox that reached

@@ -2,16 +2,16 @@
 
 Three crates, split by what can depend on what:
 
-- **`probes`** is the eBPF programs themselves: `#![no_std]`, built for `bpfel-unknown-none` via
+- **`ekvm-probes`** is the eBPF programs themselves: `#![no_std]`, built for `bpfel-unknown-none` via
   `bpf-linker`, using CO-RE and BTF so one object loads across kernel versions. Syscall tracepoints, a
   tc/XDP classifier on the VM's tap, and cgroup accounting.
-- **`probes-common`** holds the `#[repr(C)]` plain-old-data records that cross the kernel/user
+- **`ekvm-probes-common`** holds the `#[repr(C)]` plain-old-data records that cross the kernel/user
   boundary. **Zero dependencies, single-sourced**, so the program writing a record and the loader
   reading it cannot disagree about layout.
-- **`probes-loader`** is the userspace half, on `aya`: attach to a specific sandbox, read the maps,
+- **`ekvm-probes-loader`** is the userspace half, on `aya`: attach to a specific sandbox, read the maps,
   fold events, and assemble the signed `RunRecord`.
 
-`probes-loader` is one module per subsystem, which is the map to read it by:
+`ekvm-probes-loader` is one module per subsystem, which is the map to read it by:
 
 | Module | What it owns |
 |---|---|

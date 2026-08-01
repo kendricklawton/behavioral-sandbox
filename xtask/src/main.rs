@@ -610,6 +610,15 @@ fn ci() -> Result<()> {
         &["test", "--workspace", "--locked"],
         &[("RUSTFLAGS", "-D warnings")],
     )?;
+    // What this step buys is `-D warnings` over rustdoc's lints, above all
+    // `broken_intra_doc_links`: a `[`Type`]` that no longer resolves is a dead pointer in prose,
+    // the same class the drift lint catches for repo paths. The rendered HTML is not the point and
+    // is never published (`.github/workflows/docs.yml` builds the mdBook, not rustdoc).
+    //
+    // That is why cargo's "output filename collision at target/doc/ekvm" warning is left standing:
+    // `ekvm-cli`'s bin target and `ekvm`'s lib target are both named `ekvm`, so they render to one
+    // path and one overwrites the other. Silencing it means `doc = false` on the bin, which would
+    // drop ~70 intra-doc links across the daemon's own modules out of the check. Keep the links.
     cargo_env(
         &["doc", "--no-deps", "--workspace", "--locked"],
         &[("RUSTDOCFLAGS", "-D warnings")],
@@ -795,9 +804,9 @@ fn privileged_preflight() -> Result<()> {
     // own boot-time refusal; this is the gate's up-front one). Same loud-up-front discipline as the
     // checks above, reusing the doctor's tested detector against the exact scratch dir the tests
     // will resolve (`BootConfig::from_env`, so an `EKVM_SCRATCH_DIR` override clears it).
-    let scratch = vmm::BootConfig::from_env().scratch_dir;
-    let flags = vmm::doctor::scratch_mount_flags(&scratch);
-    if flags.is_some_and(vmm::doctor::MountFlags::blocks_jail) {
+    let scratch = ekvm::BootConfig::from_env().scratch_dir;
+    let flags = ekvm::doctor::scratch_mount_flags(&scratch);
+    if flags.is_some_and(ekvm::doctor::MountFlags::blocks_jail) {
         let flag = if flags.is_some_and(|f| f.nodev) {
             "nodev"
         } else {
@@ -882,15 +891,15 @@ fn setup() -> Result<()> {
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
-    let config = vmm::BootConfig::from_env();
-    for c in vmm::doctor::checks(&config) {
-        let ok = c.status == vmm::doctor::CheckStatus::Ok;
+    let config = ekvm::BootConfig::from_env();
+    for c in ekvm::doctor::checks(&config) {
+        let ok = c.status == ekvm::doctor::CheckStatus::Ok;
         check(&c.label, ok);
     }
-    // The eBPF-observability capability row (owned by the probe loader, out of `vmm`).
+    // The eBPF-observability capability row (owned by the probe loader, out of `ekvm`).
     check(
         "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
-        probes_loader::check_support().is_ok(),
+        ekvm_probes_loader::check_support().is_ok(),
     );
 
     // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
@@ -934,7 +943,7 @@ fn setup() -> Result<()> {
     // The degradation matrix, the same fails-open-vs-hard split `ekvm doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.
     println!("\nDegradation matrix: what a missing item above means at runtime:");
-    for line in vmm::doctor::matrix() {
+    for line in ekvm::doctor::matrix() {
         println!("  {line}");
     }
 
@@ -949,7 +958,7 @@ fn setup() -> Result<()> {
     println!(
         "                  world-writable /tmp default), so no other local user can plant residue"
     );
-    println!("    run the sweep: schedule vmm::sweep_orphans() (boot-time + periodic), the");
+    println!("    run the sweep: schedule ekvm::sweep_orphans() (boot-time + periodic), the");
     println!("                  engine exposes it; when/how often it runs is your ops call");
     println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
     println!("                  run drivers as several users, each user must run its own sweep");
@@ -961,7 +970,7 @@ fn setup() -> Result<()> {
     println!(
         "             A host without kernel BTF or those caps is named by a typed error, not a"
     );
-    println!("             cryptic verifier reject (probes_loader::check_support).");
+    println!("             cryptic verifier reject (ekvm_probes_loader::check_support).");
 
     println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
     Ok(())

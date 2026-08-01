@@ -1,5 +1,5 @@
 [package]
-name = "client"
+name = "ekvm-client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,12 +10,12 @@ publish = false
 description = "The reference Rust client for the ekvm wire API: drives a sandbox session over a unix socket using only the wire contract, no engine internals."
 
 # The whole point of the reference client is to **prove a non-Rust caller can drive `ekvm`** with
-# nothing but the wire contract: it depends on `protocol` (the shared JSON shapes) and
-# `serde_json` (the opaque `trace` record), and deliberately **not** on `vmm`. If this ever
+# nothing but the wire contract: it depends on `ekvm-protocol` (the shared JSON shapes) and
+# `serde_json` (the opaque `trace` record), and deliberately **not** on `ekvm`. If this ever
 # links the engine, the proof is void: reimplementing it in any language must need only a JSON
 # library and a unix socket, which is exactly what this dependency set models.
 [dependencies]
-protocol = { path = "../protocol" }
+ekvm-protocol = { path = "../protocol" }
 serde_json = { workspace = true }
 
 [lints]

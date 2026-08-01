@@ -1,20 +1,20 @@
 //! The reference **Rust client** for the `ekvm` wire API: drive a sandbox **session**
 //! over a unix socket, `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`, using
-//! nothing but the shared wire contract ([`protocol`]) and a JSON value for the opaque trace
+//! nothing but the shared wire contract ([`ekvm_protocol`]) and a JSON value for the opaque trace
 //! record.
 //!
-//! **This is the proof.** The proof: it links **no `vmm`**, so it demonstrates
+//! **This is the proof.** The proof: it links **no `ekvm`**, so it demonstrates
 //! that a caller drives the daemon with only a JSON library and a unix socket, the exact surface a
 //! caller in any language has.
 
 //!
 //! **Synchronous and blocking**, matching the daemon: one [`Client`] owns one connection (one
 //! session), each call sends a request line and blocks for the one response line. Errors are typed
-//! ([`ClientError`]), a decode fault, a remote [`Error`](protocol::Response::Error), or an
+//! ([`ClientError`]), a decode fault, a remote [`Error`](ekvm_protocol::Response::Error), or an
 //! unexpected reply, never a panic.
 //!
 //! ```no_run
-//! use client::Client;
+//! use ekvm_client::Client;
 //! let mut client = Client::connect("/run/ekvm/ekvm.sock")?;
 //! client.open(Default::default())?;                 // boot the session's sandbox
 //! let run = client.exec(&["echo".into(), "hi".into()], "")?;
@@ -30,7 +30,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
+use ekvm_protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
 
 /// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]

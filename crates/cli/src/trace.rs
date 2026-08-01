@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use probes_loader::{AxisGap, RunRecord, Syscall};
+use ekvm_probes_loader::{AxisGap, RunRecord, Syscall};
 
 /// How many notable host syscalls the trail prints before folding the rest into a count, the
 /// record itself already caps and truncation-flags the full set; this is only about screen space.
@@ -201,18 +201,18 @@ pub(crate) fn syscall_name(kind: Syscall) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use probes_loader::RecordSubject;
-    use probes_loader::{
+    use ekvm_probes_loader::RecordSubject;
+    use ekvm_probes_loader::{
         FlowCounts, FlowKey, FlowKey6, NetSection, NetStats, ResourceSummary, SyscallEvent,
         SyscallFootprint, Timing,
     };
 
     /// A synthetic event from public fields, as the loader's own unit tests build them.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; probes_loader::DETAIL_CAP];
+        let mut d = [0u8; ekvm_probes_loader::DETAIL_CAP];
         let n = detail.len().min(d.len());
         d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; probes_loader::COMM_CAP];
+        let mut c = [0u8; ekvm_probes_loader::COMM_CAP];
         let m = comm.len().min(c.len());
         c[..m].copy_from_slice(&comm.as_bytes()[..m]);
         SyscallEvent {

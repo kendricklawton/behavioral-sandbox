@@ -73,7 +73,7 @@ impl GuestBin {
 fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
     ensure_guest_target()?;
     let (selector, subpath, label) = kind.spec();
-    let mut args = vec!["build", "--release", "--locked", "-p", "guest-agent"];
+    let mut args = vec!["build", "--release", "--locked", "-p", "ekvm-guest-agent"];
     args.extend_from_slice(selector);
     args.extend_from_slice(&["--target", GUEST_TARGET]);
     cargo(&args)?;

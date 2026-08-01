@@ -19,7 +19,7 @@ mod common;
 
 use std::time::Duration;
 
-use vmm::{RunningVm, Vm};
+use ekvm::{RunningVm, Vm};
 
 use common::{have_jailer_privileges, jailed_overlay_config, TmpDir};
 

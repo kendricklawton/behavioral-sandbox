@@ -46,16 +46,16 @@ verified outcome.
 
 | Crate | Role |
 |---|---|
-| `vmm` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
-| `channel` | The host/guest wire protocol. Dependency-free framing, shared verbatim by driver and agent. |
-| `guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. |
-| `probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. |
-| `probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
-| `probes-loader` | The aya userspace half: attach, fold, assemble the record, sign it. |
-| `protocol` | The daemon's wire types, versioned. |
-| `client` | The Rust reference client for `ekvm serve`. |
-| `cli` | The `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. Package name `ekvm`, directory `cli`. |
-| `test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
+| `ekvm` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
+| `ekvm-channel` | The host/guest wire protocol. Dependency-free framing, shared verbatim by driver and agent. |
+| `ekvm-guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. |
+| `ekvm-probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. |
+| `ekvm-probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
+| `ekvm-probes-loader` | The aya userspace half: attach, fold, assemble the record, sign it. |
+| `ekvm-protocol` | The daemon's wire types, versioned. |
+| `ekvm-client` | The Rust reference client for `ekvm serve`. |
+| `ekvm-cli` | The `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. Package name `ekvm-cli`, directory `cli`. |
+| `ekvm-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped. |
 
 ## The rest of this section

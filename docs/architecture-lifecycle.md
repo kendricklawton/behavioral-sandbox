@@ -57,7 +57,7 @@ a little-endian `u32` length) and then a payload, with **the length checked agai
 (1 MiB) before anything is allocated**. That ordering is the whole defense against a hostile guest
 declaring a 4 GiB frame.
 
-`channel` has **no dependencies at all**, and is shared verbatim by the driver and the in-guest agent,
+`ekvm-channel` has **no dependencies at all**, and is shared verbatim by the driver and the in-guest agent,
 so the two sides cannot drift on the wire format.
 
 Inside the guest, `guest-agent` runs one command per connection and streams stdout, stderr, and the

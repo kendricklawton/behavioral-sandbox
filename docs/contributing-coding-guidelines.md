@@ -87,7 +87,7 @@ source.
 
 This project is **dependency-light by design**, and the threshold for adding one is higher than
 default. Before adding a dependency, consider whether the needed slice is small enough to write. The
-`channel` crate is dependency-free on purpose; `probes-common` has zero dependencies so the two sides
+`ekvm-channel` crate is dependency-free on purpose; `ekvm-probes-common` has zero dependencies so the two sides
 of the eBPF boundary cannot drift.
 
 `cargo deny` runs in the host-safe gate and checks licenses, advisories, and duplicate versions. Every
@@ -112,17 +112,17 @@ Two boundaries decide where new code belongs:
 
 - **The host path stays `unsafe`-free**, so anything that must touch raw pointers belongs behind the
   eBPF boundary in `crates/probes`, not in the driver.
-- **Types crossing the eBPF boundary live in `probes-common`**, single-sourced as `#[repr(C)]`
+- **Types crossing the eBPF boundary live in `ekvm-probes-common`**, single-sourced as `#[repr(C)]`
   plain-old-data with no dependencies, so the kernel side and the loader side cannot disagree about a
   layout.
 
-`vmm` is the library downstream embedders pin, so its public surface is the API that carries the `api`
+`ekvm` is the library downstream embedders pin, so its public surface is the API that carries the `api`
 commit scope. Keep new public items out of it unless an embedder needs them.
 
 ## Use of `unsafe`
 
 **The host path forbids it outright.** Every shipped host crate carries `#![forbid(unsafe_code)]`:
-`vmm`, `cli`, `channel`, `guest-agent`, and `probes-loader`. This is not an aspiration policed by
+`ekvm`, `ekvm-cli`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader`. This is not an aspiration policed by
 review; it is a compiler error, and it is the enforcer named wherever the docs claim the host path is
 unsafe-free.
 
@@ -133,7 +133,7 @@ the threat-model framing once, on the item that owns it.
 
 The rule for new code is therefore simple, and simpler than most projects can manage: if a design
 needs `unsafe` on the host path, the design is wrong for this repository. Reach for the safe wrapper
-instead. `probes-loader` joins a network namespace through nix's *safe* `setns` specifically to keep
+instead. `ekvm-probes-loader` joins a network namespace through nix's *safe* `setns` specifically to keep
 its `forbid` attribute intact, and that trade (a dependency instead of an `unsafe` block) is the one
 this project prefers every time.
 

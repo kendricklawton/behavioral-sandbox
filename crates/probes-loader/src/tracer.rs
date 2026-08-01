@@ -5,7 +5,7 @@ use std::time::Duration;
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
 use aya::Ebpf;
-use probes_common::SyscallEvent;
+use ekvm_probes_common::SyscallEvent;
 
 use crate::meter::TARGET_PRESENT;
 use crate::{check_support, load_object, ProbeError};

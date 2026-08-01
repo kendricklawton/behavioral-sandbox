@@ -7,8 +7,8 @@
 //!    silently *creates* missing `SUMMARY.md` chapters as empty stubs, so a deleted page would
 //!    otherwise ship as a blank one.
 //! 3. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
-//!    package. A crate's directory is not always its package (`crates/cli` builds `ekvm`), so this
-//!    is invisible to check 1: the path resolves while the command it appears in does not run.
+//!    package. A crate's directory is not always its package (`crates/cli` builds `ekvm-cli`), so
+//!    this is invisible to check 1: the path resolves while the command it appears in does not run.
 //!
 //! This lint checks that pointers point at something, not that the prose around them is still
 //! *true*; the meaning half stays with review, and the standing rule is to promote a checkable
@@ -59,10 +59,10 @@ pub fn check(root: &Path) -> Result<()> {
             }
         }
         // A `cargo … -p <name>` a reader is told to run must name a real workspace package. The
-        // directory and the package name are allowed to differ here (`crates/cli` builds `ekvm`),
-        // which is how five copies of a `-p cli` invocation came to be printed at people, in the
-        // docs, in two test headers, and in xtask's own output. Every one errored with
-        // "package(s) not found in workspace".
+        // directory and the package name are allowed to differ here (`crates/cli` builds
+        // `ekvm-cli`), which is how five copies of a `-p cli` invocation came to be printed at
+        // people, in the docs, in two test headers, and in xtask's own output. Every one errored
+        // with "package(s) not found in workspace".
         for (line_no, pkg) in cargo_package_refs(&text) {
             pkg_refs += 1;
             if !packages.contains(&pkg) {
@@ -98,7 +98,7 @@ pub fn check(root: &Path) -> Result<()> {
 }
 
 /// Every package name in the workspace, read from the tracked `Cargo.toml` files rather than from
-/// directory names: the two differ (`crates/cli` builds `ekvm`), and it is the name `-p` takes.
+/// directory names: the two differ (`crates/cli` builds `ekvm-cli`), and it is the name `-p` takes.
 fn package_names(root: &Path, tracked: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let mut names = BTreeSet::new();
     for rel in tracked.iter().filter(|p| p.ends_with("Cargo.toml")) {
@@ -154,7 +154,7 @@ fn cargo_package_refs(text: &str) -> Vec<(usize, String)> {
             if pkg.starts_with(['<', '{', '$', '"']) {
                 continue;
             }
-            // Trailing shell/prose punctuation (`-p vmm,` `-p vmm`.) is not part of the name.
+            // Trailing shell/prose punctuation (`-p ekvm,` `-p ekvm`.) is not part of the name.
             let pkg =
                 pkg.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
             if pkg.is_empty() || pkg.starts_with('-') {

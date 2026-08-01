@@ -10,7 +10,7 @@
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use probes_loader::{record_hash, verify, verify_chain, HostKey, TrustedKey};
+use ekvm_probes_loader::{record_hash, verify, verify_chain, HostKey, TrustedKey};
 
 /// One deterministic key (the unit tests' seed) so per-iteration cost is one sign + one verify,
 /// not a keygen.

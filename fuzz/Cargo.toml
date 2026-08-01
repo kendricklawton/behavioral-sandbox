@@ -17,29 +17,29 @@ libfuzzer-sys = "0.4"
 serde_json = "1"
 toml = "0.8"
 
-[dependencies.channel]
+[dependencies.ekvm-channel]
 path = "../crates/channel"
 features = ["fuzzing"]
 
 # The signed-record envelope surface (`verify`/`verify_chain`/`TrustedKey::from_hex`); the public
 # API is exactly the fuzz surface, so no feature flag is needed.
-[dependencies.probes-loader]
+[dependencies.ekvm-probes-loader]
 path = "../crates/probes-loader"
 
 # The daemon's untrusted-client wire (`read_message` over the newline-JSON contract). The `fuzzing`
 # feature exposes the internal line reader + schema gate behind module `fuzz`.
-[dependencies.protocol]
+[dependencies.ekvm-protocol]
 path = "../crates/protocol"
 features = ["fuzzing"]
 
 # The shared eBPF-boundary parsers (`SyscallEvent::from_bytes`, `parse_ipv4_5tuple`). `std` gives the
 # host-side formatting helpers; the parse surface itself is public, so no feature flag is needed.
-[dependencies.probes-common]
+[dependencies.ekvm-probes-common]
 path = "../crates/probes-common"
 features = ["std"]
 
 # CLI policy and config parsers (`parse_allow`, `EkvmToml`).
-[dependencies.ekvm]
+[dependencies.ekvm-cli]
 path = "../crates/cli"
 
 

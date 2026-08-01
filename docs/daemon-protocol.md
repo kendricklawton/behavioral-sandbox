@@ -15,7 +15,7 @@ malformed or oversize line is a reported error or a drop rather than a parse the
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
 working directory, and closing the connection tears the sandbox down.
 
-The shared wire contract lives in the `protocol` crate (serde-only, no `vmm`), so the
+The shared wire contract lives in the `ekvm-protocol` crate (serde-only, no `ekvm`), so the
 daemon, the [reference client](./daemon.md#the-reference-client), and the future polyglot SDKs all speak exactly
 the same shapes.
 
@@ -68,7 +68,7 @@ failed boot is fatal yet nothing about the caller's request was wrong.
 | `refused` | Understood and declined: an operator-chosen posture (snapshotting a jailed session) or a capability this session lacks (no probes attached). | Don't retry as-is. |
 
 `infra` / `transport` / `guest` are the wire form of the engine's own pinned error taxonomy
-(`vmm::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same way.
+(`ekvm::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same way.
 
 **Treat an unrecognized `kind` as `infra`.** The set may grow; a value your client predates means
 "unclassified", and assuming the host rather than the caller is the conservative read. An absent

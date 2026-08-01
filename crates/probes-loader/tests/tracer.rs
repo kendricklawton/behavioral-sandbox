@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use probes_loader::{cgroup_id_of_self, check_support, object_path, Syscall, SyscallTracer};
+use ekvm_probes_loader::{cgroup_id_of_self, check_support, object_path, Syscall, SyscallTracer};
 
 /// Why this host can't load the probe (a skip reason), or `None` when it can, so each test prints
 /// *why* it skipped. Same gate the counter tests use.
@@ -98,7 +98,7 @@ fn an_over_long_path_is_captured_as_truncated_not_as_a_shorter_path() {
     // by what *was* captured. The file need not exist: `sys_enter_openat` fires regardless.
     let prefix = format!("/tmp/ekvm-longpath-{me}-");
     let long = format!("{prefix}{}", "a".repeat(400));
-    assert!(long.len() > probes_common::DETAIL_CAP * 2);
+    assert!(long.len() > ekvm_probes_common::DETAIL_CAP * 2);
     let _ = std::fs::File::open(&long);
     sleep(Duration::from_millis(50));
 

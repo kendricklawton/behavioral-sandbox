@@ -33,7 +33,7 @@ something other than their subject" exists in this history. When selecting a row
 substring, prefer an exact or prefix match: `label.starts_with("host kernel")` rather than
 `label.contains("kernel")`, which would also match "guest kernel present".
 
-Tests whose meaning changes under `sudo` must say so with an explicit `test_support::have_real_root()`
+Tests whose meaning changes under `sudo` must say so with an explicit `ekvm_test_support::have_real_root()`
 guard, because the privileged gate runs the whole suite as root.
 
 ## Coverage

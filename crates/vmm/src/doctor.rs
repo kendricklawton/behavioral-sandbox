@@ -702,7 +702,7 @@ mod tests {
     /// operator staring at a failed boot, so the row distinguishes them.
     #[test]
     fn selinux_reports_enforcing_separately_from_permissive() {
-        let tmp = test_support::ScratchDir::created("doctor-lsm");
+        let tmp = ekvm_test_support::ScratchDir::created("doctor-lsm");
         let lsm = tmp.path().join("lsm");
         let enforce = tmp.path().join("enforce");
 
@@ -755,7 +755,7 @@ mod tests {
     /// would report absent on every host that has it.
     #[test]
     fn cgroup_kill_is_found_one_level_down_not_at_the_root() {
-        let tmp = test_support::ScratchDir::created("doctor-cgkill");
+        let tmp = ekvm_test_support::ScratchDir::created("doctor-cgkill");
         let root = tmp.path();
         assert!(!cgroup_kill_under(root), "empty root must not qualify");
 
@@ -774,7 +774,7 @@ mod tests {
     /// A probed capability outranks the version string: that is what admits RHEL 9.
     #[test]
     fn a_probed_cgroup_kill_qualifies_a_kernel_below_the_fallback_floor() {
-        let tmp = test_support::ScratchDir::created("doctor-verdict");
+        let tmp = ekvm_test_support::ScratchDir::created("doctor-verdict");
         let scope = tmp.path().join("init.scope");
         std::fs::create_dir(&scope).expect("mkdir");
         std::fs::write(scope.join("cgroup.kill"), "").expect("write");
@@ -787,7 +787,7 @@ mod tests {
 
         // With nothing to probe, the verdict falls back to the version floor. This host is above
         // it, so the assertion is that the fallback *ran*, not that any host passes.
-        let empty = test_support::ScratchDir::created("doctor-empty");
+        let empty = ekvm_test_support::ScratchDir::created("doctor-empty");
         assert_ne!(
             kernel_verdict(empty.path()),
             KernelVerdict::CapabilityVerified,
@@ -984,7 +984,7 @@ mod tests {
 
     #[test]
     fn vulnerable_entries_reports_only_files_that_say_vulnerable() {
-        let dir = test_support::ScratchDir::created("vulns");
+        let dir = ekvm_test_support::ScratchDir::created("vulns");
         let write = |name: &str, content: &str| {
             std::fs::write(dir.path().join(name), content).expect("write fixture");
         };

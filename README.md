@@ -152,7 +152,7 @@ portable across kernels is tested on one kernel so far, and
 
 The engine is consumed in three shapes, one of which exists today:
 
-* **Rust**, the `vmm` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`). Not on
+* **Rust**, the `ekvm` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`). Not on
   crates.io yet, so depend on it by git rev. A change to that API is committed with an `api` scope,
   so a pin bump is auditable from the log alone. The contract is [docs/embedding.md][embedding].
 
@@ -214,7 +214,7 @@ been run.
 There is no published roadmap and no promised date. A capability becomes a feature when it ships
 with a working demo, and is not announced before that. The first tagged release, `v0.1.0`, will pin
 the driver API and the wire protocol under the support policy in [RELEASES.md](RELEASES.md); until
-then the `Sandbox`/`vmm` API, the daemon protocol, the record format, and the crate names can all
+then the `Sandbox`/`ekvm` API, the daemon protocol, the record format, and the crate names can all
 change without notice.
 
 The project is **open to outside pull requests**. Bug fixes, tests, and documentation can go

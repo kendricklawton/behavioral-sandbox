@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 /// The filesystem labels the driver stamps on the data devices so the guest mounts them by label,
 /// not by enumeration-order `/dev/vdX` (a boot may attach input, output, both, or neither). Defined
-/// in `channel`, the one host↔guest contract both the driver and the rootfs build consume.
-use channel::{INPUT_LABEL, OUTPUT_LABEL};
+/// in `ekvm-channel`, the one host↔guest contract both the driver and the rootfs build consume.
+use ekvm_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
 use crate::paths::path_str;
 use crate::VmmError;
@@ -581,7 +581,7 @@ fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::ScratchDir;
+    use ekvm_test_support::ScratchDir;
 
     #[test]
     fn sanitize_symlinks_drops_escapes_including_chained_intermediate_links() {
@@ -781,14 +781,14 @@ mod tests {
         // Guarded because it *inverts* under root: root writes through mode 0555, the readback then
         // genuinely succeeds, and the assertion below would fail on a correct engine. A test whose
         // meaning flips with privilege has to say so.
-        if test_support::have_real_root() {
+        if ekvm_test_support::have_real_root() {
             eprintln!(
                 "skipping a_readback_that_wrote_nothing_is_never_reported_as_a_successful_one: \
                  root writes through an unwritable dir, so there is no failure to observe"
             );
             return;
         }
-        let dir = test_support::ScratchDir::created("rdump-unwritable");
+        let dir = ekvm_test_support::ScratchDir::created("rdump-unwritable");
         let tree = dir.path().join("tree");
         std::fs::create_dir_all(&tree).expect("seed dir");
         std::fs::write(tree.join("payload"), b"guest output").expect("seed payload");
@@ -825,7 +825,7 @@ mod tests {
         // file costs nothing), then `mke2fs` writes real metadata and hits ENOSPC. Without the
         // capture the boot would fail with a bare exit code and the operator would have no way to
         // tell a full scratch dir from a corrupt image.
-        let Some(fs) = test_support::SmallFs::create(8, "mke2fs-full") else {
+        let Some(fs) = ekvm_test_support::SmallFs::create(8, "mke2fs-full") else {
             eprintln!("skipping a_full_scratch_names_mke2fs_as_the_cause: needs real root");
             return;
         };
@@ -871,14 +871,14 @@ mod tests {
         // `debugfs` and `e2fsck` used to discard their stderr, so a readback into a full output dir
         // reported `(exit 1)` and nothing else. The image here is legitimate; only the destination
         // is out of space, which is precisely the failure an exit code cannot distinguish.
-        let Some(fs) = test_support::SmallFs::create(8, "rdump-full") else {
+        let Some(fs) = ekvm_test_support::SmallFs::create(8, "rdump-full") else {
             eprintln!("skipping a_full_output_dir_names_debugfs_as_the_cause: needs real root");
             return;
         };
         // The image is built on the *host* filesystem and seeded with real content: this test is
         // about the destination being full, and rdump of an empty image would write nothing at all
         // and succeed on any headroom.
-        let src = test_support::ScratchDir::created("rdump-src");
+        let src = ekvm_test_support::ScratchDir::created("rdump-src");
         let tree = src.path().join("tree");
         std::fs::create_dir_all(&tree).expect("seed dir");
         for i in 0..4 {

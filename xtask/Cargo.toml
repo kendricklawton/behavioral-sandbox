@@ -12,14 +12,14 @@ anyhow.workspace = true
 clap.workspace = true
 # The host↔guest contract constants (`VSOCK_PORT`, `GUEST_READY_MARKER`): the rootfs build
 # writes the guest's init line from the same definition the driver dials, so they cannot drift.
-channel = { path = "../crates/channel" }
+ekvm-channel = { path = "../crates/channel" }
 # The driver, for `bench-boot`: it boots real microVMs and reads `boot_latency`. A dev-only
 # dep on a never-shipped crate; the everyday `ci` gate doesn't invoke it (booting needs KVM).
-vmm = { path = "../crates/vmm" }
+ekvm = { path = "../crates/vmm" }
 # The probe loader, for `bench-trace`: it attaches the syscall tracepoints and measures their
 # per-syscall overhead. Dev-only; the everyday `ci` gate doesn't invoke it (loading eBPF
 # needs CAP_BPF/CAP_PERFMON).
-probes-loader = { path = "../crates/probes-loader" }
+ekvm-probes-loader = { path = "../crates/probes-loader" }
 
 [lints]
 workspace = true

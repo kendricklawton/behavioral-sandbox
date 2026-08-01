@@ -22,8 +22,8 @@ use std::num::{NonZeroU32, NonZeroU8};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
-use vmm::Limits;
+use ekvm::Limits;
+use ekvm_probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
 
 /// One parsed `--allow` allowance: a validated destination CIDR with optional port/protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

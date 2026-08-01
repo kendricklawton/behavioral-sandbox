@@ -1,5 +1,5 @@
 [package]
-name = "ekvm"
+name = "ekvm-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,11 +19,11 @@ path = "src/main.rs"
 [dependencies]
 # The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
 # tracks: it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
-probes-loader = { path = "../probes-loader" }
-vmm = { path = "../vmm" }
+ekvm-probes-loader = { path = "../probes-loader" }
+ekvm = { path = "../vmm" }
 # The `ekvm` daemon's wire protocol: the versioned newline-JSON contract it shares with the
 # reference client and the polyglot SDKs. A serde-only leaf, no engine internals.
-protocol = { path = "../protocol" }
+ekvm-protocol = { path = "../protocol" }
 clap = { workspace = true }
 # `ekvm run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
@@ -37,8 +37,8 @@ serde_json = { workspace = true }
 # A **non-destructive** readability check on the session socket, so the daemon can notice a
 # `cancel` (or a hang-up) while an exec is in flight. `UnixStream::peek` is still unstable, and
 # nix's `recv(MSG_PEEK)` is a *safe* function, so the CLI needs no `unsafe` (the same reasoning
-# that put nix in `vmm` for a bounded connect and `probes-loader` for `setns`). Already in the
-# tree via `vmm`, so no new crate enters it.
+# that put nix in `ekvm` for a bounded connect and `ekvm-probes-loader` for `setns`). Already in the
+# tree via `ekvm`, so no new crate enters it.
 nix = { version = "0.31", default-features = false, features = ["socket"] }
 signal-hook = "0.3"
 toml = { workspace = true }
@@ -49,10 +49,10 @@ tracing-subscriber.workspace = true
 # The reference client for the versioned wire API (docs/daemon.md), used by the
 # daemon's e2e demo to prove a caller drives `ekvm` over the wire alone. A dev-dep so the daemon
 # crate can spawn `ekvm` (it owns the artifacts)
-# while the client itself stays free of `vmm`.
-client = { path = "../client" }
+# while the client itself stays free of `ekvm`.
+ekvm-client = { path = "../client" }
 # The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).
-test-support = { path = "../test-support" }
+ekvm-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

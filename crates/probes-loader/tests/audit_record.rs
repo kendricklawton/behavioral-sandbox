@@ -3,7 +3,7 @@
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches all three
 //! host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built object). Run
-//! via `cargo xtask ci-privileged`. Uses `vmm` as a **dev-dependency only**, so the loader library
+//! via `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a VMM pid, a netns, a tap).
 //!
 //! This is the convergence proof, the microVM and the eBPF observability as **one system**. It drives
@@ -24,11 +24,11 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use probes_loader::{
+use ekvm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_probes_loader::{
     check_support, object_path, AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes,
     SharedMeter, SharedTracer, Timing,
 };
-use vmm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
 const IPPROTO_UDP: u8 = 17;

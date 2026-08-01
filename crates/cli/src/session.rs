@@ -3,7 +3,7 @@
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
 //! session), until `close` (or a hung-up connection) tears it down.
 //!
-//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](vmm::Sandbox), so a warm clone
+//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](ekvm::Sandbox), so a warm clone
 //! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
@@ -26,12 +26,12 @@ use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
-use ekvm::audit::RunProbes;
-use ekvm::policy::{parse_allow, Policy, Requested};
 use ekvm::{vcpus_supported, MAX_VCPUS};
-use probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
-use protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
-use vmm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
+use ekvm::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
+use ekvm_cli::audit::RunProbes;
+use ekvm_cli::policy::{parse_allow, Policy, Requested};
+use ekvm_probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
+use ekvm_protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
 
 use crate::metrics::{Metrics, Verb};
 use crate::serve::{
@@ -368,7 +368,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         let envelope = server
                             .signing_key
                             .sign_canonical_chained(&canonical, record_chain.as_deref());
-                        record_chain = Some(probes_loader::record_hash(&canonical));
+                        record_chain = Some(ekvm_probes_loader::record_hash(&canonical));
                         Response::Trace {
                             record: record_to_value(&envelope),
                         }
@@ -412,7 +412,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
             // `Request` is `#[non_exhaustive]`, so this arm exists and the compiler can no longer
             // tell us a verb went unhandled: the check that used to be a build error is now this
             // runtime reply. Unreachable from the wire (an unknown `op` fails at decode), so getting
-            // here means `protocol` grew a verb the daemon never wired up. Loud on purpose.
+            // here means `ekvm-protocol` grew a verb the daemon never wired up. Loud on purpose.
             Ok(Some(other)) => {
                 server.metrics.protocol_error();
                 tracing::error!(request = ?other, "unhandled wire verb; the daemon is behind its own protocol crate");
@@ -467,11 +467,11 @@ pub fn serve(stream: UnixStream, server: &Server) {
 fn serve_run(
     w: &mut UnixStream,
     metrics: &Metrics,
-    result: Result<vmm::RunResult, VmmError>,
+    result: Result<ekvm::RunResult, VmmError>,
     wall: Duration,
     total_exec_wall: &mut Duration,
     is_command: bool,
-    to_response: impl FnOnce(&vmm::RunResult) -> Response,
+    to_response: impl FnOnce(&ekvm::RunResult) -> Response,
 ) -> bool {
     // Only a real `exec` counts as a guest command. `put`/`get` ride a no-op `true` purely to carry a
     // file, so folding their wall into the `guest_command` histogram or the trace `exec_wall` would
@@ -563,7 +563,7 @@ fn boot_session_vm(
 }
 
 /// Cold-boot a `RunningVm` with the daemon's confinement posture, replicating what
-/// [`Sandbox::open`](vmm::Sandbox::open) does before booting, force the vsock exec channel on,
+/// [`Sandbox::open`](ekvm::Sandbox::open) does before booting, force the vsock exec channel on,
 /// and set (or clear) the jail, so a cold session and a pooled one are the same shape of VM.
 fn cold_boot(mut config: BootConfig, jailed: bool) -> Result<RunningVm, VmmError> {
     config.jail = if jailed {
@@ -592,7 +592,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
 }
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
-/// between sessions, the moment the [`Pool`](vmm::Pool) doc reserves for restore cost).
+/// between sessions, the moment the [`Pool`](ekvm::Pool) doc reserves for restore cost).
 /// The refill is **best-effort and non-blocking** (16-A): `try_lock`, and skip if the pool is
 /// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
 /// another's restore. Stock recovers on the next uncontended close (the holder refills all the way to
@@ -827,7 +827,7 @@ fn exec_watching_for_cancel(
     stdin: &str,
     env: &[(String, String)],
     socket: &UnixStream,
-) -> (Result<vmm::RunResult, VmmError>, bool) {
+) -> (Result<ekvm::RunResult, VmmError>, bool) {
     let kill = vm.kill_handle();
     std::thread::scope(|scope| {
         // `exec_with_files` rather than `exec`: same call, but it carries the session's env. No

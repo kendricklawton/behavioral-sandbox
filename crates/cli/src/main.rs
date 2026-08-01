@@ -11,8 +11,8 @@
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
-use ekvm::audit;
-use ekvm::config;
+use ekvm_cli::audit;
+use ekvm_cli::config;
 mod doctor;
 mod metrics;
 mod serve;
@@ -29,10 +29,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use ekvm::policy::{parse_allow, AllowRule, Policy, Requested};
+use ekvm::{
+    sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD,
+};
 use ekvm::{vcpus_supported, MAX_VCPUS};
-use probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
-use vmm::{sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD};
+use ekvm_cli::policy::{parse_allow, AllowRule, Policy, Requested};
+use ekvm_probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
 /// command's own exit code): conventional "2", named so the intent is legible at the
@@ -40,7 +42,7 @@ use vmm::{sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmEr
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The version of the `--json` **run-result** contract (exit code, streams, artifacts, metrics,
-/// limits). Distinct from the audit record's `probes_loader::AUDIT_SCHEMA_VERSION`: two
+/// limits). Distinct from the audit record's `ekvm_probes_loader::AUDIT_SCHEMA_VERSION`: two
 /// surfaces, two independent versions. Same policy, additive within a version, a rename/removal
 /// bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
@@ -465,7 +467,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         None
     } else {
         let policy = build_egress(&args.allow)?;
-        if let Err(e) = probes_loader::check_support() {
+        if let Err(e) = ekvm_probes_loader::check_support() {
             return Err(CliError::Cli(format!(
                 "--allow requested egress enforcement, but this host can't load the eBPF probes: {e}"
             )));
@@ -490,7 +492,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     // not do. Loading is idempotent: the write path reloads the same key.
     if record_path.is_some() {
         let key_path = config::signing_key_path(file);
-        probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+        ekvm_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
             CliError::Cli(format!(
                 "signing key {} is unusable, so this run could not be recorded: {e}",
                 key_path.display()
@@ -502,7 +504,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     // Flags win over the `EKVM_GATEWAY`/`EKVM_RESOLVER` + file layers `base_config` already resolved,
     // so a run can override the host's uplink without editing its config.
     if let Some(gateway) = args.gateway {
-        let mut egress = vmm::GuestEgress::via(gateway);
+        let mut egress = ekvm::GuestEgress::via(gateway);
         if let Some(resolver) = args.resolver {
             egress = egress.with_resolver(resolver);
         }
@@ -692,7 +694,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
                 "records_dir"
             };
             let key_path = config::signing_key_path(file);
-            let key = probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+            let key = ekvm_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
                 VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
             })?;
             std::fs::write(path, key.sign_record(&record) + "\n")
@@ -1044,10 +1046,10 @@ mod tests {
         build_egress, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus, shell_policy,
         write_artifacts_in, AllowRule, Artifact, Policy, ShellArgs, MAX_VCPUS,
     };
-    use probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
+    use ekvm_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
+    use ekvm_test_support::ScratchDir;
     use std::net::Ipv4Addr;
     use std::num::{NonZeroU32, NonZeroU8};
-    use test_support::ScratchDir;
 
     fn artifact(path: &str, data: &[u8]) -> Vec<Artifact> {
         vec![Artifact::new(path, data.to_vec())]

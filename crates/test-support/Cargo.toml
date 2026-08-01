@@ -1,5 +1,5 @@
 [package]
-name = "test-support"
+name = "ekvm-test-support"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

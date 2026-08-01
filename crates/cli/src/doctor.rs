@@ -1,14 +1,14 @@
 //! `ekvm doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
-//! checks ([`vmm::doctor`]) plus the eBPF-observability capability row (owned by the probe
-//! loader, out of `vmm`), so a fresh host reads exactly what will work, degrade, or refuse
+//! checks ([`ekvm::doctor`]) plus the eBPF-observability capability row (owned by the probe
+//! loader, out of `ekvm`), so a fresh host reads exactly what will work, degrade, or refuse
 //! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
 //! truth for "ready", two entry points.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-use vmm::doctor::{self, Check, CheckStatus};
-use vmm::BootConfig;
+use ekvm::doctor::{self, Check, CheckStatus};
+use ekvm::BootConfig;
 
 /// Whether to emit ANSI colour on a stream.
 ///
@@ -67,7 +67,7 @@ pub struct DoctorArgs {
 
 /// Render `checks` as a JSON object: the verdict, then one entry per row.
 ///
-/// Hand-rolled rather than derived: `Check` lives in `vmm`, which has no `serde` dependency, and
+/// Hand-rolled rather than derived: `Check` lives in `ekvm`, which has no `serde` dependency, and
 /// adding one to the engine crate to print a diagnostic would be the wrong trade. The only values
 /// interpolated are this binary's own labels and notes, so [`json_escape`] covers the quoting.
 fn checks_as_json(checks: &[Check]) -> String {
@@ -232,7 +232,7 @@ fn tally(checks: &[Check], paint: Paint) -> String {
 /// `CAP_PERFMON` + kernel BTF). A degradation, not hard: without it, `--trace`/`--watch` still run
 /// (recording a coverage gap) and only `--allow` *enforcement* refuses.
 fn ebpf_check() -> Check {
-    match probes_loader::check_support() {
+    match ekvm_probes_loader::check_support() {
         Ok(()) => Check {
             label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
             status: CheckStatus::Ok,

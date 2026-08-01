@@ -16,13 +16,13 @@ it defines the host/guest contract), then `crates/vmm/src/vm.rs` and `spawn.rs`,
 this host and what the driver may therefore send it), and `spawn/workdir.rs` (minting the per-VM dir
 and the two path constraints on it).
 
-## The `vmm` crate
+## The `ekvm` crate
 
-`vmm` is the engine. It is the crate an embedder depends on, and the only one whose public API
+`ekvm` is the engine. It is the crate an embedder depends on, and the only one whose public API
 carries the [`api` commit scope](./contributing-development-process.md#the-api-scope).
 
 Its safety posture is the inverse of most VMM projects: **the host path forbids `unsafe` outright**.
-`vmm`, `cli`, `channel`, `guest-agent`, and `probes-loader` each carry `#![forbid(unsafe_code)]`, so
+`ekvm`, `ekvm-cli`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader` each carry `#![forbid(unsafe_code)]`, so
 that is a compiler error rather than a review convention. `crates/probes` is the single exception,
 structurally, because the BPF target requires raw map dereferences. See
 [Coding guidelines](./contributing-coding-guidelines.md#use-of-unsafe).
@@ -30,7 +30,7 @@ structurally, because the BPF target requires raw map dereferences. See
 The public surface is deliberately narrow. From `lib.rs`:
 
 ```rust
-pub use channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
+pub use ekvm_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
 pub use net::GuestLink;
@@ -39,7 +39,7 @@ pub use sweep::{sweep_orphans, SweepReport};
 pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT};
 ```
 
-Note the first line: `channel`'s wire types are re-exported through `vmm`, so an embedder reaches
+Note the first line: `ekvm-channel`'s wire types are re-exported through `ekvm`, so an embedder reaches
 them without adding a second dependency, and they are part of the surface
 [the stability boundary](./embedding-scope.md#semver--api-stability) names.
 
@@ -90,13 +90,13 @@ Some types to have in the back of your head before reading further.
   user). **The match in `kind()` is deliberately wildcard-free**, so adding a variant fails to compile
   until someone gives it a deliberate bucket. That is the mechanism keeping the contract honest.
 
-* **`SandboxProbes` and `RunRecord`** (`probes-loader`) are the observation half: the attach bundle for
+* **`SandboxProbes` and `RunRecord`** (`ekvm-probes-loader`) are the observation half: the attach bundle for
   one sandbox, and the record it finalizes. See [the eBPF half](./architecture-ebpf.md).
 
 ## The daemon
 
-`ekvm serve` is the same engine behind a versioned newline-JSON protocol on a unix socket. `protocol`
-holds the wire types, `client` is a dependency-light reference client, and `cli`'s `serve.rs` and
+`ekvm serve` is the same engine behind a versioned newline-JSON protocol on a unix socket. `ekvm-protocol`
+holds the wire types, `ekvm-client` is a dependency-light reference client, and `ekvm-cli`'s `serve.rs` and
 `session.rs` are the server.
 
 The security-relevant difference from the CLI: a daemon's clients control neither its config file nor

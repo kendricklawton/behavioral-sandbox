@@ -9,7 +9,7 @@
 //! an ownership mess for no gain. So this runs the whole suite once, `--include-ignored`, as root.
 //! The consequence is that unit tests written for an unprivileged process run privileged here; a
 //! test whose meaning changes under `sudo` must say so with an explicit
-//! `test_support::have_real_root()` guard rather than quietly asserting something else.
+//! `ekvm_test_support::have_real_root()` guard rather than quietly asserting something else.
 //!
 //! Never part of a gate: no threshold, no CI job. A coverage percentage that blocks a merge gets
 //! gamed with tests written for the number; this exists to be read.
@@ -30,7 +30,7 @@ use crate::{dev_tool_path, toolchain_channel, workspace_root};
 const COVERAGE_DIR: &str = "target-coverage";
 
 /// Paths held out of the measurement: neither ships. `xtask` is dev orchestration whose benches and
-/// demos are driven by hand, and `test-support` is the fixtures themselves. Counting them answers
+/// demos are driven by hand, and `ekvm-test-support` is the fixtures themselves. Counting them answers
 /// "how much of this repo do the tests run", which is not the question; the question is how much of
 /// the **engine** they reach, and 2.5k lines of never-covered-by-design tooling buries that.
 ///

@@ -5,7 +5,7 @@ is the selection rule: if a parser reads bytes the host did not author, it wants
 
 The boundaries with targets today:
 
-- The `channel` decoder's framing, which is what a compromised in-guest agent talks to.
+- The `ekvm-channel` decoder's framing, which is what a compromised in-guest agent talks to.
 - The daemon's newline-JSON wire protocol.
 - Signed audit-record envelopes, including the verifier's behavior on arbitrary mutations.
 - The eBPF ring-buffer event deserializers.
@@ -31,12 +31,12 @@ in the [introduction](./introduction.md#what-has-not-been-done).
 
 Corpus size is worth checking before trusting a target: a corpus of a handful of inputs means the
 fuzzer has barely explored the input space, whatever the target's age suggests. Two targets are
-currently thin, and the `channel` handshake is one of them, which matters because it is the first thing
+currently thin, and the `ekvm-channel` handshake is one of them, which matters because it is the first thing
 a compromised guest agent talks to on the host.
 
 A crash reproducer belongs in the corpus permanently, alongside a unit test that pins the same case,
 so the fix is protected by something cheaper than a fuzz run.
 
-The `channel` and `protocol` crates also carry in-gate, dependency-free mutation tests as a
+The `ekvm-channel` and `ekvm-protocol` crates also carry in-gate, dependency-free mutation tests as a
 counterpart to libFuzzer, so the host-safe gate exercises the same parsers without the fuzzing
 toolchain installed.

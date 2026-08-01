@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use channel::VSOCK_PORT;
+use ekvm_channel::VSOCK_PORT;
 
 use crate::console::{last_lines, Console};
 use crate::drives::{build_input_image, build_output_image, OutputDevice};
@@ -911,14 +911,14 @@ fn overlay_size_mib(mem_mib: NonZeroU32) -> u32 {
 /// `overlay-init` reads `$overlay_size` without mounting `/proc` first.
 ///
 /// Split out of the boot sequence so the one line naming a *guest* path is testable without a VM:
-/// [`channel::GUEST_OVERLAY_INIT`] is written here and by the rootfs build, and a boot into a path
+/// [`ekvm_channel::GUEST_OVERLAY_INIT`] is written here and by the rootfs build, and a boot into a path
 /// nothing occupies reads as a kernel panic rather than as a mismatch.
 fn overlay_boot_args(config: &BootConfig) -> String {
     if config.read_only_root {
         format!(
             "{} init={} overlay_size={}M",
             config.boot_args,
-            channel::GUEST_OVERLAY_INIT,
+            ekvm_channel::GUEST_OVERLAY_INIT,
             overlay_size_mib(config.mem_mib)
         )
     } else {
@@ -965,7 +965,7 @@ fn network_boot_args(
     match v6 {
         Some(v6) => format!(
             "{args} {}={}/{}",
-            channel::GUEST_IP6_CMDLINE_KEY,
+            ekvm_channel::GUEST_IP6_CMDLINE_KEY,
             v6.guest,
             v6.prefix_len
         ),
@@ -1116,7 +1116,7 @@ mod version_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use test_support::ScratchDir;
+    use ekvm_test_support::ScratchDir;
 
     /// Write an executable shell script into the scratch dir and hand back its path. Stands in for
     /// an `EKVM_FIRECRACKER` pointed at a wrapper, which is the whole reason the probe is bounded.
@@ -1457,7 +1457,7 @@ mod tests {
         // at the snapshot's baked-in path is worse than a failed restore: `create_new` would then
         // refuse every later restore of that snapshot, reporting a concurrent restore that is not
         // happening.
-        let Some(fs) = test_support::SmallFs::create(8, "stage-full") else {
+        let Some(fs) = ekvm_test_support::SmallFs::create(8, "stage-full") else {
             eprintln!("skipping a_disk_full_mid_stage_leaves_nothing_behind: needs real root");
             return;
         };
@@ -1502,7 +1502,7 @@ mod tests {
         // warns about (a tmpfs `/tmp` charges it to host RAM). The copy fails before any spawn, so
         // this needs no KVM; what must hold is that `WorkdirGuard` reclaims the half-written copy
         // rather than leaving scratch to accumulate one per failed boot.
-        let Some(fs) = test_support::SmallFs::create(8, "boot-full") else {
+        let Some(fs) = ekvm_test_support::SmallFs::create(8, "boot-full") else {
             eprintln!(
                 "skipping a_full_scratch_dir_fails_the_boot_without_stranding_a_partial_rootfs: \
                  needs real root"
@@ -1680,7 +1680,7 @@ mod tests {
     }
 
     /// The one boot-arg that names a **guest** path. The rootfs build writes the file at
-    /// `channel::GUEST_OVERLAY_INIT` and this puts `init=` on the command line, so the two are one
+    /// `ekvm_channel::GUEST_OVERLAY_INIT` and this puts `init=` on the command line, so the two are one
     /// constant; a boot into a path nothing occupies reads as a kernel panic, not as a mismatch.
     /// Host-safe, since the overlay itself is only reachable through a jailed boot (real root).
     #[test]
@@ -1700,12 +1700,12 @@ mod tests {
             args,
             format!(
                 "console=ttyS0 init={} overlay_size=128M",
-                channel::GUEST_OVERLAY_INIT
+                ekvm_channel::GUEST_OVERLAY_INIT
             )
         );
         // Spelled out too: the assertion above would still pass if the constant became empty or
         // relative, and the kernel needs an absolute path to an executable.
-        assert!(channel::GUEST_OVERLAY_INIT.starts_with('/'));
+        assert!(ekvm_channel::GUEST_OVERLAY_INIT.starts_with('/'));
     }
 
     /// The guest's mask and the host tap's prefix are one value: `net.rs` owns the prefix, the link
@@ -1745,7 +1745,7 @@ mod tests {
             network_boot_args(&link(30), Some(v6), None),
             format!(
                 "ip=10.200.0.2:::255.255.255.252::eth0:off {}=fd00:200::2/64",
-                channel::GUEST_IP6_CMDLINE_KEY
+                ekvm_channel::GUEST_IP6_CMDLINE_KEY
             )
         );
     }
@@ -1788,7 +1788,7 @@ mod tests {
             network_boot_args(&link, Some(v6), Some(GuestEgress::via(gw))),
             format!(
                 "ip=10.200.0.2::10.200.0.1:255.255.255.252::eth0:off {}=fd00:200::2/64",
-                channel::GUEST_IP6_CMDLINE_KEY
+                ekvm_channel::GUEST_IP6_CMDLINE_KEY
             )
         );
     }

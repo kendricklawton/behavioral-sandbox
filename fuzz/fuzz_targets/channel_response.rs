@@ -5,5 +5,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    channel::fuzz::decode_response(data);
+    ekvm_channel::fuzz::decode_response(data);
 });

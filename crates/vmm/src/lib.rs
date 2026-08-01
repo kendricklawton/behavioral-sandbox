@@ -1,4 +1,4 @@
-//! `vmm`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
+//! `ekvm`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
 //! [`Sandbox`] lifecycle API.
 //!
 //! The host path is `unsafe`-free; a hostile or crashing guest is a typed [`VmmError`], never a
@@ -30,9 +30,9 @@ mod vm;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
 
-use channel::ChannelError;
+use ekvm_channel::ChannelError;
 
-pub use channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
+pub use ekvm_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
 pub use net::{GuestEgress, GuestLink};
@@ -43,7 +43,7 @@ pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT}
 #[cfg(test)]
 mod tests {
     use super::{ErrorKind, VmmError};
-    use channel::ChannelError;
+    use ekvm_channel::ChannelError;
     use std::time::Duration;
 
     #[test]

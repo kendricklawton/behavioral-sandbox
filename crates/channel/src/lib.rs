@@ -1,4 +1,4 @@
-//! `channel`, the host↔guest wire protocol for the exec channel.
+//! `ekvm-channel`, the host↔guest wire protocol for the exec channel.
 //!
 //! One command in, its `stdout`/`stderr`/exit out, over a single bidirectional byte stream (vsock
 //! in the guest, a unix socket in tests, the protocol doesn't care). This crate is only the framing, so it stays near dependency-free (one `no_std` crate,
@@ -12,7 +12,7 @@
 //! - Every message is a **length-prefixed frame**, `tag(u8) · len(u32-le) · payload`, never a
 //!   read-to-EOF or a delimiter scan. `len` is checked against [`MAX_PAYLOAD`] *before* allocating,
 //!   so a hostile or buggy peer cannot drive an unbounded read (the same discipline as the HTTP
-//!   client in `vmm`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
+//!   client in `ekvm`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
 //!   source; nothing here panics.
 //!
 //! **The API is type-state, not free functions.** [`ClientConnection`] (host) and

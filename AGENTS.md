@@ -51,8 +51,10 @@ a design error rather than a trade-off.
 
 ## Repo layout
 
-One workspace. For the types worth knowing before editing, the boot sequence, and the teardown
-layers, read `docs/architecture.md` before a non-trivial change to `vmm`.
+One workspace. Every package is named `ekvm-*`, the library taking the bare `ekvm`, so a package
+name is never a directory name: `-p` takes the package (`-p ekvm-cli`), paths take the directory
+(`crates/cli`). For the types worth knowing before editing, the boot sequence, and the teardown
+layers, read `docs/architecture.md` before a non-trivial change to `ekvm`.
 
 | Path | What it is |
 |---|---|
@@ -64,7 +66,7 @@ layers, read `docs/architecture.md` before a non-trivial change to `vmm`.
 | `crates/probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble and sign the record. |
 | `crates/protocol` | The daemon's wire types, versioned. |
 | `crates/client` | Rust reference client for `ekvm serve`. |
-| `crates/cli` | The `ekvm` binary (`run`/`shell`/`doctor`/`verify`) plus `ekvm serve`. Package name `ekvm`, directory `cli`. |
+| `crates/cli` | The `ekvm` binary (`run`/`shell`/`doctor`/`verify`) plus `ekvm serve`. Package name `ekvm-cli`, directory `cli`. |
 | `crates/test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped. |
 | `docs/` | mdBook, `SUMMARY.md` is the index. Flat `topic-subtopic.md` names; the hierarchy lives in `SUMMARY.md`, not in directories. |
@@ -125,10 +127,10 @@ layers, read `docs/architecture.md` before a non-trivial change to `vmm`.
   imperative and describes **what was done** ("fix: bound session reads by a deadline", not "fixed
   timeouts"). A mixed change takes its most significant type (`fix` over `refactor` over `test`)
   rather than splitting hairs.
-- **Public-API changes carry the `api` scope.** The engine is embedded downstream at the `vmm`
+- **Public-API changes carry the `api` scope.** The engine is embedded downstream at the `ekvm`
   library's public API, pinned by git rev, so a change to that API (`Sandbox`, `Limits`,
-  `RunResult`, `VmmError` including its variants *or* the `kind()` bucket mapping, the `channel`
-  wire protocol, or the daemon's `protocol` wire types) is committed as
+  `RunResult`, `VmmError` including its variants *or* the `kind()` bucket mapping, the `ekvm-channel`
+  wire protocol, or the daemon's `ekvm-protocol` wire types) is committed as
   `feat(api):` / `fix(api):` (with `!` appended when the change is
   incompatible), so a downstream pin bump is auditable from the log alone. Internal-only changes
   don't use the scope. This is about legibility, not a new process: still one imperative subject,

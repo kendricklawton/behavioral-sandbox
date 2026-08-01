@@ -1,7 +1,7 @@
 # Using the engine API
 
 The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
-the `vmm` library promises when you pin it and build on it, stated once, against the real
+the `ekvm` library promises when you pin it and build on it, stated once, against the real
 API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
 [Where the engine ends](./embedding-scope.md) draws the line this project refuses to cross, and
 [Recipes](./embedding-recipes.md) is the same lifecycle in runnable code.
@@ -34,7 +34,7 @@ only when `enable_network` is set and ignored otherwise. Neither builds a path: 
 forwarding, or NAT, so on a netns nothing has furnished the reachable set is unchanged and only what
 the host can *observe* widens. Attaching an uplink is the embedder's, per
 [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster);
-bounding what crosses the tap is the eBPF policy in [`probes-loader`](./probes.md).
+bounding what crosses the tap is the eBPF policy in [`ekvm-probes-loader`](./probes.md).
 
 ### Exec: synchronous, bounded, faithful
 
