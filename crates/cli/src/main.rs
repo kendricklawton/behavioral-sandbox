@@ -224,8 +224,10 @@ struct RunArgs {
     /// unenforced run.
     #[arg(long, value_name = "IP[:PORT]", value_parser = parse_allow, requires = "net", help_heading = "Network")]
     allow: Vec<AllowRule>,
-    /// Give the guest a default route via this address.
+    /// Give the guest a default route via this address (the host end of its /30).
     ///
+    /// Must be on the guest's own link, which the shipped /30 narrows to one usable value; anything
+    /// else is refused, because the guest could not ARP it and would come up sealed.
     /// Names a path rather than creating one: the engine builds no uplink, so on a host whose per-VM
     /// netns nothing has furnished the guest still reaches nothing. What it changes is that the
     /// attempt now crosses the tap, so `--allow` can bound it and the record can show it. Normally

@@ -113,6 +113,20 @@ impl GuestLink<Ipv4Addr> {
         let host_bits = 32u32.saturating_sub(u32::from(self.prefix_len));
         Ipv4Addr::from(u32::MAX.checked_shl(host_bits).unwrap_or(0))
     }
+
+    /// Whether `addr` sits on this link, i.e. whether the guest can reach it without a router. The
+    /// question a gateway has to answer: an off-link one is an address the guest cannot ARP, so the
+    /// kernel refuses the route and the sandbox comes up with no way out at all.
+    pub(crate) fn on_link(&self, addr: Ipv4Addr) -> bool {
+        let mask = u32::from(self.netmask());
+        (u32::from(addr) & mask) == (u32::from(self.guest) & mask)
+    }
+}
+
+/// The fixed v4 link every sandbox gets. Single-sourced here because two places need it: the tap
+/// builder, and the boot-time check that a configured gateway is one the guest can actually reach.
+pub(crate) fn v4_link() -> GuestLink<Ipv4Addr> {
+    GuestLink::new(HOST_IP, GUEST_IP, HOST_PREFIX)
 }
 
 /// Where a guest should send traffic bound past its own /30, and who it should ask for names. Set
@@ -139,9 +153,13 @@ pub struct GuestEgress {
 }
 
 impl GuestEgress {
-    /// Route the guest's off-link traffic at `gateway`, with no resolver configured. The gateway is
-    /// normally the host end of the tap ([`RunningVm::ipv4`](crate::RunningVm::ipv4)'s `host`),
-    /// since that is the only address the guest can reach without one.
+    /// Route the guest's off-link traffic at `gateway`, with no resolver configured.
+    ///
+    /// The gateway **must be on the guest's own link**, which for the shipped `/30` leaves exactly
+    /// one usable value: the host end of the tap ([`RunningVm::ipv4`](crate::RunningVm::ipv4)'s
+    /// `host`). Anything else is an address the guest cannot ARP, so the kernel refuses the default
+    /// route and the sandbox comes up sealed; a networked boot rejects that up front rather than
+    /// letting it read as a broken option.
     #[must_use]
     pub fn via(gateway: Ipv4Addr) -> Self {
         Self {
@@ -216,7 +234,7 @@ impl Tap {
             netns: netns.to_string(),
             name: TAP_NAME.to_string(),
             mac: GUEST_MAC.to_string(),
-            v4: GuestLink::new(HOST_IP, GUEST_IP, HOST_PREFIX),
+            v4: v4_link(),
             // The v6 link is present only when its host end actually landed on the tap.
             v6: v6_up.then(|| GuestLink::new(HOST_IP6, GUEST_IP6, HOST_PREFIX6)),
         })

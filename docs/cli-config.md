@@ -131,6 +131,11 @@ The default route this host hands its guests, and the resolver it tells them to 
 host has is a host fact rather than a per-run one, which is why these live here; `--gateway` and
 `--resolver` override them per run.
 
+`gateway` must be on the guest's own link, which the shipped `/30` narrows to exactly one usable
+value: `10.200.0.1`, the host end of the tap. A networked boot refuses anything else up front, since
+the guest could not ARP it and would come up sealed. It stays inert on a boot that asks for no NIC,
+so setting it host-wide does not disturb runs that want no networking.
+
 Setting a gateway does not build a path. The engine adds no veth, bridge, forwarding, or NAT, so
 where nothing has furnished the per-VM netns the guest still reaches nothing. What it changes is
 that the guest can emit those packets, so `--allow` can bound them and the audit record can show

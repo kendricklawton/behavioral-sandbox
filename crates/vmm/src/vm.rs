@@ -354,6 +354,34 @@ pub(crate) fn refuse_uncappable_boot(config: &BootConfig) -> Result<(), VmmError
     Ok(())
 }
 
+/// Refuse a networked boot whose configured gateway is not on the guest's own link.
+///
+/// The guest's link is a `/30`: two usable addresses, the tap's host end and the guest's own. Any
+/// other gateway is one the guest cannot ARP, so the kernel refuses the default route and the
+/// sandbox comes up with no way out, which reads as "the gateway option does not work" rather than
+/// as the typo it is. Checked against the link the tap builder will actually assign, so a change to
+/// the prefix moves both together.
+///
+/// Only fires when a NIC was asked for: a host-wide `EKVM_GATEWAY` must stay inert on a boot that
+/// wants no networking at all.
+pub(crate) fn refuse_offlink_gateway(config: &BootConfig) -> Result<(), VmmError> {
+    let (true, Some(egress)) = (config.enable_network, config.egress) else {
+        return Ok(());
+    };
+    let link = crate::net::v4_link();
+    if !link.on_link(egress.gateway()) {
+        return Err(VmmError::Vmm(format!(
+            "gateway {} is not on the guest's /{} link ({} .. {}); the guest cannot reach it, so              the kernel would refuse the default route and the sandbox would come up sealed              (use {})",
+            egress.gateway(),
+            link.prefix_len,
+            link.host,
+            link.guest,
+            link.host
+        )));
+    }
+    Ok(())
+}
+
 /// Refuse a **jailed** boot or restore whose scratch dir is on a mount the jailer's chroot cannot
 /// work from: `nodev` makes the `/dev/kvm` node it mknods there inert (Firecracker fails deep in
 /// boot with a raw "creating KVM object: Permission denied"), and `noexec` refuses the exec of the
@@ -599,6 +627,9 @@ impl Vm {
         // Same shape for a vCPU count the pinned VMM won't take: name the rule here rather than
         // spawn a VMM only to have `PUT /machine-config` reject it.
         refuse_unsupported_vcpus(&config)?;
+        // And a gateway the guest could never reach, which would otherwise boot into a sandbox that
+        // looks configured and is sealed.
+        refuse_offlink_gateway(&config)?;
         // The jail composes with every boot feature now: vsock (socket staged
         // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
         // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
@@ -1184,6 +1215,37 @@ mod tests {
             cfg.egress.map(|e| e.gateway()),
             Some(Ipv4Addr::new(10, 200, 0, 1))
         );
+    }
+
+    #[test]
+    fn a_gateway_the_guest_could_never_reach_is_refused() {
+        use crate::net::GuestEgress;
+        let mut cfg = BootConfig {
+            enable_network: true,
+            ..BootConfig::default()
+        };
+
+        // The host end of the /30 is the only address on the guest's link, so it is the only value
+        // that can work. It passes.
+        cfg.egress = Some(GuestEgress::via(Ipv4Addr::new(10, 200, 0, 1)));
+        assert!(refuse_offlink_gateway(&cfg).is_ok());
+
+        // Anything else is unreachable from the guest: the kernel refuses the route and the sandbox
+        // comes up sealed, which reads as a broken feature rather than as the typo it is.
+        cfg.egress = Some(GuestEgress::via(Ipv4Addr::new(192, 168, 1, 1)));
+        let err = refuse_offlink_gateway(&cfg)
+            .expect_err("an off-link gateway must be refused")
+            .to_string();
+        assert!(err.contains("192.168.1.1"), "names the bad value: {err}");
+        assert!(err.contains("10.200.0.1"), "names the working one: {err}");
+
+        // Even an address one bit outside the /30, the near-miss a hand-edited config produces.
+        cfg.egress = Some(GuestEgress::via(Ipv4Addr::new(10, 200, 0, 5)));
+        assert!(refuse_offlink_gateway(&cfg).is_err());
+
+        // And it stays inert without a NIC, so a host-wide gateway never blocks a sealed boot.
+        cfg.enable_network = false;
+        assert!(refuse_offlink_gateway(&cfg).is_ok());
     }
 
     #[test]
