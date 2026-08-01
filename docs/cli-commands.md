@@ -27,7 +27,7 @@ ekvm run [FLAGS] -- <cmd> [args…]
 | `--output-cap BYTES` | Cap on captured stdout+stderr+artifacts (default 16 MiB). |
 | `--json` | Emit the structured run result as one JSON object on stdout (exit code, streams, artifacts, metrics, and the effective `limits`) instead of relaying the raw streams. |
 | `--net` | Boot with a NIC (a per-VM tap the host-side probes observe). Deny-by-default is unchanged: with no egress allowance the guest reaches nothing beyond the host end of its /30. |
-| `--allow IP[/CIDR][:PORT][/PROTO]` | Allow one egress destination past the deny-by-default tap (repeatable), e.g. `1.1.1.1`, `10.0.0.0/8`, `1.1.1.1:443/tcp`. Requires `--net`; semantics in [Enforcing egress](./cli-observe.md#enforcing-egress-with---allow). |
+| `--allow IP[/CIDR][:PORT][/PROTO]` | Bound what may cross the deny-by-default tap (repeatable), e.g. `10.200.0.1:9000/udp`, `10.0.0.0/8:443/tcp`. Constrains traffic rather than creating a path: without an operator-provided uplink the reachable set is the host end of the /30. Requires `--net`; semantics in [Enforcing egress](./cli-observe.md#enforcing-egress-with---allow). |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
 | `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope, so alteration is detectable; check it with [`ekvm verify`](#ekvm-verify). |
 | `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record shaped for an agent's observe-then-act loop. |
