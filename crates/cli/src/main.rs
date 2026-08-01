@@ -1044,10 +1044,44 @@ fn init_tracing(filter: Option<&str>) {
 mod tests {
     use super::{
         build_egress, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus, shell_policy,
-        write_artifacts_in, AllowRule, Artifact, Policy, ShellArgs, MAX_VCPUS,
+        write_artifacts_in, AllowRule, Artifact, Cli, Policy, ShellArgs, MAX_VCPUS,
     };
+    use clap::CommandFactory;
     use ekvm_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
     use ekvm_test_support::ScratchDir;
+
+    /// A `///` on a clap field **is** the user interface, so it has to survive being rendered at a
+    /// real terminal width. Clap wraps nothing unless the `wrap_help` feature is on, and it was not:
+    /// `ekvm run -h` printed 19 lines past 80 columns, running off the edge of any normal terminal.
+    /// Rendering every subcommand narrow is what catches that, because the overflow is invisible at
+    /// the width a developer happens to be using.
+    #[test]
+    fn help_wraps_to_the_terminal_instead_of_running_off_it() {
+        // Not narrower than 80: clap cannot wrap below its own option column, so a 60
+        // would fail on `serve`'s long flag names for a reason no terminal ever presents.
+        for width in [80usize, 100, 120] {
+            let mut root = Cli::command();
+            // Every subcommand, not just the root: the long help lives on `run`'s and `serve`'s
+            // flags, which the root's own `--help` never renders.
+            let names: Vec<String> = root
+                .get_subcommands()
+                .map(|c| c.get_name().to_owned())
+                .collect();
+            for name in std::iter::once(String::new()).chain(names) {
+                let cmd = if name.is_empty() {
+                    &mut root
+                } else {
+                    root.find_subcommand_mut(&name).expect("subcommand")
+                };
+                let text = cmd.clone().term_width(width).render_long_help().to_string();
+                let worst = text.lines().map(str::len).max().unwrap_or(0);
+                assert!(
+                    worst <= width,
+                    "`ekvm {name} --help` renders {worst} columns at a {width}-column terminal"
+                );
+            }
+        }
+    }
     use std::net::Ipv4Addr;
     use std::num::{NonZeroU32, NonZeroU8};
 

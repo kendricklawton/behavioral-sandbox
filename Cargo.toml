@@ -40,7 +40,11 @@ repository = "https://github.com/packsixfour/ekvm"
 # over a unix socket (serde), the CLI parses with clap, logs with tracing.
 [workspace.dependencies]
 anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+# `wrap_help` costs one crate (`terminal_size`) and is what makes `--help` legible: without it clap
+# wraps at no width at all, so a flag whose doc comment runs long prints off the right edge of any
+# terminal. That is not hypothetical here, since a `///` on a clap field *is* the user interface,
+# and `ekvm run -h` ran 19 lines past 80 columns before this was set.
+clap = { version = "4", features = ["derive", "wrap_help"] }
 # The CLI's live view (`ekvm run --watch`), rendered to **stderr** so stdout stays pipe-clean.
 # Terminal I/O rides ratatui's re-exported crossterm, so the two can't version-skew.
 ratatui = "0.30"
