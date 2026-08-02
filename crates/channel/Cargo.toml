@@ -21,7 +21,7 @@ zeroize = { workspace = true }
 
 # Off by default. Exposes the internal wire decoders (module `fuzz`) so the `cargo fuzz` targets in
 # `fuzz/` can drive them; never enabled in the normal build, so the crate stays dependency-free and
-# the wire contract is unchanged. See `docs/contributing-fuzzing.md`.
+# the wire contract is unchanged.
 [features]
 fuzzing = []
 

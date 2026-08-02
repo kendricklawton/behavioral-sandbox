@@ -84,8 +84,8 @@ the support floor on a `_SINCE` constant, so adding a field cannot silently rais
 
 The engine supports v1.15 through v1.16 and tests v1.16. The floor tracks upstream's own support
 window rather than a number of convenience, because it exists to reject *unpatched* VMMs rather than
-old ones; the reasoning and the procedure for moving it are in
-[Firecracker version policy](./contributing-firecracker-policy.md).
+old ones. `spawn.rs` carries the supported window, and `firecracker-pin.yml` reports weekly when
+upstream has moved past it.
 
 `clock_realtime` on `PUT /snapshot/load` is the worked example. It exists from v1.16 and advances a
 restored guest's clock by the time elapsed since the snapshot, which for a pre-warmed pool is the

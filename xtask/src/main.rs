@@ -421,7 +421,7 @@ const FUZZ_TARGETS: &[&str] = &[
 
 /// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance
 /// rather than pretending. Fuzzing is never wired into `ci` (the in-gate coverage is the crates' own
-/// dependency-light mutation tests). See `docs/contributing-fuzzing.md`.
+/// dependency-light mutation tests).
 fn require_cargo_fuzz() -> Result<()> {
     if cargo_fuzz_available() {
         return Ok(());
@@ -430,7 +430,7 @@ fn require_cargo_fuzz() -> Result<()> {
     bail!(
         "cargo-fuzz not found — install it with `cargo install cargo-fuzz --locked` and add the \
          pinned toolchain (`rustup toolchain install {nightly} --profile minimal`). \
-         See docs/contributing-fuzzing.md."
+        "
     )
 }
 
@@ -499,7 +499,7 @@ fn require_llvm_tools() -> Result<()> {
     }
     bail!(
         "llvm-tools not installed — `cargo fuzz coverage` needs it to merge the profile: \
-         `rustup component add llvm-tools --toolchain {nightly}`. See docs/contributing-fuzzing.md."
+         `rustup component add llvm-tools --toolchain {nightly}`."
     )
 }
 
@@ -580,7 +580,7 @@ fn fuzz_coverage(target: &str) -> Result<()> {
     println!(
         "render a report (needs `cargo install cargo-binutils`): `cargo cov -- show` / `report` \
          against the target binary under fuzz/target/<triple>/coverage with \
-         `-instr-profile={}`. See docs/contributing-fuzzing.md and the Rust Fuzz Book.",
+         `-instr-profile={}`. See the Rust Fuzz Book.",
         profdata.display()
     );
     Ok(())
@@ -734,9 +734,9 @@ fn workspace_clippy_denies(root: &Path) -> Result<Vec<String>> {
 ///
 /// Neither had ever been formatted or linted by anything. `crates/probes` is the crate that
 /// matters: it is the only one allowed `unsafe`, its object ships in the release tarball, and it
-/// sat on 18 clippy findings while `docs/contributing-coding-guidelines.md` told readers the gate
-/// runs clippy "across the workspace" and that `main` never carries a warning. Both claims were
-/// true only of the members.
+/// sat on 18 clippy findings while the contributor docs told readers the gate runs clippy "across
+/// the workspace" and that `main` never carries a warning. Both claims were true only of the
+/// members.
 ///
 /// Each command runs with the cwd **inside** its workspace, so rustup honours that directory's own
 /// `rust-toolchain.toml`: `crates/probes` pins a nightly, the root pins stable, and linting the
@@ -1130,7 +1130,7 @@ fn privileged_preflight() -> Result<()> {
         bail!(
             "eBPF object not built ({}) — the probe tests skip themselves without it, and a \
              skipped test looks like a pass; install bpf-linker + the nightly toolchain (see \
-             docs/contributing-building.md)",
+             AGENTS.md)",
             object.display()
         );
     }

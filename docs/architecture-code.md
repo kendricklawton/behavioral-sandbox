@@ -19,14 +19,13 @@ and the two path constraints on it).
 ## The `ekvm-engine` crate
 
 `ekvm-engine` is the engine. It is the crate an embedder depends on, and the only one whose public API
-carries the [`api` commit scope](./contributing-development-process.md#the-api-scope).
+carries the `api` commit scope (`AGENTS.md`).
 
 Its safety posture is the inverse of most VMM projects: **the host path forbids `unsafe` outright**.
 every crate in the workspace carries `#![forbid(unsafe_code)]` except `crates/probes`, so that is a
 compiler error rather than a review convention. That one exception is structural: the BPF target
 requires raw map dereferences. `every_crate_forbids_unsafe_except_the_bpf_one` holds the rule from
-the tree rather than from a list here. See
-[Coding guidelines](./contributing-coding-guidelines.md#use-of-unsafe).
+the tree rather than from a list here.
 
 The public surface is deliberately narrow. From `lib.rs`:
 

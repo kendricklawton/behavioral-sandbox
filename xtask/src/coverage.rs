@@ -150,7 +150,7 @@ fn require_cargo_llvm_cov() -> Result<PathBuf> {
     dev_tool_path("cargo-llvm-cov").ok_or_else(|| {
         anyhow::anyhow!(
             "cargo-llvm-cov not installed — `cargo xtask coverage` needs it: \
-             `cargo install cargo-llvm-cov --locked`. See docs/contributing-testing.md."
+             `cargo install cargo-llvm-cov --locked`."
         )
     })
 }
@@ -179,6 +179,6 @@ fn require_llvm_tools_stable() -> Result<()> {
     }
     bail!(
         "llvm-tools not installed on {channel} — coverage instrumentation needs it: \
-         `rustup component add llvm-tools-preview --toolchain {channel}`. See docs/contributing-testing.md."
+         `rustup component add llvm-tools-preview --toolchain {channel}`."
     )
 }

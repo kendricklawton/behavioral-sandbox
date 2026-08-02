@@ -177,12 +177,10 @@ in place. It is not published as a site until the first release.
 - **[Using the eKVM CLI](docs/cli.md)**, including [installation](docs/cli-install.md).
 - **[Using the `ekvm serve` daemon](docs/daemon.md)**, the wire API.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract and the non-goals.
-- **[Examples](docs/examples.md)**, worked end-to-end walkthroughs.
 - **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
 - **[Benchmarks](docs/benchmarks.md)**, the methodology and how to run it yourself.
 - **[Security](docs/security.md)** and the **[threat model](docs/security-threat-model.md)**.
-- **[Contributing](docs/contributing.md)**, invariants, developer tools, CI gates, testing, fuzzing.
 
 ## Getting help
 
@@ -242,8 +240,7 @@ change without notice.
 The project is **open to outside pull requests**. Bug fixes, tests, and documentation can go
 straight to one; anything larger starts with an issue, since the surface above is still moving.
 Commits carry a `Signed-off-by` line. The terms are in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
-developer manual is the [contributing chapters](docs/contributing.md). Coding agents working in this
-repo follow [`AGENTS.md`](AGENTS.md).
+developer manual is [`AGENTS.md`](AGENTS.md), which coding agents working in this repo follow too.
 
 Security issues: [`SECURITY.md`](SECURITY.md).
 

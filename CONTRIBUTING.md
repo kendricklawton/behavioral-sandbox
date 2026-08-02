@@ -39,8 +39,9 @@ This project follows the [Code of Conduct](CODE_OF_CONDUCT.md). Suspected vulner
 private advisory form described in [`SECURITY.md`](SECURITY.md), never to a public issue or pull
 request.
 
-The developer instructions are consolidated in [docs/contributing.md](docs/contributing.md):
-invariants, toolchain requirements, CI gates (`cargo xtask ci` / `cargo xtask ci-privileged`), testing, benchmarks, and fuzzing.
+The developer instructions are consolidated in [`AGENTS.md`](AGENTS.md): the design rules, the repo
+layout, building from source with the pinned toolchains, the two gates (`cargo xtask ci` /
+`cargo xtask ci-privileged`), and the commit conventions.
 
 Host prerequisites and first-run instructions are in [Installation](docs/cli-install.md).
 

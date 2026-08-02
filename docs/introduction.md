@@ -51,14 +51,12 @@ and dashboards belong to whatever *hosts* the engine, and the model driving an a
 - **[Using the `ekvm serve` daemon](./daemon.md)**, drive the engine over a unix socket: the versioned
   wire API (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`), the pre-warmed pool for fast
   `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
-- **[Examples](./examples.md)**, worked, end-to-end walkthroughs covering untrusted code execution, host-side observation, agent containment, binary analysis, and CI job sandboxing.
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each with a live demo.
 - **[Threat model](./security-threat-model.md)**, what is trusted, host hardening baseline, supply-chain provenance, and residual risk.
 - **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
   report one.
-- **[Contributing](./contributing.md)**, invariants, developer tools, CI gates, testing, and fuzzing.
 
 ## Status
 
@@ -103,13 +101,13 @@ Stated because their absence is the honest counterweight to everything else in t
   be claimed.
 
 The source for this book lives in the repository's
-[`docs/` directory](https://github.com/packsixfour/ekvm/tree/main/docs) and contributions are
-welcome, see [Contributing](./contributing.md).
+[`docs/` directory](https://github.com/packsixfour/ekvm/tree/main/docs). `AGENTS.md` in the
+repository root is the operating manual: the design rules, the two gates, and the commit
+conventions.
 
 ## License
 
 eKVM is licensed under the **Apache License 2.0**, copyright 2026 PackSixFour LLC. The full text is
 [`LICENSE`](https://github.com/packsixfour/ekvm/blob/main/LICENSE) in the repository. Contributions
 are made inbound under that same license, asserted per commit with a `Signed-off-by` line under the
-[Developer Certificate of Origin](https://developercertificate.org/); see
-[Contributing](./contributing.md).
+[Developer Certificate of Origin](https://developercertificate.org/).

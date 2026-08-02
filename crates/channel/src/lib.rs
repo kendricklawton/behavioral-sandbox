@@ -786,7 +786,7 @@ impl<'a> Body<'a> {
 /// bytes straight to the internal wire decoders so a `cargo fuzz` (libFuzzer) target can explore
 /// them. A panic, hang, or unbounded allocation on any input is the bug being hunted.
 /// Not built by default and not part of the wire contract, the harness lives in `fuzz/` (excluded
-/// from the workspace); see `docs/contributing-fuzzing.md`. The in-gate, dependency-free counterpart
+/// from the workspace). The in-gate, dependency-free counterpart
 /// is [`fuzz_tests`].
 #[cfg(feature = "fuzzing")]
 pub mod fuzz {

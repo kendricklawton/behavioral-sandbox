@@ -1,6 +1,5 @@
 //! Dependency-light fuzz-style property tests for the wire message reader, the in-gate half of this
-//! crate's fuzzing (the deep, nightly `cargo fuzz` half lives in `fuzz/`; see
-//! `docs/contributing-fuzzing.md`).
+//! crate's fuzzing (the deep, nightly `cargo fuzz` half lives in `fuzz/`).
 //!
 //! **Why here.** The daemon (`ekvm serve`) reads these bytes off its unix socket from *any* client:
 //! this is the outermost untrusted-input boundary the engine exposes, unlike the channel decoder,

@@ -1,4 +1,4 @@
-# The deep fuzzing tier (docs/contributing-fuzzing.md): coverage-guided libFuzzer over the
+# The deep fuzzing tier: coverage-guided libFuzzer over the
 # untrusted-input decoders, the host↔guest channel (guest-controlled bytes) and the signed-record
 # envelope (attacker-relayed by design: a verifier checks a record without trusting the host that
 # delivered it). The CI gate runs the cheap dependency-free property tests on every push; this

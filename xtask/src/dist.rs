@@ -87,7 +87,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         // host-safe; a *package* without the observability half is not the product, so hard-fail.
         bail!(
             "eBPF object not built ({}) — a dist ships the audit half; install bpf-linker + the \
-             nightly toolchain (see docs/contributing-building.md)",
+             nightly toolchain (see AGENTS.md)",
             object.display()
         );
     }
@@ -684,9 +684,9 @@ mod tests {
             dir.display()
         );
 
-        // The contributor-facing docs hand out the same commands; a reader who follows them must
-        // land on the pinned versions, not on whatever is newest.
-        const BUILDING_DOC: &str = "docs/contributing-building.md";
+        // The build instructions hand out the same commands; a reader who follows them must land on
+        // the pinned versions, not on whatever is newest.
+        const BUILDING_DOC: &str = "AGENTS.md";
         let contributing = std::fs::read_to_string(repo.join(BUILDING_DOC)).expect(BUILDING_DOC);
         let mut doc_checked = 0usize;
         for line in contributing.lines() {

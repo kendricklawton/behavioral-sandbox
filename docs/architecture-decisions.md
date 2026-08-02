@@ -82,8 +82,7 @@ The worked example is the host-kernel floor. It began as `>= 5.15`, a version nu
 Red Hat backports security fixes to it for a decade, so a version test refuses a patched, supported
 kernel for no safety gain. `ekvm doctor` now probes for `cgroup.kill` (the crash-safe teardown
 primitive `lifetime.rs` needs, kernel 5.14+) and keeps the version only as a fallback for hosts with
-no cgroup v2 hierarchy to probe. Same argument as the Firecracker floor in
-[Firecracker version policy](./contributing-firecracker-policy.md#a-new-api-field-may-not-raise-the-floor): reject *unpatched*, not
+no cgroup v2 hierarchy to probe. Same argument as the Firecracker floor: reject *unpatched*, not
 *old*.
 
 Three properties follow, and they are the reason this is a rule rather than a preference:

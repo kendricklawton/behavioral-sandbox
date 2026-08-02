@@ -14,8 +14,8 @@ subvert it", "guaranteed"), in docs, comments, or commit messages. Where a test 
 make the test the subject: "`driver_death_cannot_leak_a_vm` kills a driver mid-boot and asserts no
 VMM, netns, or scratch dir survives." An absolute is fine when the sentence names its enforcer
 (`#![forbid(unsafe_code)]`, a wildcard-free `match`, an ordering inside one function); it is not
-fine when the enforcer is "the implementation being correct". Full rationale:
-`docs/contributing-development-process.md`.
+fine when the enforcer is "the implementation being correct". This paragraph is the rationale; it
+used to point at a longer one in the book, which is parked.
 
 **Scope: the engine, not the platform.** A runtime + a clean driver API you self-host: the boring,
 embeddable, self-hostable core for running untrusted code with hardware isolation and a host-observed
@@ -78,6 +78,38 @@ worth knowing before editing, the boot sequence, and the teardown layers, read
 | `crates/test-support` | `ekvm-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, never renamed (`cargo xtask` is a `--package xtask` alias). |
 | `docs/` | | mdBook, `SUMMARY.md` is the index. Flat `topic-subtopic.md` names; the hierarchy lives in `SUMMARY.md`, not in directories. |
+
+## Building from source
+
+Preparing a *host* (KVM access, Firecracker, the host tools) is `docs/cli-install.md`; this is the
+developer's side. `cargo xtask setup` renders the same rows `ekvm doctor` does plus the
+build-toolchain ones, so it is the first command on a new machine.
+
+```console
+rustup target add x86_64-unknown-linux-musl   # the static in-guest agent
+cargo install cargo-deny                      # run by the host-safe gate
+```
+
+The eBPF toolchain is needed only for the probes, and both pieces are **pinned** deliberately.
+Unlike `aya`, which `Cargo.lock` holds, these install out of band, so an unpinned install takes
+whatever shipped that morning and a compiler change breaks the build with no commit from anyone.
+`bpf-linker` links against the pinned nightly's LLVM, so the two move together.
+
+```console
+cargo install bpf-linker --locked --version 0.10.3
+rustup toolchain install nightly-2026-07-20 --profile minimal --component rust-src
+```
+
+The nightly's single source is `crates/probes/rust-toolchain.toml`, `bpf-linker`'s is `xtask`, and
+`ebpf_toolchain_pins_are_single_sourced` compares every copy against those two (this page included,
+by the same non-vacuity guard that would otherwise let the install line quietly stop matching).
+
+```console
+cargo xtask setup            # verify KVM, BTF, Firecracker, bpf-linker, caps
+cargo xtask fetch-artifacts  # download the sha-pinned guest kernel and boot rootfs
+cargo xtask build-rootfs     # build the guest rootfs (Alpine + python3 + static agent)
+cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none)
+```
 
 ## Conventions
 

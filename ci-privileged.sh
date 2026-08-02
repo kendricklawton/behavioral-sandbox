@@ -12,7 +12,7 @@
 #
 # xtask cannot do this itself: the outer `cargo run` that builds xtask writes to ./target as root
 # *before* any xtask code runs, so the redirect must be set before cargo starts (xtask can only
-# refuse; see the P20.17a pre-checks and docs/contributing-ci.md). Run it from the repo root.
+# refuse; see the P20.17a pre-checks and AGENTS.md). Run it from the repo root.
 #
 # Each of the three honours a value you already exported, so override any by setting it first.
 set -eu
