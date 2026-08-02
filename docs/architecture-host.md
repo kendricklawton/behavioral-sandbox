@@ -16,7 +16,7 @@ flowchart TB
             
             subgraph eBPF["Host-Side eBPF (aya)"]
                 Tracepoints["sys_enter_* Tracepoints"]
-                TCEnforcer["tc/XDP Egress Classifier"]
+                TCEnforcer["tc clsact Egress Classifier"]
                 CPUMeter["sched_switch CPU Meter"]
             end
         end
@@ -87,15 +87,19 @@ flowchart LR
 
 ## Storage
 
-The guest root is a read-only base image (Alpine, with the static `guest-agent` baked in), shared
-across sandboxes, with a writable `tmpfs` overlay per run, so nothing a run changes outlives it
-unless explicitly collected. Bulk data rides block devices instead: a read-only ext4 built from
-`input_dir`, and a writable one extracted after teardown for `output_dir`. Both are embedding-API
-fields rather than CLI flags.
+The guest root comes from one Alpine base image with the static `guest-agent` baked in, attached one
+of two ways. By default each VM gets its **own read-write copy** of that base in its workdir,
+reclaimed with the workdir at teardown. A `read_only_root` boot instead hands Firecracker the base
+`O_RDONLY` and lets every sandbox share it, with the guest's writable layer supplied by a per-run
+`tmpfs` overlay; that is the mode the snapshot and pool paths use, and it is what makes one base
+image serve many concurrent VMs. Either way nothing a run changes outlives it unless explicitly
+collected. Bulk data rides block devices instead: a read-only ext4 built from
+`input_dir`, and a writable one extracted after teardown for `output_dir`. `read_only_root`,
+`input_dir`, and `output_dir` are all embedding-API fields rather than CLI flags.
 
 ```mermaid
 flowchart TB
-    subgraph StorageLayout["Sandbox Storage Layering"]
+    subgraph StorageLayout["Sandbox Storage Layering (a read_only_root boot; the default copies the base per VM instead)"]
         BaseFS["Read-Only Base Rootfs\n(artifacts/rootfs-guest.ext4)"]
         TmpfsOverlay["Per-Run Writable tmpfs Overlay\n(Size capped at 50% RAM)"]
         MergedRoot["Merged Guest Root (/)\noverlay-init"]

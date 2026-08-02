@@ -45,7 +45,8 @@ quiet run (the lock reads in `observer.rs` fail open to exactly that gap). Egres
 enforcement is the opposite: `--allow` on a host that cannot load the probes is a typed refusal, since
 silently not enforcing a security control is the worst available outcome.
 
-Finalized records are signed with an `ed25519` host key the guest never sees, and within a session each
-record commits to the previous one's hash, so a *sequence* is tamper-evident and not just a single
-record. What that does and does not establish is in
+`collect` hands back an unsigned `RunRecord`; signing is the caller's step, done with an `ed25519`
+host key that stays in the host process. Within a daemon session the records also chain: the first
+is an unchained anchor and each one after it commits to the previous record's hash, so a *sequence*
+is checkable and not just a single record. What that does and does not establish is in
 [the threat model](./security-threat-model.md#record-integrity-beyond-the-guest).

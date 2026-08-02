@@ -21,7 +21,7 @@ the **`ekvm` daemon** and its versioned wire API.
 ```text
 untrusted code
       → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
-      → host-side eBPF (aya): syscalls · the VM's tap device (tc/XDP) · its cgroup
+      → host-side eBPF (aya): syscalls · the VM's tap device (tc clsact) · its cgroup
       → per-run audit record (network flows · notable syscalls · resources · denials)
 ```
 

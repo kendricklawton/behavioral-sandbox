@@ -28,7 +28,7 @@ gets its own instance. Latency figures are withdrawn pending a re-measurement on
 see [Benchmarks](./benchmarks.md).
 
 ## 5. Host-signed audit records
-Audit records captured by `ekvm-probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. The host signs each finalized record with a host-held ed25519 key, so alteration after the run is detectable off-host (`ekvm verify`).
+Audit records captured by `ekvm-probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. Whichever path persists a record signs it with a host-held ed25519 key, so alteration after the run is detectable off-host (`ekvm verify`).
 
 ## 6. Versioned newline-JSON daemon protocol
 The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals; polyglot SDKs drive the wire, not the crate.

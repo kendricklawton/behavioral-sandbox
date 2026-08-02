@@ -15,8 +15,9 @@ boundary: the programs are loaded by a host process and attached to host-kernel 
 drives four crossings, enumerated in the [threat model](./security-threat-model.md), and none of them names a
 BPF program or map.
 
-Every execution yields a host-observed, host-signed **audit log** of execution events. What a
-signature does and does not establish is stated in
+Every execution yields a host-observed **audit record** of what the host was able to see, and the
+paths that persist one sign it with a host key (`ekvm run --record` or an operator's `records_dir`,
+and the daemon's `trace` reply). What a signature does and does not establish is stated in
 [Record integrity beyond the guest](./security-threat-model.md#record-integrity-beyond-the-guest).
 
 ### Design rules
