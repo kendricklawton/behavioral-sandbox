@@ -83,7 +83,7 @@ SKIP_SIG="${EKVM_INSECURE_SKIP_SIGNATURE:-}"
 write_pinned_release_key() {
     cat > "$1" <<'PIN_EOF'
 -----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAi7i9h0nOfdhTwRpLC/HgDdmMkRhFrviVL2kET+fWoUU=
+MCowBQYDK2VwAyEAiVUCNNe6J3YsRujkmyKZ1MrZr6DbUiH6SKTXa9R9tcw=
 -----END PUBLIC KEY-----
 PIN_EOF
 }
