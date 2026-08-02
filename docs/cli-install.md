@@ -1,8 +1,8 @@
 # Installation
 
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
-install a packaged release (tarball / `install.sh` / container), which is the path the tooling is
-built for but which has no published artifact behind it yet; `cargo xtask setup` (or
+install a packaged release (tarball / `install.sh` / container), which `v0.0.1` publishes as a
+checkpoint rather than as a supported release; `cargo xtask setup` (or
 `ekvm doctor` once installed) tells you what your host is missing at every step.
 
 ## Preparing the host

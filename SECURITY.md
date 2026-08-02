@@ -5,7 +5,7 @@ security reports are taken seriously even this early. The security **model** (wh
 counts as a security bug and what does not, and how a fix ships) is documented in
 [`docs/security.md`](docs/security.md).
 
-**There is no supported release yet.** Until the first tagged release (`v0.1.0`), every version is
+**There is no supported release yet.** Until the first supported release (`v0.1.0`), every version is
 a development snapshot: no version receives backported fixes, and nothing should be treated as
 production-ready.
 

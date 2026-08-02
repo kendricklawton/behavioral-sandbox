@@ -1,5 +1,5 @@
 <div align="center">
-  <h1><code>ekvm</code></h1>
+  <h1><code>eKVM</code></h1>
 
   <p>
     <strong>A self-hostable engine for running untrusted code in a hardware-isolated
@@ -74,8 +74,8 @@ prints the fix for whatever your host is missing. Starting from a bare machine,
 [Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version.
 
 The release tarball, `install.sh`, and container image are built by `cargo xtask dist` and described
-in [Installation](docs/cli-install.md), but **no release has been published yet**, so those paths do
-not resolve until the first tag.
+in [Installation](docs/cli-install.md). `v0.0.1` publishes them, so those paths resolve, but it is a
+checkpoint that exercises the release path rather than a supported release.
 
 ## Example
 

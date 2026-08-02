@@ -8,7 +8,7 @@ in [`SECURITY.md`](https://github.com/packsixfour/ekvm/blob/main/SECURITY.md) at
 
 ## No supported release yet
 
-Until the first tagged release (`v0.1.0`), every version is a development snapshot: no version
+Until the first supported release (`v0.1.0`), every version is a development snapshot: no version
 receives backported fixes, and nothing here should be treated as production-ready. This page states
 the current stance, not a finished audit; the full **[threat model](./security-threat-model.md)** is its
 companion.

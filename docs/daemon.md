@@ -7,7 +7,7 @@ use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no 
 the hoster's, above the engine, and are a recorded non-goal).
 
 > **Status.** The wire API is **versioned**: every message carries a `schema` field, and a
-> mismatch is rejected up front. Until the first tagged release the shape may still change; the
+> mismatch is rejected up front. Until the first supported release the shape may still change; the
 > stamp is what makes that survivable for a client.
 
 ## Run it

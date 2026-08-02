@@ -1,4 +1,4 @@
-# Contributing to ekvm
+# Contributing to eKVM
 
 Thanks for your interest. **Outside contributions are welcome.** A few things are worth knowing
 before you spend time on one.
@@ -7,7 +7,7 @@ before you spend time on one.
 straight to a pull request. For a new capability, a change to a public API, or a refactor that moves
 code between crates, open an issue and settle the shape first. That is not gatekeeping: the project
 is pre-1.0 and the surface still moves (the `Sandbox`/`ekvm` API, the `ekvm serve` wire protocol, the
-audit-record format, and the crate names all change without notice until the first tagged release),
+audit-record format, and the crate names all change without notice until the first supported release, `v0.1.0`),
 and an issue is how you avoid building against a shape that is about to change under you.
 
 **Six design rules govern every change**, and the first question in review is which rule a change
