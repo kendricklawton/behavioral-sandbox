@@ -269,26 +269,32 @@ pub(crate) fn alpine_artifact() -> Result<Artifact> {
 /// The pinned static `apk` (from Alpine's `apk-tools-static` package, itself a tarball): the
 /// installer that puts [`GUEST_PACKAGES`] into the staging dir **rootless**, on any host distro.
 ///
-/// **This pin expires when upstream bumps the package, and the failure is a 404, not a mismatch.**
-/// An Alpine branch repo carries only the newest revision of each package, which is the same reason
-/// [`GUEST_PACKAGES`] deliberately floats instead of pinning `pkg=ver-rN` (stated at length in
-/// `.github/workflows/rootfs-packages.yml`). This artifact is the exception, because it is the
-/// installer itself and a sha256 is the only thing standing between a fresh clone and running an
-/// unverified binary as part of the build. So the version is pinned here **knowing** it will 404
-/// the day Alpine publishes the next one: `3.0.6-r0` did, on 2026-08-02, breaking every fresh
-/// clone and every clean CI run while cached hosts kept building.
+/// **Fetched from our own mirror, because the upstream URL expires.** An Alpine branch repo carries
+/// only the newest revision of each package, so a pinned `pkg-ver-rN` filename 404s the day upstream
+/// publishes the next one: `3.0.6-r0` did exactly that on 2026-08-02, breaking every fresh clone and
+/// every clean CI run while cached hosts kept building, which is why nobody noticed for hours. The
+/// version cannot simply float either, since this is the installer itself and the sha256 is the only
+/// thing between a fresh clone and executing an unverified binary as part of the build.
 ///
-/// Bumping it is: read the current filename out of the branch index, download it, `sha256sum` it,
-/// and put both here. A rebuild afterwards is not optional, since the installer writes the package
+/// The mirror is the `build-inputs` release (a pre-release, so it stays out of `releases/latest`,
+/// which `install.sh` reads). Mirroring changed no bytes: the sha256 below is the one that was here
+/// when the artifact came from Alpine, so the copy is checkable against upstream rather than trusted
+/// on our say-so. Upstream, for provenance:
+/// `https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/apk-tools-static-3.0.7-r0.apk`, and
+/// apk-tools is GPL-2.0-only with source at `https://gitlab.alpinelinux.org/alpine/apk-tools`.
+/// The asset carries a `.tgz` extension only because GitHub's uploader rejects `.apk`; an `.apk`
+/// *is* a gzip-compressed tar, so the name is accurate and the bytes are untouched.
+///
+/// Bumping it now means uploading the new revision to that release and putting the filename and
+/// `sha256sum` here. A rebuild afterwards is not optional, since the installer writes the package
 /// database the guest image hashes over.
 pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
         "x86_64" => Ok(Artifact {
-            url: format!(
-                "https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main/x86_64/\
-                 apk-tools-static-3.0.7-r0.apk"
-            ),
+            url: "https://github.com/packsixfour/ekvm/releases/download/build-inputs/\
+                  apk-tools-static-3.0.7-r0.tgz"
+                .to_string(),
             sha256: "ed1c5e82177844249b7c4ecc2653b78eed096be20496b7fb860a9e165b2e5ce1",
             dest: dir.join("apk-tools-static.apk"),
         }),
