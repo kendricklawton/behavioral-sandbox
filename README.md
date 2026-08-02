@@ -205,6 +205,7 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | `crates/protocol` | `ekvm-protocol` | The daemon wire types, versioned. |
 | `crates/client` | `ekvm-client` | The Rust reference client for `ekvm serve`. |
 | `crates/cli` | `ekvm` | The `ekvm` CLI: `run`, `shell`, `doctor`, plus the `ekvm serve` daemon. The binary on `PATH` is `ekvm`. |
+| `crates/test-support` | `ekvm-test-support` | Shared test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. Dev-only, never shipped. |
 | `docs` | | This documentation, as an mdBook. |
 | `xtask` | `xtask` | Dev orchestration: `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 

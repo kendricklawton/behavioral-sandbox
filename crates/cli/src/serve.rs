@@ -1,6 +1,6 @@
 //! `ekvm`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
 //! [wire API](ekvm_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
-//! socket**, so a local client drives microVMs without linking the `ekvm` library itself. This
+//! socket**, so a local client drives microVMs without linking the `ekvm-engine` library. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
 //! use: no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).

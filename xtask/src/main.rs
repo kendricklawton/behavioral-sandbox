@@ -1435,6 +1435,8 @@ fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
 
     #[test]
@@ -1542,6 +1544,86 @@ mod tests {
         assert!(!elf_has_section(&tiny_elf(".text"), ".BTF")); // real sections, none named .BTF
         assert!(!elf_has_section(b"not an elf at all", ".BTF"));
         assert!(!elf_has_section(&[], ".BTF"));
+    }
+
+    /// The repo-layout table is restated in three places for three audiences: `AGENTS.md` for an
+    /// agent, `README.md` for someone who never clones, and `docs/architecture.md` for the book.
+    /// Three hand-maintained copies of one list drift, and this one did: `README.md` silently
+    /// omitted `ekvm-test-support` while the other two carried all ten.
+    ///
+    /// Asserts each table names every workspace package, and that the directory it pairs with is
+    /// the real one, so a rename cannot leave a table half-updated. The tables may say anything
+    /// else they like; only the name/directory pairing is pinned here.
+    #[test]
+    fn every_layout_table_lists_every_package() {
+        let root = workspace_root();
+        let real: BTreeMap<String, String> = workspace_packages(root);
+        assert!(
+            real.len() >= 10,
+            "expected the full workspace, got {real:?}"
+        );
+
+        for page in ["AGENTS.md", "README.md", "docs/architecture.md"] {
+            let text = std::fs::read_to_string(root.join(page)).unwrap();
+            let mut seen = BTreeSet::new();
+            for line in text.lines().filter(|l| l.starts_with('|')) {
+                let cells: Vec<_> = line
+                    .split('|')
+                    .map(|c| c.trim().trim_matches('`').to_string())
+                    .collect();
+                for name in cells.iter().filter(|c| real.contains_key(*c)) {
+                    seen.insert(name.clone());
+                    // The row must also carry that package's real directory, in either column
+                    // order (the three tables do not agree on which comes first).
+                    let dir = &real[name];
+                    let paired = cells.iter().any(|c| {
+                        c == dir
+                            || c.rsplit('/')
+                                .next()
+                                .is_some_and(|tail| tail == dir && c.starts_with("crates/"))
+                    });
+                    assert!(
+                        paired,
+                        "{page}: the row for `{name}` does not name its directory `{dir}`"
+                    );
+                }
+            }
+            let missing: Vec<_> = real.keys().filter(|k| !seen.contains(*k)).collect();
+            assert!(
+                missing.is_empty(),
+                "{page}'s layout table omits {missing:?}"
+            );
+        }
+    }
+
+    /// Package name -> directory name, read from the manifests rather than from `cargo metadata`.
+    /// Two reasons: `metadata`'s JSON repeats `"name"` for every *target* as well as every package,
+    /// which is what made the first cut of this test report `exec` and `tracer` as missing packages;
+    /// and `crates/probes` is excluded from the workspace, so `metadata` never sees it while the
+    /// layout tables rightly list it.
+    fn workspace_packages(root: &Path) -> BTreeMap<String, String> {
+        let mut map = BTreeMap::new();
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(root.join("crates"))
+            .expect("crates/")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir())
+            .collect();
+        dirs.push(root.join("xtask"));
+        for dir in dirs {
+            let manifest = dir.join("Cargo.toml");
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            // The `[package]` table comes first, so its `name` is the one this returns; a later
+            // `[[bin]] name` cannot shadow it.
+            let Some(name) = toml_string_value(&text, "name") else {
+                continue;
+            };
+            if let Some(d) = dir.file_name() {
+                map.insert(name, d.to_string_lossy().into_owned());
+            }
+        }
+        map
     }
 
     /// Every workspace crate forbids `unsafe` except `crates/probes`, which builds for the BPF
