@@ -3,6 +3,7 @@
 ## One shot: open, run, read the result
 
 ```rust,no_run
+# extern crate ekvm;
 use ekvm::{BootConfig, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
@@ -27,6 +28,7 @@ fn main() -> Result<(), VmmError> {
 ## Budgets and files on the call
 
 ```rust,no_run
+# extern crate ekvm;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
 use ekvm::{BootConfig, Limits, Sandbox, VmmError};
@@ -62,6 +64,7 @@ fn main() -> Result<(), VmmError> {
 ## The pre-warmed pool
 
 ```rust,no_run
+# extern crate ekvm;
 use ekvm::{BootConfig, Pool, Snapshot, Vm, VmmError};
 
 fn main() -> Result<(), VmmError> {
@@ -69,8 +72,11 @@ fn main() -> Result<(), VmmError> {
     let source_cfg = BootConfig::from_env();
     let source_vm = Vm::boot(source_cfg)?;
 
-    let snap_dir = tempfile::tempdir().unwrap();
-    let snapshot = source_vm.snapshot(snap_dir.path())?;
+    // Any directory you own works; a snapshot bundle is just files. `tempfile` would do, but it is
+    // not a dependency of `ekvm`, so this stays on `std` rather than sending you to add one.
+    let snap_dir = std::env::temp_dir().join("ekvm-pool-snapshot");
+    std::fs::create_dir_all(&snap_dir).expect("create the snapshot dir");
+    let snapshot = source_vm.snapshot(&snap_dir)?;
 
     // 2. Initialize a pool of 4 pre-warmed clones (clones will restore jailed)
     let pool_cfg = BootConfig::from_env();
@@ -95,7 +101,7 @@ recreate their tap in a private netns, so any number coexist.
 **Sizing rule** (stated here so you never meet it as `EMFILE`): each live VM holds up to
 `FDS_PER_VM` (8) driver-side fds, so keep
 
-```
+```text
 N_live × FDS_PER_VM + headroom (≈64, process baseline)  ≤  ulimit -n (soft)
 ```
 

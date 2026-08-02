@@ -682,3 +682,22 @@ impl Sandbox {
         self.vm.shutdown()
     }
 }
+
+/// Compile the book's embedding recipes as doctests of this crate.
+///
+/// `docs/embedding-recipes.md` is the page an embedder copies from, so a recipe that does not
+/// compile is worse than no recipe. Pulling the page in here puts every `rust` block in it through
+/// rustdoc with this crate's real dependency graph, on the existing `cargo test --workspace` step:
+/// no new tool in the gate, and `--extern` handled by cargo rather than by hand.
+///
+/// `mdbook test` cannot do this job. It passes only `-L`, never `--extern`, so a 2018-edition
+/// `use ekvm::…` does not resolve; making it work at all needs a hidden `extern crate` line in each
+/// block plus a library path with exactly one candidate rlib. The book still gets `mdbook test` in
+/// `docs.yml` for the rest of its blocks, which is what catches an untagged fence being compiled as
+/// Rust (four ASCII diagrams were, until 2026-08-01).
+///
+/// `#[cfg(doctest)]` keeps this out of the built library and out of the rendered docs; it exists
+/// only while rustdoc is collecting tests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/embedding-recipes.md")]
+struct EmbeddingRecipes;
