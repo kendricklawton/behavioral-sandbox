@@ -84,8 +84,9 @@ id -nG | tr ' ' '\n' | grep -x kvm   # prints kvm once the group is in effect
 The engine drives Firecracker, it does not bundle it (the container image is the one exception), so
 both binaries have to be on `PATH`. Two versions matter, and both track upstream's own patch
 window: the **pinned** release (currently **v1.16.1**) is what CI tests and what `ekvm doctor`
-checks the on-`PATH` binary's sha256 against (the hash itself lives in `install.sh` and
-`crates/engine/src/doctor.rs`, single-sourced rather than restated here), and the
+checks the on-`PATH` binary's sha256 against (the hash lives in `install.sh` and
+`crates/engine/src/doctor.rs`, with `install_sh_firecracker_pin_matches_doctor` holding the two in
+step, so this page states no third copy), and the
 **floor** (currently **v1.15**) is the oldest series the Firecracker team still
 patches, with the driver adapting its API requests to any release in between. Below the floor, a
 boot continues with a warning but is neither tested here nor patched upstream, which is the wrong
@@ -160,7 +161,9 @@ findmnt -no OPTIONS -T /tmp | tr , '\n' | grep -E 'nodev|noexec'   # prints the 
 If it prints `nodev` or `noexec`, the engine already falls back to `/var/tmp` on its own: the
 default scratch dir is chosen by probing `/tmp`'s mount flags, not assumed. You only need to set one
 yourself if `/var/tmp` is *also* mounted with those flags, or if you have pinned `scratch_dir` or
-`EKVM_SCRATCH_DIR` at a blocked path. To set one, put it in `~/.ekvm.toml`.
+`EKVM_SCRATCH_DIR` at a blocked path. To set one, put it in a `.ekvm.toml`. Discovery walks up from
+the working directory, so `~/.ekvm.toml` covers everything you run from under your home directory,
+and a nearer file shadows it.
 Keep the path **short**: a jailed boot nests this dir name twice inside its API socket path, which the
 kernel caps at ~108 bytes (an over-long one surfaces as a boot error, not a doctor row), so a
 short dir like `~/.ekvm` beats a long one:
@@ -198,10 +201,11 @@ are supported:
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh)"
 ```
 
-Prefer this form over `curl … | sh`. Piped into `sh`, the script cannot see its own path, so it
-falls back to the current directory when deciding whether it is running inside an already-extracted
-package: in a directory that happens to hold a `bin/ekvm` and a `MANIFEST.sha256`, the pipe form
-installs *that* instead of downloading a release.
+`curl … | sh` behaves identically; neither form lets the script see its own path, so both resolve
+the "am I inside an already-extracted package?" test against the **current directory**. In a
+directory that happens to hold a `bin/ekvm` and a `MANIFEST.sha256`, either form installs *that*
+instead of downloading a release, and says so on the first line of its output. Run it from
+somewhere else if that is not what you want.
 
 ### Option B: verify and extract by hand
 

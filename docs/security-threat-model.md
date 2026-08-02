@@ -60,7 +60,7 @@ The boundary and the crossings the host mediates, as a picture:
     crossings the host mediates:           |
       vsock    exec + stdio        <------->|   carried by the in-guest agent
       tap      all guest packets   <------->|   observed by tc/eBPF, policed deny-by-default
-      block    rootfs RO / in RO / out RW  >|   ext4 images the engine builds, never a host dir
+      block    rootfs / in RO / out RW     >|   ext4 images the engine builds, never a host dir
       cgroup   mem/cpu/pids/io caps ------->|   CPU is also metered from eBPF
    ----------------------------                       ----------------------------
    Every security-relevant observation and policy sits on the HOST side of every crossing.
@@ -150,8 +150,9 @@ signature over the canonical record bytes), and a verify path ships with it (`ek
 library `verify`, and the daemon's signed `trace` reply).
 
 Signing is the *caller's* step, not the loader's: `SandboxProbes::collect` returns an unsigned
-`RunRecord`, and `HostKey` signs it in `ekvm run --record` and in the daemon's `trace`. An embedder
-driving `ekvm-probes-loader` directly, and an `ekvm run` without `--record`, produce no signature.
+`RunRecord`, and `HostKey` signs it in the CLI's record path and in the daemon's `trace`. An
+embedder driving `ekvm-probes-loader` directly gets no signature. A run signs when it writes a
+record at all, which is `--record` or an operator's `records_dir`.
 
 - **What a verifier establishes:** `verify_entry` fails closed on a bad signature, a malformed
   envelope, or a `key_id` outside the trusted set, so a record it accepts was not altered after the
@@ -213,8 +214,9 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   section, and a reader must actually check that section rather than read an empty axis as quiet.
   Egress *enforcement* is the deliberate exception: `--allow` that cannot arm the tap is a refusal.
 - **Fuzzing is nightly, not continuous.** Ten libFuzzer targets cover the untrusted-input decoders
-  (the guest channel, the daemon wire, the signed-record envelope, the eBPF-boundary parsers and the
-  egress rule parser) on a nightly schedule, bounded per target. There is no OSS-Fuzz or equivalent
+  (the guest channel, the daemon wire, the signed-record envelope, the eBPF-boundary parsers, the
+  egress rule parser, and the `.ekvm.toml` config parser) on a nightly schedule, bounded per target
+  at fifteen minutes. There is no OSS-Fuzz or equivalent
   continuous tier, and some corpora are thin, so depth on any one target is limited.
 
 ## Out of scope (engine, not platform)
@@ -243,10 +245,11 @@ it can check.
 
 ## Supply chain & provenance
 
-Every artifact the build downloads is pinned by sha256 and verified on fetch: the guest kernel and
+Every *artifact* the build downloads is pinned by sha256 and verified on fetch: the guest kernel and
 the demo boot rootfs (`xtask/src/artifacts.rs`), the Alpine minirootfs and `apk-tools-static`
-(`xtask/src/rootfs.rs`). The Firecracker binary is pinned too but never fetched by this project: the
-operator installs it, and `ekvm doctor` compares what is on `PATH` against the pin.
+(`xtask/src/rootfs.rs`). The guest package closure `apk` then installs on top of that base is the
+exception, covered below. The Firecracker binary is pinned too but never fetched by this project:
+the operator installs it, and `ekvm doctor` compares what is on `PATH` against the pin.
 
 One of them is served from this project rather than from its origin. `apk-tools-static` is the
 static `apk` the build executes on the host to populate the guest image, and an Alpine branch repo
@@ -264,8 +267,8 @@ than reproduce it (`GUEST_PACKAGES` in `xtask/src/rootfs.rs`). What holds instea
 checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, `build-rootfs --verify`
 fails on any drift from it, and `.github/workflows/rootfs-packages.yml`
 rebuilds weekly so a bump arrives on a schedule. `--verify` also builds the image twice and compares
-hashes, so one host reproduces its own build. Worth knowing before relying on either: **no automated
-job passes `--verify` today**, so both checks are opt-in and run by hand.
+hashes, so one host reproduces its own build. Both run nightly: `privileged_preflight` builds the
+rootfs with verify on, so `cargo xtask ci-privileged` is the gate that enforces them.
 
 Across hosts is a weaker claim, and until 2026-08-02 it was weaker than this page said. Two hosts on
 the same commit, the same pinned toolchain and the same mke2fs built images hashing `71a79914…` and
