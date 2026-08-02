@@ -185,7 +185,7 @@ the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with
 ### Option A: the installer script (`curl | sh`)
 
 ```console
-curl -fsSL https://get.ekvm.dev | sh
+curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh | sh
 ```
 
 ### Option B: verify and extract by hand
