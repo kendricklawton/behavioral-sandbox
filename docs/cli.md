@@ -1,4 +1,4 @@
-# Using the `ekvm` CLI
+# Using the eKVM CLI
 
 In addition to the [embedding API](./embedding.md), which lets you use the engine as a library, the
 project provides an `ekvm` CLI to run untrusted code in a hardware-isolated microVM from the command
