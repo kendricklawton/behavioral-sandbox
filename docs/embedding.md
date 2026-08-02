@@ -29,7 +29,7 @@ those are.
 
 ## The lifecycle
 
-```
+```text
 Sandbox::open(config)            confined by default: KVM + the jailer
     .exec(argv, stdin)           synchronous; a RunResult or a typed VmmError
     .exec_with_files(argv, stdin, files, env, artifacts)

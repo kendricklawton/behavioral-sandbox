@@ -49,7 +49,7 @@ properties established by this document:
 
 The boundary and the crossings the host mediates, as a picture:
 
-```
+```text
         HOST  (trusted)                  boundary             GUEST  (untrusted)
    ----------------------------      = the CPU (KVM) =      ----------------------------
     driver + VMM + jailer                  |                 untrusted code

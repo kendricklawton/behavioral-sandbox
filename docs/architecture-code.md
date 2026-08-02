@@ -29,7 +29,7 @@ structurally, because the BPF target requires raw map dereferences. See
 
 The public surface is deliberately narrow. From `lib.rs`:
 
-```rust
+```rust,ignore
 pub use ekvm_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
