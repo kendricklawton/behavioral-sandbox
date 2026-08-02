@@ -668,11 +668,76 @@ fn ci() -> Result<()> {
         &[("RUSTDOCFLAGS", "-D warnings")],
     )?;
     cargo(&["deny", "check"])?;
+    deny_detached_workspaces(workspace_root())?;
     // The eBPF object build is part of the CI gate. Host-safe and guarded, it skips with a note
     // when `bpf-linker`/`rustup` are absent, so `ci` still runs everywhere, but on a set-up dev box a
     // probe that fails to compile (or drops its BTF) now fails here, not later at load.
     build_probes()?;
     println!("\n✓ all checks passed");
+    Ok(())
+}
+
+/// The manifests `cargo deny check` at the root cannot reach: every path in the root workspace's
+/// `exclude`, read from the tree rather than listed here.
+///
+/// A hand-written list is the thing that rots. `detached_workspaces_are_all_scanned` holds this to
+/// `exclude`, so a third detached workspace has to be decided about instead of defaulting into an
+/// unscanned gap, which is how the first two got there.
+fn detached_manifests(root: &Path) -> Result<Vec<PathBuf>> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .context("read the root Cargo.toml to find the excluded workspaces")?;
+    Ok(excluded_dirs(&manifest)
+        .into_iter()
+        .map(|d| root.join(d).join("Cargo.toml"))
+        .collect())
+}
+
+/// The `exclude = [...]` entries of a workspace manifest, in order.
+fn excluded_dirs(manifest: &str) -> Vec<String> {
+    let Some(rest) = manifest.split_once("exclude = [").map(|(_, r)| r) else {
+        return Vec::new();
+    };
+    let Some((list, _)) = rest.split_once(']') else {
+        return Vec::new();
+    };
+    list.split(',')
+        .filter_map(|e| {
+            let e = e.trim().trim_matches('"');
+            (!e.is_empty()).then(|| e.to_string())
+        })
+        .collect()
+}
+
+/// `cargo deny check advisories` for the workspaces the root check cannot see.
+///
+/// `crates/probes` and `fuzz` carry their own `[workspace]` and lockfile and are excluded from the
+/// root one, so `cargo deny check` walks neither: 281 packages that no advisory scan touched, in a
+/// repo whose daily `audit.yml` looks like it covers everything. `crates/probes` is the crate that
+/// matters, being the only one allowed `unsafe` and the one whose object ships in the tarball.
+///
+/// Advisories only, and against the root config so there is one advisory policy. Bans, licenses and
+/// sources describe the shipped dependency graph, which the root check already owns; re-running them
+/// here would mean a second policy to keep in step for no coverage.
+fn deny_detached_workspaces(root: &Path) -> Result<()> {
+    let config = root.join("deny.toml");
+    for manifest in detached_manifests(root)? {
+        let shown = manifest.strip_prefix(root).unwrap_or(&manifest);
+        println!(
+            "$ cargo deny --manifest-path {} check advisories",
+            shown.display()
+        );
+        let status = Command::new(env!("CARGO"))
+            .args(["deny", "--manifest-path"])
+            .arg(&manifest)
+            .args(["check", "--config"])
+            .arg(&config)
+            .arg("advisories")
+            .status()
+            .with_context(|| format!("running cargo deny for {}", shown.display()))?;
+        if !status.success() {
+            bail!("cargo deny check advisories failed for {}", shown.display());
+        }
+    }
     Ok(())
 }
 
@@ -1444,6 +1509,41 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
+
+    /// Every workspace the root `cargo deny check` cannot walk must still get an advisory scan.
+    ///
+    /// Both detached workspaces went unscanned from the day they were excluded, and nothing said
+    /// so: `audit.yml` is named "audit" and reads like it covers the repo. Deriving the set from
+    /// `exclude` means a third one cannot repeat that silently.
+    #[test]
+    fn detached_workspaces_are_all_scanned() {
+        let root = workspace_root();
+        let excluded = excluded_dirs(&std::fs::read_to_string(root.join("Cargo.toml")).unwrap());
+        assert!(
+            !excluded.is_empty(),
+            "the root manifest should still exclude the detached workspaces"
+        );
+        let scanned = detached_manifests(root).unwrap();
+        assert_eq!(
+            scanned.len(),
+            excluded.len(),
+            "every excluded workspace needs an advisory scan, got {scanned:?} for {excluded:?}"
+        );
+        for m in &scanned {
+            assert!(m.is_file(), "{} should exist to be scanned", m.display());
+        }
+    }
+
+    #[test]
+    fn excluded_dirs_reads_the_list_and_ignores_the_members() {
+        let manifest = r#"
+[workspace]
+members = ["crates/engine", "xtask"]
+exclude = ["crates/probes", "fuzz"]
+"#;
+        assert_eq!(excluded_dirs(manifest), vec!["crates/probes", "fuzz"]);
+        assert!(excluded_dirs("[workspace]\nmembers = [\"a\"]\n").is_empty());
+    }
 
     #[test]
     fn toml_string_value_reads_the_key_and_skips_comments() {
