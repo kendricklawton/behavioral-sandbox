@@ -232,8 +232,17 @@ than reproduce it (`GUEST_PACKAGES` in `xtask/src/rootfs.rs`). What holds instea
 checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, `build-rootfs --verify` (run
 by the privileged gate) fails on any drift from it, and `.github/workflows/rootfs-packages.yml`
 rebuilds weekly so a bump arrives on a schedule. `--verify` also builds the image twice and compares
-hashes, so one host reproduces its own build; across hosts the image hash still follows the mke2fs
-version.
+hashes, so one host reproduces its own build.
+
+Across hosts is a weaker claim, and until 2026-08-02 it was weaker than this page said. Two hosts on
+the same commit, the same pinned toolchain and the same mke2fs built images hashing `71a79914…` and
+`4772f3fb…`, because a release build bakes in `panic!` location strings even with debug info off, and
+for std and every registry dependency those were absolute paths under the building host's
+`CARGO_HOME` and rustup directory. `xtask` now builds the guest agent under `--remap-path-prefix`
+for both (`cargo_reproducible` in `xtask/src/main.rs`), mapping the toolchain's vendored std sources
+back onto the `/rustc/<commit>` token rustc itself uses, so a host carrying the `rust-src` component
+and one without it emit the same bytes. What that leaves outside the remap is the mke2fs version,
+which `dist` refuses below the `SOURCE_DATE_EPOCH` floor rather than packaging around.
 
 `cargo xtask vendor` snapshots the whole input set, the resolved `.apk` closure included, into an
 offline mirror with a sha256 manifest. That is where the packages do get pinned by hash, so an

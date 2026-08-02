@@ -6,7 +6,7 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use crate::{cargo, workspace_root};
+use crate::{cargo_reproducible, workspace_root};
 
 /// The musl target the guest agent is built for: a fully static binary that runs in the guest with
 /// no dynamic loader or libc to bake into the rootfs.
@@ -76,7 +76,7 @@ fn build_guest_musl(kind: GuestBin) -> Result<PathBuf> {
     let mut args = vec!["build", "--release", "--locked", "-p", "ekvm-guest-agent"];
     args.extend_from_slice(selector);
     args.extend_from_slice(&["--target", GUEST_TARGET]);
-    cargo(&args)?;
+    cargo_reproducible(&args)?;
     let bin = guest_target_dir().join(GUEST_TARGET).join(subpath);
     verify_static(&bin, label)?;
     println!("\n✓ {label} built (static): {}", bin.display());

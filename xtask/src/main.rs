@@ -1637,6 +1637,86 @@ fn cargo(args: &[&str]) -> Result<()> {
     cargo_env(args, &[])
 }
 
+/// Run cargo with this host's identity remapped out of whatever it builds. For the binaries a
+/// release ships, never for a build a developer runs and debugs.
+///
+/// A release build carries no debug info, but `panic!` location strings are baked in regardless,
+/// and for std and every registry dependency those are absolute paths under this host's
+/// `CARGO_HOME` and rustup directory. Two hosts building the same commit therefore emit different
+/// bytes. On 2026-08-02 that was the whole of why `rootfs-guest.ext4` hashed `71a79914…` on a dev
+/// box and `4772f3fb…` on the CI runner, same pinned toolchain, same mke2fs, same package closure.
+///
+/// Uses `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS` so a home directory containing a space
+/// cannot split one flag into two. Either form *replaces* configured `rustflags` rather than
+/// appending to them, which is why this stays on the packaging paths and out of the gate.
+fn cargo_reproducible(args: &[&str]) -> Result<()> {
+    let flags = remap_flags(
+        &cargo_home(),
+        &rustc_sysroot()?,
+        rustc_commit_hash().as_deref(),
+    );
+    cargo_env(args, &[("CARGO_ENCODED_RUSTFLAGS", &flags.join("\x1f"))])
+}
+
+/// The `--remap-path-prefix` flags [`cargo_reproducible`] passes: `CARGO_HOME` and the toolchain's
+/// vendored std sources, each onto a fixed token.
+///
+/// The std mapping is the subtle one. rustc ships std with its paths already remapped to
+/// `/rustc/<commit>/…`, but rewrites them back to the local checkout whenever the `rust-src`
+/// component is installed, so a host carrying that component disagrees with one that does not, on
+/// the same toolchain. Mapping the checkout onto `/rustc/<commit>` is what makes the two agree.
+/// Without a commit hash there is no canonical form to map onto, so that flag is dropped rather
+/// than invented: a wrong token would make every host agree with itself and none with upstream.
+fn remap_flags(cargo_home: &Path, sysroot: &Path, commit_hash: Option<&str>) -> Vec<String> {
+    let mut flags = vec![format!(
+        "--remap-path-prefix={}=/cargo",
+        cargo_home.display()
+    )];
+    if let Some(hash) = commit_hash {
+        let src = sysroot.join("lib/rustlib/src/rust");
+        flags.push(format!(
+            "--remap-path-prefix={}=/rustc/{hash}",
+            src.display()
+        ));
+    }
+    flags
+}
+
+/// This host's `CARGO_HOME`, by cargo's own resolution order.
+fn cargo_home() -> PathBuf {
+    std::env::var_os("CARGO_HOME").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cargo"),
+        PathBuf::from,
+    )
+}
+
+/// The active toolchain's sysroot, asked of the same `rustc` the build will use (so a leaked
+/// `RUSTUP_TOOLCHAIN` moves this answer with it rather than past it).
+fn rustc_sysroot() -> Result<PathBuf> {
+    let out = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .context("running rustc --print sysroot")?;
+    if !out.status.success() {
+        bail!("rustc --print sysroot exited {:?}", out.status.code());
+    }
+    Ok(PathBuf::from(
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    ))
+}
+
+/// The rustc commit hash, or `None` when this build of rustc does not carry one (`unknown`, which
+/// distro-built toolchains do report). `None` costs one remap, not correctness.
+fn rustc_commit_hash() -> Option<String> {
+    let out = Command::new("rustc").arg("-vV").output().ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|l| l.strip_prefix("commit-hash: "))
+        .map(str::trim)
+        .filter(|h| !h.is_empty() && *h != "unknown")
+        .map(str::to_string)
+}
+
 fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
     println!("$ cargo {}", args.join(" "));
     let mut cmd = Command::new(env!("CARGO"));
@@ -1997,6 +2077,62 @@ exclude = ["crates/probes", "fuzz"]
             sorted(matrix.split(',').map(|t| t.trim().to_string()).collect()),
             expected,
             ".github/workflows/fuzz.yml's matrix drifted from FUZZ_TARGETS"
+        );
+    }
+
+    /// No flag may carry a path that only exists on the machine that built the artifact.
+    ///
+    /// This is the whole point of the remap, and it is the part a plausible-looking edit breaks
+    /// silently: the build still succeeds, the binary still runs, and the divergence only shows up
+    /// as two hosts disagreeing on an image hash weeks later.
+    #[test]
+    fn remap_flags_leave_no_host_path_in_the_build() {
+        let flags = remap_flags(
+            Path::new("/home/alice/.cargo"),
+            Path::new("/home/alice/.rustup/toolchains/1.97.0-x86_64-unknown-linux-gnu"),
+            Some("2d8144b7880597b6e6d3dfd63a9a9efae3f533d3"),
+        );
+        for flag in &flags {
+            let target = flag.rsplit_once('=').expect("a remap flag is from=to").1;
+            assert!(
+                !target.contains("alice"),
+                "{flag} maps onto a path carrying the build host's identity"
+            );
+        }
+    }
+
+    /// The std remap has to land on exactly the token rustc uses when `rust-src` is absent, or it
+    /// buys nothing: the two hosts still disagree, just in a new spelling.
+    #[test]
+    fn the_std_remap_reconstructs_the_upstream_rustc_token() {
+        let hash = "2d8144b7880597b6e6d3dfd63a9a9efae3f533d3";
+        let flags = remap_flags(
+            Path::new("/home/alice/.cargo"),
+            Path::new("/home/alice/.rustup/toolchains/1.97.0-x86_64-unknown-linux-gnu"),
+            Some(hash),
+        );
+        assert!(
+            flags.iter().any(|f| f
+                == &format!(
+                    "--remap-path-prefix=/home/alice/.rustup/toolchains/\
+                     1.97.0-x86_64-unknown-linux-gnu/lib/rustlib/src/rust=/rustc/{hash}"
+                )),
+            "std sources are not mapped onto /rustc/<commit>: {flags:?}"
+        );
+    }
+
+    /// A rustc without a commit hash drops that flag rather than inventing a token: agreeing with
+    /// upstream is the goal, and no token at all is closer to it than a made-up one.
+    #[test]
+    fn a_hashless_rustc_drops_the_std_remap_rather_than_guessing() {
+        let flags = remap_flags(
+            Path::new("/home/alice/.cargo"),
+            Path::new("/opt/rust"),
+            None,
+        );
+        assert_eq!(
+            flags,
+            vec!["--remap-path-prefix=/home/alice/.cargo=/cargo".to_string()]
         );
     }
 }

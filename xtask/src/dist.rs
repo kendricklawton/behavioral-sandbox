@@ -14,7 +14,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::artifacts::sha256_of;
-use crate::{build_probes, cargo, guest_rootfs_path, kernel_path, workspace_root};
+use crate::{build_probes, cargo_reproducible, guest_rootfs_path, kernel_path, workspace_root};
 
 /// The packaged eBPF object's name inside `share/ekvm/` (the loader finds it via
 /// `EKVM_PROBES_OBJECT`, which `install.sh` and the container image point here).
@@ -93,7 +93,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     }
 
     println!("\n== 4/5  build the release binary (static, {DIST_TARGET}) ==");
-    cargo(&[
+    cargo_reproducible(&[
         "build",
         "--release",
         "--locked",
