@@ -125,6 +125,12 @@ trap cleanup EXIT INT TERM
 
 # Where this script itself lives: inside an extracted package it sits next to bin/ekvm, and then
 # the surrounding stage IS the install source (no download, no re-extract).
+# `CDPATH=` neutralises a user's CDPATH for this one `cd`, which would otherwise resolve a relative
+# path somewhere else entirely and echo where it went. shellcheck reads the empty assignment as a
+# typo; it is the intended POSIX idiom.
+# The `|| true` is the else-branch on purpose: an unresolvable `$0` leaves SCRIPT_DIR empty, which
+# the next block tests for. shellcheck warns because that shape is usually a mistaken if-then-else.
+# shellcheck disable=SC1007,SC2015
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd || true)
 
 STAGE=""

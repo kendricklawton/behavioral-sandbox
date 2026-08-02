@@ -26,6 +26,8 @@ if ! command -v cargo >/dev/null 2>&1; then
         cargo_bin="$(getent passwd "$SUDO_USER" | cut -d: -f6)/.cargo/bin"
     fi
     if [ ! -x "$cargo_bin/cargo" ]; then
+        # The backticks are literal punctuation in the message, not a substitution.
+        # shellcheck disable=SC2016
         printf 'ci-privileged.sh: cannot find cargo — run under `sudo -E`, or install rustup for root\n' >&2
         exit 1
     fi
