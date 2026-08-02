@@ -40,10 +40,10 @@ jobs:
 
           # The pin lives in one place (doctor.rs' comment markers next to each sha256), so this
           # reads the source of truth rather than a duplicate the two could drift apart on.
-          pinned="$(grep -oE '// v[0-9]+\.[0-9]+\.[0-9]+' crates/vmm/src/doctor.rs \
+          pinned="$(grep -oE '// v[0-9]+\.[0-9]+\.[0-9]+' crates/engine/src/doctor.rs \
             | sed 's|// v||' | sort -V | tail -1)"
           if [ -z "$pinned" ]; then
-            echo "::error::could not read the pinned Firecracker version from crates/vmm/src/doctor.rs"
+            echo "::error::could not read the pinned Firecracker version from crates/engine/src/doctor.rs"
             echo "If the pin moved, update this workflow's parser with it."
             exit 1
           fi
@@ -79,7 +79,7 @@ jobs:
           echo "Bumping the pin is a human step, not a bot PR. It means:"
           echo "  1. read the release notes for API and snapshot-format changes"
           echo "  2. sha256 the new release binary and update PINNED_FIRECRACKER_SHA256"
-          echo "     in crates/vmm/src/doctor.rs (keep the older sha until the floor moves)"
+          echo "     in crates/engine/src/doctor.rs (keep the older sha until the floor moves)"
           echo "  3. run 'cargo xtask ci-privileged' against the new binary"
           echo "  4. check whether v$pinned is still in upstream's supported series"
           exit 1
@@ -94,9 +94,9 @@ jobs:
           set -euo pipefail
 
           floor="$(grep -oE 'MIN_SUPPORTED_FC_VERSION: \(u64, u64\) = \([0-9]+, [0-9]+\)' \
-            crates/vmm/src/spawn/fcversion.rs | grep -oE '\([0-9]+, [0-9]+\)$' | tr -d '() ' | tr ',' '.')"
+            crates/engine/src/spawn/fcversion.rs | grep -oE '\([0-9]+, [0-9]+\)$' | tr -d '() ' | tr ',' '.')"
           if [ -z "$floor" ]; then
-            echo "::error::could not read MIN_SUPPORTED_FC_VERSION from crates/vmm/src/spawn/fcversion.rs"
+            echo "::error::could not read MIN_SUPPORTED_FC_VERSION from crates/engine/src/spawn/fcversion.rs"
             echo "If the constant moved or was renamed, update this workflow's parser with it."
             exit 1
           fi
@@ -127,13 +127,13 @@ jobs:
             echo "::error::our floor (v$floor) is ABOVE upstream's oldest supported series (v$oldest)."
             echo "We are refusing a release the Firecracker team still patches, which pushes"
             echo "operators onto an older unpatched VMM to satisfy us. Lower"
-            echo "MIN_SUPPORTED_FC_VERSION in crates/vmm/src/spawn/fcversion.rs to v$oldest, and check"
+            echo "MIN_SUPPORTED_FC_VERSION in crates/engine/src/spawn/fcversion.rs to v$oldest, and check"
             echo "whether any conditional API field (e.g. clock_realtime) needs a new gate."
             exit 1
           fi
 
           echo "::error::our floor (v$floor) is BELOW upstream's oldest supported series (v$oldest)."
           echo "v$floor no longer receives security patches, so we are blessing an unpatched"
-          echo "isolation boundary. Raise MIN_SUPPORTED_FC_VERSION in crates/vmm/src/spawn/fcversion.rs to"
+          echo "isolation boundary. Raise MIN_SUPPORTED_FC_VERSION in crates/engine/src/spawn/fcversion.rs to"
           echo "v$oldest, drop any now-dead version gate, and update the host-requirements line."
           exit 1

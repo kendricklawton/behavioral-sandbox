@@ -195,7 +195,7 @@ while a path takes the directory.
 
 | Path | Package | Role |
 |------|---------|------|
-| `crates/vmm` | `ekvm-engine` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
+| `crates/engine` | `ekvm-engine` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
 | `crates/channel` | `ekvm-channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
 | `crates/guest-agent` | `ekvm-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |

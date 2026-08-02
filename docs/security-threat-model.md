@@ -129,13 +129,13 @@ privileged lane.
 
 What each claim maps to:
 
-- **Escape, exhaustion, egress, co-resident interference** are `crates/vmm/tests/confinement.rs`:
+- **Escape, exhaustion, egress, co-resident interference** are `crates/engine/tests/confinement.rs`:
   `driver_death_cannot_leak_a_vm`, `kill_handle_unblocks_a_wedged_exec`,
   `guest_mem_hog_is_bounded_by_the_cgroup`, `guest_fork_bomb_is_bounded_by_the_cgroup`,
   `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir`, and the consolidated
   `a_hostile_run_cannot_starve_or_observe_a_co_resident_run` (one hostile guest attacking every axis
   at once).
-- **No host leak across runs** is `crates/vmm/tests/boot.rs`: `repeated_boots_leave_no_leaks` (scratch
+- **No host leak across runs** is `crates/engine/tests/boot.rs`: `repeated_boots_leave_no_leaks` (scratch
   dirs, orphan VMMs, netns, process-local fds and threads all return to baseline) and
   `fd_footprint_per_vm_stays_within_budget_and_never_leaks`.
 

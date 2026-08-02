@@ -53,7 +53,7 @@ a design error rather than a trade-off.
 
 One workspace. **Directories stay short and packages carry the `ekvm-` prefix**, the **CLI** taking
 the bare `ekvm`, so the two columns below rarely match: `-p` takes the **package**
-(`-p ekvm-engine`), paths take the **directory** (`crates/vmm`). The prefix would only stutter on
+(`-p ekvm-engine`), paths take the **directory** (`crates/engine`). The prefix would only stutter on
 the filesystem of a repo already called ekvm, and it is the package name that has to be unambiguous,
 since that is the one a registry and a downstream `Cargo.toml` see. The bare name goes to the thing
 a user names: `cargo install ekvm` and the binary on `PATH` agree, and an embedder writes
@@ -64,7 +64,7 @@ worth knowing before editing, the boot sequence, and the teardown layers, read
 
 | Path | Package | What it is |
 |---|---|---|
-| `crates/vmm` | `ekvm-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
+| `crates/engine` | `ekvm-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
 | `crates/channel` | `ekvm-channel` | Host↔guest framing. Zero dependencies, shared verbatim by driver and agent, so the two can't drift. |
 | `crates/guest-agent` | `ekvm-guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. Its binary keeps the bare name `guest-agent`: that is the path the rootfs build bakes in. |
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. Its binary keeps the bare name `probes`: that is the object filename the loader looks for. |

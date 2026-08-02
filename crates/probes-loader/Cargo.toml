@@ -46,7 +46,7 @@ zeroize = { workspace = true }
 # The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach
 # the probes, prove what the guest did shows up). A dev-dependency so the loader library
 # stays independent of `ekvm`: the eBPF track and the driver track bridge only by plain values.
-ekvm-engine = { path = "../vmm" }
+ekvm-engine = { path = "../engine" }
 # Cross-crate test helpers (the cgroup-cap harness, host-capability probes), shared with the driver's
 # confinement tests so they aren't copy-pasted. Dev-only, never shipped.
 ekvm-test-support = { path = "../test-support" }

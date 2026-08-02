@@ -1,7 +1,7 @@
 //! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else
 //! compiles or tests, and four kinds are mechanically checkable, so this pass checks them:
 //!
-//! 1. **Repo paths in backticks.** A comment naming `` `crates/vmm/src/lib.rs` `` must point at
+//! 1. **Repo paths in backticks.** A comment naming `` `crates/engine/src/lib.rs` `` must point at
 //!    something in the tree; a rename otherwise leaves the comment lying about where things live.
 //! 2. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
 //!    silently *creates* missing `SUMMARY.md` chapters as empty stubs, so a deleted page would
@@ -10,7 +10,7 @@
 //!    section leaves the file resolving and the anchor dead, which check 2 cannot see, and
 //!    `RELEASES.md` pointed at a relocated Semver section for months on exactly that blind spot.
 //! 4. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
-//!    package. A crate's directory is not always its package (`crates/vmm` builds `ekvm-engine`), so
+//!    package. A crate's directory is not always its package (`crates/engine` builds `ekvm-engine`), so
 //!    this is invisible to check 1: the path resolves while the command it appears in does not run.
 //!    Unlike checks 1 to 3 this one reads **every** tracked text file, not just `.rs` and `.md`:
 //!    a copy-pasteable command is a command wherever it is printed, and two dead `-p cli`
@@ -59,7 +59,7 @@ pub fn check(root: &Path) -> Result<()> {
         };
 
         // A `cargo … -p <name>` a reader is told to run must name a real workspace package. The
-        // directory and the package name are allowed to differ here (`crates/vmm` builds
+        // directory and the package name are allowed to differ here (`crates/engine` builds
         // `ekvm-engine`), which is how five copies of a `-p cli` invocation came to be printed at
         // people, in the docs, in two test headers, and in xtask's own output. Every one errored
         // with "package(s) not found in workspace". Scoping this to `.rs`/`.md` is what let two
@@ -144,7 +144,7 @@ pub fn check(root: &Path) -> Result<()> {
 }
 
 /// Every package name in the workspace, read from the tracked `Cargo.toml` files rather than from
-/// directory names: the two differ (`crates/vmm` builds `ekvm-engine`), and it is the name `-p` takes.
+/// directory names: the two differ (`crates/engine` builds `ekvm-engine`), and it is the name `-p` takes.
 fn package_names(root: &Path, tracked: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let mut names = BTreeSet::new();
     for rel in tracked.iter().filter(|p| p.ends_with("Cargo.toml")) {
@@ -524,25 +524,26 @@ mod tests {
         let anchors = path_anchors(&BTreeSet::new());
         // A backticked path outside a fence is a candidate; the same inside a ``` fence is skipped
         // (an illustrative example that needn't exist).
-        let text = "real `crates/vmm/src/lib.rs` here.\n\
+        let text = "real `crates/engine/src/lib.rs` here.\n\
                     ```\n`docs/made-up-example.md`\n```\n";
         let got = path_candidates(text, &anchors);
         assert_eq!(
             got,
-            vec![(1, "crates/vmm/src/lib.rs".to_string())],
+            vec![(1, "crates/engine/src/lib.rs".to_string())],
             "{got:?}"
         );
     }
 
     #[test]
     fn path_candidates_match_anchored_paths_not_prose_slashes() {
-        let tracked: BTreeSet<String> = ["crates/vmm/src/lib.rs", "crates/guest-agent/src/lib.rs"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        let tracked: BTreeSet<String> =
+            ["crates/engine/src/lib.rs", "crates/guest-agent/src/lib.rs"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
         let anchors = path_anchors(&tracked);
         for good in [
-            "crates/vmm/src/lib.rs",
+            "crates/engine/src/lib.rs",
             "docs/probes.md",
             "crates/probes",
             "crates/guest-agent/src/lib.rs",
@@ -568,18 +569,21 @@ mod tests {
 
     #[test]
     fn path_exists_matches_exact_dir_and_suffix() {
-        let tracked: BTreeSet<String> = ["crates/vmm/src/lib.rs", "crates/vmm/Cargo.toml"]
+        let tracked: BTreeSet<String> = ["crates/engine/src/lib.rs", "crates/engine/Cargo.toml"]
             .into_iter()
             .map(str::to_owned)
             .collect();
-        assert!(path_exists(&tracked, "crates/vmm/src/lib.rs"));
-        assert!(path_exists(&tracked, "crates/vmm"));
-        assert!(path_exists(&tracked, "vmm/src/lib.rs"));
-        assert!(path_exists(&tracked, "crates/vmm/"));
-        assert!(!path_exists(&tracked, "crates/vmm/src/gone.rs"));
+        assert!(path_exists(&tracked, "crates/engine/src/lib.rs"));
+        assert!(path_exists(&tracked, "crates/engine"));
         assert!(
-            !path_exists(&tracked, "mm/src/lib.rs"),
-            "not a path segment"
+            path_exists(&tracked, "engine/src/lib.rs"),
+            "trailing segments name a path"
+        );
+        assert!(path_exists(&tracked, "crates/engine/"));
+        assert!(!path_exists(&tracked, "crates/engine/src/gone.rs"));
+        assert!(
+            !path_exists(&tracked, "gine/src/lib.rs"),
+            "a suffix of a segment is not a segment"
         );
     }
 

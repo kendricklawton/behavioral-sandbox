@@ -405,7 +405,7 @@ mod tests {
     fn install_sh_firecracker_pin_matches_doctor() {
         let repo = workspace_root();
         let install = std::fs::read_to_string(repo.join("install.sh")).unwrap();
-        let doctor = std::fs::read_to_string(repo.join("crates/vmm/src/doctor.rs")).unwrap();
+        let doctor = std::fs::read_to_string(repo.join("crates/engine/src/doctor.rs")).unwrap();
 
         let shas_in = |text: &str, prefix: &str| -> Vec<String> {
             text.lines()
@@ -455,7 +455,7 @@ mod tests {
         let repo = workspace_root();
         let install = std::fs::read_to_string(repo.join("install.sh")).unwrap();
         let spawn =
-            std::fs::read_to_string(repo.join("crates/vmm/src/spawn/fcversion.rs")).unwrap();
+            std::fs::read_to_string(repo.join("crates/engine/src/spawn/fcversion.rs")).unwrap();
 
         let fc_ver = install
             .lines()
@@ -491,7 +491,7 @@ mod tests {
         let repo = workspace_root();
         let container = std::fs::read_to_string(repo.join("Containerfile")).expect("Containerfile");
         let spawn =
-            std::fs::read_to_string(repo.join("crates/vmm/src/spawn/fcversion.rs")).unwrap();
+            std::fs::read_to_string(repo.join("crates/engine/src/spawn/fcversion.rs")).unwrap();
 
         let fc_ver = container
             .lines()
@@ -672,7 +672,7 @@ mod tests {
                     if !(token.starts_with("crates/") || token.starts_with("xtask/")) {
                         continue;
                     }
-                    // `crates/vmm/**` is a path *filter*, not a file: check the dir it roots.
+                    // `crates/engine/**` is a path *filter*, not a file: check the dir it roots.
                     // Trailing sentence punctuation is not part of the path either.
                     let target = token
                         .trim_end_matches("/**")

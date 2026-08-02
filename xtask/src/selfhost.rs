@@ -112,7 +112,7 @@ fn write_starter_config() -> Result<()> {
         body.push_str(&format!(
             "# /tmp is mounted nodev/noexec on this host, so the jailer's chroot there can't open its\n\
              # /dev/kvm or exec its firecracker copy; an unrestricted scratch dir so the jailed\n\
-             # default boots (the check in crates/vmm/src/doctor.rs).\n\
+             # default boots (the check in crates/engine/src/doctor.rs).\n\
              scratch_dir = \"{}\"\n",
             scratch.display()
         ));

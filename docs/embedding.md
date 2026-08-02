@@ -16,7 +16,7 @@ The engine is not distributed through crates.io and
 ekvm-engine = { git = "https://github.com/packsixfour/ekvm", rev = "<40-char sha>" }
 ```
 
-The package is `ekvm-engine`; its directory is `crates/vmm`, and a git dependency resolves by
+The package is `ekvm-engine`; its directory is `crates/engine`, and a git dependency resolves by
 **package name**, so the path never appears. The bare `ekvm` is the **CLI**, a different crate that
 happens to live in the same repository, so depending on it gets you the command-line tool's
 internals rather than the engine. Take the rev from a tag or a commit you have read, not from a
@@ -103,7 +103,7 @@ cgroup-owned sentinel reaps the VM if the embedding *process* is SIGKILL'd or OO
 blocked in, the host-gave-up path. Residue from a crashed embedder is reclaimed by `sweep_orphans`,
 with ownership keyed on liveness rather than on names, and scoped to your own euid's residue.
 
-`crates/vmm/tests/confinement.rs` exercises these paths: `driver_death_cannot_leak_a_vm` SIGKILLs a
+`crates/engine/tests/confinement.rs` exercises these paths: `driver_death_cannot_leak_a_vm` SIGKILLs a
 driver mid-run and asserts the VMM dies with it, `a_vmm_killed_while_awaiting_userspace_leaks_nothing`
 kills a VMM mid-boot and asserts the scratch dir is reclaimed, and
 `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir` covers the residue path. What a passing test

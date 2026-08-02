@@ -181,7 +181,7 @@ out=$(findfs LABEL={out_label} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t 
 /// first, `ifconfig` as the fallback,
 /// so it works whether or not busybox's `ip` applet carries v6 address support.
 /// DAD is disabled (`accept_dad=0`) before the address is added, mirroring the host tap end's
-/// `nodad` (`crates/vmm/src/net.rs`): the point-to-point `/64` has exactly one other endpoint,
+/// `nodad` (`crates/engine/src/net.rs`): the point-to-point `/64` has exactly one other endpoint,
 /// owned by the same driver, so detection can find nothing, and its tentative window (~1s) makes
 /// the address unusable as a source right after boot, a real failure for a guest command that
 /// talks v6 immediately.
@@ -464,7 +464,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
 /// **What this proves, and what it doesn't.** It proves the tree handed to `mke2fs` carries what the
 /// constants promise, at the modes the guest needs. It does not prove the image *boots*: nothing here
 /// runs a kernel, and a script can satisfy every check and still be wrong. Booting is the privileged
-/// suite's job (`crates/vmm/tests/boot.rs`).
+/// suite's job (`crates/engine/tests/boot.rs`).
 fn verify_guest_contract(staging: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 

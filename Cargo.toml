@@ -6,7 +6,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/vmm",
+    "crates/engine",
     "crates/channel",
     "crates/guest-agent",
     "crates/probes-common",

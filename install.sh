@@ -52,7 +52,7 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
 
 # Whether the filesystem holding $2 is mounted with flag $1 (`nodev` makes the jailer's chroot
 # /dev/kvm inert; `noexec` refuses the exec of its firecracker copy), mirroring the detector in
-# crates/vmm/src/doctor.rs. Uses findmnt (util-linux, present on every systemd host); a missing
+# crates/engine/src/doctor.rs. Uses findmnt (util-linux, present on every systemd host); a missing
 # findmnt reads as "flag absent" so we never guess wrong and pin a scratch dir the operator didn't
 # ask for.
 has_mount_flag() {
@@ -243,10 +243,10 @@ esac
 if [ "$DATA" != "${XDG_DATA_HOME:-$HOME/.local/share}/ekvm" ]; then
     say "  - non-default data dir, so observability needs: export EKVM_PROBES_OBJECT=\"$DATA/probes\""
 fi
-# Keep in step with PINNED_FIRECRACKER_SHA256 in crates/vmm/src/doctor.rs.
+# Keep in step with PINNED_FIRECRACKER_SHA256 in crates/engine/src/doctor.rs.
 FC_PIN1="2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7"
 # The release the printed commands below install; keep in step with PINNED_FC_VERSION in
-# crates/vmm/src/spawn.rs (a dist test compares the series so the two cannot drift).
+# crates/engine/src/spawn.rs (a dist test compares the series so the two cannot drift).
 FC_VER="v1.16.1"
 FC_BIN=$(command -v firecracker 2>/dev/null || true)
 if [ -n "$FC_BIN" ]; then

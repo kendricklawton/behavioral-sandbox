@@ -21,7 +21,7 @@ on:
   # CLI-only change does not spend 45 minutes booting a VM it cannot affect.
   pull_request:
     paths:
-      - "crates/vmm/**"
+      - "crates/engine/**"
       - "crates/probes/**"
       - "crates/probes-common/**"
       - "crates/probes-loader/**"

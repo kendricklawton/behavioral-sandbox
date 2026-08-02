@@ -7,7 +7,7 @@ this is the side that makes the boundary hardware.
 ## Talking to Firecracker
 
 Firecracker takes its configuration as HTTP/1.1 over a unix socket, one request per resource, and
-`crates/vmm/src/firecracker.rs` hand-rolls the sliver of HTTP that needs rather than pulling in an
+`crates/engine/src/firecracker.rs` hand-rolls the sliver of HTTP that needs rather than pulling in an
 HTTP crate and an async runtime. That keeps the dependency graph of the crate an embedder pins
 small, which [decision 7](./architecture-decisions.md#7-synchronous-engine-no-async-runtime) argues
 is a security property rather than a preference.

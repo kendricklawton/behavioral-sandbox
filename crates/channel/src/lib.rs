@@ -109,7 +109,7 @@ pub const OUTPUT_LABEL: &str = "ekvm-output";
 /// The guest path of the **overlay init**, the PID 1 a read-only-root boot hands off to (it stacks
 /// a per-run tmpfs over the shared read-only base, then execs the real init). Like the vsock port
 /// above, this is a pre-connection host↔guest contract with two writers: the driver appends
-/// `init=<this>` to the kernel command line (`crates/vmm/src/spawn.rs`), and the rootfs build writes
+/// `init=<this>` to the kernel command line (`crates/engine/src/spawn.rs`), and the rootfs build writes
 /// the script there (`xtask/src/rootfs.rs`). A drifted copy is worse than a mismatched port, since
 /// the kernel would boot into a path nothing occupies and the failure arrives as a boot timeout
 /// rather than as a build error.

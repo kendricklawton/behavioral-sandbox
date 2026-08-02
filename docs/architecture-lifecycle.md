@@ -111,7 +111,7 @@ Two smaller guards follow the same shape: `StagedDisk` for the restore path's ou
 and `ensure_private_staging_dir`, which refuses to adopt a staging directory that is not owned by us at
 mode 0700, because a snapshot bakes in a predictable path that a local attacker could pre-create.
 
-The confinement suite (`crates/vmm/tests/confinement.rs`) is where these are exercised:
+The confinement suite (`crates/engine/tests/confinement.rs`) is where these are exercised:
 `driver_death_cannot_leak_a_vm`, `a_jailed_vmm_killed_mid_boot_leaves_no_mounts_behind`,
 `sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir`.
 

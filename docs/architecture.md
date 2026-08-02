@@ -49,7 +49,7 @@ Directories stay short and packages carry the `ekvm-` prefix, so the two columns
 
 | Crate | Directory | Role |
 |---|---|---|
-| `ekvm-engine` | `crates/vmm` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
+| `ekvm-engine` | `crates/engine` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
 | `ekvm-channel` | `crates/channel` | The host/guest wire protocol. Dependency-free framing, shared verbatim by driver and agent. |
 | `ekvm-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
 | `ekvm-probes` | `crates/probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. Its object keeps the bare name `probes`. |
