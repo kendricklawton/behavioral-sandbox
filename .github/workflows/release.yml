@@ -34,6 +34,30 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Host tools for the rootfs build
+        run: |
+          # `cargo xtask dist` builds the guest rootfs, which shells out to mke2fs, fakeroot, tar,
+          # readelf, curl and sha256sum. The runner image happens to carry fakeroot and binutils
+          # today, but that is an undocumented property of a third-party image, not a contract, and
+          # this is the one workflow that produces signed artifacts. Name what is needed.
+          sudo apt-get update
+          sudo apt-get install -y e2fsprogs binutils fakeroot curl
+
+      - name: mke2fs >= 1.47.1 (noble ships 1.47.0, which ignores SOURCE_DATE_EPOCH)
+        run: |
+          # Same build as ci-privileged-hosted.yml, and load-bearing for a different reason there.
+          # There it keeps the reproducibility *verify* from failing; here it keeps a released image
+          # from silently differing from every other build of the same tree. `dist` hard-fails below
+          # the floor rather than warning, so this step is what makes the release path pass at all.
+          ver="1.47.2"
+          curl -fsSL "https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v${ver}/e2fsprogs-${ver}.tar.xz" -o /tmp/e2fsprogs.tar.xz
+          tar -C /tmp -xJf /tmp/e2fsprogs.tar.xz
+          cd "/tmp/e2fsprogs-${ver}"
+          ./configure >/dev/null
+          make -j"$(nproc)" >/dev/null
+          sudo install -m0755 misc/mke2fs /usr/local/sbin/mke2fs
+          mke2fs -V
+
       - name: Toolchains (nightly + rust-src + bpf-linker for the eBPF object; musl for the guest agent)
         run: |
           # Both pinned, and kept equal to their single sources by

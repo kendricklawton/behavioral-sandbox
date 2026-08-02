@@ -59,6 +59,24 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     crate::artifacts::fetch_one(&pinned)?;
 
     println!("\n== 2/5  build the guest rootfs (agent baked in) ==");
+    // `build_rootfs` only *warns* below the floor, so a dev build still works on a stale host. A
+    // package is the one place that is wrong: the image would boot fine and hash differently from
+    // every other build of the same tree, which is undetectable from the tarball alone and turns a
+    // signed artifact into one nobody can reproduce. Same call as the eBPF object below.
+    match crate::rootfs::mke2fs_version() {
+        Some(v) if v < crate::rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN => {
+            let (ma, mi, pa) = v;
+            let (fa, fi, fp) = crate::rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN;
+            bail!(
+                "mke2fs {ma}.{mi}.{pa} ignores SOURCE_DATE_EPOCH (honoured from e2fsprogs \
+                 {fa}.{fi}.{fp}), so the packaged rootfs would not be byte-reproducible. A dist \
+                 ships an image whose hash is recorded; install e2fsprogs >= {fa}.{fi}.{fp} \
+                 (Ubuntu 24.04 ships 1.47.0, which is below the floor)"
+            );
+        }
+        None => bail!("mke2fs not found or its version unparseable; a dist needs it to build the guest rootfs"),
+        Some(_) => {}
+    }
     crate::rootfs::build_rootfs(false, false)?;
 
     println!("\n== 3/5  build the eBPF probe object ==");
