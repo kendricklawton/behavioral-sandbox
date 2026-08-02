@@ -240,8 +240,16 @@ for std and every registry dependency those were absolute paths under the buildi
 `CARGO_HOME` and rustup directory. `xtask` now builds the guest agent under `--remap-path-prefix`
 for both (`cargo_reproducible` in `xtask/src/main.rs`), mapping the toolchain's vendored std sources
 back onto the `/rustc/<commit>` token rustc itself uses, so a host carrying the `rust-src` component
-and one without it emit the same bytes. What that leaves outside the remap is the mke2fs version,
-which `dist` refuses below the `SOURCE_DATE_EPOCH` floor rather than packaging around.
+and one without it emit the same bytes.
+
+**That was not sufficient, and the measurement says so.** On 2026-08-02, with the remap in place and
+both hosts on e2fsprogs 1.47.2, a dev box built `29c2e192…` and the `ubuntu-24.04` runner built
+`0d614c70…` from the same commit. Something outside `CARGO_HOME` and the toolchain sources still
+varies between the two, and it has not been identified. So the property this project claims is the
+one `--verify` checks: **one host reproduces its own build**. Cross-host reproducibility is an open
+problem here, not a feature, and an independent rebuild is not expected to match the shipped image.
+What the release does rest on is the signed manifest: `install.sh` verifies `SHA256SUMS.sig` against
+a pinned public key and never rebuilds anything.
 
 `cargo xtask vendor` snapshots the whole input set, the resolved `.apk` closure included, into an
 offline mirror with a sha256 manifest. That is where the packages do get pinned by hash, so an
