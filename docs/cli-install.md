@@ -284,7 +284,7 @@ KVM box. `--no-run` skips the boot proof (build + install only). Like `install.s
 `~/.ekvm.toml` (absolute kernel/rootfs paths, and a `scratch_dir` off `nodev`/`noexec` when your
 `/tmp` carries either flag) unless one already exists; `EKVM_NO_TOML=1` skips it.
 
-To build **offline**, no Firecracker S3 bucket, no Alpine CDN, point it at a vendored mirror first
+To build **offline**, reaching none of those upstreams, point it at a vendored mirror first
 (see [Vendoring for offline builds](#vendoring-for-offline-builds)):
 
 ```console
@@ -424,8 +424,10 @@ Once you have a binary, head to [Using the eKVM CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 
-A build otherwise fetches from two upstreams: three sha-pinned inputs (the guest kernel + boot rootfs
-from Firecracker's CI S3 bucket, the Alpine minirootfs from the Alpine CDN), plus the guest package
+A build otherwise fetches sha-pinned inputs from three places: the guest kernel and boot rootfs from
+Firecracker's CI S3 bucket, the Alpine minirootfs from the Alpine CDN, and `apk-tools-static` from
+this repo's own `build-inputs` release (mirrored there because Alpine's branch repo deletes older
+package revisions, so the upstream URL expires). On top of those sits the guest package
 (`.apk`) closure, which floats within the pinned Alpine branch and is recorded rather than hash-pinned
 (see [Supply chain & provenance](./security-threat-model.md)). `cargo xtask vendor` snapshots **all**
 of them into a local mirror, pinning the closure in the process, so a fresh host builds without either

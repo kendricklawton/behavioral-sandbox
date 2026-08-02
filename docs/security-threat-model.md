@@ -223,8 +223,19 @@ it can check.
 
 ## Supply chain & provenance
 
-The guest kernel and the Alpine base rootfs are pinned by sha256 and verified on fetch
-(`xtask/src/artifacts.rs`). The package closure installed on top of that base is **not** hash-pinned
+The guest kernel, the Alpine base rootfs, and `apk-tools-static` are each pinned by sha256 and
+verified on fetch (`xtask/src/artifacts.rs` and `xtask/src/rootfs.rs`).
+
+One of them is served from this project rather than from its origin. `apk-tools-static` is the
+static `apk` the build executes on the host to populate the guest image, and an Alpine branch repo
+keeps only the newest revision of each package, so a pinned filename 404s the day upstream bumps: it
+did on 2026-08-02, breaking every fresh clone while cached machines kept building. It now comes from
+this repo's `build-inputs` release. Mirroring changed no bytes, and the pinned sha256 is the one that
+was there when the file came from Alpine, so the copy is checkable against upstream rather than
+trusted on this project's word. The trade is explicit: availability of a build input now depends on
+this repo, and a reader auditing the supply chain should count that as one more thing to trust.
+
+The package closure installed on top of that base is **not** hash-pinned
 on the live-CDN path: it floats within one Alpine branch, because branch repos carry only the latest
 revision per package, so an exact `pkg=ver-rN` pin would fail the build the day upstream bumps rather
 than reproduce it (`GUEST_PACKAGES` in `xtask/src/rootfs.rs`). What holds instead is a record and two
@@ -260,4 +271,11 @@ is what the sandbox is built to contain, not a break of it. The exposure it does
 distribution. `cargo xtask dist` bakes `rootfs-guest.ext4` into the signed release tarball, so
 operators run the image from the last release until the next one, and nothing here scans that closure
 against Alpine's security database.
-- **Dependency Auditing**: CI runs `cargo deny` to check for security advisories and enforce license policy across the dependency tree.
+Rust dependencies are audited by `cargo deny` in the host-safe gate, but not uniformly, and the
+difference matters: the root workspace gets the full set (advisories, bans, licenses, sources),
+while each workspace `exclude`d from it gets **advisories only**. License and ban policy is
+therefore enforced on the root tree alone. Which workspaces those are is derived from `Cargo.toml`
+by `detached_workspaces_are_all_scanned` rather than restated anywhere, because both of them went
+unscanned entirely from the day they were excluded until 2026-08-02, and nothing said so.
+`audit.yml` re-runs the advisory scan daily against the pinned lockfile, so a newly disclosed
+advisory surfaces without anyone committing.
