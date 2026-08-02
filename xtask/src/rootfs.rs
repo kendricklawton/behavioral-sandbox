@@ -389,6 +389,7 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     // is present, at the mode it needs. Fails the build rather than shipping an image that boots
     // into a missing helper.
     verify_guest_contract(&staging)?;
+    verify_staged_ownership(&staging)?;
 
     // Build the ext4 from the staging dir, rootless, via `mke2fs -d`, and **deterministic**:
     // a fixed UUID + directory-hash seed, plus `SOURCE_DATE_EPOCH` (honoured from e2fsprogs
@@ -465,6 +466,37 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
 /// constants promise, at the modes the guest needs. It does not prove the image *boots*: nothing here
 /// runs a kernel, and a script can satisfy every check and still be wrong. Booting is the privileged
 /// suite's job (`crates/engine/tests/boot.rs`).
+/// The staged tree has to be owned by uid/gid **0**, which is what the Alpine tarball ships and
+/// what a guest expects of its own `/`.
+///
+/// Unprivileged `tar` cannot set ownership and `mke2fs -d` copies whatever the tree has, so before
+/// the `fakeroot` re-exec this staged as the *builder's* uid and the image carried it: the same
+/// source produced a different hash for uid 1000 than for uid 0, and the reproducibility check could
+/// not see it, because it builds twice inside one process and so compares two builds sharing a uid.
+///
+/// Separate from [`verify_guest_contract`] on purpose. That one checks paths and content, and its
+/// unit tests construct minimal trees as whoever runs `cargo test`; this checks a property of the
+/// *build environment*, so it belongs on the build path and not in a contract a fixture can satisfy.
+fn verify_staged_ownership(staging: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    for probe in [GUEST_AGENT_PATH, INITTAB_PATH] {
+        let staged = in_staging(staging, probe);
+        let meta =
+            std::fs::metadata(&staged).with_context(|| format!("stat the staged {probe}"))?;
+        let (uid, gid) = (meta.uid(), meta.gid());
+        if (uid, gid) != (0, 0) {
+            bail!(
+                "the staged {probe} is {uid}:{gid}, not 0:0, so the image would carry the \
+                 builder's identity and hash differently than the same source built by anyone \
+                 else. `build_rootfs` re-execs under `fakeroot` to arrange this; reaching here \
+                 means that did not happen."
+            );
+        }
+    }
+    Ok(())
+}
+
 fn verify_guest_contract(staging: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -584,7 +616,53 @@ struct RootfsBuild {
 /// from the committed lockfile. `--update-lock` re-records that lockfile (the "re-pin" after an
 /// upstream bump); `--verify` proves reproducibility, a second build must be byte-identical, and
 /// turns closure drift into a hard failure. `ci-privileged` runs `--verify` as the CI gate.
+/// Re-exec this xtask under `fakeroot` when the caller is unprivileged, returning `true` if it ran
+/// the build in a child (so the caller should stop).
+///
+/// The guest rootfs must be owned by uid/gid **0**: that is what the Alpine tarball ships and what a
+/// guest expects of its own `/`. Unprivileged `tar` cannot set ownership, `mke2fs -d` copies
+/// whatever the staging tree has, and neither `tar --owner` on extract nor any `mke2fs` flag
+/// overrides it, so an unprivileged build silently produced a tree owned by the *builder's* uid. The
+/// image hash then depended on who ran the build (uid 1000 and uid 0 gave different images from the
+/// same source), which the reproducibility check could not see because it builds twice inside one
+/// process and so compares two builds that share a uid.
+///
+/// One `fakeroot` has to wrap the *whole* assembly, not each command: the faked ownership lives in
+/// one process's bookkeeping, so extracting under one invocation and running `mke2fs` under another
+/// would lose it. Re-exec is how a single session spans all of them. `FAKEROOTKEY` is set inside a
+/// session, which is what stops this recursing.
+fn reexec_under_fakeroot_if_needed() -> Result<bool> {
+    if crate::effective_uid()? == 0 || std::env::var_os("FAKEROOTKEY").is_some() {
+        return Ok(false);
+    }
+    if crate::dev_tool_path("fakeroot").is_none() {
+        bail!(
+            "building the guest rootfs unprivileged needs `fakeroot`, so the image is owned by \
+             uid 0 rather than by you (an image owned by uid {} boots but is not the image anyone \
+             else builds). Install fakeroot, or run this under sudo.",
+            crate::effective_uid()?
+        );
+    }
+    let exe = std::env::current_exe().context("locate the xtask binary to re-exec")?;
+    println!(
+        "$ fakeroot {} …  (guest rootfs must be uid 0)",
+        exe.display()
+    );
+    let status = std::process::Command::new("fakeroot")
+        .arg(exe)
+        .args(std::env::args_os().skip(1))
+        .status()
+        .context("running fakeroot")?;
+    if !status.success() {
+        bail!("the fakeroot build failed");
+    }
+    Ok(true)
+}
+
 pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
+    if reexec_under_fakeroot_if_needed()? {
+        return Ok(());
+    }
     // Name the mke2fs floor up front (see `MKE2FS_SOURCE_DATE_EPOCH_MIN`), instead of letting
     // `--verify` die later on a bare two-hash mismatch a reader can't diagnose.
     if let Some((major, minor, patch)) = mke2fs_version() {

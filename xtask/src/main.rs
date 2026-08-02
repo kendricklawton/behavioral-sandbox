@@ -597,7 +597,7 @@ fn fuzz_cmin(target: &str) -> Result<()> {
 
 /// This process's effective uid, read from `/proc/self/status` (`Uid:` line, second value), so the
 /// check needs no libc call.
-fn effective_uid() -> Result<u32> {
+pub(crate) fn effective_uid() -> Result<u32> {
     let status = std::fs::read_to_string("/proc/self/status").context("read /proc/self/status")?;
     parse_effective_uid(&status).context("parse the effective uid from /proc/self/status")
 }
@@ -1004,6 +1004,12 @@ fn setup() -> Result<()> {
         ),
         guest_bins::guest_target_installed(),
     );
+    // Not optional for an unprivileged rootfs build: without it the staged tree is owned by the
+    // builder's uid rather than 0, and the image hash then depends on who ran the build.
+    check(
+        "fakeroot (guest rootfs ownership: uid 0, not yours)",
+        dev_tool_path("fakeroot").is_some(),
+    );
     check(
         "readelf (binutils: static-link verification)",
         dev_tool_path("readelf").is_some(),
@@ -1362,7 +1368,7 @@ fn in_path(bin: &str) -> bool {
 /// root's PATH, so the natural `sudo cargo xtask setup` (run to green the *runtime* rows) would
 /// otherwise report an installed tool as missing. Checking the cargo bin dirs, including the
 /// *invoking* user's under sudo, keeps the dev-toolchain rows honest whichever way setup is invoked.
-fn dev_tool_path(bin: &str) -> Option<PathBuf> {
+pub(crate) fn dev_tool_path(bin: &str) -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PATH") {
         if let Some(hit) = std::env::split_paths(&path)
             .map(|dir| dir.join(bin))
