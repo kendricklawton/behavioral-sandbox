@@ -514,11 +514,40 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
     run_cargo_fuzz(&args, root)
 }
 
+/// Warn about a `fuzz/corpus/<name>` directory that is not a [`FUZZ_TARGETS`] entry, with how many
+/// inputs it holds. Renaming a target leaves its corpus behind under the old name and cargo-fuzz
+/// starts the new one from empty, so accumulated coverage goes *quiet* rather than missing, which is
+/// why nothing noticed: `agent_config` became `ekvm_config` in `0afde19` and 480 unique inputs sat
+/// unused until 2026-08-01.
+///
+/// A warning from a dev command rather than an assertion in `ci`, because `fuzz/corpus/` is
+/// gitignored working data. A gate reading it would pass or fail on whatever the developer happened
+/// to have run locally, and would fail on a fresh clone that has no corpus at all.
+fn warn_orphan_corpora(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root.join("fuzz/corpus")) else {
+        return; // nothing fuzzed here yet
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if FUZZ_TARGETS.contains(&name) || !entry.path().is_dir() {
+            continue;
+        }
+        let inputs = std::fs::read_dir(entry.path()).map_or(0, Iterator::count);
+        println!(
+            "  ! fuzz/corpus/{name} holds {inputs} input(s) but names no target. Renamed? The \
+             filenames are content hashes, so `cp -n {name}/* <new-target>/` merges and dedupes in \
+             one step; deleting it instead throws the accumulated coverage away."
+        );
+    }
+}
+
 /// The per-PR smoke: fuzz every [`FUZZ_TARGETS`] target for a bounded time, seeded, fail-fast. Cheap
 /// enough to run before a push (every target x the default 60s) yet enough to catch a decoder a change
 /// just broke, the gap between "green nightly" and "this PR regressed a parser".
 fn fuzz_smoke(seconds: u64) -> Result<()> {
     require_cargo_fuzz()?;
+    warn_orphan_corpora(workspace_root());
     println!(
         "fuzz-smoke: {} targets x {seconds}s each (seeded)",
         FUZZ_TARGETS.len()
