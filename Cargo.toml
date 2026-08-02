@@ -58,13 +58,13 @@ toml = "1"
 # so a consumer detects post-hoc alteration off-host. The audited, standard implementation, never a
 # hand-rolled one; keygen randomness is read from `/dev/urandom` (Linux-only engine), so no `rand`.
 # `zeroize` scrubs the secret key from memory on drop.
-ed25519-dalek = { version = "2", features = ["zeroize"] }
+ed25519-dalek = { version = "3", features = ["zeroize"] }
 # Scrub transient copies of the signing seed (the hex read from / written to the key file) so the
 # secret doesn't linger in freed memory.
 zeroize = "1"
 # SHA-256 for the record hash-chain: each record commits to the previous one's hash.
 # Already pulled in transitively by `ed25519-dalek`; pinned here so the loader names it directly.
-sha2 = "0.10"
+sha2 = "0.11"
 # Structured logging to stderr; stdout stays reserved for a run's result / audit log.
 tracing = "0.1"
 # `json`: the daemon's `--log-json` machine-readable encoding of the same structured events.

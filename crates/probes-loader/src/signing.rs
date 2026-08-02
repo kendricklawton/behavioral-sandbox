@@ -990,3 +990,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod ed25519_wire_compat {
+    use super::*;
+
+    /// Ed25519 is RFC 8032: a seed determines the key, and signing is deterministic, so these
+    /// bytes are fixed by the standard rather than by the implementation. Pinned as literals so a
+    /// dependency bump that changed key derivation or signature encoding fails here instead of
+    /// silently invalidating `release-key.pem`, every previously signed `RunRecord`, and every
+    /// `ekvm verify` a consumer has already run.
+    ///
+    /// The values were produced under ed25519-dalek 2.2.0 and must not move.
+    #[test]
+    fn a_fixed_seed_yields_a_fixed_key_id_and_signature() {
+        let key = HostKey::from_seed([7u8; 32]);
+        assert_eq!(
+            key.key_id(),
+            "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+            "the public key derived from a fixed seed moved: a consumer's trusted-key list is \
+             keyed on this"
+        );
+        let sig = key.sign_detached(b"ekvm signing wire-compat fixture");
+        assert_eq!(
+            sig.iter().fold(String::new(), |mut s, b| {
+                use std::fmt::Write as _;
+                let _ = write!(s, "{b:02x}");
+                s
+            }),
+            "b3211b1cdcecf34704e347b53041aa10facd97e0ba13f6ec6df8c9f51496a4c0e68851002a93cb2c3da3968c6ad03388da8831c3c3af9fb308aaeff791f40707",
+            "the detached signature over a fixed message moved: every record signed before this \
+             bump would stop verifying"
+        );
+    }
+}

@@ -426,7 +426,13 @@ fn file_sha256(path: &Path) -> Option<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Some(format!("{:x}", hasher.finalize()))
+    // sha2 0.11 returns RustCrypto's `Array` rather than `GenericArray`, and that type does not
+    // implement `LowerHex`, so the digest is formatted byte by byte instead of with `{:x}`.
+    Some(hasher.finalize().iter().fold(String::new(), |mut s, b| {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{b:02x}");
+        s
+    }))
 }
 
 /// Whether the running kernel is at least `major.minor`, from `/proc/sys/kernel/osrelease`.
