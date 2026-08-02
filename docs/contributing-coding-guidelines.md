@@ -6,7 +6,9 @@ page is about the code itself.
 
 ## `rustfmt`
 
-All code is formatted according to rustfmt, checked by the host-safe gate. Format locally with:
+All code is formatted according to rustfmt, checked by the host-safe gate. That includes the two
+**detached** workspaces, `crates/probes` and `fuzz`, which are excluded from the root one and so are
+reached by their own gate step rather than by `--all`. Format locally with:
 
 ```console
 cargo fmt --all
@@ -18,7 +20,11 @@ with the prose-drift lint and Clippy, which is the intended inner loop.
 ## Compiler warnings and lints
 
 The gate promotes all compiler warnings to errors, so `main` never has warnings for the pinned
-compiler. Unlike a project that floats on `stable`, this one **pins the toolchain exactly** in
+compiler. One exception is real and visible: the eBPF object build in `crates/probes` emits a
+`linker_messages` warning about the nightly's LLVM shared library and does **not** deny warnings,
+because that build runs through `rustup run … cargo build` for `bpfel-unknown-none` rather than
+through the workspace's `-D warnings` step. Clippy does gate that crate; the compiler warning is
+what survives. Unlike a project that floats on `stable`, this one **pins the toolchain exactly** in
 `rust-toolchain.toml`, so a warning that appears locally appears in CI too and vice versa. That is the
 whole reason for the pin: a lint that passes on a stale local stable and fails on a newer CI stable is
 a class of surprise this project chose to design out.
@@ -28,8 +34,9 @@ useful mid-refactor. By the time a change lands, the gate requires them resolved
 
 ## Clippy
 
-The gate runs Clippy with `-D warnings` across the workspace. On top of the default set, this project
-**opts additional lints into `deny`** through `[workspace.lints.clippy]` in the root `Cargo.toml`:
+The gate runs Clippy with `-D warnings` across the workspace **and across the two detached
+workspaces**. On top of the default set, this project **opts additional lints into `deny`** through
+`[workspace.lints.clippy]` in the root `Cargo.toml`:
 
 ```toml
 [workspace.lints.clippy]
@@ -64,6 +71,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Contributors are welcome to propose new lints. Enabling one for the workspace means fixing it
 everywhere in the same change.
+
+`crates/probes` and `fuzz` cannot write `[lints] workspace = true`, because cargo inherits lints for
+*members* and both are excluded. The gate reads the deny list above out of the root manifest and
+passes it to them on the command line, so there is one policy rather than a second copy to keep in
+step. Until 2026-08-02 there was no policy on them at all: both were outside rustfmt, Clippy, and
+`cargo deny`, and `crates/probes`, the one crate allowed `unsafe`, had accumulated 18 findings that
+nothing would have reported.
 
 ## Minimum supported `rustc` version (MSRV)
 
