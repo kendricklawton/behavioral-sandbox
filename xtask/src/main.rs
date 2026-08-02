@@ -749,12 +749,30 @@ fn lint_detached_workspaces(root: &Path) -> Result<()> {
         let dir = manifest.parent().unwrap_or(root).to_path_buf();
         let shown = dir.strip_prefix(root).unwrap_or(&dir).display().to_string();
         // Only `crates/probes` pins its own channel; `fuzz` builds on whatever the caller has.
+        //
+        // The nightly is installed `--profile minimal`, so the toolchain being present does not
+        // mean it can lint: `rustfmt` and `clippy` are separate components. Skip on either being
+        // absent rather than failing, the same call [`build_probes`] makes, and name the fix.
         let toolchain = if dir.ends_with("probes") {
-            if !nightly_ebpf_ready() {
-                println!("· skipping {shown}: its pinned nightly is not installed");
+            let nightly = probes_nightly()?;
+            let missing: Vec<&str> = ["rustfmt", "clippy"]
+                .into_iter()
+                .filter(|c| !nightly_has_component(c))
+                .collect();
+            if !nightly_ebpf_ready() || !missing.is_empty() {
+                println!(
+                    "· skipping fmt/clippy for {shown}: {nightly} lacks {} (add it: `rustup \
+                     component add --toolchain {nightly} {}`)",
+                    if missing.is_empty() {
+                        "the pinned toolchain".to_string()
+                    } else {
+                        missing.join(" and ")
+                    },
+                    missing.join(" ")
+                );
                 continue;
             }
-            Some(probes_nightly()?)
+            Some(nightly)
         } else {
             None
         };
@@ -1388,6 +1406,39 @@ fn nightly_ebpf_ready() -> bool {
                 && String::from_utf8_lossy(&o.stdout)
                     .lines()
                     .any(|l| l.trim().starts_with("rust-src"))
+        })
+        .unwrap_or(false)
+}
+
+/// Whether the pinned nightly carries `component`, asked the same sudo-aware way as
+/// [`nightly_ebpf_ready`].
+///
+/// The nightly is installed `--profile minimal`, which carries neither `rustfmt` nor `clippy`, so
+/// having the toolchain says nothing about being able to lint with it. CI learned this the hard
+/// way: the detached-workspace lint passed on a dev box that happened to have both and failed the
+/// gate with "'cargo-fmt' is not installed for the toolchain".
+fn nightly_has_component(component: &str) -> bool {
+    let Some(rustup) = dev_tool_path("rustup") else {
+        return false;
+    };
+    let Ok(nightly) = probes_nightly() else {
+        return false;
+    };
+    let mut cmd = Command::new(rustup);
+    cmd.args(["component", "list", "--toolchain", nightly, "--installed"]);
+    if std::env::var_os("RUSTUP_HOME").is_none() {
+        if let Some(user) = std::env::var_os("SUDO_USER") {
+            if let Some(home) = user_home(&user) {
+                cmd.env("RUSTUP_HOME", home.join(".rustup"));
+            }
+        }
+    }
+    cmd.output()
+        .map(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.trim().starts_with(component))
         })
         .unwrap_or(false)
 }

@@ -37,10 +37,16 @@ jobs:
 
       # Everything `cargo xtask ci` needs, so none of its layers soft-skip here: stable
       # fmt/clippy, and the probes' pinned nightly + rust-src (`build-std` for bpfel-unknown-none).
+      #
+      # The nightly also carries rustfmt and clippy, because the gate lints the detached workspaces
+      # under the toolchain each one pins, and `--profile minimal` includes neither. Without them
+      # that layer skips, which on this job means a green run that linted the one crate allowed
+      # `unsafe` not at all: the state this step's first line exists to prevent.
       - name: Install the toolchains
         run: |
           rustup component add rustfmt clippy
-          rustup toolchain install nightly-2026-07-20 --profile minimal --component rust-src
+          rustup toolchain install nightly-2026-07-20 --profile minimal \
+            --component rust-src --component rustfmt --component clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
