@@ -53,7 +53,7 @@ and dashboards belong to whatever *hosts* the engine, and the model driving an a
   `open`, logs and metrics for the hoster, and the reference client the language SDKs grow from.
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
-  accounting, each with a live demo.
+  accounting, each pinned by a privileged test.
 - **[Threat model](./security-threat-model.md)**, what is trusted, host hardening baseline, supply-chain provenance, and residual risk.
 - **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
   report one.

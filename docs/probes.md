@@ -130,9 +130,7 @@ the loader stays `#![forbid(unsafe_code)]`.
 A sandbox's tap lives in its own network namespace, so `TapMonitor::attach_in_netns` enters that netns (via `setns` behind nix's
 safe wrapper) to bind the monitor to one sandbox's `fc0`, and `totals()` sums the flows
 into a per-VM rollup. Dropping the monitor frees its userspace handles; the sandbox's netns teardown
-reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host residue. `cargo xtask
-watch-sandbox` boots a real networked sandbox and prints the per-VM flows its guest actually generated,
-this axis's live view.
+reclaims the `tc` filter, so attach-on-open and detach-on-close leave no host residue.
 
 ## Egress enforcement in the kernel
 
@@ -175,7 +173,7 @@ churns source ports to fill the table cannot quietly evict its real traffic from
 on the maps: a denied packet is dropped at the tap whether or not its audit row fit. The egress filter mechanism (map,
 schema, deny-by-default, ingress-hook enforcement, ARP carve-out) is pinned by `net_enforce.rs`
 (ignored/privileged): a guest reaches an allow-listed endpoint and is blocked from everything
-else. `cargo xtask enforce-sandbox` is the live demo. Folding attach-and-enforce into the launch
+else. Folding attach-and-enforce into the launch
 path is the fused record's convergence (below).
 
 ## Resource accounting from the cgroup
@@ -210,8 +208,7 @@ accounting fails open). `ResourceMeter::summary_for_pid(vmm_pid)` rolls all thre
 `ResourceSummary` for one sandbox. The split is deliberate, "cgroup-bpf **or** cgroup + tracepoints":
 eBPF where per-event timing earns its keep (CPU), the kernel's own counters where they already exist
 (memory, IO). `resource_meter.rs` (ignored/privileged) runs a CPU-heavy sandbox and an idle one and asserts the
-first is attributed more CPU than the second; `cargo xtask
-meter-sandbox` is the live demo. The engine *measures*; the hoster *bills*.
+first is attributed more CPU than the second. The engine *measures*; the hoster *bills*.
 
 ## The fused audit record
 
@@ -274,15 +271,10 @@ cargo test -p ekvm-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
 ```
 
-The per-axis demos each boot a real sandbox and show one probe end to end (all need
-`/dev/kvm` + the eKVM rootfs + the built object, run as root or with the named caps):
+The metering overhead has its own bench, which needs no KVM:
 
 ```console
-cargo xtask trace-sandbox      # the sandbox's host syscall footprint, by cgroup
-cargo xtask watch-sandbox      # the guest's per-VM network flows on its tap
-cargo xtask enforce-sandbox    # deny-by-default egress, allow-listed, enforced at the tap
-cargo xtask meter-sandbox      # per-sandbox CPU (eBPF) + memory/IO (cgroup v2)
-cargo xtask bench-meter        # the metering overhead, measured (no KVM needed)
+cargo xtask bench-meter
 ```
 
 ## Beyond the counter: the per-event syscall trace

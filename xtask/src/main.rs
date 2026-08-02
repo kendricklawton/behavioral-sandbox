@@ -71,8 +71,6 @@
 
 mod artifacts;
 mod bench;
-mod coverage;
-mod demo;
 mod dist;
 mod drift;
 mod guest_bins;
@@ -101,9 +99,6 @@ struct Cli {
 enum Cmd {
     /// Host-safe gate: fmt · prose-drift · clippy `-D warnings` · build · test · docs · cargo-deny.
     Ci,
-    /// Fast inner loop: fmt · prose-drift · clippy `-D warnings`. Runs **no tests** (that is what
-    /// makes it fast: ~4s vs ~17s), so it says the code compiles and lints, not that it works.
-    Check,
     /// Privileged integration tests (KVM + eBPF), the `#[ignore]`d tests. Needs `/dev/kvm` + caps.
     CiPrivileged {
         /// Run the test phase this many times (setup runs once): the release-readiness soak, so
@@ -111,18 +106,6 @@ enum Cmd {
         /// broke.
         #[arg(long, value_name = "N", default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..))]
         repeat: u32,
-    },
-    /// Line coverage of the **workspace** by the test suite (`cargo llvm-cov`), the number neither
-    /// gate produces: `fuzz-coverage` measures one libFuzzer target against its corpus and says
-    /// nothing about the rest of the engine. Runs the whole suite once, `--include-ignored`, so the
-    /// number is the union of the host-safe and privileged gates. Same host needs as
-    /// `ci-privileged`, plus `cargo install cargo-llvm-cov` and `llvm-tools-preview`. Never gates
-    /// anything; the per-file uncovered regions are the point.
-    Coverage {
-        /// Skip the privileged tests (and the root requirement) for a fast partial number. The
-        /// boot, jailer, and probe paths go unmeasured, so the result is a floor.
-        #[arg(long)]
-        host_only: bool,
     },
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
@@ -173,8 +156,6 @@ enum Cmd {
         #[arg(long, value_name = "FILE")]
         path: PathBuf,
     },
-    /// Build the guest agent as a static musl binary (baked into the rootfs by `build-rootfs`).
-    BuildGuestAgent,
     /// Build the static native-ELF fixture (`examples/writefile`) for the guest target, the
     /// runtime-agnostic test injects and runs it to prove the engine executes any static Linux binary.
     BuildGuestExample,
@@ -282,33 +263,6 @@ enum Cmd {
         #[arg(long, default_value_t = 1000)]
         runs: usize,
     },
-    /// The syscall-trace demo: boot a real sandbox and stream its host syscall footprint,
-    /// attributed to the sandbox's cgroup (the VMM's host syscalls, the guest's stay in-guest).
-    /// Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes`.
-    TraceSandbox {
-        /// Seconds to keep streaming the live trace after the boot+exec window is printed (`0` = just
-        /// the boot+exec footprint).
-        #[arg(long, default_value_t = 5)]
-        seconds: u64,
-    },
-    /// The network-observability demo: boot a real networked sandbox, attach a `tc` monitor to its tap
-    /// inside its netns, drive guest traffic, and print the per-VM network flows and totals it counts.
-    /// Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + `cargo xtask build-probes`.
-    WatchSandbox {
-        /// How many guest-traffic bursts to send, watching the per-VM counters climb each one.
-        /// At least 1, enforced at parse (a zero-round watch would prove nothing).
-        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u64).range(1..))]
-        rounds: u64,
-    },
-    /// The egress-enforcement demo: boot a real networked sandbox, arm a deny-by-default egress policy
-    /// allowing one endpoint, and show the allow-listed traffic passing while everything else is dropped
-    /// at the tap and recorded. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
-    EnforceSandbox,
-    /// The resource-metering demo: boot a real sandbox, meter its cgroup with the `sched_switch`
-    /// accounting probe, and show an idle guest charging near-zero host CPU while a CPU-heavy guest charges
-    /// most of a core, plus the per-run resource summary (CPU from eBPF, memory/IO from cgroup v2). Needs
-    /// `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
-    MeterSandbox,
     /// Fuzz the untrusted-input decoders (the host↔guest channel, the daemon's client wire, the
     /// signed-record envelope, the eBPF-boundary parsers) with `cargo fuzz` (libFuzzer), the deep,
     /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
@@ -332,27 +286,12 @@ enum Cmd {
         #[arg(long, default_value_t = 60)]
         seconds: u64,
     },
-    /// Measure a target's line coverage over its corpus + seeds (`cargo fuzz coverage`), so a target
-    /// stuck bouncing off an early check shows as low coverage instead of a hollow green. Prints where
-    /// the profile landed and how to render a report.
-    FuzzCoverage {
-        #[arg(default_value = "channel_response", value_parser = fuzz_target_parser())]
-        target: String,
-    },
-    /// Minimize a target's on-disk corpus (`cargo fuzz cmin`): drop inputs that add no coverage so the
-    /// corpus (and each run's replay) stays small. A periodic maintenance step, not part of a run.
-    FuzzCmin {
-        #[arg(default_value = "channel_response", value_parser = fuzz_target_parser())]
-        target: String,
-    },
 }
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Ci => ci(),
-        Cmd::Check => fast_check(),
         Cmd::CiPrivileged { repeat } => ci_privileged(repeat),
-        Cmd::Coverage { host_only } => coverage::coverage(host_only),
         Cmd::Setup => setup(),
         Cmd::SelfHost { prefix, no_run } => selfhost::self_host(prefix, no_run),
         Cmd::Vendor { dir, verify } => {
@@ -366,7 +305,6 @@ fn main() -> Result<()> {
         Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
         Cmd::Dist { version } => dist::dist(version),
         Cmd::ReleaseKey { path } => dist::release_key(&path),
-        Cmd::BuildGuestAgent => guest_bins::build_guest_agent().map(|_| ()),
         Cmd::BuildGuestExample => guest_bins::build_guest_example().map(|_| ()),
         Cmd::BuildRootfs {
             verify,
@@ -381,14 +319,8 @@ fn main() -> Result<()> {
         Cmd::BenchMeter { runs } => bench::bench_meter(runs),
         Cmd::BenchScale { runs } => bench::bench_scale(runs),
         Cmd::BenchSign { runs } => bench::bench_sign(runs),
-        Cmd::TraceSandbox { seconds } => demo::trace_sandbox(seconds),
-        Cmd::WatchSandbox { rounds } => demo::watch_sandbox(rounds),
-        Cmd::EnforceSandbox => demo::enforce_sandbox(),
-        Cmd::MeterSandbox => demo::meter_sandbox(),
         Cmd::Fuzz { target, seconds } => fuzz(&target, seconds),
         Cmd::FuzzSmoke { seconds } => fuzz_smoke(seconds),
-        Cmd::FuzzCoverage { target } => fuzz_coverage(&target),
-        Cmd::FuzzCmin { target } => fuzz_cmin(&target),
     }
 }
 
@@ -479,29 +411,6 @@ fn run_cargo_fuzz(args: &[String], root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// `cargo fuzz coverage` renders its profile with `llvm-profdata` from the nightly `llvm-tools`
-/// component, an opt-in install like cargo-fuzz itself, so check for it up front and bail with the
-/// one-line fix rather than letting the run fail cryptically at the merge step.
-fn require_llvm_tools() -> Result<()> {
-    // The *pinned* toolchain, matching what `cargo_fuzz_argv` selects: checking the `nightly` alias
-    // would report ready off a toolchain the coverage run never uses.
-    let nightly = probes_nightly()?;
-    let installed = Command::new("rustup")
-        .args(["component", "list", "--toolchain", nightly, "--installed"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("llvm-tools"))
-        .unwrap_or(false);
-    if installed {
-        return Ok(());
-    }
-    bail!(
-        "llvm-tools not installed — `cargo fuzz coverage` needs it to merge the profile: \
-         `rustup component add llvm-tools --toolchain {nightly}`."
-    )
-}
-
 /// Run one `cargo fuzz` (libFuzzer) target against the untrusted-input decoders, seeded. A positive
 /// `seconds` bounds the run (`0` runs until a crash or Ctrl-C).
 fn fuzz(target: &str, seconds: u64) -> Result<()> {
@@ -560,38 +469,6 @@ fn fuzz_smoke(seconds: u64) -> Result<()> {
         FUZZ_TARGETS.len()
     );
     Ok(())
-}
-
-/// Measure a target's coverage over its corpus + seeds. cargo-fuzz writes a `coverage.profdata`; a
-/// low reached-fraction means the target is bouncing off an early check (bad seeds, an over-tight
-/// guard) rather than exercising the decode logic, which a green run alone can't reveal.
-fn fuzz_coverage(target: &str) -> Result<()> {
-    require_cargo_fuzz()?;
-    require_llvm_tools()?;
-    let root = workspace_root();
-    let args = cargo_fuzz_argv("coverage", target, root, true)?;
-    run_cargo_fuzz(&args, root)?;
-    let profdata = root
-        .join("fuzz/coverage")
-        .join(target)
-        .join("coverage.profdata");
-    println!("\ncoverage profile written: {}", profdata.display());
-    println!(
-        "render a report (needs `cargo install cargo-binutils`): `cargo cov -- show` / `report` \
-         against the target binary under fuzz/target/<triple>/coverage with \
-         `-instr-profile={}`. See the Rust Fuzz Book.",
-        profdata.display()
-    );
-    Ok(())
-}
-
-/// Minimize a target's on-disk corpus in place, keeping one input per coverage feature. A periodic
-/// maintenance step so a corpus that grew over many runs stays fast to replay.
-fn fuzz_cmin(target: &str) -> Result<()> {
-    require_cargo_fuzz()?;
-    let root = workspace_root();
-    let args = cargo_fuzz_argv("cmin", target, root, false)?;
-    run_cargo_fuzz(&args, root)
 }
 
 /// This process's effective uid, read from `/proc/self/status` (`Uid:` line, second value), so the
@@ -951,34 +828,6 @@ fn major_minor(v: &str) -> Option<(u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     Some((major, minor))
-}
-
-/// The fast inner loop: does it format, lint, and compile. **Deliberately runs no tests**, which is
-/// the whole point, measured on this workspace, the test step is ~16s of a ~17s `ci` and everything
-/// else rounds to nothing, so dropping it is the only thing that makes a faster loop (~4s). Skipping
-/// docs and `cargo deny` saves nothing once they're warm; they're left out only because a
-/// no-test run can't honestly claim to be the gate anyway.
-/// Not a substitute for [`ci`]: it cannot tell you the code *works*. Run the gate before handing
-/// work over.
-/// Each step it does share with `ci` is byte-identical, flags *and* environment: a differing
-/// `RUSTFLAGS` would give the two commands separate build fingerprints, so alternating between them
-/// would rebuild the world each time and make the fast loop the slow one.
-fn fast_check() -> Result<()> {
-    cargo(&["fmt", "--all", "--check"])?;
-    drift::check(workspace_root())?;
-    cargo(&[
-        "clippy",
-        "--workspace",
-        "--all-targets",
-        "--locked",
-        "--",
-        "-D",
-        "warnings",
-    ])?;
-    println!(
-        "\n✓ check passed: formats, lints, compiles. No tests ran, the gate is `cargo xtask ci`"
-    );
-    Ok(())
 }
 
 /// Booting a microVM and loading/attaching eBPF need `/dev/kvm` + elevated caps, so those tests are

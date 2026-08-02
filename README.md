@@ -178,7 +178,8 @@ in place. It is not published as a site until the first release.
 - **[Using the `ekvm serve` daemon](docs/daemon.md)**, the wire API.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract and the non-goals.
 - **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
-  per-VM network flows, in-kernel egress enforcement, resource accounting, each with a live demo.
+  per-VM network flows, in-kernel egress enforcement, resource accounting, each pinned by a
+  privileged test.
 - **[Benchmarks](docs/benchmarks.md)**, the methodology and how to run it yourself.
 - **[Security](docs/security.md)** and the **[threat model](docs/security-threat-model.md)**.
 
