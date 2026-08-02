@@ -1,7 +1,7 @@
 # Using the `ekvm serve` daemon
 
 `ekvm serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
-lifecycle over a **unix socket**, so a local client drives microVMs without linking the `ekvm`
+lifecycle over a **unix socket**, so a local client drives microVMs without linking the `ekvm-engine`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
 use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
 the hoster's, above the engine, and are a recorded non-goal).

@@ -12,7 +12,7 @@
 //! faithful renderings of a non-result, not a golden mismatch.
 //!
 //! `#[ignore]`d: boots real microVMs (needs `/dev/kvm` + the guest rootfs). Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm-cli -- --ignored`. Both faces run
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Both faces run
 //! **unjailed**, the golden is the run-result rendering, not the jailer (that has its own suite),
 //! and unjailed needs no root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
@@ -111,7 +111,7 @@ impl Drop for Daemon {
 fn shared_env(cmd: &mut Command, root: &std::path::Path) {
     cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("EKVM_MARKER", ekvm::GUEST_READY_MARKER)
+        .env("EKVM_MARKER", ekvm_engine::GUEST_READY_MARKER)
         .env("EKVM_LOG", "warn");
     if std::env::var_os("EKVM_KERNEL").is_none() {
         cmd.env("EKVM_KERNEL", root.join("artifacts/vmlinux"));

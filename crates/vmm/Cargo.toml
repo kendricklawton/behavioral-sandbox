@@ -1,5 +1,5 @@
 [package]
-name = "ekvm"
+name = "ekvm-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

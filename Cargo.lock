@@ -532,31 +532,9 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 name = "ekvm"
 version = "0.0.0"
 dependencies = [
- "ekvm-channel",
- "ekvm-guest-agent",
- "ekvm-test-support",
- "nix 0.31.3",
- "serde",
- "serde_json",
- "sha2",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ekvm-channel"
-version = "0.0.0"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "ekvm-cli"
-version = "0.0.0"
-dependencies = [
  "clap",
- "ekvm",
  "ekvm-client",
+ "ekvm-engine",
  "ekvm-probes-loader",
  "ekvm-protocol",
  "ekvm-test-support",
@@ -571,11 +549,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "ekvm-channel"
+version = "0.0.0"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
 name = "ekvm-client"
 version = "0.0.0"
 dependencies = [
  "ekvm-protocol",
  "serde_json",
+]
+
+[[package]]
+name = "ekvm-engine"
+version = "0.0.0"
+dependencies = [
+ "ekvm-channel",
+ "ekvm-guest-agent",
+ "ekvm-test-support",
+ "nix 0.31.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -598,7 +598,7 @@ version = "0.0.0"
 dependencies = [
  "aya",
  "ed25519-dalek",
- "ekvm",
+ "ekvm-engine",
  "ekvm-probes-common",
  "ekvm-test-support",
  "nix 0.31.3",
@@ -2298,8 +2298,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
- "ekvm",
  "ekvm-channel",
+ "ekvm-engine",
  "ekvm-probes-loader",
 ]
 

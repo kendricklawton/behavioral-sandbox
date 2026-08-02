@@ -3,7 +3,7 @@
 //! `Pool`, and the restore-beats-cold-boot payoff.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -13,7 +13,7 @@ mod common;
 use std::num::NonZeroU8;
 use std::time::Duration;
 
-use ekvm::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
+use ekvm_engine::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
 
 use common::{
     cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
@@ -484,7 +484,7 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
     // test silently drifts onto the shared-base branch the previous test already covers.
     let mut source_cfg = guest_rootfs_config();
     source_cfg.read_only_root = false;
-    let source = ekvm::Sandbox::open_unjailed(source_cfg).expect("pool source should boot");
+    let source = ekvm_engine::Sandbox::open_unjailed(source_cfg).expect("pool source should boot");
     let snap = source.snapshot(bundle.path()).expect("snapshot the source");
     source.shutdown().expect("source shutdown");
     assert!(
@@ -693,7 +693,7 @@ fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     // health probe, not a cold boot. A clone that died while pooled is a typed GuestUnavailable
     // from the probe, so `take` discards it and serves the next (or restores inline when dry)
     // instead of surfacing an infra failure, the retry semantics the deferral promised.
-    use ekvm::Pool;
+    use ekvm_engine::Pool;
 
     let bundle = TmpDir::new("snap-pool");
     let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);

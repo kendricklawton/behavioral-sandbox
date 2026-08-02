@@ -10,9 +10,9 @@
 The first supported release of eKVM: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
 
 ### Added
-- **Hardware Isolation Driver (`ekvm`, `crates/vmm`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
+- **Hardware Isolation Driver (`ekvm-engine`, `crates/vmm`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
 - **Host eBPF Observability (`ekvm-probes` & `ekvm-probes-loader`)**: `aya`-based eBPF probes for out-of-guest syscall tracing, TAP network flow monitoring, and cgroup v2 resource accounting.
-- **Daemon Wire Interface (`ekvm-protocol` & `ekvm-cli`)**: Versioned newline-delimited JSON wire API (`schema: 1`) served by `ekvm serve` over Unix domain sockets.
+- **Daemon Wire Interface (`ekvm-protocol` & `ekvm`)**: Versioned newline-delimited JSON wire API (`schema: 1`) served by `ekvm serve` over Unix domain sockets.
 - **Audit Records**: Host-observed, Ed25519-signed JSON audit logs (`RunRecord`) with a hash-chained `trace`. What a signature establishes is in [docs/security-threat-model.md](docs/security-threat-model.md#record-integrity-beyond-the-guest).
 - **Reference Rust Client (`ekvm-client`, `crates/client`)**: Dependency-light reference client driving `ekvm serve` over Unix sockets.
 - **Pre-warmed Sandbox Pool**: Snapshot-restore pool for warm sandbox starts. Latency figures are withdrawn pending a re-measurement on a verified host; see [docs/benchmarks.md](docs/benchmarks.md).
@@ -23,7 +23,7 @@ The first supported release of eKVM: a self-hostable engine that boots a hardwar
 The same surface `AGENTS.md`'s `api`-scope rule and
 [the Semver section](docs/embedding-scope.md#semver--api-stability) name, restated here as what a
 tag would freeze.
-- **Rust Driver API** (`ekvm`): `Sandbox`, `Limits`, `RunResult`, `VmmError` (`kind() -> ErrorKind`).
+- **Rust Driver API** (`ekvm-engine`): `Sandbox`, `Limits`, `RunResult`, `VmmError` (`kind() -> ErrorKind`).
 - **Host↔guest framing** (`ekvm-channel`): the length-prefixed exec protocol the driver and the
   in-guest agent share.
 - **Daemon wire protocol** (`ekvm-protocol`): line-delimited JSON (`schema: 1`).

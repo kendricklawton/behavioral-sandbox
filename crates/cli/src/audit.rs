@@ -12,7 +12,7 @@
 //! *policy* (`--allow`) is the exception: it is a security control, so a run that asked to enforce
 //! one and couldn't arm the tap is a typed refusal, never a silent unenforced run.
 
-use ekvm::VmmError;
+use ekvm_engine::VmmError;
 use ekvm_probes_loader::{
     AxisGap, EgressPolicy, LiveSnapshot, RecordSubject, ResourceSummary, RunRecord, SandboxProbes,
     SharedMeter, SharedTracer, SyscallFootprint, Timing,

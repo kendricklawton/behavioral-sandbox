@@ -47,7 +47,7 @@ jobs:
       # `crates/vmm/src/lib.rs`), which is what checks them on every commit; this step's own catch
       # is the rest of the book, above all an untagged fence, which rustdoc compiles as Rust.
       - name: Build the engine for the book's doctests
-        run: CARGO_TARGET_DIR=target/docs-check cargo build -p ekvm --locked
+        run: CARGO_TARGET_DIR=target/docs-check cargo build -p ekvm-engine --locked
 
       - name: Test the book's Rust blocks
         run: |

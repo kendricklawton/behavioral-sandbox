@@ -11,7 +11,7 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use ekvm::{Limits, Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
+use ekvm_engine::{Limits, Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -89,7 +89,7 @@ fn lifecycle_runs_inputs_and_collects_outputs() {
     assert_eq!(result.stdout, b"from stdin\n");
     assert_eq!(
         result.files,
-        vec![ekvm::Artifact::new(
+        vec![ekvm_engine::Artifact::new(
             "art.txt",
             b"api-test=from a file".to_vec()
         )],

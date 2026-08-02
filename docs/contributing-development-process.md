@@ -13,7 +13,7 @@ not "fixed timeouts". A mixed change takes its most significant type (`fix` over
 
 ## The `api` scope
 
-The engine is embedded downstream at the `ekvm` library's public API, pinned by git rev, so a change to
+The engine is embedded downstream at the `ekvm-engine` library's public API, pinned by git rev, so a change to
 that surface is committed with the `api` scope:
 
 - `Sandbox`, `Limits`, `RunResult`

@@ -68,7 +68,7 @@ pub const WIRE_SCHEMA: u32 = 1;
 /// Upper bound on one protocol line, before decoding, the allocation cap so a peer that
 /// never sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an
 /// unbounded read. Generous: a per-message `stdin`/`content` string plus its JSON envelope fits,
-/// while the exec channel still enforces the real `ekvm::MAX_PAYLOAD` on the bytes that reach
+/// while the exec channel still enforces the real `ekvm_engine::MAX_PAYLOAD` on the bytes that reach
 /// the guest, so this is a DoS bound, not the input-size contract.
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 
@@ -104,7 +104,7 @@ pub enum Request {
     /// Carries **resource** knobs and the session's network request; the confinement posture (jailed
     /// vs unjailed, and whether a route out exists at all) is the daemon's launch-time choice, never
     /// a client's, so a caller can't downgrade the jail or route itself out of the sandbox.
-    /// Any omitted field keeps the conservative `ekvm::Limits` default.
+    /// Any omitted field keeps the conservative `ekvm_engine::Limits` default.
     Open {
         /// Guest vCPUs (1..=32); omitted keeps the default 1.
         #[serde(default)]
@@ -411,7 +411,7 @@ macro_rules! fault_kinds {
     ($( $(#[$doc:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
         /// Which layer faulted, so a client branches on a **value** rather than on the prose in
         /// [`Response::Error`]'s `message`. The wire form of the engine's pinned error taxonomy
-        /// (`ekvm::ErrorKind`), restated here because this crate stays `ekvm`-free; the daemon maps
+        /// (`ekvm_engine::ErrorKind`), restated here because this crate stays `ekvm`-free; the daemon maps
         /// one onto the other, and a test pins the mapping.
         ///
         /// The `fatal` flag answers "is this session over?"; this answers "whose fault, and what
@@ -458,14 +458,14 @@ macro_rules! fault_kinds {
 
 fault_kinds! {
     /// The host couldn't stand the sandbox up, or a bounded wait expired. Not the caller's fault:
-    /// retry, or try another host. (`ekvm::ErrorKind::Infra`.)
+    /// retry, or try another host. (`ekvm_engine::ErrorKind::Infra`.)
     Infra => "infra",
     /// A framing or I/O fault on an already-established exec channel, or a guest that went silent
     /// past its deadline. The sandbox is unreliable: retire it rather than blame the command.
-    /// (`ekvm::ErrorKind::Transport`.)
+    /// (`ekvm_engine::ErrorKind::Transport`.)
     Transport => "transport",
     /// The run is at fault: the command couldn't be spawned, outran its budget, or flooded output.
-    /// Retrying the same command unchanged gets the same answer. (`ekvm::ErrorKind::Guest`.)
+    /// Retrying the same command unchanged gets the same answer. (`ekvm_engine::ErrorKind::Guest`.)
     Guest => "guest",
     /// The client's own message was the problem: wrong [`WIRE_SCHEMA`], undecodable, oversize, or
     /// out of order (an `open` on an already-open session). Fix the client.

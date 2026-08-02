@@ -11,8 +11,8 @@
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
-use ekvm_cli::audit;
-use ekvm_cli::config;
+use ekvm::audit;
+use ekvm::config;
 mod doctor;
 mod metrics;
 mod serve;
@@ -29,11 +29,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use ekvm::{
+use ekvm::policy::{parse_allow, AllowRule, Policy, Requested};
+use ekvm_engine::{
     sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD,
 };
-use ekvm::{vcpus_supported, MAX_VCPUS};
-use ekvm_cli::policy::{parse_allow, AllowRule, Policy, Requested};
+use ekvm_engine::{vcpus_supported, MAX_VCPUS};
 use ekvm_probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
@@ -504,7 +504,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     // Flags win over the `EKVM_GATEWAY`/`EKVM_RESOLVER` + file layers `base_config` already resolved,
     // so a run can override the host's uplink without editing its config.
     if let Some(gateway) = args.gateway {
-        let mut egress = ekvm::GuestEgress::via(gateway);
+        let mut egress = ekvm_engine::GuestEgress::via(gateway);
         if let Some(resolver) = args.resolver {
             egress = egress.with_resolver(resolver);
         }

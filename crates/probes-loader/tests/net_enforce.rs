@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_engine::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use ekvm_probes_loader::{check_support, object_path, EgressPolicy, Protocol, TapMonitor};
 
 /// IP protocol number for UDP, for the raw flow-key comparisons the loader doesn't re-export a const for.
@@ -181,7 +181,7 @@ fn a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail() {
     // The reachable set is unchanged either way: nothing here builds an uplink, so the packet dies
     // in the netns. What changes is that the host can now see it was tried.
     let mut cfg = networked_agent_config();
-    let host_end = ekvm::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
+    let host_end = ekvm_engine::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
     cfg.egress = Some(host_end);
     let vm = Vm::boot(cfg).expect("a networked agent microVM with a gateway should boot");
     let netns = vm

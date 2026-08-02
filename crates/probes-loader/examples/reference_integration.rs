@@ -28,7 +28,7 @@
 use std::error::Error;
 use std::time::Duration;
 
-use ekvm::{BootConfig, Limits, Sandbox};
+use ekvm_engine::{BootConfig, Limits, Sandbox};
 use ekvm_probes_loader::{RecordSubject, SandboxProbes, SharedMeter, SharedTracer, Timing};
 
 fn main() -> Result<(), Box<dyn Error>> {

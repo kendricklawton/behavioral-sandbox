@@ -52,9 +52,9 @@ use std::sync::{Arc, Mutex};
 
 use std::num::{NonZeroU32, NonZeroU8};
 
-use ekvm::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
-use ekvm_cli::audit::Observability;
-use ekvm_cli::policy::Policy;
+use ekvm::audit::Observability;
+use ekvm::policy::Policy;
+use ekvm_engine::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
 
 use crate::metrics::Metrics;
 
@@ -673,7 +673,7 @@ fn own_euid() -> Option<u32> {
 /// daemon of the same user). A dead daemon's pid is genuinely absent from `/proc` (it's not our
 /// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
 /// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
-/// ([`ekvm::sweep_orphans`]), logging what it reclaimed. The complement of
+/// ([`ekvm_engine::sweep_orphans`]), logging what it reclaimed. The complement of
 /// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
 fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
@@ -1074,7 +1074,7 @@ mod tests {
         max_committed_vcpus: u64,
     ) -> Arc<Server> {
         Arc::new(Server {
-            base: ekvm::BootConfig::default(),
+            base: ekvm_engine::BootConfig::default(),
             jailed: false,
             policy: Policy::default(),
             observ: Observability::load(),

@@ -1,7 +1,7 @@
 //! The `.ekvm.toml` **file layer** of the config precedence `flags > env (EKVM_*) > file >
 //! defaults`.
 //!
-//! The env layer already lives in [`ekvm::BootConfig::from_env`], and the flags layer is the
+//! The env layer already lives in [`ekvm_engine::BootConfig::from_env`], and the flags layer is the
 //! CLI's own arguments; this module inserts a file between env and defaults. **One vocabulary:** the
 //! file's keys mirror the `EKVM_*` env names 1:1 (minus the prefix, lowercased), so a value is
 //! spelled the same whether it comes from a flag, the environment, or the file. Discovery is the
@@ -11,7 +11,7 @@
 //! **Typos are a typed error, never a silent no-op:** the file is parsed with
 //! `deny_unknown_fields`, so a misspelled key (`kernal = …`) fails loudly rather than being ignored.
 //!
-//! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](ekvm::BootConfig::from_env_with): return the
+//! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](ekvm_engine::BootConfig::from_env_with): return the
 //! real env var if set, else the file's value, which resolves `env > file > defaults` for the
 //! artifact/scratch keys with zero duplication of the engine's env-key logic or defaults. The `log`
 //! key has no `BootConfig` field (it drives `tracing`), so the CLI reads it from here directly.
@@ -21,7 +21,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::{NonZeroU32, NonZeroU8};
 use std::path::{Path, PathBuf};
 
-use ekvm::VmmError;
+use ekvm_engine::VmmError;
 use ekvm_probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 
@@ -157,7 +157,7 @@ impl EkvmToml {
     }
 
     /// The file's value for an `EKVM_*` env key, as an [`OsString`], or `None` if the key is unset
-    /// in the file, the shape [`from_env_with`](ekvm::BootConfig::from_env_with) consumes, so
+    /// in the file, the shape [`from_env_with`](ekvm_engine::BootConfig::from_env_with) consumes, so
     /// the file slots in *under* the environment in one composed lookup.
     #[must_use]
     pub fn env_value(&self, key: &str) -> Option<OsString> {
@@ -388,14 +388,14 @@ mod tests {
             on.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("true"))
         );
-        assert!(ekvm::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
+        assert!(ekvm_engine::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
 
         let off = EkvmToml::parse("require_limits = false\n").expect("valid toml parses");
         assert_eq!(
             off.env_value("EKVM_REQUIRE_LIMITS"),
             Some(OsString::from("false"))
         );
-        assert!(!ekvm::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
+        assert!(!ekvm_engine::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
 
         // Unset in the file falls through to the default.
         let bare = EkvmToml::parse("marker = \"UP\"\n").expect("valid toml parses");

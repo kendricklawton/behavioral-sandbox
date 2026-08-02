@@ -40,7 +40,7 @@ before thread stacks are worth a thought. Thread-per-session at this scale is fr
 stack trace readable end to end.
 
 **The dependency surface is a security property.** This engine's pitch is that a hoster can audit
-what runs untrusted code. `ekvm` is `#![forbid(unsafe_code)]` with a deliberately small dependency
+what runs untrusted code. `ekvm-engine` is `#![forbid(unsafe_code)]` with a deliberately small dependency
 graph gated by `cargo deny`; pulling an executor and its ecosystem into that crate would enlarge
 the supply-chain surface of exactly the component whose minimalism is the point.
 

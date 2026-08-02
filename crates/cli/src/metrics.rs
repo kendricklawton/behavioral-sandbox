@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ekvm::SweepReport;
+use ekvm_engine::SweepReport;
 
 /// Upper bound on one scrape request's head (request line + headers). A scrape is a bare `GET`; far
 /// past this is not a scraper.

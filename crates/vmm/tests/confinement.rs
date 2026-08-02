@@ -4,7 +4,7 @@
 //! driver's netns + scratch dir without touching a live sibling's.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -15,7 +15,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ekvm::{sweep_orphans, BootConfig, Vm, VmmError, VMM_PIDS_MAX};
+use ekvm_engine::{sweep_orphans, BootConfig, Vm, VmmError, VMM_PIDS_MAX};
 
 use common::{
     cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
@@ -185,10 +185,15 @@ fn api_socket_under(dir: &Path, depth: u32) -> Option<PathBuf> {
 /// `jailed_overlay_is_dense_and_base_is_untouched` failed against a stale mount pinning a rebuilt
 /// artifact's deleted inode. The cost is that a *failing* run waits out the boot deadline; a leak
 /// that outlives the process is worse than a slow failure.
-struct BootJoin(Option<std::thread::JoinHandle<Result<ekvm::RunningVm, ekvm::VmmError>>>);
+struct BootJoin(
+    Option<std::thread::JoinHandle<Result<ekvm_engine::RunningVm, ekvm_engine::VmmError>>>,
+);
 
 impl BootJoin {
-    fn take(&mut self) -> Option<std::thread::JoinHandle<Result<ekvm::RunningVm, ekvm::VmmError>>> {
+    fn take(
+        &mut self,
+    ) -> Option<std::thread::JoinHandle<Result<ekvm_engine::RunningVm, ekvm_engine::VmmError>>>
+    {
         self.0.take()
     }
     fn is_finished(&self) -> bool {
@@ -207,7 +212,7 @@ impl Drop for BootJoin {
 }
 
 // A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
-fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> ekvm::VmmError {
+fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> ekvm_engine::VmmError {
     let scratch = cfg.scratch_dir.clone();
     let mut booting = BootJoin(Some(std::thread::spawn(move || Vm::boot(cfg))));
 
@@ -267,7 +272,7 @@ fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> ekvm::VmmError {
 /// names the cause, where "no VMM here" only names the symptom.
 // A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
 fn panic_with_boot_outcome(
-    booting: Option<std::thread::JoinHandle<Result<ekvm::RunningVm, ekvm::VmmError>>>,
+    booting: Option<std::thread::JoinHandle<Result<ekvm_engine::RunningVm, ekvm_engine::VmmError>>>,
 ) -> ! {
     match booting.map(std::thread::JoinHandle::join) {
         Some(Ok(Err(e))) => panic!("the boot failed before a VMM could be killed: {e}"),

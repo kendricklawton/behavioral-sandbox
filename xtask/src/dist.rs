@@ -80,7 +80,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         "--release",
         "--locked",
         "-p",
-        "ekvm-cli",
+        "ekvm",
         "--target",
         DIST_TARGET,
     ])

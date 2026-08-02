@@ -87,7 +87,7 @@ risk](#assumptions-and-residual-risk); a passing test is scoped as described in 
 
 | Attack | Contained by | Exercised by |
 |--------|--------------|-----------|
-| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, seccomp, namespaces) as defense in depth | the jail-escape tests in `ekvm`'s `confinement.rs` |
+| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, seccomp, namespaces) as defense in depth | the jail-escape tests in `ekvm-engine`'s `confinement.rs` |
 | Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter); guest processes run against the guest kernel's scheduler, not as host threads | the fork-bomb/mem-hog and consolidated exhaustion tests in `confinement.rs` |
 | Network exfiltration / flood | Deny-by-default egress policy enforced in-kernel at the tap, armed before the guest's first packet; drops are counted | `net_enforce.rs`; the hostile-guest and flood tests in `confinement.rs` |
 | Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap; the guest's four crossings (vsock, tap, block devices, cgroup) name no BPF program or map | `hardening.rs` |

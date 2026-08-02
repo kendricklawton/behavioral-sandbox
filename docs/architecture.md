@@ -49,7 +49,7 @@ Directories stay short and packages carry the `ekvm-` prefix, so the two columns
 
 | Crate | Directory | Role |
 |---|---|---|
-| `ekvm` | `crates/vmm` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
+| `ekvm-engine` | `crates/vmm` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
 | `ekvm-channel` | `crates/channel` | The host/guest wire protocol. Dependency-free framing, shared verbatim by driver and agent. |
 | `ekvm-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
 | `ekvm-probes` | `crates/probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. Its object keeps the bare name `probes`. |
@@ -57,7 +57,7 @@ Directories stay short and packages carry the `ekvm-` prefix, so the two columns
 | `ekvm-probes-loader` | `crates/probes-loader` | The aya userspace half: attach, fold, assemble the record, sign it. |
 | `ekvm-protocol` | `crates/protocol` | The daemon's wire types, versioned. |
 | `ekvm-client` | `crates/client` | The Rust reference client for `ekvm serve`. |
-| `ekvm-cli` | `crates/cli` | The `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. The binary is `ekvm`; only the package carries the suffix. |
+| `ekvm` | `crates/cli` | The `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. Package, binary, and command all share the name. |
 | `ekvm-test-support` | `crates/test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
 

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use ekvm::{
+use ekvm_engine::{
     BootConfig, Pool, RunningVm, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID, GUEST_READY_MARKER,
 };
 use ekvm_probes_loader::{ResourceMeter, SyscallTracer};

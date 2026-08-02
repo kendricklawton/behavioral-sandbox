@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use ekvm::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_engine::{BootConfig, Sandbox, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use ekvm_probes_loader::{
     cgroup_id_of_pid, EgressPolicy, Protocol, ResourceMeter, SyscallTracer, TapMonitor,
 };

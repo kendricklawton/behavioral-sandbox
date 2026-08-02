@@ -2,7 +2,7 @@
 //! the Python/Node/static-native runtimes, and the bulk input/output block devices.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -12,7 +12,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ekvm::Vm;
+use ekvm_engine::Vm;
 
 use common::{
     guest_rootfs_config, have_jailer_privileges, jailed_agent_config, jailed_overlay_config,
@@ -67,7 +67,7 @@ fn jailed_exec_runs_a_command() {
         });
     assert_eq!(
         uid.as_deref(),
-        Some(ekvm::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        Some(ekvm_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
         "the exec'ing VMM should be the dropped jail uid, proving it is confined"
     );
     let out = vm
@@ -120,7 +120,7 @@ fn jailed_bulk_io_round_trips_through_the_chroot() {
         });
     assert_eq!(
         uid.as_deref(),
-        Some(ekvm::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        Some(ekvm_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
         "the bulk-I/O VMM should be the dropped jail uid, proving the jail held"
     );
 

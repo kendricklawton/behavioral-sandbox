@@ -1,5 +1,5 @@
 //! `ekvm doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
-//! checks ([`ekvm::doctor`]) plus the eBPF-observability capability row (owned by the probe
+//! checks ([`ekvm_engine::doctor`]) plus the eBPF-observability capability row (owned by the probe
 //! loader, out of `ekvm`), so a fresh host reads exactly what will work, degrade, or refuse
 //! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
 //! truth for "ready", two entry points.
@@ -7,8 +7,8 @@
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-use ekvm::doctor::{self, Check, CheckStatus};
-use ekvm::BootConfig;
+use ekvm_engine::doctor::{self, Check, CheckStatus};
+use ekvm_engine::BootConfig;
 
 /// Whether to emit ANSI colour on a stream.
 ///

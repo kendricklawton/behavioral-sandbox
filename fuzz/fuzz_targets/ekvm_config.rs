@@ -4,14 +4,14 @@
 
 #![no_main]
 
-use ekvm_cli::config::EkvmToml;
+use ekvm::config::EkvmToml;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {
         if let Ok(config) = toml::from_str::<EkvmToml>(s) {
             let policy = config.policy();
-            let _ = policy.resolve(&ekvm_cli::policy::Requested::default());
+            let _ = policy.resolve(&ekvm::policy::Requested::default());
 
         }
     }

@@ -51,18 +51,20 @@ a design error rather than a trade-off.
 
 ## Repo layout
 
-One workspace. **Directories stay short and packages carry the `ekvm-` prefix**, the library taking
-the bare `ekvm`, so the two columns below rarely match: `-p` takes the **package** (`-p ekvm-cli`),
-paths take the **directory** (`crates/cli`). The prefix would only stutter on the filesystem of a
-repo already called ekvm, and it is the package name that has to be unambiguous, since that is the
-one a registry and a downstream `Cargo.toml` see. `cargo xtask ci` checks every `-p` in every
-tracked text file against the real package list, so a stale one fails the gate rather than a
-reader's terminal. For the types worth knowing before editing, the boot sequence, and the teardown
-layers, read `docs/architecture.md` before a non-trivial change to `ekvm`.
+One workspace. **Directories stay short and packages carry the `ekvm-` prefix**, the **CLI** taking
+the bare `ekvm`, so the two columns below rarely match: `-p` takes the **package**
+(`-p ekvm-engine`), paths take the **directory** (`crates/vmm`). The prefix would only stutter on
+the filesystem of a repo already called ekvm, and it is the package name that has to be unambiguous,
+since that is the one a registry and a downstream `Cargo.toml` see. The bare name goes to the thing
+a user names: `cargo install ekvm` and the binary on `PATH` agree, and an embedder writes
+`ekvm-engine` for the library. `cargo xtask ci` checks every `-p` in every tracked text file against
+the real package list, so a stale one fails the gate rather than a reader's terminal. For the types
+worth knowing before editing, the boot sequence, and the teardown layers, read
+`docs/architecture.md` before a non-trivial change to `ekvm-engine`.
 
 | Path | Package | What it is |
 |---|---|---|
-| `crates/vmm` | `ekvm` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
+| `crates/vmm` | `ekvm-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
 | `crates/channel` | `ekvm-channel` | Host↔guest framing. Zero dependencies, shared verbatim by driver and agent, so the two can't drift. |
 | `crates/guest-agent` | `ekvm-guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. Its binary keeps the bare name `guest-agent`: that is the path the rootfs build bakes in. |
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. Its binary keeps the bare name `probes`: that is the object filename the loader looks for. |
@@ -70,7 +72,7 @@ layers, read `docs/architecture.md` before a non-trivial change to `ekvm`.
 | `crates/probes-loader` | `ekvm-probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble and sign the record. |
 | `crates/protocol` | `ekvm-protocol` | The daemon's wire types, versioned. |
 | `crates/client` | `ekvm-client` | Rust reference client for `ekvm serve`. |
-| `crates/cli` | `ekvm-cli` | The `ekvm` binary (`run`/`shell`/`doctor`/`verify`) plus `ekvm serve`. The binary is `ekvm`; only the package carries the suffix. |
+| `crates/cli` | `ekvm` | The `ekvm` binary (`run`/`shell`/`doctor`/`verify`) plus `ekvm serve`. Package, binary, and command are all `ekvm`; its library half is the CLI's own internals, not the engine. |
 | `crates/test-support` | `ekvm-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, never renamed (`cargo xtask` is a `--package xtask` alias). |
 | `docs/` | | mdBook, `SUMMARY.md` is the index. Flat `topic-subtopic.md` names; the hierarchy lives in `SUMMARY.md`, not in directories. |
@@ -135,8 +137,8 @@ layers, read `docs/architecture.md` before a non-trivial change to `ekvm`.
   imperative and describes **what was done** ("fix: bound session reads by a deadline", not "fixed
   timeouts"). A mixed change takes its most significant type (`fix` over `refactor` over `test`)
   rather than splitting hairs.
-- **Public-API changes carry the `api` scope.** The engine is embedded downstream at the `ekvm`
-  library's public API, pinned by git rev, so a change to that API (`Sandbox`, `Limits`,
+- **Public-API changes carry the `api` scope.** The engine is embedded downstream at the
+  `ekvm-engine` library's public API, pinned by git rev, so a change to that API (`Sandbox`, `Limits`,
   `RunResult`, `VmmError` including its variants *or* the `kind()` bucket mapping, the `ekvm-channel`
   wire protocol, or the daemon's `ekvm-protocol` wire types) is committed as
   `feat(api):` / `fix(api):` (with `!` appended when the change is

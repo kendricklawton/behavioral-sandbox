@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use ekvm::VmmError;
+use ekvm_engine::VmmError;
 use ekvm_probes_loader::LiveSnapshot;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
@@ -25,7 +25,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use crate::trace::{human_bytes, human_duration, proto_name, syscall_name};
-use ekvm_cli::audit::RunProbes;
+use ekvm::audit::RunProbes;
 
 /// What the header identifies the run by, plain values captured before the sandbox moves to the
 /// exec worker thread.

@@ -153,7 +153,7 @@ portable across kernels is tested on one kernel so far, and
 
 The engine is consumed in three shapes, one of which exists today:
 
-* **Rust**, the `ekvm` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`), depended
+* **Rust**, the `ekvm-engine` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`), depended
   on by git rev:
   `ekvm = { git = "https://github.com/packsixfour/ekvm", rev = "…" }`. It is not distributed through
   crates.io **by decision, not pending**: an immutable registry version would outlive this engine's
@@ -195,7 +195,7 @@ while a path takes the directory.
 
 | Path | Package | Role |
 |------|---------|------|
-| `crates/vmm` | `ekvm` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
+| `crates/vmm` | `ekvm-engine` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
 | `crates/channel` | `ekvm-channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
 | `crates/guest-agent` | `ekvm-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
@@ -203,7 +203,7 @@ while a path takes the directory.
 | `crates/probes-loader` | `ekvm-probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
 | `crates/protocol` | `ekvm-protocol` | The daemon wire types, versioned. |
 | `crates/client` | `ekvm-client` | The Rust reference client for `ekvm serve`. |
-| `crates/cli` | `ekvm-cli` | The `ekvm` CLI: `run`, `shell`, `doctor`, plus the `ekvm serve` daemon. The binary on `PATH` is `ekvm`. |
+| `crates/cli` | `ekvm` | The `ekvm` CLI: `run`, `shell`, `doctor`, plus the `ekvm serve` daemon. The binary on `PATH` is `ekvm`. |
 | `docs` | | This documentation, as an mdBook. |
 | `xtask` | `xtask` | Dev orchestration: `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |
 
@@ -223,7 +223,7 @@ been run.
 There is no published roadmap and no promised date. A capability becomes a feature when it ships
 with a working demo, and is not announced before that. The first tagged release, `v0.1.0`, will pin
 the driver API and the wire protocol under the support policy in [RELEASES.md](RELEASES.md); until
-then the `Sandbox`/`ekvm` API, the daemon protocol, the record format, and the crate names can all
+then the `Sandbox`/`ekvm-engine` API, the daemon protocol, the record format, and the crate names can all
 change without notice.
 
 The project is **open to outside pull requests**. Bug fixes, tests, and documentation can go

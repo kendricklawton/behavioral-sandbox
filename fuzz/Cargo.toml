@@ -39,7 +39,7 @@ path = "../crates/probes-common"
 features = ["std"]
 
 # CLI policy and config parsers (`parse_allow`, `EkvmToml`).
-[dependencies.ekvm-cli]
+[dependencies.ekvm]
 path = "../crates/cli"
 
 

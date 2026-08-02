@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_engine::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
 use ekvm_probes_loader::{
     check_support, object_path, AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes,
     SharedMeter, SharedTracer, Timing,

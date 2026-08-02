@@ -3,8 +3,8 @@
 ## One shot: open, run, read the result
 
 ```rust,no_run
-# extern crate ekvm;
-use ekvm::{BootConfig, Sandbox, VmmError};
+# extern crate ekvm_engine;
+use ekvm_engine::{BootConfig, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
     // 1. Resolve boot configuration from environment (EKVM_KERNEL, EKVM_ROOTFS, etc.)
@@ -28,10 +28,10 @@ fn main() -> Result<(), VmmError> {
 ## Budgets and files on the call
 
 ```rust,no_run
-# extern crate ekvm;
+# extern crate ekvm_engine;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
-use ekvm::{BootConfig, Limits, Sandbox, VmmError};
+use ekvm_engine::{BootConfig, Limits, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
     // 2 vCPU, 512 MiB RAM, 60s wall. `Limits` is `#[non_exhaustive]`, so a downstream crate
@@ -64,8 +64,8 @@ fn main() -> Result<(), VmmError> {
 ## The pre-warmed pool
 
 ```rust,no_run
-# extern crate ekvm;
-use ekvm::{BootConfig, Pool, Snapshot, Vm, VmmError};
+# extern crate ekvm_engine;
+use ekvm_engine::{BootConfig, Pool, Snapshot, Vm, VmmError};
 
 fn main() -> Result<(), VmmError> {
     // 1. Boot an unjailed source VM to prepare a pre-warmed snapshot
@@ -73,7 +73,7 @@ fn main() -> Result<(), VmmError> {
     let source_vm = Vm::boot(source_cfg)?;
 
     // Any directory you own works; a snapshot bundle is just files. `tempfile` would do, but it is
-    // not a dependency of `ekvm`, so this stays on `std` rather than sending you to add one.
+    // not a dependency of `ekvm-engine`, so this stays on `std` rather than sending you to add one.
     let snap_dir = std::env::temp_dir().join("ekvm-pool-snapshot");
     std::fs::create_dir_all(&snap_dir).expect("create the snapshot dir");
     let snapshot = source_vm.snapshot(&snap_dir)?;

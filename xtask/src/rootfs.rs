@@ -647,7 +647,7 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
 
     // The full runnable hint, printed from the contract constants so it can't drift from the code.
     println!(
-        "  exec inside a microVM with:\n  EKVM_ROOTFS={} EKVM_MARKER={} cargo run -p ekvm-cli -- run -- echo hi",
+        "  exec inside a microVM with:\n  EKVM_ROOTFS={} EKVM_MARKER={} cargo run -p ekvm -- run -- echo hi",
         out.display(),
         ekvm_channel::GUEST_READY_MARKER
     );

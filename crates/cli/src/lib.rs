@@ -14,4 +14,4 @@ pub mod policy;
 /// (`--vcpus`) and the daemon (`open`) refuse an out-of-domain count at their own edge rather than
 /// surfacing a late API error mid-boot, and taking the rule from `ekvm` is what keeps the three
 /// checks from drifting apart the way a copied constant does.
-pub use ekvm::{vcpus_supported, MAX_VCPUS};
+pub use ekvm_engine::{vcpus_supported, MAX_VCPUS};

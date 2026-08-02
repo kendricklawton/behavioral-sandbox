@@ -16,13 +16,13 @@ it defines the host/guest contract), then `crates/vmm/src/vm.rs` and `spawn.rs`,
 this host and what the driver may therefore send it), and `spawn/workdir.rs` (minting the per-VM dir
 and the two path constraints on it).
 
-## The `ekvm` crate
+## The `ekvm-engine` crate
 
-`ekvm` is the engine. It is the crate an embedder depends on, and the only one whose public API
+`ekvm-engine` is the engine. It is the crate an embedder depends on, and the only one whose public API
 carries the [`api` commit scope](./contributing-development-process.md#the-api-scope).
 
 Its safety posture is the inverse of most VMM projects: **the host path forbids `unsafe` outright**.
-`ekvm`, `ekvm-cli`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader` each carry `#![forbid(unsafe_code)]`, so
+`ekvm-engine`, `ekvm`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader` each carry `#![forbid(unsafe_code)]`, so
 that is a compiler error rather than a review convention. `crates/probes` is the single exception,
 structurally, because the BPF target requires raw map dereferences. See
 [Coding guidelines](./contributing-coding-guidelines.md#use-of-unsafe).
@@ -96,7 +96,7 @@ Some types to have in the back of your head before reading further.
 ## The daemon
 
 `ekvm serve` is the same engine behind a versioned newline-JSON protocol on a unix socket. `ekvm-protocol`
-holds the wire types, `ekvm-client` is a dependency-light reference client, and `ekvm-cli`'s `serve.rs` and
+holds the wire types, `ekvm-client` is a dependency-light reference client, and `ekvm`'s `serve.rs` and
 `session.rs` are the server.
 
 The security-relevant difference from the CLI: a daemon's clients control neither its config file nor

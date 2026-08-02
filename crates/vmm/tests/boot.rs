@@ -2,7 +2,7 @@
 //! the read-only base + overlay, and the no-leak guarantee across repeated boots.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -12,7 +12,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm::{Jail, Vm, DEFAULT_GUEST_CID, DEFAULT_JAIL_UID};
+use ekvm_engine::{Jail, Vm, DEFAULT_GUEST_CID, DEFAULT_JAIL_UID};
 
 use common::{
     config, guest_rootfs_config, have_jailer_privileges, have_net_admin, jailed_overlay_config,
@@ -219,7 +219,7 @@ fn boots_under_the_jailer() {
     // via `from_env`, so `EKVM_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
     // not zero leaks.
     let prefix = format!("ekvm-{}-", std::process::id());
-    let scratch_root = ekvm::BootConfig::from_env().scratch_dir;
+    let scratch_root = ekvm_engine::BootConfig::from_env().scratch_dir;
     let scratch_leaks = std::fs::read_dir(&scratch_root)
         .expect("scan the scratch root for leaks")
         .flatten()
@@ -481,7 +481,7 @@ fn repeated_boots_leave_no_leaks() {
     let net = have_net_admin();
     let cycles = soak_cycles();
     let prefix = format!("ekvm-{}-", std::process::id());
-    let scratch_root = ekvm::BootConfig::from_env().scratch_dir;
+    let scratch_root = ekvm_engine::BootConfig::from_env().scratch_dir;
     let netns_before = agent_netns();
     let mut vmm_pids = Vec::new();
 
@@ -720,7 +720,7 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     // budget (`FDS_PER_VM`) per start path, cold, networked, prewarmed restore, and, just as
     // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any
     // long-lived embedder into EMFILE regardless of the per-VM budget).
-    use ekvm::{sweep_orphans, FDS_PER_VM};
+    use ekvm_engine::{sweep_orphans, FDS_PER_VM};
 
     let baseline = open_fds();
 
@@ -789,5 +789,5 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     }
 
     // Keep the host tidy for the suite's other leak checks (and dogfood the sweep's live-skip).
-    let _ = sweep_orphans(&ekvm::BootConfig::from_env().scratch_dir);
+    let _ = sweep_orphans(&ekvm_engine::BootConfig::from_env().scratch_dir);
 }

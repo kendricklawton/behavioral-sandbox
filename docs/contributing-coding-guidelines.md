@@ -116,13 +116,13 @@ Two boundaries decide where new code belongs:
   plain-old-data with no dependencies, so the kernel side and the loader side cannot disagree about a
   layout.
 
-`ekvm` is the library downstream embedders pin, so its public surface is the API that carries the `api`
+`ekvm-engine` is the library downstream embedders pin, so its public surface is the API that carries the `api`
 commit scope. Keep new public items out of it unless an embedder needs them.
 
 ## Use of `unsafe`
 
 **The host path forbids it outright.** Every shipped host crate carries `#![forbid(unsafe_code)]`:
-`ekvm`, `ekvm-cli`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader`. This is not an aspiration policed by
+`ekvm-engine`, `ekvm`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader`. This is not an aspiration policed by
 review; it is a compiler error, and it is the enforcer named wherever the docs claim the host path is
 unsafe-free.
 

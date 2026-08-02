@@ -10,7 +10,7 @@
 //!    section leaves the file resolving and the anchor dead, which check 2 cannot see, and
 //!    `RELEASES.md` pointed at a relocated Semver section for months on exactly that blind spot.
 //! 4. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
-//!    package. A crate's directory is not always its package (`crates/cli` builds `ekvm-cli`), so
+//!    package. A crate's directory is not always its package (`crates/vmm` builds `ekvm-engine`), so
 //!    this is invisible to check 1: the path resolves while the command it appears in does not run.
 //!    Unlike checks 1 to 3 this one reads **every** tracked text file, not just `.rs` and `.md`:
 //!    a copy-pasteable command is a command wherever it is printed, and two dead `-p cli`
@@ -59,8 +59,8 @@ pub fn check(root: &Path) -> Result<()> {
         };
 
         // A `cargo … -p <name>` a reader is told to run must name a real workspace package. The
-        // directory and the package name are allowed to differ here (`crates/cli` builds
-        // `ekvm-cli`), which is how five copies of a `-p cli` invocation came to be printed at
+        // directory and the package name are allowed to differ here (`crates/vmm` builds
+        // `ekvm-engine`), which is how five copies of a `-p cli` invocation came to be printed at
         // people, in the docs, in two test headers, and in xtask's own output. Every one errored
         // with "package(s) not found in workspace". Scoping this to `.rs`/`.md` is what let two
         // more of them survive in `.env.example`, so it runs over every tracked text file.
@@ -144,7 +144,7 @@ pub fn check(root: &Path) -> Result<()> {
 }
 
 /// Every package name in the workspace, read from the tracked `Cargo.toml` files rather than from
-/// directory names: the two differ (`crates/cli` builds `ekvm-cli`), and it is the name `-p` takes.
+/// directory names: the two differ (`crates/vmm` builds `ekvm-engine`), and it is the name `-p` takes.
 fn package_names(root: &Path, tracked: &BTreeSet<String>) -> Result<BTreeSet<String>> {
     let mut names = BTreeSet::new();
     for rel in tracked.iter().filter(|p| p.ends_with("Cargo.toml")) {
@@ -200,7 +200,7 @@ fn cargo_package_refs(text: &str) -> Vec<(usize, String)> {
             if pkg.starts_with(['<', '{', '$', '"']) {
                 continue;
             }
-            // Trailing shell/prose punctuation (`-p ekvm,` `-p ekvm`.) is not part of the name.
+            // Trailing shell/prose punctuation (`-p ekvm-engine,` `-p ekvm-engine`.) is not part of the name.
             let pkg =
                 pkg.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
             if pkg.is_empty() || pkg.starts_with('-') {

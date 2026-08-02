@@ -14,7 +14,7 @@
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the guest-agent
-//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p ekvm-cli -- --ignored`. Unjailed
+//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root, except [`a_jailed_daemon_serves_prewarmed_opens`], which exists precisely
 //! because the jailed daemon composes pieces no other suite drives together (it self-skips
@@ -135,7 +135,7 @@ fn launch_daemon_opts(
     }
     cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("EKVM_MARKER", ekvm::GUEST_READY_MARKER)
+        .env("EKVM_MARKER", ekvm_engine::GUEST_READY_MARKER)
         // Keep the daemon's generated record-signing key inside the test's socket dir.
         .env("EKVM_SIGNING_KEY", dir.join("signing.key"))
         .env("EKVM_LOG", "warn")

@@ -34,7 +34,7 @@ instead of a silent misbehavior.
 
 Downstream of the public API there are two consumers, and they couple to this repo in different ways.
 
-An **embedder** is a Rust program that links `ekvm` and drives sandboxes in its own process. It pins
+An **embedder** is a Rust program that links `ekvm-engine` and drives sandboxes in its own process. It pins
 this crate's git rev, so it is coupled to the library surface the [Semver
 section](#semver--api-stability) below describes.
 
@@ -56,9 +56,9 @@ patches. Distribution stays the signed release package for operators and the git
 embedders, both of which the support policy in `RELEASES.md` can actually govern.
 
 Holding a name and shipping through it are separate things, and this project does the first and not
-the second. Where `ekvm`, `ekvm-client`, or `ekvm-protocol` appears on crates.io under this project,
-it is a **reserved placeholder**: version `0.0.0`, no dependencies, no code, and a description saying
-so. It exists because the registry is a flat namespace and the alternative to holding the name is
+the second. Where `ekvm`, `ekvm-engine`, `ekvm-client`, or `ekvm-protocol` appears on crates.io under
+this project, it is a **reserved placeholder**: version `0.0.0`, no dependencies, no code, and a
+description saying so. It exists because the registry is a flat namespace and the alternative to holding the name is
 someone else holding it. Finding one is not evidence that this paragraph is stale. A real release
 would arrive as a version that is not `0.0.0`, and it would arrive with a decision recorded here
 first.
@@ -71,7 +71,7 @@ first.
 > describes the boundary the project intends to pin at `v0.1.0`; until that tag, every item on it can
 > change without notice. Pin a git rev.
 
-The `ekvm` public library API and the two wire protocols are the surface the project intends to pin
+The `ekvm-engine` public library API and the two wire protocols are the surface the project intends to pin
 as its stability boundary. This list, `AGENTS.md`'s `api`-scope rule, and
 [RELEASES.md](../RELEASES.md) name the same surface, since a commit scope that does not match the
 policy it audits is worse than no scope at all:
