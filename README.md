@@ -190,8 +190,9 @@ in place. It is not published as a site until the first release.
 
 ## Repo layout
 
-Directories stay short and packages carry the `ekvm-` prefix, so `cargo … -p` takes the package
-while a path takes the directory.
+Directories stay short and packages carry the `ekvm-` prefix, so a package is its directory plus that
+prefix, with one exception: `crates/cli` builds `ekvm`, the bare name going to the command a user
+types. `cargo … -p` takes the package, a path takes the directory.
 
 | Path | Package | Role |
 |------|---------|------|

@@ -24,6 +24,7 @@
 //! client.close()?;                                  // tear the sandbox down
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
+#![forbid(unsafe_code)]
 
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;

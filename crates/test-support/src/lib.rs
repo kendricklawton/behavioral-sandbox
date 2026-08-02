@@ -5,6 +5,7 @@
 //!
 //! It is **never shipped** (`publish = false`, a dev-dependency only) and pure-std (no engine deps),
 //! so it stays a leaf both the driver and the loader suites can borrow without coupling.
+#![forbid(unsafe_code)]
 // A test-support crate: `enter` panics as the idiomatic test assertion (the caller treats it like an
 // `assert`), which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns,
 // the same file-level opt-out the integration-test binaries carry.

@@ -1544,6 +1544,55 @@ mod tests {
         assert!(!elf_has_section(&[], ".BTF"));
     }
 
+    /// Every workspace crate forbids `unsafe` except `crates/probes`, which builds for the BPF
+    /// target where reading a map value means dereferencing a raw pointer the verifier has already
+    /// bounded. Two doc pages state that rule; this is what makes it a checked claim rather than a
+    /// list, after both pages spent an unknown stretch naming five of the six crates that carried
+    /// the attribute and asserting a universal ("every shipped host crate") that three crates did
+    /// not satisfy.
+    ///
+    /// Derived from the tree, so a new crate fails here until someone decides which side it is on.
+    #[test]
+    fn every_crate_forbids_unsafe_except_the_bpf_one() {
+        let root = workspace_root();
+        let mut forbids = Vec::new();
+        let mut allows = Vec::new();
+        for entry in std::fs::read_dir(root.join("crates")).unwrap() {
+            let dir = entry.unwrap().path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let name = dir.file_name().unwrap().to_string_lossy().into_owned();
+            // A crate declares the attribute in whichever roots it has; `forbid` is per-crate, so
+            // a package with both a lib and a bin has to carry it in both to be covered.
+            let roots: Vec<_> = ["src/lib.rs", "src/main.rs"]
+                .iter()
+                .map(|r| dir.join(r))
+                .filter(|p| p.is_file())
+                .collect();
+            assert!(!roots.is_empty(), "crates/{name} has no lib.rs or main.rs");
+            let all = roots.iter().all(|p| {
+                std::fs::read_to_string(p)
+                    .unwrap()
+                    .lines()
+                    .any(|l| l.trim() == "#![forbid(unsafe_code)]")
+            });
+            if all {
+                forbids.push(name)
+            } else {
+                allows.push(name)
+            }
+        }
+        forbids.sort();
+        allows.sort();
+        assert_eq!(
+            allows,
+            vec!["probes".to_string()],
+            "exactly one crate may go without `#![forbid(unsafe_code)]`, and it is the BPF one. \
+             Forbidding: {forbids:?}"
+        );
+    }
+
     /// The three copies of [`FUZZ_TARGETS`] that no constant can reach: a cargo manifest and a
     /// workflow file cannot read a Rust `const`, and a target's source file is named by the
     /// filesystem. Each drifts in its own direction and each failure is silent. A target in the

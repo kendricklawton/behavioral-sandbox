@@ -53,6 +53,7 @@
 //! these shapes. Access control is the unix socket's directory permissions; a schema bump adds a
 //! verb, never a tenancy field. (The embedding-side statement of the same line is
 //! `docs/embedding.md` "Where the engine ends".)
+#![forbid(unsafe_code)]
 
 use std::io::{BufRead, Write};
 

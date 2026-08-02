@@ -33,6 +33,16 @@ multiple-versions = "warn"
 # version and would otherwise trip this, so path deps are explicitly allowed.
 wildcards = "deny"
 allow-wildcard-paths = true
+# Decision 7 (synchronous engine, no async runtime) was prose with nothing behind it: the tree
+# happened to be clean, and a transitive dependency could have pulled a runtime in without anything
+# saying so. An async runtime arriving is a design change, so it should fail the gate and be argued
+# for, not land as a lockfile diff nobody reads.
+deny = [
+    { name = "tokio" },
+    { name = "async-std" },
+    { name = "smol" },
+    { name = "async-executor" },
+]
 
 [sources]
 # Only the official crates.io registry: no unknown git or alternate registries.

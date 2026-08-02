@@ -22,9 +22,10 @@ and the two path constraints on it).
 carries the [`api` commit scope](./contributing-development-process.md#the-api-scope).
 
 Its safety posture is the inverse of most VMM projects: **the host path forbids `unsafe` outright**.
-`ekvm-engine`, `ekvm`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader` each carry `#![forbid(unsafe_code)]`, so
-that is a compiler error rather than a review convention. `crates/probes` is the single exception,
-structurally, because the BPF target requires raw map dereferences. See
+every crate in the workspace carries `#![forbid(unsafe_code)]` except `crates/probes`, so that is a
+compiler error rather than a review convention. That one exception is structural: the BPF target
+requires raw map dereferences. `every_crate_forbids_unsafe_except_the_bpf_one` holds the rule from
+the tree rather than from a list here. See
 [Coding guidelines](./contributing-coding-guidelines.md#use-of-unsafe).
 
 The public surface is deliberately narrow. From `lib.rs`:

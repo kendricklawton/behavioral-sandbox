@@ -44,8 +44,9 @@ verified outcome.
 
 ## Index of crates
 
-Directories stay short and packages carry the `ekvm-` prefix, so the two columns rarely match:
-`cargo … -p` takes the **package**, a path takes the **directory**.
+Directories stay short and packages carry the `ekvm-` prefix, so a package is its directory plus that
+prefix, with one exception: `crates/cli` builds `ekvm`, the bare name going to the command a user
+types. `cargo … -p` takes the **package**, a path takes the **directory**.
 
 | Crate | Directory | Role |
 |---|---|---|

@@ -30,8 +30,10 @@ The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol ov
 
 ## 7. Synchronous engine, no async runtime
 The driver and the daemon are **synchronous**: blocking I/O, one thread per session, no `tokio` or
-other executor anywhere in `ekvm`, `ekvm-channel`, or `ekvm serve`. This is a decision, not an accident of
-how the code grew, and it rests on three arguments.
+other executor anywhere in `ekvm-engine`, `ekvm-channel`, or `ekvm serve`. This is a decision, not an
+accident of how the code grew, and it rests on three arguments. `deny.toml` bans the common runtimes
+outright, so one arriving transitively fails `cargo deny check` in the gate rather than landing as a
+lockfile diff.
 
 **Concurrency here is bounded by microVMs, not by sockets.** A session's real cost
 is a whole Firecracker microVM holding hundreds of MiB of guest RAM, so the daemon's ceiling

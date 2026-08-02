@@ -121,10 +121,15 @@ commit scope. Keep new public items out of it unless an embedder needs them.
 
 ## Use of `unsafe`
 
-**The host path forbids it outright.** Every shipped host crate carries `#![forbid(unsafe_code)]`:
-`ekvm-engine`, `ekvm`, `ekvm-channel`, `ekvm-guest-agent`, and `ekvm-probes-loader`. This is not an aspiration policed by
-review; it is a compiler error, and it is the enforcer named wherever the docs claim the host path is
-unsafe-free.
+**The host path forbids it outright.** Every crate in the workspace carries
+`#![forbid(unsafe_code)]` except `crates/probes`. This is not an aspiration policed by review; it is
+a compiler error, and it is the enforcer named wherever the docs claim the host path is unsafe-free.
+
+The rule is stated as "every crate except one" rather than as a list of crate names on purpose:
+`every_crate_forbids_unsafe_except_the_bpf_one` derives the set from the tree and fails if any crate
+drops the attribute *or* if `probes` quietly gains it, so a new crate has to be decided about rather
+than defaulting into an unchecked gap. Both pages that state this rule previously named five of the
+six crates that carried it, while claiming a universal that three crates did not satisfy.
 
 `crates/probes` is the sole exception, and structurally so. It builds for the BPF target, where
 reading a map value means dereferencing a raw pointer the verifier has already bounded. Its module

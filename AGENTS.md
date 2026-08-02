@@ -51,9 +51,11 @@ a design error rather than a trade-off.
 
 ## Repo layout
 
-One workspace. **Directories stay short and packages carry the `ekvm-` prefix**, the **CLI** taking
-the bare `ekvm`, so the two columns below rarely match: `-p` takes the **package**
-(`-p ekvm-engine`), paths take the **directory** (`crates/engine`). The prefix would only stutter on
+One workspace. **Directories stay short and packages carry the `ekvm-` prefix**, so a package name is
+its directory plus that prefix, with **exactly one exception**: `crates/cli` builds `ekvm`, because
+the bare name goes to the thing a user types. That one row is why `-p` takes the **package**
+(`-p ekvm-engine`) and paths take the **directory** (`crates/engine`), and why the two are worth
+keeping distinct even where they agree. The prefix would only stutter on
 the filesystem of a repo already called ekvm, and it is the package name that has to be unambiguous,
 since that is the one a registry and a downstream `Cargo.toml` see. The bare name goes to the thing
 a user names: `cargo install ekvm` and the binary on `PATH` agree, and an embedder writes
