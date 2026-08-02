@@ -105,3 +105,11 @@ Stated because their absence is the honest counterweight to everything else in t
 The source for this book lives in the repository's
 [`docs/` directory](https://github.com/packsixfour/ekvm/tree/main/docs) and contributions are
 welcome, see [Contributing](./contributing.md).
+
+## License
+
+eKVM is licensed under the **Apache License 2.0**, copyright 2026 PackSixFour LLC. The full text is
+[`LICENSE`](https://github.com/packsixfour/ekvm/blob/main/LICENSE) in the repository. Contributions
+are made inbound under that same license, asserted per commit with a `Signed-off-by` line under the
+[Developer Certificate of Origin](https://developercertificate.org/); see
+[Contributing](./contributing.md).
