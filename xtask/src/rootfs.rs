@@ -29,7 +29,7 @@ const ROOTFS_UUID: &str = "5b3a9c1e-0000-4000-8000-000000000001";
 /// to it**, so repeated builds don't churn timestamps. A constant, deliberately, a `git log` or
 /// wall-clock date would vary across shallow clones and over time, defeating the purpose. Together
 /// with the fixed UUID + hash seed, this makes two builds byte-identical. 2024-01-01T00:00:00Z.
-const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
+pub(crate) const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
 
 /// The reproducibility floor: `mke2fs` honours `SOURCE_DATE_EPOCH` from e2fsprogs 1.47.1; older
 /// versions silently ignore it and stamp wall-clock times, so two builds of the identical tree
@@ -631,7 +631,7 @@ struct RootfsBuild {
 /// one process's bookkeeping, so extracting under one invocation and running `mke2fs` under another
 /// would lose it. Re-exec is how a single session spans all of them. `FAKEROOTKEY` is set inside a
 /// session, which is what stops this recursing.
-fn reexec_under_fakeroot_if_needed() -> Result<bool> {
+fn reexec_under_fakeroot_if_needed(verify: bool, update_lock: bool) -> Result<bool> {
     if crate::effective_uid()? == 0 || std::env::var_os("FAKEROOTKEY").is_some() {
         return Ok(false);
     }
@@ -644,13 +644,25 @@ fn reexec_under_fakeroot_if_needed() -> Result<bool> {
         );
     }
     let exe = std::env::current_exe().context("locate the xtask binary to re-exec")?;
+    // Re-exec **only the rootfs build**, reconstructed from this call's own arguments, never the
+    // caller's argv. Replaying argv re-runs whatever invoked us: under `dist` the child ran the
+    // entire packaging (eBPF object, musl binary, stage, tar), the parent then ran steps 3 to 5 a
+    // second time on top of it, and the two tarballs differed. Only this build needs uid 0.
+    let mut args: Vec<&str> = vec!["build-rootfs"];
+    if verify {
+        args.push("--verify");
+    }
+    if update_lock {
+        args.push("--update-lock");
+    }
     println!(
-        "$ fakeroot {} …  (guest rootfs must be uid 0)",
-        exe.display()
+        "$ fakeroot {} {}  (guest rootfs must be uid 0)",
+        exe.display(),
+        args.join(" ")
     );
     let status = std::process::Command::new("fakeroot")
         .arg(exe)
-        .args(std::env::args_os().skip(1))
+        .args(&args)
         .status()
         .context("running fakeroot")?;
     if !status.success() {
@@ -660,7 +672,7 @@ fn reexec_under_fakeroot_if_needed() -> Result<bool> {
 }
 
 pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
-    if reexec_under_fakeroot_if_needed()? {
+    if reexec_under_fakeroot_if_needed(verify, update_lock)? {
         return Ok(());
     }
     // Name the mke2fs floor up front (see `MKE2FS_SOURCE_DATE_EPOCH_MIN`), instead of letting

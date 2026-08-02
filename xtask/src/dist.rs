@@ -249,17 +249,32 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> 
     Ok(())
 }
 
-/// Tar the staged directory deterministically (sorted names, numeric zero owners; `--mtime` pinned
-/// when `SOURCE_DATE_EPOCH` is set, the same reproducibility seam the rootfs build honors).
+/// The flags that make the release tarball byte-identical across builds of one tree: a stable entry
+/// order, ownership that cannot carry the builder's uid, and an mtime pinned to a constant.
+///
+/// Split out from [`tar_stage`] so it is assertable without running `tar`, since the property is a
+/// claim about these flags rather than about the process.
+fn deterministic_tar_flags() -> Vec<String> {
+    vec![
+        "--sort=name".to_string(),
+        "--owner=0".to_string(),
+        "--group=0".to_string(),
+        "--numeric-owner".to_string(),
+        format!("--mtime=@{}", crate::rootfs::ROOTFS_SOURCE_DATE_EPOCH),
+    ]
+}
+
+/// Tar the staged directory deterministically: sorted names, numeric zero owners, and `--mtime`
+/// pinned to the **same fixed epoch the rootfs image uses**, so two builds of one tree agree.
+///
+/// The epoch is taken from the constant, never from the ambient `SOURCE_DATE_EPOCH`. Honouring the
+/// environment was the bug: nothing in `dist` set it, so mtimes fell back to wall clock and two
+/// builds of the identical tree produced different tarballs and different `SHA256SUMS`. An
+/// environment-dependent value cannot give the property this function claims, since a verifier's
+/// shell is not the release runner's.
 fn tar_stage(dist_dir: &Path, name: &str, tarball: &Path) -> Result<()> {
     let mut cmd = Command::new("tar");
-    cmd.arg("--sort=name")
-        .arg("--owner=0")
-        .arg("--group=0")
-        .arg("--numeric-owner");
-    if let Ok(epoch) = std::env::var("SOURCE_DATE_EPOCH") {
-        cmd.arg(format!("--mtime=@{epoch}"));
-    }
+    cmd.args(deterministic_tar_flags());
     cmd.arg("-C")
         .arg(dist_dir)
         .arg("-czf")
@@ -376,6 +391,45 @@ pub(crate) fn release_key(path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use crate::BPF_LINKER_VERSION;
+
+    /// The release tarball has to be byte-identical across builds of one tree, so a verifier on a
+    /// stranger box reaches the `SHA256SUMS` the release signed. Wall-clock mtimes defeat that, and
+    /// they are what `tar` writes unless told otherwise. This pins the flag rather than the
+    /// resulting hash: a hash would have to be regenerated on every content change and would stop
+    /// testing anything.
+    ///
+    /// Reading `SOURCE_DATE_EPOCH` from the environment was the original bug. Nothing in `dist` set
+    /// it, so the pin silently did not apply, and two builds minutes apart differed.
+    #[test]
+    fn the_release_tarball_mtime_is_pinned_to_the_rootfs_epoch() {
+        let flags = deterministic_tar_flags();
+        let expected = format!("--mtime=@{}", crate::rootfs::ROOTFS_SOURCE_DATE_EPOCH);
+        assert!(
+            flags.contains(&expected),
+            "tar must pin --mtime to the fixed rootfs epoch, got {flags:?}"
+        );
+        // The value has to be a constant, not whatever the caller's shell happens to carry: a
+        // verifier's environment is not the release runner's.
+        assert!(
+            crate::rootfs::ROOTFS_SOURCE_DATE_EPOCH
+                .chars()
+                .all(|c| c.is_ascii_digit()),
+            "the epoch must be a literal timestamp"
+        );
+    }
+
+    /// Ownership must not depend on who ran the build, the same property `5b34dfd` fixed one layer
+    /// down for the rootfs image itself.
+    #[test]
+    fn the_release_tarball_records_no_builder_identity() {
+        let flags = deterministic_tar_flags();
+        for expected in ["--owner=0", "--group=0", "--numeric-owner", "--sort=name"] {
+            assert!(
+                flags.iter().any(|f| f == expected),
+                "tar must pass {expected}, got {flags:?}"
+            );
+        }
+    }
 
     struct TempDir(PathBuf);
     impl Drop for TempDir {
