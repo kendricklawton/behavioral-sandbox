@@ -83,10 +83,12 @@ driving a sandbox is usually an agent loop, then Go and Node; **none is written*
 is documented so any language can drive it without one.
 
 It pins the same way the engine does (`ekvm-client = { git = "https://github.com/packsixfour/ekvm",
-rev = "…" }`, directory `crates/client`), and unlike the engine it *could* publish: the
-support-window argument in [Where the engine ends](./embedding-scope.md) is computed from
-Firecracker's, and this crate's whole dependency list is `ekvm-protocol` and `serde_json`. Whether
-it does is a question for the version sweep, not a promise here.
+rev = "…" }`, directory `crates/client`). Its manifest carries `publish = false`, as every crate
+here does, so nothing is published from this repo today. What is worth noting is that the argument
+*against* publishing does not apply to this one: the support-window reasoning in [Where the engine
+ends](./embedding-scope.md) is computed from Firecracker's, and this crate's whole dependency list
+is `ekvm-protocol` and `serde_json`. Whether that line ever gets lifted is a question for the
+version sweep, not a promise here.
 
 ```rust,ignore
 use ekvm_client::{Client, OpenOptions};
@@ -106,14 +108,18 @@ client.close()?;                                    // tear the sandbox down
 allowances to arm on its tap (`allow`, each `IP[/CIDR][:PORT][/PROTO]`). Both default to the sealed
 posture, so a client written before they existed sends bytes that still decode to no NIC at all.
 
-The daemon refuses rather than narrowing. An `allow` without `net` names the contradiction, and a
+The daemon refuses rather than narrowing, which `open_network_refuses_rather_than_narrowing` pins:
+an `allow` without `net` names the contradiction, and a
 rule set past the kernel map's fixed count is caught with the cap named. The `.ekvm.toml` operator
-policy (`allow_net`, the `max_egress_*` ceilings) is the *CLI's* enforcement surface: a daemon reads
-no config file, so what it enforces is the flag ceilings it was launched with plus the invariants
-below.
+policy (`allow_net`, the `max_egress_*` ceilings) is the *CLI's* enforcement surface. The daemon
+runs the same checks, but nothing sets those values: it reads no config file and has no flag for
+them, so what actually binds a session is the flag ceilings the daemon was launched with plus the
+invariants below.
 
-**A NIC over the wire is always policed, deny-all at minimum** (the session's networked `open` arms
-`EgressPolicy::deny_all` before any allowance is considered), which is the one place the daemon is
+**A NIC over the wire is always policed, deny-all at minimum.** Every networked `open` starts from
+`EgressPolicy::deny_all` and adds allowances to it, so there is no path through that produces an
+unarmed tap; `open_network_resolves_the_wire_request_against_the_operators_ceilings` opens a bare
+NIC and reads the armed policy back. This is the one place the daemon is
 deliberately stricter than the CLI. A bare `ekvm run --net` attaches observe-only, and that is safe
 there because the caller is local and owns the config file. A wire client is neither, so leaving it
 observe-only would mean a session could ask for a NIC with no allowances and get an unpoliced tap:
