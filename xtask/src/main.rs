@@ -807,11 +807,19 @@ fn run_in(dir: &Path, toolchain: Option<&str>, args: &[&str], shown: &str) -> Re
 /// repo whose daily `audit.yml` looks like it covers everything. `crates/probes` is the crate that
 /// matters, being the only one allowed `unsafe` and the one whose object ships in the tarball.
 ///
-/// Advisories only, and against the root config so there is one advisory policy. Bans, licenses and
-/// sources describe the shipped dependency graph, which the root check already owns; re-running them
-/// here would mean a second policy to keep in step for no coverage.
+/// Advisories only. Bans, licenses and sources describe the shipped dependency graph, which the root
+/// check already owns; re-running them here would mean a second policy to keep in step for no
+/// coverage.
+///
+/// **No `--config`, deliberately.** Pointing these at the root `deny.toml` buys exactly one line
+/// over cargo-deny's defaults, `yanked = "deny"` instead of `warn`, and costs the argument being
+/// version-sensitive: `--config` belongs to the `check` subcommand in some releases and is global in
+/// others, which is a command that passes on a dev box and fails CI. Buying that one line meant
+/// pinning cargo-deny's version, and a pinned dev tool is real recurring maintenance for no security
+/// gain. Vulnerabilities are denied by default, which is the whole reason this scan exists; a yanked
+/// crate in the BPF crate or the fuzz harness warns rather than fails, and that is an accepted trade
+/// rather than an oversight.
 fn deny_detached_workspaces(root: &Path) -> Result<()> {
-    let config = root.join("deny.toml");
     for manifest in detached_manifests(root)? {
         let shown = manifest.strip_prefix(root).unwrap_or(&manifest);
         println!(
@@ -821,9 +829,7 @@ fn deny_detached_workspaces(root: &Path) -> Result<()> {
         let status = Command::new(env!("CARGO"))
             .args(["deny", "--manifest-path"])
             .arg(&manifest)
-            .args(["check", "--config"])
-            .arg(&config)
-            .arg("advisories")
+            .args(["check", "advisories"])
             .status()
             .with_context(|| format!("running cargo deny for {}", shown.display()))?;
         if !status.success() {
