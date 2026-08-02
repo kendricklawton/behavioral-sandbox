@@ -268,15 +268,28 @@ pub(crate) fn alpine_artifact() -> Result<Artifact> {
 
 /// The pinned static `apk` (from Alpine's `apk-tools-static` package, itself a tarball): the
 /// installer that puts [`GUEST_PACKAGES`] into the staging dir **rootless**, on any host distro.
+///
+/// **This pin expires when upstream bumps the package, and the failure is a 404, not a mismatch.**
+/// An Alpine branch repo carries only the newest revision of each package, which is the same reason
+/// [`GUEST_PACKAGES`] deliberately floats instead of pinning `pkg=ver-rN` (stated at length in
+/// `.github/workflows/rootfs-packages.yml`). This artifact is the exception, because it is the
+/// installer itself and a sha256 is the only thing standing between a fresh clone and running an
+/// unverified binary as part of the build. So the version is pinned here **knowing** it will 404
+/// the day Alpine publishes the next one: `3.0.6-r0` did, on 2026-08-02, breaking every fresh
+/// clone and every clean CI run while cached hosts kept building.
+///
+/// Bumping it is: read the current filename out of the branch index, download it, `sha256sum` it,
+/// and put both here. A rebuild afterwards is not optional, since the installer writes the package
+/// database the guest image hashes over.
 pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
         "x86_64" => Ok(Artifact {
             url: format!(
                 "https://dl-cdn.alpinelinux.org/alpine/{ALPINE_BRANCH}/main/x86_64/\
-                 apk-tools-static-3.0.6-r0.apk"
+                 apk-tools-static-3.0.7-r0.apk"
             ),
-            sha256: "a62f54609910d1eb23d8ebcf69dd7954280fe76047452bb88410122cbca14a6e",
+            sha256: "ed1c5e82177844249b7c4ecc2653b78eed096be20496b7fb860a9e165b2e5ce1",
             dest: dir.join("apk-tools-static.apk"),
         }),
         other => bail!("no pinned apk-tools-static for arch {other} yet (x86_64 only)"),
