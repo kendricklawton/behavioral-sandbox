@@ -6,11 +6,15 @@
 //! content through the real construct-then-parse cycle.
 
 #![no_main]
+// A fuzz target: `panic!` is how a finding is *reported*, since libFuzzer treats a panic as the
+// crash it is hunting for. Same exemption the test binaries take, and for the same reason: the
+// workspace's `clippy::panic` deny serves design rule 5 on the host path, which this is not.
+#![allow(clippy::panic)]
 
 use std::sync::OnceLock;
 
-use libfuzzer_sys::fuzz_target;
 use ekvm_probes_loader::{record_hash, verify, verify_chain, HostKey, TrustedKey};
+use libfuzzer_sys::fuzz_target;
 
 /// One deterministic key (the unit tests' seed) so per-iteration cost is one sign + one verify,
 /// not a keygen.

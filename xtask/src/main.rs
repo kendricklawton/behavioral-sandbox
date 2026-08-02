@@ -669,6 +669,7 @@ fn ci() -> Result<()> {
     )?;
     cargo(&["deny", "check"])?;
     deny_detached_workspaces(workspace_root())?;
+    lint_detached_workspaces(workspace_root())?;
     // The eBPF object build is part of the CI gate. Host-safe and guarded, it skips with a note
     // when `bpf-linker`/`rustup` are absent, so `ci` still runs everywhere, but on a set-up dev box a
     // probe that fails to compile (or drops its BTF) now fails here, not later at load.
@@ -706,6 +707,97 @@ fn excluded_dirs(manifest: &str) -> Vec<String> {
             (!e.is_empty()).then(|| e.to_string())
         })
         .collect()
+}
+
+/// The `[workspace.lints.clippy]` entries the root manifest sets to `deny`, as `-D` flags.
+///
+/// Read from the root manifest so the detached workspaces cannot carry a second, drifting copy of
+/// the list. They are `exclude`d, so `[lints] workspace = true` is not available to them: cargo
+/// only inherits lints for members. Passing the same denies on the command line is the way to give
+/// one policy to both halves of the tree.
+fn workspace_clippy_denies(root: &Path) -> Result<Vec<String>> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .context("read the root Cargo.toml for its clippy lint policy")?;
+    let Some((_, rest)) = manifest.split_once("[workspace.lints.clippy]") else {
+        return Ok(Vec::new());
+    };
+    let body = rest.split("\n[").next().unwrap_or(rest);
+    Ok(body
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .filter(|(_, v)| v.trim().trim_matches('"') == "deny")
+        .map(|(k, _)| format!("-Dclippy::{}", k.trim()))
+        .collect())
+}
+
+/// `cargo fmt --check` and `cargo clippy -D warnings` for the detached workspaces.
+///
+/// Neither had ever been formatted or linted by anything. `crates/probes` is the crate that
+/// matters: it is the only one allowed `unsafe`, its object ships in the release tarball, and it
+/// sat on 18 clippy findings while `docs/contributing-coding-guidelines.md` told readers the gate
+/// runs clippy "across the workspace" and that `main` never carries a warning. Both claims were
+/// true only of the members.
+///
+/// Each command runs with the cwd **inside** its workspace, so rustup honours that directory's own
+/// `rust-toolchain.toml`: `crates/probes` pins a nightly, the root pins stable, and linting the
+/// probes with the root's stable would fail on features the crate needs. Clippy on `crates/probes`
+/// skips cleanly when that nightly is absent, the same guard and the same reason as
+/// [`build_probes`]: the everyday gate has to run everywhere.
+fn lint_detached_workspaces(root: &Path) -> Result<()> {
+    let denies = workspace_clippy_denies(root)?;
+    for manifest in detached_manifests(root)? {
+        let dir = manifest.parent().unwrap_or(root).to_path_buf();
+        let shown = dir.strip_prefix(root).unwrap_or(&dir).display().to_string();
+        // Only `crates/probes` pins its own channel; `fuzz` builds on whatever the caller has.
+        let toolchain = if dir.ends_with("probes") {
+            if !nightly_ebpf_ready() {
+                println!("· skipping {shown}: its pinned nightly is not installed");
+                continue;
+            }
+            Some(probes_nightly()?)
+        } else {
+            None
+        };
+        run_in(&dir, toolchain, &["fmt", "--check"], &shown)?;
+        // No `--all-targets`: it adds a test harness, and `crates/probes` is `no_std` for a target
+        // with no `test` crate and no panic handler, so the harness cannot build at all. The
+        // default targets are the ones that ship.
+        let mut args = vec!["clippy", "--", "-Dwarnings"];
+        args.extend(denies.iter().map(String::as_str));
+        run_in(&dir, toolchain, &args, &shown)?;
+    }
+    Ok(())
+}
+
+/// One cargo invocation inside `dir`, under the toolchain that directory pins.
+///
+/// `toolchain` names it explicitly rather than letting the `rust-toolchain.toml` in `dir` be found,
+/// because a parent `cargo xtask` leaks `RUSTUP_TOOLCHAIN=stable` into every child and that
+/// overrides the file. [`build_probes`] hit this first and solved it the same way; the difference
+/// here is that it cost a debugging round because the command passed by hand and failed from the
+/// gate, which is the signature of an inherited variable rather than a broken command.
+fn run_in(dir: &Path, toolchain: Option<&str>, args: &[&str], shown: &str) -> Result<()> {
+    let mut cmd = match toolchain {
+        Some(t) => {
+            println!("$ rustup run {t} cargo {}  (in {shown})", args.join(" "));
+            let mut c = Command::new("rustup");
+            c.args(["run", t, "cargo"]);
+            c
+        }
+        None => {
+            println!("$ cargo {}  (in {shown})", args.join(" "));
+            Command::new(env!("CARGO"))
+        }
+    };
+    let status = cmd
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .with_context(|| format!("running cargo {} in {shown}", args.join(" ")))?;
+    if !status.success() {
+        bail!("cargo {} failed in {shown}", args.join(" "));
+    }
+    Ok(())
 }
 
 /// `cargo deny check advisories` for the workspaces the root check cannot see.

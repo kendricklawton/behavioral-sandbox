@@ -148,10 +148,10 @@ pub fn count_execve(_ctx: TracePointContext) -> u32 {
     // SAFETY: the map helpers are the verifier-checked BPF map ops; the returned pointer is only
     // dereferenced inside the `Some` arm (the mandatory null-check), never held across a helper call.
     unsafe {
-        if let Some(slot) = EXECVE_BY_PID.get_ptr_mut(&pid) {
+        if let Some(slot) = EXECVE_BY_PID.get_ptr_mut(pid) {
             *slot += 1;
         } else {
-            let _ = EXECVE_BY_PID.insert(&pid, &1, 0);
+            let _ = EXECVE_BY_PID.insert(pid, 1, 0);
         }
     }
     0
@@ -211,7 +211,7 @@ fn passes_filter(tgid: u32, cgroup: u64) -> bool {
     if TRACE_SET.get(FILTER_MODE_SLOT).copied().unwrap_or(0) != 0 {
         // Set mode: pass only registered cgroups. `get_ptr` is a presence check without a deref, so no
         // `unsafe` is needed (the same membership test `account_sched_switch` uses for the meter).
-        return TRACE_TARGETS.get_ptr(&cgroup).is_some();
+        return TRACE_TARGETS.get_ptr(cgroup).is_some();
     }
     let want_tgid = FILTER.get(FILTER_TGID).copied().unwrap_or(0);
     let want_cgroup = FILTER.get(FILTER_CGROUP).copied().unwrap_or(0);
@@ -584,9 +584,9 @@ fn record_denial(key: &FlowKey) {
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
-        if let Some(count) = DENIALS.get_ptr_mut(&dst) {
+        if let Some(count) = DENIALS.get_ptr_mut(dst) {
             *count += 1;
-        } else if DENIALS.insert(&dst, &1, 0).is_err() {
+        } else if DENIALS.insert(dst, 1, 0).is_err() {
             // Map full: the packet was still dropped (enforcement is not map-dependent), but its
             // destination is missing from the audit rows, count the loss so the record can say so.
             count_map_drop(&DENIAL_DROPS);
@@ -603,9 +603,9 @@ fn record_denial6(key: &FlowKey6) {
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
-        if let Some(count) = DENIALS6.get_ptr_mut(&dst) {
+        if let Some(count) = DENIALS6.get_ptr_mut(dst) {
             *count += 1;
-        } else if DENIALS6.insert(&dst, &1, 0).is_err() {
+        } else if DENIALS6.insert(dst, 1, 0).is_err() {
             count_map_drop(&DENIAL_DROPS);
         }
     }
@@ -675,7 +675,7 @@ fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
     unsafe {
-        if let Some(counts) = FLOWS.get_ptr_mut(&key) {
+        if let Some(counts) = FLOWS.get_ptr_mut(key) {
             match dir {
                 Direction::Ingress => {
                     (*counts).ingress_packets += 1;
@@ -698,7 +698,7 @@ fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
                     init.egress_bytes = bytes;
                 }
             }
-            if FLOWS.insert(&key, &init, 0).is_err() {
+            if FLOWS.insert(key, init, 0).is_err() {
                 // Map full: this 5-tuple's traffic is now invisible to the flow table *and* the
                 // totals folded from it, count the loss so the record reads truncated, not complete.
                 count_map_drop(&FLOW_DROPS);
@@ -739,7 +739,7 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
                     init.egress_bytes = bytes;
                 }
             }
-            if FLOWS6.insert(key, &init, 0).is_err() {
+            if FLOWS6.insert(key, init, 0).is_err() {
                 count_map_drop(&FLOW_DROPS);
             }
         }
@@ -888,7 +888,7 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
     // was already advanced, so the *next* interval stays exact. `get_ptr` obtains the lookup pointer
     // without dereferencing it (a safe presence check), so no `unsafe` is needed for the membership test.
     let all = METER_ALL.get(0).copied().unwrap_or(0) != 0;
-    if !all && METER_TARGETS.get_ptr(&cgroup).is_none() {
+    if !all && METER_TARGETS.get_ptr(cgroup).is_none() {
         return 0;
     }
 
@@ -897,10 +897,10 @@ pub fn account_sched_switch(_ctx: TracePointContext) -> u32 {
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm and never held across a helper call.
     unsafe {
-        if let Some(acc) = CPU_NS.get_ptr_mut(&cgroup) {
+        if let Some(acc) = CPU_NS.get_ptr_mut(cgroup) {
             *acc += delta;
         } else {
-            let _ = CPU_NS.insert(&cgroup, &delta, 0);
+            let _ = CPU_NS.insert(cgroup, delta, 0);
         }
     }
     0

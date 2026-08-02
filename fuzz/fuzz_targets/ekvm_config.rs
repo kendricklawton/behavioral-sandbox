@@ -12,7 +12,6 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(config) = toml::from_str::<EkvmToml>(s) {
             let policy = config.policy();
             let _ = policy.resolve(&ekvm::policy::Requested::default());
-
         }
     }
 });
