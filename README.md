@@ -25,10 +25,17 @@
   </h3>
 </div>
 
-> **Pre-release, unreleased, unaudited.** Version `0.0.0`, no tag, no published artifact, one
-> maintainer, no external review. Nothing here carries a compatibility guarantee: if you build on it,
-> pin a git rev. The full verification record, including what has *not* been done, is
-> [docs/introduction.md#status](docs/introduction.md#status).
+## Warning
+
+eKVM is pre-release, unreleased, and unaudited. Version `0.0.0`, no tag, no published artifact, one
+maintainer, no external review, and no outside users. The API changes without notice, so if you
+build on it, pin a git rev. It has been run on two kernels, neither of them enterprise. Benchmark
+numbers are withdrawn pending re-measurement.
+
+**Use it only if you are willing to read the code you are trusting.** That is the honest bar for a
+sandbox at this stage, and everything below is written to make that possible: the full verification
+record, including [what has *not* been done](docs/introduction.md#what-has-not-been-done), is in
+[Status](docs/introduction.md#status).
 
 ## What it is
 
@@ -111,38 +118,27 @@ surface, including `--record-summary` for an agent loop and `--watch` for a live
 
 ## Design rules
 
-Six rules, each stating an intent and the mechanism serving it, so a change that breaks one is
-recognisable as a design error rather than a trade-off. The full text is
-[docs/architecture.md](docs/architecture.md).
+Six rules. A change that breaks one is a design error, not a trade-off. Each states an intent and
+the mechanism serving it; the full text is [docs/architecture.md](docs/architecture.md).
 
-* **Isolation is hardware, not software.** Untrusted code runs in a KVM microVM. Moving the boundary
-  into guest-side software is a design error, not an optimisation, and a shared-kernel shortcut taken
-  to make things simpler is the same error.
+* **Isolation is hardware, not software**: untrusted code runs in a KVM microVM, never behind a
+  guest-side check.
+* **[Observe and enforce from the host][probes]**: visibility and policy are host-side eBPF on
+  host-kernel hooks; the in-guest agent carries exec and IO, never containment.
+* **Deny by default**: no explicit policy means no route out and minimal capability, and every
+  allowance lands in the record.
+* **Engine, not platform**: a runtime and a driver API. Tenancy, billing, scheduling, and
+  dashboards are the hoster's: a recorded [non-goal][embedding], not a gap.
+* **No panic, hang, or leak on the host path**: a hostile guest, a failed probe, or a broken
+  channel surfaces as a typed error. The rule the code is written against and the confinement suite
+  exercises; an aim, not a proven property.
+* **[Measure rather than assert][benchmarks]**: percentiles with the host and date, and a number
+  that cannot be defended is withdrawn. Which is why the tables are withdrawn right now.
 
-* **[Observe and enforce from the host][probes].** Visibility and policy belong in host-side eBPF
-  attached to host-kernel hooks. The in-guest agent carries exec and IO framing; making it
-  responsible for containing the guest is a design error.
-
-* **Deny by default.** A sandbox with no explicit policy is configured with no route out and minimal
-  capability, and each allowance is recorded in the audit record.
-
-* **Engine, not platform.** A self-hostable runtime and a driver API. Multi-tenant auth, billing,
-  fleet scheduling, and dashboards belong to whatever *hosts* the engine: a recorded non-goal, not a
-  gap. The [non-goals list][embedding] is explicit about it.
-
-* **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
-  broken channel should surface as a typed error. This is the rule the code is written against and
-  the property the confinement suite exercises; it is an aim, not a proven property.
-
-* **[Measure rather than assert][benchmarks].** Boot, restore, memory sharing, and overhead are
-  reported as nearest-rank percentiles with the host and date. A number that cannot be defended is
-  withdrawn, which is why the result tables are currently withdrawn pending a re-measurement on a
-  verified host.
-
-The host path is `#![forbid(unsafe_code)]`. The eBPF programs build for their own target
-(`bpfel-unknown-none`) and use CO-RE/BTF, which is a portability *mechanism*; the claim that it is
-portable across kernels is tested on one kernel so far, and
-[what has not been done](docs/introduction.md#what-has-not-been-done) says so.
+The host path is `#![forbid(unsafe_code)]`, enforced by the compiler in every crate but the eBPF
+one. Those programs build for `bpfel-unknown-none` and use CO-RE/BTF, a portability *mechanism*
+tested on two kernels so far, which
+[what has not been done](docs/introduction.md#what-has-not-been-done) says plainly.
 
 [probes]: docs/probes.md
 [embedding]: docs/embedding.md
@@ -155,7 +151,7 @@ The engine is consumed in three shapes, one of which exists today:
 
 * **Rust**, the `ekvm-engine` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`), depended
   on by git rev:
-  `ekvm = { git = "https://github.com/packsixfour/ekvm", rev = "…" }`. It is not distributed through
+  `ekvm-engine = { git = "https://github.com/packsixfour/ekvm", rev = "…" }`. It is not distributed through
   crates.io **by decision, not pending**: an immutable registry version would outlive this engine's
   support window, which is computed from Firecracker's, so a name held there is a `0.0.0` placeholder
   rather than a release ([the reasoning][embedding-scope]). A change to that API is
@@ -187,6 +183,21 @@ in place. It is not published as a site until the first release.
 - **[Benchmarks](docs/benchmarks.md)**, the methodology and how to run it yourself.
 - **[Security](docs/security.md)** and the **[threat model](docs/security-threat-model.md)**.
 - **[Contributing](docs/contributing.md)**, invariants, developer tools, CI gates, testing, fuzzing.
+
+## Getting help
+
+There is no chat server and no forum: one maintainer, and a channel nobody answers is worse than no
+channel. Everything routes through the repository, where the answer stays searchable.
+
+- **A question, or something that does not work**: [open an
+  issue](https://github.com/packsixfour/ekvm/issues/new/choose). Questions are welcome as issues;
+  if the docs did not answer it, that is usually a docs bug worth fixing.
+- **A suspected vulnerability**: use the [private advisory
+  form](https://github.com/packsixfour/ekvm/security/advisories/new), never a public issue.
+  [`SECURITY.md`](SECURITY.md) states what counts as one.
+- **A change you want to make**: read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. Bug fixes, tests,
+  and docs can go straight to a pull request; anything larger starts with an issue, because the API
+  is still moving and an issue is how you avoid building against a shape that is about to change.
 
 ## Repo layout
 
