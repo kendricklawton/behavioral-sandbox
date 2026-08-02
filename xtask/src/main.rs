@@ -429,8 +429,7 @@ fn require_cargo_fuzz() -> Result<()> {
     let nightly = probes_nightly().unwrap_or("<unreadable pin>");
     bail!(
         "cargo-fuzz not found — install it with `cargo install cargo-fuzz --locked` and add the \
-         pinned toolchain (`rustup toolchain install {nightly} --profile minimal`). \
-        "
+         pinned toolchain (`rustup toolchain install {nightly} --profile minimal`)."
     )
 }
 
