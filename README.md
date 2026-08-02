@@ -27,10 +27,10 @@
 
 ## Warning
 
-eKVM is pre-release, unreleased, and unaudited. Version `0.0.0`, no tag, no published artifact, one
-maintainer, no external review, and no outside users. The API changes without notice, so if you
-build on it, pin a git rev. It has been run on two kernels, neither of them enterprise. Benchmark
-numbers are withdrawn pending re-measurement.
+eKVM is pre-release and unaudited. Version `0.0.1` is a checkpoint that exercises the release path,
+not a supported release: one maintainer, no external review, and no outside users. The API changes
+without notice, so if you build on it, pin a git rev. It has been run on two kernels, neither of
+them enterprise. Benchmark numbers are withdrawn pending re-measurement.
 
 **Use it only if you are willing to read the code you are trusting.** That is the honest bar for a
 sandbox at this stage, and everything below is written to make that possible: the full verification

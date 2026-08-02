@@ -587,7 +587,7 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "ekvm"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "clap",
  "ekvm-engine",
@@ -605,14 +605,14 @@ dependencies = [
 
 [[package]]
 name = "ekvm-channel"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "zeroize",
 ]
 
 [[package]]
 name = "ekvm-engine"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ekvm-channel",
  "nix 0.31.3",
@@ -624,11 +624,11 @@ dependencies = [
 
 [[package]]
 name = "ekvm-probes-common"
-version = "0.0.0"
+version = "0.0.1"
 
 [[package]]
 name = "ekvm-probes-loader"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "aya",
  "ed25519-dalek",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "ekvm-protocol"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -755,7 +755,7 @@ dependencies = [
 
 [[package]]
 name = "fuzz"
-version = "0.0.0"
+version = "0.0.1"
 dependencies = [
  "ekvm",
  "ekvm-channel",

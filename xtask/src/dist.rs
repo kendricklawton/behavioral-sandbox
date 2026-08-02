@@ -180,14 +180,19 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
 }
 
 /// The default package version: the nearest checkpoint tag (`git describe --tags`, the `v0.0.x`
-/// pre-release line RELEASES.md defines, `v` stripped), falling back to `0.0.0-dev.<rev>` in a
+/// pre-release line RELEASES.md defines, `v` stripped), falling back to `<pkg>-dev.<rev>` in a
 /// tagless clone. Release CI passes `--version` from the pushed tag instead.
+///
+/// The fallback's number comes from the workspace version rather than a literal, which was `0.0.0`
+/// here until the `v0.0.1` tag made it stale: a hardcoded version in the *dev* path goes wrong
+/// quietly, since the tagged path never reads it.
 fn default_version() -> String {
     let describe = git_stdout(&["describe", "--tags", "--always", "--dirty=.dirty"]);
+    let pkg = env!("CARGO_PKG_VERSION");
     match describe {
         Some(d) if d.starts_with('v') => d[1..].to_string(),
-        Some(rev) => format!("0.0.0-dev.{rev}"),
-        None => "0.0.0-dev.unknown".to_string(),
+        Some(rev) => format!("{pkg}-dev.{rev}"),
+        None => format!("{pkg}-dev.unknown"),
     }
 }
 

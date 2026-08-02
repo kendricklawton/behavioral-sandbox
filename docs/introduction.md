@@ -60,11 +60,12 @@ and dashboards belong to whatever *hosts* the engine, and the model driving an a
 
 ## Status
 
-**Pre-release, unreleased, unaudited.** Version `0.0.0`, no tag, no published artifact. One
-maintainer, and nothing here has been reviewed by anyone outside the project. Nothing in this book is
-a promise: it describes how the engine is built and what has been exercised. Anything can change
-without notice, so if you build on this, pin a git rev. Release mechanics and the planned support
-policy are in [RELEASES.md](../RELEASES.md), none of which is in force yet.
+**Pre-release and unaudited.** Version `0.0.1` is a checkpoint that exercises the release path, not
+a supported release. One maintainer, and nothing here has been reviewed by anyone outside the
+project. Nothing in this book is a promise: it describes how the engine is built and what has been
+exercised. Anything can change without notice, so if you build on this, pin a git rev. Release
+mechanics are in [RELEASES.md](../RELEASES.md); the signing and manifest half is exercised by
+`v0.0.1`, the support policy is not in force.
 
 Each milestone ships with a demo that exercises it, so most of what this book describes has been run
 rather than only reasoned about. "Most" is load-bearing there: the release install path, the Red Hat

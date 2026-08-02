@@ -173,9 +173,9 @@ this table as orientation.
 
 ## Install from a release package
 
-> **No release has been published yet.** Version `0.0.0`, no tag, no artifacts: the URLs in this
-> section do not resolve today. It describes the intended install path so it can be reviewed and
-> tested before the first tag; until then, build from source (above). See
+> **`v0.0.1` is a checkpoint, not a supported release.** It was tagged to exercise the release path
+> end to end, so the URLs in this section resolve and the signature checks below are real. Nothing
+> about the API, the CLI, or the artifact layout is stable until v0.1.0. See
 > [Status](./introduction.md#status).
 
 Each release is intended to ship a release package tarball per platform plus `SHA256SUMS` and its
