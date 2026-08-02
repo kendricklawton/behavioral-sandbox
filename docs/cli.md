@@ -23,7 +23,8 @@ carries `python3`, `node`, and the in-guest exec agent. From a source checkout w
 the same commands are `cargo run -p ekvm -- run …`.
 
 `ekvm run` is **jailed by default**: the VMM runs under Firecracker's jailer (chroot, uid/gid drop,
-seccomp, its own namespaces, a cgroup), which needs real root and the `jailer` binary. On a dev box
+its own namespaces, a cgroup), with Firecracker's own built-in seccomp filters left on top because
+the driver never passes `--no-seccomp`. That needs real root and the `jailer` binary. On a dev box
 without them, `--unjailed` is the explicit, greppable opt-out, and the guest still sits behind the KVM
 hardware boundary; only the VMM process itself runs unconfined.
 
@@ -52,6 +53,7 @@ out of scope.
 | Verify a signed record | [`ekvm verify <record>`](./cli-commands.md#ekvm-verify) |
 | Structured run result | `--json` |
 | Host readiness | [`ekvm doctor`](./cli-commands.md#ekvm-doctor) |
+| Crashed-run residue (`sweep_orphans`) | no flag: run automatically before every boot subcommand, reclaiming this euid's dead-pid scratch dirs and netns |
 | Config layering | [flags > env (`EKVM_*`) > `.ekvm.toml` > defaults](./cli-config.md) |
 
 ## Deliberately not in the CLI
@@ -62,6 +64,10 @@ Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, n
   lives in the [`ekvm serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
 - **The wire API.** The programmatic driver surface is
   [the daemon's](./daemon-protocol.md), not a subcommand.
+- **The shared read-only root** (`BootConfig::read_only_root`, one base image served `O_RDONLY` to
+  many VMs with a per-run tmpfs overlay). A one-shot CLI boots one VM, so the sharing has nothing to
+  share with; it pays off across concurrent sandboxes, which is an embedder's arrangement. Nothing
+  the CLI or the daemon runs sets it, so each `ekvm run` gets its own read-write copy of the base.
 - **Bulk block-device I/O** (`BootConfig::input_dir`/`output_dir`, whole directories or large files as
   ext4 devices) and **out-of-band control** (`KillHandle`, force-killing a blocked exec from another
   thread) are *embedding-API* capabilities. The CLI's file path is per-frame `--put`/`--get` (small,

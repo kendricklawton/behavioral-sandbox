@@ -107,7 +107,7 @@ by the same non-vacuity guard that would otherwise let the install line quietly 
 ```console
 cargo xtask setup            # verify KVM, BTF, Firecracker, bpf-linker, caps
 cargo xtask fetch-artifacts  # download the sha-pinned guest kernel and boot rootfs
-cargo xtask build-rootfs     # build the guest rootfs (Alpine + python3 + static agent)
+cargo xtask build-rootfs     # build the guest rootfs (Alpine + the GUEST_PACKAGES runtimes + static agent)
 cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none)
 ```
 

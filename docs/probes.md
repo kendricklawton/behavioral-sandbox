@@ -102,9 +102,9 @@ Loading and attaching the tracepoint probes needs **`CAP_BPF`** (load programs/m
 **`CAP_PERFMON`** (attach a tracepoint via `perf_event_open`), the two that split out of
 `CAP_SYS_ADMIN` in Linux 5.8. **Not full root** for that path: grant a loader binary just those with
 `setcap cap_bpf,cap_perfmon+ep <binary>`. The tap axes need more: creating the clsact qdisc takes
-`CAP_NET_ADMIN`, and entering another sandbox's netns (`attach_in_netns`/`enforce_in_netns`) is a
-root-scoped `setns`, so the two-cap grant covers the counter and the tracer, not a full sandbox
-attach. `check_support` names *the two load-path caps* as the standard
+`CAP_NET_ADMIN`, and entering another sandbox's netns (`attach_in_netns`/`enforce_in_netns`) calls
+`setns`, which takes `CAP_SYS_ADMIN` or root, so the two-cap grant covers the counter and the
+tracer, not a full sandbox attach. `check_support` names *the two load-path caps* as the standard
 requirement; an exotic host with only `CAP_BPF` and a permissive `kernel.perf_event_paranoid` may
 attach anyway, but the pre-flight is a conservative advisory, not a sysctl-probing oracle. The
 capability *bit logic* (which bits, correct masking) is unit-tested on the host gate; the end-to-end
@@ -282,6 +282,16 @@ leaves no pinned residue:
 ```console
 cargo test -p ekvm-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
+```
+
+The network axis has its own example. Point it at any interface carrying traffic, a sandbox's `fc0`
+from inside its netns or an ordinary device in the current one, and it prints the per-flow
+byte/packet counters the section above describes. It needs `CAP_NET_ADMIN` on top of the two load
+caps, per the qdisc requirement above, so this one is shown under `sudo`:
+
+```console
+cargo build -p ekvm-probes-loader --example monitor_tap
+sudo target/debug/examples/monitor_tap <interface>
 ```
 
 The metering overhead has its own bench, which needs no KVM:
