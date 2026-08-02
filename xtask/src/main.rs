@@ -603,6 +603,9 @@ fn ci() -> Result<()> {
     // The pinned stable toolchain and the declared MSRV floor are kept in step by hand;
     // catch a bump that moved only one before the compile, not after a downstream MSRV surprise.
     toolchain_msrv_agree(workspace_root())?;
+    // The detached fuzz workspace's lockfile: nothing else in the tree checks it, and it had
+    // already stopped resolving. Cheap and early, next to the other pin checks.
+    fuzz_lockfile_resolves(workspace_root())?;
     cargo(&[
         "clippy",
         "--workspace",
@@ -641,6 +644,35 @@ fn ci() -> Result<()> {
     // probe that fails to compile (or drops its BTF) now fails here, not later at load.
     build_probes()?;
     println!("\n✓ all checks passed");
+    Ok(())
+}
+
+/// Assert `fuzz/Cargo.lock` still resolves. That workspace is **detached** (its own `[workspace]`
+/// and lockfile) and it takes the rest of the tree by path, so a dependency edit in the main
+/// workspace ages it. Nothing built it with `--locked`: `cargo xtask fuzz` lets cargo repair the
+/// lockfile in place, which turns drift into a silent rewrite on every run instead of a report.
+/// `crates/probes` is detached the same way but its build *does* pass `--locked`, which is why only
+/// this one rotted: adding clap's `wrap_help` pulled in `terminal_size`, and `fuzz/Cargo.lock`
+/// stopped resolving from then until 2026-08-01 while the nightly job kept passing.
+///
+/// Resolution is the whole check. Building the targets needs nightly plus cargo-fuzz, neither of
+/// which belongs in a host-safe gate that has to run everywhere.
+fn fuzz_lockfile_resolves(root: &Path) -> Result<()> {
+    let out = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--locked"])
+        .arg("--manifest-path")
+        .arg(root.join("fuzz/Cargo.toml"))
+        .output()
+        .context("running `cargo metadata` for fuzz/")?;
+    if !out.status.success() {
+        bail!(
+            "fuzz/Cargo.lock does not resolve with --locked. Regenerate it with:\n    \
+             cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 >/dev/null\n\
+             cargo said:\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    println!("· fuzz/Cargo.lock resolves with --locked");
     Ok(())
 }
 
