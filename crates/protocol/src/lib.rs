@@ -5,8 +5,8 @@
 //!
 //! **Compatibility: fields grow, values grow, replies do not.** The rule set every SDK must
 //! implement, stated here because each one reimplements these shapes without serde and would
-//! otherwise each invent its own answer (`docs/daemon.md` "Compatibility rules" is the same
-//! statement for a non-Rust reader):
+//! otherwise each invent its own answer (`docs/daemon-protocol.md` "Compatibility rules" is the
+//! same statement for a non-Rust reader):
 //!
 //! 1. **Unknown fields are ignored.** A message may gain a field within a `schema`, so decoding
 //!    must not reject an object for carrying something extra. This is how the wire evolves without
@@ -22,7 +22,7 @@
 //!
 //! **This is the SDK contract seed.** It is the one artifact the daemon
 //! ([`ekvm serve`](../ekvm/index.html)), the reference client (`ekvm-client`), and the eventual
-//! polyglot SDKs all share, so it lives in its own **`ekvm`-free** crate: the wire is the
+//! polyglot SDKs all share, so it lives in its own **engine-free** crate: the wire is the
 //! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
 //! linking the engine. Freezing and formally speccing it comes with the polyglot SDKs (separate
 //! repos); until then the shape may still change,
@@ -219,10 +219,10 @@ pub enum Request {
     /// so there is no "stop this command, keep my VM" to expose. Session state dies with it; a
     /// caller who wants it must `snapshot` before the exec it may cancel.
     ///
-    /// Sending nothing and simply hanging up has the same effect, but the daemon cannot notice
-    /// until the in-flight request finishes on its own, so the sandbox holds its `--max-sessions`
-    /// slot and its guest RAM for up to the session's remaining wall budget. `cancel` reclaims both
-    /// immediately and is acknowledged.
+    /// Simply hanging up lands in the same place: the daemon polls the connection while an exec is
+    /// in flight and treats EOF exactly like a `cancel`, killing the sandbox within one poll
+    /// interval. What `cancel` adds is the acknowledgement (`cancelled`), so a client can tell a
+    /// deliberate abort was received rather than inferring it from its own closed socket.
     Cancel,
 }
 

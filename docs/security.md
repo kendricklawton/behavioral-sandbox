@@ -95,8 +95,9 @@ The mirror list, so reports stay signal:
   count.
 - **A guest burning its own budget.** CPU/memory/IO pressure *inside* the configured limits is the
   containment working and being metered, not a finding.
-- **Dependency advisories with no path through the engine.** `cargo deny` gates the tree in CI;
-  an advisory in a dependency is handled in the open unless untrusted guest input can actually
+- **Dependency advisories with no path through the engine.** CI runs `cargo deny` (the full checks
+  on the root workspace, an advisories-only pass on the detached eBPF and fuzz workspaces); an
+  advisory in a dependency is handled in the open unless untrusted guest input can actually
   reach the vulnerable code, in which case it is a report like any other.
 
 ## After a report: how a fix ships

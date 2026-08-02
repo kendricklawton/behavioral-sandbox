@@ -5,7 +5,7 @@
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
 //! or the `--json` structured result / audit log), so `ekvm run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
-//! flags > env (`EKVM_LOG`) > default. Both subcommands run
+//! flags > env (`EKVM_LOG`) > file > default. Both subcommands run
 //! **jailed by default** with `--unjailed` as the explicit opt-out, and both point
 //! at the env-layered artifacts (`EKVM_ROOTFS`/`EKVM_KERNEL`/`EKVM_MARKER`, exec needs the
 //! guest rootfs from `cargo xtask build-rootfs`).
@@ -104,9 +104,9 @@ impl From<VmmError> for CliError {
 #[derive(Parser)]
 #[command(
     name = "ekvm",
-    // The crate version, which is the in-development working number until the first tag
-    // (`RELEASES.md`): `ekvm --version` exists so an installed binary can be told from a stale one,
-    // which is a different question from "which release is this".
+    // The crate version, which release tags mirror (`RELEASES.md`): `ekvm --version` exists so an
+    // installed binary can be told from a stale one, which is a different question from "which
+    // release is this".
     version,
     about = "Run untrusted code in a Firecracker microVM, with a host-observed audit trail.",
     // A first-run reader needs a command to type, not a feature list: `doctor` explains the host,

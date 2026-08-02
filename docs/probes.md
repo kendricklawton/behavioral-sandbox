@@ -13,13 +13,17 @@ The worked example is a counter: `count_execve` attaches to the `sys_enter_execv
 tallies how many `execve`s the host does, into two maps. It is deliberately small; the point is the
 path, not the payload.
 
-## The two crates
+## The three crates
 
 - **`crates/probes`** (`#![no_std]`, `#![no_main]`) holds the in-kernel programs. It builds for
   `bpfel-unknown-none`, not the host triple, so it is *excluded* from the workspace and pins its own
   nightly toolchain (`-Z build-std=core`, since rustup ships no prebuilt `core` for the BPF target).
   `bpf-linker` links the LLVM bitcode rustc emits into a BPF ELF. `unsafe` lives here (raw map-pointer
   derefs); the host/driver path stays `#![forbid(unsafe_code)]`.
+- **`crates/probes-common`** is the dependency-free `#![no_std]` crate both sides compile: the
+  `#[repr(C)]` records that cross the kernel/user boundary (`SyscallEvent`, the flow and policy
+  types) and the rule-matchers shared by the kernel scan and the host tests. Single-sourcing the
+  layout is what the later sections lean on.
 - **`crates/probes-loader`** is the userspace side, built with **aya** (pure-Rust, no libbpf/C
   toolchain), synchronous (no async runtime, matching the driver). Its public shape is a typed handle
   (`ExecveCounter::{load, count, counts_by_pid}`) returning a typed `ProbeError`, the eBPF analogue
@@ -47,8 +51,7 @@ Maps are the shared memory between the kernel program and userspace. Two here:
 - **`HashMap<u32, u64>`** (`EXECVE_BY_PID`), per-PID counts, bounded at 4096 entries (maps are sized
   at load). A full map drops new keys; the per-CPU total stays authoritative.
 
-Maps are **BTF-defined** (see below), so their key/value types are described in the object's BTF and
-aya validates them at load.
+Maps are **BTF-defined** (see below), so their key/value types are described in the object's BTF.
 
 ## The verifier
 
@@ -95,10 +98,13 @@ dangle on a torn-down sandbox's tap.
 
 ## Capabilities and the support probe
 
-Loading and attaching the probes needs **`CAP_BPF`** (load programs/maps, read maps) and
+Loading and attaching the tracepoint probes needs **`CAP_BPF`** (load programs/maps, read maps) and
 **`CAP_PERFMON`** (attach a tracepoint via `perf_event_open`), the two that split out of
-`CAP_SYS_ADMIN` in Linux 5.8. **Not full root:** grant a loader binary just those with
-`setcap cap_bpf,cap_perfmon+ep <binary>`. `check_support` names *those two* as the standard
+`CAP_SYS_ADMIN` in Linux 5.8. **Not full root** for that path: grant a loader binary just those with
+`setcap cap_bpf,cap_perfmon+ep <binary>`. The tap axes need more: creating the clsact qdisc takes
+`CAP_NET_ADMIN`, and entering another sandbox's netns (`attach_in_netns`/`enforce_in_netns`) is a
+root-scoped `setns`, so the two-cap grant covers the counter and the tracer, not a full sandbox
+attach. `check_support` names *the two load-path caps* as the standard
 requirement; an exotic host with only `CAP_BPF` and a permissive `kernel.perf_event_paranoid` may
 attach anyway, but the pre-flight is a conservative advisory, not a sysctl-probing oracle. The
 capability *bit logic* (which bits, correct masking) is unit-tested on the host gate; the end-to-end
@@ -146,10 +152,12 @@ program scans the fixed `MAX_POLICY_RULES` array in a **bounded loop** (the veri
 cap), and the v4 mask is built so the shift operand is always `< 32` (an out-of-range shift is a
 verifier reject).
 
-Two deliberate carve-outs keep deny-by-default from being deny-*everything*: **ARP** (v4) and **ICMPv6**
-neighbor discovery (v6) are always allowed (the guest must resolve its on-link host end before it can
-reach any endpoint), and the **egress hook** (a reply arriving *to* the guest) always accepts, since
-egress policy governs what the guest sends and replies to allowed traffic must return. Enforcement is
+Two deliberate carve-outs keep deny-by-default from being deny-*everything*. **ARP** (v4) is always
+allowed, and ICMPv6 whose **destination is an on-link scope** (`fe80::/10`, `ff02::/16`, `fc00::/7`;
+the `icmp6_dst_on_link` gate tests scope, not message type) passes so neighbor discovery works: the
+guest must resolve its on-link host end before it can reach any endpoint, and ND aimed at a routable
+address gets no carve-out. And the **egress hook** (a reply arriving *to* the guest) always accepts,
+since egress policy governs what the guest sends and replies to allowed traffic must return. Enforcement is
 **opt-in and per VM**: each `TapMonitor` owns its own maps, and a monitor that never sets a policy stays
 observe-only (both hooks accept, exactly the observe-only behavior above).
 
@@ -215,20 +223,22 @@ first is attributed more CPU than the second. The engine *measures*; the hoster 
 The sections above each drive one probe standalone; the fused record binds all three to a launched
 sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
 guest. It lives in
-`ekvm-probes-loader` (not `ekvm`), bridged to the driver only by plain values:
+`ekvm-probes-loader` (not `ekvm-engine`), bridged to the driver only by plain values:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
   global, so each is loaded **once** for the host, as `SharedMeter` and `SharedTracer` (the share-one-
   program wrappers over the meter above and the per-event syscall tracer introduced below), and every
   sandbox registers its cgroup as a *target* on both (bounded overhead). The tap monitor is per-VM.
-- **One post-boot attach.** `SandboxProbes::attach(vmm_pid, netns, tap, egress, &tracer, &meter)` runs
-  once after `Sandbox::open`: it resolves the VMM's cgroup, registers it on the shared tracer + meter, and
-  attaches the tap in the sandbox's netns (enforcing an egress policy if given). Every axis is fail-open,
+- **One post-boot attach.** `SandboxProbes::attach(vmm_pid, netns, tap, egress, gateway, &tracer,
+  &meter)` runs once after `Sandbox::open`: it resolves the VMM's cgroup, registers it on the shared
+  tracer + meter, and attaches the tap in the sandbox's netns (enforcing an egress policy if given;
+  the gateway rides into the record's egress posture). Every axis is fail-open,
   a missing cap/BTF/object degrades to a recorded `AxisGap`, never a blocked run.
-- **Finalize + detach on close.** `SandboxProbes::collect(timing)` reads the three probes into a
-  `RunRecord` **and** unregisters this run's cgroup from the shared sets, while the sandbox is still alive.
-  Dropping without collecting detaches only (the abandoned path). Timing enters as plain `Duration`s the
-  caller lifts from `Sandbox::boot_latency` + `RunResult::metrics.wall`.
+- **Finalize + detach on close.** `SandboxProbes::collect(subject, timing)` reads the three probes into
+  a `RunRecord` (the `RecordSubject` is the identity stamped first into its JSON; the CLI wrapper
+  supplies it) **and** unregisters this run's cgroup from the shared sets, while the sandbox is still
+  alive. Dropping without collecting detaches only (the abandoned path). Timing enters as plain
+  `Duration`s the caller lifts from `Sandbox::boot_latency` + `RunResult::metrics.wall`.
 - **The record.** `RunRecord` fuses network flows + per-VM totals + egress denials (tap), CPU + memory/IO
   (`ResourceSummary`), and the VMM's bounded host-syscall footprint, with `coverage` gaps for whatever was
   unavailable. Its core is network + resources + denials, the signals host eBPF observes strongly.
@@ -237,18 +247,21 @@ guest. It lives in
   planned language SDKs will parse and the CLI's `--trace` pretty-prints today. Pinned by a golden test.
 
 The privileged `audit_record.rs` exercises this end to end: it boots a guest that touches the network
-and reads a file, then asserts the record's flows carry that network activity and that the in-guest
-file read does *not* appear in the host-syscall axis (below), which is the hardware-isolation
+and reads a file, then asserts the record's flows carry that network activity and that the
+host-syscall axis is *bound* to the sandbox (no coverage gap). It deliberately asserts nothing about
+the in-guest file read: that is an axis the host is architecturally blind to, the hardware-isolation
 consequence described at the end of this chapter. `SandboxProbes::collect` is finalize-on-close; between attach
-and collect, `SandboxProbes::snapshot` gives a watcher a **non-destructive** live reading
-(`LiveSnapshot`: the tap now, the meter now, a finished *clone* of the syscall fold-so-far), what the
-CLI's `--watch` live view redraws from without ever disturbing the record. The CLI face of all of this
-(`ekvm run --net --trace --record --watch`) is documented in [Observing a run](./cli-observe.md).
+and collect, `SandboxProbes::snapshot` gives a watcher a live reading
+(`LiveSnapshot`: the tap now, the meter now, a *clone* of the syscall fold-so-far, so the fold the
+record finalizes from is left in place), what the
+CLI's `--watch` live view redraws from. The CLI face of all of this
+(`ekvm run --net --trace --record run.json --watch`) is documented in [Observing a run](./cli-observe.md).
 
 ## The hardware-isolation consequence (the honest limit)
 
 `count_execve` counts the **host's** `execve`s, not the guest's. A microVM runs its own kernel, so
-untrusted code's syscalls are serviced *in-guest* and never trap to a host tracepoint. This is the
+untrusted code's syscalls are serviced by that in-guest kernel; what reaches a host tracepoint is the
+VMM process's own host-side work. This is the
 price of design rule 1 (isolation is hardware): host-side syscall visibility is inherently coarse
 for a microVM. The strong cross-boundary signals are **network** (the tap) and **resources**
 (the cgroup), which the host observes directly. We say this plainly rather than promise in-guest
@@ -306,7 +319,8 @@ turns that into a real **stream of per-event records**:
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop
   with the Firecracker track: it resolves a VMM pid to its cgroup id (the inode of the cgroup dir,
   which equals `bpf_get_current_cgroup_id`), so `watch_cgroup(cgroup_id_of_pid(vmm_pid)?)` scopes the
-  trace to exactly one sandbox. The bridge is plain values, so `ekvm-probes-loader` never depends on `ekvm`.
+  trace to exactly one sandbox. The bridge is plain values, so `ekvm-probes-loader` never depends on
+  `ekvm-engine`.
 
 The honest limit from
 [the hardware-isolation consequence](#the-hardware-isolation-consequence-the-honest-limit)
@@ -315,5 +329,5 @@ holds here unchanged: these are the **host's** syscalls, never the guest's.
 ```console
 cargo build -p ekvm-probes-loader --example trace_syscalls
 sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/trace_syscalls
-target/debug/examples/trace_syscalls           # a filtered trace, then an unfiltered one
+target/debug/examples/trace_syscalls           # whole-host, 5s; args: [seconds] [pid-to-filter]
 ```

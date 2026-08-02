@@ -31,7 +31,7 @@ flowchart TB
     end
 
     Client -->|Unix Socket Wire API| Daemon
-    Daemon -->|vmm crate API| VMM
+    Daemon -->|ekvm-engine API| VMM
     VMM -->|KVM ioctl| KVM
     KVM -->|Hardware Exec| MicroVM
     Daemon <-->|vsock / channel| GuestAgent
@@ -46,7 +46,7 @@ flowchart TB
 
 - **OS & Kernel**: Linux host with a kernel providing `cgroup.kill`. `ekvm doctor` probes for the primitive rather than trusting a version string, falling back to `>= 5.15` only where there is no cgroup v2 hierarchy to probe.
 - **Architecture**: `x86_64` with hardware virtualization extensions (`/dev/kvm`).
-- **Permissions**: Root or delegated capabilities (`CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_BPF`) for jailing, network namespace management, and eBPF loading.
+- **Permissions**: real root (euid 0) for jailed boots, because the jailer mknod's device nodes into its chroot; `CAP_NET_ADMIN` for the per-VM netns and tap; `CAP_BPF` + `CAP_PERFMON` plus kernel BTF for the eBPF observability. `ekvm doctor` renders each as its own row.
 
 ## Networking
 
@@ -100,8 +100,8 @@ flowchart TB
         TmpfsOverlay["Per-Run Writable tmpfs Overlay\n(Size capped at 50% RAM)"]
         MergedRoot["Merged Guest Root (/)\noverlay-init"]
         
-        InputBlock["/dev/vdb Block Device\n(ReadOnly ext4 from input_dir)"]
-        OutputBlock["/dev/vdc Block Device\n(Writable ext4 for output_dir)"]
+        InputBlock["Input Block Device\n(read-only ext4 from input_dir, /dev/vdb)"]
+        OutputBlock["Output Block Device\n(writable ext4 for output_dir,\nmounted by label ekvm-output: the /dev/vdX letter varies)"]
     end
 
     BaseFS -->|Lower Layer| MergedRoot

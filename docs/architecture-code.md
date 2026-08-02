@@ -33,14 +33,14 @@ The public surface is deliberately narrow. From `lib.rs`:
 pub use ekvm_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
 pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
-pub use net::GuestLink;
+pub use net::{GuestEgress, GuestLink};
 pub use pool::Pool;
 pub use sweep::{sweep_orphans, SweepReport};
 pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT};
 ```
 
-Note the first line: `ekvm-channel`'s wire types are re-exported through `ekvm`, so an embedder reaches
-them without adding a second dependency, and they are part of the surface
+Note the first line: `ekvm-channel`'s wire types are re-exported through `ekvm-engine`, so an embedder
+reaches them without adding a second dependency, and they are part of the surface
 [the stability boundary](./embedding-scope.md#semver--api-stability) names.
 
 Everything else (`console`, `drives`, `exec`, `firecracker`, `jail`'s internals, `paths`, `proc`,
@@ -58,8 +58,8 @@ Some types to have in the back of your head before reading further.
   exists to run code.
 
   The opt-out is a *constructor name*, `Sandbox::open_unjailed`, not a boolean flag. That is
-  deliberate: a name is greppable and cannot be reached by accident or by a config file, and any
-  `jail` set on the config is cleared by it (the name wins). The type is
+  deliberate: a name is greppable, no config field or env var reaches it (`BootConfig` carries no
+  unjail knob), and any `jail` set on the config is cleared by it (the name wins). The type is
   `#[must_use = "dropping a Sandbox kills its microVM"]`.
 
 * **`BootConfig`** is the whole boot request: artifact paths, resource knobs, `input_dir`/`output_dir`
@@ -78,7 +78,8 @@ Some types to have in the back of your head before reading further.
   **The kill is the cgroup**, writing `1` to the VM's `cgroup.kill`, which SIGKILLs the whole VMM tree
   with no pid arithmetic, which is why the handle is safe to fire from any thread at any time. On a
   host with no cgroup it falls back to signalling the VMM's pid, which is safe while the VM exists
-  because an unreaped child's pid cannot be recycled.
+  (the kernel holds an unreaped child's pid); after teardown the handle no-ops instead of signalling
+  a possibly recycled pid, which `kill_handle_writes_cgroup_kill_then_noops_after_teardown` pins.
 
   Note the distinction the code is careful about: **killing is not tearing down.** Host residue is
   still reclaimed by the owner's `Drop` or `shutdown`, which is unblocked by exactly the death the

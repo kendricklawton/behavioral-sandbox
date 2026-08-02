@@ -73,8 +73,9 @@ Firecracker v1.15 through v1.16 on `PATH` (v1.16.1 is pinned and tested).
 prints the fix for whatever your host is missing. Starting from a bare machine,
 [Preparing the host](docs/cli-install.md#preparing-the-host) is the copy-pasteable version.
 
-The release tarball, `install.sh`, and container image are built by `cargo xtask dist` and described
-in [Installation](docs/cli-install.md). `v0.0.1` publishes them, so those paths resolve, but it is a
+The release tarball and `install.sh` are built by `cargo xtask dist` and described
+in [Installation](docs/cli-install.md); a `Containerfile` consumes the tarball for an image you
+build yourself. `v0.0.1` publishes the release assets, so those paths resolve, but it is a
 checkpoint that exercises the release path rather than a supported release.
 
 ## Example
@@ -232,8 +233,9 @@ been run.
 
 ## Releases and scope
 
-There is no published roadmap and no promised date. A capability becomes a feature when it ships
-with a working demo, and is not announced before that. The first tagged release, `v0.1.0`, will pin
+There is no published roadmap and no promised date. A capability becomes a feature when a test
+exercises it end to end (the privileged suite, for anything that boots a VM or attaches a probe),
+and is not announced before that. The first supported release, `v0.1.0`, will pin
 the driver API and the wire protocol under the support policy in [RELEASES.md](RELEASES.md); until
 then the `Sandbox`/`ekvm-engine` API, the daemon protocol, the record format, and the crate names can all
 change without notice.

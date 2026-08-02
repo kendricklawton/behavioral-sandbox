@@ -430,8 +430,10 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
         ],
     )?;
     // `mke2fs -d` populates the image from the staging tree. e2fsprogs enumerates that tree with
-    // `scandir(., alphasort)`, so inode allocation follows sorted names, not host readdir order: the
-    // on-disk layout (hence the image sha256) is reproducible across hosts, not just on a rebuild here.
+    // `scandir(., alphasort)`, so inode allocation follows sorted names, not host readdir order:
+    // one source of cross-host layout variance removed. The image sha256 still differs across
+    // hosts, because the baked-in agent binary does (`cargo_reproducible`'s doc in main.rs records
+    // the measured pair); what this buys is `build-rootfs --verify`'s same-host double-build compare.
     let ext_opts = format!("hash_seed={ROOTFS_UUID},lazy_itable_init=0");
     run_tool_env(
         "mke2fs",

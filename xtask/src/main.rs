@@ -1,68 +1,9 @@
 //! `cargo xtask <cmd>`, dev orchestration for the agent sandbox engine.
 //!
-//! - **`ci`**, the host-safe gate (fmt · prose-drift · clippy `-D warnings` · build · test ·
-//!   docs · `deny`).
-//!   Runs everywhere, needs no KVM or root, and mirrors `.github/workflows/ci.yml`.
-//! - **`ci-privileged`**, the KVM/eBPF integration tests (the `#[ignore]`d ones). Needs
-//!   `/dev/kvm` and elevated caps, so it's never part of the everyday loop. Builds the guest
-//!   agent + the guest rootfs first, so the in-VM exec test has something to boot.
-//! - **`setup`**, checks the host can do KVM + eBPF and reports what's missing.
-//! - **`self-host`**, the single self-host command: obtain the pinned kernel + rootfs, build the
-//!   guest image + eBPF object, install `ekvm`, and (on a KVM host) boot one sandbox to
-//!   prove it. Offline when `EKVM_VENDOR_DIR` points at a `vendor` mirror.
-//! - **`vendor`**, snapshot every sha-pinned upstream input (kernel/rootfs + the `.apk` closure)
-//!   into a local mirror with a sha manifest, so a fresh host builds without the Firecracker S3
-//!   bucket or the Alpine CDN; `--verify` re-checks the mirror offline.
-//! - **`dist`**, assemble the shippable release package: the release binary + the guest kernel,
-//!   rootfs, and eBPF object, staged, sha256-manifested, and tarred into `dist/` with a
-//!   `SHA256SUMS`; `install.sh` and the `Containerfile` consume it. Vendor-aware like `self-host`.
-//! - **`build-probes`**, build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via
-//!   `bpf-linker`, under the crate's own nightly toolchain. Host-safe (no KVM); skips with a note
-//!   when `bpf-linker`/`rustup` are absent.
-//! - **`build-rootfs`**, assemble the reproducible guest rootfs (Alpine base + baked-in agent).
-//! - **`bench-boot`**, measure boot-to-userspace latency (percentiles) vs. the base size. Needs KVM.
-//! - **`bench-warm`**, the three start paths' latency percentiles: cold boot vs prewarmed-snapshot
-//!   restore vs prewarmed-pool take, each split into its isolated start and its time-to-first-result.
-//!   Needs KVM + the built guest rootfs.
-//! - **`bench-density`**, memory-sharing under concurrency: summed Rss vs Pss as prewarmed clones
-//!   stack up, and how many fit before it degrades. Needs KVM + the built guest rootfs.
-//! - **`bench-footprint`**, per-sandbox memory footprint and the overlay/rootfs choice's effect:
-//!   per-VM Pss + whole-host cost per sandbox for cold RW-copy vs cold shared-base vs restore. Needs
-//!   KVM + the built guest rootfs.
-//! - **`bench-all`**, the whole suite as one reproducible report, methodology stated + host recorded;
-//!   sections whose prerequisite is missing are skipped with the reason. The written report is
-//!   `docs/benchmarks.md`.
-//! - **`bench-trace`**, the syscall-tracing overhead: per-`openat` cost with no probes vs
-//!   attached-but-filtered-out vs attached-and-capturing. Needs `CAP_BPF`+`CAP_PERFMON` + the built
-//!   object (not KVM).
-//! - **`trace-sandbox`**, the syscall-trace demo: boot a real sandbox and stream its
-//!   cgroup-attributed host syscall footprint. Needs KVM + the guest rootfs + `CAP_BPF` + the object.
-//! - **`watch-sandbox`**, the network-observability demo: boot a real networked sandbox and watch its
-//!   per-VM network flows on the tap. Needs KVM + the guest rootfs + `CAP_BPF`+`CAP_NET_ADMIN` + the object.
-//! - **`enforce-sandbox`**, the egress-enforcement demo: boot a real networked sandbox, arm a
-//!   deny-by-default egress policy allowing one endpoint, and show the allow-listed traffic passing while
-//!   everything else is dropped at the tap and logged. Same needs as `watch-sandbox`.
-//! - **`bench-meter`**, the resource-metering overhead: per-context-switch cost with no meter vs
-//!   attached-but-not-metering-us vs attached-and-metering-us. Needs `CAP_BPF`+`CAP_PERFMON` + the built
-//!   object (not KVM).
-//! - **`bench-scale`**, the probe overhead *under load*: per-event cost as the watched-target set
-//!   (concurrent sandboxes) grows 1 → 512, showing it stays flat (O(1) lookup). Same needs as
-//!   `bench-meter`.
-//! - **`bench-sign`**, the record-signing overhead: per-record `ed25519` sign/verify + the SHA-256
-//!   chain hash, sub-millisecond and off the boot path. Host-only (no KVM/eBPF).
-//! - **`meter-sandbox`**, the resource-metering demo: boot a real sandbox, meter its cgroup, and show an
-//!   idle guest charging near-zero host CPU while a CPU-heavy guest charges most of a core, plus the
-//!   per-run resource summary. Needs `/dev/kvm` + the guest rootfs + `CAP_BPF`+`CAP_PERFMON` + the object.
-//! - **`fuzz`**, deep `cargo fuzz` (libFuzzer) runs against the untrusted-input decoders: the
-//!   host↔guest channel (the guest→host boundary), the daemon's client wire (`ekvm serve`'s socket,
-//!   the outermost boundary), the signed-record envelope (attacker-relayed by design), and the
-//!   eBPF-boundary parsers. Nightly + `cargo install cargo-fuzz`; never part of `ci` (the in-gate
-//!   coverage is the crates' own dependency-light mutation tests).
-//!
-//! Split by concern: `guest_bins` (the static musl in-guest builds), `rootfs` (the reproducible
-//! image), `bench` (the latency benchmarks), `artifacts` (the pinned kernel/rootfs fetch), `vendor`
-//! (the offline mirror of all pinned inputs), `selfhost` (the single stand-up command); the gates
-//! and the shared plumbing (paths, `cargo`/tool runners) live here.
+//! The command list lives on the `Cmd` enum below and renders as `cargo xtask --help`; this header
+//! keeps no second copy (its old copy outlived four deleted commands before the 2026-08-02 prune).
+//! Each module carries its own `//!` header; the gates and the shared plumbing (paths,
+//! `cargo`/tool runners) live here.
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
 //! workspace; `build-probes` builds its object (with BTF) and is folded **into** `ci` (guarded, so
@@ -214,10 +155,10 @@ enum Cmd {
         #[arg(long, default_value_t = 4)]
         count: usize,
     },
-    /// Run the whole benchmark suite as one reproducible report: boot, warm, footprint, density, and
-    /// the three probe benches, in order, with the methodology stated and the host recorded. Sections
-    /// whose host prerequisite is missing (`/dev/kvm`, or `CAP_BPF`+`CAP_PERFMON` + the built object)
-    /// are skipped with the reason, never silently dropped. The written report is `docs/benchmarks.md`.
+    /// Run the whole benchmark suite as one report to stdout, every section in order, with the
+    /// methodology stated and the host recorded. Sections whose host prerequisite is missing
+    /// (`/dev/kvm`, or `CAP_BPF`+`CAP_PERFMON` + the built object) are skipped with the reason
+    /// printed. `docs/benchmarks.md` explains why no numbers are published at present.
     BenchAll {
         /// How many runs/bursts for the percentile benches (the concurrency benches use fixed cohort
         /// sizes). Default 30 to keep the full suite tractable; bump the individual command for tails.
@@ -365,25 +306,25 @@ fn require_cargo_fuzz() -> Result<()> {
     )
 }
 
-/// Build the shared `+<pinned nightly> fuzz <sub> <target> <corpus> [seeds]` argv. The writable corpus
+/// Build the `+<pinned nightly> fuzz run <target> <corpus> <seeds>` argv. The writable corpus
 /// (libFuzzer accumulates new inputs here; generated, gitignored) is created so naming it explicitly
-/// (which we must, to also pass the seeds) doesn't trip cargo-fuzz's default. `with_seeds` folds in
-/// the committed read-only seed corpus, so `run`/`coverage` start *past* the first-byte reject (real
-/// inputs reaching the decode logic); `cmin` minimizes only the accumulated corpus, so it omits them.
-fn cargo_fuzz_argv(sub: &str, target: &str, root: &Path, with_seeds: bool) -> Result<Vec<String>> {
+/// (which we must, to also pass the seeds) doesn't trip cargo-fuzz's default. The committed
+/// read-only seed corpus is folded in so a run starts *past* the first-byte reject, with real
+/// inputs reaching the decode logic.
+fn cargo_fuzz_run_argv(target: &str, root: &Path) -> Result<Vec<String>> {
     let corpus = root.join("fuzz/corpus").join(target);
     std::fs::create_dir_all(&corpus).context("create the fuzz corpus dir")?;
     // `+<pinned>`, not a bare `+nightly`: the alias is whatever the last `rustup update` fetched, so
     // a bare `+nightly` would ignore the pin entirely and a crash found here could be unreproducible
     // on the next machine. One nightly serves the whole repo (see [`probes_nightly`]).
     let toolchain = format!("+{}", probes_nightly()?);
-    let mut args: Vec<String> = [toolchain.as_str(), "fuzz", sub, target]
+    let mut args: Vec<String> = [toolchain.as_str(), "fuzz", "run", target]
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
     args.push(corpus.to_string_lossy().into_owned());
     let seeds = root.join("fuzz/seeds").join(target);
-    if with_seeds && seeds.is_dir() {
+    if seeds.is_dir() {
         args.push(seeds.to_string_lossy().into_owned());
     }
     Ok(args)
@@ -416,7 +357,7 @@ fn run_cargo_fuzz(args: &[String], root: &Path) -> Result<()> {
 fn fuzz(target: &str, seconds: u64) -> Result<()> {
     require_cargo_fuzz()?;
     let root = workspace_root();
-    let mut args = cargo_fuzz_argv("run", target, root, true)?;
+    let mut args = cargo_fuzz_run_argv(target, root)?;
     args.push("--".to_owned());
     args.push(format!("-max_total_time={seconds}"));
     run_cargo_fuzz(&args, root)
@@ -863,9 +804,8 @@ fn ci_privileged(repeat: u32) -> Result<()> {
 }
 
 /// Everything a privileged test run needs before a single test executes: the host refusals, then the
-/// artifacts the tests load. Shared by `ci-privileged` and `coverage` (which runs the same tests
-/// instrumented), so the two can never drift on what they demand of the host, and so a coverage run
-/// can't quietly measure a suite whose privileged half self-skipped.
+/// artifacts the tests load, split out so what the gate demands of the host stays one readable
+/// block rather than checks scattered through `ci_privileged`.
 fn privileged_preflight() -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("/dev/kvm not present — privileged tests need KVM (run on a KVM-capable host)");
@@ -1356,9 +1296,9 @@ fn artifacts_dir() -> PathBuf {
     workspace_root().join("artifacts")
 }
 
-/// Bail unless `/dev/kvm` is present: the shared guard every VM-booting subcommand runs first, so the
-/// "needs a KVM host" refusal reads identically across the bench and demo sections. `what` names the
-/// caller (e.g. `"bench-boot"`) for the message.
+/// Bail unless `/dev/kvm` is present: the shared guard every VM-booting bench runs first, so the
+/// "needs a KVM host" refusal reads identically across them. `what` names the caller (e.g.
+/// `"bench-boot"`) for the message.
 fn require_kvm(what: &str) -> Result<()> {
     if !Path::new("/dev/kvm").exists() {
         bail!("{what} needs /dev/kvm (run on a KVM-capable host)");

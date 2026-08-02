@@ -1,6 +1,6 @@
 //! `ekvm doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
 //! checks ([`ekvm_engine::doctor`]) plus the eBPF-observability capability row (owned by the probe
-//! loader, out of `ekvm`), so a fresh host reads exactly what will work, degrade, or refuse
+//! loader, out of `ekvm-engine`), so a fresh host reads exactly what will work, degrade, or refuse
 //! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
 //! truth for "ready", two entry points.
 
@@ -67,9 +67,9 @@ pub struct DoctorArgs {
 
 /// Render `checks` as a JSON object: the verdict, then one entry per row.
 ///
-/// Hand-rolled rather than derived: `Check` lives in `ekvm`, which has no `serde` dependency, and
-/// adding one to the engine crate to print a diagnostic would be the wrong trade. The only values
-/// interpolated are this binary's own labels and notes, so [`json_escape`] covers the quoting.
+/// Hand-rolled rather than derived, so `ekvm-engine`'s `Check` carries no `Serialize` impl for one
+/// caller's diagnostic rendering. The only values interpolated are this binary's own labels and
+/// notes, so [`json_escape`] covers the quoting.
 fn checks_as_json(checks: &[Check]) -> String {
     let rows: Vec<String> = checks
         .iter()

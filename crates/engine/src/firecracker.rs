@@ -927,7 +927,7 @@ mod tests {
     fn an_older_supported_firecracker_gets_a_load_body_without_the_clock_key() {
         // The defect this shape exists to prevent: `clock_realtime` only exists from v1.16, and
         // Firecracker rejects an *unknown field* rather than ignoring it, so a body carrying the key
-        // fails the whole restore on v1.14/v1.15, both of which upstream still patches. `None` must
+        // fails the whole restore on v1.15, the older release still in the supported window. `None` must
         // therefore omit the key entirely, not serialize `"clock_realtime": null` (which is still an
         // unknown field to a release that has never heard of it).
         let json = serde_json::to_value(SnapshotLoad {

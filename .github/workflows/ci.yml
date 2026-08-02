@@ -1,10 +1,10 @@
-# CI — the host-safe gate, one definition: every job runs `cargo xtask ci`, the same command a dev
+# CI: the host-safe gate, one definition. Every job runs `cargo xtask ci`, the same command a dev
 # box runs, so this workflow cannot drift from the local gate. (It once did: this file used to
 # hand-mirror the steps and silently missed the eBPF object build.) x86_64 only: the supported
 # platform is x86_64; aarch64 support (and its matrix leg here) returns
 # only with hardware to test the privileged path on.
 # The privileged tests (booting a microVM, loading/attaching eBPF) need /dev/kvm + elevated caps
-# and run under `cargo xtask ci-privileged` in ci-privileged-hosted.yml (nightly, nested KVM) —
+# and run under `cargo xtask ci-privileged` in ci-privileged-hosted.yml (nightly, nested KVM),
 # never gating the everyday loop. Scheduled companions: audit.yml (advisories vs the pinned lock,
 # daily) and fuzz.yml (the deep libFuzzer tier, nightly).
 name: CI
@@ -88,8 +88,8 @@ jobs:
       - name: actionlint
         run: ./actionlint -color
 
-  # Shell linting, same trade as actionlint above: a tool that only inspects three files, so
-  # requiring it on every dev box would be the wrong ask. `install.sh` is the reason this job
+  # Shell linting, same trade as actionlint above: a tool that only inspects the few tracked *.sh
+  # files, so requiring it on every dev box would be the wrong ask. `install.sh` is the reason this job
   # exists. It ships inside the release tarball and is the documented install path, so it runs on a
   # stranger's machine with whatever shell that machine has, and until 2026-08-02 nothing checked
   # it at all. `ubuntu-24.04` carries shellcheck, so there is nothing to install.
@@ -118,7 +118,7 @@ jobs:
           shellcheck "${scripts[@]}"
 
   # The single check to require in branch protection. Green only if every job above succeeded or
-  # was skipped — add a job above and it's covered here automatically, no branch-rule edit needed.
+  # was skipped: add a job above and it's covered here automatically, no branch-rule edit needed.
   ci-status:
     name: CI status
     if: always()

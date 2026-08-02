@@ -1,12 +1,12 @@
 //! CLI/daemon parity golden (the wire API): the **CLI** (`ekvm run --json`) and the
 //! **daemon wire API** (`ekvm serve`, driven
 //! through the reference [`ekvm_client::Client`]) render the *same* command **identically**, same
-//! exit code, same stdout, same stderr. The two faces are thin hosts of one `ekvm` lifecycle, so
-//! a run must never depend on which door it came through; this pins that invariant against drift (a
-//! stream captured differently, an exit code mapped differently, a default limit that diverged).
+//! exit code, same stdout, same stderr. The two faces are thin hosts of one `ekvm-engine` lifecycle,
+//! so a run must never depend on which door it came through; this pins that invariant against drift
+//! (a stream captured differently, an exit code mapped differently, a default limit that diverged).
 //!
 //! It compares only what is a *run result* on both faces: a command that **runs** and returns a
-//! [`RunResult`](ekvm), exit code (zero or not), stdout, stderr. A guest fault that never
+//! `RunResult` (`ekvm-engine`), exit code (zero or not), stdout, stderr. A guest fault that never
 //! produces a result (an unspawnable binary) is deliberately *out* of scope: the CLI renders it as an
 //! operational error (exit 2, a stderr diagnostic), the daemon as a non-fatal `error` reply, two
 //! faithful renderings of a non-result, not a golden mismatch.

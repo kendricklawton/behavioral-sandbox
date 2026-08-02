@@ -20,7 +20,9 @@ thing a benchmark ever tells you.
 - **Nearest-rank percentiles**: `min / p50 / p90 / p99 / max` without interpolation.
 - **Tail metrics**: Percentile ranks requiring higher sample counts than executed return `—` instead of relabeling `max` (e.g. `p99` requires `n ≥ 100`).
 - **Baseline comparison**: Warm starts are measured against cold boots, eBPF overhead against unattached baselines, and shared memory footprint (PSS) against un-deduplicated RSS.
-- **Success gating**: Benchmark runs that fail or error out are excluded from latency calculations.
+- **Failure is loud, not filtered**: a boot or exec that errors mid-bench aborts its whole section
+  with the error rather than being dropped from the sample, so a reported percentile never averages
+  over silent retries (`bench-density` is the one deliberate early stop, and it names its reason).
 - **Reproduce.** One command runs the whole suite as a single report:
 
   ```console

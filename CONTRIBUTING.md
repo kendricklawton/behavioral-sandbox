@@ -6,7 +6,7 @@ before you spend time on one.
 **Open an issue first for anything non-trivial.** Bug fixes, tests, and documentation can go
 straight to a pull request. For a new capability, a change to a public API, or a refactor that moves
 code between crates, open an issue and settle the shape first. That is not gatekeeping: the project
-is pre-1.0 and the surface still moves (the `Sandbox`/`ekvm` API, the `ekvm serve` wire protocol, the
+is pre-1.0 and the surface still moves (the `Sandbox`/`ekvm-engine` API, the `ekvm serve` wire protocol, the
 audit-record format, and the crate names all change without notice until the first supported release, `v0.1.0`),
 and an issue is how you avoid building against a shape that is about to change under you.
 
@@ -45,6 +45,7 @@ layout, building from source with the pinned toolchains, the two gates (`cargo x
 
 Host prerequisites and first-run instructions are in [Installation](docs/cli-install.md).
 
-If you drive a coding agent in this repo, point it at [`AGENTS.md`](AGENTS.md). That file is the
-same ground rules written as standing instructions for a machine, and it is not meant to be your
-reading: everything in it that a person needs is in the chapters above, written for a person.
+If you drive a coding agent in this repo, point it at [`AGENTS.md`](AGENTS.md): the same ground
+rules, written as standing instructions for a machine. Until the book regrows a Contributing
+chapter, it doubles as the consolidated developer reference for a person too, which is why the
+paragraph above points there.

@@ -1,4 +1,4 @@
-//! `ekvm`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
+//! `ekvm-engine`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
 //! [`Sandbox`] lifecycle API.
 //!
 //! The host path is `unsafe`-free; a hostile or crashing guest is a typed [`VmmError`], never a

@@ -412,11 +412,12 @@ print('p14-9f-complete')
     );
 }
 
-/// The reference **agent-containment** example (docs/embedding.md), as a CI-reproducible proof.
-/// The scripted agent (`docs/examples/agent-tool-loop.py`, no model, no secrets) runs in a sandbox
-/// egress-policed to **one** endpoint, calls one allowed "tool" and one forbidden one, and the
-/// host-observed record + its model-legible summary prove **exactly what it reached and what was
-/// blocked**, even though the agent's own transcript, blind to the tap, reports both as `sent`.
+/// The agent-containment scenario. A scripted agent (`docs/examples/agent-tool-loop.py`, no
+/// model, no secrets) runs in a sandbox egress-policed to **one** endpoint, calls one allowed
+/// "tool" and one forbidden one, and the host-observed record + its model-legible summary show
+/// what it reached and what was blocked, even though the agent's own transcript, blind to the
+/// tap, reports both as `sent`. The book chapter that walked this scenario is parked; this test
+/// is what keeps it exercised.
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
@@ -431,7 +432,8 @@ fn scripted_agent_is_contained_and_the_record_shows_reached_vs_blocked() {
     let record_path = scratch.path().join("record.json");
     let summary_path = scratch.path().join("summary.json");
 
-    // The very script the docs example ships, one source of truth for "the agent," exercised here.
+    // Read from disk rather than inlined: the checked-in script stays the one source of truth
+    // for "the agent", and this read is what keeps its path live.
     let agent = std::fs::read_to_string(root.join("docs/examples/agent-tool-loop.py"))
         .expect("read the scripted agent");
 

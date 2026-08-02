@@ -80,12 +80,14 @@ state that carries the limiter.
 
 Firecracker rejects unknown fields outright, so a request body written against the newest release
 fails every call on an older one. The rule the code is written against: **gate any field newer than
-the support floor on a `_SINCE` constant, so adding a field cannot silently raise the floor.**
+the support floor on a `_SINCE` constant**, so raising the floor is a deliberate decision rather
+than a side effect of adopting a field. That is a convention, not a gate;
+`the_clock_fixup_is_gated_above_the_floor_not_at_it` pins the one such constant today.
 
 The engine supports v1.15 through v1.16 and tests v1.16. The floor tracks upstream's own support
 window rather than a number of convenience, because it exists to reject *unpatched* VMMs rather than
-old ones. `spawn.rs` carries the supported window, and `firecracker-pin.yml` reports weekly when
-upstream has moved past it.
+old ones. `spawn/fcversion.rs` carries the supported window, and `firecracker-pin.yml` reports weekly
+when upstream has moved past it.
 
 `clock_realtime` on `PUT /snapshot/load` is the worked example. It exists from v1.16 and advances a
 restored guest's clock by the time elapsed since the snapshot, which for a pre-warmed pool is the
@@ -151,8 +153,9 @@ Snapshotting pauses, writes, copies, and resumes, in that order:
 1. `PATCH /vm` to `Paused`, freezing the vCPUs so the memory image is a consistent point in time.
 2. `PUT /snapshot/create`, writing the device state and the full guest memory.
 3. Copy the root disk **inside the paused window**, so it stays in step with that memory.
-4. `PATCH /vm` to `Resumed`. A failed create still falls through to this, so the guest is never
-   left frozen.
+4. `PATCH /vm` to `Resumed`. A failed create still falls through to this; the one path that can
+   leave the guest paused is the resume call itself failing after a successful create, after which
+   the VM is unusable and should be dropped.
 5. If the VM has vsock, poll the agent until it answers before handing the VM back.
 
 A torn bundle is swept by a guard that runs on an error return or an unwinding panic alike.

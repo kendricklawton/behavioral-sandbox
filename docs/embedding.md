@@ -69,7 +69,7 @@ bounding what crosses the tap is the eBPF policy in [`ekvm-probes-loader`](./pro
 
 - **Guest crash handling:** Non-zero exit code or termination by signal (`128 + signal`) returns a valid `RunResult`. Typed `VmmError` variants indicate engine-level failures.
 - **Host-enforced bounds:** the wall-clock deadline (`ExecUnresponsive`) and output limit (`OutputCap`) are derived on the host and applied by the host, so an uncoordinated guest does not set them.
-- **Per-exec input security:** `stdin`, injected `files`, and `env` are scoped to the spawned process, and the code paths that log or render a run omit secret values. `injected_secrets_never_reach_the_console_or_host_logs` runs a sandbox with a distinctive token and greps the console capture, the host logs, and the record for it. Bulk file transfers use block-device storage (`input_dir` and `output_dir`).
+- **Per-exec input security:** `stdin`, injected `files`, and `env` are scoped to the spawned process, and the code paths that log or render a run omit secret values. `injected_secrets_never_reach_the_console_or_host_logs` runs a sandbox with a distinctive token and greps the console capture, the captured host logs, and a refused injection's rendered error for it. Bulk file transfers use block-device storage (`input_dir` and `output_dir`).
 
 ### Sessions: the VM is the session
 
@@ -79,7 +79,7 @@ Session state persists for the VM lifetime and is cleared upon `shutdown`.
 
 ### Budgets: resource policy
 
-`Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. The non-zero types make a zero unrepresentable rather than validated at runtime. Network egress is configured separately via policy rules. Cgroup constraints are best-effort when host controllers are unassigned; the KVM boundary and the jailer are not conditional on them.
+`Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. The non-zero types make a zero unrepresentable rather than validated at runtime. Network egress is separate from `Limits`: the route is `BootConfig::egress` (a `GuestEgress`), and the packet-level allow-list lives in `ekvm-probes-loader`'s policy types. Cgroup constraints are best-effort when host controllers are unassigned; the KVM boundary and the jailer are not conditional on them.
 
 ### Errors: three buckets you can branch on
 
@@ -112,8 +112,10 @@ does and does not establish is in [Status](./introduction.md#status).
 ### Pre-warmed starts: snapshot an unjailed source, restore jailed clones
 
 `snapshot(dir)` pauses the VM and writes a portable bundle; `Vm::restore` (and the `Pool` built on
-it) brings up exec-ready clones by restore rather than cold boot, sharing the base disk and memory file read-only
-across concurrent sandboxes. (`Vm` is the driver's lower layer: `Vm::boot`/`Vm::restore` yield a
+it) brings up exec-ready clones by restore rather than cold boot. A `read_only_root` source's base
+disk is referenced in place by every clone, and a jailed clone bind-mounts the memory file
+read-only; a read-write snapshot's unjailed restores are single-flight, run sequentially (the
+`Pool` does exactly that). (`Vm` is the driver's lower layer: `Vm::boot`/`Vm::restore` yield a
 running microVM handle, and a `Sandbox` wraps exactly one of them with the jailed-by-default
 posture; the snapshot and pool [recipes](./embedding-recipes.md) work at the `Vm` layer.) Snapshotting is restricted
 to *unjailed* sources (their disk lives on a fixed host path); restoring into *jailed* clones is

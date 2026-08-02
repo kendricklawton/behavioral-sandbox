@@ -469,7 +469,7 @@ fn markdown_links(text: &str) -> Vec<(usize, String)> {
 mod tests {
     use super::*;
 
-    /// The engine targets kernels, not distributions (`docs/architecture.md`, decision 8): a host
+    /// The engine targets kernels, not distributions (`docs/architecture-decisions.md`, decision 8): a host
     /// difference is probed as a capability, never read off the host's identity papers. This is
     /// the enforcer for that sentence. It scans every tracked source file in the shipped crates
     /// (plus `install.sh`, which runs before the engine exists to probe anything) for the files

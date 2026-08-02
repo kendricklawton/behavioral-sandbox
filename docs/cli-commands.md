@@ -65,7 +65,7 @@ written on line 1, or a package installed on line 2, is there on line 3.
 
 Shell *process* state (`cd`, variables) does not persist: each line is its own exec. The prompt and
 diagnostics go to stderr and command output to stdout, so a piped script of lines stays clean.
-`--unjailed`, `--vcpus`, and `--mem` work the same as on [`run`](#ekvm-run).
+`--unjailed`, `--vcpus`, `--mem`, and `--require-limits` work the same as on [`run`](#ekvm-run).
 
 `ekvm shell` cannot record, so a host that sets
 [`require_record`](./cli-config.md#setting-require_record) refuses it.
@@ -73,8 +73,9 @@ diagnostics go to stderr and command output to stdout, so a piped script of line
 ## `ekvm doctor`
 
 Check this host's readiness *before* the first sandbox. `ekvm doctor` prints one line per
-prerequisite: KVM, the jailer and real root, `firecracker` plus its pinned sha256, iproute2 and
-e2fsprogs, cgroup delegation, the kernel's `cgroup.kill` capability, the boot artifacts, the eBPF
+prerequisite: the architecture (`x86_64`), KVM, the jailer and real root, `firecracker` plus its
+pinned sha256, iproute2 and e2fsprogs, a scratch dir that is not `nodev`/`noexec`, cgroup
+delegation, the kernel's `cgroup.kill` capability, the boot artifacts, the eBPF
 capabilities, the mandatory-access-control posture, and the host-hardening advisories (SMT, KSM, CPU
 vulnerability mitigations, which matter for a multi-tenant host).
 
@@ -97,14 +98,18 @@ ekvm doctor --json       # machine-readable (schema 1), for a host report you ca
 already names its own fix. `cargo xtask setup` renders the same checks for a dev box, plus the
 build-toolchain rows.
 
-Every check is a **capability probe**, never a distro or version test: `cgroup.kill` rather than a
-kernel version, `/sys/kernel/security/lsm` rather than a distro name. The rationale is
+The checks are **capability probes first, never distro tests**: `cgroup.kill` rather than a kernel
+version, `/sys/kernel/security/lsm` rather than a distro name. A version compare survives in
+exactly two places, as fallback and as pin: the kernel row falls back to a `>= 5.15` floor only
+where there is no cgroup v2 hierarchy to probe, and the Firecracker row checks the supported
+release range. The rationale is
 [design decision 8](./architecture-decisions.md#8-portability-is-a-capability-question-not-a-distro-question).
 
 ## `ekvm verify`
 
-`ekvm run --record` and the daemon's `trace` reply sign the finalized record with a **host key** the
-guest never sees (an `ed25519` detached signature over the canonical record bytes), so a consumer can
+`ekvm run --record` and the daemon's `trace` reply sign the finalized record with a **host key**
+that never crosses into the guest (the key loads in the host process; only the detached `ed25519`
+signature over the canonical record bytes reaches the file), so a consumer can
 detect any alteration made *after* the producing host. The record file is a schema-2 envelope,
 `{schema, key_id, signature, record}`, with the record carried inside as a string.
 

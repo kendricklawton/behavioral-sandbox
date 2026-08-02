@@ -101,7 +101,8 @@ which the kernel caps at roughly 108 bytes.
 - **type**: string (`tracing` filter syntax)
 - **default**: `warn`
 
-The stderr log filter, for example `info` or `debug`. Logs always go to stderr and never to stdout, so
+The stderr log filter, for example `info` or `debug`. Logs go to stderr and only there (the one
+`tracing` subscriber is initialized with a stderr writer), so
 `ekvm run … 2>/dev/null` stays pipe-clean. The `--log` flag overrides this per run.
 
 [`log`]: #setting-log
@@ -156,7 +157,8 @@ warning naming the key, so a typo reads as a misconfiguration rather than as a b
 - **type**: string (path)
 - **default**: a path under the data directory, generated on first use
 
-The host `ed25519` key that signs finalized audit records. The guest never sees it. A record's
+The host `ed25519` key that signs finalized audit records. The key stays in the host process; what
+reaches anything guest-visible is the detached signature. A record's
 `key_id` names the key that signed it, and key custody and rotation are the hoster's responsibility.
 See [`ekvm verify`](./cli-commands.md#ekvm-verify).
 
@@ -185,6 +187,18 @@ An override for the built eBPF object, rarely needed. Deliberately env-only: it 
 rather than project configuration.
 
 [`EKVM_PROBES_OBJECT`]: #setting-ekvm_probes_object
+
+## Setting `EKVM_LOG_FORMAT`
+
+- **env**: `EKVM_LOG_FORMAT` (**environment only**, daemon-scoped)
+- **type**: `json`
+- **default**: human-readable
+
+Switches `ekvm serve`'s stderr logs to JSON encoding (`--log-json` is the per-launch flag form);
+the one-shot commands do not read it. The daemon's log fields are documented in
+[Observability for the hoster](./daemon-observability.md).
+
+[`EKVM_LOG_FORMAT`]: #setting-ekvm_log_format
 
 ---
 
@@ -225,6 +239,17 @@ whether a caller actually asked:
 - **A default above a ceiling is clamped.** Nobody asked for it, so there is nothing to contradict.
   This is what lets you set only `max_wall_secs = 10` without refusing every bare run, since the
   engine's own default is 30 seconds.
+
+## Setting the egress ceilings
+
+- **keys**: `max_egress_v4`, `max_egress_v6`
+- **kind**: ceiling
+- **type**: array of CIDR strings (`max_egress_v4 = ["10.0.0.0/8"]`)
+
+Bounds what `--allow` may name: every requested rule must fall inside one of the listed CIDRs, and a
+rule outside them is refused, naming the rule and the ceiling, rather than trimmed to fit. A
+malformed entry fails the whole file at parse time, so a typo'd ceiling reads as a config error
+rather than a silently absent bound. Empty (the default) bounds nothing.
 
 ## Setting `require_jail`
 
@@ -276,6 +301,7 @@ For the CLI this is a **guardrail**: a local caller owns this file, and
 [Security](./security.md#what-is-not-a-security-bug) already treats them as trusted.
 
 The real boundary is [`ekvm serve`](./daemon.md), whose clients control neither the daemon's config nor
-its environment. It therefore takes its ceilings as **explicit flags** (`--max-vcpus`, `--max-mem-mib`,
-`--max-wall-secs`, `--max-output-cap`) rather than from a discovered file: a daemon must not read a
+its environment. It therefore takes its ceilings as **explicit flags** (the per-run `--max-vcpus`,
+`--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`, plus the daemon-wide `--max-sessions` and
+committed-resource ceilings) rather than from a discovered file: a daemon must not read a
 security control out of whatever directory it happened to be started in.

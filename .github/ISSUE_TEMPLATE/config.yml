@@ -1,5 +1,5 @@
 # Issue intake routing. The one rule that matters: suspected vulnerabilities go to the private
-# security-advisory form, never a public issue — isolation and the audit trail are the product.
+# security-advisory form, never a public issue (isolation and the audit trail are the product).
 blank_issues_enabled: true
 contact_links:
   - name: Report a security vulnerability (private)

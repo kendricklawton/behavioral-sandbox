@@ -25,7 +25,8 @@ matters for `EKVM_GATEWAY` / `EKVM_RESOLVER`: the environment is the *only* way 
 sessions a route, since the file layer the CLI would read is not consulted here.
 
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
-jail posture is fixed when the daemon launches, so a caller can never weaken it. The same holds for
+jail posture is fixed when the daemon launches, and no field of the wire's `open` carries a jail
+knob, so weakening it is not expressible on the wire. The same holds for
 `--require-limits` (also `EKVM_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
 can't be applied is refused rather than booted uncapped (fail-open is the default), so a
 hoster can make the resource envelope load-bearing on a shared host. Both are hoster postures, not
@@ -52,9 +53,11 @@ warm take hands its clone's charge over to the session's own reservation). Sessi
 ceiling are refused with `at_capacity` before boot.
 
 **Idle sessions drop with `--idle-timeout SECONDS` (default 300).** The idle half of the same
-bound: a session with no request from its client for this long is dropped, freeing its microVM and
+bound: a session whose connection makes no *progress* for this long is dropped, whether the client
+stopped sending requests or stopped draining replies (the flag arms both the read and the write
+deadline), freeing its microVM and
 its `--max-sessions` slot, so a wedged or forgotten connection does not hold capacity indefinitely. It
-covers the wait for the first `open` too; a client that keeps sending requests keeps resetting it.
+covers the wait for the first `open` too; a client that keeps the connection moving keeps resetting it.
 `0` disables it.
 
 **Shutdown.** SIGTERM/SIGINT gets a prompt, clean exit: the daemon logs, unlinks its socket, and
@@ -71,8 +74,9 @@ without `--prewarm`) cold-boots. Building the pool needs KVM (and root, for jail
 ## The reference client
 
 `ekvm-client` is the **reference Rust client**: a `Client` type that drives the whole session
-(`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`close`) over the socket. It depends on
-`ekvm-protocol` and a JSON value **only, never `ekvm`**, which is the point: it demonstrates that a
+(`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`cancel`/`close`) over the socket. It
+depends on
+`ekvm-protocol` and a JSON value **only, never `ekvm-engine`**, which is the point: it demonstrates that a
 caller can drive the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
 A language SDK is this client's method set hardened per language. Python first, since the caller
 driving a sandbox is usually an agent loop, then Go and Node; **none is written**. The wire protocol
@@ -102,18 +106,18 @@ client.close()?;                                    // tear the sandbox down
 allowances to arm on its tap (`allow`, each `IP[/CIDR][:PORT][/PROTO]`). Both default to the sealed
 posture, so a client written before they existed sends bytes that still decode to no NIC at all.
 
-The daemon refuses rather than narrowing. An `allow` without `net` names the contradiction, a host
-that withdrew guest networking (`allow_net = false`) refuses the NIC outright, a rule past the
-kernel map's fixed count is caught with the cap named, and a rule outside `max_egress_v4` is
-refused rather than trimmed to fit.
+The daemon refuses rather than narrowing. An `allow` without `net` names the contradiction, and a
+rule set past the kernel map's fixed count is caught with the cap named. The `.ekvm.toml` operator
+policy (`allow_net`, the `max_egress_*` ceilings) is the *CLI's* enforcement surface: a daemon reads
+no config file, so what it enforces is the flag ceilings it was launched with plus the invariants
+below.
 
-**A NIC over the wire is always policed, deny-all at minimum**, which is the one place the daemon is
+**A NIC over the wire is always policed, deny-all at minimum** (the session's networked `open` arms
+`EgressPolicy::deny_all` before any allowance is considered), which is the one place the daemon is
 deliberately stricter than the CLI. A bare `ekvm run --net` attaches observe-only, and that is safe
 there because the caller is local and owns the config file. A wire client is neither, so leaving it
 observe-only would mean a session could ask for a NIC with no allowances and get an unpoliced tap:
-unrestricted egress on any host that configured a gateway and furnished an uplink, with
-`max_egress_v4` never consulted, because a ceiling is only checked against rules that were asked
-for.
+unrestricted egress on any host that configured a gateway and furnished an uplink.
 
 Two things stay the daemon's:
 
@@ -121,12 +125,14 @@ Two things stay the daemon's:
   jail, so no wire message can route a session out of its sandbox. A client can ask for a NIC and
   bound what crosses it; it cannot create a path. The division of labour is
   [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster).
-- **That enforcement does not fail open.** A session whose tap could not be policed is ended, never
+- **That enforcement does not fail open.** A session whose tap could not be policed is ended (the
+  attach error is session-fatal, not a logged warning), never
   run with its caller believing an allow-list is in force. Observation still fails open: a host
   without the eBPF caps yields a coverage-gapped record, not a refused session.
 
-A networked `open` is never served from the pre-warmed pool, since a pooled clone restores a
-snapshot with its NIC presence baked in.
+A networked `open` is never served from the pre-warmed pool: pool eligibility is the bare default
+profile, `net`/`allow` make an `open` non-bare, and a pooled clone restores a snapshot with its NIC
+presence baked in, so a networked session cold-boots instead.
 
 ## Non-goals: where a PaaS would begin
 
@@ -143,11 +149,12 @@ nothing that crosses it. Its wire-level consequences:
 - **The daemon measures, never charges.** The [metrics endpoint](./daemon-observability.md#metrics-prometheus) exposes
   host-observed numbers; bills, quotas, and per-tenant caps are built above them.
 - **One daemon, one host.** Bin-packing, queues, and autoscaling live in the hoster's scheduler;
-  the daemon has no notion of another host, and its surface stays a local unix socket, never a
-  public HTTP API.
+  the daemon has no notion of another host, and its control surface stays a local unix socket, not
+  a public HTTP API (the optional `--metrics ADDR` listener is separate and read-only, and a
+  non-loopback bind draws a warning).
 
-The line is a security boundary too: the confinement posture is fixed at daemon launch, so a
-client can never weaken it.
+The line is a security boundary too: the confinement posture is fixed at daemon launch, and the
+wire carries no field that could move it.
 
 ## Teardown
 

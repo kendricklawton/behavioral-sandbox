@@ -1,5 +1,5 @@
 //! The CLI's audit face: compose the two tracks the way the engine intends, boot the sandbox
-//! (`ekvm`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
+//! (`ekvm-engine`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
 //! (`vmm_pid`/`netns`/`tap_name`) and fuse their output into the per-run [`RunRecord`].
 //!
 //! This is the caller-side launch sequence the loader specifies:

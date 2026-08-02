@@ -1,6 +1,6 @@
 #!/bin/sh
 # Install the ekvm sandbox engine from a release package.
-# Canonical use (once releases are public):
+# Canonical use:
 #   curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh | sh
 # Also works from a local package (offline / pre-release testing):
 #   EKVM_DIST_TARBALL=dist/ekvm-<ver>-x86_64-linux.tar.gz sh install.sh
@@ -258,7 +258,8 @@ fi
 # Keep in step with PINNED_FIRECRACKER_SHA256 in crates/engine/src/doctor.rs.
 FC_PIN1="2fd0171309af7e24cf8dafc8a6f921c1434c49b5f9349bb996b7ed0a4deb8aa7"
 # The release the printed commands below install; keep in step with PINNED_FC_VERSION in
-# crates/engine/src/spawn.rs (a dist test compares the series so the two cannot drift).
+# crates/engine/src/spawn/fcversion.rs (install_sh_firecracker_version_is_in_the_pinned_series
+# compares the series).
 FC_VER="v1.16.1"
 FC_BIN=$(command -v firecracker 2>/dev/null || true)
 if [ -n "$FC_BIN" ]; then

@@ -1069,8 +1069,8 @@ mod version_tests {
     #[test]
     fn the_clock_fixup_is_gated_above_the_floor_not_at_it() {
         // The whole point of gating `clock_realtime`: the field arrived *after* the floor, so an
-        // ungated send would drag the effective floor up to v1.16 and break the two older supported
-        // releases. If a future bump ever makes the floor meet the gate, this assertion is the
+        // ungated send would drag the effective floor up to v1.16 and break v1.15, the older
+        // supported release. If a future bump ever makes the floor meet the gate, this assertion is the
         // reminder that the conditional has become dead code and can be simplified away.
         assert!(
             FC_CLOCK_REALTIME_SINCE > MIN_SUPPORTED_FC_VERSION,

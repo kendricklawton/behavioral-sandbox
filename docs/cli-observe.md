@@ -132,5 +132,5 @@ run that quietly ignores the policy. `--allow` without `--net` is refused at the
 A host can withdraw guest networking entirely with
 [`allow_net`](./cli-config.md#setting-allow_net).
 
-The per-axis eBPF demos (one probe at a time) live in
+Running one probe at a time, standalone, is
 [Host-side observability & enforcement](./probes.md), under *Try it*.

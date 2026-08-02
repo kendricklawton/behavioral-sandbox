@@ -51,7 +51,7 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | Crate | Directory | Role |
 |---|---|---|
 | `ekvm-engine` | `crates/engine` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
-| `ekvm-channel` | `crates/channel` | The host/guest wire protocol. Dependency-free framing, shared verbatim by driver and agent. |
+| `ekvm-channel` | `crates/channel` | The host/guest wire protocol. Near dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by driver and agent. |
 | `ekvm-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
 | `ekvm-probes` | `crates/probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. Its object keeps the bare name `probes`. |
 | `ekvm-probes-common` | `crates/probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
@@ -74,5 +74,5 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
   and the snapshot pool.
 - **[The eBPF half](./architecture-ebpf.md)**, the three probe crates and the three decisions in the
   loader worth understanding before changing it.
-- **[Design decisions](./architecture-decisions.md)**, the eight numbered decisions and the
+- **[Design decisions](./architecture-decisions.md)**, the numbered decisions and the
   reasoning behind each.

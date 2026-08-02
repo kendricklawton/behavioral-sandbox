@@ -3,8 +3,9 @@
 Three crates, split by what can depend on what:
 
 - **`ekvm-probes`** is the eBPF programs themselves: `#![no_std]`, built for `bpfel-unknown-none` via
-  `bpf-linker`, using CO-RE and BTF so one object loads across kernel versions. Syscall tracepoints, a
-  tc/XDP classifier on the VM's tap, and cgroup accounting.
+  `bpf-linker`, carrying BTF in the object (no program reads kernel struct fields yet, so no CO-RE
+  field relocations are in play; the crate's header says when those arrive). Syscall tracepoints, tc
+  classifiers on the VM's tap, and cgroup accounting.
 - **`ekvm-probes-common`** holds the `#[repr(C)]` plain-old-data records that cross the kernel/user
   boundary. **Zero dependencies, single-sourced**, so the program writing a record and the loader
   reading it cannot disagree about layout.
@@ -19,8 +20,8 @@ Three crates, split by what can depend on what:
 | `tap.rs` | `TapMonitor`, `NetStats`: the tc classifiers, the flow and denial maps, the netns join |
 | `egress.rs` | `EgressPolicy`, `Ipv4Cidr`, `Ipv6Cidr`: **no eBPF**, just what an `--allow` string parses into, separately fuzzed |
 | `meter.rs` | `ResourceMeter`, `CgroupStats`: the shared CPU meter and cgroup counters |
-| `observer.rs` | the per-sandbox bundle over the three probes, and the `AxisGap` machinery |
-| `record.rs`, `summary.rs`, `json.rs`, `signing.rs` | the record, its projections, and its signature |
+| `observer.rs` | the per-sandbox bundle over the three probes, degrading a lost axis to a gap |
+| `record.rs`, `summary.rs`, `json.rs`, `signing.rs` | the record (`AxisGap` lives here), its projections, and its signature |
 | `lib.rs` | the error types, object-path resolution, cgroup id helpers, the capability check |
 
 Three design decisions in `observer.rs` are worth understanding before changing anything there:
@@ -39,7 +40,8 @@ window. The record's core (network, resources, denials) is unaffected.
 **Observation fails open; enforcement does not.** Every axis degrades independently to a recorded
 `AxisGap`, so a host without BTF or `CAP_BPF` still runs the sandbox and produces a thinner record that
 *says* it is thinner. The invariant to preserve when touching this code is that a lost fold or a
-poisoned lock is a **recorded gap, never an empty footprint passed off as a quiet run**. Egress
+poisoned lock surfaces as an **`AxisGap` in the record**, not as an empty footprint passed off as a
+quiet run (the lock reads in `observer.rs` fail open to exactly that gap). Egress
 enforcement is the opposite: `--allow` on a host that cannot load the probes is a typed refusal, since
 silently not enforcing a security control is the worst available outcome.
 

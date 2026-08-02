@@ -1,8 +1,9 @@
 # Releases
 
-> **Nothing in this file is in force.** No release has been tagged and no artifact published, so
-> the API surface, host requirements, support policy, and Rust policy below describe what is
-> *planned* for the first release, not commitments that apply today. See
+> **Only the release mechanics below are in force.** `v0.0.1` (2026-08-02) is a checkpoint tag that
+> exercised them: the tag-triggered build, signing, the manifest, draft-then-publish, and
+> `install.sh`'s download path. The API surface, host requirements, support policy, and Rust policy
+> still describe what is *planned* for `v0.1.0`, not commitments that apply today. See
 > [docs/introduction.md#status](docs/introduction.md#status).
 
 ## v0.1.0 (Unreleased, planned)
@@ -29,14 +30,22 @@ tag would freeze.
 - **Daemon wire protocol** (`ekvm-protocol`): line-delimited JSON (`schema: 1`).
 
 ### Planned host requirements (v0.1.0)
-- **Host**: Linux `x86_64` with `/dev/kvm`, cgroup v2, and kernel BTF; a kernel providing
-  `cgroup.kill`, else >= 5.15 where there is no cgroup v2 hierarchy to probe
-  (`/sys/kernel/btf/vmlinux`). `ekvm doctor` verifies all of it and prints the fix for
-  whatever is missing.
+- **Host**: Linux `x86_64` with `/dev/kvm`, cgroup v2, and kernel BTF (`/sys/kernel/btf/vmlinux`);
+  a kernel providing `cgroup.kill`, else >= 5.15 where there is no cgroup v2 hierarchy to probe.
+  `ekvm doctor` verifies all of it and prints the fix for whatever is missing.
 - **Firecracker**: v1.15 through v1.16 supported (upstream's current support window);
   v1.16.1 is the pinned, tested, hash-verified release. The operator installs the binary
   (see [docs/cli-install.md](docs/cli-install.md)), so an upstream security patch never
   waits on a release of this engine.
+
+---
+
+## v0.0.1 (2026-08-02, checkpoint)
+
+A disposable pre-release checkpoint, not a supported release: it exists to have exercised the
+release path end to end (the tag-triggered build, ed25519 signing of `SHA256SUMS`,
+draft-then-publish, and an `install.sh` install from the published assets). Nothing about its API
+or behavior is pinned; pin a git rev.
 
 ---
 

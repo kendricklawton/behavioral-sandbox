@@ -1,4 +1,4 @@
-//! Fuzz the daemon's untrusted-client wire: `read_message` over the newline-JSON protocol. `agent
+//! Fuzz the daemon's untrusted-client wire: `read_message` over the newline-JSON protocol. `ekvm
 //! serve` decodes exactly these bytes off its unix socket from *any* client, the outermost
 //! untrusted-input boundary the engine exposes (unlike the channel decoder, which only sees a guest
 //! already contained inside a VM). Hostile bytes here must always land in a value or a typed

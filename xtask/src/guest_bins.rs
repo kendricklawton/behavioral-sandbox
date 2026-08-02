@@ -102,7 +102,7 @@ fn ensure_guest_target() -> Result<()> {
         .context("running rustup (is it installed?)")?;
     if !installed.status.success() {
         // Without this, a non-zero rustup (no default toolchain, corrupt state) yields empty stdout
-        // and the check below misreports it as "target not installed" — the wrong fix to suggest.
+        // and the check below misreports it as "target not installed", the wrong fix to suggest.
         bail!(
             "`rustup target list --installed` failed (exit {:?}): {}",
             installed.status.code(),

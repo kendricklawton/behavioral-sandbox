@@ -54,6 +54,8 @@ and dashboards belong to whatever *hosts* the engine, and the model driving an a
 - **[Host-side observability & enforcement](./probes.md)**, the eBPF half: syscall tracing,
   per-VM network flows on the tap, in-kernel egress enforcement, and per-sandbox resource
   accounting, each pinned by a privileged test.
+- **[Benchmarks](./benchmarks.md)**, why no numbers are published at present and what a returning
+  number must carry.
 - **[Threat model](./security-threat-model.md)**, what is trusted, host hardening baseline, supply-chain provenance, and residual risk.
 - **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
   report one.
@@ -67,9 +69,12 @@ exercised. Anything can change without notice, so if you build on this, pin a gi
 mechanics are in [RELEASES.md](../RELEASES.md); the signing and manifest half is exercised by
 `v0.0.1`, the support policy is not in force.
 
-Each milestone ships with a demo that exercises it, so most of what this book describes has been run
-rather than only reasoned about. "Most" is load-bearing there: the release install path, the Red Hat
-rows, and aarch64 are described here and have not been run. Which is worth being precise about:
+Most of what this book describes has been run rather than only reasoned about: the privileged suite
+boots real microVMs and attaches real probes nightly, `cargo xtask self-host` ends in a boot proof,
+and the release install path was exercised by the author, on a machine that had already built the
+project, the day `v0.0.1` published. "Most"
+is load-bearing there: the Red Hat rows and aarch64 are described here and have not been run. Which
+is worth being precise about:
 
 **What a passing test is worth.** A passing test shows that the case it constructs behaved as
 described, on the host that ran it, at the revision it ran against. It does not show that the

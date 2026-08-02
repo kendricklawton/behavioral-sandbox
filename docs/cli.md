@@ -42,9 +42,11 @@ out of scope.
 | Stateful session | [`ekvm shell`](./cli-commands.md#ekvm-shell) |
 | Confinement (jail) | jailed by default; `--unjailed` opts out |
 | Resource limits (`Limits`) | `--vcpus`, `--mem`, `--wall`, `--output-cap` |
+| Load-bearing limits (`require_limits`) | `--require-limits`: refuse, rather than boot uncapped, when a cgroup cap can't apply |
 | Per-exec inputs | `--env`, `--put`, piped stdin |
 | Artifact retrieval | `--get` (deny-by-default) |
 | Networking (NIC) | `--net` |
+| A route out (`GuestEgress`) | `--gateway`, `--resolver` (the hoster furnishes the uplink; [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster)) |
 | Egress policy (`EgressPolicy`) | [`--allow IP[/CIDR][:PORT][/PROTO]`](./cli-observe.md#enforcing-egress-with---allow) |
 | Host-observed audit record | [`--trace`, `--record`, `--record-summary`, `--watch`](./cli-observe.md) |
 | Verify a signed record | [`ekvm verify <record>`](./cli-commands.md#ekvm-verify) |
@@ -66,7 +68,8 @@ Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, n
   bounded files); a caller needing bulk transfer or async cancellation drives the library directly. A
   one-shot CLI cancels by process signal (Ctrl-C, and the sandbox's `Drop` tears the VM down).
 - **Tenancy, auth, billing, fleet scheduling, a dashboard, image and registry management.** These are
-  the *hoster's* platform, above the engine; they never land in this repo.
+  the *hoster's* platform, above the engine: a recorded non-goal (design rule 4), which is what makes
+  proposing one a design error rather than a missing feature.
 
-The per-axis eBPF demos (one probe at a time) live in
+Running one probe at a time, standalone, is
 [Host-side observability & enforcement](./probes.md), under *Try it*.

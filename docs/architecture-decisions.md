@@ -14,7 +14,12 @@ attached to host-kernel hooks, outside the guest's address space and outside any
 can enter.
 
 ## 3. Jailed execution by default
-Firecracker instances are launched via the `jailer` helper, which places the process inside a restricted chroot, drops privileges to an unprivileged user/group, applies seccomp filters, and assigns cgroup v2 limits before executing guest code.
+The CLI, the daemon, and `Sandbox::open` jail by default: Firecracker is launched via the `jailer`
+helper, which places the process inside a restricted chroot, drops privileges to an unprivileged
+user/group, and assigns cgroup v2 limits before executing guest code. Firecracker's own built-in
+seccomp filters stay enabled (the driver never passes `--no-seccomp`). The opt-outs are named,
+`--unjailed` and `Sandbox::open_unjailed`; only the lower-level `BootConfig`/`Vm::boot` pair
+defaults to unjailed.
 
 ## 4. Ephemeral sandbox sessions & snapshots
 Each execution session maps to its own microVM instance. Pre-warmed pools and snapshot restore

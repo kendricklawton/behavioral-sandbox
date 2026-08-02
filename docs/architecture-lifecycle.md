@@ -6,7 +6,7 @@ Boot, exec, teardown, and the pre-warmed pool. The teardown section is the subtl
 
 `Vm::boot` is the entry point. `Sandbox::open` is a thin wrapper over it. The sequence, in order:
 
-**1. Refuse-first preflight.** Three checks run before anything is touched, each returning a typed
+**1. Refuse-first preflight.** The checks run before anything is touched, each returning a typed
 error that names its own fix:
 
 - `refuse_uncappable_boot`, for a `require_limits` boot that cannot be capped, because caps live on the
@@ -14,6 +14,9 @@ error that names its own fix:
 - `refuse_unusable_scratch`, for a jailed boot whose scratch dir sits on a `nodev` or `noexec` mount,
   since the jailer's chroot needs a working `/dev/kvm` node and an executable `firecracker` copy there.
 - `refuse_unsupported_vcpus`, for a count the pinned VMM will reject.
+- `refuse_offlink_gateway`, for a networked boot whose configured gateway is off the guest's own `/30`
+  link: the guest cannot ARP it, so the kernel would refuse the default route and the sandbox would
+  come up sealed, reading as "the gateway option does not work" rather than as the typo it is.
 
 The pattern is worth internalizing, because it recurs: **find out early and say so**, rather than
 spawning a VMM and letting a raw Firecracker error surface deep in boot. Each of these exists because
@@ -41,7 +44,8 @@ even starts.
   heaviest host-side step, so the deadline is checked before it and re-checked by each later step.
 - Bulk `input_dir` and `output_dir` become ext4 images in the workdir, attached as extra block devices.
 - Networking, when asked for, is a per-VM netns holding a tap.
-- The jailer is spawned (not `firecracker` directly) and stages resources into its chroot.
+- A jailed boot spawns the jailer (not `firecracker` directly) and stages resources into its chroot;
+  an unjailed boot spawns `firecracker` itself.
 
 **5. `run_boot`** drives the Firecracker API socket through the boot sequence and waits for the guest's
 readiness marker on the console. That marker is configurable, because it is a property of the rootfs
@@ -57,8 +61,9 @@ a little-endian `u32` length) and then a payload, with **the length checked agai
 (1 MiB) before anything is allocated**. That ordering is the whole defense against a hostile guest
 declaring a 4 GiB frame.
 
-`ekvm-channel` has **no dependencies at all**, and is shared verbatim by the driver and the in-guest agent,
-so the two sides cannot drift on the wire format.
+`ekvm-channel` is near dependency-free (`zeroize`, giving the post-send secret wipe a volatile store,
+is the one dependency; its `Cargo.toml` states why), and is shared verbatim by the driver and the
+in-guest agent, so a wire-format change reaches both sides in the same commit.
 
 Inside the guest, `guest-agent` runs one command per connection and streams stdout, stderr, and the
 exit status back as frames. It is built static against musl and baked into the rootfs. It is
@@ -71,7 +76,8 @@ without limit:
 - A **wall-clock budget**, so a command that never exits becomes a typed timeout.
 - An **aggregate output cap** (16 MiB by default). Each frame is already bounded by `MAX_PAYLOAD`, but
   a guest can send unboundedly *many* frames, so the total is capped too. Per-frame overhead is charged
-  toward the cap as well, so a flood of empty frames cannot spin the collect loop for free.
+  toward the cap as well, so even empty frames spend it; `exec_output_cap_is_enforced` pins the cap and
+  `output_cap_counts_file_path_bytes_not_just_data` pins the overhead accounting.
 - A **vsock connect and handshake deadline**, so a dead or stalled guest is a typed error rather than a
   host hang. Liveness is the transport's job.
 

@@ -65,11 +65,14 @@ fn main() -> Result<(), VmmError> {
 
 ```rust,no_run
 # extern crate ekvm_engine;
-use ekvm_engine::{BootConfig, Pool, Snapshot, Vm, VmmError};
+use ekvm_engine::{BootConfig, Jail, Pool, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID};
 
 fn main() -> Result<(), VmmError> {
-    // 1. Boot an unjailed source VM to prepare a pre-warmed snapshot
-    let source_cfg = BootConfig::from_env();
+    // 1. Boot an unjailed source VM to prepare a pre-warmed snapshot. `from_env` leaves the vsock
+    // exec channel off, and a snapshot taken without it restores boot-only clones, so turn it on:
+    // pre-warmed means exec-ready.
+    let mut source_cfg = BootConfig::from_env();
+    source_cfg.guest_cid = Some(DEFAULT_GUEST_CID);
     let source_vm = Vm::boot(source_cfg)?;
 
     // Any directory you own works; a snapshot bundle is just files. `tempfile` would do, but it is
@@ -78,8 +81,10 @@ fn main() -> Result<(), VmmError> {
     std::fs::create_dir_all(&snap_dir).expect("create the snapshot dir");
     let snapshot = source_vm.snapshot(&snap_dir)?;
 
-    // 2. Initialize a pool of 4 pre-warmed clones (clones will restore jailed)
-    let pool_cfg = BootConfig::from_env();
+    // 2. Initialize a pool of 4 pre-warmed clones. `jail` on the pool config is what makes every
+    // clone restore under the jailer; the `from_env` default (`None`) would restore them unjailed.
+    let mut pool_cfg = BootConfig::from_env();
+    pool_cfg.jail = Some(Jail::default());
     let mut pool = Pool::new(snapshot, pool_cfg, 4)?;
 
     // 3. Take a warm clone from the pool: a restore rather than a cold boot
@@ -114,8 +119,8 @@ a visible bump, never drift.
 ## A minimal reference integration
 
 For the whole lifecycle in one small file, embedding the engine end to end (load the host-side
-observers, `open` a jailed sandbox, attach the probes, `exec`, `collect` the audit record, `close`,
-then print both the `RunResult` and the JSON record), see the runnable example
+observers, `open` a jailed sandbox, attach the probes, `exec`, `collect` the audit record,
+`shutdown`, then print both the `RunResult` and the JSON record), see the runnable example
 [`crates/probes-loader/examples/reference_integration.rs`](../crates/probes-loader/examples/reference_integration.rs).
 It composes the driver and the loader the way a downstream host application would.
 

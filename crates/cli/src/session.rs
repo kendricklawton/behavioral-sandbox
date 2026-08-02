@@ -475,7 +475,7 @@ fn serve_run(
 ) -> bool {
     // Only a real `exec` counts as a guest command. `put`/`get` ride a no-op `true` purely to carry a
     // file, so folding their wall into the `guest_command` histogram or the trace `exec_wall` would
-    // dilute the user-command latency signal with file-transfer overhead (16-G); `requests_total{verb}`
+    // dilute the user-command latency signal with file-transfer overhead; `requests_total{verb}`
     // already counts put/get separately. For a real command, accumulate the **host-measured** wall on
     // both success and failure: a timed-out or capped exec still consumed time (up to the whole
     // budget), so `exec_wall` must count it, not silently drop it by only summing successful runs.
@@ -508,7 +508,7 @@ fn serve_run(
 /// when the daemon has one, the fast path, since the pool's clones carry the default profile. Any
 /// custom resource knob (or no pool) is a cold boot with the requested envelope.
 /// The lock is taken **non-blocking** (`try_lock`) and held only to pop **ready stock** (an O(1)
-/// pop), never across a `Vm::restore` (16-A). Two ways it declines and cold-boots instead of blocking:
+/// pop), never across a `Vm::restore`. Two ways it declines and cold-boots instead of blocking:
 /// an empty (or poisoned) pool, and a *contended* one, `end_session` holds this same lock across its
 /// `refill`'s inline restores, so a blocking `lock()` here would serialize every bare `open` behind
 /// that whole refill window. Falling through to a lock-free cold boot keeps opens independent of
@@ -528,8 +528,8 @@ fn boot_session_vm(
             match pool.try_lock() {
                 Ok(mut p) => {
                     // Pop only when there is ready stock, `Pool::take` would otherwise restore
-                    // inline under this lock (the 16-A serialization). No stock ⇒ fall through to a
-                    // lock-free cold boot below.
+                    // inline under this lock, the exact hold-across-restore this function's doc
+                    // rules out. No stock ⇒ fall through to a lock-free cold boot below.
                     if p.ready() > 0 {
                         match p.take() {
                             Ok(vm) => {
@@ -593,7 +593,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
 /// between sessions, the moment the [`Pool`](ekvm_engine::Pool) doc reserves for restore cost).
-/// The refill is **best-effort and non-blocking** (16-A): `try_lock`, and skip if the pool is
+/// The refill is **best-effort and non-blocking**: `try_lock`, and skip if the pool is
 /// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
 /// another's restore. Stock recovers on the next uncontended close (the holder refills all the way to
 /// target), and any bare `open` that meanwhile finds the pool dry cold-boots, correct, just not

@@ -67,9 +67,10 @@ first.
 
 ## Semver & API stability
 
-> **Not yet in force.** No release exists, so nothing below governs anything today. This section
-> describes the boundary the project intends to pin at `v0.1.0`; until that tag, every item on it can
-> change without notice. Pin a git rev.
+> **Not yet in force.** The only tag so far, `v0.0.1`, is a checkpoint that exercised the release
+> path, not a supported release, so nothing below governs anything today. This section describes the
+> boundary the project intends to pin at `v0.1.0`; until that tag, every item on it can change
+> without notice. Pin a git rev.
 
 The `ekvm-engine` public library API and the two wire protocols are the surface the project intends to pin
 as its stability boundary. This list, `AGENTS.md`'s `api`-scope rule, and

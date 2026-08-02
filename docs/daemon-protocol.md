@@ -24,14 +24,14 @@ the same shapes.
 | Request | Meaning |
 |---|---|
 | `{"schema":1,"op":"open","vcpus":2,"mem_mib":512,"wall_secs":60,"output_cap":16777216}` | Boot the session's sandbox (all knobs optional; omitted keeps the conservative default). **First message.** A knobbed `open` is never served from the pool. |
-| `{"schema":1,"op":"open","net":true,"allow":["1.1.1.1:443/tcp"]}` | The same, with a NIC and an egress allow-list armed on its tap. `allow` requires `net`; both default to no NIC. `net` without `allow` is **deny-all**, not observe-only: a wire client never gets an unpoliced tap. The daemon refuses a rule outside its `max_egress_v4` ceiling rather than trimming it, and refuses the session outright if the tap could not be policed. Whether a route out exists is the daemon's posture, not the client's ([decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster)). Never served from the pool. |
-| `{"schema":1,"op":"exec","argv":["echo","hi"],"stdin":"text\n"}` | Run a command, feeding `stdin` (UTF-8 text). |
+| `{"schema":1,"op":"open","net":true,"allow":["1.1.1.1:443/tcp"]}` | The same, with a NIC and an egress allow-list armed on its tap. `allow` requires `net`; both default to no NIC. `net` without `allow` is **deny-all**, not observe-only: a wire client never gets an unpoliced tap. The daemon refuses the session outright if the tap could not be policed. Whether a route out exists is the daemon's posture, not the client's ([decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster)). Never served from the pool. |
+| `{"schema":1,"op":"exec","argv":["echo","hi"],"stdin":"text\n","env":[["K","V"]]}` | Run a command, feeding `stdin` (UTF-8 text). Optional `env` pairs set the spawned command's environment only; the values are secrets by contract, rendered as key-plus-count by the wire type's redacting `Debug`. |
 | `{"schema":1,"op":"put","path":"in.txt","content":"data\n"}` | Write a UTF-8 file into the working directory, for a later `exec`/`get`. |
 | `{"schema":1,"op":"get","path":"out.txt"}` | Read a working-directory file back. A missing file is `present:false`, not an error. |
-| `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle. A **jailed** session is a typed refusal, deliberately (not a gap): a jailed VM's disk lives at a chroot-relative path torn down with the VM, so a bundle would record an unrestorable backing. Snapshot an unjailed source and restore jailed clones. |
+| `{"schema":1,"op":"snapshot"}` | Snapshot the session VM into a daemon-host bundle. Three postures are typed refusals, deliberately (not gaps): a **jailed** session (its disk lives at a chroot-relative path torn down with the VM, so a bundle would record an unrestorable backing), an **already-restored** VM (which is what every pooled clone is), and a VM carrying an input/output block device. Snapshot an unjailed, cold-booted source and restore jailed clones. |
 | `{"schema":1,"op":"trace"}` | Return the host-observed audit record (`RunRecord`) so far, as a JSON object. Sampled **live** (repeatable mid-session): its coverage reflects attach time, and an absent axis may be a transient read, not a finalized gap (unlike the CLI's `--record`). |
 | `{"schema":1,"op":"trace_summary"}` | Return the **model-legible summary** so far, the compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied, its resource envelope, any coverage gap), sampled live like `trace`. The face an agent reads between turns. |
-| `{"schema":1,"op":"cancel"}` | Abandon an **in-flight** request and end the session, answered `cancelled`. The one verb legal while another request is outstanding: it exists because a client blocked on a long `exec` has no other way to reach the daemon. **It ends the session, it does not abort one command**: the engine cancels a running exec by killing the sandbox, so session state dies with it (snapshot first if it matters). Hanging up has the same end state, but the daemon cannot notice until the in-flight request finishes on its own, so the sandbox holds its `--max-sessions` slot and guest RAM for up to the remaining wall budget; `cancel` reclaims both immediately. |
+| `{"schema":1,"op":"cancel"}` | Abandon an **in-flight** request and end the session, answered `cancelled`. The one verb legal while another request is outstanding: it exists because a client blocked on a long `exec` has no other way to reach the daemon. **It ends the session, it does not abort one command**: the engine cancels a running exec by killing the sandbox, so session state dies with it (snapshot first if it matters). Hanging up lands in the same place: the daemon polls the connection during an in-flight request and treats EOF like a `cancel`, killing the sandbox within one poll tick. What `cancel` adds is the acknowledgement. |
 | `{"schema":1,"op":"close"}` | End the session and tear the sandbox down (a hung-up connection does the same). |
 
 `put`/`get` carry **UTF-8 text**; bulk or binary I/O is the block-device path
@@ -46,7 +46,7 @@ the same shapes.
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
 | `{"schema":1,"reply":"snapshotted","dir":"/tmp/ekvm-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
-| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained** (each carries a `prev` field = the SHA-256 of the previous record), so a client can verify the sequence as a whole and detect a dropped or reordered record. |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained**: each after the first carries a `prev` field (the SHA-256 of the previous record; the first is the unchained anchor), so the sequence is tamper-evident, not just each record alone. `ekvm verify` checks one envelope; walking a whole chain is `verify_chain` in `ekvm-probes-loader`, which no shipped command drives yet. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"cancelled"}` | The in-flight request was abandoned and the sandbox torn down, acknowledging `cancel`. Always the connection's last message; whatever the cancelled request had produced is discarded. |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
@@ -68,7 +68,8 @@ failed boot is fatal yet nothing about the caller's request was wrong.
 | `refused` | Understood and declined: an operator-chosen posture (snapshotting a jailed session) or a capability this session lacks (no probes attached). | Don't retry as-is. |
 
 `infra` / `transport` / `guest` are the wire form of the engine's own pinned error taxonomy
-(`ekvm::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same way.
+(`ekvm_engine::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same
+way.
 
 **Treat an unrecognized `kind` as `infra`.** The set may grow; a value your client predates means
 "unclassified", and assuming the host rather than the caller is the conservative read. An absent
@@ -166,7 +167,7 @@ The round trip a caller uses to collect what a run *produced*, not just what it 
     "schema": 1,
     "timing": {"boot_ns": 128000000, "exec_ns": 14000000},
     "network": null,
-    "host_syscalls": {"execve": 3, "openat": 41, "connect": 0, "notable": []},
+    "host_syscalls": {"execve": 3, "openat": 41, "connect": 0, "notable": [], "truncated": false},
     "resources": {
       "cpu_ns": 16000000,
       "mem_peak_bytes": 28432000,

@@ -173,9 +173,10 @@ pub(crate) struct Server {
     pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     pub(crate) jailed: bool,
-    /// The operator's per-run policy, read from the daemon's `.ekvm.toml` at startup.
-    /// This is the enforcing copy: a client controls neither that file nor this process's
-    /// environment, so the ceilings here bound what any `open` may ask for.
+    /// The operator's per-run policy, built from the daemon's own flags at startup (a daemon
+    /// deliberately reads no `.ekvm.toml` out of its cwd; see [`serve`]). This is the enforcing
+    /// copy: a client controls neither those flags nor this process's environment, so the ceilings
+    /// here bound what any `open` may ask for.
     pub(crate) policy: Policy,
     /// The shared host-side probes, loaded once, attached per session (fail-open) for `trace`.
     pub(crate) observ: Observability,
@@ -424,7 +425,7 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
         .name("ekvm-metrics".into())
         .spawn(move || {
             crate::metrics::serve(listener, registry, move || {
-                // `try_lock`, never a blocking acquire (16-C): the scrape must not stall behind a
+                // `try_lock`, never a blocking acquire: the scrape must not stall behind a
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
                 // this scrape, `ekvm_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
@@ -845,7 +846,7 @@ fn build_pool_from(
     // 2. Snapshot it into the per-daemon bundle dir the caller prepared.
     let snapshot = source.snapshot(snap_dir)?;
     // The source has served its purpose (its state is captured); tear it down before the pool fills.
-    // Best-effort (16-D): the snapshot is the artifact that matters and it is already on disk, so a
+    // Best-effort: the snapshot is the artifact that matters and it is already on disk, so a
     // teardown error must not discard a working pool. `Drop` reclaims the source either way.
     if let Err(e) = source.shutdown() {
         tracing::warn!(error = %e, "prewarm source teardown reported an error; snapshot already captured");

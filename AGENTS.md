@@ -67,7 +67,7 @@ worth knowing before editing, the boot sequence, and the teardown layers, read
 | Path | Package | What it is |
 |---|---|---|
 | `crates/engine` | `ekvm-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
-| `crates/channel` | `ekvm-channel` | Host↔guest framing. Zero dependencies, shared verbatim by driver and agent, so the two can't drift. |
+| `crates/channel` | `ekvm-channel` | Host↔guest framing. Near dependency-free (`zeroize`, for the secret wipe, is the one dependency), shared verbatim by driver and agent, so a wire change reaches both in one commit. |
 | `crates/guest-agent` | `ekvm-guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. Its binary keeps the bare name `guest-agent`: that is the path the rootfs build bakes in. |
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. Its binary keeps the bare name `probes`: that is the object filename the loader looks for. |
 | `crates/probes-common` | `ekvm-probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero deps, single-sourced. |
@@ -136,7 +136,7 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   requirement as the capability, never as a distro that happens to satisfy it.** Host variance lives
   in `doctor.rs` preflight, never in the boot path: a conditional in `spawn.rs`/`jail.rs` creates N
   boot paths and leaves N-1 untested. The shipped binary is static musl for the same reason, no host
-  libc to mismatch. Full rationale: `docs/architecture.md`, decision 8.
+  libc to mismatch. Full rationale: `docs/architecture-decisions.md`, decision 8.
 - Don't commit built rootfs/kernel images or generated eBPF objects, they're built by `xtask`.
 - **On a panicking test, re-run it with `RUST_BACKTRACE=1`** rather than reasoning about the failure
   from the assertion line alone. The frame that panicked is often several calls below the test.
