@@ -11,8 +11,8 @@ project depends on rather than establishes.
 ## Status of this model
 
 Nothing in this document has been reviewed by anyone outside the project. There has been no external
-security audit and no independent adversarial testing. The engine has one maintainer, no tagged
-release, and no production use.
+security audit and no independent adversarial testing. The engine has one maintainer, no supported
+release (`v0.0.1` is a checkpoint that exercised the release path), and no production use.
 
 A threat model is a hypothesis about what an attacker will try. The classes below are the ones
 considered so far, not a demonstration that the list is complete, and the mechanisms below are the
@@ -32,7 +32,8 @@ properties established by this document:
    resource bleed between two sandboxes on one host. (*Whose* run is whose is the hoster's concern,
    not the engine's.)
 3. **The audit record's integrity.** What the host reports a run did should reflect what the host
-   observed, and once finalized the record is **host-signed**, so a consumer can detect alteration
+   observed, and a finalized record can be **host-signed** (the CLI's `--record` and the daemon's
+   `trace` do sign; the library hands back an unsigned record), so a consumer can detect alteration
    made after it leaves the producing host (see [Record integrity beyond the
    guest](#record-integrity-beyond-the-guest) for what that does and does not establish).
 4. **Deny-by-default.** A run with no explicit policy is configured to reach no network and hold
@@ -59,7 +60,7 @@ The boundary and the crossings the host mediates, as a picture:
     crossings the host mediates:           |
       vsock    exec + stdio        <------->|   carried by the in-guest agent
       tap      all guest packets   <------->|   observed by tc/eBPF, policed deny-by-default
-      block    rootfs RO / in RO / out RAD >|   no host filesystem is handed to the guest
+      block    rootfs RO / in RO / out RW  >|   ext4 images the engine builds, never a host dir
       cgroup   mem/cpu/pids/io caps ------->|   CPU is also metered from eBPF
    ----------------------------                       ----------------------------
    Every security-relevant observation and policy sits on the HOST side of every crossing.
@@ -87,13 +88,13 @@ risk](#assumptions-and-residual-risk); a passing test is scoped as described in 
 
 | Attack | Contained by | Exercised by |
 |--------|--------------|-----------|
-| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, seccomp, namespaces) as defense in depth | the jail-escape tests in `ekvm-engine`'s `confinement.rs` |
-| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter); guest processes run against the guest kernel's scheduler, not as host threads | the fork-bomb/mem-hog and consolidated exhaustion tests in `confinement.rs` |
+| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, namespaces) plus Firecracker's own built-in per-thread seccomp filters, which the driver never disables (it passes no `--no-seccomp`), as defense in depth | the jail-escape tests in `ekvm-engine`'s `confinement.rs`; `boots_under_the_jailer` reads `Seccomp: 2` back from the running VMM |
+| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter); guest processes run against the guest kernel's scheduler, not as host threads | the fork-bomb/mem-hog tests in `confinement.rs`; `all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy` in `ekvm-probes-loader`'s `hardening.rs` |
 | Network exfiltration / flood | Deny-by-default egress policy enforced in-kernel at the tap, armed before the guest's first packet; drops are counted | `net_enforce.rs`; the hostile-guest and flood tests in `confinement.rs` |
-| Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap; the guest's four crossings (vsock, tap, block devices, cgroup) name no BPF program or map | `hardening.rs` |
+| Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap, so no guest crossing addresses a BPF program or map | `a_guest_cannot_see_or_disable_the_host_side_probes` (`hardening.rs`) boots a guest, has it list `/sys/fs/bpf` (0 entries), and asserts its UDP flow was still recorded with no coverage gap |
 | Leak a run on driver death | A cgroup-owned lifetime + sentinel kills the VM when its driver dies; an own-euid orphan sweep reclaims residue | the sentinel and orphan-sweep tests in `confinement.rs` |
 | State bleed between clones | Each restored clone has its own in-RAM overlay and guest RAM; the shared base is read-only | `snapshot.rs` |
-| Secret disclosure | The code paths that log or render a run omit injected `--env` values and file contents | driver + CLI secret-handling tests |
+| Secret disclosure | The code paths that log or render a run omit injected `--env` values and file contents | `injected_secrets_reach_no_observable_surface` (`crates/engine/src/exec.rs`) and `injected_secrets_never_reach_the_console_or_host_logs` (`crates/engine/tests/sandbox.rs`), both engine-side; the CLI's own `--env` rendering has no test of its own |
 
 **Note on Snapshot CPU Portability:** Firecracker snapshots preserve the producing host's vCPU CPUID state (`cpu_template` is unset by default). Cross-host snapshot restore requires matching CPU models or an explicit CPU template to avoid guest illegal instruction faults.
 
@@ -140,15 +141,21 @@ What each claim maps to:
 
 ## Record integrity beyond the guest
 
-The property above (the guest can neither forge nor evade the observation) is one half of
+The row above (observation the guest does not address) is one half of
 "tamper-evident." The other half concerns a **different** adversary than the hostile guest this model
 otherwise assumes: a party that alters the record **after** it leaves the producing host, a
-compromised relay, an operator, or the transport a supervisor reads it over. To close that gap the
-loader **signs** each finalized record with a host key the guest never sees (an `ed25519` detached
-signature over the canonical record bytes), and ships a verify path (`ekvm verify`, the
+compromised relay, an operator, or the transport a supervisor reads it over. To close that gap a
+finalized record is **signed with a host key the guest has no path to** (an `ed25519` detached
+signature over the canonical record bytes), and a verify path ships with it (`ekvm verify`, the
 library `verify`, and the daemon's signed `trace` reply).
 
-- **What the signature proves:** the record was not altered after the producing host signed it.
+Signing is the *caller's* step, not the loader's: `SandboxProbes::collect` returns an unsigned
+`RunRecord`, and `HostKey` signs it in `ekvm run --record` and in the daemon's `trace`. An embedder
+driving `ekvm-probes-loader` directly, and an `ekvm run` without `--record`, produce no signature.
+
+- **What a verifier establishes:** `verify_entry` fails closed on a bad signature, a malformed
+  envelope, or a `key_id` outside the trusted set, so a record it accepts was not altered after the
+  producing host signed it. That is conditional on the consumer holding the right trusted key.
 - **What it does not prove:** that a **compromised producing host** told the truth. A host that holds
   the signing key at signing time can sign a consistent lie; the signature authenticates *"this host
   attests to these bytes,"* not *"these bytes are true."* This is the same trust root the boundary
@@ -157,9 +164,13 @@ library `verify`, and the daemon's signed `trace` reply).
 - **Custody is the hoster's** (engine, not platform): the engine generates a host key on first use and
   signs; tenant keys, a KMS, key distribution, and revocation are the hoster's. A record's `key_id`
   names the signing key, so a rotated key doesn't invalidate records already signed.
-- **Append-only, so tail truncation is undetectable in isolation.** A session's records form a
-  hash chain (each commits to the prior record's hash), so an edited, reordered, inserted, or
-  middle-deleted run is caught. What the chain alone cannot catch is **truncation of the tail**: a
+- **Append-only, so tail truncation is undetectable in isolation.** A daemon session's records form
+  a hash chain: the first is an unchained anchor and each one after it commits to the prior record's
+  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run. Two limits
+  on that today: only the daemon's `trace` path chains (`ekvm run --record` writes one standalone
+  record), and no shipped command walks a chain, `ekvm verify` checks a single envelope, so a
+  consumer wanting the sequence check calls `verify_chain` from the library itself. What the chain
+  cannot catch even then is **truncation of the tail**: a
   consumer handed only a truncated prefix cannot distinguish it from the whole sequence, since every
   link it holds is intact. Detecting a dropped tail needs an out-of-band anchor, the latest expected
   record hash or run count tracked by the consumer, which is the hoster's, the same custody line as
@@ -196,6 +207,15 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   the driver's own privileges. The calls are bounded in wall time and output bytes, and the
   extracted tree is symlink-sanitized, but a memory-corruption bug in those tools is not contained
   today. Running them under dropped privileges is a planned hardening step (using an external `setpriv`-style dependency or dedicated helper).
+- **Observation fails open, so a thin record is not a quiet run.** Each axis that cannot attach
+  (no BTF, no `CAP_BPF`/`CAP_PERFMON`, no object built) degrades to a recorded `AxisGap` and the run
+  proceeds, so a record can cover less than the table above implies. It says so in its own coverage
+  section, and a reader must actually check that section rather than read an empty axis as quiet.
+  Egress *enforcement* is the deliberate exception: `--allow` that cannot arm the tap is a refusal.
+- **Fuzzing is nightly, not continuous.** Ten libFuzzer targets cover the untrusted-input decoders
+  (the guest channel, the daemon wire, the signed-record envelope, the eBPF-boundary parsers and the
+  egress rule parser) on a nightly schedule, bounded per target. There is no OSS-Fuzz or equivalent
+  continuous tier, and some corpora are thin, so depth on any one target is limited.
 
 ## Out of scope (engine, not platform)
 
@@ -223,8 +243,10 @@ it can check.
 
 ## Supply chain & provenance
 
-The guest kernel, the Alpine base rootfs, and `apk-tools-static` are each pinned by sha256 and
-verified on fetch (`xtask/src/artifacts.rs` and `xtask/src/rootfs.rs`).
+Every artifact the build downloads is pinned by sha256 and verified on fetch: the guest kernel and
+the demo boot rootfs (`xtask/src/artifacts.rs`), the Alpine minirootfs and `apk-tools-static`
+(`xtask/src/rootfs.rs`). The Firecracker binary is pinned too but never fetched by this project: the
+operator installs it, and `ekvm doctor` compares what is on `PATH` against the pin.
 
 One of them is served from this project rather than from its origin. `apk-tools-static` is the
 static `apk` the build executes on the host to populate the guest image, and an Alpine branch repo
@@ -239,10 +261,11 @@ The package closure installed on top of that base is **not** hash-pinned
 on the live-CDN path: it floats within one Alpine branch, because branch repos carry only the latest
 revision per package, so an exact `pkg=ver-rN` pin would fail the build the day upstream bumps rather
 than reproduce it (`GUEST_PACKAGES` in `xtask/src/rootfs.rs`). What holds instead is a record and two
-checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, `build-rootfs --verify` (run
-by the privileged gate) fails on any drift from it, and `.github/workflows/rootfs-packages.yml`
+checks on it: `xtask/rootfs-packages.lock` carries the resolved closure, `build-rootfs --verify`
+fails on any drift from it, and `.github/workflows/rootfs-packages.yml`
 rebuilds weekly so a bump arrives on a schedule. `--verify` also builds the image twice and compares
-hashes, so one host reproduces its own build.
+hashes, so one host reproduces its own build. Worth knowing before relying on either: **no automated
+job passes `--verify` today**, so both checks are opt-in and run by hand.
 
 Across hosts is a weaker claim, and until 2026-08-02 it was weaker than this page said. Two hosts on
 the same commit, the same pinned toolchain and the same mke2fs built images hashing `71a79914…` and
@@ -250,17 +273,21 @@ the same commit, the same pinned toolchain and the same mke2fs built images hash
 for std and every registry dependency those were absolute paths under the building host's
 `CARGO_HOME` and rustup directory. `xtask` now builds the guest agent under `--remap-path-prefix`
 for both (`cargo_reproducible` in `xtask/src/main.rs`), mapping the toolchain's vendored std sources
-back onto the `/rustc/<commit>` token rustc itself uses, so a host carrying the `rust-src` component
-and one without it emit the same bytes.
+back onto the `/rustc/<commit>` token rustc itself uses, which removes the builder's `CARGO_HOME` and
+rustup paths from the emitted bytes.
 
 **That was not sufficient, and the measurement says so.** On 2026-08-02, with the remap in place and
-both hosts on e2fsprogs 1.47.2, a dev box built `29c2e192…` and the `ubuntu-24.04` runner built
-`0d614c70…` from the same commit. Something outside `CARGO_HOME` and the toolchain sources still
+both hosts on e2fsprogs 1.47.2, an Arch dev box (rolling, kernel 7.0.11) built `29c2e192…` and the
+`ubuntu-24.04` runner built `0d614c70…` from the same commit. Something outside `CARGO_HOME` and the
+toolchain sources still
 varies between the two, and it has not been identified. So the property this project claims is the
 one `--verify` checks: **one host reproduces its own build**. Cross-host reproducibility is an open
 problem here, not a feature, and an independent rebuild is not expected to match the shipped image.
 What the release does rest on is the signed manifest: `install.sh` verifies `SHA256SUMS.sig` against
-a pinned public key and never rebuilds anything.
+a pinned public key and never rebuilds anything. That pin ships in the same repo as the script, so
+it defeats a tampered release *asset*, not a compromised repo, and
+`EKVM_INSECURE_SKIP_SIGNATURE=1` turns the check off for anyone who sets it. `EKVM_RELEASE_PUBKEY`,
+supplied out of band, is the stronger anchor.
 
 `cargo xtask vendor` snapshots the whole input set, the resolved `.apk` closure included, into an
 offline mirror with a sha256 manifest. That is where the packages do get pinned by hash, so an

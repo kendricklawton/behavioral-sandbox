@@ -26,9 +26,10 @@ ls /sys/kernel/btf/vmlinux    # needed for the eBPF half; most distro kernels sh
 ```
 
 If `/dev/kvm` is missing, stop here: there is no software isolation fallback, so nothing below will
-help. The usual cause is a **cloud VM without nested virtualization**: a stock EC2, DigitalOcean, or
-Hetzner cloud instance cannot boot a microVM. You need bare metal (an AWS `.metal` instance, a
-dedicated server, your own machine) or a provider that exposes nested virt (GCP, some Azure SKUs).
+help. The usual cause is a **cloud VM without nested virtualization**, which stock instances on the
+common providers do not expose. What settles it is the `ls` above, not the provider's name: you need
+bare metal (an AWS `.metal` instance, a dedicated server, your own machine) or an instance type
+documented to support nested virtualization.
 On a laptop or desktop, check that virtualization is enabled in the firmware.
 
 ### 2. Install the host tools
@@ -82,8 +83,10 @@ id -nG | tr ' ' '\n' | grep -x kvm   # prints kvm once the group is in effect
 
 The engine drives Firecracker, it does not bundle it (the container image is the one exception), so
 both binaries have to be on `PATH`. Two versions matter, and both track upstream's own patch
-window: the **pinned** release (currently **v1.16.1**) is what CI tests and the sha256 below
-verifies, and the **floor** (currently **v1.15**) is the oldest series the Firecracker team still
+window: the **pinned** release (currently **v1.16.1**) is what CI tests and what `ekvm doctor`
+checks the on-`PATH` binary's sha256 against (the hash itself lives in `install.sh` and
+`crates/engine/src/doctor.rs`, single-sourced rather than restated here), and the
+**floor** (currently **v1.15**) is the oldest series the Firecracker team still
 patches, with the driver adapting its API requests to any release in between. Below the floor, a
 boot continues with a warning but is neither tested here nor patched upstream, which is the wrong
 footing for running untrusted code.
@@ -122,7 +125,7 @@ other could not).
 |---|---|---|
 | Host kernel | 24.04 ships 6.8; **22.04 ships exactly 5.15**, the fallback floor | rolling, comfortably above the floor |
 | `/dev/kvm` | `0660 root:kvm`, so you must join the group | `0666`, usually usable already |
-| `/tmp` | varies by release, check it | tmpfs **`nodev` by default** (hardened baselines add `noexec`), so the jailed default needs a `scratch_dir` off both (the guided install sets one; see below) |
+| `/tmp` | varies by release, check it | tmpfs **`nodev` by default** (hardened baselines add `noexec`), which the jailed default needs to avoid; the engine falls back to `/var/tmp` on its own, and the guided install pins a short dir (see below) |
 | `e2fsprogs` | 24.04 ships **1.47.0**, below the 1.47.1 floor where `mke2fs` honours `SOURCE_DATE_EPOCH`, so `cargo xtask build-rootfs --verify` fails (normal builds are fine) | current, above the floor |
 | AppArmor | **enabled by default**, and can deny the jailer in ways that look like an engine bug | not installed by default |
 | Build toolchain | `build-essential` | `base-devel` |
@@ -154,10 +157,12 @@ Test the `/tmp` question rather than trusting the table, since it depends on you
 findmnt -no OPTIONS -T /tmp | tr , '\n' | grep -E 'nodev|noexec'   # prints the flags that affect you
 ```
 
-If it prints `nodev` or `noexec`, point the engine at a scratch dir carrying neither, once, in
-`~/.ekvm.toml`.
+If it prints `nodev` or `noexec`, the engine already falls back to `/var/tmp` on its own: the
+default scratch dir is chosen by probing `/tmp`'s mount flags, not assumed. You only need to set one
+yourself if `/var/tmp` is *also* mounted with those flags, or if you have pinned `scratch_dir` or
+`EKVM_SCRATCH_DIR` at a blocked path. To set one, put it in `~/.ekvm.toml`.
 Keep the path **short**: a jailed boot nests this dir name twice inside its API socket path, which the
-kernel caps at ~108 bytes (`ekvm doctor` and the boot error flag an over-long one), so a
+kernel caps at ~108 bytes (an over-long one surfaces as a boot error, not a doctor row), so a
 short dir like `~/.ekvm` beats a long one:
 
 ```toml
@@ -168,8 +173,11 @@ The packaged `install.sh` and `cargo xtask self-host` **write this line for you*
 they detect a `nodev` or `noexec` `/tmp`, so a guided install already boots jailed; the manual form
 above is for a from-source run, or a config you wrote yourself.
 
-`ekvm doctor` flags every one of these against your actual host, so treat it as the authority and
-this table as orientation.
+`ekvm doctor` checks most of these against your actual host, so treat it as the authority and this
+table as orientation. Two rows it does not cover: it checks that `mke2fs` and friends are *present*,
+not their version, so the e2fsprogs floor is `cargo xtask setup`'s row (and a hard failure in
+`build-rootfs --verify` and `dist`); and the build toolchain has no doctor row at all, since it is a
+from-source concern rather than a runtime one.
 
 ## Install from a release package
 
@@ -178,25 +186,35 @@ this table as orientation.
 > about the API, the CLI, or the artifact layout is stable until v0.1.0. See
 > [Status](./introduction.md#status).
 
-Each release is intended to ship a release package tarball per platform plus `SHA256SUMS` and its
-detached ed25519 signature `SHA256SUMS.sig`, assembled by `cargo xtask dist`:
-the `ekvm` binary, the guest kernel, the guest rootfs, and the eBPF object, with a per-file `MANIFEST.sha256` inside. Two first-class installation methods are supported:
+Each release ships one `x86_64` release package tarball (`cargo xtask dist` refuses to package any
+other architecture) plus `SHA256SUMS` and its detached ed25519 signature `SHA256SUMS.sig`. Inside
+the tarball: the `ekvm` binary, the guest kernel, the guest rootfs, the eBPF object, a per-file
+`MANIFEST.sha256`, and a copy of `install.sh` and `LICENSE`. Two first-class installation methods
+are supported:
 
-### Option A: the installer script (`curl | sh`)
+### Option A: the installer script
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh | sh
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh)"
 ```
+
+Prefer this form over `curl … | sh`. Piped into `sh`, the script cannot see its own path, so it
+falls back to the current directory when deciding whether it is running inside an already-extracted
+package: in a directory that happens to hold a `bin/ekvm` and a `MANIFEST.sha256`, the pipe form
+installs *that* instead of downloading a release.
 
 ### Option B: verify and extract by hand
 
-For air-gapped hosts, manual inspection, or offline testing, download and verify the release package:
+For manual inspection, or to check the signature yourself before anything runs. Substitute the
+version you want (`0.0.1` is what is published today):
 
 ```console
+VER=0.0.1
+
 # Download release tarball, checksum manifest, and its detached signature
-curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/ekvm-0.1.0-x86_64-linux.tar.gz
-curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS
-curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS.sig
+curl -LO "https://github.com/packsixfour/ekvm/releases/download/v$VER/ekvm-$VER-x86_64-linux.tar.gz"
+curl -LO "https://github.com/packsixfour/ekvm/releases/download/v$VER/SHA256SUMS"
+curl -LO "https://github.com/packsixfour/ekvm/releases/download/v$VER/SHA256SUMS.sig"
 
 # Verify the manifest's signature against the release key pinned in the repo.
 # Obtain release-key.pem out of band, never from the release assets: from a clone of the
@@ -204,18 +222,19 @@ curl -LO https://github.com/packsixfour/ekvm/releases/latest/download/SHA256SUMS
 openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
 
 # Then verify integrity against the now-trusted SHA256SUMS
-grep "ekvm-0.1.0-x86_64-linux.tar.gz$" SHA256SUMS | sha256sum -c -
+grep "ekvm-$VER-x86_64-linux.tar.gz$" SHA256SUMS | sha256sum -c -
 
 # Extract and install (running install.sh inside the package installs with zero network calls)
-tar -xzf ekvm-0.1.0-x86_64-linux.tar.gz
-cd ekvm-0.1.0-x86_64-linux
+tar -xzf "ekvm-$VER-x86_64-linux.tar.gz"
+cd "ekvm-$VER-x86_64-linux"
 sh ./install.sh
 ```
 
 The installer knobs for this layer: `EKVM_RELEASE_PUBKEY` (an SPKI PEM path or the PEM text
 itself) overrides the key pinned inside `install.sh`, and is the stronger anchor when supplied
-out of band; `EKVM_INSECURE_SKIP_SIGNATURE=1` skips the signature check (needed only for
-releases predating the signing scheme; the sha256 and manifest checks still run).
+out of band; `EKVM_INSECURE_SKIP_SIGNATURE=1` skips the signature check (for a host whose `openssl`
+cannot do ed25519, or a release predating the signing scheme; the sha256 and manifest checks still
+run).
 
 Or for a package assembled locally from source:
 
@@ -307,7 +326,8 @@ exits non-zero if a hard requirement is missing.
 | **Architecture** | `x86_64` | the one architecture with tested artifacts and a privileged CI lane; aarch64 support returns only with hardware to test it on. |
 | **Host kernel** | `cgroup.kill` present; **≥ 5.15** only where there is no cgroup v2 to probe | `cgroup.kill` is the crash-safe teardown primitive the engine needs, so the engine asks for it directly instead of inferring it from a version. Neither signal establishes that the kernel is *patched*: that is the operator's |
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
-| **Firecracker + jailer** | present on `PATH` | no VMM to launch (the jailer's absence degrades to `--unjailed`) |
+| **Firecracker** | present on `PATH` | no VMM to launch (the *jailer*'s absence is a degradation, not a hard miss: it drops you to `--unjailed`) |
+| **Boot artifacts** | guest kernel (`EKVM_KERNEL`) and guest rootfs (`EKVM_ROOTFS`) present | nothing to boot; `cargo xtask fetch-artifacts` and `build-rootfs` produce them |
 
 **Supported / tested versions:** Firecracker per
 [step 4 above](#4-install-firecracker-and-its-jailer) (v1.15 through v1.16, v1.16 tested in CI).
@@ -327,13 +347,16 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
   hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
   carried untested. A contribution that brings tested arm artifacts plus a privileged CI lane
   reopens it.
-- One distro-specific gotcha already surfaced: a `nodev` (or `noexec`) `/tmp` makes a raw jailed
-  run fail; [Distro differences](#distro-differences-that-bite) owns the test and the fix.
+- One distro-specific gotcha already surfaced: a `nodev` (or `noexec`) `/tmp` blocks a jailed run's
+  scratch dir. The engine falls back to `/var/tmp` by probing those flags, so this bites only when
+  a scratch dir was pinned at a blocked path; [Distro differences](#distro-differences-that-bite)
+  owns the test and the fix.
 - On distros that enable **AppArmor** by default (Ubuntu and Debian), a confinement profile can deny
   the jailer or Firecracker in ways that look like an engine bug. If a jailed boot fails for a reason
   none of the checks above explain, read `dmesg | grep -i apparmor` before chasing it further.
 
-**Degradations** (the run still works, minus the named capability):
+**Degradations** (the run still works, minus the named capability). `ekvm doctor --explain` prints
+the canonical matrix; these are the ones worth knowing before you start:
 
 - No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
   egress enforcement refuses** rather than running unenforced.
@@ -344,18 +367,27 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
   chrooted VMM copy ([Distro differences](#distro-differences-that-bite) has the fix); `--unjailed`
   still runs.
 - `ip` / `e2fsprogs` missing → only `--net` or bulk-I/O runs fail; others are unaffected.
+- **Firecracker outside v1.15 through v1.16, or not matching the pinned sha256** → boots continue
+  with a warning; outside the range the request bodies and snapshot semantics are untested, and
+  below it upstream no longer ships security patches.
+- **SMT on, KSM on, or CPU mitigations off** → advisory rows, not blockers. They matter when the
+  host runs mutually-distrusting workloads; see [the hardening
+  baseline](./security-threat-model.md#host-hardening-baseline).
 
 ## Troubleshooting
 
-| Symptom / `ekvm doctor` check | Root cause | Fix |
+Some of these are `ekvm doctor` rows, which you can check before a run; the rest surface only as a
+boot error, and are marked as such.
+
+| Symptom | Root cause | Fix |
 |---|---|---|
 | **`/dev/kvm` missing or permission denied** | No virtualization exposed (stock cloud VMs lack nested virt), or the user is not in the `kvm` group. | Check nested virtualization on cloud VMs. Add user to `kvm` group:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
 | **`ScratchDirNodev` (jailed boot fails at KVM open)** | `/tmp` is mounted with the `nodev` mount option, making the jailer's chrooted `/dev/kvm` inert. | Set scratch dir to a non-`nodev` filesystem:<br>`export EKVM_SCRATCH_DIR=/var/tmp`<br>or set `scratch_dir = "/var/tmp"` in `.ekvm.toml`. |
 | **`ScratchDirNoexec` (jailed boot fails at the VMM exec)** | `/tmp` is mounted with the `noexec` mount option, so the firecracker copy in the jailer's chroot cannot be exec'd. | Same fix: a scratch dir off `noexec`, e.g. `EKVM_SCRATCH_DIR=/var/tmp`. |
 | **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged users space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
-| **`unix socket path is too long (> 108 bytes)`** | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export EKVM_SCRATCH_DIR=/var/tmp` |
+| **`unix socket path is too long (> 108 bytes)`** (boot error only, no doctor row) | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export EKVM_SCRATCH_DIR=/var/tmp` |
 | **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v ekvm)`<br>or run with `sudo -E`. |
-| **`Kernel BTF` missing** | Host Linux kernel was compiled without `CONFIG_DEBUG_INFO_BTF=y`. | Install a standard distro kernel that includes `/sys/kernel/btf/vmlinux` (Ubuntu >= 22.04, Arch, Fedora). |
+| **`eBPF observability` Warn** naming kernel BTF | Host kernel built without `CONFIG_DEBUG_INFO_BTF=y`, so `/sys/kernel/btf/vmlinux` is absent. | Boot a kernel built with that option (check with `ls /sys/kernel/btf/vmlinux`); most general-purpose distribution kernels enable it, custom and minimal ones often do not. |
 
 ## Prerequisites
 
@@ -376,8 +408,10 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
   1.47.0 is below the floor, `cargo xtask setup` probes it).
 - **`iproute2`** (`ip`): the driver creates and deletes the per-VM **tap** device backing the
   guest's virtio-net. Creating a tap needs `CAP_NET_ADMIN`.
-- **`curl`**: `cargo xtask fetch-artifacts` and `cargo xtask build-rootfs` download the pinned
-  guest kernel and Alpine packages (sha256-verified).
+- **`curl`**: `cargo xtask fetch-artifacts` and `cargo xtask build-rootfs` download the guest
+  kernel, the Alpine minirootfs, and `apk-tools-static`, each sha256-pinned, plus the guest package
+  closure on top, which floats within the Alpine branch rather than being hash-pinned (see
+  [Vendoring for offline builds](#vendoring-for-offline-builds) for where it does get pinned).
 
 ### Capabilities
 
