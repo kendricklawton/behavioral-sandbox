@@ -53,7 +53,7 @@ ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The CLI's `.ekvm.toml` config file layer. Parse-only; keys mirror the `EKVM_*` env names.
-toml = "0.8"
+toml = "1"
 # Record integrity: an `ed25519` detached signature over the canonical record bytes,
 # so a consumer detects post-hoc alteration off-host. The audited, standard implementation, never a
 # hand-rolled one; keygen randomness is read from `/dev/urandom` (Linux-only engine), so no `rand`.
