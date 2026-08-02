@@ -145,9 +145,15 @@ else
         need curl
         [ -n "$SKIP_SIG" ] || need openssl
         if [ -z "$VERSION" ]; then
-            VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-                | sed -n 's/^ *"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)
-            [ -n "$VERSION" ] || fail "could not resolve latest release of $REPO (private repo or no release yet?): set EKVM_VERSION or EKVM_DIST_TARBALL"
+            # Resolve through the web redirect rather than api.github.com. The API caps
+            # unauthenticated callers at 60 requests/hour *per IP*, which one person never notices
+            # and a CI fleet behind shared NAT exhausts; this endpoint 302s to
+            # `.../releases/tag/vX.Y.Z` and carries no quota. Both forms are equally blind to draft
+            # releases, so the failure below still fires when nothing is published.
+            VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+                "https://github.com/$REPO/releases/latest" \
+                | sed -n 's#.*/releases/tag/v\{0,1\}\([^/]*\)$#\1#p')
+            [ -n "$VERSION" ] || fail "could not resolve latest release of $REPO (private repo, or no published release yet: a draft does not count): set EKVM_VERSION or EKVM_DIST_TARBALL"
         fi
         ASSET="ekvm-$VERSION-x86_64-linux.tar.gz"
         BASE="https://github.com/$REPO/releases/download/v$VERSION"
