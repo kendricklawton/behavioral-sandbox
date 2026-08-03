@@ -1,15 +1,31 @@
-# The per-PR fuzz smoke: a short bounded run of *every* libFuzzer
-# target on each pull request (and push to main), so a change that breaks a decoder is caught
-# before it lands, not only on the nightly deep run (.github/workflows/fuzz.yml). This is the
-# coverage-guided complement to the in-gate dependency-light property tests: those run on the
-# host-safe `ci` gate every push; this runs the real fuzzer briefly, seeded, per change. A crash
-# fails the job and uploads the reproducing input from fuzz/artifacts/.
+# The per-change fuzz smoke: a short bounded run of *every* libFuzzer
+# target, so a change that breaks a decoder is caught before it lands, not only on the nightly deep
+# run (.github/workflows/fuzz.yml). This is the coverage-guided complement to the in-gate
+# dependency-light property tests: those run on the host-safe `ci` gate every push; this runs the
+# real fuzzer briefly, seeded, per change. A crash fails the job and uploads the reproducing input
+# from fuzz/artifacts/.
 name: fuzz-smoke
 
+# Scoped to what a target can actually reach, because this job is a *regression* check: a seeded
+# 60s run over unchanged code re-explores the space it explored last time, and duration plus corpus
+# accumulation (the nightly job) is where coverage-guided fuzzing finds anything new. The five
+# crates below are the ones the ten targets drive; `Cargo.lock` is here because a dependency bump
+# can change decode behavior under an unchanged decoder. The gap this accepts: a change elsewhere
+# that alters how a fuzzed decoder is *called* goes unsmoked until the nightly run.
 on:
   pull_request:
+    paths: &fuzz_inputs
+      - 'crates/channel/**'
+      - 'crates/cli/**'
+      - 'crates/probes-loader/**'
+      - 'crates/protocol/**'
+      - 'crates/probes-common/**'
+      - 'fuzz/**'
+      - 'Cargo.lock'
+      - '.github/workflows/fuzz-smoke.yml'
   push:
     branches: [main]
+    paths: *fuzz_inputs
   workflow_dispatch:
 
 permissions:
