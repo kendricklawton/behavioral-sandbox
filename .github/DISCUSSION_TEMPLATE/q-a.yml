@@ -1,0 +1,69 @@
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not report security issues here.** If you think you have found a sandbox escape, or
+        anything that weakens the isolation or the audit record, report it privately through
+        [GitHub Security Advisories](https://github.com/packsixfour/ekvm/security/advisories/new).
+        See [`SECURITY.md`](https://github.com/packsixfour/ekvm/blob/main/SECURITY.md).
+
+        Most first-run failures are already answered in the pinned **Common first failures** post
+        and in the [troubleshooting
+        table](https://github.com/packsixfour/ekvm/blob/main/docs/cli-install.md#troubleshooting).
+        Worth a look before you write this up.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What you ran, and what happened
+      description: The exact command, and the full stderr. Paste it whole rather than the line you think matters.
+      render: console
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`ekvm doctor` output"
+      description: >
+        All of it. eKVM probes host capabilities rather than distributions, so these rows
+        usually identify the problem outright.
+      render: console
+    validations:
+      required: true
+
+  - type: input
+    id: kernel
+    attributes:
+      label: Host kernel
+      description: "`uname -r`"
+      placeholder: 6.8.0-generic
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which part
+      options:
+        - Installing or building
+        - Booting a sandbox (ekvm run / ekvm shell)
+        - eBPF observability (--trace / --record / --watch)
+        - Networking (--net / --allow)
+        - The daemon (ekvm serve)
+        - Embedding the ekvm-engine library
+        - Something else
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: acknowledgements
+    attributes:
+      label: Before posting
+      options:
+        - label: This is not a security report.
+          required: true
+        - label: >
+            I understand eKVM is pre-release and unaudited, with one maintainer, and that a reply
+            may take a few days.
+          required: true
