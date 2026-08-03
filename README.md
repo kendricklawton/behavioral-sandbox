@@ -42,19 +42,22 @@ record, including [what has *not* been done](docs/introduction.md#what-has-not-b
 ```
 untrusted code
       → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
-      → host-side eBPF (aya): syscalls · the VM's tap device (tc clsact) · its cgroup
-      → per-run audit record (network flows · notable syscalls · resources · denials)
+      → host-side eBPF (aya): the VM's tap device (tc clsact) · its cgroup · the VMM's host syscalls
+      → per-run audit record (network flows · resources · notable host syscalls · denials)
 ```
 
 eKVM runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU
 through KVM rather than by guest-side software. Around that microVM, host-side eBPF (via
-[aya](https://aya-rs.dev/)) observes and enforces what the code does, its syscalls, its network, and
-its cgroup, from the host side of that boundary: the programs are loaded by a host process and
-attached to host-kernel hooks, where they sit outside the guest's address space and outside any
-namespace it can enter.
+[aya](https://aya-rs.dev/)) observes and enforces what the code does from the host side of that
+boundary: the programs are loaded by a host process and attached to host-kernel hooks, where they
+sit outside the guest's address space and outside any namespace it can enter. The network and the
+cgroup are observed directly. The syscall axis is the **VMM's host footprint**, not the guest's
+syscalls: a microVM services those in its own kernel, so host-side syscall visibility is coarse by
+construction. That trade is stated in full in [the honest
+limit](docs/probes.md#the-hardware-isolation-consequence-the-honest-limit).
 
 Every run yields a host-observed audit record of what the host was able to see: the
-network flows, the notable syscalls, the resources used, and any egress that was denied. That record
+network flows, the resources used, the VMM's notable host syscalls, and any egress that was denied. That record
 is the product. A run that persists one signs it with a host key (`--record`, or an operator's
 `records_dir`, or the daemon's `trace`), and `ekvm verify` checks that signature.
 

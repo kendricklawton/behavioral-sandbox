@@ -2,8 +2,9 @@
 
 **A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
-enforces what it does, syscalls, its network, its cgroup, from the host side of the KVM boundary,
-where the programs live outside the guest's address space and outside any namespace it can enter.
+enforces what it does from the host side of the KVM boundary: its network and its cgroup directly,
+its syscalls only as the VMM's host footprint, since a microVM services guest syscalls in its own
+kernel. The programs live outside the guest's address space and outside any namespace it can enter.
 Every run yields a host-observed **audit record** of what the host was able to see, and the paths
 that persist one sign it with a host key (`--record`, an operator's `records_dir`, the daemon's
 `trace`). This file is the operating manual, read it every session.

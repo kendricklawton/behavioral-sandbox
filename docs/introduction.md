@@ -2,8 +2,9 @@
 
 **ekvm** is a self-hostable engine for running untrusted code in hardware
 isolation, with a host-observed record of what the host was able to see it do. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
-**host-side eBPF** (**aya**) watches and enforces what it does, syscalls, its network, its
-cgroup, from the host side of the KVM boundary, outside the guest's address space.
+**host-side eBPF** (**aya**) watches and enforces what it does from the host side of the KVM
+boundary, outside the guest's address space: its network and its cgroup directly, its syscalls only
+as the VMM's host footprint.
 
 It exists for the usual suspects: a third-party binary, a fork's CI job, a dependency's install
 script, an AI-generated snippet, a sample under analysis. The code stays on your own
@@ -23,8 +24,8 @@ the **`ekvm` daemon** and its versioned wire API.
 ```text
 untrusted code
       → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
-      → host-side eBPF (aya): syscalls · the VM's tap device (tc clsact) · its cgroup
-      → per-run audit record (network flows · notable syscalls · resources · denials)
+      → host-side eBPF (aya): the VM's tap device (tc clsact) · its cgroup · the VMM's host syscalls
+      → per-run audit record (network flows · resources · notable host syscalls · denials)
 ```
 
 Untrusted code executes within the microVM while the host kernel observes and enforces policy from

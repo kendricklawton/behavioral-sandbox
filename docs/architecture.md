@@ -10,8 +10,10 @@ the code, a run from boot to teardown, the eBPF half, and the numbered decisions
 
 `eKVM` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via Linux KVM). **Host-side eBPF** (`aya`) observes and
-enforces what it does, syscalls, network flows, resource accounting, from the host side of the KVM
-boundary: the programs are loaded by a host process and attached to host-kernel hooks. The guest
+enforces what it does from the host side of the KVM boundary: network flows and resource accounting
+directly, syscalls only as the VMM's host footprint, since a microVM services guest syscalls in its
+own kernel ([the honest limit](./probes.md#the-hardware-isolation-consequence-the-honest-limit)).
+The programs are loaded by a host process and attached to host-kernel hooks. The guest
 drives four crossings, enumerated in the [threat model](./security-threat-model.md), and none of them names a
 BPF program or map.
 
