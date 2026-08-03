@@ -1719,6 +1719,75 @@ exclude = ["crates/probes", "fuzz"]
         }
     }
 
+    /// `ekvm-record` exists so a consumer can parse and verify a signed record **off-host**: an
+    /// auditor's machine, a CI job, no eBPF, no root. That is only true while its dependency
+    /// closure stays free of `aya` (the eBPF loader) and `nix` (the loader's netns join), so this
+    /// walks the closure out of `Cargo.lock` and holds the line. The crate docs' "no aya, no nix"
+    /// claim points here.
+    #[test]
+    fn record_crate_is_aya_free() {
+        let lock =
+            std::fs::read_to_string(workspace_root().join("Cargo.lock")).expect("Cargo.lock");
+        // name -> direct dependency names, from the lockfile's [[package]] blocks. A dependency
+        // entry may carry a version ("foo 1.2.3"); the name is the first token. A lockfile can
+        // hold two versions of one name; their lists are merged, so the walk over-approximates,
+        // the safe direction for a denylist.
+        let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut name = None;
+        let mut in_deps = false;
+        for line in lock.lines() {
+            let line = line.trim();
+            if line == "[[package]]" {
+                name = None;
+                in_deps = false;
+            } else if let Some(n) = line.strip_prefix("name = ") {
+                name = Some(n.trim_matches('"').to_string());
+            } else if line.starts_with("dependencies = [") {
+                in_deps = !line.ends_with(']');
+                if let (Some(n), false) = (&name, in_deps) {
+                    // single-line form: dependencies = ["a", "b"]
+                    let inner = line
+                        .trim_start_matches("dependencies = [")
+                        .trim_end_matches(']');
+                    let list = inner
+                        .split(',')
+                        .filter_map(|d| d.trim().trim_matches('"').split(' ').next())
+                        .filter(|d| !d.is_empty())
+                        .map(str::to_string);
+                    deps.entry(n.clone()).or_default().extend(list);
+                }
+            } else if in_deps {
+                if line == "]" {
+                    in_deps = false;
+                } else if let Some(n) = &name {
+                    let dep = line.trim_matches(',').trim_matches('"');
+                    if let Some(first) = dep.split(' ').next().filter(|d| !d.is_empty()) {
+                        deps.entry(n.clone()).or_default().push(first.to_string());
+                    }
+                }
+            }
+        }
+        assert!(
+            deps.contains_key("ekvm-record"),
+            "Cargo.lock has no ekvm-record entry (stale lockfile?)"
+        );
+
+        let mut queue = vec!["ekvm-record".to_string()];
+        let mut closure = BTreeSet::new();
+        while let Some(pkg) = queue.pop() {
+            if closure.insert(pkg.clone()) {
+                queue.extend(deps.get(&pkg).cloned().unwrap_or_default());
+            }
+        }
+        for forbidden in ["aya", "nix"] {
+            assert!(
+                !closure.contains(forbidden),
+                "ekvm-record's dependency closure contains `{forbidden}`; the crate exists so \
+                 record verification runs off-host without linking an eBPF loader"
+            );
+        }
+    }
+
     /// Package name -> directory name, read from the manifests rather than from `cargo metadata`.
     /// Two reasons: `metadata`'s JSON repeats `"name"` for every *target* as well as every package,
     /// which is what made the first cut of this test report `exec` and `tracer` as missing packages;

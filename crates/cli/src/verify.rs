@@ -10,7 +10,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ekvm_probes_loader::{verify, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
+use ekvm_record::{verify, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
 
 use crate::config;
 use crate::CliError;

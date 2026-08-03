@@ -13,8 +13,9 @@ use ekvm_probes_common::{
     FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE6_SIZE, POLICY_RULE_SIZE,
 };
 
+use ekvm_record::{EgressPosture, NetStats};
+
 use crate::egress::{EgressPolicy, PolicyError};
-use crate::record::EgressPosture;
 use crate::tracer::per_cpu_sum;
 use crate::{check_support, load_object, ProbeError};
 
@@ -52,22 +53,6 @@ const UNPARSED_L3_MAP: &str = "UNPARSED_L3";
 /// Where `ip netns` bind-mounts a named network namespace's handle (matches the driver's own
 /// `netns_path`), so [`TapMonitor::attach_in_netns`] can open a sandbox's netns by name.
 const NETNS_DIR: &str = "/run/netns";
-
-/// Per-VM network **totals**: one sandbox's traffic summed across all its flows, from the tap's
-/// perspective, **ingress** is what the guest sent, **egress** what it received. The sandbox-level
-/// rollup a caller exports, above the per-flow detail [`TapMonitor::flows`] gives.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct NetStats {
-    /// Packets the guest sent (tap ingress), summed over flows.
-    pub ingress_packets: u64,
-    /// Bytes the guest sent, summed over flows.
-    pub ingress_bytes: u64,
-    /// Packets the guest received (tap egress), summed over flows.
-    pub egress_packets: u64,
-    /// Bytes the guest received, summed over flows.
-    pub egress_bytes: u64,
-}
 
 /// A loaded, attached network-flow monitor: `tc`/clsact classifiers on a VM's tap that count
 /// bytes/packets per IPv4 flow per direction into a map [`flows`](Self::flows) / [`totals`](Self::totals)
@@ -380,12 +365,14 @@ impl TapMonitor {
     /// [`ProbeError::Map`] if a map is missing, cannot be opened as an array, or holds a slot whose
     /// bytes do not decode as the shared record (which would mean the kernel struct drifted).
     pub fn posture(&self, gateway: Option<Ipv4Addr>) -> Result<EgressPosture, ProbeError> {
-        Ok(EgressPosture {
-            enforcing: self.enforcing()?,
-            allowed: read_policy(&self.ebpf)?,
-            allowed6: read_policy6(&self.ebpf)?,
-            gateway,
-        })
+        // `EgressPosture` is `#[non_exhaustive]` (defined in `ekvm-record`), so it is built
+        // through `Default` + field assignment rather than a struct literal.
+        let mut posture = EgressPosture::default();
+        posture.enforcing = self.enforcing()?;
+        posture.allowed = read_policy(&self.ebpf)?;
+        posture.allowed6 = read_policy6(&self.ebpf)?;
+        posture.gateway = gateway;
+        Ok(posture)
     }
 
     /// Whether the classifier is armed (`ENFORCE` slot 0). `false` is observe-only: every packet

@@ -58,7 +58,8 @@ types. `cargo … -p` takes the **package**, a path takes the **directory**.
 | `ekvm-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
 | `ekvm-probes` | `crates/probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. Its object keeps the bare name `probes`. |
 | `ekvm-probes-common` | `crates/probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
-| `ekvm-probes-loader` | `crates/probes-loader` | The aya userspace half: attach, fold, assemble the record, sign it. |
+| `ekvm-probes-loader` | `crates/probes-loader` | The aya userspace half: attach the probes, read their maps, assemble the record. |
+| `ekvm-record` | `crates/record` | The signed audit record: its types, deterministic JSON, summary projection, and ed25519 signing/verification. No aya, so a record verifies off-host. |
 | `ekvm-protocol` | `crates/protocol` | The daemon's wire types, versioned. |
 | `ekvm-client` | `crates/client` | The Rust reference client for `ekvm serve`. |
 | `ekvm` | `crates/cli` | The `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. Package, binary, and command all share the name. |

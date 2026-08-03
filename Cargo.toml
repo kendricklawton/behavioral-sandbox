@@ -11,6 +11,7 @@ members = [
     "crates/guest-agent",
     "crates/probes-common",
     "crates/probes-loader",
+    "crates/record",
     "crates/protocol",
     "crates/client",
     "crates/cli",

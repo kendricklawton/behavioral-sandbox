@@ -89,40 +89,16 @@ mod tests {
 /// Every way driving a microVM can fail, as a typed value, the driver's **error taxonomy**.
 ///
 /// A hostile or crashing guest is one of these, never a host panic/hang/leak (the crate is
-/// `#![forbid(unsafe_code)]` and the CI gate denies `unwrap`/`expect` outside tests). The variants
-/// fall in three buckets:
-///
-/// - **Boot / infra**, [`NoKvm`](VmmError::NoKvm), [`Artifact`](VmmError::Artifact),
-///   [`Timeout`](VmmError::Timeout), [`Vmm`](VmmError::Vmm),
-///   [`GuestUnavailable`](VmmError::GuestUnavailable): the host couldn't stand the microVM up (or a
-///   bounded wait expired). This bucket also holds vsock **establishment** failures, the socket
-///   connect, the `CONNECT <port>` ack, *and the channel handshake* surface here even though the
-///   handshake is protocol-layer. Establishment is infra; the specific "nothing is listening"
-///   establishment failures (nothing accepting on the guest port, a dead VMM's stale socket) are the
-///   dedicated `GuestUnavailable`, so a retry/pool caller can tell **transient, retry or discard this
-///   VM** from "infra broken" without string-matching `Vmm`.
-/// - **Channel / transport**, [`Channel`](VmmError::Channel): a **steady-state** framing/IO fault
-///   on an already-established connection (a `send_request`/`recv_response` mid-exec). Preserves the
-///   [`ChannelError`] source. Distinct from a guest command that merely exits non-zero (a normal
-///   [`RunResult`]) or fails to spawn ([`GuestExec`](VmmError::GuestExec)).
-/// - **Guest fault**, [`GuestExec`](VmmError::GuestExec) (the agent couldn't run the command),
-///   [`ExecTimeout`](VmmError::ExecTimeout) (the command outran its wall-clock budget and was killed
-///   *by the guest*, which reported it), [`OutputCap`](VmmError::OutputCap) (it flooded output past
-///   the host cap), [`ExecUnresponsive`](VmmError::ExecUnresponsive) (the guest never reported the
-///   command's end and the *host* gave up on its own deadline, a liveness/trust fault the host
-///   enforces because the guest can't be trusted to bound itself).
+/// `#![forbid(unsafe_code)]` and the CI gate denies `unwrap`/`expect` outside tests).
 ///
 /// **Not an error.** A command that merely exits non-zero, *including dying by signal*, which the
-/// guest agent reports as exit code `128 + signal`, is a faithful [`RunResult`], not a `VmmError`.
-/// Typed errors are reserved for infra, transport, and guest-agent faults; a crash *inside* the
-/// sandbox is a normal result the caller inspects.
+/// guest agent reports as exit code `128 + signal`, is a faithful [`RunResult`]. Typed errors are
+/// reserved for infra, transport, and guest-agent faults; a crash *inside* the sandbox is a normal
+/// result the caller inspects.
 ///
-/// Callers that must **branch** on bucket (retry infra, retire the VM on a transport fault, surface a
-/// guest fault to the user) use [`kind`](VmmError::kind), whose mapping is a pinned public contract.
-/// (The `GuestUnavailable` variant and `kind()` were both deferred at first, "add them for the first
-/// caller that needs them", and landed with that caller: the classifier for the embedder that
-/// branches on bucket, the variant for the prewarmed [`Pool`], which discards a dead pooled clone and
-/// serves the next instead of surfacing an infra failure.)
+/// To branch on the class of failure rather than render it, use [`kind`](VmmError::kind): that
+/// mapping is the pinned contract, and each variant's own doc says which bucket it lands in and
+/// why.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum VmmError {
@@ -254,24 +230,20 @@ impl std::error::Error for VmmError {
     }
 }
 
-/// The three buckets a [`VmmError`] falls into, for a caller that must **branch** on the class of
-/// failure rather than render it: **infra** (retry/rebuild), **transport** (retire the VM), or
-/// **guest** (surface to the user). A small, closed set (this enum, unlike [`VmmError`], is *not*
-/// `#[non_exhaustive]`, the buckets are the stable contract; new `VmmError` variants slot into an
-/// existing bucket, they don't add a new one).
+/// The three buckets a [`VmmError`] falls into, for a caller that must **branch** rather than
+/// render: `Infra` retry or fix the host, `Transport` retire the VM, `Guest` surface to the user.
+///
+/// Deliberately not `#[non_exhaustive]`: the buckets are the stable contract, and a new
+/// `VmmError` variant slots into an existing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// Boot / infra: the host couldn't stand the microVM up, or a bounded wait expired, including
-    /// vsock **establishment** (connect + `CONNECT` ack + handshake, where "the agent isn't up yet"
-    /// shows up). Not the guest's fault; a retry or a fixed host is the response.
+    /// Includes vsock *establishment* (connect, `CONNECT` ack, handshake): "the agent isn't up yet"
+    /// lands here, not in `Transport`.
     Infra,
-    /// Channel / transport: a steady-state framing/IO fault on an already-established exec connection,
-    /// or the host giving up on an exec whose guest went silent past its deadline
-    /// ([`ExecUnresponsive`](VmmError::ExecUnresponsive)). The channel/guest is unreliable, so a
-    /// caller should retire the VM rather than blame the command.
+    /// A fault on an *already-established* channel, and
+    /// [`ExecUnresponsive`](VmmError::ExecUnresponsive): a guest gone silent is unreliable, not at
+    /// fault.
     Transport,
-    /// Guest fault: the agent couldn't run the command, it outran its budget, or it flooded output.
-    /// The run is at fault, not the engine.
     Guest,
 }
 

@@ -576,6 +576,7 @@ dependencies = [
  "ekvm-engine",
  "ekvm-probes-loader",
  "ekvm-protocol",
+ "ekvm-record",
  "ekvm-test-support",
  "nix 0.31.3",
  "ratatui",
@@ -636,14 +637,11 @@ name = "ekvm-probes-loader"
 version = "0.0.2"
 dependencies = [
  "aya",
- "ed25519-dalek",
  "ekvm-engine",
  "ekvm-probes-common",
+ "ekvm-record",
  "ekvm-test-support",
  "nix 0.31.3",
- "serde_json",
- "sha2 0.11.0",
- "zeroize",
 ]
 
 [[package]]
@@ -652,6 +650,17 @@ version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ekvm-record"
+version = "0.0.2"
+dependencies = [
+ "ed25519-dalek",
+ "ekvm-probes-common",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
 ]
 
 [[package]]

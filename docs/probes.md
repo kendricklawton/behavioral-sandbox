@@ -222,8 +222,9 @@ first is attributed more CPU than the second. The engine *measures*; the hoster 
 
 The sections above each drive one probe standalone; the fused record binds all three to a launched
 sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
-guest. It lives in
-`ekvm-probes-loader` (not `ekvm-engine`), bridged to the driver only by plain values:
+guest. The attach bundle lives in `ekvm-probes-loader` (not `ekvm-engine`), bridged to the driver
+only by plain values; the record itself (its types, JSON, and signing/verification) lives in
+`ekvm-record`, aya-free so a consumer verifies it off-host:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
   global, so each is loaded **once** for the host, as `SharedMeter` and `SharedTracer` (the share-one-

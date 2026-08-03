@@ -1,18 +1,16 @@
 //! The fused per-run **audit record** and its pure builders.
 //!
-//! This module is deliberately dependency-light: no aya, no `ekvm`. It defines the shape of
-//! "what a run did" as observed from *outside* the guest, and the aggregation that folds the three
-//! probes' raw output into it. The attach machinery that produces those inputs lives next door in
-//! [`observer`](crate::observer); keeping the record pure means its whole aggregation is unit-tested
-//! on the host gate with synthetic inputs, no KVM or caps.
+//! It defines the shape of "what a run did" as observed from *outside* the guest, and the
+//! aggregation that folds the three probes' raw output into it. The attach machinery that produces
+//! those inputs lives in `ekvm-probes-loader`'s `observer`; keeping the record pure means its whole
+//! aggregation is unit-tested on the host gate with synthetic inputs, no KVM or caps.
 //!
 //! The record's **core is network + resources + denials**, the signals host-side eBPF observes
 //! strongly across the hardware boundary. [`host_syscalls`](RunRecord::host_syscalls) is the **VMM's
 //! host footprint**, explicitly *not* the guest's syscalls (a microVM services those in-guest).
 //! Every collection is deterministically sorted, so a record built from the same
 //! observations is byte-stable regardless of map-iteration order, the property the JSON
-//! output will rely on. Kept here, out of `ekvm`, so the driver stays independent of the eBPF
-//! loader; the two tracks bridge only by plain values.
+//! output will rely on.
 
 use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;
@@ -91,9 +89,9 @@ pub struct RunRecord {
 }
 
 impl RunRecord {
-    /// Assemble a record from already-collected parts. Pure, no eBPF, no `ekvm`. This is what
-    /// [`SandboxProbes::collect`](crate::observer::SandboxProbes::collect) calls after reading the
-    /// probes, and what the unit tests exercise directly.
+    /// Assemble a record from already-collected parts. Pure, no eBPF. This is what the loader's
+    /// `SandboxProbes::collect` calls after reading the probes, and what the unit tests exercise
+    /// directly.
     #[must_use]
     pub fn from_parts(
         subject: RecordSubject,

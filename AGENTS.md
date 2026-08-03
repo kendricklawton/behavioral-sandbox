@@ -67,7 +67,8 @@ for the types worth knowing, the boot sequence, and the teardown layers.
 | `crates/guest-agent` | `ekvm-guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. Its binary keeps the bare name `guest-agent`: that is the path the rootfs build bakes in. |
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. Its binary keeps the bare name `probes`: that is the object filename the loader looks for. |
 | `crates/probes-common` | `ekvm-probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero deps, single-sourced. |
-| `crates/probes-loader` | `ekvm-probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble and sign the record. |
+| `crates/probes-loader` | `ekvm-probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble the record. |
+| `crates/record` | `ekvm-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing/verification. No aya, so a record verifies off-host. |
 | `crates/protocol` | `ekvm-protocol` | The daemon's wire types, versioned. |
 | `crates/client` | `ekvm-client` | Rust reference client for `ekvm serve`. |
 | `crates/cli` | `ekvm` | The `ekvm` binary (`run`/`shell`/`doctor`/`verify`) plus `ekvm serve`. Package, binary, and command are all `ekvm`; its library half is the CLI's own internals, not the engine. |
@@ -146,8 +147,8 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   **what was done** ("fix: bound session reads by a deadline"). A mixed change takes its most
   significant type (`fix` over `refactor` over `test`). **Public-API changes carry the `api` scope**
   (`feat(api):` / `fix(api)!:`), so a downstream pin bump is auditable from the log alone. The
-  surface is `ekvm-engine`'s public API, the `ekvm-channel` wire framing, and `ekvm-protocol`'s wire
-  types; `docs/embedding-scope.md` names it exactly.
+  surface is `ekvm-engine`'s public API, the `ekvm-channel` wire framing, `ekvm-protocol`'s wire
+  types, and `ekvm-record`'s signed-envelope surface; `docs/embedding-scope.md` names it exactly.
 - **Backwards compatibility follows the data's direction.** Structs the caller constructs
   (`Limits`, `BootConfig`) take a builder or `Default`, so a new knob is additive and invariants stay
   checkable. Structs the engine returns (`RunResult`, `Artifact`, `ExecMetrics`) keep public fields,

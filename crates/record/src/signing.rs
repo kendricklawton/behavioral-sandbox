@@ -336,7 +336,8 @@ impl TrustedKey {
 /// The engine's per-host data directory: `$XDG_DATA_HOME/ekvm` (falling back to
 /// `$HOME/.local/share/ekvm`, then `/var/lib/ekvm`). This is where an installed deployment keeps
 /// host **state** and runtime artifacts, and is the directory `install.sh` writes into.
-pub(crate) fn data_dir() -> PathBuf {
+#[must_use]
+pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())

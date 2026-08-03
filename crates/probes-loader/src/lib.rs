@@ -101,37 +101,28 @@ mod tap;
 mod tracer;
 
 pub use egress::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, PolicyError};
-pub use meter::{CgroupStats, ResourceMeter, ResourceSummary};
-pub use tap::{NetStats, TapMonitor};
+pub use meter::ResourceMeter;
+pub use tap::TapMonitor;
 pub use tracer::{ExecveCounter, SyscallTracer};
 
-/// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
-/// dependency-free (`RunRecord::to_json`). Pure, unit-tested host-safe against a golden.
-mod json;
 /// The attach bundle: bind the three probes to one sandbox at launch (shared tracer +
 /// shared meter, per-VM tap) and roll up a record; detach + finalize on close.
 mod observer;
-/// The per-run audit record: the fused, deterministically-ordered view of what one run did,
-/// aggregated from the three probes. Pure (no aya), so its whole aggregation is unit-tested host-safe.
-mod record;
-/// Record integrity: an `ed25519` detached signature over the canonical record bytes, so alteration
-/// after the producing host is detectable. Host-side key; the guest never sees it.
-mod signing;
-/// The model-legible projection of the record (`RunRecord::to_summary_json`): the compact, third face
-/// for an agent's observe→act loop. A pure view of the record, golden-tested host-safe.
-mod summary;
 
-pub use json::AUDIT_SCHEMA_VERSION;
 pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
-pub use record::{
-    AxisGap, DenialRecord, DenialRecord6, FlowRecord, FlowRecord6, NetSection, NotableSyscall,
-    RecordSubject, RunRecord, SyscallCounts, SyscallFold, SyscallFootprint, Timing, MAX_NOTABLE,
+
+// The record itself (its types, deterministic JSON, summary projection, and the signing/verify
+// surface) lives in `ekvm-record`, aya-free so a consumer can verify a record off-host without
+// linking this loader. Re-exported here because these types appear in the attach surface's own
+// signatures (`SandboxProbes::collect` returns a `RunRecord`), so a caller of this crate needs them
+// in scope without a second dependency.
+pub use ekvm_record::{
+    default_key_path, record_hash, verify, verify_chain, AxisGap, CgroupStats, ChainError,
+    DenialRecord, DenialRecord6, EgressPosture, FlowRecord, FlowRecord6, HostKey, KeyError,
+    NetSection, NetStats, NotableSyscall, RecordSubject, ResourceSummary, RunRecord, SyscallCounts,
+    SyscallFold, SyscallFootprint, Timing, TrustedKey, VerifyError, AUDIT_SCHEMA_VERSION,
+    MAX_ENVELOPE_BYTES, MAX_NOTABLE, SIGNED_RECORD_SCHEMA_VERSION, SUMMARY_SCHEMA_VERSION,
 };
-pub use signing::{
-    default_key_path, record_hash, verify, verify_chain, ChainError, HostKey, KeyError, TrustedKey,
-    VerifyError, MAX_ENVELOPE_BYTES, SIGNED_RECORD_SCHEMA_VERSION,
-};
-pub use summary::SUMMARY_SCHEMA_VERSION;
 
 /// Env override for the compiled BPF object's location, for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
@@ -210,7 +201,7 @@ impl std::error::Error for ProbeError {
 pub fn object_path() -> PathBuf {
     let built = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../probes/target/bpfel-unknown-none/release/probes");
-    let installed = signing::data_dir().join("probes");
+    let installed = ekvm_record::data_dir().join("probes");
     pick_object_path(
         std::env::var_os(OBJECT_ENV).map(PathBuf::from),
         built.is_file().then_some(built.as_path()),

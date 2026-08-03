@@ -1,0 +1,34 @@
+[package]
+name = "ekvm-record"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+description = "The signed audit record: its types, deterministic JSON, summary projection, and ed25519 signing/verification."
+
+[dependencies]
+# The probe-side vocabulary the record embeds (`FlowKey`, `PolicyRule`, `Syscall`, ...), shared
+# with the kernel writer in `crates/probes`. `std` on for the host-side `comm_lossy` helper.
+ekvm-probes-common = { path = "../probes-common", features = ["std"] }
+
+# Record integrity: an `ed25519` detached signature over the canonical record bytes,
+# so a consumer detects post-hoc alteration off-host. The signing key is host-side (the guest never
+# sees it, like the eBPF). `serde_json` builds/parses the signature envelope only; the record itself
+# stays the hand-rolled deterministic JSON (`json.rs`), and is embedded as an opaque string so its
+# signed bytes survive a serde round-trip over the wire.
+# `pkcs8`+`pem` add the SPKI/PEM public-key encoding the release-signing tooling shares with
+# stock `openssl` verifiers; the audit-record envelope itself never uses PEM.
+ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
+serde_json = { workspace = true }
+# The session hash-chain: each record commits to the SHA-256 of the previous one, so a
+# sequence is tamper-evident as a whole. Already in the tree under `ed25519-dalek`; named directly here.
+sha2 = { workspace = true }
+# Scrub transient copies of the signing seed on drop; the key itself is scrubbed by dalek's own
+# `zeroize` feature (enabled at the workspace pin).
+zeroize = { workspace = true }
+
+[lints]
+workspace = true

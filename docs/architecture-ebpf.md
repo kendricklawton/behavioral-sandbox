@@ -10,18 +10,20 @@ Three crates, split by what can depend on what:
   boundary. **Zero dependencies, single-sourced**, so the program writing a record and the loader
   reading it cannot disagree about layout.
 - **`ekvm-probes-loader`** is the userspace half, on `aya`: attach to a specific sandbox, read the maps,
-  fold events, and assemble the signed `RunRecord`.
+  fold events, and assemble the `RunRecord`.
+- **`ekvm-record`** is the record's own crate: its types (`RunRecord`, `AxisGap`), the deterministic
+  JSON, the summary projection, and the ed25519 signing/verification. No aya, so a consumer parses
+  and verifies a record off-host, with no eBPF loader linked.
 
 `ekvm-probes-loader` is one module per subsystem, which is the map to read it by:
 
 | Module | What it owns |
 |---|---|
 | `tracer.rs` | `ExecveCounter`, `SyscallTracer`: the syscall tracepoints |
-| `tap.rs` | `TapMonitor`, `NetStats`: the tc classifiers, the flow and denial maps, the netns join |
+| `tap.rs` | `TapMonitor`: the tc classifiers, the flow and denial maps, the netns join |
 | `egress.rs` | `EgressPolicy`, `Ipv4Cidr`, `Ipv6Cidr`: **no eBPF**, just what an `--allow` string parses into, separately fuzzed |
-| `meter.rs` | `ResourceMeter`, `CgroupStats`: the shared CPU meter and cgroup counters |
+| `meter.rs` | `ResourceMeter`: the shared CPU meter and cgroup counters |
 | `observer.rs` | the per-sandbox bundle over the three probes, degrading a lost axis to a gap |
-| `record.rs`, `summary.rs`, `json.rs`, `signing.rs` | the record (`AxisGap` lives here), its projections, and its signature |
 | `lib.rs` | the error types, object-path resolution, cgroup id helpers, the capability check |
 
 Three design decisions in `observer.rs` are worth understanding before changing anything there:

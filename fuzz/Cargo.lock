@@ -593,6 +593,7 @@ dependencies = [
  "ekvm-engine",
  "ekvm-probes-loader",
  "ekvm-protocol",
+ "ekvm-record",
  "nix 0.31.3",
  "ratatui",
  "serde",
@@ -631,12 +632,9 @@ name = "ekvm-probes-loader"
 version = "0.0.2"
 dependencies = [
  "aya",
- "ed25519-dalek",
  "ekvm-probes-common",
+ "ekvm-record",
  "nix 0.31.3",
- "serde_json",
- "sha2 0.11.0",
- "zeroize",
 ]
 
 [[package]]
@@ -645,6 +643,17 @@ version = "0.0.2"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "ekvm-record"
+version = "0.0.2"
+dependencies = [
+ "ed25519-dalek",
+ "ekvm-probes-common",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
 ]
 
 [[package]]
@@ -760,8 +769,8 @@ dependencies = [
  "ekvm",
  "ekvm-channel",
  "ekvm-probes-common",
- "ekvm-probes-loader",
  "ekvm-protocol",
+ "ekvm-record",
  "libfuzzer-sys",
  "serde_json",
  "toml 0.8.23",

@@ -20,6 +20,9 @@ path = "src/main.rs"
 # The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
 # tracks: it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
 ekvm-probes-loader = { path = "../probes-loader" }
+# `ekvm verify`'s half of the audit face: the record's signing/verify surface, named directly
+# because verification is the off-host path and depends on no eBPF loader.
+ekvm-record = { path = "../record" }
 ekvm-engine = { path = "../engine" }
 # The `ekvm` daemon's wire protocol: the versioned newline-JSON contract it shares with the
 # reference client and the polyglot SDKs. A serde-only leaf, no engine internals.

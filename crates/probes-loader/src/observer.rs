@@ -29,9 +29,10 @@ use std::sync::{Arc, Mutex};
 
 use ekvm_probes_common::SyscallEvent;
 
-use crate::record::{
+use ekvm_record::{
     AxisGap, NetSection, RecordSubject, RunRecord, SyscallFold, SyscallFootprint, Timing,
 };
+
 use crate::{cgroup_id_of_pid, EgressPolicy, ProbeError, ResourceMeter, SyscallTracer, TapMonitor};
 
 /// A process-shared [`ResourceMeter`]: loaded **once** and handed to every sandbox's

@@ -223,6 +223,7 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | `ekvm-probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | `ekvm-probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
+| `crates/record` | `ekvm-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing/verification. No aya, so a record verifies off-host. |
 | `crates/protocol` | `ekvm-protocol` | The daemon wire types, versioned. |
 | `crates/client` | `ekvm-client` | The Rust reference client for `ekvm serve`. |
 | `crates/cli` | `ekvm` | The `ekvm` CLI: `run`, `shell`, `doctor`, `verify`, plus the `ekvm serve` daemon. The binary on `PATH` is `ekvm`. |

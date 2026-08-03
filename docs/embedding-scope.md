@@ -81,6 +81,9 @@ policy it audits is worse than no scope at all:
 - The **`ekvm-channel`** host↔guest wire framing protocol
 - The daemon's **`ekvm-protocol`** wire types, the newline-JSON contract at `schema: 1`
   ([Wire protocol](./daemon-protocol.md)), which a non-Rust SDK couples to instead of the library
+- The **`ekvm-record`** signed-envelope surface (`verify`, `verify_chain`, `record_hash`, and the
+  record's schema versions): the one contract whose breakage reaches *backwards*, invalidating
+  records that already sit on disk, so it pins with the wire protocols rather than the library
 
 ### Versioning rules
 - **MAJOR**: Breaking changes to the pinned surface (removed/renamed `VmmError` variants, changed `kind()` bucket mappings, breaking channel wire protocol changes, or raising `Limits` defaults).

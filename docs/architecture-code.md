@@ -91,8 +91,9 @@ Some types to have in the back of your head before reading further.
   user). **The match in `kind()` is deliberately wildcard-free**, so adding a variant fails to compile
   until someone gives it a deliberate bucket. That is the mechanism keeping the contract honest.
 
-* **`SandboxProbes` and `RunRecord`** (`ekvm-probes-loader`) are the observation half: the attach bundle for
-  one sandbox, and the record it finalizes. See [the eBPF half](./architecture-ebpf.md).
+* **`SandboxProbes`** (`ekvm-probes-loader`) and **`RunRecord`** (`ekvm-record`) are the observation
+  half: the attach bundle for one sandbox, and the record it finalizes. See
+  [the eBPF half](./architecture-ebpf.md).
 
 ## The daemon
 

@@ -388,7 +388,7 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
             Ok(0) => {
                 // Firecracker closes the connection with no ack when nothing is listening on the
                 // guest port, the canonical "agent not up yet / not anymore" signal, typed so a
-                // retry/pool caller can branch on it (the deferred variant, landed with the pool).
+                // retry/pool caller can branch on it.
                 return Err(VmmError::GuestUnavailable(format!(
                     "vsock CONNECT {port}: peer closed before ack (is the guest agent listening?)"
                 )));

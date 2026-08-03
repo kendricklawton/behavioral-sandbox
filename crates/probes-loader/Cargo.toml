@@ -19,28 +19,16 @@ aya = "0.14"
 # `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
 ekvm-probes-common = { path = "../probes-common", features = ["std"] }
 
+# The audit record this loader assembles: its types, JSON, and signing/verify surface. A separate,
+# aya-free crate so a consumer can parse and verify a record off-host without linking this loader.
+ekvm-record = { path = "../record" }
+
 # Enter a sandbox's network namespace to attach the tap monitor to its `fc0`.
 # `setns` has no `std` wrapper; nix's is a *safe* function, so the loader stays
 # `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
 # Pinned to the same 0.31 the workspace already carries (via `vsock` under `ekvm`) so the build
 # links one copy of nix, not two.
 nix = { version = "0.31", default-features = false, features = ["sched"] }
-
-# Record integrity: an `ed25519` detached signature over the canonical record bytes,
-# so a consumer detects post-hoc alteration off-host. The signing key is host-side (the guest never
-# sees it, like the eBPF). `serde_json` builds/parses the signature envelope only; the record itself
-# stays the hand-rolled deterministic JSON (`json.rs`), and is embedded as an opaque string so its
-# signed bytes survive a serde round-trip over the wire.
-# `pkcs8`+`pem` add the SPKI/PEM public-key encoding the release-signing tooling shares with
-# stock `openssl` verifiers; the audit-record envelope itself never uses PEM.
-ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
-serde_json = { workspace = true }
-# The session hash-chain: each record commits to the SHA-256 of the previous one, so a
-# sequence is tamper-evident as a whole. Already in the tree under `ed25519-dalek`; named directly here.
-sha2 = { workspace = true }
-# Scrub transient copies of the signing seed on drop; the key itself is scrubbed by dalek's own
-# `zeroize` feature (enabled at the workspace pin).
-zeroize = { workspace = true }
 
 [dev-dependencies]
 # The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach
