@@ -201,11 +201,17 @@ are supported:
 sh -c "$(curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh)"
 ```
 
-`curl … | sh` behaves identically; neither form lets the script see its own path, so both resolve
-the "am I inside an already-extracted package?" test against the **current directory**. In a
-directory that happens to hold a `bin/ekvm` and a `MANIFEST.sha256`, either form installs *that*
-instead of downloading a release, and says so on the first line of its output. Run it from
-somewhere else if that is not what you want.
+`curl … | sh` resolves its own location the same way: neither form lets the script see its own
+path, so both answer the "am I inside an already-extracted package?" test against the **current
+directory**. In a directory that happens to hold a `bin/ekvm` and a `MANIFEST.sha256`, either form
+installs *that* instead of downloading a release, and says so on the first line of its output. Run
+it from somewhere else if that is not what you want.
+
+The two do differ in one way. `sh -c "$(curl …)"` finishes the download before running any of it,
+while `curl … | sh` streams, so a connection that drops mid-transfer hands `sh` a prefix of the
+script. The installer defers every filesystem-touching statement to a `main()` invoked on its last
+line, so a truncated stream is a no-op rather than a half-install;
+`installer_body_is_deferred_to_a_main_guard` pins that shape.
 
 ### Option B: verify and extract by hand
 

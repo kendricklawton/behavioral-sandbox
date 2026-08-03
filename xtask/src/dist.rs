@@ -473,6 +473,74 @@ mod tests {
             .is_err());
     }
 
+    /// `sh` reading from a pipe executes as it reads, so `curl … | sh` over a connection that drops
+    /// mid-transfer runs a *prefix* of the script. Before the `main()` guard, a drop after the
+    /// binary install left the kernel, rootfs and probes object missing, exit status 0, and a green
+    /// tick as the last line. Deferring every filesystem-touching statement to `main`, invoked on
+    /// the last line, makes a truncated stream a no-op: nothing runs until the whole file parses.
+    ///
+    /// Asserted structurally rather than by truncating at 300 line offsets in the gate: the
+    /// regression this guards against is someone adding a statement back at column zero.
+    #[test]
+    fn installer_body_is_deferred_to_a_main_guard() {
+        let install = std::fs::read_to_string(workspace_root().join("install.sh")).unwrap();
+
+        let last = install
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .expect("install.sh is not empty");
+        assert_eq!(
+            last, "main \"$@\"",
+            "the main call must be the last line, or a truncated stream still executes a prefix"
+        );
+
+        // Everything at column zero that is not a comment, a blank, `set -eu`, a constant
+        // assignment, a function definition or its closing brace, a heredoc body, or the call
+        // itself. That set being empty is what makes every proper prefix of this file a no-op.
+        let mut stray: Vec<&str> = Vec::new();
+        let mut heredoc_end: Option<String> = None;
+        for line in install.lines().map(str::trim_end) {
+            // Heredoc bodies sit at column zero on purpose (the pinned PEM is compared
+            // byte-for-byte against release-key.pem) and are data, not statements.
+            if let Some(marker) = &heredoc_end {
+                if line == marker {
+                    heredoc_end = None;
+                }
+                continue;
+            }
+            if let Some((_, rest)) = line.split_once("<<'") {
+                if let Some(marker) = rest.strip_suffix('\'') {
+                    heredoc_end = Some(marker.to_string());
+                }
+            }
+            if line.starts_with(char::is_whitespace)
+                || line.is_empty()
+                || line.starts_with('#')
+                || line == "set -eu"
+                || line == "}"
+                || line == "main \"$@\""
+                // `name() {` and one-line `name() { … }` definitions.
+                || (line.contains("()") && line.contains('{'))
+            {
+                continue;
+            }
+            // `NAME="value"` constants.
+            let is_constant = line.split_once('=').is_some_and(|(name, _)| {
+                name.starts_with(|c: char| c.is_ascii_uppercase())
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            });
+            if !is_constant {
+                stray.push(line);
+            }
+        }
+        assert!(
+            stray.is_empty(),
+            "install.sh runs these at top level, so a truncated `curl | sh` would execute them; \
+             move them inside main(): {stray:?}"
+        );
+    }
+
     /// Same drift guard, for the Firecracker pin. `install.sh` carries its own copy of the pinned
     /// release sha256 (installers run it before this repo is built, so it cannot call into `ekvm`),
     /// and `doctor.rs` carries the one the engine checks at runtime. Two copies of a security-
