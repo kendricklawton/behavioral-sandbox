@@ -12,7 +12,7 @@ project depends on rather than establishes.
 
 Nothing in this document has been reviewed by anyone outside the project. There has been no external
 security audit and no independent adversarial testing. The engine has one maintainer, no supported
-release (`v0.0.1` is a checkpoint that exercised the release path), and no production use.
+release (the `v0.0.x` tags are checkpoints that exercised the release path), and no production use.
 
 A threat model is a hypothesis about what an attacker will try. The classes below are the ones
 considered so far, not a demonstration that the list is complete, and the mechanisms below are the

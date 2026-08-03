@@ -1,10 +1,10 @@
 # Releases
 
-> **Only the release mechanics below are in force.** `v0.0.1` (2026-08-02) is a checkpoint tag that
-> exercised them: the tag-triggered build, signing, the manifest, draft-then-publish, and
-> `install.sh`'s download path. The API surface, host requirements, support policy, and Rust policy
-> still describe what is *planned* for `v0.1.0`, not commitments that apply today. See
-> [docs/introduction.md#status](docs/introduction.md#status).
+> **Only the release mechanics below are in force.** `v0.0.1` and `v0.0.2` (both 2026-08-02) are
+> checkpoint tags that exercised them: the tag-triggered build, signing, the manifest,
+> draft-then-publish, and `install.sh`'s download path. The API surface, host requirements, support
+> policy, and Rust policy still describe what is *planned* for `v0.1.0`, not commitments that apply
+> today. See [docs/introduction.md#status](docs/introduction.md#status).
 
 ## v0.1.0 (Unreleased, planned)
 
@@ -37,6 +37,27 @@ tag would freeze.
   v1.16.1 is the pinned, tested, hash-verified release. The operator installs the binary
   (see [docs/cli-install.md](docs/cli-install.md)), so an upstream security patch never
   waits on a release of this engine.
+
+---
+
+## v0.0.2 (2026-08-02, checkpoint)
+
+A second checkpoint, cut because `v0.0.1` shipped two defects worth correcting before anyone
+installs from a link. Still not a supported release; pin a git rev.
+
+### Fixed
+- **The reported version.** `v0.0.1` named its tarball from the pushed tag while the workspace was
+  still `0.0.0`, so a binary installed from `ekvm-0.0.1-x86_64-linux.tar.gz` answered
+  `ekvm --version` with `0.0.0`.
+- **A truncated `curl … | sh`.** `sh` reading from a pipe executes as it reads, so a connection
+  dropping mid-transfer ran a prefix of `install.sh`: the binary landed, the kernel, rootfs and
+  probes object did not, and it exited 0. Every filesystem-touching statement now runs from a
+  `main()` invoked on the last line, so a truncated stream is a no-op
+  (`installer_body_is_deferred_to_a_main_guard`).
+
+### Changed
+- Documentation only, otherwise: no behavioral change to the engine or the CLI. Every changed line
+  under `crates/**/*.rs` between the two tags is a comment.
 
 ---
 

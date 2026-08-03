@@ -47,6 +47,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         Some(v) => v,
         None => default_version(),
     };
+    version_matches_manifest(&version, env!("CARGO_PKG_VERSION"))?;
     let name = format!("ekvm-{version}-x86_64-linux");
     println!("dist: assembling {name}\n");
 
@@ -176,6 +177,24 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     println!(
         "  container image:         docker build -f Containerfile --build-arg DIST=dist/{name} -t ekvm:{version} ."
     );
+    Ok(())
+}
+
+/// A release version names the tarball but does *not* set what the binary reports: that comes from
+/// the workspace `version`, compiled in. `v0.0.1` shipped with the two disagreeing, so
+/// `ekvm-0.0.1-x86_64-linux.tar.gz` answered `ekvm --version` with `0.0.0`. Release CI passes
+/// `--version` from the pushed tag, so packaging is where the tag meets the manifest: refuse rather
+/// than ship a binary that misreports itself.
+///
+/// `-dev.<rev>` builds are exempt. They are not a tag and never claim to be.
+fn version_matches_manifest(version: &str, pkg: &str) -> Result<()> {
+    if !version.contains("-dev.") && version != pkg {
+        bail!(
+            "version mismatch: packaging {version} but the workspace is {pkg}, so the binary would \
+             report {pkg}. Bump `version` in Cargo.toml (and crates/probes, fuzz) to {version}, or \
+             tag v{pkg}."
+        );
+    }
     Ok(())
 }
 
@@ -471,6 +490,21 @@ mod tests {
             .verifying_key()
             .verify_detached(tampered.as_bytes(), &sig)
             .is_err());
+    }
+
+    /// The exact shape that shipped `v0.0.1`: the pushed tag said `0.0.1`, the workspace still said
+    /// `0.0.0`, and nothing compared them, so the tarball's name and the binary's `--version`
+    /// disagreed. A dev build carries the rev and is left alone.
+    #[test]
+    fn dist_refuses_a_version_the_binary_would_not_report() {
+        assert!(version_matches_manifest("0.0.1", "0.0.0").is_err());
+        assert!(version_matches_manifest("0.1.0", "0.0.2").is_err());
+
+        assert!(version_matches_manifest("0.0.2", "0.0.2").is_ok());
+        assert!(version_matches_manifest("0.0.2-dev.abc1234", "0.0.2").is_ok());
+        // The dev path builds its string from the workspace version, but a stale tag in the
+        // describe output must not turn into a release-shaped package either.
+        assert!(version_matches_manifest("0.0.1-dev.abc1234", "0.0.2").is_ok());
     }
 
     /// `sh` reading from a pipe executes as it reads, so `curl … | sh` over a connection that drops

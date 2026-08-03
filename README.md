@@ -27,7 +27,7 @@
 
 ## Warning
 
-eKVM is pre-release and unaudited. Version `0.0.1` is a checkpoint that exercises the release path,
+eKVM is pre-release and unaudited. Version `0.0.2` is a checkpoint that exercises the release path,
 not a supported release: one maintainer, no external review, and no outside users. The API changes
 without notice, so if you build on it, pin a git rev. It has been run on two kernels, neither of
 them enterprise. Benchmark numbers are withdrawn pending re-measurement.
@@ -79,7 +79,7 @@ prints the fix for whatever your host is missing. Starting from a bare machine,
 
 The release tarball and `install.sh` are built by `cargo xtask dist` and described
 in [Installation](docs/cli-install.md); a `Containerfile` consumes the tarball for an image you
-build yourself. `v0.0.1` publishes the release assets, so those paths resolve, but it is a
+build yourself. `v0.0.2` publishes the release assets, so those paths resolve, but it is a
 checkpoint that exercises the release path rather than a supported release.
 
 ## Example

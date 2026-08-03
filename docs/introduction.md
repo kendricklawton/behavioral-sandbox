@@ -1,6 +1,6 @@
 # Introduction
 
-**ekvm** is a self-hostable engine for running untrusted code in hardware
+**eKVM** is a self-hostable engine for running untrusted code in hardware
 isolation, with a host-observed record of what the host was able to see it do. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
 **host-side eBPF** (**aya**) watches and enforces what it does from the host side of the KVM
 boundary, outside the guest's address space: its network and its cgroup directly, its syscalls only
@@ -65,12 +65,12 @@ and dashboards belong to whatever *hosts* the engine, and the model driving an a
 
 ## Status
 
-**Pre-release and unaudited.** Version `0.0.1` is a checkpoint that exercises the release path, not
+**Pre-release and unaudited.** Version `0.0.2` is a checkpoint that exercises the release path, not
 a supported release. One maintainer, and nothing here has been reviewed by anyone outside the
 project. Nothing in this book is a promise: it describes how the engine is built and what has been
 exercised. Anything can change without notice, so if you build on this, pin a git rev. Release
 mechanics are in [RELEASES.md](https://github.com/packsixfour/ekvm/blob/main/RELEASES.md); the signing and manifest half is exercised by
-`v0.0.1`, the support policy is not in force.
+the `v0.0.x` checkpoints, the support policy is not in force.
 
 Most of what this book describes has been run rather than only reasoned about: the privileged suite
 boots real microVMs and attaches real probes nightly, `cargo xtask self-host` ends in a boot proof,

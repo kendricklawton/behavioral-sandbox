@@ -26,7 +26,7 @@ members = [
 exclude = ["crates/probes", "fuzz"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 # The minimum supported Rust version: the downstream MSRV floor. Kept in step with the exact
 # toolchain pinned in `rust-toolchain.toml`, so local, CI, and this floor are one Rust version and a

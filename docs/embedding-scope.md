@@ -67,8 +67,8 @@ first.
 
 ## Semver & API stability
 
-> **Not yet in force.** The only tag so far, `v0.0.1`, is a checkpoint that exercised the release
-> path, not a supported release, so nothing below governs anything today. This section describes the
+> **Not yet in force.** The tags so far, `v0.0.1` and `v0.0.2`, are checkpoints that exercised the
+> release path, not supported releases, so nothing below governs anything today. This section describes the
 > boundary the project intends to pin at `v0.1.0`; until that tag, every item on it can change
 > without notice. Pin a git rev.
 

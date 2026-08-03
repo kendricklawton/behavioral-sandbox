@@ -1,7 +1,7 @@
 # Installation
 
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
-install a packaged release (tarball / `install.sh` / container), which `v0.0.1` publishes as a
+install a packaged release (tarball / `install.sh` / container), which `v0.0.2` publishes as a
 checkpoint rather than as a supported release; `cargo xtask setup` (or
 `ekvm doctor` once installed) tells you what your host is missing at every step.
 
@@ -184,7 +184,7 @@ from-source concern rather than a runtime one.
 
 ## Install from a release package
 
-> **`v0.0.1` is a checkpoint, not a supported release.** It was tagged to exercise the release path
+> **`v0.0.2` is a checkpoint, not a supported release.** It was tagged to exercise the release path
 > end to end, so the URLs in this section resolve and the signature checks below are real. Nothing
 > about the API, the CLI, or the artifact layout is stable until v0.1.0. See
 > [Status](./introduction.md#status).
@@ -216,10 +216,10 @@ line, so a truncated stream is a no-op rather than a half-install;
 ### Option B: verify and extract by hand
 
 For manual inspection, or to check the signature yourself before anything runs. Substitute the
-version you want (`0.0.1` is what is published today):
+version you want (`0.0.2` is what is published today):
 
 ```console
-VER=0.0.1
+VER=0.0.2
 
 # Download release tarball, checksum manifest, and its detached signature
 curl -LO "https://github.com/packsixfour/ekvm/releases/download/v$VER/ekvm-$VER-x86_64-linux.tar.gz"
