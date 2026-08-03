@@ -172,8 +172,9 @@ The engine is consumed in three shapes, one of which exists today:
 
 ## Documentation
 
-The guide is an mdBook in [`docs/`](docs/SUMMARY.md). Run `mdbook serve docs`, or read the Markdown
-in place. It is not published as a site until the first release.
+The guide is an mdBook in [`docs/`](docs/SUMMARY.md), rendered at
+[ekvm.dev](https://ekvm.dev) by the `Docs` workflow. Run `mdbook serve docs` to read it locally, or
+read the Markdown in place.
 
 - **[Introduction](docs/introduction.md)**, what this is and how the pieces fit.
 - **[Architecture and design](docs/architecture.md)**, the six design rules, how the engine

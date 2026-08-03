@@ -37,7 +37,7 @@ jobs:
       # lacks. Its rustdoc must be the *pinned* rustc, because mdbook runs doctests from a temp dir
       # where rustup can no longer see `rust-toolchain.toml` and silently falls back to the default
       # toolchain; an rlib built by a different rustc is then rejected as incompatible. And the
-      # library path must hold exactly one `ekvm` candidate, which a dedicated target dir
+      # library path must hold exactly one `ekvm-engine` candidate, which a dedicated target dir
       # guarantees and a shared `target/debug/deps` does not, since repeated builds leave several.
       #
       # The toolchain is read back from rustup rather than restated here, so this cannot drift from

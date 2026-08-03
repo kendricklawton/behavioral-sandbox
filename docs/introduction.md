@@ -8,7 +8,9 @@ cgroup, from the host side of the KVM boundary, outside the guest's address spac
 It exists for the usual suspects: a third-party binary, a fork's CI job, a dependency's install
 script, an AI-generated snippet, a sample under analysis. The code stays on your own
 infrastructure (air-gapped or regulated is fine), and the watching and the policy live in the host
-kernel, outside the guest, so the record is produced by code the guest does not run. The finished record is **host-signed** (`ekvm verify`); the
+kernel, outside the guest, so the record is produced by code the guest does not run. The paths that
+persist a record sign it with a host key (`--record`, an operator's `records_dir`, the daemon's
+`trace`), and `ekvm verify` checks one; the
 [threat model](./security-threat-model.md#record-integrity-beyond-the-guest) states exactly what that does
 and does not prove.
 
@@ -66,7 +68,7 @@ and dashboards belong to whatever *hosts* the engine, and the model driving an a
 a supported release. One maintainer, and nothing here has been reviewed by anyone outside the
 project. Nothing in this book is a promise: it describes how the engine is built and what has been
 exercised. Anything can change without notice, so if you build on this, pin a git rev. Release
-mechanics are in [RELEASES.md](../RELEASES.md); the signing and manifest half is exercised by
+mechanics are in [RELEASES.md](https://github.com/packsixfour/ekvm/blob/main/RELEASES.md); the signing and manifest half is exercised by
 `v0.0.1`, the support policy is not in force.
 
 Most of what this book describes has been run rather than only reasoned about: the privileged suite
