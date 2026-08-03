@@ -237,7 +237,7 @@ main() {
         # The jailed default (real root) builds a chroot under the scratch dir (a mknod'd /dev/kvm, an
         # exec'd firecracker copy); on a host whose default base (/tmp) is `nodev` (every systemd
         # default) or `noexec` (hardened baselines) the boot fails ScratchDirNodev/ScratchDirNoexec.
-        # Pin scratch_dir off both so the first `sudo ekvm run` works (P20.16a); skipped when $HOME is
+        # Pin scratch_dir off both so the first `sudo ekvm run` works; skipped when $HOME is
         # also restricted, which pinning wouldn't fix. Kept short (~/.ekvm, not a deep dir under the
         # data dir): the jailer nests the per-VM dir name twice in the API socket path, which must fit
         # sun_path (~108 bytes).

@@ -24,13 +24,6 @@ branch: a moving `branch = "main"` re-resolves on every `cargo update`, which is
 pin. The rev you choose is what the [Semver section](./embedding-scope.md#semver--api-stability)
 governs.
 
-**This key has changed twice, so check which era your rev is from.** It was `vmm` until `167dd80`
-(2026-08-01), which moved every package under the `ekvm-` prefix and gave the library the bare
-`ekvm`; it has been `ekvm-engine` since the commit that handed that bare name to the CLI instead,
-later the same day. A rev bump across either is the one change that needs an edit here rather than
-only in `Cargo.lock`. Both carry the `api` scope with `!`, so the log alone says where the
-boundaries are.
-
 ## The lifecycle
 
 ```text
