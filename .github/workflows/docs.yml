@@ -1,8 +1,22 @@
 # Deploy mdBook documentation to GitHub Pages (ekvm.dev).
-# Disabled automatic push triggers until v0.1.0 release; trigger manually via workflow_dispatch when needed.
 name: Docs
 
+# The paths are every input this workflow reads, not just the book source. `mdbook test` compiles
+# the book's Rust blocks against a freshly built `ekvm-engine` under the pinned toolchain, so an
+# engine change can break a page without that page being touched; a redeploy of byte-identical
+# output is cheaper than a book whose examples stopped compiling. `cargo xtask ci` already compiles
+# the embedding recipes on every commit (`EmbeddingRecipes` in `crates/engine/src/lib.rs`), so what
+# this adds is the rest of the book.
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'crates/engine/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/docs.yml'
   workflow_dispatch:
 
 
