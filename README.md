@@ -2,7 +2,7 @@
   <h1><code>eKVM</code></h1>
 
   <p>
-    <strong>A self-hostable engine for running untrusted code in a hardware-isolated
+    <strong>A self-hostable sandbox for running untrusted code in a hardware-isolated
     <a href="https://github.com/firecracker-microvm/firecracker">Firecracker</a> microVM,
     with a host-observed record of exactly what it did</strong>
   </p>
@@ -17,7 +17,7 @@
   <h3>
     <a href="docs/SUMMARY.md">Guide</a>
     <span> | </span>
-    <a href="docs/architecture.md">Design</a>
+    <a href="docs/architecture.md">Architecture</a>
     <span> | </span>
     <a href="docs/introduction.md#status">Status</a>
     <span> | </span>
@@ -42,7 +42,7 @@ record, including [what has *not* been done](docs/introduction.md#what-has-not-b
 ```
 untrusted code
       → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
-      → host-side eBPF (aya): syscalls · the VM's tap device (tc/XDP) · its cgroup
+      → host-side eBPF (aya): syscalls · the VM's tap device (tc clsact) · its cgroup
       → per-run audit record (network flows · notable syscalls · resources · denials)
 ```
 
@@ -53,9 +53,10 @@ its cgroup, from the host side of that boundary: the programs are loaded by a ho
 attached to host-kernel hooks, where they sit outside the guest's address space and outside any
 namespace it can enter.
 
-Every run yields a host-observed, host-signed audit record of what the host was able to see: the
+Every run yields a host-observed audit record of what the host was able to see: the
 network flows, the notable syscalls, the resources used, and any egress that was denied. That record
-is the product, and `ekvm verify` checks its signature.
+is the product. A run that persists one signs it with a host key (`--record`, or an operator's
+`records_dir`, or the daemon's `trace`), and `ekvm verify` checks that signature.
 
 ## Installation
 
@@ -99,8 +100,9 @@ Either way:
 ```
 
 The difference is what confines the **VMM process**, not what confines the guest. Jailed, Firecracker
-itself runs under its jailer: a chroot, dropped uid/gid, its own namespaces, seccomp, and a cgroup,
-which is why it needs real root and the `jailer` binary. Unjailed, that process runs unconfined on the
+itself runs under its jailer: a chroot, dropped uid/gid, its own namespaces, and a cgroup, which is
+why it needs real root and the `jailer` binary. Firecracker's own built-in seccomp filters apply
+either way, because the driver never passes `--no-seccomp`. Unjailed, that process runs unconfined on the
 host. In both cases the untrusted code stays behind the same KVM boundary, because that boundary is
 the CPU's, not the jailer's. A host can withdraw the opt-out entirely with `require_jail`
 ([configuration](docs/cli-config.md#setting-require_jail)).
@@ -137,8 +139,10 @@ the mechanism serving it; the full text is [docs/architecture.md](docs/architect
   that cannot be defended is withdrawn. Which is why the tables are withdrawn right now.
 
 The host path is `#![forbid(unsafe_code)]`, enforced by the compiler in every crate but the eBPF
-one. Those programs build for `bpfel-unknown-none` and use CO-RE/BTF, a portability *mechanism*
-tested on two kernels so far, which
+one. Those programs build for `bpfel-unknown-none` and carry BTF, which is what CO-RE relocation
+needs; no program reads kernel struct fields yet, so no field relocations are in play and the
+portability is so far a property of the toolchain rather than something exercised. It has been
+loaded on two kernels, which
 [what has not been done](docs/introduction.md#what-has-not-been-done) says plainly.
 
 [probes]: docs/probes.md
@@ -208,14 +212,14 @@ types. `cargo … -p` takes the package, a path takes the directory.
 | Path | Package | Role |
 |------|---------|------|
 | `crates/engine` | `ekvm-engine` | The Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, the `Sandbox` API. |
-| `crates/channel` | `ekvm-channel` | The host↔guest wire protocol: dependency-free length-prefixed framing, shared by driver + agent. |
+| `crates/channel` | `ekvm-channel` | The host↔guest wire protocol: near dependency-free length-prefixed framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared by driver + agent. |
 | `crates/guest-agent` | `ekvm-guest-agent` | The in-guest agent: runs one command per connection, streams stdout/stderr/exit. Exec/IO only, not the trust boundary. |
 | `crates/probes` | `ekvm-probes` | The eBPF programs (`no_std`, built for `bpfel-unknown-none` with aya). |
 | `crates/probes-common` | `ekvm-probes-common` | The `#[repr(C)]` event/policy records shared across the eBPF boundary, single-sourced. |
 | `crates/probes-loader` | `ekvm-probes-loader` | Userspace: load/attach the probes, read their maps, stream events into the record. |
 | `crates/protocol` | `ekvm-protocol` | The daemon wire types, versioned. |
 | `crates/client` | `ekvm-client` | The Rust reference client for `ekvm serve`. |
-| `crates/cli` | `ekvm` | The `ekvm` CLI: `run`, `shell`, `doctor`, plus the `ekvm serve` daemon. The binary on `PATH` is `ekvm`. |
+| `crates/cli` | `ekvm` | The `ekvm` CLI: `run`, `shell`, `doctor`, `verify`, plus the `ekvm serve` daemon. The binary on `PATH` is `ekvm`. |
 | `crates/test-support` | `ekvm-test-support` | Shared test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. Dev-only, never shipped. |
 | `docs` | | This documentation, as an mdBook. |
 | `xtask` | `xtask` | Dev orchestration: `cargo xtask ci`, the eBPF object build, the rootfs build. Never shipped. |

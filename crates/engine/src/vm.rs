@@ -719,7 +719,7 @@ impl RunningVm {
     /// [`enable_network`](BootConfig::enable_network); `None` otherwise. This is the handle the
     /// host-side eBPF track binds policy to. The tap lives **inside** this VM's network
     /// namespace ([`netns`](Self::netns)), so the loader resolves it to an ifindex and attaches
-    /// `tc`/XDP programs to *this* sandbox's traffic **within that netns**, pair it with `netns()`.
+    /// its `tc` classifiers to *this* sandbox's traffic **within that netns**, pair it with `netns()`.
     #[must_use]
     pub fn tap_name(&self) -> Option<&str> {
         self.tap.as_ref().map(|t| t.name.as_str())

@@ -1,4 +1,4 @@
-# Architecture and design
+# Architecture
 
 What the engine is, the rules it holds itself to, and how it is put together. This page carries the
 scope and the design rules; the pages under it carry the host integration, the VMM and its jail,

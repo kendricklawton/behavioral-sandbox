@@ -12,7 +12,7 @@ description = "Userspace loader: attach the eBPF probes to a sandbox, read their
 [dependencies]
 # The userspace side of aya: load the object built from `crates/probes` (`cargo xtask build-probes`),
 # attach its programs, and read their maps, synchronously, no async runtime (see
-# `docs/probes.md`). The tc/XDP and cgroup-bpf load/attach paths build on this.
+# `docs/probes.md`). The tracepoint and tc load/attach paths build on this.
 aya = "0.14"
 
 # The wire record read out of the ring buffer (`SyscallEvent`), shared with the kernel writer in

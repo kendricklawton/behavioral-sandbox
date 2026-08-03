@@ -15,7 +15,7 @@ license = "Apache-2.0"
 authors = ["PackSixFour LLC <hello@packsixfour.dev>"]
 repository = "https://github.com/packsixfour/ekvm"
 publish = false
-description = "The eBPF programs (no_std): syscall tracepoints, tc/XDP on the tap, cgroup accounting."
+description = "The eBPF programs (no_std): syscall tracepoints, tc classifiers on the tap, cgroup accounting."
 
 [dependencies]
 # The in-kernel eBPF side of aya: `#[tracepoint]`/`#[classifier]`/… macros, program contexts, and

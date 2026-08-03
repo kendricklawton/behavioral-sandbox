@@ -4,8 +4,9 @@
 **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
 enforces what it does, syscalls, its network, its cgroup, from the host side of the KVM boundary,
 where the programs live outside the guest's address space and outside any namespace it can enter.
-Every run yields a host-observed, host-signed **audit log** of what the host was able to see. This
-file is the operating manual, read it every session.
+Every run yields a host-observed **audit record** of what the host was able to see, and the paths
+that persist one sign it with a host key (`--record`, an operator's `records_dir`, the daemon's
+`trace`). This file is the operating manual, read it every session.
 
 **Voice: claim nothing the project cannot back.** Pre-release, unaudited, one maintainer, no
 external review. Describe mechanisms (falsifiable by a diff) and state measurements with their date

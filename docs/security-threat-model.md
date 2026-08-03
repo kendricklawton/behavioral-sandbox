@@ -184,8 +184,8 @@ See [`ekvm verify`](./cli-commands.md#ekvm-verify) for the verify path.
 Explicitly assumed sound, and therefore *out* of the boundary:
 
 - **KVM and the host CPU's virtualization.** A hypervisor-level or CPU vulnerability that breaks VM
-  isolation is outside this model; the jailer + seccomp are defense in depth that narrow the VMM's
-  own attack surface, not a substitute for KVM.
+  isolation is outside this model; the jailer and Firecracker's own seccomp filters are defense in
+  depth that narrow the VMM's own attack surface, not a substitute for KVM.
 - **The host kernel**, including its eBPF and cgroup implementations.
 - **Micro-architectural side channels** (Spectre-class, timing) between co-resident guests are not
   addressed here; a hoster placing high-sensitivity workloads should account for them at the
