@@ -194,9 +194,11 @@ read the Markdown in place.
 There is no chat server and no forum: one maintainer, and a channel nobody answers is worse than no
 channel. Everything routes through the repository, where the answer stays searchable.
 
-- **A question, or something that does not work**: [open an
-  issue](https://github.com/packsixfour/ekvm/issues/new/choose). Questions are welcome as issues;
-  if the docs did not answer it, that is usually a docs bug worth fixing.
+- **A question, or something that does not work**: ask in [Q&A
+  Discussions](https://github.com/orgs/packsixfour/discussions/categories/q-a). The form asks for
+  your `ekvm doctor` output, which is usually what identifies the problem. If the docs did not
+  answer it, that is a docs bug worth fixing, so [open an
+  issue](https://github.com/packsixfour/ekvm/issues/new/choose) too.
 - **A suspected vulnerability**: use the [private advisory
   form](https://github.com/packsixfour/ekvm/security/advisories/new), never a public issue.
   [`SECURITY.md`](SECURITY.md) states what counts as one.
