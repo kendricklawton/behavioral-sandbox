@@ -147,12 +147,21 @@ fn todays_canonicalization_reproduces_the_frozen_bytes() {
     );
 }
 
-/// Regenerates the fixture after a *deliberate* schema bump. `cargo test -p ekvm-record --test
-/// durability -- --ignored --nocapture`, then paste the printed envelope into the fixture file and
-/// the printed constants above.
+/// Regenerates the fixture after a *deliberate* schema bump, printing a fresh envelope and the two
+/// constants above to paste in:
+///
+/// ```console
+/// EKVM_REGENERATE_FIXTURE=1 cargo test -p ekvm-record --test durability regenerate -- --nocapture
+/// ```
+///
+/// Gated on the variable rather than `#[ignore]`, because in this repo `#[ignore]` means "needs KVM
+/// or root" and `ci-privileged` runs **every** ignored test: an ignored helper runs there, in the
+/// suite that is release evidence. Inert everywhere until asked for.
 #[test]
-#[ignore = "writes nothing; prints a fresh fixture for a deliberate schema bump"]
 fn regenerate_fixture() {
+    if std::env::var_os("EKVM_REGENERATE_FIXTURE").is_none() {
+        return;
+    }
     let key = fixture_key();
     let envelope = key.sign_record(&fixture_record());
     let canonical = fixture_record().to_json();

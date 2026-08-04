@@ -271,21 +271,30 @@ hashes, so one host reproduces its own build. Both run nightly: `privileged_pref
 rootfs with verify on, so `cargo xtask ci-privileged` is the gate that enforces them.
 
 Across hosts is a weaker claim, and until 2026-08-02 it was weaker than this page said. Two hosts on
-the same commit, the same pinned toolchain and the same mke2fs built images hashing `71a79914…` and
-`4772f3fb…`, because a release build bakes in `panic!` location strings even with debug info off, and
-for std and every registry dependency those were absolute paths under the building host's
-`CARGO_HOME` and rustup directory. `xtask` now builds the guest agent under `--remap-path-prefix`
-for both (`cargo_reproducible` in `xtask/src/main.rs`), mapping the toolchain's vendored std sources
-back onto the `/rustc/<commit>` token rustc itself uses, which removes the builder's `CARGO_HOME` and
-rustup paths from the emitted bytes.
+the same commit and the same pinned toolchain built images that differed, because a release build
+bakes in `panic!` location strings even with debug info off, and for std and every registry
+dependency those were absolute paths under the building host's `CARGO_HOME` and rustup directory.
+`xtask` now builds the guest agent under `--remap-path-prefix` for both (`cargo_reproducible` in
+`xtask/src/main.rs`), mapping the toolchain's vendored std sources back onto the `/rustc/<commit>`
+token rustc itself uses, which removes the builder's `CARGO_HOME` and rustup paths from the emitted
+bytes.
 
-**That was not sufficient, and the measurement says so.** On 2026-08-02, with the remap in place and
-both hosts on e2fsprogs 1.47.2, an Arch dev box (rolling, kernel 7.0.11) built `29c2e192…` and the
-`ubuntu-24.04` runner built `0d614c70…` from the same commit. Something outside `CARGO_HOME` and the
-toolchain sources still
-varies between the two, and it has not been identified. So the property this project claims is the
-one `--verify` checks: **one host reproduces its own build**. Cross-host reproducibility is an open
-problem here, not a feature, and an independent rebuild is not expected to match the shipped image.
+**That was not sufficient, and the measurement says so.** On 2026-08-02, with the remap in place, an
+Arch dev box (rolling, kernel 7.0.11) and the `ubuntu-24.04` runner still built different images from
+the same commit. Something outside `CARGO_HOME` and the toolchain sources varies between them and has
+not been identified; the host's `mke2fs` build is one candidate that has not been ruled out, since
+the two hosts' `e2fsprogs` versions were never actually compared. A **same-host** rebuild is also not
+established across time: on 2026-08-03 the same Arch box produced a different image from a tree whose
+guest-agent sources, `Cargo.lock` entries for that binary, and resolved package closure were all
+unchanged, and the cause of that is open too. So the property this project claims is the narrow one
+`--verify` actually checks: **one host reproduces its own build, in one sitting**. Reproducibility
+beyond that is an open problem here, not a feature, and an independent rebuild is not expected to
+match the shipped image.
+
+**No image hash is quoted on this page, deliberately.** The value moves with the host's filesystem
+tooling and the guest package closure, so a hash written here would be a number a reader could not
+reproduce and this project could not defend. `--verify` compares two builds on the spot instead,
+which is a check rather than a claim.
 What the release does rest on is the signed manifest: `install.sh` verifies `SHA256SUMS.sig` against
 a pinned public key and never rebuilds anything. That pin ships in the same repo as the script, so
 it defeats a tampered release *asset*, not a compromised repo, and

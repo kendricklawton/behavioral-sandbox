@@ -28,6 +28,9 @@ tag would freeze.
 - **Host↔guest framing** (`ekvm-channel`): the length-prefixed exec protocol the driver and the
   in-guest agent share.
 - **Daemon wire protocol** (`ekvm-protocol`): line-delimited JSON (`schema: 1`).
+- **Signed audit record** (`ekvm-record`): the record's shape, its canonical JSON, and the
+  signature envelope (`verify`, `verify_chain`, `record_hash`). The one contract here whose
+  breakage reaches backwards, since it invalidates records already written.
 
 ### Planned host requirements (v0.1.0)
 - **Host**: Linux `x86_64` with `/dev/kvm`, cgroup v2, and kernel BTF (`/sys/kernel/btf/vmlinux`);

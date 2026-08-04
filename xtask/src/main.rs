@@ -77,6 +77,15 @@ enum Cmd {
     /// crate's own nightly toolchain (`build-std`). Host-safe; skips with a note when `bpf-linker` or
     /// `rustup` is missing. The object lands at `crates/probes/target/bpfel-unknown-none/release/probes`.
     BuildProbes,
+    /// Check the pinned API surface against a baseline git rev with `cargo-semver-checks`, naming
+    /// each crate explicitly (the default set silently drops every `publish = false` package, which
+    /// is all of them). Refuses rather than reporting a pass it did not earn. Needs
+    /// `cargo-semver-checks`; not part of `ci` (it builds rustdoc for two trees).
+    SemverCheck {
+        /// The git rev to compare against (default: the latest `v*` tag).
+        #[arg(long, value_name = "REV")]
+        baseline: Option<String>,
+    },
     /// Download + sha256-verify the pinned guest kernel and rootfs into `artifacts/` (needs `curl`).
     FetchArtifacts,
     /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
@@ -243,6 +252,7 @@ fn main() -> Result<()> {
             }
         }
         Cmd::BuildProbes => build_probes(),
+        Cmd::SemverCheck { baseline } => semver_check(baseline.as_deref()),
         Cmd::FetchArtifacts => artifacts::fetch_artifacts(),
         Cmd::Dist { version } => dist::dist(version),
         Cmd::ReleaseKey { path } => dist::release_key(&path),
@@ -1035,6 +1045,89 @@ fn setup() -> Result<()> {
 /// note and returns `Ok` instead of failing, the everyday host gate must not require the eBPF
 /// toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); this step is folded
 /// into the `ci` gate, and `ci-privileged` builds it before the probe tests.
+/// The crates whose public API a `v0.1.0` tag would freeze: the surface `AGENTS.md`'s `api`-scope
+/// rule, `docs/embedding-scope.md`, and `RELEASES.md` all name.
+/// `pinned_surface_is_named_the_same_in_every_doc` holds those three to this list, so a crate can't
+/// join the surface in one document and be missing from the tag's own release notes.
+const PINNED_SURFACE_CRATES: [&str; 4] = [
+    "ekvm-engine",
+    "ekvm-channel",
+    "ekvm-protocol",
+    "ekvm-record",
+];
+
+/// `cargo xtask semver-check`: the pinned surface against a baseline rev.
+///
+/// **Every crate is named with its own `-p`**, because `cargo-semver-checks` drops
+/// `publish = false` packages from its default set without saying so, and every crate here is
+/// `publish = false` by decision (`docs/embedding-scope.md`). Run bare against this workspace it
+/// prints one "Cloning" line, checks nothing, and exits `0`: a pass that verified nothing, which is
+/// the hollow green the two gates exist to prevent. This refuses that outcome instead of reporting
+/// it, so a green here means checks actually ran.
+fn semver_check(baseline: Option<&str>) -> Result<()> {
+    if !in_path("cargo-semver-checks") {
+        bail!(
+            "cargo-semver-checks is not installed (`cargo install cargo-semver-checks --locked`)"
+        );
+    }
+    let root = workspace_root();
+    let baseline = match baseline {
+        Some(rev) => rev.to_string(),
+        None => latest_version_tag(root)?,
+    };
+
+    // At `0.0.x` cargo's own rules make every bump a major one, so no change can be a violation and
+    // every lint is skipped: the run is green no matter what the diff did. Say so rather than
+    // print a pass that means nothing.
+    let version = toml_string_value(
+        &std::fs::read_to_string(root.join("Cargo.toml")).context("reading the root Cargo.toml")?,
+        "version",
+    )
+    .unwrap_or_default();
+    if version.starts_with("0.0.") {
+        bail!(
+            "the workspace is {version}: under cargo's semver rules every 0.0.x bump is already a \
+             major change, so cargo-semver-checks skips every lint and reports a pass it did not \
+             earn. This command becomes meaningful at 0.1.0 (see RELEASES.md)."
+        );
+    }
+
+    println!(
+        "· baseline {baseline}, {} crates",
+        PINNED_SURFACE_CRATES.len()
+    );
+    for krate in PINNED_SURFACE_CRATES {
+        let shown = format!("cargo semver-checks --baseline-rev {baseline} -p {krate}");
+        println!("$ {shown}");
+        let status = Command::new("cargo")
+            .args(["semver-checks", "--baseline-rev", &baseline, "-p", krate])
+            .current_dir(root)
+            .status()
+            .with_context(|| format!("running {shown}"))?;
+        if !status.success() {
+            bail!("{krate} fails semver against {baseline}");
+        }
+    }
+    println!("\n✓ the pinned surface is compatible with {baseline}");
+    Ok(())
+}
+
+/// The newest `v*` tag by version order, the default semver baseline. An error when the repo has
+/// none, since silently comparing against nothing is the failure this command exists to refuse.
+fn latest_version_tag(root: &Path) -> Result<String> {
+    let out = Command::new("git")
+        .args(["tag", "--list", "v*", "--sort=-v:refname"])
+        .current_dir(root)
+        .output()
+        .context("listing git tags for the semver baseline")?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
+        .context("no `v*` tag to use as a semver baseline; pass --baseline <rev>")
+}
+
 fn build_probes() -> Result<()> {
     if !in_path("bpf-linker") {
         println!(
@@ -1719,6 +1812,31 @@ exclude = ["crates/probes", "fuzz"]
         }
     }
 
+    /// The pinned API surface is stated in three places for three audiences, and **`RELEASES.md`
+    /// asserts the three are the same list**. That claim drifted the moment it was written down:
+    /// `ekvm-record` joined the surface in `AGENTS.md` and `docs/embedding-scope.md` and was left
+    /// out of `RELEASES.md`, which is the copy a tag freezes.
+    ///
+    /// Asserts every crate in [`PINNED_SURFACE_CRATES`] is named in all three. The prose around the
+    /// names is free to differ (each audience needs a different sentence); only the membership is
+    /// pinned, which is the part the three documents claim to agree on.
+    #[test]
+    fn pinned_surface_is_named_the_same_in_every_doc() {
+        let root = workspace_root();
+        for page in ["AGENTS.md", "RELEASES.md", "docs/embedding-scope.md"] {
+            let text = std::fs::read_to_string(root.join(page)).unwrap();
+            let missing: Vec<_> = PINNED_SURFACE_CRATES
+                .iter()
+                .filter(|krate| !text.contains(**krate))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{page} does not name {missing:?} in the pinned API surface, but the three \
+                 documents claim to name the same one"
+            );
+        }
+    }
+
     /// `ekvm-record` exists so a consumer can parse and verify a signed record **off-host**: an
     /// auditor's machine, a CI job, no eBPF, no root. That is only true while its dependency
     /// closure stays free of `aya` (the eBPF loader) and `nix` (the loader's netns join), so this
@@ -1732,19 +1850,28 @@ exclude = ["crates/probes", "fuzz"]
         // entry may carry a version ("foo 1.2.3"); the name is the first token. A lockfile can
         // hold two versions of one name; their lists are merged, so the walk over-approximates,
         // the safe direction for a denylist.
+        let mut packages = BTreeSet::new();
         let mut deps: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut name = None;
+        let mut name: Option<String> = None;
         let mut in_deps = false;
+        // A dependencies array whose package name hasn't been seen would mean entries silently
+        // dropped, an under-approximated closure, and a false pass; panic instead of skipping.
+        let owner = |name: &Option<String>| -> String {
+            name.clone()
+                .expect("Cargo.lock has a dependencies array before its package's name")
+        };
         for line in lock.lines() {
             let line = line.trim();
             if line == "[[package]]" {
                 name = None;
                 in_deps = false;
             } else if let Some(n) = line.strip_prefix("name = ") {
-                name = Some(n.trim_matches('"').to_string());
+                let n = n.trim_matches('"').to_string();
+                packages.insert(n.clone());
+                name = Some(n);
             } else if line.starts_with("dependencies = [") {
                 in_deps = !line.ends_with(']');
-                if let (Some(n), false) = (&name, in_deps) {
+                if !in_deps {
                     // single-line form: dependencies = ["a", "b"]
                     let inner = line
                         .trim_start_matches("dependencies = [")
@@ -1754,22 +1881,24 @@ exclude = ["crates/probes", "fuzz"]
                         .filter_map(|d| d.trim().trim_matches('"').split(' ').next())
                         .filter(|d| !d.is_empty())
                         .map(str::to_string);
-                    deps.entry(n.clone()).or_default().extend(list);
+                    deps.entry(owner(&name)).or_default().extend(list);
                 }
             } else if in_deps {
                 if line == "]" {
                     in_deps = false;
-                } else if let Some(n) = &name {
+                } else {
                     let dep = line.trim_matches(',').trim_matches('"');
                     if let Some(first) = dep.split(' ').next().filter(|d| !d.is_empty()) {
-                        deps.entry(n.clone()).or_default().push(first.to_string());
+                        deps.entry(owner(&name))
+                            .or_default()
+                            .push(first.to_string());
                     }
                 }
             }
         }
         assert!(
-            deps.contains_key("ekvm-record"),
-            "Cargo.lock has no ekvm-record entry (stale lockfile?)"
+            packages.contains("ekvm-record"),
+            "Cargo.lock has no ekvm-record package (stale lockfile?)"
         );
 
         let mut queue = vec!["ekvm-record".to_string()];
