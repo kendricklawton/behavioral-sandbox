@@ -11,10 +11,11 @@
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
-use ekvm::audit;
-use ekvm::config;
+mod audit;
+mod config;
 mod doctor;
 mod metrics;
+mod policy;
 mod serve;
 mod session;
 mod trace;
@@ -28,8 +29,8 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::policy::{parse_allow, AllowRule, Policy, Requested};
 use clap::{Parser, Subcommand};
-use ekvm::policy::{parse_allow, AllowRule, Policy, Requested};
 use ekvm_engine::{
     sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD,
 };

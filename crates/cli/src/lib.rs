@@ -1,17 +1,13 @@
-//! Shared library for the `ekvm` binary: the CLI (`src/main.rs`, `run`/`shell`/…) and the
-//! `ekvm serve` daemon (`src/serve.rs`) are both thin hosts of the same `ekvm-engine` public API, and
-//! both compose the driver track with the host-side eBPF track the same way; that composition, the
-//! [`audit`] module's [`Observability`](audit::Observability)/[`RunProbes`](audit::RunProbes), lives
-//! here so it is single-sourced, not duplicated between the CLI path and the daemon's session path.
+//! The `ekvm` binary's library target, and deliberately empty by default: the CLI's internals are
+//! not public API (`docs/embedding-scope.md` names the pinned surface, and this package is not on
+//! it), so a git pin of this package reaches the `ekvm` binary and nothing else. The one consumer
+//! is the fuzz harness in `fuzz/`, which needs the attacker-facing parsers (the `.ekvm.toml`
+//! layering in `config`, the egress-rule grammar in `policy`) as library items; the off-by-default
+//! `fuzzing` feature exposes exactly those, the same pattern `ekvm-channel` and `ekvm-protocol`
+//! use for their fuzz entry points. The binary compiles the same files as its own modules.
 #![forbid(unsafe_code)]
 
-pub mod audit;
+#[cfg(feature = "fuzzing")]
 pub mod config;
+#[cfg(feature = "fuzzing")]
 pub mod policy;
-
-/// The pinned Firecracker's vCPU ceiling and the predicate for the rest of its domain (`[1, 32]`,
-/// and 1 or an even number), re-exported from the engine rather than restated. Both the CLI
-/// (`--vcpus`) and the daemon (`open`) refuse an out-of-domain count at their own edge rather than
-/// surfacing a late API error mid-boot, and taking the rule from `ekvm-engine` is what keeps the
-/// three checks from drifting apart the way a copied constant does.
-pub use ekvm_engine::{vcpus_supported, MAX_VCPUS};

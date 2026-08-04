@@ -48,6 +48,11 @@ toml = { workspace = true }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[features]
+# Exposes the attacker-facing parsers (`config`, `policy`) as library items for the fuzz harness
+# in `fuzz/`; without it the library target is empty and the package is just the `ekvm` binary.
+fuzzing = []
+
 [dev-dependencies]
 # The reference client for the versioned wire API (docs/daemon.md), used by the
 # daemon's e2e demo to prove a caller drives `ekvm` over the wire alone. A dev-dep so the daemon

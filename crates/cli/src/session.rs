@@ -26,8 +26,8 @@ use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
-use ekvm::audit::RunProbes;
-use ekvm::policy::{parse_allow, Policy, Requested};
+use crate::audit::RunProbes;
+use crate::policy::{parse_allow, Policy, Requested};
 use ekvm_engine::{vcpus_supported, MAX_VCPUS};
 use ekvm_engine::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
 use ekvm_probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};

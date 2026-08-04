@@ -89,6 +89,16 @@ policy it audits is worse than no scope at all:
   record's schema versions): the one contract whose breakage reaches *backwards*, invalidating
   records that already sit on disk, so it pins with the wire protocols rather than the library
 
+The list above names the headline types; the enforced boundary is wider and mechanical: **every
+public item of the four crates `cargo xtask semver-check` names** (`ekvm-engine`, `ekvm-channel`,
+`ekvm-protocol`, `ekvm-record`), because that is what the tool actually checks. For `ekvm-engine`
+that includes the raw `Vm`/`RunningVm` layer under `Sandbox` ([Embedding recipes](./embedding-recipes.md)), `Pool`,
+`sweep_orphans`, the `doctor` preflight module, and the jail/vsock constants: public deliberately
+(the CLI and the daemon are built on those seams, and an embedder building a pool or a preflight
+needs the same ones), and pinned *because* they are public, so there is no public-but-unpinned
+tier to guess about. The `ekvm` CLI package is not on the list: its library target is empty
+without the off-by-default `fuzzing` feature, so a pin of it reaches the binary and nothing else.
+
 ### Versioning rules
 - **MAJOR**: Breaking changes to the pinned surface (removed/renamed `VmmError` variants, changed `kind()` bucket mappings, breaking channel wire protocol changes, or raising `Limits` defaults).
 - **MINOR**: Additive changes (new API methods, new `#[non_exhaustive]` error variants, new optional fields).

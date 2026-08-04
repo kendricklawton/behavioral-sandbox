@@ -42,6 +42,8 @@ features = ["std"]
 # CLI policy and config parsers (`parse_allow`, `EkvmToml`).
 [dependencies.ekvm]
 path = "../crates/cli"
+# The CLI's library target is empty by default; this exposes the parsers these targets fuzz.
+features = ["fuzzing"]
 
 
 # A separate one-crate workspace: detaches this crate from the repo's workspace so the everyday
