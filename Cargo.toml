@@ -69,6 +69,8 @@ sha2 = "0.11"
 tracing = "0.1"
 # `json`: the daemon's `--log-json` machine-readable encoding of the same structured events.
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# Statistical micro-benchmarking framework for in-memory operations (record signing, JSON, wire types).
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # No-panic discipline on the host path: a hostile or crashing guest, a failed probe, or a broken
 # channel is a typed `Err`, never a crash. `unwrap`/`expect` are denied outside tests; `clippy.toml`

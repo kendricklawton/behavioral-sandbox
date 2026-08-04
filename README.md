@@ -39,11 +39,32 @@ record, including [what has *not* been done](docs/introduction.md#what-has-not-b
 
 ## What it is
 
-```
-untrusted code
-      → Firecracker microVM (KVM: hardware isolation, jailer, cgroups, snapshots)
-      → host-side eBPF (aya): the VM's tap device (tc clsact) · its cgroup · the VMM's host syscalls
-      → per-run audit record (network flows · resources · notable host syscalls · denials)
+```text
+                     CONSUMER ENTRY POINTS & API SURFACES
+
+    [ Rust Embedder ]     [ Polyglot SDK / Daemon Client ]    [ Audit Verifier ]
+            |                            |                             |
+            v (In-Process)               v (Unix Socket: schema 1)     v (Off-Host)
+     `ekvm-engine`                `ekvm-protocol`               `ekvm-record`
+  (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (ed25519 verify/chain)
+            |                            |                             |
+            +----------------------------+-----------------------------+
+                                         |
+                                         v
+                            `ekvm serve` / `ekvm` CLI
+                                         |
+               +-------------------------+-------------------------+
+               | (Driver / Lifecycle)                              | (Observation)
+               v                                                   v
+     Firecracker microVM                                 `ekvm-probes-loader` (aya)
+   +-----------------------+                             +------------------------+
+   | KVM Hardware Isolation|                             | Attach TC / Tracepoints|
+   | In-Guest Agent        |<======(vsock channel)======>| Assemble RunRecord     |
+   +-----------------------+   (`ekvm-channel` framing)  +------------------------+
+                                                                   ^
+                                                                   |
+                                                         `ekvm-probes` (eBPF)
+                                                         `ekvm-probes-common`
 ```
 
 eKVM runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU

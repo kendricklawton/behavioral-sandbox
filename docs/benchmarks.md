@@ -23,10 +23,11 @@ thing a benchmark ever tells you.
 - **Failure is loud, not filtered**: a boot or exec that errors mid-bench aborts its whole section
   with the error rather than being dropped from the sample, so a reported percentile never averages
   over silent retries (`bench-density` is the one deliberate early stop, and it names its reason).
-- **Reproduce.** One command runs the whole suite as a single report:
+- **Reproduce.** Two commands run the benchmarking suites:
 
   ```console
-  cargo xtask bench-all              # the full suite; skips sections whose host prereq is missing
+  cargo bench -p ekvm-record         # Criterion micro-benchmarks: record signing, verification, hash-chaining, JSON
+  cargo xtask bench-all              # the full system suite; skips sections whose host prereq is missing
   cargo xtask bench-warm --runs 100  # or a single bench at a sharper n for publication-grade tails
   ```
 

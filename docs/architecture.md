@@ -45,6 +45,36 @@ verified outcome.
    reported as nearest-rank percentiles with the host and date they were taken on. Where a number
    cannot be defended, it is withdrawn rather than published; see [Benchmarks](./benchmarks.md).
 
+## Architecture Overview
+
+```text
+                     CONSUMER ENTRY POINTS & API SURFACES
+
+    [ Rust Embedder ]     [ Polyglot SDK / Daemon Client ]    [ Audit Verifier ]
+            |                            |                             |
+            v (In-Process)               v (Unix Socket: schema 1)     v (Off-Host)
+     `ekvm-engine`                `ekvm-protocol`               `ekvm-record`
+  (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (ed25519 verify/chain)
+            |                            |                             |
+            +----------------------------+-----------------------------+
+                                         |
+                                         v
+                            `ekvm serve` / `ekvm` CLI
+                                         |
+               +-------------------------+-------------------------+
+               | (Driver / Lifecycle)                              | (Observation)
+               v                                                   v
+     Firecracker microVM                                 `ekvm-probes-loader` (aya)
+   +-----------------------+                             +------------------------+
+   | KVM Hardware Isolation|                             | Attach TC / Tracepoints|
+   | In-Guest Agent        |<======(vsock channel)======>| Assemble RunRecord     |
+   +-----------------------+   (`ekvm-channel` framing)  +------------------------+
+                                                                   ^
+                                                                   |
+                                                         `ekvm-probes` (eBPF)
+                                                         `ekvm-probes-common`
+```
+
 ## Index of crates
 
 Directories stay short and packages carry the `ekvm-` prefix, so a package is its directory plus that
