@@ -5,5 +5,9 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
+    // Raw bytes: the frame gate's reject branches.
     ekvm_channel::fuzz::decode_response(data);
+    // A frame whose len header matches its payload: mutation reaches the per-tag Body parsing,
+    // which a raw mutation almost never does (an insert or delete falsifies the len header).
+    ekvm_channel::fuzz::decode_response_wellformed(data);
 });

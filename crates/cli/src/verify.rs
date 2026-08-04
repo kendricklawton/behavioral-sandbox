@@ -4,13 +4,20 @@
 //! public key: the host's own by default, or one (or more) `--key <hex>` supplied out of band, so a
 //! supervisor can verify a record **without trusting the host that relayed it**. Exit non-zero on any
 //! mismatch (a tampered record, an untrusted signer, or a malformed envelope).
+//!
+//! The file's shape picks the check. One line is a single envelope (a `--record` file). Several
+//! lines are a **session chain**, one envelope per line in order, the shape a daemon client saves
+//! its `trace` replies in: each reply commits to the previous one's hash, so
+//! [`verify_chain`] additionally rejects a reordered, inserted, or dropped record, which
+//! per-envelope signatures alone cannot see (every record in a reordered chain still carries a
+//! valid signature).
 
 use std::io::Read as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ekvm_record::{verify, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
+use ekvm_record::{verify, verify_chain, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
 
 use crate::config;
 use crate::CliError;
@@ -29,12 +36,29 @@ pub struct VerifyArgs {
 
 /// Verify the record file, printing the outcome and returning a non-zero exit on any failure.
 pub fn run(args: VerifyArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
-    let envelope = read_bounded(&args.record)?;
-
+    let content = read_bounded(&args.record)?;
     let trusted = trusted_keys(&args, file)?;
-    match verify(envelope.trim(), &trusted) {
-        Ok(_record) => {
-            let _ = writeln!(std::io::stdout(), "ok: {} verified", args.record.display());
+
+    // One non-empty line is a single envelope; several are a session chain in file order. The
+    // per-envelope size bound stays enforced inside the record crate either way
+    // (`VerifyError::TooLarge`); `read_bounded` bounds the whole file.
+    let envelopes: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let outcome: Result<String, String> = match envelopes.as_slice() {
+        [] => Err("empty file; not a signed record".to_string()),
+        [one] => verify(one, &trusted)
+            .map(|_record| "verified".to_string())
+            .map_err(|e| e.to_string()),
+        chain => verify_chain(chain, &trusted)
+            .map(|records| format!("verified: {} records, unbroken chain", records.len()))
+            .map_err(|e| e.to_string()),
+    };
+    match outcome {
+        Ok(what) => {
+            let _ = writeln!(std::io::stdout(), "ok: {} {what}", args.record.display());
             Ok(ExitCode::SUCCESS)
         }
         Err(e) => {

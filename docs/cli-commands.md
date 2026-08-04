@@ -118,9 +118,16 @@ mismatch. The input is treated as untrusted (that is the point of verifying) and
 over 16 MiB is rejected as "not a signed record" without being read in, since a real envelope is
 kilobytes.
 
+The file's shape picks the check. One line is a single envelope. Several lines, one envelope per
+line in order (the shape a daemon client saves its `trace` replies in), verify as a **session
+chain**: signatures plus each record's commitment to its predecessor's hash, so a reordered,
+inserted, or dropped record fails even though every envelope alone carries a valid signature.
+`a_chain_file_verifies_and_a_reordered_or_tampered_one_fails` pins both directions.
+
 ```console
 ekvm verify run.json                      # trusts this host's own signing key
 ekvm verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
+ekvm verify session.jsonl                 # several lines: the session chain, order and all
 ```
 
 The trust root is the host signing key. This detects post-hoc alteration; it does **not** prove a
@@ -136,6 +143,7 @@ with the current signing key and any `--key` given, so old and new records both 
 **Session hash-chain.** A one-shot `ekvm run --record` writes a single, unchained record. Within a
 **session** (the [daemon](./daemon.md)'s `trace` verb), each record additionally commits to the
 previous one's hash (a `prev` field), so the *sequence* is tamper-evident as a whole: a client that
-collects the records can detect a reordered, inserted, or deleted one, not just a single-record edit
-(via the library `verify_chain`). Truncating the tail of a chain is not detectable without an external
+saves the records one per line can hand the file to `ekvm verify` (or call the library's
+`verify_chain`) and detect a reordered, inserted, or deleted one, not just a single-record edit.
+Truncating the tail of a chain is not detectable without an external
 anchor, which is the append-only limitation.

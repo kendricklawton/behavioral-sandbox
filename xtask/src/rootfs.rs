@@ -33,9 +33,11 @@ pub(crate) const ROOTFS_SOURCE_DATE_EPOCH: &str = "1704067200";
 
 /// The reproducibility floor: `mke2fs` honours `SOURCE_DATE_EPOCH` from e2fsprogs 1.47.1; older
 /// versions silently ignore it and stamp wall-clock times, so two builds of the identical tree
-/// differ (Ubuntu 24.04 ships 1.47.0 and hit exactly this). [`build_rootfs`] probes it: a hard
-/// error under `--verify` (which claims reproducibility), a warning on a plain build (the image
-/// still boots fine). `cargo xtask setup` surfaces the same probe as a dev-toolchain row.
+/// differ. [`build_rootfs`] probes it: a hard error under `--verify` (which claims
+/// reproducibility), a warning on a plain build (the image still boots fine). `cargo xtask setup`
+/// surfaces the same probe as a dev-toolchain row. Which distributions sit below the floor is not
+/// stated here: it moves, and a host is asked what its `mke2fs` does rather than what it is
+/// (decision 8).
 pub(crate) const MKE2FS_SOURCE_DATE_EPOCH_MIN: (u32, u32, u32) = (1, 47, 1);
 
 /// The installed `mke2fs` version, or `None` if the tool is missing or its banner unparseable
@@ -714,6 +716,17 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     let build = assemble_rootfs(&out)?;
     println!("\n✓ rootfs built (agent baked in): {}", out.display());
     println!("  sha256: {}", build.image_sha256);
+    // Print the filesystem tool's version beside the hash it produced. Cross-host divergence is an
+    // open problem here (docs/security-threat-model.md), and `mke2fs` is a named suspect that stayed
+    // unmeasured only because no build log recorded which one ran: the hash travels in CI output and
+    // the version did not. Now a reader comparing two logs can rule it in or out from the logs alone.
+    println!(
+        "  mke2fs: {}",
+        mke2fs_version().map_or_else(
+            || "unknown (banner unparseable)".to_string(),
+            |(major, minor, patch)| format!("{major}.{minor}.{patch}")
+        )
+    );
 
     // Keep the base small: report the real footprint and fail on bloat past the budget.
     let used_mib = image_used_bytes(&out)? / (1024 * 1024);
@@ -1251,9 +1264,12 @@ mod tests {
     }
 
     #[test]
-    fn the_ubuntu_noble_version_is_below_the_floor() {
-        let noble = parse_mke2fs_version("mke2fs 1.47.0 (5-Feb-2023)").unwrap();
-        assert!(noble < MKE2FS_SOURCE_DATE_EPOCH_MIN);
+    fn the_release_below_the_floor_compares_below_it() {
+        // 1.47.0 is the last release before `mke2fs` honoured SOURCE_DATE_EPOCH, so it is the
+        // boundary the probe has to catch. Named by what it is, not by who ships it: distributions
+        // move, and the comparison is what this pins.
+        let below = parse_mke2fs_version("mke2fs 1.47.0 (5-Feb-2023)").unwrap();
+        assert!(below < MKE2FS_SOURCE_DATE_EPOCH_MIN);
     }
 
     #[test]

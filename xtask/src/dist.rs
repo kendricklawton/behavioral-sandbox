@@ -71,8 +71,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
             bail!(
                 "mke2fs {ma}.{mi}.{pa} ignores SOURCE_DATE_EPOCH (honoured from e2fsprogs \
                  {fa}.{fi}.{fp}), so the packaged rootfs would not be byte-reproducible. A dist \
-                 ships an image whose hash is recorded; install e2fsprogs >= {fa}.{fi}.{fp} \
-                 (Ubuntu 24.04 ships 1.47.0, which is below the floor)"
+                 ships an image whose hash is recorded; install e2fsprogs >= {fa}.{fi}.{fp}"
             );
         }
         None => bail!("mke2fs not found or its version unparseable; a dist needs it to build the guest rootfs"),

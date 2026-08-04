@@ -814,15 +814,27 @@ pub mod fuzz {
         let _ = read_handshake(&mut data);
     }
 
-    /// Decode a **self-consistent** frame built from `data`: first byte the tag, the rest the
-    /// payload, with the `len` header set to match.
-    ///
-    /// [`decode_frame`] alone cannot reach past the bounds check. Its `len` is a `u32` read
-    /// straight from fuzz bytes, so it exceeds [`MAX_PAYLOAD`] for all but ~0.02% of inputs and
-    /// exceeds the input's own remaining length for all but ~0.0001%. Mutation therefore explores
-    /// two reject branches and never the payload read, which is what left this target's coverage
-    /// flat across 19.7M executions.
-    pub fn decode_frame_wellformed(data: &[u8]) {
+    /// [`decode_request`] on a self-consistent frame built from `data` (first byte the tag, the
+    /// rest the payload, `len` computed), so mutation explores the per-tag `Body` parsing, the
+    /// nested counts, strings, and blobs, instead of only length-preserving flips of seeded
+    /// frames: any insertion or deletion in a raw frame falsifies its `len` header and dies at
+    /// the gate.
+    pub fn decode_request_wellformed(data: &[u8]) {
+        frame_and(data, |mut framed| {
+            let _ = read_request(&mut framed);
+        });
+    }
+
+    /// [`decode_response`]'s twin of [`decode_request_wellformed`], for the host-side parser (the
+    /// highest-value surface: a hostile guest chooses these bytes).
+    pub fn decode_response_wellformed(data: &[u8]) {
+        frame_and(data, |mut framed| {
+            let _ = read_response(&mut framed);
+        });
+    }
+
+    /// Build the self-consistent frame the `*_wellformed` entry points share and hand it to `f`.
+    fn frame_and(data: &[u8], f: impl FnOnce(&[u8])) {
         let Some((&tag, payload)) = data.split_first() else {
             return;
         };
@@ -833,8 +845,21 @@ pub mod fuzz {
         framed.push(tag);
         framed.extend_from_slice(&len.to_le_bytes());
         framed.extend_from_slice(payload);
-        let mut slice = framed.as_slice();
-        let _ = read_frame(&mut slice);
+        f(framed.as_slice());
+    }
+
+    /// Decode a **self-consistent** frame built from `data`: first byte the tag, the rest the
+    /// payload, with the `len` header set to match.
+    ///
+    /// [`decode_frame`] alone cannot reach past the bounds check. Its `len` is a `u32` read
+    /// straight from fuzz bytes, so it exceeds [`MAX_PAYLOAD`] for all but ~0.02% of inputs and
+    /// exceeds the input's own remaining length for all but ~0.0001%. Mutation therefore explores
+    /// two reject branches and never the payload read, which is what left this target's coverage
+    /// flat across 19.7M executions.
+    pub fn decode_frame_wellformed(data: &[u8]) {
+        frame_and(data, |mut framed| {
+            let _ = read_frame(&mut framed);
+        });
     }
 
     /// Validate a handshake whose 4-byte magic is already correct, so the version check and the

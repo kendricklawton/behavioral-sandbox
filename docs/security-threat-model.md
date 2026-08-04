@@ -167,10 +167,10 @@ record at all, which is `--record` or an operator's `records_dir`.
   names the signing key, so a rotated key doesn't invalidate records already signed.
 - **Append-only, so tail truncation is undetectable in isolation.** A daemon session's records form
   a hash chain: the first is an unchained anchor and each one after it commits to the prior record's
-  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run. Two limits
-  on that today: only the daemon's `trace` path chains (`ekvm run --record` writes one standalone
-  record), and no shipped command walks a chain, `ekvm verify` checks a single envelope, so a
-  consumer wanting the sequence check calls `verify_chain` from the library itself. What the chain
+  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run: `ekvm
+  verify` runs that check on a file holding the sequence one envelope per line, and the library
+  form is `verify_chain` in `ekvm-record`. One limit on the chain's reach: only the daemon's
+  `trace` path chains (`ekvm run --record` writes one standalone record). What the chain
   cannot catch even then is **truncation of the tail**: a
   consumer handed only a truncated prefix cannot distinguish it from the whole sequence, since every
   link it holds is intact. Detecting a dropped tail needs an out-of-band anchor, the latest expected
@@ -282,8 +282,12 @@ bytes.
 **That was not sufficient, and the measurement says so.** On 2026-08-02, with the remap in place, an
 Arch dev box (rolling, kernel 7.0.11) and the `ubuntu-24.04` runner still built different images from
 the same commit. Something outside `CARGO_HOME` and the toolchain sources varies between them and has
-not been identified; the host's `mke2fs` build is one candidate that has not been ruled out, since
-the two hosts' `e2fsprogs` versions were never actually compared. A **same-host** rebuild is also not
+not been identified. The leading candidate is now a specific, testable difference rather than a
+vague one: the two hosts ran **different `e2fsprogs`**, the dev box 1.47.4 and the runner a
+source-built 1.47.2 (the workflow builds it because the stock image sits below the
+`SOURCE_DATE_EPOCH` floor). Two minor releases of the tool that writes the image, never tested
+against each other. Every build now prints its `mke2fs` version beside the hash, so the comparison
+is a diff of two logs rather than an archaeology exercise. A **same-host** rebuild is also not
 established across time: on 2026-08-03 the same Arch box produced a different image from a tree whose
 guest-agent sources, `Cargo.lock` entries for that binary, and resolved package closure were all
 unchanged, and the cause of that is open too. So the property this project claims is the narrow one
