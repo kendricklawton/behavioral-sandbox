@@ -116,7 +116,7 @@ conventions.
 
 ## License
 
-eKVM is licensed under the **Apache License 2.0**, copyright 2026 PackSixFour LLC. The full text is
+eKVM is licensed under the **Apache License 2.0**, copyright 2026 Kendrick Lawton. The full text is
 [`LICENSE`](https://github.com/ekvm-rs/ekvm/blob/main/LICENSE) in the repository. Contributions
 are made inbound under that same license, asserted per commit with a `Signed-off-by` line under the
 [Developer Certificate of Origin](https://developercertificate.org/).

@@ -1,5 +1,5 @@
 [book]
-authors = ["PackSixFour LLC"]
+authors = ["eKVM Contributors"]
 src = "."
 title = "eKVM"
 
