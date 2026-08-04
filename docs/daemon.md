@@ -82,7 +82,7 @@ A language SDK is this client's method set hardened per language. Python first, 
 driving a sandbox is usually an agent loop, then Go and Node; **none is written**. The wire protocol
 is documented so any language can drive it without one.
 
-It pins the same way the engine does (`ekvm-client = { git = "https://github.com/packsixfour/ekvm",
+It pins the same way the engine does (`ekvm-client = { git = "https://github.com/ekvm-rs/ekvm",
 rev = "…" }`, directory `crates/client`). Its manifest carries `publish = false`, as every crate
 here does, so nothing is published from this repo today. What is worth noting is that the argument
 *against* publishing does not apply to this one: the support-window reasoning in [Where the engine

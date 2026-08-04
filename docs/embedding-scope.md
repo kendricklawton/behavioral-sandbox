@@ -74,7 +74,7 @@ first.
 
 The `ekvm-engine` public library API and the two wire protocols are the surface the project intends to pin
 as its stability boundary. This list, `AGENTS.md`'s `api`-scope rule, and
-[RELEASES.md](https://github.com/packsixfour/ekvm/blob/main/RELEASES.md) name the same surface, since a commit scope that does not match the
+[RELEASES.md](https://github.com/ekvm-rs/ekvm/blob/main/RELEASES.md) name the same surface, since a commit scope that does not match the
 policy it audits is worse than no scope at all:
 - **`Sandbox`**, **`Limits`**, **`RunResult`**
 - **`VmmError`**, including variants and the `kind()` -> `ErrorKind` bucket mapping

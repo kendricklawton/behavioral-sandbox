@@ -4,12 +4,12 @@ body:
       value: |
         **Do not report security issues here.** If you think you have found a sandbox escape, or
         anything that weakens the isolation or the audit record, report it privately through
-        [GitHub Security Advisories](https://github.com/packsixfour/ekvm/security/advisories/new).
-        See [`SECURITY.md`](https://github.com/packsixfour/ekvm/blob/main/SECURITY.md).
+        [GitHub Security Advisories](https://github.com/ekvm-rs/ekvm/security/advisories/new).
+        See [`SECURITY.md`](https://github.com/ekvm-rs/ekvm/blob/main/SECURITY.md).
 
         Most first-run failures are already answered in the pinned **Common first failures** post
         and in the [troubleshooting
-        table](https://github.com/packsixfour/ekvm/blob/main/docs/cli-install.md#troubleshooting).
+        table](https://github.com/ekvm-rs/ekvm/blob/main/docs/cli-install.md#troubleshooting).
         Worth a look before you write this up.
 
   - type: textarea

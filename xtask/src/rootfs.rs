@@ -292,7 +292,7 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
         "x86_64" => Ok(Artifact {
-            url: "https://github.com/packsixfour/ekvm/releases/download/build-inputs/\
+            url: "https://github.com/ekvm-rs/ekvm/releases/download/build-inputs/\
                   apk-tools-static-3.0.7-r0.tgz"
                 .to_string(),
             sha256: "ed1c5e82177844249b7c4ecc2653b78eed096be20496b7fb860a9e165b2e5ce1",

@@ -12,8 +12,8 @@ edition = "2021"
 # fields are spelled literally rather than inherited from `[workspace.package]`.
 rust-version = "1.97"
 license = "Apache-2.0"
-authors = ["PackSixFour LLC <hello@packsixfour.dev>"]
-repository = "https://github.com/packsixfour/ekvm"
+authors = ["eKVM Contributors"]
+repository = "https://github.com/ekvm-rs/ekvm"
 publish = false
 description = "The eBPF programs (no_std): syscall tracepoints, tc classifiers on the tap, cgroup accounting."
 

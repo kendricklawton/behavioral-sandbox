@@ -69,7 +69,7 @@ and dashboards belong to whatever *hosts* the engine, and the model driving an a
 a supported release. One maintainer, and nothing here has been reviewed by anyone outside the
 project. Nothing in this book is a promise: it describes how the engine is built and what has been
 exercised. Anything can change without notice, so if you build on this, pin a git rev. Release
-mechanics are in [RELEASES.md](https://github.com/packsixfour/ekvm/blob/main/RELEASES.md); the signing and manifest half is exercised by
+mechanics are in [RELEASES.md](https://github.com/ekvm-rs/ekvm/blob/main/RELEASES.md); the signing and manifest half is exercised by
 the `v0.0.x` checkpoints, the support policy is not in force.
 
 Most of what this book describes has been run rather than only reasoned about: the privileged suite
@@ -110,13 +110,13 @@ Stated because their absence is the honest counterweight to everything else in t
   be claimed.
 
 The source for this book lives in the repository's
-[`docs/` directory](https://github.com/packsixfour/ekvm/tree/main/docs). `AGENTS.md` in the
+[`docs/` directory](https://github.com/ekvm-rs/ekvm/tree/main/docs). `AGENTS.md` in the
 repository root is the operating manual: the design rules, the two gates, and the commit
 conventions.
 
 ## License
 
 eKVM is licensed under the **Apache License 2.0**, copyright 2026 PackSixFour LLC. The full text is
-[`LICENSE`](https://github.com/packsixfour/ekvm/blob/main/LICENSE) in the repository. Contributions
+[`LICENSE`](https://github.com/ekvm-rs/ekvm/blob/main/LICENSE) in the repository. Contributions
 are made inbound under that same license, asserted per commit with a `Signed-off-by` line under the
 [Developer Certificate of Origin](https://developercertificate.org/).

@@ -1,6 +1,6 @@
 <!--
 Suspected vulnerability? Do not open a pull request. Use the private advisory form:
-https://github.com/packsixfour/ekvm/security/advisories/new
+https://github.com/ekvm-rs/ekvm/security/advisories/new
 
 Anything larger than a bug fix, a test, or a docs change should start as an issue, so the shape is
 settled before you build against a pre-1.0 surface that is still moving. CONTRIBUTING.md has the terms.

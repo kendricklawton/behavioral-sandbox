@@ -121,7 +121,7 @@ a visible bump, never drift.
 For the whole lifecycle in one small file, embedding the engine end to end (load the host-side
 observers, `open` a jailed sandbox, attach the probes, `exec`, `collect` the audit record,
 `shutdown`, then print both the `RunResult` and the JSON record), see the runnable example
-[`crates/probes-loader/examples/reference_integration.rs`](https://github.com/packsixfour/ekvm/blob/main/crates/probes-loader/examples/reference_integration.rs).
+[`crates/probes-loader/examples/reference_integration.rs`](https://github.com/ekvm-rs/ekvm/blob/main/crates/probes-loader/examples/reference_integration.rs).
 It composes the driver and the loader the way a downstream host application would.
 
 ## The CLI is the reference embedder

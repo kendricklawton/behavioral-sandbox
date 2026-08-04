@@ -1,13 +1,13 @@
 #!/bin/sh
 # Install the ekvm sandbox engine from a release package.
 # Canonical use:
-#   curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ekvm-rs/ekvm/main/install.sh | sh
 # Also works from a local package (offline / pre-release testing):
 #   EKVM_DIST_TARBALL=dist/ekvm-<ver>-x86_64-linux.tar.gz sh install.sh
 # and from inside an extracted tarball (the copy packed next to bin/ekvm):
 #   sh ./install.sh
 # Knobs (env):
-#   EKVM_REPO            GitHub repo to fetch from        (default packsixfour/ekvm)
+#   EKVM_REPO            GitHub repo to fetch from        (default ekvm-rs/ekvm)
 #   EKVM_VERSION         release version, no leading v    (default: the latest release)
 #   EKVM_DIST_TARBALL    local tarball, skips the network
 #   EKVM_INSTALL_PREFIX  where the binary goes            (default ~/.local/bin)
@@ -114,7 +114,7 @@ TMP=""
 cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; }
 
 main() {
-    REPO="${EKVM_REPO:-packsixfour/ekvm}"
+    REPO="${EKVM_REPO:-ekvm-rs/ekvm}"
     PREFIX="${EKVM_INSTALL_PREFIX:-$HOME/.local/bin}"
     DATA="${EKVM_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/ekvm}"
     VERSION="${EKVM_VERSION:-}"

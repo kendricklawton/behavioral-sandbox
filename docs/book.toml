@@ -5,8 +5,8 @@ title = "eKVM"
 
 
 [output.html]
-git-repository-url = "https://github.com/packsixfour/ekvm"
-edit-url-template = "https://github.com/packsixfour/ekvm/edit/main/docs/{path}"
+git-repository-url = "https://github.com/ekvm-rs/ekvm"
+edit-url-template = "https://github.com/ekvm-rs/ekvm/edit/main/docs/{path}"
 # Only affects 404.html, which gets `<base href>` from this so its relative
 # asset and nav links resolve from any subdirectory. A path, not an absolute
 # URL: the site serves at the apex (docs/CNAME pins the domain), so "/" is

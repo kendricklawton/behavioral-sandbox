@@ -11,7 +11,7 @@ average) were added *afterwards*. The numbers may well have been roughly right; 
 nobody can tell. Publishing a number nobody can defend is worse than publishing none, so they are
 parked until a re-run on a host whose quiet state is verified.
 
-The suite lives in [`xtask`](https://github.com/packsixfour/ekvm/tree/main/xtask) and runs via
+The suite lives in [`xtask`](https://github.com/ekvm-rs/ekvm/tree/main/xtask) and runs via
 `cargo xtask bench-all`. Run it on your own host; that result is about your host, which is the only
 thing a benchmark ever tells you.
 

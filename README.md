@@ -8,7 +8,7 @@
   </p>
 
   <p>
-    <a href="https://github.com/packsixfour/ekvm/actions/workflows/ci.yml"><img src="https://github.com/packsixfour/ekvm/actions/workflows/ci.yml/badge.svg" alt="build status" /></a>
+    <a href="https://github.com/ekvm-rs/ekvm/actions/workflows/ci.yml"><img src="https://github.com/ekvm-rs/ekvm/actions/workflows/ci.yml/badge.svg" alt="build status" /></a>
     <img src="https://img.shields.io/badge/status-pre--release-orange.svg" alt="pre-release" />
     <img src="https://img.shields.io/badge/rustc-1.97%2B-green.svg" alt="supported rustc 1.97+" />
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache-2.0" /></a>
@@ -67,7 +67,7 @@ Today the supported path is from source. The engine drives Firecracker, it does 
 you supply that binary and an upstream security patch never waits on a release of this engine.
 
 ```console
-git clone https://github.com/packsixfour/ekvm && cd ekvm
+git clone https://github.com/ekvm-rs/ekvm && cd ekvm
 cargo xtask self-host       # build + install ekvm, then boot a proof sandbox
 ```
 
@@ -159,7 +159,7 @@ The engine is consumed in three shapes, one of which exists today:
 
 * **Rust**, the `ekvm-engine` crate's public API (`Sandbox`, `Limits`, `RunResult`, `VmmError`), depended
   on by git rev:
-  `ekvm-engine = { git = "https://github.com/packsixfour/ekvm", rev = "…" }`. It is not distributed through
+  `ekvm-engine = { git = "https://github.com/ekvm-rs/ekvm", rev = "…" }`. It is not distributed through
   crates.io **by decision, not pending**: an immutable registry version would outlive this engine's
   support window, which is computed from Firecracker's, so a name held there is a `0.0.0` placeholder
   rather than a release ([the reasoning][embedding-scope]). A change to that API is
@@ -198,12 +198,12 @@ There is no chat server and no forum: one maintainer, and a channel nobody answe
 channel. Everything routes through the repository, where the answer stays searchable.
 
 - **A question, or something that does not work**: ask in [Q&A
-  Discussions](https://github.com/orgs/packsixfour/discussions/categories/q-a). The form asks for
+  Discussions](https://github.com/orgs/ekvm-rs/discussions/categories/q-a). The form asks for
   your `ekvm doctor` output, which is usually what identifies the problem. If the docs did not
   answer it, that is a docs bug worth fixing, so [open an
-  issue](https://github.com/packsixfour/ekvm/issues/new/choose) too.
+  issue](https://github.com/ekvm-rs/ekvm/issues/new/choose) too.
 - **A suspected vulnerability**: use the [private advisory
-  form](https://github.com/packsixfour/ekvm/security/advisories/new), never a public issue.
+  form](https://github.com/ekvm-rs/ekvm/security/advisories/new), never a public issue.
   [`SECURITY.md`](SECURITY.md) states what counts as one.
 - **A change you want to make**: read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. Bug fixes, tests,
   and docs can go straight to a pull request; anything larger starts with an issue, because the API

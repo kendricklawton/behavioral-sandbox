@@ -198,7 +198,7 @@ are supported:
 ### Option A: the installer script
 
 ```console
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/packsixfour/ekvm/main/install.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/ekvm-rs/ekvm/main/install.sh)"
 ```
 
 `curl … | sh` resolves its own location the same way: neither form lets the script see its own
@@ -222,9 +222,9 @@ version you want (`0.0.2` is what is published today):
 VER=0.0.2
 
 # Download release tarball, checksum manifest, and its detached signature
-curl -LO "https://github.com/packsixfour/ekvm/releases/download/v$VER/ekvm-$VER-x86_64-linux.tar.gz"
-curl -LO "https://github.com/packsixfour/ekvm/releases/download/v$VER/SHA256SUMS"
-curl -LO "https://github.com/packsixfour/ekvm/releases/download/v$VER/SHA256SUMS.sig"
+curl -LO "https://github.com/ekvm-rs/ekvm/releases/download/v$VER/ekvm-$VER-x86_64-linux.tar.gz"
+curl -LO "https://github.com/ekvm-rs/ekvm/releases/download/v$VER/SHA256SUMS"
+curl -LO "https://github.com/ekvm-rs/ekvm/releases/download/v$VER/SHA256SUMS.sig"
 
 # Verify the manifest's signature against the release key pinned in the repo.
 # Obtain release-key.pem out of band, never from the release assets: from a clone of the

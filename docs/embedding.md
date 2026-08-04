@@ -13,7 +13,7 @@ The engine is not distributed through crates.io and
 
 ```toml
 [dependencies]
-ekvm-engine = { git = "https://github.com/packsixfour/ekvm", rev = "<40-char sha>" }
+ekvm-engine = { git = "https://github.com/ekvm-rs/ekvm", rev = "<40-char sha>" }
 ```
 
 The package is `ekvm-engine`; its directory is `crates/engine`, and a git dependency resolves by
