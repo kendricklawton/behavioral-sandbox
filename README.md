@@ -253,7 +253,7 @@ change without notice.
 
 The project is **open to outside pull requests**. Bug fixes, tests, and documentation can go
 straight to one; anything larger starts with an issue, since the surface above is still moving.
-Commits carry a `Signed-off-by` line. The terms are in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
+A pull request signs its commits off (`git commit -s`). The terms are in [`CONTRIBUTING.md`](CONTRIBUTING.md) and the
 developer manual is [`AGENTS.md`](AGENTS.md), which coding agents working in this repo follow too.
 
 Security issues: [`SECURITY.md`](SECURITY.md).
