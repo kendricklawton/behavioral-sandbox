@@ -33,9 +33,7 @@ without notice, so if you build on it, pin a git rev. It has been run on two ker
 them enterprise. Benchmark numbers are withdrawn pending re-measurement.
 
 **Use it only if you are willing to read the code you are trusting.** That is the honest bar for a
-sandbox at this stage, and everything below is written to make that possible: the full verification
-record, including [what has *not* been done](docs/introduction.md#what-has-not-been-done), is in
-[Status](docs/introduction.md#status).
+sandbox at this stage, and everything below is written to make that possible.
 
 ## What it is
 
@@ -166,8 +164,7 @@ The host path is `#![forbid(unsafe_code)]`, enforced by the compiler in every cr
 one. Those programs build for `bpfel-unknown-none` and carry BTF, which is what CO-RE relocation
 needs; no program reads kernel struct fields yet, so no field relocations are in play and the
 portability is so far a property of the toolchain rather than something exercised. It has been
-loaded on two kernels, which
-[what has not been done](docs/introduction.md#what-has-not-been-done) says plainly.
+loaded on two kernels.
 
 [probes]: docs/probes.md
 [embedding]: docs/embedding.md

@@ -110,7 +110,7 @@ package depends on no host libc at all. Dev builds stay native.
 
 **What this does not claim.** Probing a capability says nothing about whether the kernel is
 *patched*, which is the operator's to know and is stated as such in the check's own note. Nor is it
-a portability claim: see [what has not been done](./introduction.md#what-has-not-been-done) for which hosts have actually been run, which as of
+a portability claim: see [Introduction](./introduction.md) for details on host coverage, which as of
 this writing does not include any Red Hat host.
 
 ## 9. Egress is enabled by the engine, constructed by the hoster

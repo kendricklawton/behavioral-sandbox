@@ -4,7 +4,7 @@
 > checkpoint tags that exercised them: the tag-triggered build, signing, the manifest,
 > draft-then-publish, and `install.sh`'s download path. The API surface, host requirements, support
 > policy, and Rust policy still describe what is *planned* for `v0.1.0`, not commitments that apply
-> today. See [docs/introduction.md#status](docs/introduction.md#status).
+> today. See [docs/introduction.md](docs/introduction.md).
 
 ## v0.1.0 (Unreleased, planned)
 

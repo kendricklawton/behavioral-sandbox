@@ -99,8 +99,7 @@ with ownership keyed on liveness rather than on names, and scoped to your own eu
 `crates/engine/tests/confinement.rs` exercises these paths: `driver_death_cannot_leak_a_vm` SIGKILLs a
 driver mid-run and asserts the VMM dies with it, `a_vmm_killed_while_awaiting_userspace_leaks_nothing`
 kills a VMM mid-boot and asserts the scratch dir is reclaimed, and
-`sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir` covers the residue path. What a passing test
-does and does not establish is in [Status](./introduction.md#status).
+`sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir` covers the residue path.
 
 ### Pre-warmed starts: snapshot an unjailed source, restore jailed clones
 

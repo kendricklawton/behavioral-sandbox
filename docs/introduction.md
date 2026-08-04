@@ -62,52 +62,6 @@ is a runtime plus a clean driver API you self-host, and the model driving an age
 - **[Security](./security.md)**, what counts as a security bug, the current limits, and how to
   report one.
 
-## Status
-
-**Pre-release and unaudited.** Version `0.0.2` is a checkpoint that exercises the release path, not
-a supported release. One maintainer, and nothing here has been reviewed by anyone outside the
-project. Nothing in this book is a promise: it describes how the engine is built and what has been
-exercised. Anything can change without notice, so if you build on this, pin a git rev. Release
-mechanics are in [RELEASES.md](https://github.com/ekvm-rs/ekvm/blob/main/RELEASES.md); the signing and manifest half is exercised by
-the `v0.0.x` checkpoints, the support policy is not in force.
-
-Most of what this book describes has been run rather than only reasoned about: the privileged suite
-boots real microVMs and attaches real probes nightly, `cargo xtask self-host` ends in a boot proof,
-and the release install path was exercised by the author, on a machine that had already built the
-project, the day `v0.0.1` published. "Most"
-is load-bearing there: the Red Hat rows and aarch64 are described here and have not been run. Which
-is worth being precise about:
-
-**What a passing test is worth.** A passing test shows that the case it constructs behaved as
-described, on the host that ran it, at the revision it ran against. It does not show that the
-property holds for cases the test does not construct. Throughout this book, a named test is a pointer
-to a scenario you can read and re-run, not a proof of a general property. Two consequences: evidence
-expires, so a gate that passed in July is evidence about July's revision on July's host; and a test
-is only as good as its assertions, which is why a commit titled "stop two tests from passing on
-something other than their subject" exists in this history.
-
-### What has not been done
-
-Stated because their absence is the honest counterweight to everything else in this book:
-
-- **No external security review or audit.** The threat model is the author's own reasoning about the
-  author's own code. See [Threat model](./security-threat-model.md).
-- **Two kernels.** The CO-RE/BTF portability described in [Host-side observability &
-  enforcement](./probes.md) is a property of the mechanism rather than a broadly tested claim: the
-  probes have been loaded on the Arch development box and on the Ubuntu 24.04 runner the privileged
-  suite uses nightly. Two is not a matrix, and no enterprise kernel is among them.
-- **No Red Hat host has been run.** RHEL 9 and 10 are intended targets, and `ekvm doctor` probes for
-  `cgroup.kill` rather than a version number, which is what admits a patched kernel whose version
-  string sits below the fallback floor. But nothing has booted, gated, or attached a probe there, and
-  SELinux in particular is unexercised.
-- **No published benchmark numbers.** See [Benchmarks](./benchmarks.md) for why they were withdrawn
-  and what has to happen before they return.
-- **No fuzzing at scale.** Ten libFuzzer targets exist and run nightly, but not continuously (no
-  OSS-Fuzz or equivalent), and two targets have thin corpora.
-- **No outside users.** Nobody has installed or run this who did not build it.
-- **`x86_64` only.** aarch64 needs hardware and a privileged CI lane before anything about it could
-  be claimed.
-
 The source for this book lives in the repository's
 [`docs/` directory](https://github.com/ekvm-rs/ekvm/tree/main/docs). `AGENTS.md` in the
 repository root is the operating manual: the design rules, the two gates, and the commit

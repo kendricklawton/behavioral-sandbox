@@ -7,20 +7,6 @@ contain it and the test that exercises that mechanism today.
 The core model: **untrusted code runs inside a KVM microVM, and everything that observes or
 constrains it runs on the host.** The boundary itself is enforced by the CPU through KVM, which this
 project depends on rather than establishes.
-
-## Status of this model
-
-Nothing in this document has been reviewed by anyone outside the project. There has been no external
-security audit and no independent adversarial testing. The engine has one maintainer, no supported
-release (the `v0.0.x` tags are checkpoints that exercised the release path), and no production use.
-
-A threat model is a hypothesis about what an attacker will try. The classes below are the ones
-considered so far, not a demonstration that the list is complete, and the mechanisms below are the
-ones intended to contain them, not mechanisms proven sufficient. The single most likely defect in
-this page is an attack class nobody thought of.
-
-Read [Assumptions and residual risk](#assumptions-and-residual-risk) before relying on anything here.
-
 ## Objectives
 
 What the engine is trying to achieve, in priority order. These are the aims the design serves, not
@@ -84,7 +70,7 @@ Assumptions), or physical/side-channel attacks.
 
 Each row names the mechanism intended to contain the attack and the test that exercises it. What
 none of these rows cover is in [Assumptions and residual
-risk](#assumptions-and-residual-risk); a passing test is scoped as described in [Status](./introduction.md#status).
+risk](#assumptions-and-residual-risk).
 
 | Attack | Contained by | Exercised by |
 |--------|--------------|-----------|

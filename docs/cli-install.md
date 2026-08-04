@@ -186,8 +186,7 @@ from-source concern rather than a runtime one.
 
 > **`v0.0.2` is a checkpoint, not a supported release.** It was tagged to exercise the release path
 > end to end, so the URLs in this section resolve and the signature checks below are real. Nothing
-> about the API, the CLI, or the artifact layout is stable until v0.1.0. See
-> [Status](./introduction.md#status).
+> about the API, the CLI, or the artifact layout is stable until v0.1.0.
 
 Each release ships one `x86_64` release package tarball (`cargo xtask dist` refuses to package any
 other architecture) plus `SHA256SUMS` and its detached ed25519 signature `SHA256SUMS.sig`. Inside
