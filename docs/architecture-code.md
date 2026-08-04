@@ -9,7 +9,10 @@ reasoning this page summarizes. The order things happen in during a run is
 [the next page](./architecture-lifecycle.md).
 
 The reading order that works: this page, then `crates/channel/src/lib.rs` (small, self-contained, and
-it defines the host/guest contract), then `crates/engine/src/vm.rs` and `spawn.rs`, then the eBPF half.
+it defines the host/guest contract), then `crates/engine/src/lib.rs` (the public surface: `VmmError`,
+`ErrorKind`, `Limits`, and the `pub use` block naming everything a caller can reach, all of which the
+next two files assume), then `crates/engine/src/vm.rs` and `spawn.rs`, then `exec.rs` (where the
+framing from `channel` gets used to actually run something), then the eBPF half.
 
 `spawn.rs` keeps the launch, boot, and abort state machine; its separable parts sit alongside it in
 `spawn/restore.rs` (the restore path and its disk staging), `spawn/fcversion.rs` (what release is on

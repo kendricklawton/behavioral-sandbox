@@ -100,21 +100,24 @@ fn scrape_metrics(port: u16) -> String {
 /// `--prewarm N` when set (the pool path); `metrics_port` becomes `--metrics 127.0.0.1:PORT`.
 /// Returns once the socket is connectable.
 fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, PathBuf) {
-    launch_daemon_opts(prewarm, metrics_port, false)
+    launch_daemon_opts(prewarm, metrics_port, false, &[])
 }
 
 fn launch_daemon_opts(
     prewarm: Option<usize>,
     metrics_port: Option<u16>,
     jailed: bool,
+    extra_args: &[&str],
 ) -> (Daemon, PathBuf) {
     let root = workspace_root();
-    let dir = std::env::temp_dir().join(format!(
-        "ekvm-e2e-{}-{:?}-{}",
-        std::process::id(),
-        prewarm,
-        if jailed { "jailed" } else { "unjailed" }
-    ));
+    // A per-call sequence number, because the process id alone cannot distinguish two tests in
+    // this one binary: two launches with the same knobs (`agent_serves…` and `cancel_reclaims…`
+    // both pass `(None, None)`) would otherwise share a dir, and each `remove_dir_all` below then
+    // deletes the *other* test's live socket, a flake that only fires when the scheduler overlaps
+    // them.
+    static LAUNCH_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = LAUNCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("ekvm-e2e-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
@@ -133,6 +136,7 @@ fn launch_daemon_opts(
     if let Some(port) = metrics_port {
         cmd.arg("--metrics").arg(format!("127.0.0.1:{port}"));
     }
+    cmd.args(extra_args);
     cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
         .env("EKVM_MARKER", ekvm_engine::GUEST_READY_MARKER)
@@ -609,7 +613,7 @@ fn a_jailed_daemon_serves_prewarmed_opens() {
         );
         return;
     }
-    let (_daemon, socket) = launch_daemon_opts(Some(1), None, true);
+    let (_daemon, socket) = launch_daemon_opts(Some(1), None, true, &[]);
 
     let mut client = Client::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
     if let Err(e) = client.set_read_timeout(Some(Duration::from_secs(45))) {
@@ -695,5 +699,177 @@ fn cancel_reclaims_a_session_wedged_in_a_long_exec() {
     assert!(
         elapsed < Duration::from_secs(20),
         "cancel should end a 60s exec promptly, took {elapsed:?}"
+    );
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_cancel_after_the_idle_deadline_still_gets_its_ack() {
+    // The sibling of `cancel_reclaims_a_session_wedged_in_a_long_exec`, at the corner where the
+    // exec outlives `--idle-timeout`. The per-message deadline was armed when the *exec request*
+    // arrived, so by the time a long exec is interrupted it has lapsed; the post-interrupt read
+    // that looks for the client's `cancel` must run on a fresh budget, or the ack is replaced by
+    // a silent connection drop exactly for the long execs cancel exists to interrupt. (The VM is
+    // killed either way; what this pins is the client-visible `cancelled` reply.)
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping a_cancel_after_the_idle_deadline_still_gets_its_ack: {why}");
+        return;
+    }
+    let (_daemon, socket) = launch_daemon_opts(None, None, false, &["--idle-timeout", "2"]);
+
+    let mut stream = UnixStream::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
+    let mut canceller = stream
+        .try_clone()
+        .unwrap_or_else(|e| panic!("clone the connection: {e}"));
+
+    // A wall budget far past the idle timeout, so the exec is what outlives the deadline.
+    writeln!(stream, r#"{{"schema":1,"op":"open","wall_secs":120}}"#)
+        .unwrap_or_else(|e| panic!("send open: {e}"));
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .unwrap_or_else(|e| panic!("clone for reading: {e}")),
+    );
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .unwrap_or_else(|e| panic!("read the open reply: {e}"));
+    assert!(
+        line.contains(r#""reply":"opened""#),
+        "expected an opened reply, got {line}"
+    );
+
+    writeln!(
+        stream,
+        r#"{{"schema":1,"op":"exec","argv":["sleep","60"]}}"#
+    )
+    .unwrap_or_else(|e| panic!("send exec: {e}"));
+
+    // Sit out the 2s idle budget (armed at the exec request) plus slack, so the deadline has
+    // provably lapsed before the cancel goes out.
+    std::thread::sleep(Duration::from_secs(4));
+    writeln!(canceller, r#"{{"schema":1,"op":"cancel"}}"#)
+        .unwrap_or_else(|e| panic!("send cancel: {e}"));
+
+    line.clear();
+    reader
+        .read_line(&mut line)
+        .unwrap_or_else(|e| panic!("read the cancel reply: {e}"));
+    assert!(
+        line.contains(r#""reply":"cancelled""#),
+        "a cancel sent after the idle deadline lapsed must still be acknowledged, got {line:?} \
+         (an empty line is the connection dropping without the ack)"
+    );
+}
+
+/// Open the daemon at `socket` with `open_body` (the raw JSON after the schema stamp) and return
+/// the one reply line.
+fn open_reply(socket: &PathBuf, open_body: &str) -> String {
+    let mut stream = UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect: {e}"));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap_or_else(|e| panic!("set read timeout: {e}"));
+    writeln!(stream, r#"{{"schema":1,{open_body}}}"#).unwrap_or_else(|e| panic!("send open: {e}"));
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .unwrap_or_else(|e| panic!("read the open reply: {e}"));
+    line
+}
+
+// NOT `#[ignore]`d, alone in this file: a refused `open` is answered before any VM exists, so this
+// runs on a host with no KVM and no rootfs, which puts the wire's fault taxonomy in the everyday
+// host-safe gate.
+#[test]
+fn an_operator_ceiling_refusal_is_kind_refused_on_the_wire() {
+    // The book's fault table (docs/daemon-protocol.md): `refused` is "understood and declined: an
+    // operator-chosen posture"; `protocol` is "the client's own message". An ask past an operator
+    // ceiling is a well-formed request this host declines, so it must arrive as `refused`: an SDK
+    // branching on the table would otherwise read a policy refusal as its own malformed message.
+    let (_daemon, socket) = launch_daemon_opts(None, None, false, &["--max-vcpus", "2"]);
+
+    let line = open_reply(&socket, r#""op":"open","vcpus":16"#);
+    assert!(
+        line.contains(r#""reply":"error""#) && line.contains(r#""fatal":true"#),
+        "an over-ceiling open is a fatal error reply, got {line}"
+    );
+    assert!(
+        line.contains(r#""kind":"refused""#),
+        "an operator ceiling is the daemon declining, not a malformed message: {line}"
+    );
+    // The refusal points at the knob the operator actually set. This daemon's policy is its own
+    // flags (it deliberately reads no `.ekvm.toml`), so naming that file would send the client's
+    // operator to a file that does not govern this daemon.
+    assert!(
+        !line.contains(".ekvm.toml"),
+        "a daemon refusal must not point at a file the daemon never reads: {line}"
+    );
+    assert!(
+        line.contains("--max-vcpus"),
+        "the refusal names the serve flag that set the ceiling: {line}"
+    );
+
+    // The discrimination: a value the VMM could never boot is the *client's* error and stays
+    // `protocol`, so the split is real and not a blanket rename.
+    let line = open_reply(&socket, r#""op":"open","vcpus":0"#);
+    assert!(
+        line.contains(r#""kind":"protocol""#),
+        "a malformed value stays the client's fault: {line}"
+    );
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_binary_get_is_flagged_lossy_and_a_text_get_is_not() {
+    // The wire is text (`content` is lossy UTF-8), so fetching a file whose bytes are not valid
+    // UTF-8 substitutes replacement characters. The `lossy` flag is what keeps that substitution
+    // from being silent: without it a client has no way to know its bytes are not the file's.
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping a_binary_get_is_flagged_lossy_and_a_text_get_is_not: {why}");
+        return;
+    }
+    let (_daemon, socket) = launch_daemon(None, None);
+
+    let mut stream = UnixStream::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
+    stream
+        .set_read_timeout(Some(Duration::from_secs(45)))
+        .unwrap_or_else(|e| panic!("set read timeout: {e}"));
+    let mut reader = BufReader::new(
+        stream
+            .try_clone()
+            .unwrap_or_else(|e| panic!("clone for reading: {e}")),
+    );
+    let mut line = String::new();
+    let mut roundtrip = |req: &str| -> String {
+        writeln!(stream, "{req}").unwrap_or_else(|e| panic!("send: {e}"));
+        line.clear();
+        reader
+            .read_line(&mut line)
+            .unwrap_or_else(|e| panic!("read reply: {e}"));
+        line.clone()
+    };
+
+    let opened = roundtrip(r#"{"schema":1,"op":"open"}"#);
+    assert!(opened.contains(r#""reply":"opened""#), "{opened}");
+
+    // One file of raw non-UTF-8 bytes, one of plain text, written inside the guest.
+    let wrote = roundtrip(
+        r#"{"schema":1,"op":"exec","argv":["sh","-c","printf '\\377\\376\\375' > bin.dat && printf 'hello' > text.txt"]}"#,
+    );
+    assert!(wrote.contains(r#""exit_code":0"#), "{wrote}");
+
+    let got = roundtrip(r#"{"schema":1,"op":"get","path":"bin.dat"}"#);
+    assert!(got.contains(r#""present":true"#), "{got}");
+    assert!(
+        got.contains(r#""lossy":true"#),
+        "non-UTF-8 bytes must be flagged, not silently substituted: {got}"
+    );
+
+    let got = roundtrip(r#"{"schema":1,"op":"get","path":"text.txt"}"#);
+    assert!(got.contains(r#""content":"hello""#), "{got}");
+    assert!(
+        got.contains(r#""lossy":false"#),
+        "clean UTF-8 is not lossy: {got}"
     );
 }

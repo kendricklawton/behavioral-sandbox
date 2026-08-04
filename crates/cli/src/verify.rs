@@ -3,7 +3,7 @@
 //! Re-reads the canonical record bytes from the envelope and verifies them against a **trusted**
 //! public key: the host's own by default, or one (or more) `--key <hex>` supplied out of band, so a
 //! supervisor can verify a record **without trusting the host that relayed it**. Exit non-zero on any
-//! mismatch (a tampered record, an untrusted signer, or a malformed envelope), the demo P19.3 asks for.
+//! mismatch (a tampered record, an untrusted signer, or a malformed envelope).
 
 use std::io::Read as _;
 use std::io::Write as _;

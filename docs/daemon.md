@@ -110,7 +110,10 @@ posture, so a client written before they existed sends bytes that still decode t
 
 The daemon refuses rather than narrowing, which `open_network_refuses_rather_than_narrowing` pins:
 an `allow` without `net` names the contradiction, and a
-rule set past the kernel map's fixed count is caught with the cap named. The `.ekvm.toml` operator
+rule set past the kernel map's fixed count is caught with the cap named. The refusal's `kind` field
+says which side must move: a malformed ask is `protocol` (fix the client), a posture the operator
+declined is `refused` (don't retry as-is); the [fault table](./daemon-protocol.md#error-kinds)
+draws the whole taxonomy. The `.ekvm.toml` operator
 policy (`allow_net`, the `max_egress_*` ceilings) is the *CLI's* enforcement surface. The daemon
 runs the same checks, but nothing sets those values: it reads no config file and has no flag for
 them, so what actually binds a session is the flag ceilings the daemon was launched with plus the

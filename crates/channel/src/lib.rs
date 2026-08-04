@@ -790,7 +790,7 @@ impl<'a> Body<'a> {
 /// is [`fuzz_tests`].
 #[cfg(feature = "fuzzing")]
 pub mod fuzz {
-    use super::{read_frame, read_handshake, read_request, read_response};
+    use super::{read_frame, read_handshake, read_request, read_response, MAGIC};
 
     /// Decode one host→guest [`Request`](crate::Request) from `data` (the *guest agent's* view of
     /// host bytes).
@@ -812,6 +812,40 @@ pub mod fuzz {
     /// Validate a peer handshake from `data`.
     pub fn decode_handshake(mut data: &[u8]) {
         let _ = read_handshake(&mut data);
+    }
+
+    /// Decode a **self-consistent** frame built from `data`: first byte the tag, the rest the
+    /// payload, with the `len` header set to match.
+    ///
+    /// [`decode_frame`] alone cannot reach past the bounds check. Its `len` is a `u32` read
+    /// straight from fuzz bytes, so it exceeds [`MAX_PAYLOAD`] for all but ~0.02% of inputs and
+    /// exceeds the input's own remaining length for all but ~0.0001%. Mutation therefore explores
+    /// two reject branches and never the payload read, which is what left this target's coverage
+    /// flat across 19.7M executions.
+    pub fn decode_frame_wellformed(data: &[u8]) {
+        let Some((&tag, payload)) = data.split_first() else {
+            return;
+        };
+        let Ok(len) = u32::try_from(payload.len()) else {
+            return;
+        };
+        let mut framed = Vec::with_capacity(5 + payload.len());
+        framed.push(tag);
+        framed.extend_from_slice(&len.to_le_bytes());
+        framed.extend_from_slice(payload);
+        let mut slice = framed.as_slice();
+        let _ = read_frame(&mut slice);
+    }
+
+    /// Validate a handshake whose 4-byte magic is already correct, so the version check and the
+    /// accept path are reachable at all: random bytes match the magic with probability 2^-32, so
+    /// [`decode_handshake`] alone only ever exercises the reject branches.
+    pub fn decode_handshake_after_magic(data: &[u8]) {
+        let mut framed = Vec::with_capacity(MAGIC.len() + data.len());
+        framed.extend_from_slice(&MAGIC);
+        framed.extend_from_slice(data);
+        let mut slice = framed.as_slice();
+        let _ = read_handshake(&mut slice);
     }
 }
 

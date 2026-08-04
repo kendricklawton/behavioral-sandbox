@@ -342,7 +342,11 @@ fn main() -> ExitCode {
         }
     };
     // Log filter resolves flags > env > file > default.
-    init_tracing(config::resolve_log(cli.log.as_deref(), file.as_ref()).as_deref());
+    if let Err(e) = init_tracing(config::resolve_log(cli.log.as_deref(), file.as_ref()).as_deref())
+    {
+        let _ = writeln!(std::io::stderr(), "ekvm: {e}");
+        return ExitCode::from(EXIT_OPERATIONAL);
+    }
     match run(cli.cmd, file.as_ref()) {
         Ok(code) => code,
         Err(e) => {
@@ -447,8 +451,12 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         .record
         .clone()
         .or_else(|| host_policy.records_dir.as_deref().map(default_record_path));
+    // `--record-summary` does not count: the summary is an unsigned *projection* of the record
+    // (its own flag doc), so a summary-only run leaves nothing verifiable, exactly what
+    // `require_record` exists to refuse ("refuses any run that would leave no audit record",
+    // docs/cli-config.md). `require_record_refuses_a_run_that_would_leave_no_audit_record` pins it.
     host_policy
-        .check_record(record_path.is_some() || args.record_summary.is_some())
+        .check_record(record_path.is_some())
         .map_err(|e| CliError::Cli(e.to_string()))?;
 
     // Refuse `--watch` without a terminal *before* paying a boot: the live view draws on stderr.
@@ -1028,16 +1036,29 @@ fn piped_stdin() -> Result<Vec<u8>, CliError> {
 /// Initialize stderr logging from the filter [`config::resolve_log`] already resolved
 /// (`flag > EKVM_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
 /// environment: the precedence is single-sourced in `resolve_log`, this only applies the result.
-/// An invalid filter falls back to `warn` rather than failing the run.
-fn init_tracing(filter: Option<&str>) {
+///
+/// A filter `tracing` cannot parse is a **typed refusal**, the same loudness the file layer gives
+/// a mistyped *key* (`deny_unknown_fields`): silently running with logging the operator did not
+/// choose is the no-op that posture forbids. What this cannot police is EnvFilter's own grammar:
+/// a bare unknown ident (`debgu`) parses as a *target* name, so only what the parser itself
+/// rejects is refused. `an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` pins both
+/// entry points.
+/// # Errors
+/// [`CliError::Cli`] naming the unparseable filter.
+fn init_tracing(filter: Option<&str>) -> Result<(), CliError> {
     let filter = filter.unwrap_or("warn");
-    let env_filter = tracing_subscriber::EnvFilter::try_new(filter)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn"));
+    let env_filter = tracing_subscriber::EnvFilter::try_new(filter).map_err(|e| {
+        CliError::Cli(format!(
+            "invalid log filter {filter:?}: {e} (a level like warn|info|debug, or a tracing \
+             directive like \"ekvm=debug\")"
+        ))
+    })?;
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(env_filter)
         .with_target(false)
         .try_init();
+    Ok(())
 }
 
 #[cfg(test)]

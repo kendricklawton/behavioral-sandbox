@@ -44,7 +44,7 @@ the same shapes.
 | `{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}` | The sandbox booted; `pooled` says whether it came from the pre-warmed pool. |
 | `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `ekvm run --json`; a non-zero `exit_code` is a *result*, not an error). |
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
-| `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). |
+| `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true,"lossy":false}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). `content` is lossy UTF-8; `lossy:true` flags that the file's bytes were not valid UTF-8, so replacement characters stand in and the original bytes are not recoverable from this reply. Absent (an older daemon) reads as `false`. |
 | `{"schema":1,"reply":"snapshotted","dir":"/tmp/ekvm-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
 | `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained**: each after the first carries a `prev` field (the SHA-256 of the previous record; the first is the unchained anchor), so the sequence is tamper-evident, not just each record alone. `ekvm verify` checks one envelope; walking a whole chain is `verify_chain` in `ekvm-record`, which no shipped command drives yet. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
@@ -65,7 +65,7 @@ failed boot is fatal yet nothing about the caller's request was wrong.
 | `transport` | A framing/IO fault on an established exec channel, or a guest silent past its deadline. | Retire the sandbox; don't blame the command. |
 | `guest` | The run is at fault: couldn't spawn, outran its budget, flooded output. | Fix the command; an identical retry fails identically. |
 | `protocol` | The client's own message: wrong `schema`, undecodable, oversize, or out of order. | Fix the client. |
-| `refused` | Understood and declined: an operator-chosen posture (snapshotting a jailed session) or a capability this session lacks (no probes attached). | Don't retry as-is. |
+| `refused` | Understood and declined: an operator-chosen posture (an `open` past an operator ceiling, a withdrawn NIC, snapshotting a jailed session) or a capability this session lacks (no probes attached). | Don't retry as-is. |
 
 `infra` / `transport` / `guest` are the wire form of the engine's own pinned error taxonomy
 (`ekvm_engine::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same
@@ -149,7 +149,7 @@ The round trip a caller uses to collect what a run *produced*, not just what it 
 ```
 **Response 3:**
 ```json
-{"schema":1,"reply":"got","path":"out.txt","content":"generated in the guest\n","present":true}
+{"schema":1,"reply":"got","path":"out.txt","content":"generated in the guest\n","present":true,"lossy":false}
 ```
 
 ### Live audit inspection (`trace_summary`)

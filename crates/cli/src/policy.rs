@@ -185,6 +185,40 @@ impl fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
+impl PolicyError {
+    /// The refusal phrased for a **daemon's** wire client: the same message, but the pointer names
+    /// the `ekvm serve` flag that set the posture rather than `.ekvm.toml`, which a daemon
+    /// deliberately never reads (its policy is its own flags; see `config::policy_of`). `Display`
+    /// stays the CLI flavor, where the file *is* where the posture lives.
+    #[must_use]
+    pub fn daemon_message(&self) -> String {
+        match self {
+            Self::Ceiling {
+                knob,
+                asked,
+                ceiling,
+            } => format!(
+                "{knob} {asked} exceeds this host's limit of {ceiling} (operator policy: \
+                 `--max-{}` on ekvm serve)",
+                knob.replace('_', "-")
+            ),
+            // Unreachable from today's daemon (it sets no such posture), phrased without the file
+            // pointer so they stay honest if a serve flag ever grows them.
+            Self::JailRequired => "this host requires the jail (operator policy)".to_string(),
+            Self::NetForbidden => {
+                "this host does not permit guest networking (operator policy)".to_string()
+            }
+            Self::RecordRequired => {
+                "this host requires an audit record (operator policy)".to_string()
+            }
+            Self::EgressNotAllowed { asked } => format!(
+                "requested egress CIDR {asked} extends beyond this host's operator ceiling \
+                 (operator policy)"
+            ),
+        }
+    }
+}
+
 impl Policy {
     /// Resolve a caller's request against this policy into concrete [`Limits`].
     /// Two different things happen to an over-large value, and the difference is whether a caller
@@ -609,5 +643,36 @@ mod tests {
         };
         assert_eq!(on.check_record(false), Err(PolicyError::RecordRequired));
         assert!(on.check_record(true).is_ok(), "recorded runs are permitted");
+    }
+
+    #[test]
+    fn the_daemon_flavor_names_the_serve_flag_not_the_file() {
+        // Two renderings of one refusal, each naming where the posture actually lives: `Display`
+        // is the CLI's (`.ekvm.toml` governs), `daemon_message` the daemon's (its own flags do; it
+        // reads no `.ekvm.toml`). Pointing a wire client at the file would name a control surface
+        // that does not govern its daemon.
+        for (knob, flag) in [
+            ("vcpus", "--max-vcpus"),
+            ("mem_mib", "--max-mem-mib"),
+            ("wall_secs", "--max-wall-secs"),
+            ("output_cap", "--max-output-cap"),
+        ] {
+            let err = PolicyError::Ceiling {
+                knob,
+                asked: 9,
+                ceiling: 2,
+            };
+            assert!(
+                err.to_string().contains(".ekvm.toml"),
+                "the CLI flavor names the file: {err}"
+            );
+            let daemon = err.daemon_message();
+            assert!(
+                daemon.contains(flag) && !daemon.contains(".ekvm.toml"),
+                "the daemon flavor names {flag}, never the file: {daemon}"
+            );
+            // Both carry the same substance: the knob, the ask, and the bound.
+            assert!(daemon.contains(knob) && daemon.contains('9') && daemon.contains('2'));
+        }
     }
 }

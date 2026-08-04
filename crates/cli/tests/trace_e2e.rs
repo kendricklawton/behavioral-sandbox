@@ -132,7 +132,7 @@ fn run_with_trace_and_record_yields_trail_and_json() {
         "every axis binds on a capable host: {json}"
     );
 
-    // The P19.3 demo: `ekvm verify` accepts the untouched record, and rejects it after one flipped
+    // The verify round-trip: `ekvm verify` accepts the untouched record, and rejects it after one flipped
     // byte, trusting the same host key that signed it (resolved from EKVM_SIGNING_KEY).
     let verify_ok = Command::new(env!("CARGO_BIN_EXE_ekvm"))
         .current_dir(&root)

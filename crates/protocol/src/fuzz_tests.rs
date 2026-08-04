@@ -152,6 +152,7 @@ fn rand_response(rng: &mut Rng) -> Response {
             path: rand_string(rng),
             content: rand_string(rng),
             present: rng.below(2) == 0,
+            lossy: rng.below(2) == 0,
         },
         3 => Response::Trace {
             record: json!({"schema": 2, "n": rng.byte()}),

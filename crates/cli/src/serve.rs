@@ -234,7 +234,12 @@ impl Server {
 pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     let log_json = args.log_json
         || std::env::var("EKVM_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
-    init_tracing(log.as_deref(), log_json);
+    if let Err(e) = init_tracing(log.as_deref(), log_json) {
+        // tracing is not up (that is the failure), so the refusal goes to stderr directly.
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), "ekvm: {e}");
+        return ExitCode::from(EXIT_OPERATIONAL);
+    }
 
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
     // on top). The daemon has no `.ekvm.toml` cwd discovery, that's a CLI-in-a-project convenience;
@@ -982,15 +987,23 @@ impl Drop for StagedPath {
 /// stderr logging, filter from `--log` else `EKVM_LOG` else `info`. `info` (not the CLI's `warn`):
 /// a daemon's per-session boot/close lines are its operational trace. `json` switches the *encoding*
 /// of the same structured events, one JSON object per line, fields intact, for a log shipper, the
-/// events themselves are identical either way. `try_init` + a fallback so a bad filter or a
-/// double-init can never panic the daemon.
-fn init_tracing(flag: Option<&str>, json: bool) {
+/// events themselves are identical either way. A filter `tracing` cannot parse refuses the start,
+/// the same loudness as the CLI's `init_tracing` and this function's other fail-fast startup checks:
+/// a daemon serving with logging the operator did not choose is a silent no-op on its one
+/// operational trace. `try_init` still absorbs a double-init.
+/// # Errors
+/// A message naming the unparseable filter.
+fn init_tracing(flag: Option<&str>, json: bool) -> Result<(), String> {
     let filter = flag
         .map(str::to_string)
         .or_else(|| std::env::var("EKVM_LOG").ok())
         .unwrap_or_else(|| "info".to_string());
-    let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let env_filter = tracing_subscriber::EnvFilter::try_new(&filter).map_err(|e| {
+        format!(
+            "invalid log filter {filter:?}: {e} (a level like warn|info|debug, or a tracing \
+             directive like \"ekvm=debug\")"
+        )
+    })?;
     let builder = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(env_filter)
@@ -1000,6 +1013,7 @@ fn init_tracing(flag: Option<&str>, json: bool) {
     } else {
         builder.try_init()
     };
+    Ok(())
 }
 
 #[cfg(test)]

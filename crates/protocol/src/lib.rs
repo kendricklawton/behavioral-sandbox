@@ -338,6 +338,13 @@ pub enum Response {
         content: String,
         /// Whether the file existed.
         present: bool,
+        /// Whether `content` is a **lossy** rendering: the file's bytes were not valid UTF-8, so
+        /// replacement characters stand in and the original bytes are not recoverable from this
+        /// reply (bulk/binary transfer belongs to the engine's block-device path, not this line).
+        /// The flag is what keeps that substitution from being silent. Absent (a daemon older
+        /// than the field) reads as `false`.
+        #[serde(default)]
+        lossy: bool,
     },
     /// A [`Request::Snapshot`] wrote a bundle. `dir` is a **daemon-host** path (the bundle's device
     /// state + guest memory live on the daemon's filesystem, not sent over this line).
@@ -806,6 +813,7 @@ mod tests {
                 path: "out.txt".into(),
                 content: "data\n".into(),
                 present: true,
+                lossy: false,
             },
             Response::Snapshotted {
                 dir: "/var/lib/ekvm/snap-1".into(),
@@ -833,6 +841,26 @@ mod tests {
                 .expect("a message");
             assert_eq!(back, resp);
         }
+    }
+
+    #[test]
+    fn a_got_reply_without_the_lossy_field_decodes_as_not_lossy() {
+        // The additive-field contract: a daemon older than `lossy` omits it, and a client on this
+        // crate must read that as `false` (`#[serde(default)]`), not a decode error, so the field
+        // lands without a schema bump.
+        let line = b"{\"schema\":1,\"reply\":\"got\",\"path\":\"x\",\"content\":\"hi\",\"present\":true}\n";
+        let back: Response = read_message(&mut line.as_slice())
+            .expect("an old daemon's got decodes")
+            .expect("a message");
+        assert_eq!(
+            back,
+            Response::Got {
+                path: "x".into(),
+                content: "hi".into(),
+                present: true,
+                lossy: false,
+            }
+        );
     }
 
     #[test]

@@ -109,7 +109,9 @@ which the kernel caps at roughly 108 bytes.
 
 The stderr log filter, for example `info` or `debug`. Logs go to stderr and only there (the one
 `tracing` subscriber is initialized with a stderr writer), so
-`ekvm run … 2>/dev/null` stays pipe-clean. The `--log` flag overrides this per run.
+`ekvm run … 2>/dev/null` stays pipe-clean. The `--log` flag overrides this per run. A filter
+`tracing` cannot parse is refused up front, the same loudness as a mistyped key in this file; a
+bare unknown word is not that case, since the filter grammar reads it as a target name.
 
 [`log`]: #setting-log
 
@@ -285,7 +287,10 @@ stronger statement than the default posture: no guest networking at all.
 - **default**: `false`
 
 Refuses any run that would leave no audit record, including [`ekvm shell`](./cli-commands.md#ekvm-shell),
-which cannot record. Satisfied on its own by [`records_dir`](#setting-records_dir).
+which cannot record. Satisfied on its own by [`records_dir`](#setting-records_dir). A
+`--record-summary` alone does not satisfy it: the summary is an unsigned projection of the record,
+not the record, so a summary-only run still refuses
+(`require_record_refuses_a_run_that_would_leave_no_audit_record` pins this).
 
 [`require_record`]: #setting-require_record
 

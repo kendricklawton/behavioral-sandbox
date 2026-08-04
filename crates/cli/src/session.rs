@@ -88,17 +88,17 @@ pub fn serve(stream: UnixStream, server: &Server) {
     };
     let (limits, bare) = match open_limits(&open, &server.policy) {
         Ok(parsed) => parsed,
-        Err(message) => {
+        Err(refusal) => {
             server.metrics.open_failed();
-            let _ = write_response(&mut writer, &fatal(message, FaultKind::Protocol));
+            let _ = write_response(&mut writer, &refusal.into_fatal());
             return;
         }
     };
     let net = match open_network(&open, &server.policy) {
         Ok(resolved) => resolved,
-        Err(message) => {
+        Err(refusal) => {
             server.metrics.open_failed();
-            let _ = write_response(&mut writer, &fatal(message, FaultKind::Protocol));
+            let _ = write_response(&mut writer, &refusal.into_fatal());
             return;
         }
     };
@@ -243,8 +243,13 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 if interrupted {
                     // The sandbox is gone, so the exec's own error is noise; acknowledge only if
                     // the client actually sent `cancel` (an outright hang-up gets no reply, there
-                    // is nobody to read it).
+                    // is nobody to read it). This read awaits a *new* message, so it gets a fresh
+                    // deadline: the in-flight one was armed when the exec request arrived, and an
+                    // exec longer than the idle budget (the case cancel exists for) has already
+                    // spent it, which would turn the ack into a connection reset with the cancel
+                    // line unread. `a_cancel_after_the_idle_deadline_still_gets_its_ack` pins this.
                     server.metrics.request_failed(false);
+                    reader.get_mut().rearm();
                     if matches!(
                         read_message::<Request>(&mut reader),
                         Ok(Some(Request::Cancel))
@@ -330,6 +335,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
                             path: path.clone(),
                             content: found.map(|a| lossy(&a.data)).unwrap_or_default(),
                             present: found.is_some(),
+                            // Flagged, never silent: replacement characters in `content` are not
+                            // the file's bytes, and only the daemon (which saw the bytes) knows.
+                            lossy: found.is_some_and(|a| std::str::from_utf8(&a.data).is_err()),
                         }
                     },
                 ) {
@@ -647,6 +655,43 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
     }
 }
 
+/// Why an `open` was refused before any VM existed, split the way the wire's fault table splits
+/// (docs/daemon-protocol.md): [`Malformed`](Self::Malformed) is the client's own message (a value
+/// the VMM could never boot, a contradiction like allowances without a NIC), which goes out as
+/// [`FaultKind::Protocol`]; [`Policy`](Self::Policy) is a well-formed ask the operator's posture
+/// declines, which goes out as [`FaultKind::Refused`], so an SDK branching on the table repairs
+/// the right thing (its own message vs its ask).
+/// `an_operator_ceiling_refusal_is_kind_refused_on_the_wire` pins the split.
+#[derive(Debug, PartialEq, Eq)]
+enum OpenRefusal {
+    /// The client's message is wrong in itself: fix the client.
+    Malformed(String),
+    /// The message is fine; this host's operator declines the ask: don't retry as-is.
+    Policy(String),
+}
+
+impl OpenRefusal {
+    /// The human-readable reason, whichever bucket carries it. Test-only: the serving path moves
+    /// the message out through [`into_fatal`](Self::into_fatal) instead of borrowing it.
+    #[cfg(test)]
+    fn message(&self) -> &str {
+        match self {
+            Self::Malformed(m) | Self::Policy(m) => m,
+        }
+    }
+
+    /// The session-ending error response, carrying the bucket's wire kind.
+    fn into_fatal(self) -> Response {
+        let kind = match &self {
+            Self::Malformed(_) => FaultKind::Protocol,
+            Self::Policy(_) => FaultKind::Refused,
+        };
+        match self {
+            Self::Malformed(m) | Self::Policy(m) => fatal(m, kind),
+        }
+    }
+}
+
 /// What an `open` asked for on the network axis, resolved against the operator's policy: whether the
 /// session gets a NIC, and the egress policy to arm on its tap.
 ///
@@ -665,17 +710,23 @@ struct SessionNet {
 /// Resolve an [`Request::Open`]'s network request against the operator's `policy`. Refuses rather
 /// than clamping, like [`open_limits`]: a session that asked for egress it cannot have is an error,
 /// never a quietly narrowed run.
-fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, String> {
+fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusal> {
     let Request::Open { net, allow, .. } = req else {
-        return Err("first message must be `open`".to_string());
+        return Err(OpenRefusal::Malformed(
+            "first message must be `open`".to_string(),
+        ));
     };
     let nic = net.unwrap_or(false);
     let allows = allow.as_deref().unwrap_or(&[]);
     if !allows.is_empty() && !nic {
-        return Err("allow requires net: an egress policy needs a tap to be armed on".to_string());
+        return Err(OpenRefusal::Malformed(
+            "allow requires net: an egress policy needs a tap to be armed on".to_string(),
+        ));
     }
     // The operator's withdrawal of guest networking, checked before anything is parsed.
-    policy.check_net(nic).map_err(|e| e.to_string())?;
+    policy
+        .check_net(nic)
+        .map_err(|e| OpenRefusal::Policy(e.daemon_message()))?;
     if !nic {
         return Ok(SessionNet::default());
     }
@@ -692,20 +743,23 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, String> {
         });
     }
     if allows.len() > MAX_POLICY_RULES {
-        return Err(format!(
-            "too many allow rules: {} given, but the kernel egress policy holds at most              {MAX_POLICY_RULES}",
+        return Err(OpenRefusal::Malformed(format!(
+            "too many allow rules: {} given, but the kernel egress policy holds at most \
+             {MAX_POLICY_RULES}",
             allows.len()
-        ));
+        )));
     }
     let mut egress = EgressPolicy::deny_all();
     for spec in allows {
-        let rule = parse_allow(spec)?;
+        let rule = parse_allow(spec).map_err(OpenRefusal::Malformed)?;
         egress = egress.allow(rule.cidr, rule.port, rule.proto);
     }
     // Containment against the operator's ceilings (`max_egress_v4`/`max_egress_v6`), the check that
     // makes a ceiling real for a caller who controls neither this process's environment nor its
     // config file.
-    policy.check_egress(&egress).map_err(|e| e.to_string())?;
+    policy
+        .check_egress(&egress)
+        .map_err(|e| OpenRefusal::Policy(e.daemon_message()))?;
     Ok(SessionNet {
         nic: true,
         egress: Some(egress),
@@ -721,7 +775,7 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, String> {
 /// controls neither this process's environment nor its `.ekvm.toml`, so bounding the request here
 /// is what makes an operator ceiling real. Asking past a ceiling is refused, never
 /// quietly clamped.
-fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String> {
+fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), OpenRefusal> {
     let Request::Open {
         vcpus,
         mem_mib,
@@ -731,7 +785,9 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String>
         allow,
     } = req
     else {
-        return Err("first message must be `open`".to_string());
+        return Err(OpenRefusal::Malformed(
+            "first message must be `open`".to_string(),
+        ));
     };
     // `net`/`allow` count toward bareness even though they are not resource knobs: a pooled clone
     // restores a snapshot whose NIC presence is baked in, so a session that asked for a NIC cannot
@@ -748,19 +804,23 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String>
     let mut requested = Requested::default();
     if let Some(v) = vcpus {
         if !vcpus_supported(*v) {
-            return Err(format!(
+            return Err(OpenRefusal::Malformed(format!(
                 "vcpus must be 1 or an even number in 1..={MAX_VCPUS}, got {v}"
-            ));
+            )));
         }
         requested.vcpus = NonZeroU8::new(*v);
     }
     if let Some(m) = mem_mib {
-        requested.mem_mib =
-            Some(NonZeroU32::new(*m).ok_or_else(|| "mem_mib must be at least 1".to_string())?);
+        requested.mem_mib = Some(
+            NonZeroU32::new(*m)
+                .ok_or_else(|| OpenRefusal::Malformed("mem_mib must be at least 1".to_string()))?,
+        );
     }
     if let Some(s) = wall_secs {
         if *s == 0 {
-            return Err("wall_secs must be at least 1".to_string());
+            return Err(OpenRefusal::Malformed(
+                "wall_secs must be at least 1".to_string(),
+            ));
         }
         requested.wall_secs = Some(*s);
     }
@@ -769,7 +829,9 @@ fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), String>
     // then clamps to the operator's ceiling anyway. Lossless on 64-bit.
     requested.output_cap = output_cap.map(|c| usize::try_from(c).unwrap_or(usize::MAX));
 
-    let limits = policy.resolve(&requested).map_err(|e| e.to_string())?;
+    let limits = policy
+        .resolve(&requested)
+        .map_err(|e| OpenRefusal::Policy(e.daemon_message()))?;
     Ok((limits, bare))
 }
 
@@ -1036,8 +1098,13 @@ mod tests {
         )
         .expect_err("16 vCPUs is past the operator's ceiling");
         assert!(
-            err.contains("vcpus") && err.contains('2'),
-            "the refusal names the knob and the bound: {err}"
+            err.message().contains("vcpus") && err.message().contains('2'),
+            "the refusal names the knob and the bound: {}",
+            err.message()
+        );
+        assert!(
+            matches!(err, OpenRefusal::Policy(_)),
+            "a ceiling is the operator declining (wire kind `refused`), not a malformed message"
         );
 
         // Under the ceiling still works, and the pool-eligibility signal is unaffected by policy.
@@ -1147,32 +1214,56 @@ mod tests {
     #[test]
     fn open_network_refuses_rather_than_narrowing() {
         // Allowances without a NIC: nothing to arm them on. Caught before any parsing, so the
-        // message names the contradiction rather than complaining about a rule.
+        // message names the contradiction rather than complaining about a rule. The client's own
+        // contradiction, so the `Malformed` bucket (wire kind `protocol`).
         let err = open_network(&open_net(None, &["1.1.1.1"]), &Policy::default())
             .expect_err("allow without net must refuse");
-        assert!(err.contains("requires net"), "{err}");
+        assert!(err.message().contains("requires net"), "{}", err.message());
+        assert!(matches!(err, OpenRefusal::Malformed(_)));
 
-        // A host that has withdrawn guest networking refuses the NIC outright.
+        // A host that has withdrawn guest networking refuses the NIC outright: the operator
+        // declining a well-formed ask, so the `Policy` bucket (wire kind `refused`).
         let no_net = Policy {
             allow_net: Some(false),
             ..Policy::default()
         };
         let err = open_network(&open_net(Some(true), &[]), &no_net)
             .expect_err("a withdrawn NIC must refuse");
-        assert!(!err.is_empty(), "the refusal carries a reason");
+        assert!(!err.message().is_empty(), "the refusal carries a reason");
+        assert!(matches!(err, OpenRefusal::Policy(_)));
 
         // A malformed rule is a typed message, not a panic and not a silently dropped rule.
         let err = open_network(&open_net(Some(true), &["not-an-ip"]), &Policy::default())
             .expect_err("a malformed rule must refuse");
-        assert!(!err.is_empty(), "the refusal carries a reason");
+        assert!(!err.message().is_empty(), "the refusal carries a reason");
+        assert!(matches!(err, OpenRefusal::Malformed(_)));
 
         // Past the kernel map's fixed rule count, refused here with the cap named rather than
-        // failing cryptically at attach time.
+        // failing cryptically at attach time. An engine limit the client can fix by sending fewer
+        // rules, not an operator posture: `Malformed`.
         let many: Vec<&str> =
             std::iter::repeat_n("1.1.1.1:443/tcp", MAX_POLICY_RULES + 1).collect();
         let err = open_network(&open_net(Some(true), &many), &Policy::default())
             .expect_err("over the cap must refuse");
-        assert!(err.contains(&MAX_POLICY_RULES.to_string()), "{err}");
+        assert!(
+            err.message().contains(&MAX_POLICY_RULES.to_string()),
+            "{}",
+            err.message()
+        );
+        assert!(matches!(err, OpenRefusal::Malformed(_)));
+
+        // An egress rule outside the operator's ceiling: well-formed, declined, `Policy`.
+        let ceiling = Policy {
+            max_egress_v4: vec![ekvm_probes_loader::Ipv4Cidr::new(
+                std::net::Ipv4Addr::new(10, 0, 0, 0),
+                8,
+            )
+            .expect("valid /8")],
+            ..Policy::default()
+        };
+        let err = open_network(&open_net(Some(true), &["192.168.1.1"]), &ceiling)
+            .expect_err("outside the egress ceiling must refuse");
+        assert!(matches!(err, OpenRefusal::Policy(_)));
     }
 
     #[test]
@@ -1241,7 +1332,13 @@ mod tests {
         ] {
             let err =
                 open_limits(&req, &Policy::default()).expect_err("illegal value must be rejected");
-            assert!(err.contains(needle), "error should name {needle}: {err}");
+            assert!(
+                err.message().contains(needle),
+                "error should name {needle}: {}",
+                err.message()
+            );
+            // A value the VMM could never boot is the client's own message, never a policy call.
+            assert!(matches!(err, OpenRefusal::Malformed(_)));
         }
     }
 
@@ -1249,7 +1346,8 @@ mod tests {
     fn a_non_open_first_message_is_rejected() {
         let err =
             open_limits(&Request::Close, &Policy::default()).expect_err("close is not an open");
-        assert!(err.contains("open"), "{err}");
+        assert!(err.message().contains("open"), "{}", err.message());
+        assert!(matches!(err, OpenRefusal::Malformed(_)));
     }
 
     #[test]

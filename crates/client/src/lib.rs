@@ -274,6 +274,10 @@ impl Client {
     /// error); `Ok(Some(content))` is its lossy-UTF-8 contents.
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
+    ///
+    /// The reply's `lossy` flag (non-UTF-8 bytes were replaced in `content`) is dropped by this
+    /// text-convenience signature; a caller that must detect substitution reads
+    /// [`Response::Got`] itself.
     pub fn get(&mut self, path: &str) -> Result<Option<String>, ClientError> {
         self.send(&Request::Get {
             path: path.to_string(),
