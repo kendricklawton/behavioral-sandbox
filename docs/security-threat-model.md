@@ -221,9 +221,9 @@ Explicitly assumed sound, and therefore *out* of the boundary:
 
 ## Out of scope (engine, not platform)
 
-Per-run containment is the engine's concern; tenancy is not. Tenant authentication, authorization,
-quotas, billing, fleet scheduling, and a management dashboard are the **hoster's** responsibility,
-not a gap in the engine. The engine's own scope is narrower and mechanical: its privileged tools are
+Per-run containment is the engine's concern; tenancy is not. The platform layer above it, enumerated
+once in [Where the engine ends](./embedding-scope.md), is the **hoster's** responsibility, not a gap
+in the engine. The engine's own scope is narrower and mechanical: its privileged tools are
 euid-scoped, and its defaults self-limit (no network route out unless one is configured, a
 dropped-uid jail, an own-euid sweep). Turning that into a multi-tenant service is the hoster's job, and this project makes no claim
 about whether the result would be safe.

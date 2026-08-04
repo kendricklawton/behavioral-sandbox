@@ -73,9 +73,9 @@ Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, n
   thread) are *embedding-API* capabilities. The CLI's file path is per-frame `--put`/`--get` (small,
   bounded files); a caller needing bulk transfer or async cancellation drives the library directly. A
   one-shot CLI cancels by process signal (Ctrl-C, and the sandbox's `Drop` tears the VM down).
-- **Tenancy, auth, billing, fleet scheduling, a dashboard, image and registry management.** These are
-  the *hoster's* platform, above the engine: a recorded non-goal (design rule 4), which is what makes
-  proposing one a design error rather than a missing feature.
+- **Platform features.** These are the *hoster's* layer, above the engine: a recorded non-goal
+  (design rule 4), which is what makes proposing one a design error rather than a missing feature.
+  What that covers is listed in [Where the engine ends](./embedding-scope.md).
 
 Running one probe at a time, standalone, is
 [Host-side observability & enforcement](./probes.md), under *Try it*.

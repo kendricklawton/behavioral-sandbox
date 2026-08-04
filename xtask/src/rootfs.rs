@@ -125,7 +125,7 @@ fn rootfs_inittab() -> String {
 # via `cgroup.kill`, so a double-forked grandchild or `setsid` daemon can't outlive the command and
 # wedge the exec connection. `/sys/fs/cgroup` is provided by the sysfs mount above.
 ::sysinit:/bin/mount -t cgroup2 cgroup2 /sys/fs/cgroup
-# Bulk input/output block devices: mount whichever the driver attached, by label — so
+# Bulk input/output block devices: mount whichever the driver attached, by label, so
 # their /dev/vdX order doesn't matter. Best-effort: a missing device is skipped, so plain boots are
 # unaffected. Runs after devtmpfs/proc are up (findfs needs the device nodes + /proc/partitions).
 ::sysinit:{mount_drives}
@@ -805,7 +805,7 @@ fn resolved_packages(staging: &Path) -> Result<Vec<String>> {
 fn write_packages_lock(packages: &[String]) -> Result<()> {
     let path = packages_lock_path();
     let mut body = String::from(
-        "# Resolved guest rootfs package closure — the exact Alpine packages baked into\n\
+        "# Resolved guest rootfs package closure: the exact Alpine packages baked into\n\
          # artifacts/rootfs-guest.ext4. Regenerate after an upstream bump with:\n\
          #   cargo xtask build-rootfs --update-lock\n\
          # Drift from this list means Alpine's branch repo moved and the image no longer reproduces.\n",

@@ -3,8 +3,8 @@
 `ekvm serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
 lifecycle over a **unix socket**, so a local client drives microVMs without linking the `ekvm-engine`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
-use, and it stays **engine, not platform**: no tenancy, no auth, no billing, no scheduler (those are
-the hoster's, above the engine, and are a recorded non-goal).
+use, and it stays **engine, not platform**: what sits above that line is a recorded non-goal, listed
+in [Where the engine ends](./embedding-scope.md).
 
 > **Status.** The wire API is **versioned**: every message carries a `schema` field, and a
 > mismatch is rejected up front. Until the first supported release the shape may still change; the
@@ -142,9 +142,8 @@ presence baked in, so a networked session cold-boots instead.
 
 ## Non-goals: where a PaaS would begin
 
-The canonical engine/PaaS line, tenancy, auth, billing, scheduling, dashboards, is drawn in
-[Where the engine ends](./embedding-scope.md); the daemon adds
-nothing that crosses it. Its wire-level consequences:
+The canonical engine/PaaS line is drawn in [Where the engine ends](./embedding-scope.md); the daemon
+adds nothing that crosses it. Its wire-level consequences:
 
 - **No message carries a tenant, account, or user.** One connection drives one sandbox; two
   callers are two connections to two VMs. Whose run is whose is the hoster's bookkeeping, above

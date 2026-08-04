@@ -35,9 +35,8 @@ serving each, in [Architecture and design](./architecture.md#design-rules). They
 not repeated here, because a third copy is a third thing to drift.
 
 One of them sets the project's scope and is worth stating up front: **engine, not platform.** This
-is a runtime plus a clean driver API you self-host. Multi-tenant auth, billing, fleet scheduling,
-and dashboards belong to whatever *hosts* the engine, and the model driving an agent is always the
-*caller*, never an engine component; the full non-goals list is in
+is a runtime plus a clean driver API you self-host, and the model driving an agent is always the
+*caller*, never an engine component. What belongs to whatever *hosts* the engine instead is listed in
 [Where the engine ends](./embedding-scope.md).
 
 ## Reading this book

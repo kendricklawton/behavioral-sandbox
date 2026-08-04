@@ -13,8 +13,8 @@
 //!    package. A crate's directory is not always its package (`crates/cli` builds `ekvm`), so
 //!    this is invisible to check 1: the path resolves while the command it appears in does not run.
 //!    Unlike checks 1 to 3 this one reads **every** tracked text file, not just `.rs` and `.md`:
-//!    a copy-pasteable command is a command wherever it is printed, and two dead `-p cli`
-//!    invocations sat in `.env.example` precisely because the check skipped the file.
+//!    a copy-pasteable command is a command wherever it is printed. The scope was widened after
+//!    two dead `-p cli` invocations turned up in a config sample the narrower check had skipped.
 //!
 //! This lint checks that pointers point at something, not that the prose around them is still
 //! *true*; the meaning half stays with review, and the standing rule is to promote a checkable
@@ -63,7 +63,7 @@ pub fn check(root: &Path) -> Result<()> {
         // `ekvm`), which is how five copies of a `-p cli` invocation came to be printed at
         // people, in the docs, in two test headers, and in xtask's own output. Every one errored
         // with "package(s) not found in workspace". Scoping this to `.rs`/`.md` is what let two
-        // more of them survive in `.env.example`, so it runs over every tracked text file.
+        // more of them survive outside those extensions, so it runs over every tracked text file.
         for (line_no, pkg) in cargo_package_refs(&text) {
             pkg_refs += 1;
             if !packages.contains(&pkg) {

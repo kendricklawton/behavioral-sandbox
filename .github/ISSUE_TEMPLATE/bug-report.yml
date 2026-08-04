@@ -1,5 +1,5 @@
 name: Bug report
-description: Something the engine does wrong — a boot, exec, snapshot, probe, or audit-record misbehavior.
+description: Something the engine does wrong: a boot, exec, snapshot, probe, or audit-record misbehavior.
 labels: [bug]
 body:
   - type: markdown
@@ -37,7 +37,7 @@ body:
     attributes:
       label: "`ekvm doctor` output"
       description: >-
-        Paste the full output — it captures KVM, Firecracker, jailer, cgroup, and eBPF readiness in
+        Paste the full output: it captures KVM, Firecracker, jailer, cgroup, and eBPF readiness in
         one shot, which answers most environment questions up front.
       render: text
     validations:

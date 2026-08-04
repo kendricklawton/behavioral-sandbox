@@ -16,6 +16,10 @@ non-goals, these belong to whatever hosts the engine, and PRs adding them are wr
 - **No fleet scheduling.** One engine drives sandboxes on one host. Bin-packing across hosts,
   queues, and autoscaling are the hoster's: the engine runs sandboxes on its host; it doesn't
   schedule a cluster.
+- **No image or registry management.** The engine boots the rootfs it is handed (a path, via
+  `BootConfig` or `EKVM_ROOTFS`); it does not build, fetch, cache, or version images, and it speaks
+  no registry protocol. `cargo xtask build-rootfs` produces one, but that is dev tooling in this
+  repo, not a runtime feature.
 - **No dashboard, no platform API.** The programmatic surface is the Rust library, the CLI, and
   the [`ekvm` daemon](./daemon.md), a *local* driver daemon over a unix socket, a thin host of
   the same library's public API, with no auth and no tenancy (access control is the socket

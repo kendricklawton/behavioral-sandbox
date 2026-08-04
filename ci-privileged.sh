@@ -1,5 +1,5 @@
 #!/bin/sh
-# One-line privileged gate (P20.17b). The manual invocation stacks three env concerns:
+# One-line privileged gate. The manual invocation stacks three env concerns:
 #
 #   sudo -E env "PATH=$PATH" CARGO_TARGET_DIR=… EKVM_SCRATCH_DIR=… cargo xtask ci-privileged
 #

@@ -20,6 +20,12 @@ marker = "GUEST-READY"
 log = "info"
 ```
 
+**What is deliberately not a knob.** The read-only base plus per-run tmpfs overlay, bulk read-only
+input via a second block device, and bulk writable output via a third (pulled back with
+`RunningVm::collect_outputs`) are per-VM boot inputs a caller sets on `BootConfig`, not layered
+config. There is no `EKVM_READONLY`, `EKVM_INPUT`, or `EKVM_OUTPUT` to go looking for; the reasoning
+is in [Architecture and design](./architecture.md).
+
 [toml]: https://toml.io/
 [operator policy]: #operator-policy
 

@@ -66,9 +66,8 @@ Given those aims, a security bug is anything that breaks one of them:
 - Injected secrets (`--env` values, injected file contents) appearing in logs, errors, or the
   serial console.
 
-Because this is an **engine, not a platform**, multi-tenant concerns it deliberately does not own
-(tenant authentication, quotas, billing) are the hoster's responsibility, not a bug here; the full
-line is the threat model's
+Because this is an **engine, not a platform**, the multi-tenant concerns it deliberately does not own
+are the hoster's responsibility, not a bug here; the line is the threat model's
 [out-of-scope section](./security-threat-model.md#out-of-scope-engine-not-platform).
 
 ## What is not a security bug
