@@ -153,10 +153,13 @@ cap), and the v4 mask is built so the shift operand is always `< 32` (an out-of-
 verifier reject).
 
 Two deliberate carve-outs keep deny-by-default from being deny-*everything*. **ARP** (v4) is always
-allowed, and ICMPv6 whose **destination is an on-link scope** (`fe80::/10`, `ff02::/16`, `fc00::/7`;
-the `icmp6_dst_on_link` gate tests scope, not message type) passes so neighbor discovery works: the
-guest must resolve its on-link host end before it can reach any endpoint, and ND aimed at a routable
-address gets no carve-out. And the **egress hook** (a reply arriving *to* the guest) always accepts,
+allowed, and ICMPv6 whose **destination is an on-link scope** (`fe80::/10`, `ff02::/16`, and the
+guest's own link; the `icmp6_dst_on_link` gate tests scope, not message type) passes so neighbor
+discovery works: the guest must resolve its on-link host end before it can reach any endpoint, and ND
+aimed at a routable address gets no carve-out. The link arm is that one `/64`, not `fc00::/7`: a
+unique-local address is routable *within a site* (RFC 4193), so sparing the whole range would leave a
+guest an unpoliced ICMPv6 path (Echo carries payload) to whatever an operator-furnished uplink can
+reach, which `a_ula_outside_the_guests_own_link_is_policed_not_spared` pins shut. And the **egress hook** (a reply arriving *to* the guest) always accepts,
 since egress policy governs what the guest sends and replies to allowed traffic must return. Enforcement is
 **opt-in and per VM**: each `TapMonitor` owns its own maps, and a monitor that never sets a policy stays
 observe-only (both hooks accept, exactly the observe-only behavior above).

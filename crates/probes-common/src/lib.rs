@@ -845,23 +845,42 @@ pub fn egress_allowed6(
         .any(|r| rule_matches6(r, dst_addr, dst_port, proto))
 }
 
+/// The per-VM IPv6 link every sandbox reuses, as a `(network, prefix_len)` pair: the prefix the
+/// engine assigns the tap's host end and the guest's `eth0` (`fd00:200::1` and `fd00:200::2`, a
+/// `/64`). Fixed rather than per-sandbox because the per-VM netns supplies uniqueness, which is
+/// what lets a `#![no_std]` in-kernel program know the link without a map lookup.
+///
+/// The engine owns the addresses themselves (`ekvm-engine`'s `net.rs`); this pair is the *shape*
+/// the eBPF policy needs, and `the_guest_v6_link_is_the_same_in_the_engine_and_the_probes` in
+/// `xtask` reads both files and fails if the two ever disagree.
+pub const GUEST_LINK6: ([u8; 16], u8) = (
+    [0xfd, 0x00, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    64,
+);
+
 /// Whether `dst` is an **on-link** IPv6 scope that guest-originated ICMPv6 must reach for neighbor
-/// discovery / MLD / NUD to work, and only those scopes: link-local unicast (`fe80::/10`), link-scoped
-/// multicast (`ff02::/16`, every NDP/MLD group the guest sends to), or a unique-local address
-/// (`fc00::/7`, where this engine's on-link host end lives, so steady-state NUD to it stays reachable).
-/// None of these route off the connected link. An ICMPv6 destination outside this set is a routable
-/// (global-unicast) target the egress valve must police like any other v6 flow, not spare: it lets a
-/// guest Echo an arbitrary internet host, an egress channel deny-by-default forbids.
+/// discovery / MLD / NUD to work, and only those scopes: link-local unicast (`fe80::/10`),
+/// link-scoped multicast (`ff02::/16`, every NDP/MLD group the guest sends to), or the guest's own
+/// link ([`GUEST_LINK6`]), so steady-state NUD to the host end stays reachable. None of these route
+/// off the connected link.
+///
+/// **Deliberately the one `/64`, not `fc00::/7`.** A ULA is not off-link by virtue of being a ULA:
+/// RFC 4193 addresses are routable *within a site*, so sparing the whole range would hand a guest an
+/// unpoliced ICMPv6 channel (Echo carries payload) to every internal endpoint an operator's furnished
+/// uplink can reach, with [`egress_allowed6`] never consulted. Any ICMPv6 destination outside this
+/// set, ULA or global unicast alike, is a routable target the egress valve polices like any other v6
+/// flow.
+///
 /// Built on [`addr6_in_prefix`] so it holds in the eBPF `#![no_std]` program (byte-wise, no `u128`) and
 /// is single-sourced with the host-tested matcher the tc program calls.
 #[must_use]
 pub fn icmp6_dst_on_link(dst: [u8; 16]) -> bool {
     const LINK_LOCAL: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // fe80::/10
     const LINK_MCAST: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // ff02::/16
-    const ULA: [u8; 16] = [0xfc, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // fc00::/7
+    let (link, link_len) = GUEST_LINK6;
     addr6_in_prefix(dst, LINK_LOCAL, 10)
         || addr6_in_prefix(dst, LINK_MCAST, 16)
-        || addr6_in_prefix(dst, ULA, 7)
+        || addr6_in_prefix(dst, link, link_len)
 }
 
 #[cfg(test)]
@@ -1194,8 +1213,8 @@ mod v6_tests {
         assert!(icmp6_dst_on_link(a("ff02::2"))); // all-routers (RS)
         assert!(icmp6_dst_on_link(a("ff02::1:ff00:1"))); // solicited-node (NS)
         assert!(icmp6_dst_on_link(a("ff02::16"))); // MLDv2 report
-        assert!(icmp6_dst_on_link(a("fc00::1"))); // ULA
         assert!(icmp6_dst_on_link(ula(1))); // this engine's on-link host end (fd00:200::1)
+        assert!(icmp6_dst_on_link(ula(2))); // the guest's own end, same /64
 
         // Routable / off-link: policed, not spared. Global unicast, and wider-scope multicast that a
         // multicast router could carry off the link (only link-local ff02:: is a neighbor group).
@@ -1205,6 +1224,32 @@ mod v6_tests {
         assert!(!icmp6_dst_on_link(a("ff0e::1"))); // global-scope multicast
         assert!(!icmp6_dst_on_link(a("ff05::1"))); // site-scope multicast
         assert!(!icmp6_dst_on_link(a("::1"))); // loopback (never a guest egress dst)
+    }
+
+    #[test]
+    fn a_ula_outside_the_guests_own_link_is_policed_not_spared() {
+        // The spare exists so steady-state NUD to the on-link host end keeps working, and that is
+        // one `/64`. Sparing all of `fc00::/7` hands a guest an unpoliced ICMPv6 channel to every
+        // ULA there is: RFC 4193 addresses are *routable within a site*, so on a host whose netns
+        // an operator furnished with an uplink (design decision 9), an Echo carries payload to
+        // internal infrastructure without `POLICY6` ever being consulted. Deny-by-default has to
+        // reach these exactly as it reaches global unicast.
+        let a = |s: &str| s.parse::<core::net::Ipv6Addr>().unwrap().octets();
+        assert!(
+            !icmp6_dst_on_link(a("fc00::1")),
+            "a ULA in another prefix is a routable destination, not this link"
+        );
+        assert!(
+            !icmp6_dst_on_link(a("fd00:999::1")),
+            "a neighbouring fd00::/8 ULA is still off this link"
+        );
+        assert!(
+            !icmp6_dst_on_link(a("fd00:200:0:1::1")),
+            "the adjacent /64 is off-link: the guest's link is fd00:200::/64, not fd00:200::/48"
+        );
+        // The host end and everything else on the guest's own /64 stay spared, so NUD is unaffected.
+        assert!(icmp6_dst_on_link(a("fd00:200::1")));
+        assert!(icmp6_dst_on_link(a("fd00:200::ffff")));
     }
 
     #[test]

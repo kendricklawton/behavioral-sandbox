@@ -552,7 +552,7 @@ fn egress_verdict6(_ctx: &TcContext, key: &FlowKey6) -> Verdict {
     }
     // ICMPv6 is the v6 twin of ARP, but unlike ARP (its own ethertype) it rides the IPv6 ethertype and
     // can carry a routable Echo, so spare it only to **on-link** scopes: the neighbor-discovery / MLD /
-    // NUD traffic (link-local, link-scoped multicast, the on-link host end's ULA) the guest needs to
+    // NUD traffic (link-local, link-scoped multicast, the guest's own link) the guest needs to
     // resolve and keep its host end, none of which routes off the link. ICMPv6 to a routable
     // (global-unicast) destination falls through to `POLICY6` and is denied by default, the same
     // posture v4 gives ICMPv4, so a spared Echo can't be an egress channel that leans solely on the

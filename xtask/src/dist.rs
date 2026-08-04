@@ -574,6 +574,84 @@ mod tests {
         );
     }
 
+    /// The same drift guard, for the guest's IPv6 link. `ekvm-probes-common` needs the prefix as a
+    /// `#![no_std]` constant ([`GUEST_LINK6`]) because the in-kernel ICMPv6 spare decides on-link
+    /// versus routable without a map lookup; `crates/engine/src/net.rs` owns the addresses it
+    /// actually assigns. The engine does not depend on `probes-common`, and its address constants
+    /// are `pub(crate)`, so neither can read the other: the copies are compared here, exactly as the
+    /// Firecracker pin's are.
+    ///
+    /// Drift is a **security** defect, not an inconsistency. If the engine re-addresses the link and
+    /// the eBPF constant stays put, the spare stops covering the real host end (NUD breaks, noisily)
+    /// or, worse, keeps sparing a prefix the guest can now route off, which is the unpoliced ICMPv6
+    /// channel narrowing `fc00::/7` to this one `/64` closed.
+    #[test]
+    fn the_guest_v6_link_is_the_same_in_the_engine_and_the_probes() {
+        let repo = workspace_root();
+        let net = std::fs::read_to_string(repo.join("crates/engine/src/net.rs"))
+            .expect("crates/engine/src/net.rs");
+        let common = std::fs::read_to_string(repo.join("crates/probes-common/src/lib.rs"))
+            .expect("crates/probes-common/src/lib.rs");
+
+        // The engine writes its ends as `Ipv6Addr::new(0xfd00, 0x200, 0, 0, 0, 0, 0, N)`; take the
+        // first two hextets (the /32 the /64 prefix's non-zero bytes live in) plus the prefix length.
+        let hextets = |text: &str, name: &str| -> Option<(u16, u16)> {
+            let line = text
+                .lines()
+                .find(|l| l.contains(name) && l.contains("Ipv6Addr::new"))?;
+            let args = line.split("Ipv6Addr::new(").nth(1)?.split(')').next()?;
+            let mut it = args.split(',').map(str::trim);
+            let parse = |t: &str| u16::from_str_radix(t.trim_start_matches("0x"), 16).ok();
+            Some((parse(it.next()?)?, parse(it.next()?)?))
+        };
+        let host = hextets(&net, "HOST_IP6").expect("net.rs must define HOST_IP6");
+        let guest = hextets(&net, "GUEST_IP6").expect("net.rs must define GUEST_IP6");
+        assert_eq!(host, guest, "the two ends must sit on one prefix");
+        let engine_len: u8 = net
+            .lines()
+            .find(|l| l.contains("HOST_PREFIX6") && l.contains('='))
+            .and_then(|l| l.rsplit('=').next())
+            .map(|v| v.trim().trim_end_matches(';').trim())
+            .and_then(|v| v.parse().ok())
+            .expect("net.rs must define HOST_PREFIX6");
+
+        // `GUEST_LINK6` is `([u8; 16], u8)`, so the declaration ends at the tuple's `);` (not at the
+        // first `;`, which sits inside the array type). Its first four bytes carry the same two
+        // hextets the engine writes, and its trailing decimal is the prefix length.
+        let body = common
+            .split("pub const GUEST_LINK6")
+            .nth(1)
+            .and_then(|rest| rest.split(");").next())
+            .expect("probes-common must define GUEST_LINK6");
+        let bytes: Vec<u16> = body
+            .split(|c: char| !c.is_ascii_hexdigit() && c != 'x')
+            .filter(|t| t.starts_with("0x"))
+            .filter_map(|t| u16::from_str_radix(&t[2..], 16).ok())
+            .collect();
+        assert!(
+            bytes.len() >= 4,
+            "GUEST_LINK6 must spell its prefix bytes as 0x.. literals, got {bytes:?}"
+        );
+        let probes = (
+            (bytes[0] << 8) | bytes[1],
+            (bytes[2] << 8) | bytes[3],
+            body.rsplit(',')
+                .find_map(|t| t.trim().parse::<u8>().ok())
+                .expect("GUEST_LINK6 must carry a prefix length"),
+        );
+        assert_eq!(
+            (host.0, host.1, engine_len),
+            probes,
+            "the engine assigns {:x}:{:x}::/{engine_len} but the eBPF ICMPv6 spare covers \
+             {:x}:{:x}::/{}: the in-kernel policy and the real link must name one prefix",
+            host.0,
+            host.1,
+            probes.0,
+            probes.1,
+            probes.2
+        );
+    }
+
     /// Same drift guard, for the Firecracker pin. `install.sh` carries its own copy of the pinned
     /// release sha256 (installers run it before this repo is built, so it cannot call into `ekvm`),
     /// and `doctor.rs` carries the one the engine checks at runtime. Two copies of a security-
