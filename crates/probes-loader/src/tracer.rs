@@ -157,6 +157,11 @@ pub struct SyscallTracer {
     /// spin forever. Its `MapData` owns the map fd, taken out of `ebpf`; the attached programs keep
     /// writing to the same kernel map.
     events: RingBuf<MapData>,
+    /// Ring records [`drain`](Self::drain) could not decode as a [`SyscallEvent`] (the userspace
+    /// twin of the kernel's `EVENT_DROPS` counter), read by
+    /// [`undecodable_events`](Self::undecodable_events) so writer/reader drift surfaces as a
+    /// coverage gap instead of an empty footprint reading as a quiet run.
+    undecodable: u64,
 }
 
 impl SyscallTracer {
@@ -199,7 +204,11 @@ impl SyscallTracer {
         let events = RingBuf::try_from(events_map)
             .map_err(|e| ProbeError::Map(format!("open `{EVENTS_MAP}` as a ring buffer: {e}")))?;
 
-        Ok(Self { ebpf, events })
+        Ok(Self {
+            ebpf,
+            events,
+            undecodable: 0,
+        })
     }
 
     /// Watch only the process tree with this **tgid** (the userspace pid): the programs drop events
@@ -259,6 +268,17 @@ impl SyscallTracer {
     /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
     pub fn dropped_events(&self) -> Result<u64, ProbeError> {
         per_cpu_sum(&self.ebpf, EVENT_DROPS_MAP)
+    }
+
+    /// Ring records [`drain`](Self::drain) read but could not decode as a [`SyscallEvent`]: the
+    /// userspace twin of [`dropped_events`](Self::dropped_events), covering writer/reader drift
+    /// (a resized or reshaped kernel event record) the way that one covers a full buffer. A
+    /// monotonic counter since [`load`](Self::load); callers snapshot it around a window and
+    /// report a nonzero delta as a coverage gap. Zero on a healthy host: the kernel writer sizes
+    /// every record it commits.
+    #[must_use]
+    pub fn undecodable_events(&self) -> u64 {
+        self.undecodable
     }
 
     /// Register `cgroup_id` in the trace target *set* and switch to set mode if not already, so from
@@ -335,8 +355,11 @@ impl SyscallTracer {
 
     /// Drain every event currently in the ring buffer, calling `on_event` for each, and return how
     /// many were delivered. **Non-blocking**: it returns 0 when the buffer is empty rather than
-    /// waiting; [`stream`](Self::stream) wraps it in the live-trace loop. A record too short to parse
-    /// is skipped, not an error.
+    /// waiting; [`stream`](Self::stream) wraps it in the live-trace loop. A record that does not
+    /// decode is **counted** ([`undecodable_events`](Self::undecodable_events)) and skipped, never
+    /// silent: an `Err` here would abandon every event still queued behind the bad record (and the
+    /// shared multi-sandbox drain discards drain errors), so the loss rides a counter the collector
+    /// turns into a coverage gap instead.
     ///
     /// # Errors
     /// Currently infallible (the consumer was opened once at [`load`](Self::load)); the `Result` is
@@ -349,7 +372,7 @@ impl SyscallTracer {
         // consumer every call, so its position/cache stay coherent (a fresh one would spin, see the
         // field doc).
         while let Some(item) = self.events.next() {
-            if let Some(event) = SyscallEvent::from_bytes(&item) {
+            if let Some(event) = decode_or_count(&item, &mut self.undecodable) {
                 on_event(event);
                 delivered += 1;
             }
@@ -387,5 +410,54 @@ impl SyscallTracer {
             }
         }
         Ok(total)
+    }
+}
+
+/// Decode one ring record, or count it: `Some(event)` when the bytes decode as a [`SyscallEvent`],
+/// else bump `undecodable` (saturating, the adversarial-counter discipline [`per_cpu_sum`] states)
+/// and `None`. Pure, so the skip branch, unreachable from a real kernel ring buffer (the writer
+/// sizes every record it commits), is testable host-safe.
+fn decode_or_count(bytes: &[u8], undecodable: &mut u64) -> Option<SyscallEvent> {
+    match SyscallEvent::from_bytes(bytes) {
+        Some(event) => Some(event),
+        None => {
+            *undecodable = undecodable.saturating_add(1);
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Host-safe: the decode-or-count decision on raw bytes, no aya, no kernel.
+    use super::decode_or_count;
+    use ekvm_probes_common::EVENT_SIZE;
+
+    #[test]
+    fn a_short_ring_record_is_counted_not_silently_dropped() {
+        let mut undecodable = 0u64;
+        let short = [0u8; EVENT_SIZE - 1];
+        assert!(decode_or_count(&short, &mut undecodable).is_none());
+        assert_eq!(
+            undecodable, 1,
+            "a record that does not decode must be counted, never silently skipped"
+        );
+    }
+
+    #[test]
+    fn the_undecodable_counter_saturates_instead_of_wrapping() {
+        // Adversarial-counter discipline: a huge count must never wrap down to a small one, and a
+        // debug-build overflow panic is forbidden on the host path.
+        let mut undecodable = u64::MAX;
+        assert!(decode_or_count(&[], &mut undecodable).is_none());
+        assert_eq!(undecodable, u64::MAX);
+    }
+
+    #[test]
+    fn a_full_size_record_decodes_and_counts_nothing() {
+        let mut undecodable = 0u64;
+        let full = [0u8; EVENT_SIZE];
+        assert!(decode_or_count(&full, &mut undecodable).is_some());
+        assert_eq!(undecodable, 0, "a decoded record is not a loss");
     }
 }

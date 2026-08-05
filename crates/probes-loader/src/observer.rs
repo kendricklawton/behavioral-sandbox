@@ -168,6 +168,13 @@ impl SharedTracer {
             .flatten()
     }
 
+    /// The reader-side twin of [`drops`](Self::drops): the tracer's undecodable-record counter
+    /// ([`SyscallTracer::undecodable_events`]), covering writer/reader drift the way `drops` covers
+    /// a full buffer. `None` only if the lock is poisoned.
+    fn undecodable(&self) -> Option<u64> {
+        self.with(|inner| inner.tracer.undecodable_events())
+    }
+
     fn with<R>(&self, f: impl FnOnce(&mut TracerInner) -> R) -> Option<R> {
         self.0.lock().ok().map(|mut g| f(&mut g))
     }
@@ -188,6 +195,26 @@ fn drain_route(inner: &mut TracerInner) -> usize {
         .unwrap_or(0)
 }
 
+/// Fold a monotonic loss counter's attach-to-collect window into a coverage gap: `None` when both
+/// endpoints read and nothing was lost; `lost(delta)` when the counter moved; `unreadable` when
+/// either endpoint is missing, because unknown loss is still loss, never silence. The one delta
+/// rule both of `collect`'s host-syscall loss counters (kernel ring drops, reader-side undecodable
+/// records) go through, so neither can drift into its own laxer reading.
+fn loss_gap(
+    before: Option<u64>,
+    after: Option<u64>,
+    lost: impl FnOnce(u64) -> String,
+    unreadable: &'static str,
+) -> Option<AxisGap> {
+    match (before, after) {
+        (Some(before), Some(after)) if after > before => {
+            Some(AxisGap::HostSyscalls(lost(after - before).into()))
+        }
+        (Some(_), Some(_)) => None, // both endpoints read, no increase: exact
+        _ => Some(AxisGap::HostSyscalls(unreadable.into())),
+    }
+}
+
 /// Live bundle for one VM: a target registration on the shared tracer + meter, the per-VM tap, and the
 /// coverage gaps seen so far. [`collect`](Self::collect) finalizes it into a [`RunRecord`] while
 /// the sandbox is still alive; dropping without collecting detaches (RAII) and unregisters both shared
@@ -206,6 +233,9 @@ pub struct SandboxProbes {
     /// The kernel's cumulative ring-buffer drop count at attach time; `collect` reports a nonzero
     /// delta as a coverage gap (the footprint may undercount). `None` if unreadable at attach.
     drops_at_attach: Option<u64>,
+    /// The [`drops_at_attach`](Self::drops_at_attach) twin for the reader-side undecodable-record
+    /// counter; a nonzero delta at `collect` is the same class of gap.
+    undecodable_at_attach: Option<u64>,
     /// The default route the driver configured, carried through to the record. The tap cannot see
     /// it, so it rides as a plain value rather than being observed.
     gateway: Option<std::net::Ipv4Addr>,
@@ -312,6 +342,7 @@ impl SandboxProbes {
             meter: meter.clone(),
             metered,
             drops_at_attach: if traced { tracer.drops() } else { None },
+            undecodable_at_attach: if traced { tracer.undecodable() } else { None },
             gaps,
             finalized: false,
         }
@@ -342,28 +373,34 @@ impl SandboxProbes {
         };
         self.traced = false;
 
-        // The shared ring buffer is host-global; if the kernel counted drops during this run's window,
-        // the footprint may undercount, say so instead of looking exact. And if the tracer was attached
-        // but either endpoint of the delta is *unreadable*, the loss is unknown, still a gap (unknown
+        // The shared ring buffer is host-global; if either loss counter moved during this run's
+        // window (the kernel's full-buffer drops, or the reader's undecodable records), the
+        // footprint may undercount, say so instead of looking exact. And if the tracer was attached
+        // but either endpoint of a delta is *unreadable*, the loss is unknown, still a gap (unknown
         // loss is loss), never silence.
         if had_tracer {
-            match (self.drops_at_attach, self.tracer.drops()) {
-                (Some(before), Some(after)) if after > before => {
-                    self.gaps.push(AxisGap::HostSyscalls(
-                        format!(
-                        "ring buffer dropped {} event(s) during this run's window; the footprint \
-                         may undercount",
-                        after - before
+            self.gaps.extend(loss_gap(
+                self.drops_at_attach,
+                self.tracer.drops(),
+                |n| {
+                    format!(
+                        "ring buffer dropped {n} event(s) during this run's window; the footprint \
+                         may undercount"
                     )
-                        .into(),
-                    ));
-                }
-                (Some(_), Some(_)) => {} // both read, no increase: exact
-                _ => self.gaps.push(AxisGap::HostSyscalls(
-                    "ring-buffer event-loss counter unreadable at finalize; possible undercount"
-                        .into(),
-                )),
-            }
+                },
+                "ring-buffer event-loss counter unreadable at finalize; possible undercount",
+            ));
+            self.gaps.extend(loss_gap(
+                self.undecodable_at_attach,
+                self.tracer.undecodable(),
+                |n| {
+                    format!(
+                        "{n} ring record(s) did not decode as a SyscallEvent (kernel/userspace \
+                         event-record drift); the footprint may undercount"
+                    )
+                },
+                "undecodable-record counter unreadable at finalize; possible undercount",
+            ));
         }
 
         // Network + denials from the one per-VM tap monitor. Totals are the section's spine (a section
@@ -602,6 +639,35 @@ impl Drop for SandboxProbes {
                 let _ = m.remove_target(cgid);
                 m.clear(cgid)
             });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Host-safe: the loss-counter delta rule on plain values, no aya, no kernel.
+    use super::loss_gap;
+
+    #[test]
+    fn a_counter_increase_between_attach_and_collect_is_a_gap() {
+        let gap = loss_gap(Some(2), Some(5), |n| format!("{n} lost"), "unreadable")
+            .expect("an increase is loss");
+        assert_eq!(gap.reason(), "3 lost", "the gap names the window's delta");
+    }
+
+    #[test]
+    fn equal_endpoints_are_exact_and_gap_nothing() {
+        assert!(loss_gap(Some(7), Some(7), |n| format!("{n} lost"), "unreadable").is_none());
+        assert!(loss_gap(Some(0), Some(0), |n| format!("{n} lost"), "unreadable").is_none());
+    }
+
+    #[test]
+    fn an_unreadable_endpoint_is_unknown_loss_which_is_still_a_gap() {
+        // Unknown loss is loss: a missing endpoint on either side must gap, never read as exact.
+        for (before, after) in [(None, Some(5)), (Some(2), None), (None, None)] {
+            let gap = loss_gap(before, after, |n| format!("{n} lost"), "counter unreadable")
+                .expect("a missing endpoint is unknown loss");
+            assert_eq!(gap.reason(), "counter unreadable");
         }
     }
 }
