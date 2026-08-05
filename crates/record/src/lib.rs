@@ -35,6 +35,10 @@ mod stats;
 /// The model-legible projection of the record (`RunRecord::to_summary_json`): the compact, third face
 /// for an agent's observe→act loop. A pure view of the record, golden-tested host-safe.
 mod summary;
+/// Synthetic wire-struct inputs shared by the three modules' unit tests, so a field added to one of
+/// those structs is answered once rather than in three copies that drift.
+#[cfg(test)]
+mod testutil;
 
 pub use json::AUDIT_SCHEMA_VERSION;
 pub use record::{

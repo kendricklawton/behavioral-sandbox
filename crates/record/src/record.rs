@@ -641,26 +641,7 @@ impl AxisGap {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Build a synthetic event: a syscall kind (or a raw discriminant), a cgroup, a detail blob, and a
-    /// comm. Fields are `pub` on `SyscallEvent`, so no eBPF is involved.
-    fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; ekvm_probes_common::DETAIL_CAP];
-        let n = detail.len().min(d.len());
-        d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; ekvm_probes_common::COMM_CAP];
-        let m = comm.len().min(c.len());
-        c[..m].copy_from_slice(&comm.as_bytes()[..m]);
-        SyscallEvent {
-            cgroup_id: cgroup,
-            pid: 7,
-            tid: 7,
-            syscall,
-            detail_len: n as u32,
-            comm: c,
-            detail: d,
-        }
-    }
+    use crate::testutil::ev;
 
     const CG: u64 = 0x42;
 

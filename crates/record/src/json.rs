@@ -429,94 +429,11 @@ pub(crate) fn json_escape_into(out: &mut String, s: &str) {
 mod tests {
     use std::time::Duration;
 
-    use ekvm_probes_common::{FlowCounts, FlowKey, IPPROTO_TCP, IPPROTO_UDP, SyscallEvent};
+    use ekvm_probes_common::{IPPROTO_TCP, IPPROTO_UDP};
 
     use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
-    use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
-
-    /// Build a synthetic `SyscallEvent` from public fields (no eBPF), matching `record.rs`'s helper.
-    fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; ekvm_probes_common::DETAIL_CAP];
-        let n = detail.len().min(d.len());
-        d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; ekvm_probes_common::COMM_CAP];
-        let m = comm.len().min(c.len());
-        c[..m].copy_from_slice(&comm.as_bytes()[..m]);
-        SyscallEvent {
-            cgroup_id: cgroup,
-            pid: 7,
-            tid: 7,
-            syscall,
-            detail_len: n as u32,
-            comm: c,
-            detail: d,
-        }
-    }
-
-    fn flow(
-        src: [u8; 4],
-        sport: u16,
-        dst: [u8; 4],
-        dport: u16,
-        proto: u8,
-    ) -> (FlowKey, FlowCounts) {
-        (
-            FlowKey::new(
-                u32::from_be_bytes(src),
-                u32::from_be_bytes(dst),
-                sport,
-                dport,
-                proto,
-            ),
-            FlowCounts {
-                ingress_packets: 2,
-                ingress_bytes: 120,
-                egress_packets: 3,
-                egress_bytes: 200,
-            },
-        )
-    }
-
-    /// A representative record with every axis populated, for the golden and stability tests.
-    fn sample(flows: Vec<(FlowKey, FlowCounts)>) -> RunRecord {
-        let totals = NetStats {
-            ingress_packets: 2,
-            ingress_bytes: 120,
-            egress_packets: 3,
-            egress_bytes: 200,
-        };
-        let denials = vec![(
-            FlowKey::new(0, u32::from_be_bytes([9, 9, 9, 9]), 0, 443, IPPROTO_TCP),
-            4,
-        )];
-        let resources = ResourceSummary {
-            cpu_time: Duration::from_nanos(5_000),
-            cgroup: CgroupStats {
-                cpu_usage_usec: Some(6),
-                memory_current: Some(1024),
-                memory_peak: Some(4096),
-                io_rbytes: None,
-                io_wbytes: Some(512),
-            },
-        };
-        // execve once + openat twice (same path) exercises the notable de-dup + sort.
-        let host_syscalls = SyscallFootprint::from_events(
-            0x42,
-            &[
-                ev(0, 0x42, b"/bin/sh", "sh"),
-                ev(1, 0x42, b"/etc/hosts", "sh"),
-                ev(1, 0x42, b"/etc/hosts", "sh"),
-            ],
-        );
-        RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
-            Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
-            resources,
-            host_syscalls,
-            Timing::new(Duration::from_millis(120), Duration::from_millis(42)),
-            vec![AxisGap::Cpu("meter lock poisoned".into())],
-        )
-    }
+    use crate::testutil::{ev, flow, sample};
+    use crate::{AxisGap, NetStats, ResourceSummary};
 
     #[test]
     fn a_path_cut_at_the_cap_is_marked_in_the_record() {
