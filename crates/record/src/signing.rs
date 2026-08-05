@@ -242,7 +242,7 @@ impl HostKey {
             out.push('"');
         }
         out.push_str(",\"record\":\"");
-        push_json_string(&mut out, canonical);
+        crate::json::json_escape_into(&mut out, canonical);
         out.push_str("\"}");
         out
     }
@@ -510,24 +510,6 @@ fn hexval(c: u8) -> Result<u8, ()> {
     }
 }
 
-/// Escape `s` as the contents of a JSON string (no surrounding quotes). The record is embedded this
-/// way so its bytes survive verbatim; the inverse is any JSON parser's string unescape.
-fn push_json_string(out: &mut String, s: &str) {
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-}
-
 /// A signing-key load/generate failure.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -643,6 +625,24 @@ mod tests {
     /// A fixed seed so signatures are deterministic in tests (ed25519 signing is deterministic).
     fn test_key() -> HostKey {
         HostKey::from_seed([7u8; 32])
+    }
+
+    /// The envelope embeds the record as a JSON string, so the bytes it escapes are the bytes that
+    /// get signed. Two escapers would be two chances to be wrong about them; assert there is one.
+    /// The control characters below are exactly where the old pair disagreed: the record escaper
+    /// had dedicated `\b`/`\f` arms and the envelope escaper fell through to the `\u00XX` form.
+    #[test]
+    fn the_envelope_escapes_a_string_exactly_as_the_record_does() {
+        let hostile = "tab\tnl\nquote\"backslash\\bs\u{08}ff\u{0C}nul\u{00}";
+        let mut envelope = String::new();
+        crate::json::json_escape_into(&mut envelope, hostile);
+        let mut record = String::new();
+        crate::json::json_str(&mut record, hostile);
+        assert_eq!(
+            format!("\"{envelope}\""),
+            record,
+            "one escaper: the envelope's bytes are the record's, quotes aside"
+        );
     }
 
     #[test]

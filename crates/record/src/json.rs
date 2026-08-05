@@ -400,6 +400,14 @@ pub(crate) fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, fir
 /// re-validate UTF-8.
 pub(crate) fn json_str(out: &mut String, s: &str) {
     out.push('"');
+    json_escape_into(out, s);
+    out.push('"');
+}
+
+/// [`json_str`] without the surrounding quotes: the escaping itself, so the signing envelope, which
+/// embeds the whole record *as* a JSON string, escapes by the same rules the record does rather than
+/// by a second copy of them. The bytes this produces are the bytes that get signed.
+pub(crate) fn json_escape_into(out: &mut String, s: &str) {
     for ch in s.chars() {
         match ch {
             '"' => out.push_str("\\\""),
@@ -415,7 +423,6 @@ pub(crate) fn json_str(out: &mut String, s: &str) {
             c => out.push(c),
         }
     }
-    out.push('"');
 }
 
 #[cfg(test)]
