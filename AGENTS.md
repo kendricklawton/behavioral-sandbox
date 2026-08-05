@@ -158,4 +158,7 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   drops every `publish = false` package (all of them) and exits `0` having checked nothing. It is
   also inert until `0.1.0`, since cargo treats every `0.0.x` bump as already breaking.
 - **Non-Rust SDKs live in separate repos** (`ekvm-sdk-python`, `ekvm-sdk-js`, `ekvm-sdk-go`); do not pull
-  Python, Node, or Go build tooling into this workspace.
+  Python, Node, or Go build tooling into this workspace. The same holds for a **web frontend**: a
+  dashboard is the hoster's layer (design rule 4, and `docs/embedding-scope.md` states it as a
+  non-goal), so its build tooling stays out of this workspace too. Anything that authenticates
+  *users* belongs there, never in `ekvm-protocol`: the wire carries no identity by design.
