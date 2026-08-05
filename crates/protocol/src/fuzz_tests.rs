@@ -76,7 +76,11 @@ fn rand_request(rng: &mut Rng) -> Request {
             vcpus: Some(rng.byte()),
             mem_mib: Some(rng.next_u64() as u32),
             wall_secs: Some(rng.next_u64()),
-            output_cap: None,
+            output_cap: if rng.below(2) == 0 {
+                Some(rng.next_u64())
+            } else {
+                None
+            },
             net: Some(rng.below(2) == 0),
             allow: if rng.below(2) == 0 {
                 Some((0..rng.below(4)).map(|_| rand_string(rng)).collect())
@@ -137,7 +141,7 @@ fn rand_fault_kind(rng: &mut Rng) -> FaultKind {
 }
 
 fn rand_response(rng: &mut Rng) -> Response {
-    match rng.below(10) {
+    match rng.below(11) {
         0 => Response::Opened {
             boot_ms: rng.next_u64(),
             pooled: rng.below(2) == 0,
@@ -170,6 +174,9 @@ fn rand_response(rng: &mut Rng) -> Response {
             retry_after_ms: rng.next_u64(),
         },
         8 => Response::Cancelled,
+        9 => Response::TraceSummary {
+            summary: json!({"schema": 1, "n": rng.byte()}),
+        },
         _ => Response::Put {
             path: rand_string(rng),
         },
@@ -242,8 +249,9 @@ fn truncations_of_valid_messages_never_panic() {
     }
 }
 
-/// A line at or past the cap is a typed `TooLarge`, never an unbounded buffer, the DoS a client can
-/// attempt by never sending a newline. `read_line_capped` must refuse before `out` exceeds the cap.
+/// A line past the cap is a typed `TooLarge` (an exactly-at-cap line is still legal), never an
+/// unbounded buffer, the DoS a client can attempt by never sending a newline. `read_line_capped`
+/// must refuse before `out` exceeds the cap.
 #[test]
 fn an_overlong_line_is_bounded_not_buffered() {
     // One byte past the cap with no newline: the reader must stop at the cap, not read it all in.

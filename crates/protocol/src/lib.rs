@@ -392,7 +392,7 @@ pub enum Response {
         kind: FaultKind,
     },
     /// The daemon refused because it is **at capacity**: the `--max-sessions` count ceiling or an
-    /// aggregate resource ceiling. is full. Distinct from [`Error`](Self::Error) so a
+    /// aggregate resource ceiling is full. Distinct from [`Error`](Self::Error) so a
     /// fleet dispatcher can branch on backpressure ("full, try another host") without string-matching
     /// a message; it is always session-ending. `retry_after_ms` is a backoff hint, not a promise (the
     /// daemon cannot know when a slot frees).
@@ -590,7 +590,7 @@ fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
         Some(other) => return Err(ProtocolError::Schema(other)),
         None => {
             return Err(ProtocolError::Malformed(
-                "missing `schema` field".to_string(),
+                "missing or non-integer `schema` field".to_string(),
             ))
         }
     }
@@ -691,14 +691,16 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
     // serialize error is a bug, not a runtime state, fold it into `Io` rather than a new variant.
     let mut line = serde_json::to_string(&envelope)
         .map_err(|e| ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-    line.push('\n');
     // The encode side honors the same size envelope as the decode side: a line the peer's own
     // `read_message` would reject as `TooLarge` is refused *here*, typed, before any byte moves.
+    // Checked before the newline is appended, since the read side's cap is on the line's content
+    // (`read_line_capped` excludes the terminator), so the two bounds name one number.
     // Latent today (every producer is bounded well under the cap: flows ≤ 4096, notable ≤ 64), but
     // the size contract must not live as an implicit invariant of a different crate's caps.
     if line.len() > MAX_MESSAGE_BYTES {
         return Err(ProtocolError::TooLarge);
     }
+    line.push('\n');
     w.write_all(line.as_bytes()).map_err(ProtocolError::Io)?;
     w.flush().map_err(ProtocolError::Io)
 }
@@ -788,6 +790,7 @@ mod tests {
             Request::Trace,
             Request::TraceSummary,
             Request::Close,
+            Request::Cancel,
         ] {
             assert_eq!(roundtrip_request(&req), req);
         }
@@ -948,6 +951,53 @@ mod tests {
                 "{bad:?} should be a typed Malformed error"
             );
         }
+    }
+
+    #[test]
+    fn the_size_cap_names_one_number_on_both_sides_of_the_wire() {
+        // The bound is the line's content, the newline excluded, on the write side exactly as on
+        // the read side (`read_line_capped` drops the terminator before counting): a message whose
+        // line is exactly [`MAX_MESSAGE_BYTES`] encodes and decodes, one more byte is refused by
+        // the writer before any byte moves. Pinned because the writer used to count the newline
+        // too, refusing an at-cap line its own peer would have accepted.
+        let overhead = {
+            let mut w = Vec::new();
+            write_message(
+                &mut w,
+                &Request::Put {
+                    path: "p".into(),
+                    content: String::new(),
+                },
+            )
+            .expect("encode");
+            w.len() - 1 // the line's content: everything but the newline
+        };
+        let at_cap = Request::Put {
+            path: "p".into(),
+            content: "x".repeat(MAX_MESSAGE_BYTES - overhead),
+        };
+        let mut wire = Vec::new();
+        write_message(&mut wire, &at_cap).expect("an at-cap line encodes");
+        assert_eq!(
+            wire.len(),
+            MAX_MESSAGE_BYTES + 1,
+            "content at the cap, plus the newline"
+        );
+        let back: Request = read_message(&mut wire.as_slice())
+            .expect("the peer accepts an at-cap line")
+            .expect("a message");
+        assert_eq!(back, at_cap);
+
+        let over = Request::Put {
+            path: "p".into(),
+            content: "x".repeat(MAX_MESSAGE_BYTES - overhead + 1),
+        };
+        let mut wire = Vec::new();
+        assert!(matches!(
+            write_message(&mut wire, &over),
+            Err(ProtocolError::TooLarge)
+        ));
+        assert!(wire.is_empty(), "refused before any byte moved");
     }
 
     #[test]
