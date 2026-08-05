@@ -31,7 +31,10 @@ use crate::policy::{Policy, Requested, parse_allow};
 use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, ErrorKind, Limits, RunningVm, Vm, VmmError};
 use ekvm_engine::{MAX_VCPUS, vcpus_supported};
 use ekvm_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
-use ekvm_protocol::{FaultKind, ProtocolError, Request, Response, read_message, write_message};
+use ekvm_protocol::{
+    ExecParams, FaultKind, GetParams, OpenParams, ProtocolError, PutParams, Request, Response,
+    read_message, write_message,
+};
 
 use crate::metrics::{Metrics, Verb};
 use crate::serve::{
@@ -219,7 +222,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 let _ = send(&mut writer, &Response::Closed);
                 break;
             }
-            Ok(Some(Request::Open { .. })) => {
+            Ok(Some(Request::Open(OpenParams { .. }))) => {
                 if !send(
                     &mut writer,
                     &nonfatal(
@@ -230,7 +233,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     break;
                 }
             }
-            Ok(Some(Request::Exec { argv, stdin, env })) => {
+            Ok(Some(Request::Exec(ExecParams {
+                argv, stdin, env, ..
+            }))) => {
                 server.metrics.request(Verb::Exec);
                 let t0 = Instant::now();
                 let (result, interrupted) = exec_watching_for_cancel(
@@ -290,7 +295,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     break;
                 }
             }
-            Ok(Some(Request::Put { path, content })) => {
+            Ok(Some(Request::Put(PutParams { path, content, .. }))) => {
                 server.metrics.request(Verb::Put);
                 let t0 = Instant::now();
                 let result = vm.exec_with_files(
@@ -312,7 +317,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     break;
                 }
             }
-            Ok(Some(Request::Get { path })) => {
+            Ok(Some(Request::Get(GetParams { path, .. }))) => {
                 server.metrics.request(Verb::Get);
                 let t0 = Instant::now();
                 let result = vm.exec_with_files(
@@ -706,7 +711,7 @@ struct SessionNet {
 /// than clamping, like [`open_limits`]: a session that asked for egress it cannot have is an error,
 /// never a quietly narrowed run.
 fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusal> {
-    let Request::Open { net, allow, .. } = req else {
+    let Request::Open(OpenParams { net, allow, .. }) = req else {
         return Err(OpenRefusal::Malformed(
             "first message must be `open`".to_string(),
         ));
@@ -771,14 +776,15 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusa
 /// is what makes an operator ceiling real. Asking past a ceiling is refused, never
 /// quietly clamped.
 fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), OpenRefusal> {
-    let Request::Open {
+    let Request::Open(OpenParams {
         vcpus,
         mem_mib,
         wall_secs,
         output_cap,
         net,
         allow,
-    } = req
+        ..
+    }) = req
     else {
         return Err(OpenRefusal::Malformed(
             "first message must be `open`".to_string(),
@@ -1029,18 +1035,24 @@ fn ms(d: Duration) -> u64 {
 mod tests {
     use super::*;
 
+    /// An `open` with the given knobs set on an otherwise-default request: the foreign-crate way
+    /// to build the `#[non_exhaustive]` params struct, and the shape every future knob keeps.
+    fn open_req(set: impl FnOnce(&mut OpenParams)) -> Request {
+        let mut p = OpenParams::default();
+        set(&mut p);
+        Request::Open(p)
+    }
+
     #[test]
     fn open_limits_folds_validates_and_flags_bare() {
         // A full open folds each knob and is not bare; the defaults stand where omitted.
         let (limits, bare) = open_limits(
-            &Request::Open {
-                vcpus: Some(4),
-                mem_mib: Some(1024),
-                wall_secs: Some(60),
-                output_cap: Some(4096),
-                net: None,
-                allow: None,
-            },
+            &open_req(|p| {
+                p.vcpus = Some(4);
+                p.mem_mib = Some(1024);
+                p.wall_secs = Some(60);
+                p.output_cap = Some(4096);
+            }),
             &Policy::default(),
         )
         .expect("valid open");
@@ -1051,18 +1063,7 @@ mod tests {
         assert_eq!(limits.output_cap, 4096);
 
         let d = Limits::default();
-        let (base, bare) = open_limits(
-            &Request::Open {
-                vcpus: None,
-                mem_mib: None,
-                wall_secs: None,
-                output_cap: None,
-                net: None,
-                allow: None,
-            },
-            &Policy::default(),
-        )
-        .expect("bare open");
+        let (base, bare) = open_limits(&open_req(|_| {}), &Policy::default()).expect("bare open");
         assert!(bare, "a fully-defaulted open is pool-eligible");
         assert_eq!(base.vcpus, d.vcpus);
         assert_eq!(base.mem_mib, d.mem_mib);
@@ -1081,14 +1082,9 @@ mod tests {
             ..Policy::default()
         };
         let err = open_limits(
-            &Request::Open {
-                vcpus: Some(16),
-                mem_mib: None,
-                wall_secs: None,
-                output_cap: None,
-                net: None,
-                allow: None,
-            },
+            &open_req(|p| {
+                p.vcpus = Some(16);
+            }),
             &policy,
         )
         .expect_err("16 vCPUs is past the operator's ceiling");
@@ -1104,14 +1100,9 @@ mod tests {
 
         // Under the ceiling still works, and the pool-eligibility signal is unaffected by policy.
         let (limits, bare) = open_limits(
-            &Request::Open {
-                vcpus: Some(2),
-                mem_mib: None,
-                wall_secs: None,
-                output_cap: None,
-                net: None,
-                allow: None,
-            },
+            &open_req(|p| {
+                p.vcpus = Some(2);
+            }),
             &policy,
         )
         .expect("at the ceiling is allowed");
@@ -1127,18 +1118,8 @@ mod tests {
             mem_mib: NonZeroU32::new(768),
             ..Policy::default()
         };
-        let (limits, bare) = open_limits(
-            &Request::Open {
-                vcpus: None,
-                mem_mib: None,
-                wall_secs: None,
-                output_cap: None,
-                net: None,
-                allow: None,
-            },
-            &policy,
-        )
-        .expect("bare open under policy");
+        let (limits, bare) =
+            open_limits(&open_req(|_| {}), &policy).expect("bare open under policy");
         assert_eq!(limits.mem_mib.get(), 768, "the house default applied");
         assert!(bare, "policy does not make a bare open non-bare");
     }
@@ -1147,14 +1128,9 @@ mod tests {
     fn a_single_knob_makes_the_open_non_bare() {
         // Even one custom knob means the pool's default-profile clone can't serve it, cold boot.
         let (_, bare) = open_limits(
-            &Request::Open {
-                vcpus: None,
-                mem_mib: Some(512),
-                wall_secs: None,
-                output_cap: None,
-                net: None,
-                allow: None,
-            },
+            &open_req(|p| {
+                p.mem_mib = Some(512);
+            }),
             &Policy::default(),
         )
         .expect("valid open");
@@ -1163,14 +1139,10 @@ mod tests {
 
     /// An `open` asking for a NIC and the given allowances.
     fn open_net(net: Option<bool>, allow: &[&str]) -> Request {
-        Request::Open {
-            vcpus: None,
-            mem_mib: None,
-            wall_secs: None,
-            output_cap: None,
-            net,
-            allow: Some(allow.iter().map(|s| (*s).to_string()).collect()),
-        }
+        open_req(|p| {
+            p.net = net;
+            p.allow = Some(allow.iter().map(|s| (*s).to_string()).collect());
+        })
     }
 
     #[test]
@@ -1280,47 +1252,27 @@ mod tests {
     fn open_limits_rejects_illegal_values_as_typed_messages() {
         for (req, needle) in [
             (
-                Request::Open {
-                    vcpus: Some(0),
-                    mem_mib: None,
-                    wall_secs: None,
-                    output_cap: None,
-                    net: None,
-                    allow: None,
-                },
+                open_req(|p| {
+                    p.vcpus = Some(0);
+                }),
                 "vcpus",
             ),
             (
-                Request::Open {
-                    vcpus: Some(33),
-                    mem_mib: None,
-                    wall_secs: None,
-                    output_cap: None,
-                    net: None,
-                    allow: None,
-                },
+                open_req(|p| {
+                    p.vcpus = Some(33);
+                }),
                 "vcpus",
             ),
             (
-                Request::Open {
-                    vcpus: None,
-                    mem_mib: Some(0),
-                    wall_secs: None,
-                    output_cap: None,
-                    net: None,
-                    allow: None,
-                },
+                open_req(|p| {
+                    p.mem_mib = Some(0);
+                }),
                 "mem_mib",
             ),
             (
-                Request::Open {
-                    vcpus: None,
-                    mem_mib: None,
-                    wall_secs: Some(0),
-                    output_cap: None,
-                    net: None,
-                    allow: None,
-                },
+                open_req(|p| {
+                    p.wall_secs = Some(0);
+                }),
                 "wall_secs",
             ),
         ] {

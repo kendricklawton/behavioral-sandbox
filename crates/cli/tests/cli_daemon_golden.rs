@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ekvm_client::{Client, OpenOptions};
+use ekvm_client::{Client, OpenParams};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -258,7 +258,7 @@ fn the_cli_and_the_daemon_render_a_run_identically() {
         panic!("set read timeout: {e}");
     }
     client
-        .open(OpenOptions::default())
+        .open(OpenParams::default())
         .unwrap_or_else(|e| panic!("open: {e}"));
 
     for (argv, stdin, expected) in cases() {

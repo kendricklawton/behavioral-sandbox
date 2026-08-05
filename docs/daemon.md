@@ -91,10 +91,10 @@ is `ekvm-protocol` and `serde_json`. Whether that line ever gets lifted is a que
 version sweep, not a promise here.
 
 ```rust,ignore
-use ekvm_client::{Client, OpenOptions};
+use ekvm_client::{Client, OpenParams};
 
 let mut client = Client::connect("/run/ekvm/ekvm.sock")?;
-client.open(OpenOptions::default())?;               // boot the session's sandbox
+client.open(OpenParams::default())?;                // boot the session's sandbox
 let run = client.exec(&["echo".into(), "hi".into()], "")?;
 assert_eq!(run.stdout, "hi\n");
 client.put("input.txt", "payload\n")?;              // stage a file for a later exec

@@ -72,7 +72,7 @@ fn rand_string(rng: &mut Rng) -> String {
 
 fn rand_request(rng: &mut Rng) -> Request {
     match rng.below(9) {
-        0 => Request::Open {
+        0 => Request::Open(OpenParams {
             vcpus: Some(rng.byte()),
             mem_mib: Some(rng.next_u64() as u32),
             wall_secs: Some(rng.next_u64()),
@@ -87,8 +87,8 @@ fn rand_request(rng: &mut Rng) -> Request {
             } else {
                 None
             },
-        },
-        1 => Request::Exec {
+        }),
+        1 => Request::Exec(ExecParams {
             argv: (0..rng.below(6)).map(|_| rand_string(rng)).collect(),
             stdin: if rng.below(2) == 0 {
                 Some(rand_string(rng))
@@ -106,14 +106,14 @@ fn rand_request(rng: &mut Rng) -> Request {
             } else {
                 None
             },
-        },
-        2 => Request::Put {
+        }),
+        2 => Request::Put(PutParams {
             path: rand_string(rng),
             content: rand_string(rng),
-        },
-        3 => Request::Get {
+        }),
+        3 => Request::Get(GetParams {
             path: rand_string(rng),
-        },
+        }),
         4 => Request::Snapshot,
         5 => Request::Trace,
         6 => Request::TraceSummary,

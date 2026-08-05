@@ -31,7 +31,15 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use ekvm_protocol::{FaultKind, ProtocolError, Request, Response, read_message, write_message};
+use ekvm_protocol::{
+    ExecParams, FaultKind, GetParams, ProtocolError, PutParams, Request, Response, read_message,
+    write_message,
+};
+
+// The session-knobs struct is the protocol's, re-exported so a caller of this client names one
+// type and a new knob is written once (the field list lived here as `OpenOptions` until it was
+// hoisted into `ekvm-protocol`, where the wire shape and the Rust shape can't drift apart).
+pub use ekvm_protocol::OpenParams;
 
 /// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]
@@ -95,34 +103,6 @@ impl From<ProtocolError> for ClientError {
     fn from(e: ProtocolError) -> Self {
         ClientError::Protocol(e)
     }
-}
-
-/// What the session asks for, sent with [`Client::open`]: its resource envelope and its network
-/// request. Every field is optional; `None` keeps the daemon's conservative default. Mirrors
-/// [`Request::Open`]'s knobs.
-///
-/// `#[non_exhaustive]`: build it from [`default`](Default::default) and set the fields you want, so
-/// a new knob is not a source break the way adding one to a struct literal would be.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
-pub struct OpenOptions {
-    /// Guest vCPUs (1..=32); `None` keeps the default 1.
-    pub vcpus: Option<u8>,
-    /// Guest memory in MiB (>= 1); `None` keeps the default 256.
-    pub mem_mib: Option<u32>,
-    /// Wall-clock budget in seconds (>= 1); `None` keeps the default 30.
-    pub wall_secs: Option<u64>,
-    /// Aggregate captured-output cap in bytes; `None` keeps the default 16 MiB. `u64` to match
-    /// the wire, whose width cannot depend on the caller's pointer size.
-    pub output_cap: Option<u64>,
-    /// Give the guest a NIC; `None` (or `Some(false)`) is no NIC. A NIC alone reaches nothing past
-    /// the host end of its /30, and whether a route out exists is the daemon's choice, not this
-    /// one's. The daemon may refuse it outright.
-    pub net: Option<bool>,
-    /// Egress allowances, each `IP[/CIDR][:PORT][/PROTO]`, building a deny-by-default policy;
-    /// `None` is deny-all. Requires [`net`](Self::net). The daemon validates each against its own
-    /// ceilings and refuses the session rather than running it unenforced.
-    pub allow: Option<Vec<String>>,
 }
 
 /// What [`Client::open`] returns: the sandbox booted.
@@ -195,15 +175,8 @@ impl Client {
     /// # Errors
     /// [`ClientError`] on a decode fault, a remote error (e.g. a boot failure), or an unexpected
     /// reply.
-    pub fn open(&mut self, opts: OpenOptions) -> Result<Opened, ClientError> {
-        self.send(&Request::Open {
-            vcpus: opts.vcpus,
-            mem_mib: opts.mem_mib,
-            wall_secs: opts.wall_secs,
-            output_cap: opts.output_cap,
-            net: opts.net,
-            allow: opts.allow,
-        })?;
+    pub fn open(&mut self, params: OpenParams) -> Result<Opened, ClientError> {
+        self.send(&Request::Open(params))?;
         match self.recv()? {
             Response::Opened { boot_ms, pooled } => Ok(Opened { boot_ms, pooled }),
             other => Err(unexpected(other)),
@@ -233,12 +206,11 @@ impl Client {
         stdin: &str,
         env: &[(String, String)],
     ) -> Result<ExecOutcome, ClientError> {
-        self.send(&Request::Exec {
-            argv: argv.to_vec(),
-            stdin: (!stdin.is_empty()).then(|| stdin.to_string()),
-            // Absent rather than an empty list, so the common case stays off the wire entirely.
-            env: (!env.is_empty()).then(|| env.to_vec()),
-        })?;
+        let mut params = ExecParams::new(argv.to_vec());
+        params.stdin = (!stdin.is_empty()).then(|| stdin.to_string());
+        // Absent rather than an empty list, so the common case stays off the wire entirely.
+        params.env = (!env.is_empty()).then(|| env.to_vec());
+        self.send(&Request::Exec(params))?;
         match self.recv()? {
             Response::Result {
                 exit_code,
@@ -260,10 +232,10 @@ impl Client {
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn put(&mut self, path: &str, content: &str) -> Result<(), ClientError> {
-        self.send(&Request::Put {
-            path: path.to_string(),
-            content: content.to_string(),
-        })?;
+        self.send(&Request::Put(PutParams::new(
+            path.to_string(),
+            content.to_string(),
+        )))?;
         match self.recv()? {
             Response::Put { .. } => Ok(()),
             other => Err(unexpected(other)),
@@ -279,9 +251,7 @@ impl Client {
     /// text-convenience signature; a caller that must detect substitution reads
     /// [`Response::Got`] itself.
     pub fn get(&mut self, path: &str) -> Result<Option<String>, ClientError> {
-        self.send(&Request::Get {
-            path: path.to_string(),
-        })?;
+        self.send(&Request::Get(GetParams::new(path.to_string())))?;
         match self.recv()? {
             Response::Got {
                 content, present, ..

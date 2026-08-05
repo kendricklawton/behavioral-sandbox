@@ -93,99 +93,35 @@ pub struct Envelope<T> {
 /// `#[non_exhaustive]`: a Rust peer must keep a catch-all arm, so adding a verb is not a source
 /// break for it. That says nothing about the *wire*, where an unknown `op` is still a hard decode
 /// error; growing the verb set is a schema-level decision, this only keeps the Rust half honest.
-/// `Debug` is **hand-written and redacting** (below), not derived, for the same reason
-/// `ekvm_channel::Request`'s is: this type carries secret-bearing payloads (`Put::content`,
-/// `Exec::stdin`, `Exec::env` *values*), and the daemon does log a request on its unhandled-verb
-/// path. A derived `Debug` would put file contents and env values into that log line.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **A verb gaining a field is not a source break either.** Each payload-carrying verb holds a
+/// dedicated params struct whose fields inline on the wire beside `op` (an internally-tagged
+/// newtype variant), so the JSON is unchanged from when these were inline fields:
+/// `the_wire_bytes_of_every_message_shape_are_pinned` holds that. The structs are
+/// `#[non_exhaustive]`, built from [`Default`]/`new` plus field assignment, so an additive wire
+/// field is additive for a Rust caller too, where a struct literal's new field was a break the
+/// wire rules never intended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Request {
     /// Open the connection's sandbox, the first message of a session (the VM *is* the session).
-    /// Carries **resource** knobs and the session's network request; the confinement posture (jailed
-    /// vs unjailed, and whether a route out exists at all) is the daemon's launch-time choice, never
-    /// a client's, so a caller can't downgrade the jail or route itself out of the sandbox.
-    /// Any omitted field keeps the conservative `ekvm_engine::Limits` default.
-    Open {
-        /// Guest vCPUs (1..=32); omitted keeps the default 1.
-        #[serde(default)]
-        vcpus: Option<u8>,
-        /// Guest memory in MiB (>= 1); omitted keeps the default 256.
-        #[serde(default)]
-        mem_mib: Option<u32>,
-        /// Wall-clock budget in seconds (>= 1): the boot deadline and each exec's budget; omitted
-        /// keeps the default 30.
-        #[serde(default)]
-        wall_secs: Option<u64>,
-        /// Aggregate captured-output cap in bytes; omitted keeps the default 16 MiB.
-        ///
-        /// `u64`, not `usize`: this is a wire value a 32-bit client and a 64-bit daemon must agree
-        /// on, so its width cannot depend on whose pointer is being counted. The daemon clamps it
-        /// to its own `usize` on the way in.
-        #[serde(default)]
-        output_cap: Option<u64>,
-        /// Give the session's guest a NIC (a per-VM tap the host-side probes observe); omitted is
-        /// no NIC, which is the posture every release so far shipped over the wire.
-        ///
-        /// A NIC on its own reaches nothing beyond the host end of its /30. Whether a route out
-        /// exists is the **daemon's** launch-time choice, like the jail: a client can ask for a
-        /// NIC and bound what crosses it, never conjure a path. The daemon may refuse this outright
-        /// (its `allow_net` posture).
-        ///
-        /// Additive, so no `WIRE_SCHEMA` bump: a daemon that predates the field ignores it, and a
-        /// client that predates it simply omits it.
-        #[serde(default)]
-        net: Option<bool>,
-        /// Egress allowances for the session, each `IP[/CIDR][:PORT][/PROTO]`, building a
-        /// deny-by-default policy armed before the tap goes live; omitted is deny-all.
-        ///
-        /// Requires [`net`](Self::Open::net). Strings rather than a structured type so the wire
-        /// spells a rule exactly as `ekvm run --allow` does, and one parser serves both. The daemon
-        /// validates each against its own operator ceilings and refuses the session if enforcement
-        /// cannot be armed, since egress policy is a security control and does not fail open.
-        ///
-        /// Additive, like [`net`](Self::Open::net).
-        #[serde(default)]
-        allow: Option<Vec<String>>,
-    },
-    /// Run one command in the open sandbox, feeding `stdin` (UTF-8 text) to it. Repeated `exec`s
-    /// share the session's working directory.
-    Exec {
-        /// The command and its arguments (`argv[0]` is the program). Empty is a guest fault.
-        argv: Vec<String>,
-        /// Text piped to the command's stdin; omitted is empty. Bulk/binary input is the
-        /// block-device path, not this field.
-        #[serde(default)]
-        stdin: Option<String>,
-        /// Environment variables for the **spawned command only**, as `KEY=VALUE` pairs; omitted is
-        /// none. The guest agent applies them via `Command::env`, never to its own process, so one
-        /// exec's environment cannot bleed into the agent or into a later exec on the same session.
-        ///
-        /// **Values are secrets by contract**: they never appear in a log line, an error, or this
-        /// type's `Debug`, which renders keys and a count only. A caller may still leak them by
-        /// having the command print them, which is the run's own output, not an engine surface.
-        ///
-        /// Additive, so no `WIRE_SCHEMA` bump: a daemon that predates the field ignores it, and a
-        /// client that predates it simply omits it. (This closes the gap where `ekvm run --env`
-        /// could set variables but no wire client could.)
-        #[serde(default)]
-        env: Option<Vec<(String, String)>>,
-    },
-    /// Write `content` (UTF-8 text) to `path` in the session's working directory, so a later `exec`
-    /// sees it. A relative `path` is resolved against that working directory; the file persists for
+    /// Carries **resource** knobs and the session's network request ([`OpenParams`]); the
+    /// confinement posture (jailed vs unjailed, and whether a route out exists at all) is the
+    /// daemon's launch-time choice, never a client's, so a caller can't downgrade the jail or
+    /// route itself out of the sandbox. Any omitted field keeps the conservative
+    /// `ekvm_engine::Limits` default.
+    Open(OpenParams),
+    /// Run one command in the open sandbox ([`ExecParams`]), feeding `stdin` (UTF-8 text) to it.
+    /// Repeated `exec`s share the session's working directory.
+    Exec(ExecParams),
+    /// Write a UTF-8 file into the session's working directory ([`PutParams`]), so a later `exec`
+    /// sees it. A relative path is resolved against that working directory; the file persists for
     /// the life of the session (the VM is the session).
-    Put {
-        /// Where in the working directory to write, relative (e.g. `input.txt`).
-        path: String,
-        /// The file's UTF-8 contents. Bulk/binary is the block-device path, not this verb.
-        content: String,
-    },
-    /// Read `path` back from the session's working directory. A missing file is not an error, the
-    /// [`Response::Got`] simply reports `present: false`.
-    Get {
-        /// Which file in the working directory to read back, relative.
-        path: String,
-    },
+    Put(PutParams),
+    /// Read a file back from the session's working directory ([`GetParams`]). A missing file is
+    /// not an error, the [`Response::Got`] simply reports `present: false`.
+    Get(GetParams),
     /// Snapshot the session's live VM into a daemon-side bundle, answered with the bundle's host
     /// path ([`Response::Snapshotted`]). Snapshotting a **jailed** session is a typed refusal (its
     /// disk lives in the chroot), the prewarm-source flow is unjailed, mirroring the engine API.
@@ -226,69 +162,165 @@ pub enum Request {
     Cancel,
 }
 
-impl std::fmt::Debug for Request {
-    /// The redacting `Debug` (see the type doc). Secret-bearing payloads render as counts and key
-    /// names only, so no log line, formatting path, or panic message can leak them; everything else
-    /// (paths, argv, resource knobs) renders normally, so the variant stays legible.
+/// What a session asks for, carried by [`Request::Open`]: its resource envelope and its network
+/// request. Every field is optional; `None` keeps the daemon's conservative default.
+///
+/// `#[non_exhaustive]`: build it from [`default`](Default::default) and set the fields you want,
+/// so a new knob lands for a Rust caller exactly as it lands on the wire, additively, rather than
+/// as the source break a struct literal's new field would be.
+///
+/// No secret-bearing field (resource knobs and egress destinations), so `Debug` derives: an
+/// operator reading a log needs to see which egress a session asked for, and the same values are
+/// already on the audit record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
+pub struct OpenParams {
+    /// Guest vCPUs (1..=32); omitted keeps the default 1.
+    #[serde(default)]
+    pub vcpus: Option<u8>,
+    /// Guest memory in MiB (>= 1); omitted keeps the default 256.
+    #[serde(default)]
+    pub mem_mib: Option<u32>,
+    /// Wall-clock budget in seconds (>= 1): the boot deadline and each exec's budget; omitted
+    /// keeps the default 30.
+    #[serde(default)]
+    pub wall_secs: Option<u64>,
+    /// Aggregate captured-output cap in bytes; omitted keeps the default 16 MiB.
     ///
-    /// The classification mirrors the engine's stated contract exactly: an error may name a file
-    /// *path* or an env *key*, never a value.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Exec { argv, stdin, env } => {
-                let keys: Vec<&str> = env.iter().flatten().map(|(k, _)| k.as_str()).collect();
-                f.debug_struct("Exec")
-                    .field("argv", argv)
-                    .field(
-                        "stdin",
-                        &format_args!(
-                            "<redacted; {} byte(s)>",
-                            stdin.as_deref().map_or(0, str::len)
-                        ),
-                    )
-                    .field(
-                        "env",
-                        &format_args!(
-                            "<{} var(s), values redacted; keys: {keys:?}>",
-                            env.as_ref().map_or(0, Vec::len)
-                        ),
-                    )
-                    .finish()
-            }
-            Self::Put { path, content } => f
-                .debug_struct("Put")
-                .field("path", path)
-                .field(
-                    "content",
-                    &format_args!("<redacted; {} byte(s)>", content.len()),
-                )
-                .finish(),
-            // No secret-bearing field: resource knobs, a path, or nothing at all.
-            Self::Open {
-                vcpus,
-                mem_mib,
-                wall_secs,
-                output_cap,
-                net,
-                allow,
-            } => f
-                .debug_struct("Open")
-                .field("vcpus", vcpus)
-                .field("mem_mib", mem_mib)
-                .field("wall_secs", wall_secs)
-                .field("output_cap", output_cap)
-                .field("net", net)
-                // Destinations, not secrets: an operator reading a log needs to see which egress a
-                // session asked for, and the same values are already on the audit record.
-                .field("allow", allow)
-                .finish(),
-            Self::Get { path } => f.debug_struct("Get").field("path", path).finish(),
-            Self::Snapshot => f.write_str("Snapshot"),
-            Self::Trace => f.write_str("Trace"),
-            Self::TraceSummary => f.write_str("TraceSummary"),
-            Self::Close => f.write_str("Close"),
-            Self::Cancel => f.write_str("Cancel"),
+    /// `u64`, not `usize`: this is a wire value a 32-bit client and a 64-bit daemon must agree
+    /// on, so its width cannot depend on whose pointer is being counted. The daemon clamps it
+    /// to its own `usize` on the way in.
+    #[serde(default)]
+    pub output_cap: Option<u64>,
+    /// Give the session's guest a NIC (a per-VM tap the host-side probes observe); omitted is
+    /// no NIC, which is the posture every release so far shipped over the wire.
+    ///
+    /// A NIC on its own reaches nothing beyond the host end of its /30. Whether a route out
+    /// exists is the **daemon's** launch-time choice, like the jail: a client can ask for a
+    /// NIC and bound what crosses it, never conjure a path. The daemon may refuse this outright
+    /// (its `allow_net` posture).
+    #[serde(default)]
+    pub net: Option<bool>,
+    /// Egress allowances for the session, each `IP[/CIDR][:PORT][/PROTO]`, building a
+    /// deny-by-default policy armed before the tap goes live; omitted is deny-all.
+    ///
+    /// Requires [`net`](Self::net). Strings rather than a structured type so the wire
+    /// spells a rule exactly as `ekvm run --allow` does, and one parser serves both. The daemon
+    /// validates each against its own operator ceilings and refuses the session if enforcement
+    /// cannot be armed, since egress policy is a security control and does not fail open.
+    #[serde(default)]
+    pub allow: Option<Vec<String>>,
+}
+
+/// One command to run, carried by [`Request::Exec`]. Build with [`new`](Self::new) (the required
+/// `argv`), then set the optional fields; they and any future knob stay additive
+/// (`#[non_exhaustive]`, like [`OpenParams`]).
+///
+/// `Debug` is **hand-written and redacting**, not derived, for the same reason
+/// `ekvm_channel::Request`'s is: `stdin` and the `env` *values* are secret-bearing, and the daemon
+/// does log a request on its unhandled-verb path. A derived `Debug` would put them in that log
+/// line; this one renders sizes, env keys, and argv only, mirroring the engine's stated contract
+/// (an error may name a file *path* or an env *key*, never a value).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ExecParams {
+    /// The command and its arguments (`argv[0]` is the program). Empty is a guest fault.
+    pub argv: Vec<String>,
+    /// Text piped to the command's stdin; omitted is empty. Bulk/binary input is the
+    /// block-device path, not this field.
+    #[serde(default)]
+    pub stdin: Option<String>,
+    /// Environment variables for the **spawned command only**, as `KEY=VALUE` pairs; omitted is
+    /// none. The guest agent applies them via `Command::env`, never to its own process, so one
+    /// exec's environment cannot bleed into the agent or into a later exec on the same session.
+    ///
+    /// **Values are secrets by contract**: they never appear in a log line, an error, or this
+    /// type's `Debug`, which renders keys and a count only. A caller may still leak them by
+    /// having the command print them, which is the run's own output, not an engine surface.
+    #[serde(default)]
+    pub env: Option<Vec<(String, String)>>,
+}
+
+impl ExecParams {
+    /// The command to run; the optional fields start empty and are set on the value.
+    #[must_use]
+    pub fn new(argv: Vec<String>) -> Self {
+        Self {
+            argv,
+            stdin: None,
+            env: None,
         }
+    }
+}
+
+impl std::fmt::Debug for ExecParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let keys: Vec<&str> = self.env.iter().flatten().map(|(k, _)| k.as_str()).collect();
+        f.debug_struct("ExecParams")
+            .field("argv", &self.argv)
+            .field(
+                "stdin",
+                &format_args!(
+                    "<redacted; {} byte(s)>",
+                    self.stdin.as_deref().map_or(0, str::len)
+                ),
+            )
+            .field(
+                "env",
+                &format_args!(
+                    "<{} var(s), values redacted; keys: {keys:?}>",
+                    self.env.as_ref().map_or(0, Vec::len)
+                ),
+            )
+            .finish()
+    }
+}
+
+/// One file to write, carried by [`Request::Put`]. `Debug` redacts `content` (file contents are
+/// secrets under the engine's contract, exactly like [`ExecParams`]'s payloads); the path stays
+/// legible, an error may name one.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PutParams {
+    /// Where in the working directory to write, relative (e.g. `input.txt`).
+    pub path: String,
+    /// The file's UTF-8 contents. Bulk/binary is the block-device path, not this verb.
+    pub content: String,
+}
+
+impl PutParams {
+    /// The path to write and the contents to put there.
+    #[must_use]
+    pub fn new(path: String, content: String) -> Self {
+        Self { path, content }
+    }
+}
+
+impl std::fmt::Debug for PutParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PutParams")
+            .field("path", &self.path)
+            .field(
+                "content",
+                &format_args!("<redacted; {} byte(s)>", self.content.len()),
+            )
+            .finish()
+    }
+}
+
+/// One file to read back, carried by [`Request::Get`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct GetParams {
+    /// Which file in the working directory to read back, relative.
+    pub path: String,
+}
+
+impl GetParams {
+    /// The path to read.
+    #[must_use]
+    pub fn new(path: String) -> Self {
+        Self { path }
     }
 }
 
@@ -753,39 +785,39 @@ mod tests {
     #[test]
     fn requests_round_trip_through_the_versioned_line_codec() {
         for req in [
-            Request::Open {
+            Request::Open(OpenParams {
                 vcpus: Some(2),
                 mem_mib: Some(512),
                 wall_secs: Some(60),
                 output_cap: None,
                 net: None,
                 allow: None,
-            },
-            Request::Open {
+            }),
+            Request::Open(OpenParams {
                 vcpus: None,
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
                 net: None,
                 allow: None,
-            },
-            Request::Exec {
+            }),
+            Request::Exec(ExecParams {
                 argv: vec!["echo".into(), "hi".into()],
                 stdin: Some("piped\n".into()),
                 env: None,
-            },
-            Request::Exec {
+            }),
+            Request::Exec(ExecParams {
                 argv: vec!["env".into()],
                 stdin: None,
                 env: Some(vec![("TOKEN".into(), "s3cret".into())]),
-            },
-            Request::Put {
+            }),
+            Request::Put(PutParams {
                 path: "input.txt".into(),
                 content: "hello\n".into(),
-            },
-            Request::Get {
+            }),
+            Request::Get(GetParams {
                 path: "out.txt".into(),
-            },
+            }),
             Request::Snapshot,
             Request::Trace,
             Request::TraceSummary,
@@ -883,50 +915,50 @@ mod tests {
         // Requests: every verb, payload-carrying ones fully populated.
         for (msg, want) in [
             (
-                Request::Open {
+                Request::Open(OpenParams {
                     vcpus: Some(2),
                     mem_mib: Some(512),
                     wall_secs: Some(60),
                     output_cap: Some(16_777_216),
                     net: Some(true),
                     allow: Some(vec!["1.1.1.1:443/tcp".into()]),
-                },
+                }),
                 "{\"schema\":1,\"op\":\"open\",\"vcpus\":2,\"mem_mib\":512,\"wall_secs\":60,\
                  \"output_cap\":16777216,\"net\":true,\"allow\":[\"1.1.1.1:443/tcp\"]}\n",
             ),
             (
                 // Every knob omitted: the conservative default an old client sends.
-                Request::Open {
+                Request::Open(OpenParams {
                     vcpus: None,
                     mem_mib: None,
                     wall_secs: None,
                     output_cap: None,
                     net: None,
                     allow: None,
-                },
+                }),
                 "{\"schema\":1,\"op\":\"open\",\"vcpus\":null,\"mem_mib\":null,\"wall_secs\":null,\
                  \"output_cap\":null,\"net\":null,\"allow\":null}\n",
             ),
             (
-                Request::Exec {
+                Request::Exec(ExecParams {
                     argv: vec!["echo".into(), "hi".into()],
                     stdin: Some("in\n".into()),
                     env: Some(vec![("K".into(), "V".into())]),
-                },
+                }),
                 "{\"schema\":1,\"op\":\"exec\",\"argv\":[\"echo\",\"hi\"],\"stdin\":\"in\\n\",\
                  \"env\":[[\"K\",\"V\"]]}\n",
             ),
             (
-                Request::Put {
+                Request::Put(PutParams {
                     path: "in.txt".into(),
                     content: "data\n".into(),
-                },
+                }),
                 "{\"schema\":1,\"op\":\"put\",\"path\":\"in.txt\",\"content\":\"data\\n\"}\n",
             ),
             (
-                Request::Get {
+                Request::Get(GetParams {
                     path: "out.txt".into(),
-                },
+                }),
                 "{\"schema\":1,\"op\":\"get\",\"path\":\"out.txt\"}\n",
             ),
             (Request::Snapshot, "{\"schema\":1,\"op\":\"snapshot\"}\n"),
@@ -1060,14 +1092,14 @@ mod tests {
             .expect("a message");
         assert_eq!(
             req,
-            Request::Open {
+            Request::Open(OpenParams {
                 vcpus: None,
                 mem_mib: None,
                 wall_secs: None,
                 output_cap: None,
                 net: None,
                 allow: None,
-            }
+            })
         );
     }
 
@@ -1121,18 +1153,18 @@ mod tests {
             let mut w = Vec::new();
             write_message(
                 &mut w,
-                &Request::Put {
+                &Request::Put(PutParams {
                     path: "p".into(),
                     content: String::new(),
-                },
+                }),
             )
             .expect("encode");
             w.len() - 1 // the line's content: everything but the newline
         };
-        let at_cap = Request::Put {
+        let at_cap = Request::Put(PutParams {
             path: "p".into(),
             content: "x".repeat(MAX_MESSAGE_BYTES - overhead),
-        };
+        });
         let mut wire = Vec::new();
         write_message(&mut wire, &at_cap).expect("an at-cap line encodes");
         assert_eq!(
@@ -1145,10 +1177,10 @@ mod tests {
             .expect("a message");
         assert_eq!(back, at_cap);
 
-        let over = Request::Put {
+        let over = Request::Put(PutParams {
             path: "p".into(),
             content: "x".repeat(MAX_MESSAGE_BYTES - overhead + 1),
-        };
+        });
         let mut wire = Vec::new();
         assert!(matches!(
             write_message(&mut wire, &over),
@@ -1298,14 +1330,14 @@ mod tests {
         // A value above `u32::MAX` has to survive the round trip: on a 32-bit peer it would
         // previously have failed to decode at all.
         let over_32_bits = u64::from(u32::MAX) + 1;
-        let req = Request::Open {
+        let req = Request::Open(OpenParams {
             vcpus: None,
             mem_mib: None,
             wall_secs: None,
             output_cap: Some(over_32_bits),
             net: None,
             allow: None,
-        };
+        });
         let mut wire = Vec::new();
         write_message(&mut wire, &req).expect("an open serializes");
         let back: Request = read_message(&mut &wire[..])
@@ -1342,11 +1374,11 @@ mod tests {
             .expect("one message");
         assert_eq!(
             req,
-            Request::Exec {
+            Request::Exec(ExecParams {
                 argv: vec!["echo".to_string()],
                 stdin: None,
                 env: None,
-            }
+            })
         );
     }
 
@@ -1355,14 +1387,14 @@ mod tests {
         // The daemon logs a request on its unhandled-verb path (`tracing::error!(request = ?other)`),
         // so `Debug` is a live leak path, not a theoretical one. Env *values* and file *content* must
         // never render; keys, paths, and argv must, or the log line is useless for debugging.
-        let exec = Request::Exec {
+        let exec = Request::Exec(ExecParams {
             argv: vec!["env".into()],
             stdin: Some("stdin-secret".into()),
             env: Some(vec![
                 ("AWS_SECRET_ACCESS_KEY".into(), "leaked-value".into()),
                 ("TOKEN".into(), "another-secret".into()),
             ]),
-        };
+        });
         let rendered = format!("{exec:?}");
         for secret in ["leaked-value", "another-secret", "stdin-secret"] {
             assert!(
@@ -1382,10 +1414,10 @@ mod tests {
 
         // `put` carries file content, which the engine's contract treats as a secret too. This
         // variant predates the env field and was already leaking through the derived `Debug`.
-        let put = Request::Put {
+        let put = Request::Put(PutParams {
             path: "creds.json".into(),
             content: "very-secret-file-body".into(),
-        };
+        });
         let rendered = format!("{put:?}");
         assert!(
             !rendered.contains("very-secret-file-body"),
@@ -1398,14 +1430,14 @@ mod tests {
 
         // A variant with nothing secret still renders its fields, so redaction did not cost
         // legibility across the board.
-        let open = Request::Open {
+        let open = Request::Open(OpenParams {
             vcpus: Some(2),
             mem_mib: Some(512),
             wall_secs: None,
             output_cap: None,
             net: None,
             allow: None,
-        };
+        });
         let rendered = format!("{open:?}");
         assert!(rendered.contains("vcpus"), "{rendered}");
         assert!(rendered.contains('2'), "{rendered}");

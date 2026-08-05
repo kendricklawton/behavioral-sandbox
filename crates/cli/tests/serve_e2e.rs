@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ekvm_client::{Client, OpenOptions};
+use ekvm_client::{Client, OpenParams};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -473,7 +473,7 @@ fn the_reference_client_drives_a_full_session() {
     }
 
     let opened = client
-        .open(OpenOptions::default())
+        .open(OpenParams::default())
         .unwrap_or_else(|e| panic!("open: {e}"));
     assert!(!opened.pooled, "no --prewarm, so a cold boot");
 
@@ -581,7 +581,7 @@ fn a_prewarmed_open_is_served_from_the_pool() {
     }
     // A bare-default open must come from the warm pool: `pooled: true`, and it still execs.
     let opened = client
-        .open(OpenOptions::default())
+        .open(OpenParams::default())
         .unwrap_or_else(|e| panic!("open: {e}"));
     assert!(
         opened.pooled,
@@ -620,7 +620,7 @@ fn a_jailed_daemon_serves_prewarmed_opens() {
         panic!("set read timeout: {e}");
     }
     let opened = client
-        .open(OpenOptions::default())
+        .open(OpenParams::default())
         .unwrap_or_else(|e| panic!("open: {e}"));
     assert!(
         opened.pooled,
