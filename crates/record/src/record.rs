@@ -852,6 +852,38 @@ mod tests {
         );
     }
 
+    /// [`SyscallFold::snapshot`] is the live-trace read (the daemon's `trace` verb, the watch
+    /// TUI) and [`SyscallFold::finish`] is the record's; they are two renderings of one fold and
+    /// must say the same thing. `finish` is pinned by the goldens, so pin `snapshot` to `finish`:
+    /// a fold mid-stream, with a repeat, a truncation, an overflow, and an unknown discriminant in
+    /// play, must snapshot to exactly the footprint finishing it would produce.
+    #[test]
+    fn a_snapshot_reads_what_finish_would_write() {
+        let mut fold = SyscallFold::new(CG);
+        fold.record(&ev(
+            Syscall::Connect as u32,
+            CG,
+            &[2, 0, 0, 80, 1, 1, 1, 1],
+            "curl",
+        ));
+        fold.record(&ev(Syscall::Execve as u32, CG, b"/bin/sh", "sh"));
+        fold.record(&ev(Syscall::Openat as u32, CG, b"/etc/hosts", "sh"));
+        fold.record(&ev(Syscall::Openat as u32, CG, b"/etc/hosts", "zsh")); // repeat, comm contest
+        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
+        fold.record(&ev(Syscall::Openat as u32, CG, &long, "sh")); // truncated capture
+        fold.record(&ev(999, CG, b"", "sh")); // unknown discriminant
+        for i in 0..MAX_NOTABLE + 2 {
+            // Push past the cap so the overflow/truncation flags are live in both renderings.
+            let path = format!("/spill/{i}");
+            fold.record(&ev(Syscall::Openat as u32, CG, path.as_bytes(), "sh"));
+        }
+        assert_eq!(
+            fold.snapshot(),
+            fold.clone().finish(),
+            "the live snapshot and the final record disagree about the same fold"
+        );
+    }
+
     #[test]
     fn overflow_counts_every_event_past_the_cap() {
         let mut fold = SyscallFold::new(CG);
