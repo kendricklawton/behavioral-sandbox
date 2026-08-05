@@ -4,8 +4,11 @@
 # eBPF toolchain, the guest artifacts, and runs `cargo xtask ci-privileged` as root. Proven green
 # end to end (boot, jailer, probes, restore, the audit record), so it runs nightly plus on demand.
 # Correctness only: nested KVM makes performance numbers unrepresentative, so the benches are not
-# gated here ("measured, not marketed" means measured on bare metal, by hand). This is the only
-# privileged lane: the supported platform is x86_64.
+# gated here ("measured, not marketed" means measured on bare metal, by hand). x86_64 is the only
+# supported platform, so the matrix below varies one axis: the **VMM**, one lane per Firecracker
+# series the engine claims (the floor and the pin). Claiming a range while gating only its top
+# leaves the other end untested, which is how a version-gated path (`clock_realtime`, v1.16+) can
+# regress on the floor with every lane green.
 # SECURITY: this runs untrusted-capable code as ROOT with KVM, so it must NEVER execute fork code.
 # Triggers are schedule + manual dispatch, plus **same-repo** PRs that touch the isolation path. The
 # job-level `if` skips every fork PR, and `pull_request` (NEVER `pull_request_target`) already denies a
@@ -40,14 +43,10 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  # Must match spawn/fcversion.rs's PINNED_FC_VERSION (major.minor) and doctor.rs's pinned sha256: the
-  # privileged gate is the only place the driver meets a real VMM, so testing a different release
-  # than the one shipped would validate nothing. firecracker-pin.yml watches for a newer one.
-  FC_VERSION: v1.16.1
 
 jobs:
   hosted:
-    name: VM boot + probe attach (ubuntu-24.04 hosted)
+    name: VM boot + probe attach (fc ${{ matrix.fc }}, ubuntu-24.04 hosted)
     # Fork guard (SECURITY, load-bearing): run for schedule/dispatch always, and for a PR only when the
     # head branch lives in THIS repo, never a fork. Root + KVM must never execute untrusted fork code.
     if: >-
@@ -55,6 +54,25 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    strategy:
+      # Neither lane cancels the other: which end of the range broke is the finding, and a floor
+      # failure that killed the pinned lane would hide whether the break is version-specific.
+      fail-fast: false
+      matrix:
+        include:
+          # The pin: what a release ships and what doctor's sha256 row blesses. Must equal
+          # spawn/fcversion.rs's PINNED_FC_VERSION series; firecracker-pin.yml watches for a newer
+          # one, and `the_privileged_workflow_gates_every_supported_firecracker_series` holds this
+          # list to the engine's own range so a fourth copy of the pin cannot drift quietly.
+          - fc: v1.16.1
+          # The floor: the oldest series upstream still patches (MIN_SUPPORTED_FC_VERSION). The
+          # engine adapts its API requests across the range, and those adaptations are only
+          # exercised here.
+          - fc: v1.15.1
+    env:
+      # The privileged gate is the only place the driver meets a real VMM, so each lane installs its
+      # own series and runs the whole suite against it.
+      FC_VERSION: ${{ matrix.fc }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -119,6 +137,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
+          # Keyed per lane: the two matrix jobs build the same tree, so one shared key would have
+          # them racing to save it.
+          key: ${{ matrix.fc }}
           workspaces: |
             .
             crates/probes

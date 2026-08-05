@@ -738,6 +738,85 @@ mod tests {
         );
     }
 
+    /// The privileged workflow gates **every** series the engine claims, not just the pinned one.
+    /// A GitHub Actions matrix cannot read `MIN_SUPPORTED_FC_VERSION`/`PINNED_FC_VERSION`, so its
+    /// lane list is a fourth copy of the range and drifts like every copy: this compares the set of
+    /// series it installs against the set the engine declares, in both directions.
+    ///
+    /// The asymmetry is what makes it worth a test. A missing lane is silent, and specifically
+    /// silent about the end of the range nobody runs by hand: the engine adapts its API requests
+    /// across the supported window (`clock_realtime` is withheld below v1.16), so a claim of
+    /// "v1.15 through v1.16" gated only at v1.16 can regress on the floor with CI fully green.
+    /// A lane for a series the engine no longer claims is the opposite failure, spending a
+    /// privileged runner on a VMM upstream has stopped patching.
+    #[test]
+    fn the_privileged_workflow_gates_every_supported_firecracker_series() {
+        let repo = workspace_root();
+        let wf = repo.join(".github/workflows/ci-privileged-hosted.yml");
+        let text = std::fs::read_to_string(&wf).expect("ci-privileged-hosted.yml");
+        let spawn =
+            std::fs::read_to_string(repo.join("crates/engine/src/spawn/fcversion.rs")).unwrap();
+
+        // `pub(crate) const NAME: (u64, u64) = (1, 15);` -> (1, 15).
+        let constant = |name: &str| -> (u64, u64) {
+            let nums = spawn
+                .lines()
+                .find(|l| l.contains(&format!("{name}: (u64, u64)")))
+                .and_then(|l| l.rsplit('(').next())
+                .map(|t| {
+                    t.split(|c: char| !c.is_ascii_digit())
+                        .filter_map(|d| d.parse::<u64>().ok())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            assert!(
+                nums.len() >= 2,
+                "spawn/fcversion.rs must declare `{name}: (u64, u64) = (major, minor)`; parsed \
+                 {nums:?}, so the declaration's shape moved and this guard reads nothing"
+            );
+            (nums[0], nums[1])
+        };
+        let (floor, pin) = (
+            constant("MIN_SUPPORTED_FC_VERSION"),
+            constant("PINNED_FC_VERSION"),
+        );
+
+        // The lanes: `- fc: vX.Y.Z` entries in the matrix, reduced to their series. A lane installs
+        // a patch release; what the engine reasons about is the series.
+        let mut lanes: Vec<(u64, u64)> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#'))
+            .filter_map(|l| l.strip_prefix("- fc: v"))
+            .map(|v| {
+                let mut it = v.split('.').filter_map(|d| d.parse::<u64>().ok());
+                (it.next().unwrap_or(0), it.next().unwrap_or(0))
+            })
+            .collect();
+        lanes.sort_unstable();
+        lanes.dedup();
+        assert!(
+            !lanes.is_empty(),
+            "no `- fc: vX.Y.Z` lanes found in {}: the matrix shape this test greps for moved, so \
+             it is asserting nothing",
+            wf.display()
+        );
+
+        // Every series from the floor through the pin, which is what the support claim names.
+        assert_eq!(
+            floor.0, pin.0,
+            "the supported range spans a major bump: {floor:?}..={pin:?}"
+        );
+        let claimed: Vec<(u64, u64)> = (floor.1..=pin.1).map(|minor| (floor.0, minor)).collect();
+        assert_eq!(
+            lanes, claimed,
+            "the privileged workflow gates {lanes:?} but the engine claims {claimed:?} \
+             (MIN_SUPPORTED_FC_VERSION..=PINNED_FC_VERSION): every claimed series needs a lane, \
+             and a lane for an unclaimed series burns a privileged runner on a VMM the engine \
+             does not support"
+        );
+    }
+
     /// Same drift guard, for the **third** copy of the Firecracker pin: the container image's
     /// `FC_VERSION` build arg. The install.sh/doctor.rs pair drifted for 21 months before their
     /// test existed; this file was missed in that sweep and sat on v1.9.1 (below the supported
