@@ -11,9 +11,13 @@ Three crates, split by what can depend on what:
   reading it cannot disagree about layout.
 - **`ekvm-probes-loader`** is the userspace half, on `aya`: attach to a specific sandbox, read the maps,
   fold events, and assemble the `RunRecord`.
-- **`ekvm-record`** is the record's own crate: its types (`RunRecord`, `AxisGap`), the deterministic
-  JSON, the summary projection, and the ed25519 signing/verification. No aya, so a consumer parses
-  and verifies a record off-host, with no eBPF loader linked.
+
+**`ekvm-record` is deliberately not one of them.** It owns the record itself: its types (`RunRecord`,
+`AxisGap`), the deterministic JSON, the summary projection, and the ed25519 signing and
+verification. It links no aya, and the dependency runs one way, the loader onto the record, never
+back. That is what lets a consumer parse and verify a record on a machine with no eBPF loader, no
+KVM, and no reason to trust the host that produced it. The two share only
+`ekvm-probes-common`, the record's own vocabulary.
 
 `ekvm-probes-loader` is one module per subsystem, which is the map to read it by:
 
