@@ -1,5 +1,5 @@
 //! Privileged proof that the per-drive virtio-blk bandwidth limiter (`RateLimiter::default_guest_io`)
-//! actually throttles a sustained-thrashing guest, and leaves a cold boot unthrottled (P19.9c).
+//! actually throttles a sustained-thrashing guest, and leaves a cold boot unthrottled.
 //!
 //! The limiter is a 256 MiB/s steady cap with a 1 GiB one-time burst on every drive. Two facts shape
 //! the test. A *single* write can never show the cap: the only guest-writable virtio-blk device is
