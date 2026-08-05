@@ -866,6 +866,159 @@ mod tests {
         );
     }
 
+    /// The wire's compatibility contract, as bytes: the exact line every message shape serializes
+    /// to, fully populated (plus the all-omitted `open`, whose absent knobs render as `null`s).
+    /// This is what "the wire does not change" means mechanically, so a red assertion here is a
+    /// **wire change**: either revert it, or bump [`WIRE_SCHEMA`] and update every SDK, never
+    /// re-bless the string. The Rust-side shape of these types is free to move (params structs,
+    /// constructors, variant attributes) exactly as long as this test cannot tell.
+    #[test]
+    fn the_wire_bytes_of_every_message_shape_are_pinned() {
+        fn line<T: serde::Serialize>(msg: &T) -> String {
+            let mut wire = Vec::new();
+            write_message(&mut wire, msg).expect("every pinned shape encodes");
+            String::from_utf8(wire).expect("the wire is UTF-8")
+        }
+
+        // Requests: every verb, payload-carrying ones fully populated.
+        for (msg, want) in [
+            (
+                Request::Open {
+                    vcpus: Some(2),
+                    mem_mib: Some(512),
+                    wall_secs: Some(60),
+                    output_cap: Some(16_777_216),
+                    net: Some(true),
+                    allow: Some(vec!["1.1.1.1:443/tcp".into()]),
+                },
+                "{\"schema\":1,\"op\":\"open\",\"vcpus\":2,\"mem_mib\":512,\"wall_secs\":60,\
+                 \"output_cap\":16777216,\"net\":true,\"allow\":[\"1.1.1.1:443/tcp\"]}\n",
+            ),
+            (
+                // Every knob omitted: the conservative default an old client sends.
+                Request::Open {
+                    vcpus: None,
+                    mem_mib: None,
+                    wall_secs: None,
+                    output_cap: None,
+                    net: None,
+                    allow: None,
+                },
+                "{\"schema\":1,\"op\":\"open\",\"vcpus\":null,\"mem_mib\":null,\"wall_secs\":null,\
+                 \"output_cap\":null,\"net\":null,\"allow\":null}\n",
+            ),
+            (
+                Request::Exec {
+                    argv: vec!["echo".into(), "hi".into()],
+                    stdin: Some("in\n".into()),
+                    env: Some(vec![("K".into(), "V".into())]),
+                },
+                "{\"schema\":1,\"op\":\"exec\",\"argv\":[\"echo\",\"hi\"],\"stdin\":\"in\\n\",\
+                 \"env\":[[\"K\",\"V\"]]}\n",
+            ),
+            (
+                Request::Put {
+                    path: "in.txt".into(),
+                    content: "data\n".into(),
+                },
+                "{\"schema\":1,\"op\":\"put\",\"path\":\"in.txt\",\"content\":\"data\\n\"}\n",
+            ),
+            (
+                Request::Get {
+                    path: "out.txt".into(),
+                },
+                "{\"schema\":1,\"op\":\"get\",\"path\":\"out.txt\"}\n",
+            ),
+            (Request::Snapshot, "{\"schema\":1,\"op\":\"snapshot\"}\n"),
+            (Request::Trace, "{\"schema\":1,\"op\":\"trace\"}\n"),
+            (
+                Request::TraceSummary,
+                "{\"schema\":1,\"op\":\"trace_summary\"}\n",
+            ),
+            (Request::Close, "{\"schema\":1,\"op\":\"close\"}\n"),
+            (Request::Cancel, "{\"schema\":1,\"op\":\"cancel\"}\n"),
+        ] {
+            assert_eq!(line(&msg), want, "request wire bytes moved");
+        }
+
+        // Responses: every reply, payload-carrying ones fully populated.
+        for (msg, want) in [
+            (
+                Response::Opened {
+                    boot_ms: 120,
+                    pooled: true,
+                },
+                "{\"schema\":1,\"reply\":\"opened\",\"boot_ms\":120,\"pooled\":true}\n",
+            ),
+            (
+                Response::Result {
+                    exit_code: 3,
+                    stdout: "out".into(),
+                    stderr: "err".into(),
+                    exec_wall_ms: 5,
+                },
+                "{\"schema\":1,\"reply\":\"result\",\"exit_code\":3,\"stdout\":\"out\",\
+                 \"stderr\":\"err\",\"exec_wall_ms\":5}\n",
+            ),
+            (
+                Response::Put {
+                    path: "in.txt".into(),
+                },
+                "{\"schema\":1,\"reply\":\"put\",\"path\":\"in.txt\"}\n",
+            ),
+            (
+                Response::Got {
+                    path: "out.txt".into(),
+                    content: "data".into(),
+                    present: true,
+                    lossy: true,
+                },
+                "{\"schema\":1,\"reply\":\"got\",\"path\":\"out.txt\",\"content\":\"data\",\
+                 \"present\":true,\"lossy\":true}\n",
+            ),
+            (
+                Response::Snapshotted {
+                    dir: "/var/lib/ekvm/snap-1".into(),
+                },
+                "{\"schema\":1,\"reply\":\"snapshotted\",\"dir\":\"/var/lib/ekvm/snap-1\"}\n",
+            ),
+            (
+                Response::Trace {
+                    record: serde_json::json!({"schema": 1}),
+                },
+                "{\"schema\":1,\"reply\":\"trace\",\"record\":{\"schema\":1}}\n",
+            ),
+            (
+                Response::TraceSummary {
+                    summary: serde_json::json!({"schema": 1}),
+                },
+                "{\"schema\":1,\"reply\":\"trace_summary\",\"summary\":{\"schema\":1}}\n",
+            ),
+            (Response::Closed, "{\"schema\":1,\"reply\":\"closed\"}\n"),
+            (
+                Response::Cancelled,
+                "{\"schema\":1,\"reply\":\"cancelled\"}\n",
+            ),
+            (
+                Response::Error {
+                    message: "boom".into(),
+                    fatal: true,
+                    kind: FaultKind::Guest,
+                },
+                "{\"schema\":1,\"reply\":\"error\",\"message\":\"boom\",\"fatal\":true,\
+                 \"kind\":\"guest\"}\n",
+            ),
+            (
+                Response::AtCapacity {
+                    retry_after_ms: 1000,
+                },
+                "{\"schema\":1,\"reply\":\"at_capacity\",\"retry_after_ms\":1000}\n",
+            ),
+        ] {
+            assert_eq!(line(&msg), want, "response wire bytes moved");
+        }
+    }
+
     #[test]
     fn every_message_carries_the_schema() {
         // The stamp is present and legible on both directions of the wire.
