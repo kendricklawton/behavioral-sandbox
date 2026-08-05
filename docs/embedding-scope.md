@@ -60,12 +60,14 @@ patches. Distribution stays the signed release package for operators and the git
 embedders, both of which the support policy in `RELEASES.md` can actually govern.
 
 Holding a name and shipping through it are separate things, and this project does the first and not
-the second. Where `ekvm`, `ekvm-engine`, `ekvm-client`, or `ekvm-protocol` appears on crates.io under
-this project, it is a **reserved placeholder**: version `0.0.0`, no dependencies, no code, and a
-description saying so. It exists because the registry is a flat namespace and the alternative to holding the name is
-someone else holding it. Finding one is not evidence that this paragraph is stale. A real release
-would arrive as a version that is not `0.0.0`, and it would arrive with a decision recorded here
-first.
+the second. The names reserved on crates.io under this project are the binary (`ekvm`) and the
+packages carrying a pinned surface or a client: `ekvm-engine`, `ekvm-channel`, `ekvm-protocol`,
+`ekvm-record`, and `ekvm-client`. Each is a **reserved placeholder**: no dependencies, no code, and a
+description saying exactly that. They exist because the registry is a flat namespace and the
+alternative to holding a name is someone else holding it. Finding one is not evidence that this
+paragraph is stale, and its version number carries no signal: a placeholder is identified by being
+empty, not by sitting at some particular version. A real release would arrive with code in it, and
+it would arrive with a decision recorded here first.
 
 ---
 

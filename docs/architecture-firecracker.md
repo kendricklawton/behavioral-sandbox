@@ -84,9 +84,11 @@ the support floor on a `_SINCE` constant**, so raising the floor is a deliberate
 than a side effect of adopting a field. That is a convention, not a gate;
 `the_clock_fixup_is_gated_above_the_floor_not_at_it` pins the one such constant today.
 
-The engine supports v1.15 through v1.16 and tests v1.16. The floor tracks upstream's own support
-window rather than a number of convenience, because it exists to reject *unpatched* VMMs rather than
-old ones. `spawn/fcversion.rs` carries the supported window, and `firecracker-pin.yml` reports weekly
+The engine supports v1.15 through v1.16, and the privileged gate runs one lane per series in that
+window: `the_privileged_workflow_gates_every_supported_firecracker_series` compares the workflow's
+lane list against the window, so widening the window without adding a lane fails the gate. The floor
+tracks upstream's own support window rather than a number of convenience, because it exists to
+reject *unpatched* VMMs rather than old ones. `spawn/fcversion.rs` carries the supported window, and `firecracker-pin.yml` reports weekly
 when upstream has moved past it.
 
 `clock_realtime` on `PUT /snapshot/load` is the worked example. It exists from v1.16 and advances a

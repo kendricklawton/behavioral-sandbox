@@ -339,7 +339,8 @@ exits non-zero if a hard requirement is missing.
 | **Boot artifacts** | guest kernel (`EKVM_KERNEL`) and guest rootfs (`EKVM_ROOTFS`) present | nothing to boot; `cargo xtask fetch-artifacts` and `build-rootfs` produce them |
 
 **Supported / tested versions:** Firecracker per
-[step 4 above](#4-install-firecracker-and-its-jailer) (v1.15 through v1.16, v1.16 tested in CI).
+[step 4 above](#4-install-firecracker-and-its-jailer) (v1.15 through v1.16, one nightly CI lane per
+series in that window).
 The **guest kernel** baked into the rootfs is pinned to a Firecracker-supported version;
 Firecracker periodically retires old guest kernels, so a fresh build tracks their supported set.
 

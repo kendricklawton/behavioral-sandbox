@@ -40,16 +40,18 @@ The withdrawn figures were taken on the development host, with the guest at 256 
 
 ### The reference host
 
-Local measurements and the privileged suite run on a laptop, not a server: Linux 7.0.11, Intel
-i5-10310U (8 vCPUs at 1.70 GHz), 15 GiB RAM, Arch Linux, Firecracker v1.16.1, `x86_64`. It is also the
-host these numbers describe. The engine is exercised on one other kernel, the Ubuntu 24.04 runner
+Local measurements and the privileged suite run on a laptop, not a server: Intel
+i5-10310U (8 vCPUs at 1.70 GHz), 15 GiB RAM, Arch Linux (rolling, kernel 7.1.5 as of 2026-08-05),
+Firecracker v1.16.1, `x86_64`. Arch is rolling, so a returning number states the kernel it was
+measured on rather than inheriting the one named here.
+The engine is exercised on one other kernel, the Ubuntu 24.04 runner
 the privileged suite uses nightly, which is why the portability claim in
 [Host-side observability & enforcement](./probes.md) is described as a mechanism rather than a
 broadly tested property.
 
 CI runs the host-safe gate on Ubuntu 24.04 `x86_64` on every change, and the privileged suite nightly
-on a GitHub-hosted Ubuntu 24.04 `x86_64` runner with nested KVM. Nested KVM makes timing
-unrepresentative, so benchmarks are never gated there.
+on GitHub-hosted Ubuntu 24.04 `x86_64` runners with nested KVM, one lane per supported Firecracker
+series. Nested KVM makes timing unrepresentative, so benchmarks are never gated there.
 
 ## What the suite measures
 
