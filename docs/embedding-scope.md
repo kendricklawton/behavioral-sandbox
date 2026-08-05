@@ -1,6 +1,14 @@
 # Where the engine ends
 
-The line this project refuses to cross, and the surface it intends to pin. A runtime that quietly grows platform features stops being embeddable.
+Where the engine stops and the layer above it starts, and the surface this project intends to pin. A
+runtime that quietly grows platform features stops being embeddable.
+
+**This is a boundary, not a renunciation.** Everything below is out of *the engine*, which says
+nothing about whether such a layer gets built, or by whom. A control plane, a dashboard, or a hosted
+service may well be built on this engine, possibly by this project: the rule is that it lives above
+the engine, in its own repo, talking to the daemon as a client like any other caller. That
+separation is the point. It is what lets someone embed the engine under their own platform, and it
+is why "add a tenant id to the wire" stays a design error even for the project's own hoster.
 
 ## Where the engine ends (the engine/PaaS line)
 
@@ -9,15 +17,15 @@ a runtime plus a clean driver API you self-host. The moment it grows opinions ab
 runs and *who pays*, it stops being embeddable in anything with its own opinions. So, explicit
 non-goals, these belong to whatever hosts the engine, and PRs adding them are wrong by design:
 
-- **No tenancy or auth.** The engine trusts its caller completely; multi-user identity, quotas,
+- **No tenancy or auth.** The engine trusts its caller completely. Multi-user identity, quotas,
   and authorization live in the hoster's layer.
 - **No billing or metering policy.** The engine *measures* (host-observed metrics, benchmarked
-  percentiles); charging for it is the hoster's.
+  percentiles). Charging for it is the hoster's.
 - **No fleet scheduling.** One engine drives sandboxes on one host. Bin-packing across hosts,
-  queues, and autoscaling are the hoster's: the engine runs sandboxes on its host; it doesn't
+  queues, and autoscaling are the hoster's: the engine runs sandboxes on its host, it does not
   schedule a cluster.
 - **No image or registry management.** The engine boots the rootfs it is handed (a path, via
-  `BootConfig` or `EKVM_ROOTFS`); it does not build, fetch, cache, or version images, and it speaks
+  `BootConfig` or `EKVM_ROOTFS`). It does not build, fetch, cache, or version images, and it speaks
   no registry protocol. `cargo xtask build-rootfs` produces one, but that is dev tooling in this
   repo, not a runtime feature.
 - **No dashboard, no platform API.** The programmatic surface is the Rust library, the CLI, and

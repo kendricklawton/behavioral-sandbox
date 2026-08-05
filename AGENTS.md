@@ -42,8 +42,12 @@ a design error rather than a trade-off.
 3. **Deny by default.** A sandbox with no explicit policy is configured with no route out and
    minimal capability, and each allowance is recorded in the audit log.
 4. **Engine, not platform.** A self-hostable runtime and a driver API; tenancy, billing, scheduling,
-   and dashboards are the hoster's. The **AI model is out too**: it is always the *caller* driving
-   the engine from outside, never an engine component. A recorded non-goal.
+   and dashboards belong to whatever hosts the engine. The **AI model is out too**: it is always the
+   *caller* driving the engine from outside, never an engine component. This is a rule about **where
+   code lives**, not a promise about what this project may build later: a hosted platform, a
+   dashboard, or a control plane, if any is ever offered, is a layer *above* the engine with its own
+   repo and its own rules. Keeping that layer out is what leaves the engine embeddable in someone
+   else's, and what makes "the engine grew a tenant id" a design error either way.
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
    broken channel should surface as a typed error. This is the rule the code is written against and
    the property the confinement suite exercises; it is an aim, not a proven property.
