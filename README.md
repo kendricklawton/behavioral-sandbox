@@ -188,8 +188,10 @@ The engine is consumed in three shapes, one of which exists today:
   on a unix socket, documented in [docs/daemon.md](docs/daemon.md). `ekvm-client` (in
   `crates/client`) is a dependency-light Rust reference client for it.
 
-* **Language SDKs** (`ekvm-python`, `ekvm-go`, `ekvm-node`, in that order), planned in separate companion
-  repositories so their build tooling stays out of this workspace. **None are built yet.**
+* **Language SDKs** ([`ekvm-sdk-python`](https://github.com/ekvm-rs/ekvm-sdk-python),
+  [`ekvm-sdk-go`](https://github.com/ekvm-rs/ekvm-sdk-go),
+  [`ekvm-sdk-js`](https://github.com/ekvm-rs/ekvm-sdk-js)), separate companion repositories so their
+  build tooling stays out of this workspace. **None are built yet.**
 
 ## Documentation
 

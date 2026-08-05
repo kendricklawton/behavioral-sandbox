@@ -157,5 +157,5 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   `cargo xtask semver-check`, which names each crate explicitly: run bare, `cargo-semver-checks`
   drops every `publish = false` package (all of them) and exits `0` having checked nothing. It is
   also inert until `0.1.0`, since cargo treats every `0.0.x` bump as already breaking.
-- **Non-Rust SDKs live in separate repos** (`ekvm-python`, `ekvm-node`, `ekvm-go`); do not pull
+- **Non-Rust SDKs live in separate repos** (`ekvm-sdk-python`, `ekvm-sdk-js`, `ekvm-sdk-go`); do not pull
   Python, Node, or Go build tooling into this workspace.
