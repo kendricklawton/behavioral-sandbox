@@ -76,13 +76,32 @@ pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
 /// A schema-stamped message. Every line on the wire, request or response, is an `Envelope`: the
 /// leading `schema` field plus the flattened [`Request`]/[`Response`] body, so a line reads
 /// `{"schema":1,"op":"exec",...}` and the version is legible before the body.
+///
+/// Built by [`new`](Self::new), which stamps [`WIRE_SCHEMA`], the only version this crate speaks.
+/// The *gate* is [`read_message`]: deserializing an `Envelope` directly checks nothing, so a
+/// stamp this crate would refuse is representable here, on purpose, since a test or a probe wants
+/// to read a foreign stamp, but only ever *minted* through `new`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Envelope<T> {
     /// The [`WIRE_SCHEMA`] the sender speaks.
     pub schema: u32,
     /// The message body, flattened so its own tag (`op`/`reply`) sits beside `schema`.
     #[serde(flatten)]
     pub body: T,
+}
+
+impl<T> Envelope<T> {
+    /// Stamp `body` with the one schema this crate speaks. There is no way to mint any other
+    /// number here; a peer's foreign stamp exists only on the decode side, where [`read_message`]
+    /// refuses it.
+    #[must_use]
+    pub fn new(body: T) -> Self {
+        Self {
+            schema: WIRE_SCHEMA,
+            body,
+        }
+    }
 }
 
 /// A client → daemon message. Internally tagged by an `op` field, so a line reads
@@ -804,10 +823,7 @@ fn discard_to_newline(reader: &mut impl BufRead) -> Result<(), ProtocolError> {
 /// [`ProtocolError::TooLarge`] if the serialized line exceeds [`MAX_MESSAGE_BYTES`], the same
 /// envelope the read side enforces, refused before a byte is written.
 pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), ProtocolError> {
-    let envelope = Envelope {
-        schema: WIRE_SCHEMA,
-        body,
-    };
+    let envelope = Envelope::new(body);
     // These types always serialize (no maps with non-string keys, no failing custom impls), so a
     // serialize error is a bug, not a runtime state, fold it into `Io` rather than a new variant.
     let mut line = serde_json::to_string(&envelope)
@@ -1179,6 +1195,17 @@ mod tests {
                 pooled: true
             }
         );
+    }
+
+    /// [`Envelope::new`] is the only mint, so pin what it stamps: the crate's own
+    /// [`WIRE_SCHEMA`], not a number a caller could get wrong. (`every_message_carries_the_schema`
+    /// pins the same fact at the byte level; this pins it at the type level, where a foreign
+    /// stamp is representable for the decode side but must never be minted.)
+    #[test]
+    fn a_minted_envelope_carries_the_wire_schema() {
+        let envelope = Envelope::new(Request::Close);
+        assert_eq!(envelope.schema, WIRE_SCHEMA);
+        assert_eq!(envelope.body, Request::Close);
     }
 
     #[test]
