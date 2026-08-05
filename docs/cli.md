@@ -59,6 +59,10 @@ out of scope.
 ## Deliberately not in the CLI
 
 Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, not omission.
+"The CLI" here means the one-shot commands (`run`, `shell`, `doctor`, `verify`): a process that
+boots one VM, does its work, and exits. The daemon is the **same `ekvm` binary** started as
+`ekvm serve`, so a daemon-scoped feature is one subcommand away, not a separate install; what
+differs is the operational shape, a long-lived process with its own flags, policy, and wire API.
 
 - **Snapshots and the pre-warmed pool.** A pre-warmed pool is a long-lived-process concern, so it
   lives in the [`ekvm serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
