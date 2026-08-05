@@ -658,32 +658,70 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
         "two clones' first urandom draws must differ (VMGenID must reseed the CRNG on restore)"
     );
 
-    // Clock posture. `Vm::restore` sends `clock_realtime` on `PUT /snapshot/load`, which asks
-    // Firecracker to advance the guest's kvmclock by the wall time elapsed since the snapshot was
-    // taken instead of resuming it frozen. That is a promise the docs make, so it is asserted here
-    // rather than merely printed: without the fix-up a clone restored `SNAPSHOT_AGE` after its
-    // snapshot reads back an epoch at least that far behind the host's. Clone B restores even
-    // later (the sleep plus clone A's whole draw), so it checks the fix-up across a larger age,
-    // not just the same one twice.
+    // Clock posture, split by what the resolved VMM can be asked for. On v1.16+, `Vm::restore`
+    // sends `clock_realtime` on `PUT /snapshot/load`, which asks Firecracker to advance the
+    // guest's kvmclock by the wall time elapsed since the snapshot was taken instead of resuming
+    // it frozen; that is a promise the docs make, so it is asserted rather than merely printed.
+    // The flag arrived in v1.16 (`FC_CLOCK_REALTIME_SINCE`), so on v1.15 the engine withholds it
+    // rather than failing the restore, and the *documented* behavior (the RELEASES.md carve-out,
+    // measured 2026-08-04) is a clone waking at snapshot time. Both postures are asserted, so a
+    // v1.15 gate run stays green on the difference it documents and still turns red if either
+    // side stops behaving as written (a v1.15 restore that advances, or a v1.16 one that freezes).
+    // Clone B restores later than A (the sleep plus A's whole draw), so each posture is checked
+    // across two different ages, not the same one twice.
     //
     // The tolerance is deliberately loose. It is not a claim about time-sync accuracy (the advance
     // is only as good as the host's own clock, and the guest never runs NTP); it only has to be
-    // tight enough to fail when the clock resumes frozen, which is why it sits below `SNAPSHOT_AGE`.
+    // tight enough to tell "advanced" from "frozen" across `SNAPSHOT_AGE`, which is why it sits
+    // below it.
     let tolerance = (SNAPSHOT_AGE.as_secs() as i64) - 2;
+    let clock_advances = vmm_version().is_none_or(|v| v >= (1, 16));
     for (label, skew) in [("A", skew_a), ("B", skew_b)] {
         eprintln!(
             "clock: restored clone {label} wall-clock skew vs host ≈ {skew}s \
-             (snapshot aged ≥{}s before restore)",
-            SNAPSHOT_AGE.as_secs()
+             (snapshot aged ≥{}s before restore; VMM {})",
+            SNAPSHOT_AGE.as_secs(),
+            if clock_advances {
+                "v1.16+: expecting the advance"
+            } else {
+                "v1.15: expecting the documented freeze"
+            }
         );
-        assert!(
-            skew.abs() < tolerance,
-            "clone {label}: a restored clone's clock must be advanced across the snapshot's age, \
-             not resumed frozen: skew {skew}s is not under {tolerance}s after a snapshot aged at \
-             least {}s",
-            SNAPSHOT_AGE.as_secs()
-        );
+        if clock_advances {
+            assert!(
+                skew.abs() < tolerance,
+                "clone {label}: a restored clone's clock must be advanced across the snapshot's \
+                 age, not resumed frozen: skew {skew}s is not under {tolerance}s after a snapshot \
+                 aged at least {}s",
+                SNAPSHOT_AGE.as_secs()
+            );
+        } else {
+            assert!(
+                skew >= tolerance,
+                "clone {label}: on a v1.15 VMM the engine withholds `clock_realtime` (it is \
+                 v1.16+), so the documented posture is a clock frozen at snapshot time: skew \
+                 {skew}s under {tolerance}s means the clock advanced without the flag, and the \
+                 carve-out in RELEASES.md is stale"
+            );
+        }
     }
+}
+
+/// The resolved VMM's `(major, minor)`, probed the way an operator checks it
+/// (`firecracker --version` on the binary `BootConfig::from_env` resolves), so this suite can
+/// assert version-documented behavior instead of failing on it. `None` (probe or parse failed)
+/// reads as the pinned series: a broken probe must not quietly switch which posture is asserted.
+fn vmm_version() -> Option<(u64, u64)> {
+    let out = std::process::Command::new(ekvm_engine::BootConfig::from_env().firecracker)
+        .arg("--version")
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let rest = text.split("Firecracker v").nth(1)?;
+    let mut nums = rest
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|t| t.parse::<u64>().ok());
+    Some((nums.next()?, nums.next()?))
 }
 
 #[test]
