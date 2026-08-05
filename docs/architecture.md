@@ -45,7 +45,7 @@ verified outcome.
    reported as nearest-rank percentiles with the host and date they were taken on. Where a number
    cannot be defended, it is withdrawn rather than published; see [Benchmarks](./benchmarks.md).
 
-## Architecture Overview
+## Architecture overview
 
 ```text
                      CONSUMER ENTRY POINTS & API SURFACES
@@ -55,11 +55,12 @@ verified outcome.
             v (In-Process)               v (Unix Socket: schema 1)     v (Off-Host)
      `ekvm-engine`                `ekvm-protocol`               `ekvm-record`
   (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (ed25519 verify/chain)
-            |                            |                             |
-            +----------------------------+-----------------------------+
-                                         |
-                                         v
-                            `ekvm serve` / `ekvm` CLI
+            |                            |
+            |                            v
+            |               `ekvm serve` / `ekvm` CLI
+            |            (a thin host of the same `ekvm-engine`)
+            |                            |
+            +----------------------------+
                                          |
                +-------------------------+-------------------------+
                | (Driver / Lifecycle)                              | (Observation)

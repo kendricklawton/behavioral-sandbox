@@ -7,6 +7,7 @@ contain it and the test that exercises that mechanism today.
 The core model: **untrusted code runs inside a KVM microVM, and everything that observes or
 constrains it runs on the host.** The boundary itself is enforced by the CPU through KVM, which this
 project depends on rather than establishes.
+
 ## Objectives
 
 What the engine is trying to achieve, in priority order. These are the aims the design serves, not
