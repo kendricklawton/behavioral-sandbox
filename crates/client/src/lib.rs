@@ -178,7 +178,9 @@ impl Client {
     pub fn open(&mut self, params: OpenParams) -> Result<Opened, ClientError> {
         self.send(&Request::Open(params))?;
         match self.recv()? {
-            Response::Opened { boot_ms, pooled } => Ok(Opened { boot_ms, pooled }),
+            Response::Opened {
+                boot_ms, pooled, ..
+            } => Ok(Opened { boot_ms, pooled }),
             other => Err(unexpected(other)),
         }
     }
@@ -217,6 +219,7 @@ impl Client {
                 stdout,
                 stderr,
                 exec_wall_ms,
+                ..
             } => Ok(ExecOutcome {
                 exit_code,
                 stdout,
@@ -267,7 +270,7 @@ impl Client {
     pub fn snapshot(&mut self) -> Result<String, ClientError> {
         self.send(&Request::Snapshot)?;
         match self.recv()? {
-            Response::Snapshotted { dir } => Ok(dir),
+            Response::Snapshotted { dir, .. } => Ok(dir),
             other => Err(unexpected(other)),
         }
     }
@@ -279,7 +282,7 @@ impl Client {
     pub fn trace(&mut self) -> Result<serde_json::Value, ClientError> {
         self.send(&Request::Trace)?;
         match self.recv()? {
-            Response::Trace { record } => Ok(record),
+            Response::Trace { record, .. } => Ok(record),
             other => Err(unexpected(other)),
         }
     }
@@ -292,7 +295,7 @@ impl Client {
     pub fn trace_summary(&mut self) -> Result<serde_json::Value, ClientError> {
         self.send(&Request::TraceSummary)?;
         match self.recv()? {
-            Response::TraceSummary { summary } => Ok(summary),
+            Response::TraceSummary { summary, .. } => Ok(summary),
             other => Err(unexpected(other)),
         }
     }
@@ -345,12 +348,13 @@ impl Client {
                 message,
                 fatal,
                 kind,
+                ..
             }) => Err(ClientError::Remote {
                 message,
                 fatal,
                 kind,
             }),
-            Some(Response::AtCapacity { retry_after_ms }) => {
+            Some(Response::AtCapacity { retry_after_ms, .. }) => {
                 Err(ClientError::AtCapacity { retry_after_ms })
             }
             Some(resp) => Ok(resp),

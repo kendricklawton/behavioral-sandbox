@@ -648,9 +648,7 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     );
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     let mut stream = stream;
-    let refusal = ekvm_protocol::Response::AtCapacity {
-        retry_after_ms: AT_CAPACITY_RETRY_MS,
-    };
+    let refusal = ekvm_protocol::Response::at_capacity(AT_CAPACITY_RETRY_MS);
     let _ = ekvm_protocol::write_message(&mut stream, &refusal);
 }
 
@@ -1303,7 +1301,7 @@ mod tests {
             .expect("the refusal parses")
             .expect("the refusal is a message, not EOF");
         assert!(
-            matches!(&reply, ekvm_protocol::Response::AtCapacity { retry_after_ms } if *retry_after_ms > 0),
+            matches!(&reply, ekvm_protocol::Response::AtCapacity { retry_after_ms, .. } if *retry_after_ms > 0),
             "expected the typed at-capacity refusal, got {reply:?}"
         );
         assert!(

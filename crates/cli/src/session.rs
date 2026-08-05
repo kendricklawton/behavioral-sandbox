@@ -124,12 +124,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 vcpus = limits.vcpus.get(),
                 "refusing an open: at an aggregate resource ceiling"
             );
-            let _ = write_response(
-                &mut writer,
-                &Response::AtCapacity {
-                    retry_after_ms: AT_CAPACITY_RETRY_MS,
-                },
-            );
+            let _ = write_response(&mut writer, &Response::at_capacity(AT_CAPACITY_RETRY_MS));
             return;
         }
     };
@@ -201,7 +196,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         .metrics
         .session_opened(pooled, boot, vm.sentinel_degraded());
     tracing::info!(vmm_pid = vm.vmm_pid(), boot_ms, pooled, "session opened");
-    if !send(&mut writer, &Response::Opened { boot_ms, pooled }) {
+    if !send(&mut writer, &Response::opened(boot_ms, pooled)) {
         end_session(server, vm, probes, pooled); // client gone before we could serve
         return;
     }
@@ -270,11 +265,13 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     t0.elapsed(),
                     &mut total_exec_wall,
                     true, // a real guest command
-                    |r| Response::Result {
-                        exit_code: r.exit_code,
-                        stdout: lossy(&r.stdout),
-                        stderr: lossy(&r.stderr),
-                        exec_wall_ms: ms(r.metrics.wall),
+                    |r| {
+                        Response::result(
+                            r.exit_code,
+                            lossy(&r.stdout),
+                            lossy(&r.stderr),
+                            ms(r.metrics.wall),
+                        )
                     },
                 ) {
                     break;
@@ -312,7 +309,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     t0.elapsed(),
                     &mut total_exec_wall,
                     false, // put rides a no-op `true`, not a guest command
-                    |_| Response::Put { path: path.clone() },
+                    |_| Response::put(path.clone()),
                 ) {
                     break;
                 }
@@ -336,14 +333,14 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     false, // get rides a no-op `true`, not a guest command
                     |r| {
                         let found = r.files.iter().find(|a| a.path == path);
-                        Response::Got {
-                            path: path.clone(),
-                            content: found.map(|a| lossy(&a.data)).unwrap_or_default(),
-                            present: found.is_some(),
+                        Response::got(
+                            path.clone(),
+                            found.map(|a| lossy(&a.data)).unwrap_or_default(),
+                            found.is_some(),
                             // Flagged, never silent: replacement characters in `content` are not
                             // the file's bytes, and only the daemon (which saw the bytes) knows.
-                            lossy: found.is_some_and(|a| std::str::from_utf8(&a.data).is_err()),
-                        }
+                            found.is_some_and(|a| std::str::from_utf8(&a.data).is_err()),
+                        )
                     },
                 ) {
                     break;
@@ -354,7 +351,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 // Always non-fatal: a jailed refusal never touches the VM, and a genuine mid-snapshot
                 // failure surfaces on the next exec (the fault taxonomy handles it there).
                 let resp = match do_snapshot(server, &vm) {
-                    Ok(dir) => Response::Snapshotted { dir },
+                    Ok(dir) => Response::snapshotted(dir),
                     Err(e) => {
                         server.metrics.request_failed(true);
                         nonfatal(format!("snapshot: {e}"), wire_kind(e.kind()))
@@ -379,9 +376,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                             .signing_key
                             .sign_canonical_chained(&canonical, record_chain.as_deref());
                         record_chain = Some(ekvm_probes_loader::record_hash(&canonical));
-                        Response::Trace {
-                            record: record_to_value(&envelope),
-                        }
+                        Response::trace(record_to_value(&envelope))
                     }
                     None => {
                         server.metrics.request_failed(true);
@@ -401,9 +396,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
                 // The same live, non-destructive record snapshot as `trace`, projected to the
                 // model-legible summary the CLI's `--record-summary` writes.
                 let resp = match probes.as_ref() {
-                    Some(p) => Response::TraceSummary {
-                        summary: record_to_value(&p.live_record(timing).to_summary_json()),
-                    },
+                    Some(p) => Response::trace_summary(record_to_value(
+                        &p.live_record(timing).to_summary_json(),
+                    )),
                     None => {
                         server.metrics.request_failed(true);
                         nonfatal(
@@ -957,11 +952,7 @@ fn nonfatal(message: impl Into<String>, kind: FaultKind) -> Response {
 
 /// Build a typed error response.
 fn error(message: String, fatal: bool, kind: FaultKind) -> Response {
-    Response::Error {
-        message,
-        fatal,
-        kind,
-    }
+    Response::error(message, fatal, kind)
 }
 
 /// The engine's pinned error taxonomy, as the wire's. Kept a total, wildcard-free match so a new

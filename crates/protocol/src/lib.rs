@@ -330,12 +330,20 @@ impl GetParams {
 /// not a source break for it. The *wire* is stricter: an unknown `reply` is still a hard decode
 /// error, so adding one remains a schema-level decision (unlike [`FaultKind`], which degrades to
 /// [`Unknown`](FaultKind::Unknown) on purpose).
+///
+/// **A reply gaining a field is not a source break either.** Every payload-carrying variant is
+/// itself `#[non_exhaustive]`, so a foreign match must carry `..` and keeps compiling when a field
+/// lands; construction goes through the constructor fns below, whose signatures take the variant's
+/// required fields, the only kind a reply can't gain within a schema (an old daemon would not send
+/// it), so an additive wire field never moves them. The one producer of these values is the
+/// daemon in this repo.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Response {
     /// The sandbox booted; carries its boot-to-userspace latency and whether it came from the
     /// pre-warmed pool (a fast `open`) or a cold boot.
+    #[non_exhaustive]
     Opened {
         /// Boot-to-userspace latency, milliseconds (a warm-pool restore is a small fraction of a
         /// cold boot).
@@ -346,6 +354,7 @@ pub enum Response {
     },
     /// A command finished. `exit_code` is the guest command's own code (non-zero is a *result*, not
     /// an error); `stdout`/`stderr` are lossy UTF-8 like `ekvm run --json`.
+    #[non_exhaustive]
     Result {
         /// The guest command's exit code (`128 + signal` on signal death).
         exit_code: i32,
@@ -357,12 +366,14 @@ pub enum Response {
         exec_wall_ms: u64,
     },
     /// A [`Request::Put`] landed: the file was written to the working directory.
+    #[non_exhaustive]
     Put {
         /// The path written, echoed back for correlation.
         path: String,
     },
     /// The result of a [`Request::Get`]. `present: false` (with an empty `content`) is a missing
     /// file, not an error.
+    #[non_exhaustive]
     Got {
         /// The path read, echoed back.
         path: String,
@@ -380,12 +391,14 @@ pub enum Response {
     },
     /// A [`Request::Snapshot`] wrote a bundle. `dir` is a **daemon-host** path (the bundle's device
     /// state + guest memory live on the daemon's filesystem, not sent over this line).
+    #[non_exhaustive]
     Snapshotted {
         /// The host directory holding the snapshot bundle.
         dir: String,
     },
     /// The session's audit record (answering [`Request::Trace`]), as the **signed record envelope**,
     /// carried opaquely here so this crate stays free of the `ekvm-probes-loader` types.
+    #[non_exhaustive]
     Trace {
         /// The signed envelope as a JSON object: `{schema, key_id, signature, record}`, where its
         /// `schema` is the *delivery-surface* version and `record` is the canonical `RunRecord` JSON
@@ -395,6 +408,7 @@ pub enum Response {
     },
     /// The session's model-legible summary (answering [`Request::TraceSummary`]), as the projection's
     /// JSON object, carried opaquely, same as [`Trace`](Self::Trace).
+    #[non_exhaustive]
     TraceSummary {
         /// The record summary as a JSON object (its own leading `schema` is the *summary* schema,
         /// distinct from the record schema and this wire [`WIRE_SCHEMA`]).
@@ -409,6 +423,7 @@ pub enum Response {
     /// The request could not be served: a malformed message, a boot/channel failure, or a guest
     /// fault. `fatal` distinguishes a session-ending failure (the sandbox is gone, reconnect) from
     /// a per-request one the session survives (e.g. a command that couldn't spawn).
+    #[non_exhaustive]
     Error {
         /// A human-readable reason (never carries injected secrets, an engine `VmmError` rendering
         /// may name a path or an env *key*, never a value). For display and logs; branch on
@@ -428,10 +443,84 @@ pub enum Response {
     /// fleet dispatcher can branch on backpressure ("full, try another host") without string-matching
     /// a message; it is always session-ending. `retry_after_ms` is a backoff hint, not a promise (the
     /// daemon cannot know when a slot frees).
+    #[non_exhaustive]
     AtCapacity {
         /// Suggested backoff before retrying, in milliseconds. A hint only.
         retry_after_ms: u64,
     },
+}
+
+/// The construction surface for the `#[non_exhaustive]` variants above. Each fn takes the
+/// variant's **required** fields; an optional field added later is set on the value by the daemon,
+/// so these signatures move only when the wire itself breaks.
+impl Response {
+    /// The sandbox booted: its boot-to-userspace latency and whether the pool served it.
+    #[must_use]
+    pub fn opened(boot_ms: u64, pooled: bool) -> Self {
+        Self::Opened { boot_ms, pooled }
+    }
+
+    /// A command finished with `exit_code`, its captured streams, and its host-observed wall time.
+    #[must_use]
+    pub fn result(exit_code: i32, stdout: String, stderr: String, exec_wall_ms: u64) -> Self {
+        Self::Result {
+            exit_code,
+            stdout,
+            stderr,
+            exec_wall_ms,
+        }
+    }
+
+    /// A `put` landed at `path`.
+    #[must_use]
+    pub fn put(path: String) -> Self {
+        Self::Put { path }
+    }
+
+    /// A `get`'s answer: the file at `path`, or its absence (`present: false`, empty `content`).
+    #[must_use]
+    pub fn got(path: String, content: String, present: bool, lossy: bool) -> Self {
+        Self::Got {
+            path,
+            content,
+            present,
+            lossy,
+        }
+    }
+
+    /// A snapshot bundle was written at the daemon-host path `dir`.
+    #[must_use]
+    pub fn snapshotted(dir: String) -> Self {
+        Self::Snapshotted { dir }
+    }
+
+    /// The session's signed audit-record envelope, carried opaquely.
+    #[must_use]
+    pub fn trace(record: serde_json::Value) -> Self {
+        Self::Trace { record }
+    }
+
+    /// The session's model-legible summary projection, carried opaquely.
+    #[must_use]
+    pub fn trace_summary(summary: serde_json::Value) -> Self {
+        Self::TraceSummary { summary }
+    }
+
+    /// The request could not be served; `fatal` says whether the session died with it.
+    #[must_use]
+    pub fn error(message: String, fatal: bool, kind: FaultKind) -> Self {
+        Self::Error {
+            message,
+            fatal,
+            kind,
+        }
+    }
+
+    /// The daemon is at capacity; `retry_after_ms` is a backoff hint, not a promise.
+    #[must_use]
+    pub fn at_capacity(retry_after_ms: u64) -> Self {
+        Self::AtCapacity { retry_after_ms }
+    }
 }
 
 /// The `kind` a [`Response::Error`] decodes to when the peer omitted the field entirely (a daemon
@@ -1049,6 +1138,47 @@ mod tests {
         ] {
             assert_eq!(line(&msg), want, "response wire bytes moved");
         }
+    }
+
+    /// The response constructors are positional, and three of them take arguments a compiler
+    /// cannot tell apart (`result`'s two streams, `got`'s two strings, `error`'s message). Pin
+    /// what lands where, so a swapped pair inside a constructor is a red test, not a record whose
+    /// stdout is its stderr.
+    #[test]
+    fn constructors_place_arguments_in_the_documented_fields() {
+        assert_eq!(
+            Response::result(3, "out".into(), "err".into(), 5),
+            Response::Result {
+                exit_code: 3,
+                stdout: "out".into(),
+                stderr: "err".into(),
+                exec_wall_ms: 5,
+            }
+        );
+        assert_eq!(
+            Response::got("p".into(), "c".into(), true, false),
+            Response::Got {
+                path: "p".into(),
+                content: "c".into(),
+                present: true,
+                lossy: false,
+            }
+        );
+        assert_eq!(
+            Response::error("boom".into(), true, FaultKind::Guest),
+            Response::Error {
+                message: "boom".into(),
+                fatal: true,
+                kind: FaultKind::Guest,
+            }
+        );
+        assert_eq!(
+            Response::opened(7, true),
+            Response::Opened {
+                boot_ms: 7,
+                pooled: true
+            }
+        );
     }
 
     #[test]

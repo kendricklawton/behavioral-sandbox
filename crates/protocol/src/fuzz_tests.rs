@@ -142,44 +142,27 @@ fn rand_fault_kind(rng: &mut Rng) -> FaultKind {
 
 fn rand_response(rng: &mut Rng) -> Response {
     match rng.below(11) {
-        0 => Response::Opened {
-            boot_ms: rng.next_u64(),
-            pooled: rng.below(2) == 0,
-        },
-        1 => Response::Result {
-            exit_code: rng.next_u64() as i32,
-            stdout: rand_string(rng),
-            stderr: rand_string(rng),
-            exec_wall_ms: rng.next_u64(),
-        },
-        2 => Response::Got {
-            path: rand_string(rng),
-            content: rand_string(rng),
-            present: rng.below(2) == 0,
-            lossy: rng.below(2) == 0,
-        },
-        3 => Response::Trace {
-            record: json!({"schema": 2, "n": rng.byte()}),
-        },
-        4 => Response::Snapshotted {
-            dir: rand_string(rng),
-        },
+        0 => Response::opened(rng.next_u64(), rng.below(2) == 0),
+        1 => Response::result(
+            rng.next_u64() as i32,
+            rand_string(rng),
+            rand_string(rng),
+            rng.next_u64(),
+        ),
+        2 => Response::got(
+            rand_string(rng),
+            rand_string(rng),
+            rng.below(2) == 0,
+            rng.below(2) == 0,
+        ),
+        3 => Response::trace(json!({"schema": 2, "n": rng.byte()})),
+        4 => Response::snapshotted(rand_string(rng)),
         5 => Response::Closed,
-        6 => Response::Error {
-            message: rand_string(rng),
-            fatal: rng.below(2) == 0,
-            kind: rand_fault_kind(rng),
-        },
-        7 => Response::AtCapacity {
-            retry_after_ms: rng.next_u64(),
-        },
+        6 => Response::error(rand_string(rng), rng.below(2) == 0, rand_fault_kind(rng)),
+        7 => Response::at_capacity(rng.next_u64()),
         8 => Response::Cancelled,
-        9 => Response::TraceSummary {
-            summary: json!({"schema": 1, "n": rng.byte()}),
-        },
-        _ => Response::Put {
-            path: rand_string(rng),
-        },
+        9 => Response::trace_summary(json!({"schema": 1, "n": rng.byte()})),
+        _ => Response::put(rand_string(rng)),
     }
 }
 
