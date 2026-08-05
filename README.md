@@ -153,8 +153,7 @@ the mechanism serving it; the full text is [docs/architecture.md](docs/architect
 * **Deny by default**: no explicit policy means no route out and minimal capability, and every
   allowance lands in the record.
 * **Engine, not platform**: a runtime and a driver API. Tenancy, billing, scheduling, and
-  dashboards belong to whatever hosts the engine, a [scope line][embedding] about where code lives
-  rather than a claim about what may get built above it.
+  dashboards are the hoster's: a recorded [non-goal][embedding], not a gap.
 * **No panic, hang, or leak on the host path**: a hostile guest, a failed probe, or a broken
   channel surfaces as a typed error. The rule the code is written against and the confinement suite
   exercises; an aim, not a proven property.

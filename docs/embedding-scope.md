@@ -1,14 +1,6 @@
 # Where the engine ends
 
-Where the engine stops and the layer above it starts, and the surface this project intends to pin. A
-runtime that quietly grows platform features stops being embeddable.
-
-**This is a boundary, not a renunciation.** Everything below is out of *the engine*, which says
-nothing about whether such a layer gets built, or by whom. A control plane, a dashboard, or a hosted
-service may well be built on this engine, possibly by this project: the rule is that it lives above
-the engine, in its own repo, talking to the daemon as a client like any other caller. That
-separation is the point. It is what lets someone embed the engine under their own platform, and it
-is why "add a tenant id to the wire" stays a design error even for the project's own hoster.
+The line this project refuses to cross, and the surface it intends to pin. A runtime that quietly grows platform features stops being embeddable.
 
 ## Where the engine ends (the engine/PaaS line)
 

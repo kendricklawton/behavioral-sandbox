@@ -37,9 +37,7 @@ verified outcome.
 3. **Deny by default.** A sandbox with no explicit policy is configured with no network route out
    and minimal capability, and each allowance is recorded in the audit log.
 4. **Engine, not platform.** A self-hostable runtime and a driver API. Tenancy, auth, billing, fleet
-   scheduling, and dashboards belong to whoever hosts the engine, including this project if it ever
-   hosts one: the rule places them in a layer *above* the engine rather than ruling out that the
-   layer gets built.
+   scheduling, and dashboards belong to whoever hosts the engine.
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
    broken channel should surface as a typed error. This is what the code is written against and what
    the confinement suite exercises; it is an aim, not a proven property.
