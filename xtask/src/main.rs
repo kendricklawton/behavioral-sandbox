@@ -852,7 +852,7 @@ fn privileged_preflight() -> Result<()> {
     // The jailed-boot tests build a chroot under the scratch dir (mknod'd /dev/kvm, an exec'd
     // firecracker copy); on a `nodev` mount (every systemd `/tmp` default) or a `noexec` one
     // (hardened baselines) they fail *deep in the run* with `ScratchDirNodev`/`ScratchDirNoexec`,
-    // reading like an engine bug rather than the one-line host fix it is (P19.9e is the engine's
+    // reading like an engine bug rather than the one-line host fix it is (the engine carries its
     // own boot-time refusal; this is the gate's up-front one). Same loud-up-front discipline as the
     // checks above, reusing the doctor's tested detector against the exact scratch dir the tests
     // will resolve (`BootConfig::from_env`, so an `EKVM_SCRATCH_DIR` override clears it).
@@ -1601,6 +1601,10 @@ fn rustc_commit_hash() -> Option<String> {
 fn cargo_env(args: &[&str], env: &[(&str, &str)]) -> Result<()> {
     println!("$ cargo {}", args.join(" "));
     let mut cmd = Command::new(env!("CARGO"));
+    // From the workspace root regardless of the invoker's cwd. Cargo's own subcommands walk up to
+    // the workspace on their own, but plugins resolve from the cwd (`cargo deny check` looks for
+    // ./Cargo.toml there), so a `cargo xtask ci` run from a subdirectory died at exactly that step.
+    cmd.current_dir(workspace_root());
     cmd.args(args);
     for (k, v) in env {
         cmd.env(k, v);
