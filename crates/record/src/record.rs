@@ -445,21 +445,22 @@ pub struct SyscallFold {
     cgroup_id: u64,
     total: u64,
     by_kind: SyscallCounts,
-    /// Keyed `kind discriminant → detail → accumulator` (the same `(kind, detail)` dedup as a flat
-    /// pair key, nested so [`record`](Self::record) can probe the inner map with a **borrowed**
-    /// `&str`: the common repeat path allocates nothing, the owned `String` is built only on a
-    /// vacant under-cap insert). Both `BTreeMap` levels keep the total `(kind, detail)` order, so
+    /// Keyed `kind → detail → accumulator` (the same `(kind, detail)` dedup as a flat pair key,
+    /// nested so [`record`](Self::record) can probe the inner map with a **borrowed** `&str`: the
+    /// common repeat path allocates nothing, the owned `String` is built only on a vacant under-cap
+    /// insert). Both `BTreeMap` levels keep the total `(kind, detail)` order, so
     /// [`finish`](Self::finish) flattens already-sorted.
-    notable: BTreeMap<u32, BTreeMap<String, NotableAccum>>,
+    notable: BTreeMap<Syscall, BTreeMap<String, NotableAccum>>,
     /// Total distinct `(kind, detail)` entries held across the nested map, the [`MAX_NOTABLE`] cap
     /// check (the outer map's `len()` counts kinds, not entries).
     distinct: usize,
     overflow_events: u64,
 }
 
+/// The per-`(kind, detail)` accumulator. It carries no `kind`: the map's outer key is that fact,
+/// and a copy here would be a second place for it to be wrong.
 #[derive(Debug, Clone)]
 struct NotableAccum {
-    kind: Syscall,
     comm: String,
     hits: u64,
     /// Sticky: set by *any* event folded into this entry. A truncated capture and a complete one
@@ -506,7 +507,7 @@ impl SyscallFold {
         // vacant, under-cap insert. This fold runs once per streamed ring-buffer event, so the
         // per-repeat allocation was the record path's one avoidable hot-loop cost.
         let detail = ev.detail_display_cow();
-        let inner = self.notable.entry(kind as u32).or_default();
+        let inner = self.notable.entry(kind).or_default();
         if let Some(acc) = inner.get_mut(detail.as_ref()) {
             acc.hits += 1;
             acc.truncated |= ev.detail_truncated();
@@ -526,7 +527,6 @@ impl SyscallFold {
             inner.insert(
                 detail.into_owned(),
                 NotableAccum {
-                    kind,
                     comm: ev.comm_lossy().into_owned(),
                     hits: 1,
                     truncated: ev.detail_truncated(),
@@ -544,14 +544,17 @@ impl SyscallFold {
     pub fn finish(self) -> SyscallFootprint {
         let notable: Vec<NotableSyscall> = self
             .notable
-            .into_values()
-            .flatten()
-            .map(|(detail, acc)| NotableSyscall {
-                kind: acc.kind,
-                detail,
-                comm: acc.comm,
-                hits: acc.hits,
-                truncated: acc.truncated,
+            .into_iter()
+            .flat_map(|(kind, by_detail)| {
+                by_detail
+                    .into_iter()
+                    .map(move |(detail, acc)| NotableSyscall {
+                        kind,
+                        detail,
+                        comm: acc.comm,
+                        hits: acc.hits,
+                        truncated: acc.truncated,
+                    })
             })
             .collect();
         SyscallFootprint {
@@ -569,14 +572,15 @@ impl SyscallFold {
     pub fn snapshot(&self) -> SyscallFootprint {
         let notable: Vec<NotableSyscall> = self
             .notable
-            .values()
-            .flat_map(|inner| inner.iter())
-            .map(|(detail, acc)| NotableSyscall {
-                kind: acc.kind,
-                detail: detail.clone(),
-                comm: acc.comm.clone(),
-                hits: acc.hits,
-                truncated: acc.truncated,
+            .iter()
+            .flat_map(|(kind, by_detail)| {
+                by_detail.iter().map(move |(detail, acc)| NotableSyscall {
+                    kind: *kind,
+                    detail: detail.clone(),
+                    comm: acc.comm.clone(),
+                    hits: acc.hits,
+                    truncated: acc.truncated,
+                })
             })
             .collect();
         SyscallFootprint {
@@ -763,6 +767,36 @@ mod tests {
             4,
             "one notable per known-kind event, none for the unknown discriminant: {:?}",
             f.notable
+        );
+    }
+
+    /// `notable` is ordered by `(kind, detail)`, and the *kind* half is now [`Syscall`]'s own
+    /// `Ord` rather than a hand-rolled discriminant key. That ordering sits inside the signed
+    /// bytes, so pin it against what actually decides it: the enum's **explicit discriminants**,
+    /// which are the wire values the probe writes. Source order is not what is being asserted, and
+    /// reordering the arms alone is correctly a no-op; changing a discriminant is what must fail.
+    #[test]
+    fn notable_kinds_are_ordered_by_the_syscall_discriminants() {
+        // Fed in descending discriminant order, so arrival order cannot be what produces the result.
+        let events = [
+            ev(
+                Syscall::Connect as u32,
+                CG,
+                &[2, 0, 0, 53, 8, 8, 8, 8],
+                "sh",
+            ),
+            ev(Syscall::Openat as u32, CG, b"/etc/hosts", "sh"),
+            ev(Syscall::Execve as u32, CG, b"/bin/sh", "sh"),
+        ];
+        let kinds: Vec<Syscall> = SyscallFootprint::from_events(CG, &events)
+            .notable
+            .iter()
+            .map(|n| n.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            [Syscall::Execve, Syscall::Openat, Syscall::Connect],
+            "notable kinds follow ascending Syscall discriminants, not arrival order"
         );
     }
 

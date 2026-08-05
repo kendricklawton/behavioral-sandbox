@@ -40,8 +40,13 @@ pub const SOCKADDR_SNAP_V4: usize = 16;
 /// ([`SyscallEvent::syscall`]) rather than this enum, so reconstructing an event from arbitrary bytes
 /// can never form an invalid discriminant; [`SyscallEvent::kind`] maps it back, returning `None` for
 /// an unknown value.
+/// `Ord` compares the **explicit discriminants below**, not source order, so a `BTreeMap` keyed on
+/// this iterates exactly as one keyed on the raw `u32` wire value does, and reordering these arms
+/// moves nothing. The audit record's `notable` ordering rests on that, which ties it to the wire
+/// numbering the probe writes rather than to how this file is laid out
+/// (`notable_kinds_are_ordered_by_the_syscall_discriminants` in `ekvm-record` holds it).
 #[repr(u32)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Syscall {
     /// `execve` (`sys_enter_execve`): detail holds the program path.
     Execve = 0,

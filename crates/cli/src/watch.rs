@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use ekvm_engine::VmmError;
 use ekvm_probes_loader::LiveSnapshot;
+use ekvm_record::Syscall;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -46,7 +47,7 @@ const MAX_TIMELINE: usize = 256;
 pub struct Timeline {
     seen_flows: BTreeSet<(u32, u16, u8, u32, u16)>,
     denial_counts: BTreeMap<(u32, u16, u8), u64>,
-    seen_notable: BTreeSet<(u32, String)>,
+    seen_notable: BTreeSet<(Syscall, String)>,
     events: Vec<(Duration, String)>,
 }
 
@@ -103,7 +104,7 @@ impl Timeline {
         }
         if let Some(footprint) = &snap.host_syscalls {
             for n in &footprint.notable {
-                let id = (n.kind as u32, n.detail.clone());
+                let id = (n.kind, n.detail.clone());
                 if !self.seen_notable.contains(&id) {
                     self.push(
                         at,
