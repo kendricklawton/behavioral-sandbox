@@ -1,19 +1,23 @@
 # Introduction
 
-**eKVM** is a self-hostable engine for running untrusted code in hardware
-isolation, with a host-observed record of what the host was able to see it do. The code runs inside a **Firecracker** microVM (hardware isolation via KVM);
-**host-side eBPF** (**aya**) watches and enforces what it does from the host side of the KVM
-boundary, outside the guest's address space: its network and its cgroup directly, its syscalls only
-as the VMM's host footprint.
+**eKVM** is a self-hostable engine for running untrusted code in hardware isolation, with a
+host-observed record of what the host was able to see it do.
+
+Untrusted code runs inside a **Firecracker** microVM, so the isolation boundary is the CPU's,
+enforced by KVM. Everything that watches or restricts that code runs on the *host* side of that
+boundary as **host-side eBPF** (**aya**), outside the guest's address space and outside any
+namespace the guest can enter. It reads the sandbox's network traffic and its cgroup directly. Guest
+syscalls it sees only as the VMM's own host footprint, because a microVM services them in its own
+kernel.
 
 It exists for the usual suspects: a third-party binary, a fork's CI job, a dependency's install
 script, an AI-generated snippet, a sample under analysis. The code stays on your own
 infrastructure (air-gapped or regulated is fine), and the watching and the policy live in the host
 kernel, outside the guest, so the record is produced by code the guest does not run. The paths that
 persist a record sign it with a host key (`--record`, an operator's `records_dir`, the daemon's
-`trace`), and `ekvm verify` checks one; the
-[threat model](./security-threat-model.md#record-integrity-beyond-the-guest) states exactly what that does
-and does not prove.
+`trace`), and `ekvm verify` checks one. The
+[threat model](./security-threat-model.md#record-integrity-beyond-the-guest) states exactly what that
+does and does not prove.
 
 The engine can be driven three ways: as the **`ekvm` CLI** (one sandbox per command), as a
 **Rust library** embedded in a larger application, or programmatically over a unix socket through
@@ -29,10 +33,11 @@ untrusted code
 ```
 
 Untrusted code executes within the microVM while the host kernel observes and enforces policy from
-the host side of that boundary. Six design rules govern every change, and a change that breaks one
-is treated as a design error rather than a trade-off; they are stated in full, with the mechanism
-serving each, in [Architecture and design](./architecture.md#design-rules). They are deliberately
-not repeated here, because a third copy is a third thing to drift.
+the host side of that boundary. Six design rules govern every change, covering where isolation
+lives, where enforcement lives, the deny-by-default posture, the line between an engine and a
+platform, what the host path does instead of panicking, and how performance is reported.
+[Architecture and design](./architecture.md#design-rules) states each in full with the mechanism
+serving it. A change that breaks one is treated as a design error rather than a trade-off.
 
 One of them sets the project's scope and is worth stating up front: **engine, not platform.** This
 is a runtime plus a clean driver API you self-host, and the model driving an agent is always the
@@ -74,4 +79,4 @@ eKVM is licensed under the **Apache License 2.0**, copyright 2026 Kendrick Lawto
 are accepted inbound under that same license, and a pull request asserts that per commit with a
 `Signed-off-by` line under the [Developer Certificate of
 Origin](https://developercertificate.org/). The project's own history predates that ask and is
-mostly unsigned; nothing in CI checks for the line.
+mostly unsigned, and nothing in CI checks for the line.
