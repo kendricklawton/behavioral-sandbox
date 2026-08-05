@@ -216,8 +216,11 @@ impl EgressPolicy {
 
     /// Allow a destination [`Ipv4Cidr`] on an optional `port` and `proto` ([`None`] = any), consuming and
     /// returning `self` for chaining. `None` reads as a wildcard (the kernel's `0`), so
-    /// `allow(cidr, None, None)` admits the whole CIDR on any port and protocol. The address goes in host
-    /// byte order (as [`Ipv4Addr`] naturally converts), matching the kernel matcher.
+    /// `allow(cidr, None, None)` admits the whole CIDR on any port and protocol. `Some(0)` lowers
+    /// to that same `0`, so it also means any port, never literal port 0 (which is not an
+    /// addressable destination); pass `None` to say so
+    /// (`some_zero_port_lowers_to_the_same_wildcard_as_none` pins the equivalence). The address
+    /// goes in host byte order (as [`Ipv4Addr`] naturally converts), matching the kernel matcher.
     #[must_use]
     pub fn allow(mut self, cidr: Ipv4Cidr, port: Option<u16>, proto: Option<Protocol>) -> Self {
         self.rules.push(PolicyRule::allow(
@@ -411,6 +414,22 @@ mod tests {
     }
 
     #[test]
+    fn some_zero_port_lowers_to_the_same_wildcard_as_none() {
+        // The kernel's 0 sentinel means "any port", so `Some(0)` cannot mean literal port 0 (not
+        // an addressable destination); the two spellings must lower to identical rules.
+        let host = Ipv4Addr::new(10, 200, 0, 1);
+        assert_eq!(
+            EgressPolicy::deny_all().allow_host(host, Some(0), None),
+            EgressPolicy::deny_all().allow_host(host, None, None)
+        );
+        let host6: Ipv6Addr = "fd00:200::1".parse().unwrap();
+        assert_eq!(
+            EgressPolicy::deny_all().allow_host6(host6, Some(0), None),
+            EgressPolicy::deny_all().allow_host6(host6, None, None)
+        );
+    }
+
+    #[test]
     fn none_port_and_proto_lower_to_the_any_wildcard() {
         // `None` is the typed "any", lowering to the kernel's `0` sentinel, no magic 0 at the API.
         let p = EgressPolicy::deny_all().allow_host(Ipv4Addr::new(10, 200, 0, 1), None, None);
@@ -462,6 +481,4 @@ mod tests {
             Protocol::Udp.as_u8()
         ));
     }
-
-    // --- Resource accounting: the cgroup v2 file parsers, host-testable without a live cgroup ---
 }

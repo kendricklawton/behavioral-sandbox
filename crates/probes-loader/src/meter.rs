@@ -92,8 +92,8 @@ impl ResourceMeter {
 
     /// Register `cgroup_id` for metering: from here the tracepoint charges its on-CPU time into the
     /// `CPU_NS` map. The multi-sandbox path, register each sandbox's cgroup (via
-    /// [`crate::cgroup_id_of_pid`]) with one shared meter, and the per-switch cost stays a single hash lookup
-    ///. Idempotent (re-registering is harmless). Does **not** zero any prior total for this
+    /// [`crate::cgroup_id_of_pid`]) with one shared meter, and the per-switch cost stays a single
+    /// hash lookup. Idempotent (re-registering is harmless). Does **not** zero any prior total for this
     /// cgroup; [`reset`](Self::reset) does that if a caller wants a clean per-run baseline.
     ///
     /// # Errors

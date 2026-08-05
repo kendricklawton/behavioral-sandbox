@@ -16,13 +16,14 @@ const PROGRAM: &str = "count_execve";
 const MAP: &str = "EXECVE_COUNT";
 /// The per-PID hash map's name (the `#[map] static EXECVE_BY_PID` symbol).
 const MAP_BY_PID: &str = "EXECVE_BY_PID";
-/// The tracepoint the program attaches to: category `syscalls`, event `sys_enter_execve`.
-const TP_CATEGORY: &str = "syscalls";
+/// The `syscalls` tracepoint category every program in this module attaches under.
+const TP_SYSCALLS: &str = "syscalls";
+/// The event the counter program hooks: `syscalls/sys_enter_execve`.
 const TP_NAME: &str = "sys_enter_execve";
 
 /// A loaded, attached `sys_enter_execve` counter. Holds the aya [`Ebpf`] that owns the
-/// program, its map, and the live attachment; dropping this detaches and frees them, pinning nothing
-///. Read the running total with [`count`](ExecveCounter::count).
+/// program, its map, and the live attachment; dropping this detaches and frees them, pinning
+/// nothing. Read the running total with [`count`](ExecveCounter::count).
 #[must_use = "dropping an ExecveCounter detaches the probe"]
 pub struct ExecveCounter {
     ebpf: Ebpf,
@@ -52,9 +53,9 @@ impl ExecveCounter {
         program
             .load()
             .map_err(|e| ProbeError::Load(format!("verify/load `{PROGRAM}`: {e}")))?;
-        program.attach(TP_CATEGORY, TP_NAME).map_err(|e| {
+        program.attach(TP_SYSCALLS, TP_NAME).map_err(|e| {
             ProbeError::Attach(format!(
-                "attach `{PROGRAM}` to {TP_CATEGORY}/{TP_NAME}: {e}"
+                "attach `{PROGRAM}` to {TP_SYSCALLS}/{TP_NAME}: {e}"
             ))
         })?;
 
@@ -70,8 +71,8 @@ impl ExecveCounter {
         per_cpu_sum(&self.ebpf, MAP)
     }
 
-    /// The per-PID `execve` counts as `(pid, count)` pairs, read from the `EXECVE_BY_PID` hash map
-    ///. Order is unspecified (hash-map iteration); the [`count`](ExecveCounter::count) total is
+    /// The per-PID `execve` counts as `(pid, count)` pairs, read from the `EXECVE_BY_PID` hash
+    /// map. Order is unspecified (hash-map iteration); the [`count`](ExecveCounter::count) total is
     /// authoritative, since the per-PID map is bounded and drops new keys when full.
     ///
     /// # Errors
@@ -123,8 +124,6 @@ const TRACERS: [(&str, &str); 3] = [
     ("trace_openat", "sys_enter_openat"),
     ("trace_connect", "sys_enter_connect"),
 ];
-/// The `syscalls` tracepoint category all of [`TRACERS`] live under.
-const TP_SYSCALLS: &str = "syscalls";
 /// The ring buffer the programs stream [`SyscallEvent`]s into (`#[map] static EVENTS`).
 const EVENTS_MAP: &str = "EVENTS";
 /// The target filter the programs consult (`#[map] static FILTER`): slot 0 tgid, slot 1 cgroup id.
