@@ -5,9 +5,9 @@
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::artifacts::{fetch_one, sha256_of, Artifact};
+use crate::artifacts::{Artifact, fetch_one, sha256_of};
 use crate::bench::image_used_bytes;
 use crate::guest_bins::build_guest_agent;
 use crate::{artifacts_dir, guest_rootfs_path, run_tool, run_tool_env, vendor_dir, workspace_root};
@@ -547,7 +547,9 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
     ] {
         let staged = in_staging(staging, path);
         let meta = std::fs::metadata(&staged).with_context(|| {
-            format!("guest-image contract: {path} is missing from the staged rootfs ({consequence})")
+            format!(
+                "guest-image contract: {path} is missing from the staged rootfs ({consequence})"
+            )
         })?;
         if !meta.is_file() {
             bail!("guest-image contract: {path} is not a regular file ({consequence})");
@@ -700,17 +702,17 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
     }
     // Name the mke2fs floor up front (see `MKE2FS_SOURCE_DATE_EPOCH_MIN`), instead of letting
     // `--verify` die later on a bare two-hash mismatch a reader can't diagnose.
-    if let Some((major, minor, patch)) = mke2fs_version() {
-        if (major, minor, patch) < MKE2FS_SOURCE_DATE_EPOCH_MIN {
-            let msg = format!(
-                "mke2fs {major}.{minor}.{patch} ignores SOURCE_DATE_EPOCH (honoured from e2fsprogs \
+    if let Some((major, minor, patch)) = mke2fs_version()
+        && (major, minor, patch) < MKE2FS_SOURCE_DATE_EPOCH_MIN
+    {
+        let msg = format!(
+            "mke2fs {major}.{minor}.{patch} ignores SOURCE_DATE_EPOCH (honoured from e2fsprogs \
                  1.47.1), so the image will not be byte-reproducible; install e2fsprogs >= 1.47.1"
-            );
-            if verify {
-                bail!("{msg}");
-            }
-            println!("! {msg} (building anyway; the image itself is fine)");
+        );
+        if verify {
+            bail!("{msg}");
         }
+        println!("! {msg} (building anyway; the image itself is fine)");
     }
     let out = guest_rootfs_path();
     let build = assemble_rootfs(&out)?;
@@ -1083,9 +1085,9 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{
-        in_staging, net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
         GUEST_AGENT_PATH, INITTAB_PATH, INPUT_DIR, KERNEL_PNP_PATH, MKE2FS_SOURCE_DATE_EPOCH_MIN,
-        MOUNT_DRIVES_PATH, NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR, RESOLV_CONF_PATH,
+        MOUNT_DRIVES_PATH, NET_UP_PATH, OUTPUT_DIR, OVERLAY_DIR, RESOLV_CONF_PATH, in_staging,
+        net_up_script, parse_mke2fs_version, rootfs_inittab, verify_guest_contract,
     };
 
     /// A scratch dir removed on drop, so a failing assertion can't leave one behind. Per-test name

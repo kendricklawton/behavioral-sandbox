@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ekvm_probes_loader::{record_hash, HostKey};
+use ekvm_probes_loader::{HostKey, record_hash};
 
 /// A scratch dir for the chain file, removed on drop; also the spawn cwd, so a `.ekvm.toml`
 /// higher up the tree can't leak configuration into the run.

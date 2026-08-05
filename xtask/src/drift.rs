@@ -23,7 +23,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// One broken reference, kept as a rendered line so the report stays a plain sorted list.
 type Violation = String;
@@ -160,16 +160,15 @@ fn package_names(root: &Path, tracked: &BTreeSet<String>) -> Result<BTreeSet<Str
                 in_package = line == "[package]";
                 continue;
             }
-            if in_package {
-                if let Some(name) = line
+            if in_package
+                && let Some(name) = line
                     .strip_prefix("name")
                     .and_then(|r| r.trim_start().strip_prefix('='))
                     .and_then(|r| r.trim().strip_prefix('"'))
                     .and_then(|r| r.split('"').next())
-                {
-                    names.insert(name.to_string());
-                    in_package = false;
-                }
+            {
+                names.insert(name.to_string());
+                in_package = false;
             }
         }
     }
@@ -286,10 +285,10 @@ fn path_anchors(tracked: &BTreeSet<String>) -> BTreeSet<String> {
         .map(str::to_owned)
         .collect();
     for t in tracked {
-        if let Some(rest) = t.strip_prefix("crates/") {
-            if let Some((name, _)) = rest.split_once('/') {
-                anchors.insert(name.to_owned());
-            }
+        if let Some(rest) = t.strip_prefix("crates/")
+            && let Some((name, _)) = rest.split_once('/')
+        {
+            anchors.insert(name.to_owned());
         }
     }
     anchors

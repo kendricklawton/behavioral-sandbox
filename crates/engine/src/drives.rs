@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 /// in `ekvm-channel`, the one host↔guest contract both the driver and the rootfs build consume.
 use ekvm_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
-use crate::paths::path_str;
 use crate::VmmError;
+use crate::paths::path_str;
 
 /// Size of the blank writable output image. A fixed cap for now, it's the natural bulk-output
 /// bound (the guest can't write more than the filesystem holds), mirroring the channel path's

@@ -422,7 +422,7 @@ pub(crate) fn json_str(out: &mut String, s: &str) {
 mod tests {
     use std::time::Duration;
 
-    use ekvm_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
+    use ekvm_probes_common::{FlowCounts, FlowKey, IPPROTO_TCP, IPPROTO_UDP, SyscallEvent};
 
     use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
     use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};

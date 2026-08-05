@@ -33,7 +33,7 @@ use ekvm_record::{
     AxisGap, NetSection, RecordSubject, RunRecord, SyscallFold, SyscallFootprint, Timing,
 };
 
-use crate::{cgroup_id_of_pid, EgressPolicy, ProbeError, ResourceMeter, SyscallTracer, TapMonitor};
+use crate::{EgressPolicy, ProbeError, ResourceMeter, SyscallTracer, TapMonitor, cgroup_id_of_pid};
 
 /// A process-shared [`ResourceMeter`]: loaded **once** and handed to every sandbox's
 /// [`attach`](SandboxProbes::attach), which registers its cgroup as a target. The one CPU-metering
@@ -587,20 +587,20 @@ impl Drop for SandboxProbes {
         if self.finalized {
             return;
         }
-        if self.traced {
-            if let Some(cgid) = self.cgroup_id {
-                self.tracer.detach(cgid);
-            }
+        if self.traced
+            && let Some(cgid) = self.cgroup_id
+        {
+            self.tracer.detach(cgid);
         }
-        if self.metered {
-            if let Some(cgid) = self.cgroup_id {
-                // Drop-path teardown with no final read: unregister and free the `CPU_NS` row so the
-                // shared map doesn't accumulate this dead cgroup (mirrors `collect`).
-                let _ = self.meter.with(|m| {
-                    let _ = m.remove_target(cgid);
-                    m.clear(cgid)
-                });
-            }
+        if self.metered
+            && let Some(cgid) = self.cgroup_id
+        {
+            // Drop-path teardown with no final read: unregister and free the `CPU_NS` row so the
+            // shared map doesn't accumulate this dead cgroup (mirrors `collect`).
+            let _ = self.meter.with(|m| {
+                let _ = m.remove_target(cgid);
+                m.clear(cgid)
+            });
         }
     }
 }

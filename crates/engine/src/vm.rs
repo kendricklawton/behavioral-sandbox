@@ -13,7 +13,7 @@
 //! piped stdout and the console still reaches [`Console`].
 
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::num::{NonZeroU32, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU32};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -23,13 +23,13 @@ use std::time::{Duration, Instant};
 use ekvm_channel::ClientConnection;
 
 use crate::console::Console;
-use crate::drives::{collect_output_image, OutputDevice};
+use crate::drives::{OutputDevice, collect_output_image};
 use crate::exec::{
-    connect_agent_at, connect_agent_once, run_exec, ExecBounds, EXEC_KILL_SLACK, PROBE_TIMEOUT,
-    VSOCK_TIMEOUT,
+    EXEC_KILL_SLACK, ExecBounds, PROBE_TIMEOUT, VSOCK_TIMEOUT, connect_agent_at,
+    connect_agent_once, run_exec,
 };
 use crate::firecracker::{Action, ApiClient};
-use crate::jail::{remove_cgroup, Chroot, Jail};
+use crate::jail::{Chroot, Jail, remove_cgroup};
 use crate::lifetime::{KillHandle, VmLifetime};
 use crate::net::{GuestEgress, GuestLink, Tap};
 use crate::spawn::Spawned;

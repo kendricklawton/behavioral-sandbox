@@ -17,10 +17,10 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ekvm_record::{verify, verify_chain, HostKey, TrustedKey, MAX_ENVELOPE_BYTES};
+use ekvm_record::{HostKey, MAX_ENVELOPE_BYTES, TrustedKey, verify, verify_chain};
 
-use crate::config;
 use crate::CliError;
+use crate::config;
 
 /// `ekvm verify` arguments.
 #[derive(clap::Args, Debug)]

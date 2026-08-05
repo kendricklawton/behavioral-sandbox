@@ -218,10 +218,10 @@ pub(crate) fn run_exec<S: Read + Write>(
         // symptom. Only a disconnect leaves a refusal to read: a `PayloadTooLarge`/`Protocol` send
         // error wrote nothing, and a local write timeout leaves the guest healthy and awaiting a
         // request, so draining either would just park `recv_response` for the full read timeout.
-        if send_was_disconnect(&send_err) {
-            if let Ok(Response::Error(msg)) = conn.recv_response() {
-                return Err(VmmError::GuestExec(msg));
-            }
+        if send_was_disconnect(&send_err)
+            && let Ok(Response::Error(msg)) = conn.recv_response()
+        {
+            return Err(VmmError::GuestExec(msg));
         }
         return Err(send_err);
     }
@@ -321,7 +321,7 @@ pub(crate) fn run_exec<S: Read + Write>(
             _ => {
                 return Err(VmmError::GuestProtocol(
                     "unexpected response frame from guest agent".into(),
-                ))
+                ));
             }
         }
     }
@@ -412,7 +412,7 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
             {
                 return Err(VmmError::Timeout(format!(
                     "vsock CONNECT {port}: no ack before deadline"
-                )))
+                )));
             }
             Err(e) if is_disconnect(e.kind()) => {
                 // A reset mid-ack: the same peer-close as the EOF arm above, same retryable type.
@@ -568,10 +568,12 @@ mod tests {
         let dir = ScratchDir::created("ekvm-vsock-dead");
         let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
-        let dead = std::thread::spawn(move || loop {
-            match listener.accept() {
-                Ok((stream, _)) => drop(stream),
-                Err(_) => return,
+        let dead = std::thread::spawn(move || {
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => drop(stream),
+                    Err(_) => return,
+                }
             }
         });
         let window = Duration::from_millis(300);
@@ -816,7 +818,7 @@ mod tests {
         }
     }
     impl LogSink {
-        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync + use<> {
             let sink = self.clone();
             tracing_subscriber::fmt()
                 .with_max_level(tracing::Level::TRACE)

@@ -9,8 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
-use ekvm_probes_loader::{check_support, object_path, TapMonitor};
+use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use ekvm_probes_loader::{TapMonitor, check_support, object_path};
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
 const IPPROTO_UDP: u8 = 17;

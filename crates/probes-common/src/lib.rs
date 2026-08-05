@@ -1048,7 +1048,7 @@ mod policy_tests {
             443,
             IPPROTO_TCP
         )); // outside /24
-            // prefix_len 0 is an explicit allow-all address (still gated by port/proto if set).
+        // prefix_len 0 is an explicit allow-all address (still gated by port/proto if set).
         let any = PolicyRule::allow(0, 0, 443, IPPROTO_TCP);
         assert!(rule_matches(&any, ip(1, 2, 3, 4), 443, IPPROTO_TCP));
         assert!(!rule_matches(&any, ip(1, 2, 3, 4), 80, IPPROTO_TCP));
@@ -1190,7 +1190,7 @@ mod v6_tests {
         assert!(!rule_matches6(&rule, ula(2), 9999, IPPROTO_UDP)); // other host
         assert!(!rule_matches6(&rule, ula(1), 9998, IPPROTO_UDP)); // other port
         assert!(!rule_matches6(&rule, ula(1), 9999, IPPROTO_TCP)); // other proto
-                                                                   // An out-of-range prefix (a garbled write) never matches, no panic.
+        // An out-of-range prefix (a garbled write) never matches, no panic.
         let bad = PolicyRule6 {
             prefix_len: 200,
             ..PolicyRule6::allow(ula(0), 64, 0, 0)

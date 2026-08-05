@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::artifacts::sha256_of;
 use crate::{build_probes, cargo_reproducible, guest_rootfs_path, kernel_path, workspace_root};
@@ -74,7 +74,9 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
                  ships an image whose hash is recorded; install e2fsprogs >= {fa}.{fi}.{fp}"
             );
         }
-        None => bail!("mke2fs not found or its version unparseable; a dist needs it to build the guest rootfs"),
+        None => bail!(
+            "mke2fs not found or its version unparseable; a dist needs it to build the guest rootfs"
+        ),
         Some(_) => {}
     }
     crate::rootfs::build_rootfs(false, false)?;
@@ -485,10 +487,11 @@ mod tests {
 
         // A tampered manifest (what the installer's `sha256sum -c` would read) fails the check.
         let tampered = sample_manifest.replacen('1', "2", 1);
-        assert!(key
-            .verifying_key()
-            .verify_detached(tampered.as_bytes(), &sig)
-            .is_err());
+        assert!(
+            key.verifying_key()
+                .verify_detached(tampered.as_bytes(), &sig)
+                .is_err()
+        );
     }
 
     /// The exact shape that shipped `v0.0.1`: the pushed tag said `0.0.1`, the workspace still said
@@ -542,10 +545,10 @@ mod tests {
                 }
                 continue;
             }
-            if let Some((_, rest)) = line.split_once("<<'") {
-                if let Some(marker) = rest.strip_suffix('\'') {
-                    heredoc_end = Some(marker.to_string());
-                }
+            if let Some((_, rest)) = line.split_once("<<'")
+                && let Some(marker) = rest.strip_suffix('\'')
+            {
+                heredoc_end = Some(marker.to_string());
             }
             if line.starts_with(char::is_whitespace)
                 || line.is_empty()

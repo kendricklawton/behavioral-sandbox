@@ -15,13 +15,13 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ekvm_engine::{sweep_orphans, BootConfig, Vm, VmmError, VMM_PIDS_MAX};
+use ekvm_engine::{BootConfig, VMM_PIDS_MAX, Vm, VmmError, sweep_orphans};
 
 use common::{
     cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
     jailed_agent_config, jailed_overlay_config,
 };
-use ekvm_test_support::{process_threads, LimitCgroup, ScratchDir as TmpDir};
+use ekvm_test_support::{LimitCgroup, ScratchDir as TmpDir, process_threads};
 
 /// The env var that turns `helper_boot_and_park` from a no-op into the crash-test victim. Without
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
@@ -161,10 +161,10 @@ fn api_socket_under(dir: &Path, depth: u32) -> Option<PathBuf> {
         if name == "fc.sock" || name == "firecracker.socket" {
             return Some(path);
         }
-        if entry.file_type().is_ok_and(|t| t.is_dir()) {
-            if let Some(hit) = api_socket_under(&path, depth - 1) {
-                return Some(hit);
-            }
+        if entry.file_type().is_ok_and(|t| t.is_dir())
+            && let Some(hit) = api_socket_under(&path, depth - 1)
+        {
+            return Some(hit);
         }
     }
     None
@@ -956,7 +956,9 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
         LimitCgroup::create(vcpus, mem_mib, "victim"),
         LimitCgroup::create(vcpus, mem_mib, "attacker"),
     ) else {
-        eprintln!("skipping a_hostile_run_cannot_starve_or_observe_a_co_resident_run: cgroup v2 not writable/delegated");
+        eprintln!(
+            "skipping a_hostile_run_cannot_starve_or_observe_a_co_resident_run: cgroup v2 not writable/delegated"
+        );
         return;
     };
 
@@ -1045,7 +1047,9 @@ fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
     // host-dependent, so the real guarantee is the cap above; this is the sanity check).
     const SLOWDOWN_MAX: u32 = 10;
     let ceiling = solo_wall * SLOWDOWN_MAX + Duration::from_secs(5);
-    eprintln!("co-resident: victim solo {solo_wall:?} vs under attack {under_wall:?} (ceiling {ceiling:?})");
+    eprintln!(
+        "co-resident: victim solo {solo_wall:?} vs under attack {under_wall:?} (ceiling {ceiling:?})"
+    );
     assert!(
         under_wall <= ceiling,
         "victim was slowed past the bound: {under_wall:?} > {ceiling:?} (starvation)"

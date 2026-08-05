@@ -7,9 +7,9 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use ekvm_engine::{
-    BootConfig, Pool, RunningVm, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID, GUEST_READY_MARKER,
+    BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Pool, RunningVm, Snapshot, Vm, VmmError,
 };
 use ekvm_probes_loader::{ResourceMeter, SyscallTracer};
 
@@ -410,7 +410,9 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
     let floor_kib = (mem_total / 20).max(1024 * 1024);
     let start_avail = mem_available_kib()?;
 
-    println!("bench-density: guest rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, target {count} clones");
+    println!(
+        "bench-density: guest rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, target {count} clones"
+    );
     println!(
         "  keeping ≥ {} MiB available (a floor, so this never swaps the host)",
         floor_kib / 1024
@@ -550,8 +552,12 @@ pub(crate) fn bench_footprint(count: usize) -> Result<()> {
     let mem_total = proc_kib(&meminfo, "MemTotal").context("no MemTotal in /proc/meminfo")?;
     let floor_kib = (mem_total / 20).max(1024 * 1024);
 
-    println!("bench-footprint: guest rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, guest RAM {guest_mib} MiB");
-    println!("  cohort of {count} identical sandboxes per strategy (per-VM Pss from smaps; whole-host from MemAvailable)");
+    println!(
+        "bench-footprint: guest rootfs {used_mib} MiB, snapshot mem {mem_mib} MiB, guest RAM {guest_mib} MiB"
+    );
+    println!(
+        "  cohort of {count} identical sandboxes per strategy (per-VM Pss from smaps; whole-host from MemAvailable)"
+    );
     println!(
         "  keeping ≥ {} MiB available (a floor, so this never swaps the host)",
         floor_kib / 1024

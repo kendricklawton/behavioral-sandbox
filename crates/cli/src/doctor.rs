@@ -7,8 +7,8 @@
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-use ekvm_engine::doctor::{self, Check, CheckStatus};
 use ekvm_engine::BootConfig;
+use ekvm_engine::doctor::{self, Check, CheckStatus};
 
 /// Whether to emit ANSI colour on a stream.
 ///

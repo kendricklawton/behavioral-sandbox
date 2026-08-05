@@ -679,7 +679,7 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{budget_from, MAX_EXEC_TIMEOUT};
+    use super::{MAX_EXEC_TIMEOUT, budget_from};
     use std::time::Duration;
 
     #[test]

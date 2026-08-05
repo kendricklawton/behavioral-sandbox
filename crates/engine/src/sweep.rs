@@ -31,10 +31,10 @@ use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
+use crate::VmmError;
 use crate::jail::unmount_base;
 use crate::net::{netns_del, netns_exists};
 use crate::spawn::VM_DIR_PREFIX;
-use crate::VmmError;
 
 /// What a [`sweep_orphans`] pass reclaimed and what it deliberately left alone.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -131,15 +131,15 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
         // The netns is named after the scratch dir; a networked VM whose driver died leaves it behind
         // (holding the tap). Delete it (cascading the tap away). No ownership ambiguity: the dir is
         // ours (checked above) and the netns carries its name.
-        if let Some(netns) = dir.file_name().and_then(|n| n.to_str()) {
+        if let Some(netns) = dir.file_name().and_then(|n| n.to_str())
+            && netns_exists(netns)
+        {
+            netns_del(netns);
             if netns_exists(netns) {
-                netns_del(netns);
-                if netns_exists(netns) {
-                    tracing::warn!(%netns, "sweep: failed to delete orphaned netns");
-                } else {
-                    report.netns_reclaimed += 1;
-                    tracing::info!(%netns, "sweep: reclaimed orphaned network namespace");
-                }
+                tracing::warn!(%netns, "sweep: failed to delete orphaned netns");
+            } else {
+                report.netns_reclaimed += 1;
+                tracing::info!(%netns, "sweep: reclaimed orphaned network namespace");
             }
         }
         // Defer removing a dir a live restore is staging into: a cross-process restore stages the
@@ -265,10 +265,10 @@ fn vmm_running_in(dir: &Path) -> Option<u32> {
         if !matches!(comm.trim(), "firecracker" | "jailer") {
             continue;
         }
-        if let Ok(cwd) = std::fs::metadata(entry.path().join("cwd")) {
-            if protected.contains(&(cwd.dev(), cwd.ino())) {
-                return Some(pid);
-            }
+        if let Ok(cwd) = std::fs::metadata(entry.path().join("cwd"))
+            && protected.contains(&(cwd.dev(), cwd.ino()))
+        {
+            return Some(pid);
         }
     }
     None

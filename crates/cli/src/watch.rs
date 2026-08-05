@@ -16,7 +16,7 @@ use ekvm_probes_loader::LiveSnapshot;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -141,8 +141,8 @@ struct Term {
 /// and its residue reclaimed by the next run's startup sweep. External SIGINT is caught here; a
 /// keyboard Ctrl-C stays a key event under raw mode and is handled as quit in the poll loop.
 /// Best-effort: a failed registration returns `None`, keeping the pre-existing behavior.
-fn install_view_signal_restore(
-) -> Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)> {
+fn install_view_signal_restore()
+-> Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)> {
     let mut signals = match signal_hook::iterator::Signals::new([
         signal_hook::consts::SIGTERM,
         signal_hook::consts::SIGINT,
@@ -503,7 +503,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, timeline: &Timeline) {
 mod tests {
     use super::*;
     use ekvm_probes_loader::{
-        FlowCounts, FlowKey, NetSection, NetStats, SyscallFootprint, DETAIL_CAP,
+        DETAIL_CAP, FlowCounts, FlowKey, NetSection, NetStats, SyscallFootprint,
     };
 
     fn net(flows: Vec<(FlowKey, FlowCounts)>, denials: Vec<(FlowKey, u64)>) -> NetSection {

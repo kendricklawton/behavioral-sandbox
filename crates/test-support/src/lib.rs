@@ -492,7 +492,7 @@ pub fn process_threads(pid: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cap_eff, serial_requested, CAP_NET_ADMIN};
+    use super::{CAP_NET_ADMIN, parse_cap_eff, serial_requested};
 
     fn args(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| (*s).to_string()).collect()

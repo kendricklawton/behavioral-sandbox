@@ -678,12 +678,13 @@ fn unescape_octal(s: &str) -> PathBuf {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 3 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 4], 8) {
-                out.push(byte);
-                i += 4;
-                continue;
-            }
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 4], 8)
+        {
+            out.push(byte);
+            i += 4;
+            continue;
         }
         out.push(bytes[i]);
         i += 1;
@@ -928,8 +929,10 @@ mod tests {
         // A mount point with a space is octal-escaped in mountinfo; it must still prefix-match.
         let mi = "50 21 0:23 / /mnt/my\\040scratch rw,nodev shared:4 - ext4 /dev/sdb rw\n\
                   21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw";
-        assert!(mount_flags_in(mi, Path::new("/mnt/my scratch/ekvm-1"))
-            .is_some_and(|f| f.nodev && !f.noexec));
+        assert!(
+            mount_flags_in(mi, Path::new("/mnt/my scratch/ekvm-1"))
+                .is_some_and(|f| f.nodev && !f.noexec)
+        );
     }
 
     #[test]
@@ -938,9 +941,11 @@ mod tests {
         let checks = checks(&cfg);
         // The isolation boundary and the artifacts are present as hard checks.
         assert!(checks.iter().any(|c| c.label.contains("/dev/kvm present")));
-        assert!(checks
-            .iter()
-            .any(|c| c.label.contains("kernel") && c.status != CheckStatus::Warn));
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.label.contains("kernel") && c.status != CheckStatus::Warn)
+        );
         // The jailer path is a degradation, not hard (unjailed exists).
         let jailer = checks
             .iter()

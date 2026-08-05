@@ -10,7 +10,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::{
     build_probes, cargo, guest_rootfs_path, kernel_path, run_tool_env, vendor_dir, workspace_root,

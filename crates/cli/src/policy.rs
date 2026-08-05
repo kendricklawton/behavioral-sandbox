@@ -18,7 +18,7 @@
 
 use std::fmt;
 use std::net::Ipv4Addr;
-use std::num::{NonZeroU32, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -357,14 +357,14 @@ fn resolve_knob(
     engine_default: u64,
     ceiling: Option<u64>,
 ) -> Result<u64, PolicyError> {
-    if let (Some(a), Some(c)) = (asked, ceiling) {
-        if a > c {
-            return Err(PolicyError::Ceiling {
-                knob,
-                asked: a,
-                ceiling: c,
-            });
-        }
+    if let (Some(a), Some(c)) = (asked, ceiling)
+        && a > c
+    {
+        return Err(PolicyError::Ceiling {
+            knob,
+            asked: a,
+            ceiling: c,
+        });
     }
     let value = asked.or(operator_default).unwrap_or(engine_default);
     Ok(match ceiling {

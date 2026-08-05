@@ -19,12 +19,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
+use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
 use ekvm_probes_loader::{
-    check_support, object_path, AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes,
-    SharedMeter, SharedTracer, Timing,
+    AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes, SharedMeter, SharedTracer,
+    Timing, check_support, object_path,
 };
-use ekvm_test_support::{have_real_root, process_threads, LimitCgroup};
+use ekvm_test_support::{LimitCgroup, have_real_root, process_threads};
 
 /// IP protocol number for UDP, for the raw flow/denial-key comparisons the loader doesn't re-export
 /// a const for.
@@ -374,7 +374,9 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
         return;
     }
     if !have_real_root() {
-        eprintln!("skipping all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy: needs real root for the cgroup caps");
+        eprintln!(
+            "skipping all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy: needs real root for the cgroup caps"
+        );
         return;
     }
 
@@ -384,7 +386,9 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     let cfg = networked_agent_config();
     let (vcpus, mem_mib) = (u32::from(cfg.vcpus.get()), cfg.mem_mib.get());
     let Some(cg) = LimitCgroup::create(vcpus, mem_mib, "hostile") else {
-        eprintln!("skipping all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy: cgroup v2 not writable/delegated");
+        eprintln!(
+            "skipping all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy: cgroup v2 not writable/delegated"
+        );
         return;
     };
     let vm = Vm::boot(cfg).expect("a networked agent microVM should boot");

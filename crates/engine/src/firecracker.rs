@@ -464,7 +464,7 @@ pub(crate) enum MemBackendType {
 /// unspecified, so reusing it would be undefined-ish territory for the sake of one syscall.
 pub(crate) fn connect_with_timeout(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
     use nix::errno::Errno;
-    use nix::sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr};
+    use nix::sys::socket::{AddressFamily, SockFlag, SockType, UnixAddr, connect, socket};
     use std::os::fd::AsRawFd as _;
 
     let addr = UnixAddr::new(path)?;
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn a_refused_dial_keeps_its_errno_and_a_wedged_peer_times_out() {
         use nix::sys::socket::{
-            bind, listen, socket, AddressFamily, Backlog, SockFlag, SockType, UnixAddr,
+            AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket,
         };
         use std::os::fd::AsRawFd as _;
         let dir = ekvm_test_support::ScratchDir::created("fc-connect-wedged");

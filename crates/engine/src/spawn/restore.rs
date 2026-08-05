@@ -6,21 +6,21 @@ use std::time::{Duration, Instant};
 
 use super::fcversion::{clock_realtime_arg, warn_on_unpinned_firecracker};
 use super::workdir::{create_workdir, workdir_name};
-use super::{spawn_fc, still_before, Spawned};
+use super::{Spawned, spawn_fc, still_before};
+use crate::VmmError;
 use crate::firecracker::{
-    snapshot_api_timeout, ApiClient, MemBackend, MemBackendType, SnapshotLoad,
+    ApiClient, MemBackend, MemBackendType, SnapshotLoad, snapshot_api_timeout,
 };
 use crate::jail::{
-    cgroup_limit_args, give_to_jail, restore_mem_mib, stage_into_chroot, stage_ro_base_into_chroot,
-    Chroot, Jail,
+    Chroot, Jail, cgroup_limit_args, give_to_jail, restore_mem_mib, stage_into_chroot,
+    stage_ro_base_into_chroot,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::Tap;
 use crate::paths::path_str;
 use crate::vm::{
-    reclaim_scratch, reclaim_scratch_after_tap_failure, BootConfig, Snapshot, VSOCK_UDS,
+    BootConfig, Snapshot, VSOCK_UDS, reclaim_scratch, reclaim_scratch_after_tap_failure,
 };
-use crate::VmmError;
 
 impl Spawned {
     /// Spawn a bare `firecracker` for a snapshot restore: a fresh scratch dir + process + console,

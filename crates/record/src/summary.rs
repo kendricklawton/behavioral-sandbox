@@ -324,7 +324,7 @@ fn endpoint6(out: &mut String, addr: [u8; 16], port: u16, proto: u8) {
 mod tests {
     use std::time::Duration;
 
-    use ekvm_probes_common::{FlowCounts, FlowKey, SyscallEvent, IPPROTO_TCP, IPPROTO_UDP};
+    use ekvm_probes_common::{FlowCounts, FlowKey, IPPROTO_TCP, IPPROTO_UDP, SyscallEvent};
 
     use super::SUMMARY_NOTABLE_CAP;
     use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};

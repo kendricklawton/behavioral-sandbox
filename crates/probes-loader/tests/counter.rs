@@ -11,7 +11,7 @@
 
 use std::process::Command;
 
-use ekvm_probes_loader::{check_support, object_path, ExecveCounter};
+use ekvm_probes_loader::{ExecveCounter, check_support, object_path};
 
 /// Whether this host can actually load the probe, as a skip reason (`Some`) when it can't, so each
 /// test prints *why* it skipped. Capability-aware: `check_support` passes under

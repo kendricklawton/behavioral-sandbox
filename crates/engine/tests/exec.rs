@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use ekvm_engine::Vm;
 
 use common::{
-    guest_rootfs_config, have_jailer_privileges, jailed_agent_config, jailed_overlay_config,
-    sha256_hex, TmpDir,
+    TmpDir, guest_rootfs_config, have_jailer_privileges, jailed_agent_config,
+    jailed_overlay_config, sha256_hex,
 };
 
 #[test]

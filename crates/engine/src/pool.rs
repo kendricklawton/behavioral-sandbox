@@ -11,7 +11,7 @@
 //! pool belongs to the daemon, not the library.
 
 use crate::vm::{Snapshot, Vm};
-use crate::{BootConfig, RunningVm, VmmError, FDS_PER_VM};
+use crate::{BootConfig, FDS_PER_VM, RunningVm, VmmError};
 
 /// Fd slack reserved for everything that is *not* a pooled clone: the process baseline (stdio,
 /// logging, the embedder's own files) plus the transient fds a boot/exec opens and closes. Part of
@@ -232,7 +232,7 @@ fn parse_nofile_soft(limits: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{fd_budget_excess, parse_nofile_soft, POOL_FD_HEADROOM};
+    use super::{POOL_FD_HEADROOM, fd_budget_excess, parse_nofile_soft};
     use crate::FDS_PER_VM;
 
     #[test]

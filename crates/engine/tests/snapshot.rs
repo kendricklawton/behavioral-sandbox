@@ -13,11 +13,11 @@ mod common;
 use std::num::NonZeroU8;
 use std::time::Duration;
 
-use ekvm_engine::{Jail, Pool, Vm, DEFAULT_JAIL_UID};
+use ekvm_engine::{DEFAULT_JAIL_UID, Jail, Pool, Vm};
 
 use common::{
-    cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
-    prewarmed_python_snapshot, TmpDir,
+    TmpDir, cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
+    prewarmed_python_snapshot,
 };
 
 #[test]

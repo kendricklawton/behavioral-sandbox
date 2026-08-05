@@ -50,11 +50,11 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use std::num::{NonZeroU32, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::audit::Observability;
 use crate::policy::Policy;
-use ekvm_engine::{sweep_orphans, BootConfig, Limits, Pool, Sandbox, VmmError, DEFAULT_GUEST_CID};
+use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, Limits, Pool, Sandbox, VmmError, sweep_orphans};
 
 use crate::metrics::Metrics;
 
@@ -299,14 +299,14 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // The endpoint is plain HTTP with no auth (the doc says bind loopback or a private scrape
     // network); a public bind may be a deliberate private-network choice, so warn, don't refuse,
     // a fat-fingered `0.0.0.0` must at least be visible in the startup log.
-    if let Some(addr) = args.metrics {
-        if !addr.ip().is_loopback() {
-            tracing::warn!(
-                %addr,
-                "metrics endpoint bound to a non-loopback address; it serves plain HTTP with no \
-                 auth, make sure this is a private scrape network"
-            );
-        }
+    if let Some(addr) = args.metrics
+        && !addr.ip().is_loopback()
+    {
+        tracing::warn!(
+            %addr,
+            "metrics endpoint bound to a non-loopback address; it serves plain HTTP with no \
+             auth, make sure this is a private scrape network"
+        );
     }
     // Snapshot bundles are guest-memory-sized, so they live under the engine's own scratch knob
     // (`EKVM_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where

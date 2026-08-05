@@ -110,17 +110,21 @@ fn run_with_trace_and_record_yields_trail_and_json() {
     let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope parses");
     assert_eq!(envelope["schema"], 2, "the signed delivery surface: {json}");
     assert!(envelope["key_id"].as_str().is_some_and(|s| s.len() == 64));
-    assert!(envelope["signature"]
-        .as_str()
-        .is_some_and(|s| s.len() == 128));
+    assert!(
+        envelope["signature"]
+            .as_str()
+            .is_some_and(|s| s.len() == 128)
+    );
     // The record rides inside as a string; parse it and check the pinned top-level shape, and a
     // capable host binds every axis (no coverage gap).
     let record: serde_json::Value =
         serde_json::from_str(envelope["record"].as_str().expect("record string"))
             .expect("record parses");
-    assert!(record["timing"]["boot_ns"]
-        .as_u64()
-        .is_some_and(|ns| ns > 0));
+    assert!(
+        record["timing"]["boot_ns"]
+            .as_u64()
+            .is_some_and(|ns| ns > 0)
+    );
     assert!(
         record["network"].is_object(),
         "a --net run has a network section"
@@ -214,7 +218,9 @@ fn run_with_trace_and_record_yields_trail_and_json() {
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial() {
     if let Some(why) = skip_reason() {
-        eprintln!("skipping allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial: {why}");
+        eprintln!(
+            "skipping allow_enforces_egress_and_the_record_shows_the_allowed_flow_and_the_denial: {why}"
+        );
         return;
     }
     let root = workspace_root();

@@ -790,7 +790,7 @@ impl<'a> Body<'a> {
 /// is [`fuzz_tests`].
 #[cfg(feature = "fuzzing")]
 pub mod fuzz {
-    use super::{read_frame, read_handshake, read_request, read_response, MAGIC};
+    use super::{MAGIC, read_frame, read_handshake, read_request, read_response};
 
     /// Decode one host→guest [`Request`](crate::Request) from `data` (the *guest agent's* view of
     /// host bytes).

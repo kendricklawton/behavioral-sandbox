@@ -23,19 +23,19 @@ mod verify;
 mod watch;
 
 use std::io::{IsTerminal, Read, Write};
-use std::num::{NonZeroU32, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::policy::{parse_allow, AllowRule, Policy, Requested};
+use crate::policy::{AllowRule, Policy, Requested, parse_allow};
 use clap::{Parser, Subcommand};
 use ekvm_engine::{
-    sweep_orphans, Artifact, BootConfig, ErrorKind, Limits, Sandbox, VmmError, MAX_PAYLOAD,
+    Artifact, BootConfig, ErrorKind, Limits, MAX_PAYLOAD, Sandbox, VmmError, sweep_orphans,
 };
-use ekvm_engine::{vcpus_supported, MAX_VCPUS};
-use ekvm_probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
+use ekvm_engine::{MAX_VCPUS, vcpus_supported};
+use ekvm_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
 /// command's own exit code): conventional "2", named so the intent is legible at the
@@ -665,12 +665,10 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         // (a full disk) is a real failure, not to be swallowed like the guest-output relay below (the
         // `--record` file writes are treated the same). A downstream-closed pipe is still not our
         // fault, so BrokenPipe is the one exception.
-        if let Err(e) = writeln!(std::io::stdout(), "{structured}") {
-            if e.kind() != std::io::ErrorKind::BrokenPipe {
-                return Err(
-                    VmmError::Artifact(format!("write --json result to stdout: {e}")).into(),
-                );
-            }
+        if let Err(e) = writeln!(std::io::stdout(), "{structured}")
+            && e.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(VmmError::Artifact(format!("write --json result to stdout: {e}")).into());
         }
     } else {
         // Relay the guest's output on our own stdout/stderr, the whole point of `exec`. Ignore
@@ -1065,11 +1063,11 @@ fn init_tracing(filter: Option<&str>) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_egress, parse_allow, parse_env_pair, parse_mem_mib, parse_vcpus, shell_policy,
-        write_artifacts_in, AllowRule, Artifact, Cli, Policy, ShellArgs, MAX_VCPUS,
+        AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, build_egress, parse_allow,
+        parse_env_pair, parse_mem_mib, parse_vcpus, shell_policy, write_artifacts_in,
     };
     use clap::CommandFactory;
-    use ekvm_probes_loader::{Ipv4Cidr, Protocol, MAX_POLICY_RULES};
+    use ekvm_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
     use ekvm_test_support::ScratchDir;
 
     /// A `///` on a clap field **is** the user interface, so it has to survive being rendered at a
@@ -1105,7 +1103,7 @@ mod tests {
         }
     }
     use std::net::Ipv4Addr;
-    use std::num::{NonZeroU32, NonZeroU8};
+    use std::num::{NonZeroU8, NonZeroU32};
 
     fn artifact(path: &str, data: &[u8]) -> Vec<Artifact> {
         vec![Artifact::new(path, data.to_vec())]
@@ -1154,9 +1152,11 @@ mod tests {
             );
         }
         // The refusal names the cap so it is actionable.
-        assert!(parse_vcpus("64")
-            .unwrap_err()
-            .contains(&MAX_VCPUS.to_string()));
+        assert!(
+            parse_vcpus("64")
+                .unwrap_err()
+                .contains(&MAX_VCPUS.to_string())
+        );
     }
 
     #[test]

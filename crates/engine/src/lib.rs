@@ -27,18 +27,18 @@ mod spawn;
 mod sweep;
 mod vm;
 
-use std::num::{NonZeroU32, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU32};
 use std::time::Duration;
 
 use ekvm_channel::ChannelError;
 
-pub use ekvm_channel::{ClientConnection, Request, Response, GUEST_READY_MARKER, MAX_PAYLOAD};
-pub use jail::{Jail, DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, VMM_PIDS_MAX};
+pub use ekvm_channel::{ClientConnection, GUEST_READY_MARKER, MAX_PAYLOAD, Request, Response};
+pub use jail::{DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, Jail, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
 pub use net::{GuestEgress, GuestLink};
 pub use pool::Pool;
-pub use sweep::{sweep_orphans, SweepReport};
-pub use vm::{BootConfig, RunningVm, Snapshot, Vm, DEFAULT_GUEST_CID, VSOCK_PORT};
+pub use sweep::{SweepReport, sweep_orphans};
+pub use vm::{BootConfig, DEFAULT_GUEST_CID, RunningVm, Snapshot, VSOCK_PORT, Vm};
 
 #[cfg(test)]
 mod tests {

@@ -17,8 +17,8 @@
 #![forbid(unsafe_code)]
 
 pub use ekvm_probes_common::{
-    FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol, Syscall, SyscallEvent,
-    COMM_CAP, DETAIL_CAP,
+    COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol,
+    Syscall, SyscallEvent,
 };
 
 /// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
@@ -38,13 +38,13 @@ mod summary;
 
 pub use json::AUDIT_SCHEMA_VERSION;
 pub use record::{
-    AxisGap, DenialRecord, DenialRecord6, EgressPosture, FlowRecord, FlowRecord6, NetSection,
-    NotableSyscall, RecordSubject, RunRecord, SyscallCounts, SyscallFold, SyscallFootprint, Timing,
-    MAX_NOTABLE,
+    AxisGap, DenialRecord, DenialRecord6, EgressPosture, FlowRecord, FlowRecord6, MAX_NOTABLE,
+    NetSection, NotableSyscall, RecordSubject, RunRecord, SyscallCounts, SyscallFold,
+    SyscallFootprint, Timing,
 };
 pub use signing::{
-    data_dir, default_key_path, record_hash, verify, verify_chain, ChainError, HostKey, KeyError,
-    TrustedKey, VerifyError, MAX_ENVELOPE_BYTES, SIGNED_RECORD_SCHEMA_VERSION,
+    ChainError, HostKey, KeyError, MAX_ENVELOPE_BYTES, SIGNED_RECORD_SCHEMA_VERSION, TrustedKey,
+    VerifyError, data_dir, default_key_path, record_hash, verify, verify_chain,
 };
 pub use stats::{CgroupStats, NetStats, ResourceSummary};
 pub use summary::SUMMARY_SCHEMA_VERSION;

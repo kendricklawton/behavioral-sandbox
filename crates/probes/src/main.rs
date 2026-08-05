@@ -80,11 +80,12 @@ use aya_ebpf::{
     programs::{TcContext, TracePointContext},
 };
 use ekvm_probes_common::{
-    icmp6_dst_on_link, rule_matches, rule_matches6, FlowCounts, FlowKey, FlowKey6, PolicyRule,
-    PolicyRule6, Syscall, SyscallEvent, DETAIL_CAP, ETHERTYPE_OFFSET, ETH_HLEN, ETH_P_8021Q,
-    ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV4_DST_OFFSET,
+    DETAIL_CAP, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, ETHERTYPE_OFFSET,
+    FlowCounts, FlowKey, FlowKey6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV4_DST_OFFSET,
     IPV4_FRAG_OFFSET, IPV4_MIN_IHL, IPV4_PROTO_OFFSET, IPV4_SRC_OFFSET, IPV6_DST_OFFSET, IPV6_HLEN,
-    IPV6_NEXT_HEADER_OFFSET, IPV6_SRC_OFFSET, MAX_POLICY_RULES, SOCKADDR_SNAP, SOCKADDR_SNAP_V4,
+    IPV6_NEXT_HEADER_OFFSET, IPV6_SRC_OFFSET, MAX_POLICY_RULES, PolicyRule, PolicyRule6,
+    SOCKADDR_SNAP, SOCKADDR_SNAP_V4, Syscall, SyscallEvent, icmp6_dst_on_link, rule_matches,
+    rule_matches6,
 };
 
 /// The object's kernel `license` section. Without it every program loads as **non-GPL-compatible**,
@@ -93,8 +94,8 @@ use ekvm_probes_common::{
 /// cryptic "cannot call GPL-restricted function", undercutting the documented cross-kernel
 /// portability. Declaring `GPL` makes the programs GPL-compatible (dual-licensable: this crate is
 /// Apache-2.0). `#[no_mangle]` + the exact `license` section name are what the kernel loader reads.
-#[no_mangle]
-#[link_section = "license"]
+#[unsafe(no_mangle)]
+#[unsafe(link_section = "license")]
 static _LICENSE: [u8; 4] = *b"GPL\0";
 
 /// A single-slot **per-CPU** counter of `sys_enter_execve` events. Per-CPU means each CPU increments
@@ -321,12 +322,12 @@ fn record(
     // but the drop is *counted*, so the loader can report the loss instead of undercounting silently.
     // Turbofish since aya-ebpf 0.2: `output` became `output<T: ?Sized>(data: impl Borrow<T>, ..)`,
     // and `&ev` satisfies that bound for more than one `T`, so the element type must be named.
-    if EVENTS.output::<SyscallEvent>(&ev, 0).is_err() {
-        if let Some(drops) = EVENT_DROPS.get_ptr_mut(0) {
-            // SAFETY: this CPU's own slot of the one-element per-CPU array; the pointer is only used
-            // inside the null-check and this program is its sole writer on this CPU.
-            unsafe { *drops += 1 };
-        }
+    if EVENTS.output::<SyscallEvent>(&ev, 0).is_err()
+        && let Some(drops) = EVENT_DROPS.get_ptr_mut(0)
+    {
+        // SAFETY: this CPU's own slot of the one-element per-CPU array; the pointer is only used
+        // inside the null-check and this program is its sole writer on this CPU.
+        unsafe { *drops += 1 };
     }
     0
 }
@@ -619,10 +620,10 @@ fn record_denial6(key: &FlowKey6) {
 fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     let mut i: u32 = 0;
     while i < MAX_POLICY_RULES as u32 {
-        if let Some(rule) = POLICY.get(i) {
-            if rule_matches(rule, dst_addr, dst_port, proto) {
-                return true;
-            }
+        if let Some(rule) = POLICY.get(i)
+            && rule_matches(rule, dst_addr, dst_port, proto)
+        {
+            return true;
         }
         i += 1;
     }
@@ -636,10 +637,10 @@ fn policy_allows(dst_addr: u32, dst_port: u16, proto: u8) -> bool {
 fn policy_allows6(dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
     let mut i: u32 = 0;
     while i < MAX_POLICY_RULES as u32 {
-        if let Some(rule) = POLICY6.get(i) {
-            if rule_matches6(rule, dst_addr, dst_port, proto) {
-                return true;
-            }
+        if let Some(rule) = POLICY6.get(i)
+            && rule_matches6(rule, dst_addr, dst_port, proto)
+        {
+            return true;
         }
         i += 1;
     }

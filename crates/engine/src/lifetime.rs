@@ -31,12 +31,12 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::jail::read_cgroup_dir;
 use crate::VmmError;
+use crate::jail::read_cgroup_dir;
 
 /// What the sentinel runs, verbatim (POSIX `sh`; the watched cgroup dirs arrive as `"$@"`).
 ///

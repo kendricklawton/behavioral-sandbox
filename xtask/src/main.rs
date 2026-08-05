@@ -23,7 +23,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -1165,7 +1165,9 @@ fn build_probes() -> Result<()> {
     // crate's `.cargo/config.toml` supplies the target + `build-std`; `bpf-linker` (on PATH) links
     // the object. `--locked` holds the probes lockfile.
     let nightly = probes_nightly()?;
-    println!("$ rustup run {nightly} cargo build --release --locked  (in crates/probes → bpfel-unknown-none)");
+    println!(
+        "$ rustup run {nightly} cargo build --release --locked  (in crates/probes → bpfel-unknown-none)"
+    );
     let status = Command::new("rustup")
         .args(["run", nightly, "cargo", "build", "--release", "--locked"])
         .current_dir(&dir)
@@ -1274,12 +1276,11 @@ fn nightly_ebpf_ready() -> bool {
     // Under a sudo that reset `$HOME` to root's, `rustup` would read root's empty `~/.rustup` and
     // report no nightly. Point it at the *invoking* user's toolchain home so the row is honest
     // whichever way setup is run (only when `RUSTUP_HOME` isn't already pinned by the environment).
-    if std::env::var_os("RUSTUP_HOME").is_none() {
-        if let Some(user) = std::env::var_os("SUDO_USER") {
-            if let Some(home) = user_home(&user) {
-                cmd.env("RUSTUP_HOME", home.join(".rustup"));
-            }
-        }
+    if std::env::var_os("RUSTUP_HOME").is_none()
+        && let Some(user) = std::env::var_os("SUDO_USER")
+        && let Some(home) = user_home(&user)
+    {
+        cmd.env("RUSTUP_HOME", home.join(".rustup"));
     }
     cmd.output()
         .map(|o| {
@@ -1307,12 +1308,11 @@ fn nightly_has_component(component: &str) -> bool {
     };
     let mut cmd = Command::new(rustup);
     cmd.args(["component", "list", "--toolchain", nightly, "--installed"]);
-    if std::env::var_os("RUSTUP_HOME").is_none() {
-        if let Some(user) = std::env::var_os("SUDO_USER") {
-            if let Some(home) = user_home(&user) {
-                cmd.env("RUSTUP_HOME", home.join(".rustup"));
-            }
-        }
+    if std::env::var_os("RUSTUP_HOME").is_none()
+        && let Some(user) = std::env::var_os("SUDO_USER")
+        && let Some(home) = user_home(&user)
+    {
+        cmd.env("RUSTUP_HOME", home.join(".rustup"));
     }
     cmd.output()
         .map(|o| {
@@ -1464,13 +1464,12 @@ fn in_path(bin: &str) -> bool {
 /// otherwise report an installed tool as missing. Checking the cargo bin dirs, including the
 /// *invoking* user's under sudo, keeps the dev-toolchain rows honest whichever way setup is invoked.
 pub(crate) fn dev_tool_path(bin: &str) -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("PATH") {
-        if let Some(hit) = std::env::split_paths(&path)
+    if let Ok(path) = std::env::var("PATH")
+        && let Some(hit) = std::env::split_paths(&path)
             .map(|dir| dir.join(bin))
             .find(|p| p.is_file())
-        {
-            return Some(hit);
-        }
+    {
+        return Some(hit);
     }
     cargo_bin_dirs()
         .into_iter()
@@ -1488,10 +1487,10 @@ fn cargo_bin_dirs() -> Vec<PathBuf> {
     if let Some(home) = std::env::var_os("HOME") {
         dirs.push(PathBuf::from(home).join(".cargo").join("bin"));
     }
-    if let Some(user) = std::env::var_os("SUDO_USER") {
-        if let Some(home) = user_home(&user) {
-            dirs.push(home.join(".cargo").join("bin"));
-        }
+    if let Some(user) = std::env::var_os("SUDO_USER")
+        && let Some(home) = user_home(&user)
+    {
+        dirs.push(home.join(".cargo").join("bin"));
     }
     dirs
 }
@@ -1499,17 +1498,15 @@ fn cargo_bin_dirs() -> Vec<PathBuf> {
 /// The home directory of `user`, from `getent passwd` (field 6), falling back to `/home/<user>` if
 /// `getent` is unavailable, so the sudo path in [`cargo_bin_dirs`] never hardcodes the home layout.
 fn user_home(user: &OsStr) -> Option<PathBuf> {
-    if let Ok(out) = Command::new("getent").arg("passwd").arg(user).output() {
-        if out.status.success() {
-            if let Some(home) = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .and_then(|l| l.split(':').nth(5))
-                .filter(|h| !h.is_empty())
-            {
-                return Some(PathBuf::from(home));
-            }
-        }
+    if let Ok(out) = Command::new("getent").arg("passwd").arg(user).output()
+        && out.status.success()
+        && let Some(home) = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .and_then(|l| l.split(':').nth(5))
+            .filter(|h| !h.is_empty())
+    {
+        return Some(PathBuf::from(home));
     }
     Some(PathBuf::from("/home").join(user.to_str()?))
 }
@@ -2025,13 +2022,12 @@ exclude = ["crates/probes", "fuzz"]
         for line in manifest.lines().map(str::trim) {
             if line.starts_with('[') {
                 in_bin = line == "[[bin]]";
-            } else if in_bin {
-                if let Some(name) = line
+            } else if in_bin
+                && let Some(name) = line
                     .strip_prefix("name = \"")
                     .and_then(|n| n.strip_suffix('"'))
-                {
-                    bins.push(name.to_string());
-                }
+            {
+                bins.push(name.to_string());
             }
         }
         assert_eq!(
@@ -2044,10 +2040,10 @@ exclude = ["crates/probes", "fuzz"]
         let mut files = Vec::new();
         for entry in std::fs::read_dir(root.join("fuzz/fuzz_targets")).unwrap() {
             let path = entry.unwrap().path();
-            if path.extension().is_some_and(|e| e == "rs") {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    files.push(stem.to_string());
-                }
+            if path.extension().is_some_and(|e| e == "rs")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+            {
+                files.push(stem.to_string());
             }
         }
         assert_eq!(

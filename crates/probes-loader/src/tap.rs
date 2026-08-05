@@ -5,19 +5,19 @@ use std::fs::File;
 use std::net::Ipv4Addr;
 use std::path::Path;
 
-use aya::maps::{Array, HashMap as AyaHashMap};
-use aya::programs::{tc, SchedClassifier, TcAttachType};
 use aya::Ebpf;
+use aya::maps::{Array, HashMap as AyaHashMap};
+use aya::programs::{SchedClassifier, TcAttachType, tc};
 use ekvm_probes_common::{
-    FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, FLOW_COUNTS_SIZE, FLOW_KEY6_SIZE,
-    FLOW_KEY_SIZE, MAX_POLICY_RULES, POLICY_RULE6_SIZE, POLICY_RULE_SIZE,
+    FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, FLOW_KEY6_SIZE, FlowCounts, FlowKey, FlowKey6,
+    MAX_POLICY_RULES, POLICY_RULE_SIZE, POLICY_RULE6_SIZE, PolicyRule, PolicyRule6,
 };
 
 use ekvm_record::{EgressPosture, NetStats};
 
 use crate::egress::{EgressPolicy, PolicyError};
 use crate::tracer::per_cpu_sum;
-use crate::{check_support, load_object, ProbeError};
+use crate::{ProbeError, check_support, load_object};
 
 /// The two `tc` classifier programs [`TapMonitor`] attaches (their `#[classifier] fn` symbols in
 /// `crates/probes`), one per clsact hook.
@@ -555,12 +555,12 @@ fn attach_classifiers(
     // clsact is fine; any other failure (no CAP_NET_ADMIN, or the interface is gone) is a typed
     // error. aya models "already there" as its own variant, so this matches on the variant rather
     // than on a raw `EEXIST` errno, which is what the pre-0.14 code had to do.
-    if let Err(e) = tc::qdisc_add_clsact(interface) {
-        if !matches!(e, aya::programs::TcError::AlreadyAttached) {
-            return Err(ProbeError::Attach(format!(
-                "add clsact qdisc on {interface}: {e}"
-            )));
-        }
+    if let Err(e) = tc::qdisc_add_clsact(interface)
+        && !matches!(e, aya::programs::TcError::AlreadyAttached)
+    {
+        return Err(ProbeError::Attach(format!(
+            "add clsact qdisc on {interface}: {e}"
+        )));
     }
     // aya's `SchedClassifier::attach` picks its link kind by host kernel: a TCX bpf_link (which owns
     // an fd) on >= 6.6, the classic netlink clsact filter (no held fd) below that. The two demand
@@ -618,7 +618,7 @@ fn with_netns<T: Send>(
     netns_handle: &Path,
     f: impl FnOnce() -> Result<T, ProbeError> + Send,
 ) -> Result<T, ProbeError> {
-    use nix::sched::{setns, CloneFlags};
+    use nix::sched::{CloneFlags, setns};
     std::thread::scope(|scope| {
         scope
             .spawn(|| {

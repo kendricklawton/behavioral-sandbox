@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use ekvm_record::{record_hash, verify, verify_chain, HostKey, RecordSubject, RunRecord, Timing};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use ekvm_record::{HostKey, RecordSubject, RunRecord, Timing, record_hash, verify, verify_chain};
 
 fn sample_record() -> RunRecord {
     let subject = RecordSubject::new("sb-bench-12345".to_string(), 1_700_000_000_000_000_000);

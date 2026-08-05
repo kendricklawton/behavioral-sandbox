@@ -20,7 +20,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use vsock::{VsockListener, VMADDR_CID_ANY};
+use vsock::{VMADDR_CID_ANY, VsockListener};
 
 use ekvm_guest_agent::serve_session;
 
@@ -211,7 +211,7 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_listen, Listen};
+    use super::{Listen, parse_listen};
 
     #[test]
     fn parses_vsock_port() {

@@ -12,7 +12,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{Jail, Vm, DEFAULT_GUEST_CID, DEFAULT_JAIL_UID};
+use ekvm_engine::{DEFAULT_GUEST_CID, DEFAULT_JAIL_UID, Jail, Vm};
 
 use common::{
     config, guest_rootfs_config, have_jailer_privileges, have_net_admin, jailed_overlay_config,
@@ -720,7 +720,7 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     // budget (`FDS_PER_VM`) per start path, cold, networked, prewarmed restore, and, just as
     // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any
     // long-lived embedder into EMFILE regardless of the per-VM budget).
-    use ekvm_engine::{sweep_orphans, FDS_PER_VM};
+    use ekvm_engine::{FDS_PER_VM, sweep_orphans};
 
     let baseline = open_fds();
 

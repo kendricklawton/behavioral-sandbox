@@ -21,22 +21,22 @@
 //! either, the lifetime sentinel owns that.
 
 use std::io::{BufReader, Read};
-use std::num::{NonZeroU32, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU32};
 use std::os::unix::net::UnixStream;
 use std::sync::TryLockError;
 use std::time::{Duration, Instant};
 
 use crate::audit::RunProbes;
-use crate::policy::{parse_allow, Policy, Requested};
-use ekvm_engine::{vcpus_supported, MAX_VCPUS};
-use ekvm_engine::{BootConfig, ErrorKind, Limits, RunningVm, Vm, VmmError, DEFAULT_GUEST_CID};
-use ekvm_probes_loader::{EgressPolicy, Timing, MAX_POLICY_RULES};
-use ekvm_protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
+use crate::policy::{Policy, Requested, parse_allow};
+use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, ErrorKind, Limits, RunningVm, Vm, VmmError};
+use ekvm_engine::{MAX_VCPUS, vcpus_supported};
+use ekvm_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
+use ekvm_protocol::{FaultKind, ProtocolError, Request, Response, read_message, write_message};
 
 use crate::metrics::{Metrics, Verb};
 use crate::serve::{
-    pool_clone_limits, release_pool_clones, reserve_pool_clones, ResourceReservation, Server,
-    AT_CAPACITY_RETRY_MS,
+    AT_CAPACITY_RETRY_MS, ResourceReservation, Server, pool_clone_limits, release_pool_clones,
+    reserve_pool_clones,
 };
 
 /// The no-op command `put`/`get` run: the engine injects files and returns artifacts only *around an
@@ -531,37 +531,38 @@ fn boot_session_vm(
     // when the request was bare: with operator defaults set, a bare open resolves to a different
     // profile than the pooled clones hold, and handing one out would both under-serve the session
     // and desynchronize the committed-resource accounting from the real footprint.
-    if bare && limits == pool_clone_limits() {
-        if let Some(pool) = &server.pool {
-            match pool.try_lock() {
-                Ok(mut p) => {
-                    // Pop only when there is ready stock, `Pool::take` would otherwise restore
-                    // inline under this lock, the exact hold-across-restore this function's doc
-                    // rules out. No stock ⇒ fall through to a lock-free cold boot below.
-                    if p.ready() > 0 {
-                        match p.take() {
-                            Ok(vm) => {
-                                // The clone's charge hands off to the session's own reservation
-                                // (already acquired), so the committed gauges keep matching the
-                                // RAM actually resident; the brief overlap between the two
-                                // charges is conservative, never an undercount.
-                                release_pool_clones(server, 1, &pool_clone_limits());
-                                return Ok((vm, true));
-                            }
-                            Err(e) => tracing::warn!(
-                                error = %e,
-                                "pool take failed; cold-booting this session"
-                            ),
+    if bare
+        && limits == pool_clone_limits()
+        && let Some(pool) = &server.pool
+    {
+        match pool.try_lock() {
+            Ok(mut p) => {
+                // Pop only when there is ready stock, `Pool::take` would otherwise restore
+                // inline under this lock, the exact hold-across-restore this function's doc
+                // rules out. No stock ⇒ fall through to a lock-free cold boot below.
+                if p.ready() > 0 {
+                    match p.take() {
+                        Ok(vm) => {
+                            // The clone's charge hands off to the session's own reservation
+                            // (already acquired), so the committed gauges keep matching the
+                            // RAM actually resident; the brief overlap between the two
+                            // charges is conservative, never an undercount.
+                            release_pool_clones(server, 1, &pool_clone_limits());
+                            return Ok((vm, true));
                         }
+                        Err(e) => tracing::warn!(
+                            error = %e,
+                            "pool take failed; cold-booting this session"
+                        ),
                     }
                 }
-                // Contended (a refill holds the lock): don't wait it out, cold-boot instead.
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    tracing::debug!("pool busy (refilling?); cold-booting this session")
-                }
-                Err(std::sync::TryLockError::Poisoned(_)) => {
-                    tracing::warn!("pool lock poisoned; cold-booting this session")
-                }
+            }
+            // Contended (a refill holds the lock): don't wait it out, cold-boot instead.
+            Err(std::sync::TryLockError::WouldBlock) => {
+                tracing::debug!("pool busy (refilling?); cold-booting this session")
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                tracing::warn!("pool lock poisoned; cold-booting this session")
             }
         }
     }
@@ -1254,11 +1255,10 @@ mod tests {
 
         // An egress rule outside the operator's ceiling: well-formed, declined, `Policy`.
         let ceiling = Policy {
-            max_egress_v4: vec![ekvm_probes_loader::Ipv4Cidr::new(
-                std::net::Ipv4Addr::new(10, 0, 0, 0),
-                8,
-            )
-            .expect("valid /8")],
+            max_egress_v4: vec![
+                ekvm_probes_loader::Ipv4Cidr::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8)
+                    .expect("valid /8"),
+            ],
             ..Policy::default()
         };
         let err = open_network(&open_net(Some(true), &["192.168.1.1"]), &ceiling)

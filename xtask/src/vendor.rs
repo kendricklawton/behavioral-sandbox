@@ -15,10 +15,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::artifacts::{artifacts, download_one, sha256_of, Artifact};
-use crate::rootfs::{alpine_artifact, apk_tools_artifact, populate_apk_cache, APK_CACHE_SUBDIR};
+use crate::artifacts::{Artifact, artifacts, download_one, sha256_of};
+use crate::rootfs::{APK_CACHE_SUBDIR, alpine_artifact, apk_tools_artifact, populate_apk_cache};
 use crate::workspace_root;
 
 /// The manifest file the vendor snapshot writes: one `sha256  relpath` line per vendored file, so the

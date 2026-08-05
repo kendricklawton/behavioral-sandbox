@@ -88,13 +88,13 @@ impl Observability {
                     SandboxProbes::attach(vmm_pid, netns, tap, egress, gateway, tracer, meter);
                 // Enforcement is all-or-nothing: a policed tap that gapped (missing CAP_NET_ADMIN,
                 // a tc attach failure) must refuse, not degrade to an unenforced run.
-                if egress.is_some() {
-                    if let Some(reason) = probes.coverage().iter().find_map(network_gap_reason) {
-                        return Err(VmmError::Vmm(format!(
-                            "--allow requested egress enforcement, but the tap could not be \
+                if egress.is_some()
+                    && let Some(reason) = probes.coverage().iter().find_map(network_gap_reason)
+                {
+                    return Err(VmmError::Vmm(format!(
+                        "--allow requested egress enforcement, but the tap could not be \
                              policed: {reason}"
-                        )));
-                    }
+                    )));
                 }
                 Ok(RunProbes {
                     probes: Some(probes),

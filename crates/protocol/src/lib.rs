@@ -591,7 +591,7 @@ fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
         None => {
             return Err(ProtocolError::Malformed(
                 "missing or non-integer `schema` field".to_string(),
-            ))
+            ));
         }
     }
     // The body ignores the extra `schema` key (the message enums aren't `deny_unknown_fields`).
@@ -716,7 +716,7 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
 pub mod fuzz {
     use std::io::Cursor;
 
-    use crate::{read_message, Request, Response};
+    use crate::{Request, Response, read_message};
 
     /// Read a stream of `Request`s from `data` (the daemon's view of a client's bytes), the
     /// highest-value target: `ekvm serve` decodes exactly this off its socket. Drains to EOF so a
@@ -925,12 +925,16 @@ mod tests {
             .expect("decode")
             .expect("a message past the blanks");
         assert_eq!(req, Request::Close);
-        assert!(read_message::<Request>(&mut b"\n  \n".as_slice())
-            .expect("decode")
-            .is_none());
-        assert!(read_message::<Request>(&mut b"".as_slice())
-            .expect("decode")
-            .is_none());
+        assert!(
+            read_message::<Request>(&mut b"\n  \n".as_slice())
+                .expect("decode")
+                .is_none()
+        );
+        assert!(
+            read_message::<Request>(&mut b"".as_slice())
+                .expect("decode")
+                .is_none()
+        );
     }
 
     #[test]

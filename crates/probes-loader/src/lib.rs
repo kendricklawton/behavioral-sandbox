@@ -84,8 +84,8 @@ use std::path::{Path, PathBuf};
 use aya::Ebpf;
 
 pub use ekvm_probes_common::{
-    FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol, Syscall, SyscallEvent,
-    COMM_CAP, DETAIL_CAP, MAX_POLICY_RULES,
+    COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, FlowKey6, MAX_POLICY_RULES, PolicyRule, PolicyRule6,
+    Protocol, Syscall, SyscallEvent,
 };
 
 /// The egress policy and its address types: what an `--allow` string parses into, before any map
@@ -117,11 +117,12 @@ pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
 // signatures (`SandboxProbes::collect` returns a `RunRecord`), so a caller of this crate needs them
 // in scope without a second dependency.
 pub use ekvm_record::{
-    default_key_path, record_hash, verify, verify_chain, AxisGap, CgroupStats, ChainError,
-    DenialRecord, DenialRecord6, EgressPosture, FlowRecord, FlowRecord6, HostKey, KeyError,
-    NetSection, NetStats, NotableSyscall, RecordSubject, ResourceSummary, RunRecord, SyscallCounts,
-    SyscallFold, SyscallFootprint, Timing, TrustedKey, VerifyError, AUDIT_SCHEMA_VERSION,
-    MAX_ENVELOPE_BYTES, MAX_NOTABLE, SIGNED_RECORD_SCHEMA_VERSION, SUMMARY_SCHEMA_VERSION,
+    AUDIT_SCHEMA_VERSION, AxisGap, CgroupStats, ChainError, DenialRecord, DenialRecord6,
+    EgressPosture, FlowRecord, FlowRecord6, HostKey, KeyError, MAX_ENVELOPE_BYTES, MAX_NOTABLE,
+    NetSection, NetStats, NotableSyscall, RecordSubject, ResourceSummary, RunRecord,
+    SIGNED_RECORD_SCHEMA_VERSION, SUMMARY_SCHEMA_VERSION, SyscallCounts, SyscallFold,
+    SyscallFootprint, Timing, TrustedKey, VerifyError, default_key_path, record_hash, verify,
+    verify_chain,
 };
 
 /// Env override for the compiled BPF object's location, for a vendored / installed deployment where

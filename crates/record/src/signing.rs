@@ -304,8 +304,8 @@ impl TrustedKey {
     /// [`KeyError::Malformed`] if the DER/PEM encoding fails (a library-internal failure; an
     /// `ed25519` public key always has a valid SPKI form).
     pub fn to_spki_pem(&self) -> Result<String, KeyError> {
-        use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
         use ed25519_dalek::pkcs8::EncodePublicKey as _;
+        use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
         self.0
             .to_public_key_pem(LineEnding::LF)
             .map_err(|e| KeyError::Malformed(format!("SPKI PEM encoding failed: {e}")))

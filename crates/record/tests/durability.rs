@@ -13,8 +13,8 @@
 use std::time::Duration;
 
 use ekvm_record::{
-    record_hash, verify, AxisGap, FlowCounts, FlowKey, HostKey, NetSection, NetStats,
-    RecordSubject, ResourceSummary, RunRecord, SyscallEvent, SyscallFootprint, Timing, TrustedKey,
+    AxisGap, FlowCounts, FlowKey, HostKey, NetSection, NetStats, RecordSubject, ResourceSummary,
+    RunRecord, SyscallEvent, SyscallFootprint, Timing, TrustedKey, record_hash, verify,
 };
 
 /// The frozen envelope. Regenerate only on a deliberate schema bump (`regenerate_fixture`).

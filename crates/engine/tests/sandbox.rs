@@ -11,11 +11,11 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use ekvm_engine::{Limits, Sandbox, Vm, VmmError, DEFAULT_JAIL_UID};
-use std::sync::atomic::{AtomicBool, Ordering};
+use ekvm_engine::{DEFAULT_JAIL_UID, Limits, Sandbox, Vm, VmmError};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use common::{guest_rootfs_config, have_jailer_privileges, TmpDir};
+use common::{TmpDir, guest_rootfs_config, have_jailer_privileges};
 
 /// The uid the process behind `pid` runs as (the real uid from `/proc/<pid>/status`), as text.
 fn vmm_uid(pid: u32) -> Option<String> {

@@ -10,12 +10,12 @@
 
 use std::net::{SocketAddr, TcpStream};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use ekvm_probes_loader::{cgroup_id_of_self, check_support, object_path, Syscall, SyscallTracer};
+use ekvm_probes_loader::{Syscall, SyscallTracer, cgroup_id_of_self, check_support, object_path};
 
 /// Why this host can't load the probe (a skip reason), or `None` when it can, so each test prints
 /// *why* it skipped. Same gate the counter tests use.

@@ -31,7 +31,7 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use ekvm_protocol::{read_message, write_message, FaultKind, ProtocolError, Request, Response};
+use ekvm_protocol::{FaultKind, ProtocolError, Request, Response, read_message, write_message};
 
 /// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]

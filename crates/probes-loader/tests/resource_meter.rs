@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
-use ekvm_probes_loader::{cgroup_id_of_pid, check_support, object_path, ResourceMeter};
+use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use ekvm_probes_loader::{ResourceMeter, cgroup_id_of_pid, check_support, object_path};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {

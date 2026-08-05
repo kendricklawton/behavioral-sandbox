@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use ekvm_engine::{RunningVm, Vm};
 
-use common::{have_jailer_privileges, jailed_overlay_config, TmpDir};
+use common::{TmpDir, have_jailer_privileges, jailed_overlay_config};
 
 /// Run one write stream to `/output` (`iters` rewrites of a `count_mib`-MiB file, continuous so the
 /// steady bucket can't refill between them) and return the host-observed rate in MiB/s. A rewrite

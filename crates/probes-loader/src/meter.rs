@@ -3,12 +3,12 @@
 
 use std::time::Duration;
 
+use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap, MapData};
 use aya::programs::TracePoint;
-use aya::Ebpf;
 use ekvm_record::{CgroupStats, ResourceSummary};
 
-use crate::{cgroup_dir_of_pid, cgroup_id_of_dir, check_support, load_object, ProbeError};
+use crate::{ProbeError, cgroup_dir_of_pid, cgroup_id_of_dir, check_support, load_object};
 
 /// The `account_sched_switch` program's name (its `#[tracepoint] fn` symbol in `crates/probes`).
 const PROG_SCHED_SWITCH: &str = "account_sched_switch";

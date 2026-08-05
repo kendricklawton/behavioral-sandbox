@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, Vm, DEFAULT_GUEST_CID, GUEST_READY_MARKER};
-use ekvm_probes_loader::{check_support, object_path, EgressPolicy, Protocol, TapMonitor};
+use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use ekvm_probes_loader::{EgressPolicy, Protocol, TapMonitor, check_support, object_path};
 
 /// IP protocol number for UDP, for the raw flow-key comparisons the loader doesn't re-export a const for.
 const IPPROTO_UDP: u8 = Protocol::Udp as u8;
@@ -74,7 +74,9 @@ fn networked_agent_config() -> BootConfig {
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest() {
     if let Some(why) = skip_reason() {
-        eprintln!("skipping a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest: {why}");
+        eprintln!(
+            "skipping a_guest_reaches_the_allow_listed_endpoint_and_is_blocked_from_the_rest: {why}"
+        );
         return;
     }
 

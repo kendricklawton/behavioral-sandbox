@@ -17,41 +17,41 @@ use std::time::{Duration, Instant};
 
 use ekvm_channel::VSOCK_PORT;
 
-use crate::console::{last_lines, Console};
-use crate::drives::{build_input_image, build_output_image, OutputDevice};
+use crate::VmmError;
+use crate::console::{Console, last_lines};
+use crate::drives::{OutputDevice, build_input_image, build_output_image};
 use crate::exec::connect_agent_at;
 use crate::firecracker::{
     Action, ApiClient, BootSource, Drive, MachineConfig, NetworkInterface, RateLimiter, Vsock,
 };
 use crate::jail::{
-    cgroup_limit_args, give_to_jail, jailer_cgroup_dir, read_cgroup_dir, remove_cgroup,
-    spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot, Chroot, Jail, JAILED_VSOCK_UDS,
+    Chroot, JAILED_VSOCK_UDS, Jail, cgroup_limit_args, give_to_jail, jailer_cgroup_dir,
+    read_cgroup_dir, remove_cgroup, spawn_jailer, stage_into_chroot, stage_ro_base_into_chroot,
 };
 use crate::lifetime::VmLifetime;
 use crate::net::{GuestEgress, GuestLink, Tap};
 use crate::paths::{absolute, path_str, require_file};
 use crate::vm::{
-    reclaim_scratch, reclaim_scratch_after_tap_failure, teardown, BootConfig, RunningVm, FC_STDERR,
-    IFACE_ID, VSOCK_UDS,
+    BootConfig, FC_STDERR, IFACE_ID, RunningVm, VSOCK_UDS, reclaim_scratch,
+    reclaim_scratch_after_tap_failure, teardown,
 };
-use crate::VmmError;
 
 mod fcversion;
 mod restore;
 mod workdir;
 
-use fcversion::warn_on_unpinned_firecracker;
 #[cfg(test)]
 use fcversion::FC_CLOCK_REALTIME_SINCE;
-pub(crate) use fcversion::{fc_version_of, MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION};
+use fcversion::warn_on_unpinned_firecracker;
 #[cfg(test)]
-use fcversion::{probe_fc_version, probe_fc_version_within, FcProbe, VERSION_HEAD_CAP};
+use fcversion::{FcProbe, VERSION_HEAD_CAP, probe_fc_version, probe_fc_version_within};
+pub(crate) use fcversion::{MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION, fc_version_of};
 #[cfg(test)]
-use restore::{ensure_private_staging_dir, stage_restore_disk, StagedDisk};
+use restore::{StagedDisk, ensure_private_staging_dir, stage_restore_disk};
 #[cfg(test)]
 use workdir::SUN_PATH_MAX;
-pub(crate) use workdir::{check_sun_path, VM_DIR_PREFIX};
-use workdir::{create_workdir, workdir_name, WorkdirGuard};
+pub(crate) use workdir::{VM_DIR_PREFIX, check_sun_path};
+use workdir::{WorkdirGuard, create_workdir, workdir_name};
 
 /// A spawned-but-not-yet-ready VMM. Kept distinct from [`RunningVm`] so the boot sequence can fail
 /// and clean up without ever constructing a half-booted `RunningVm`. Its `Drop` is the panic
@@ -449,14 +449,14 @@ impl Spawned {
     fn learn_jailer_cgroup(&mut self) {
         if let Some(pid) = self.child.as_ref().map(|c| c.id()) {
             let actual = read_cgroup_dir(pid);
-            if let Some(dir) = actual.as_deref() {
-                if !self.lifetime.watches(dir) {
-                    tracing::warn!(
-                        cgroup = %dir.display(),
-                        "jailer placed the VMM outside the precomputed cgroup; the lifetime \
-                         sentinel is not guarding it (driver death would leak this VMM)"
-                    );
-                }
+            if let Some(dir) = actual.as_deref()
+                && !self.lifetime.watches(dir)
+            {
+                tracing::warn!(
+                    cgroup = %dir.display(),
+                    "jailer placed the VMM outside the precomputed cgroup; the lifetime \
+                     sentinel is not guarding it (driver death would leak this VMM)"
+                );
             }
             if let Some(chroot) = self.chroot.as_mut() {
                 chroot.cgroup_dir = actual;
@@ -1046,7 +1046,7 @@ pub(crate) fn deadline_after(timeout: Duration) -> Instant {
 #[cfg(test)]
 mod version_tests {
     use super::{
-        fc_version_of, FC_CLOCK_REALTIME_SINCE, MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION,
+        FC_CLOCK_REALTIME_SINCE, MIN_SUPPORTED_FC_VERSION, PINNED_FC_VERSION, fc_version_of,
     };
 
     #[test]

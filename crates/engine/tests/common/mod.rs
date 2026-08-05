@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, Jail, Vm, DEFAULT_GUEST_CID};
+use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, Jail, Vm};
 
 /// The shared scratch-dir guard (removed on drop). `new` reserves the path without creating it, the
 /// semantics these integration tests rely on (a snapshot bundle / output dir the driver creates).

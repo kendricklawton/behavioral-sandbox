@@ -32,16 +32,16 @@
 //! teardown lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's
 //! cgroup at its precomputed path, so host death can't leak a jailed VMM either.
 
-use std::num::{NonZeroU32, NonZeroU8};
+use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Instant;
 
+use crate::VmmError;
 use crate::console::Console;
 use crate::paths::absolute;
 use crate::spawn::check_sun_path;
 use crate::vm::FC_STDERR;
-use crate::VmmError;
 
 /// The default unprivileged uid/gid the jailer drops Firecracker to. Deliberately high and unlikely
 /// to collide with a real account; the resources the VMM touches live in a chroot we chown to this

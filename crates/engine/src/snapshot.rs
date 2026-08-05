@@ -12,13 +12,13 @@
 use std::path::Path;
 use std::time::Duration;
 
+use crate::VmmError;
 use crate::firecracker::{
-    snapshot_api_timeout, SnapshotCreate, SnapshotType, VmState, VmStateKind,
+    SnapshotCreate, SnapshotType, VmState, VmStateKind, snapshot_api_timeout,
 };
 use crate::paths::{absolute, path_str, require_file};
 use crate::spawn::Spawned;
 use crate::vm::{BootConfig, RunningVm, Snapshot, Vm};
-use crate::VmmError;
 
 /// How long a snapshot waits for the guest agent to answer again after the resume. The guest
 /// re-arms its vsock listener within milliseconds of resuming; this bound exists so a guest that

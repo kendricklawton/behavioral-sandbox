@@ -10,7 +10,7 @@
 
 use std::process::Command;
 
-use ekvm_probes_loader::{check_support, object_path, ProbeError, TapMonitor};
+use ekvm_probes_loader::{ProbeError, TapMonitor, check_support, object_path};
 
 /// Why this host can't load the probe (a skip reason), or `None` when it can, so the test prints
 /// *why* it skipped. Same gate the tracer/counter tests use.

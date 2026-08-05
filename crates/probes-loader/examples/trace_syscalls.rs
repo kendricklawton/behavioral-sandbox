@@ -26,7 +26,7 @@
 use std::error::Error;
 use std::time::{Duration, Instant};
 
-use ekvm_probes_loader::{cgroup_id_of_pid, SyscallTracer};
+use ekvm_probes_loader::{SyscallTracer, cgroup_id_of_pid};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);

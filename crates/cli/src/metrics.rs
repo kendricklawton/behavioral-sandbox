@@ -21,8 +21,8 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use ekvm_engine::SweepReport;
@@ -836,9 +836,10 @@ mod tests {
         // An unpaired decrement is a bug, but the scraped value must never wrap to u64::MAX.
         let m = Metrics::default();
         m.session_closed(false);
-        assert!(m
-            .render(&CapacitySample::pool(None))
-            .contains("ekvm_sessions_active 0"));
+        assert!(
+            m.render(&CapacitySample::pool(None))
+                .contains("ekvm_sessions_active 0")
+        );
     }
 
     #[test]

@@ -8,8 +8,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 
-use crate::vm::VM_SEQ;
 use crate::VmmError;
+use crate::vm::VM_SEQ;
 
 /// Linux caps `sockaddr_un.sun_path` at 108 bytes including the trailing NUL. Firecracker binds the
 /// API and vsock sockets *inside* the scratch dir, so a long scratch base (a relocated
@@ -78,7 +78,7 @@ pub(crate) fn create_workdir(base: &Path) -> Result<PathBuf, VmmError> {
                     "create scratch dir {} (is {} present and writable?): {e}",
                     workdir.display(),
                     base.display()
-                )))
+                )));
             }
         }
     }
