@@ -361,10 +361,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
             }
             Ok(Some(Request::Trace)) => {
                 server.metrics.request(Verb::Trace);
-                let timing = Timing {
-                    boot,
-                    exec_wall: total_exec_wall,
-                };
+                let timing = Timing::new(boot, total_exec_wall);
                 // Sign the finalized record with the host key. and carry the envelope:
                 // the record rides inside it as a string, so its signed bytes survive the wire's
                 // serde round-trip and a client can verify without trusting this daemon's transport.
@@ -395,10 +392,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
             }
             Ok(Some(Request::TraceSummary)) => {
                 server.metrics.request(Verb::TraceSummary);
-                let timing = Timing {
-                    boot,
-                    exec_wall: total_exec_wall,
-                };
+                let timing = Timing::new(boot, total_exec_wall);
                 // The same live, non-destructive record snapshot as `trace`, projected to the
                 // model-legible summary the CLI's `--record-summary` writes.
                 let resp = match probes.as_ref() {

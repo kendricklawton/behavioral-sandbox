@@ -259,10 +259,7 @@ mod tests {
             ],
         };
         assert!(probes.snapshot().network.is_none());
-        let timing = Timing {
-            boot: Duration::from_millis(100),
-            exec_wall: Duration::from_millis(5),
-        };
+        let timing = Timing::new(Duration::from_millis(100), Duration::from_millis(5));
         let record = probes.collect(timing);
         assert!(record.network.is_none());
         assert_eq!(record.host_syscalls.total, 0);

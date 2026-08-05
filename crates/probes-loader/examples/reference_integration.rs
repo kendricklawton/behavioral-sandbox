@@ -83,10 +83,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     //    never what it describes, so an embedder archiving records supplies both here.
     let record = probes.collect(
         RecordSubject::new(sandbox.name().to_string(), unix_nanos_now()),
-        Timing {
-            boot: sandbox.boot_latency(),
-            exec_wall: run.metrics.wall,
-        },
+        Timing::new(sandbox.boot_latency(), run.metrics.wall),
     );
     sandbox.shutdown()?;
 

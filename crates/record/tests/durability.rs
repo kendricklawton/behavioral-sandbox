@@ -115,10 +115,7 @@ fn fixture_record() -> RunRecord {
         Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
         resources,
         host_syscalls,
-        Timing {
-            boot: Duration::from_millis(120),
-            exec_wall: Duration::from_millis(42),
-        },
+        Timing::new(Duration::from_millis(120), Duration::from_millis(42)),
         vec![AxisGap::Cpu("meter lock poisoned".into())],
     )
 }

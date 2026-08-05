@@ -506,10 +506,7 @@ mod tests {
             Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
             resources,
             host_syscalls,
-            Timing {
-                boot: Duration::from_millis(120),
-                exec_wall: Duration::from_millis(42),
-            },
+            Timing::new(Duration::from_millis(120), Duration::from_millis(42)),
             vec![AxisGap::Cpu("meter lock poisoned".into())],
         )
     }
@@ -647,10 +644,7 @@ mod tests {
             Some(dropped),
             ResourceSummary::default(),
             SyscallFootprint::default(),
-            Timing {
-                boot: Duration::ZERO,
-                exec_wall: Duration::ZERO,
-            },
+            Timing::new(Duration::ZERO, Duration::ZERO),
             vec![],
         );
         let json = record.to_json();
@@ -678,10 +672,7 @@ mod tests {
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
-            Timing {
-                boot: Duration::ZERO,
-                exec_wall: Duration::ZERO,
-            },
+            Timing::new(Duration::ZERO, Duration::ZERO),
             vec![AxisGap::Network("tab\tand \"quote\" and \\slash".into())],
         );
         let json = record.to_json();
@@ -782,10 +773,7 @@ mod tests {
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
-            Timing {
-                boot: Duration::from_millis(1),
-                exec_wall: Duration::from_millis(1),
-            },
+            Timing::new(Duration::from_millis(1), Duration::from_millis(1)),
             vec![],
         );
         let json = record.to_json();
@@ -809,10 +797,7 @@ mod tests {
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
-            Timing {
-                boot: Duration::from_millis(1),
-                exec_wall: Duration::from_millis(1),
-            },
+            Timing::new(Duration::from_millis(1), Duration::from_millis(1)),
             vec![],
         );
         assert!(record.to_json().contains(r#""started_unix_ns":0"#));

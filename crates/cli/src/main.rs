@@ -619,12 +619,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     // Finalize the audit record **while the sandbox is still alive** (the attached bundle reads the
     // live cgroup + maps) and **before** the fallible artifact write below: an artifact-write error
     // must not lose the record for exactly the misbehaving-guest run whose audit you want.
-    let record = probes.map(|p| {
-        p.collect(Timing {
-            boot: boot_latency,
-            exec_wall: result.metrics.wall,
-        })
-    });
+    let record = probes.map(|p| p.collect(Timing::new(boot_latency, result.metrics.wall)));
     write_artifacts(&result.files, &args.get)?;
     // Teardown is best-effort: a shutdown error must not mask the run's real result (its exit code,
     // streams, and the record just collected). Log and continue, as `shell`'s teardown already does.

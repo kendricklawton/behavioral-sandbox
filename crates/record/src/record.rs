@@ -591,10 +591,24 @@ impl SyscallFold {
 
 /// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from
 /// `Sandbox::boot_latency` and `RunResult::metrics.wall`, so the record never depends on `ekvm`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// A further measurement lands as a new field plus a `with_*` method, never as a wider
+/// [`new`](Self::new): the two-argument constructor is the pair every run has, and
+/// [`Default`] (all-zero, "unmeasured", the [`RecordSubject::started_unix_ns`] posture) is the
+/// starting point for a caller that has only some of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct Timing {
     pub boot: Duration,
     pub exec_wall: Duration,
+}
+
+impl Timing {
+    /// The boot latency and the exec wall time, the two every run measures.
+    #[must_use]
+    pub fn new(boot: Duration, exec_wall: Duration) -> Self {
+        Self { boot, exec_wall }
+    }
 }
 
 /// One observation axis that was unavailable, and why, carried in [`RunRecord::coverage`] so a
@@ -1072,10 +1086,7 @@ mod tests {
                 Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
                 ResourceSummary::default(),
                 SyscallFootprint::from_events(CG, &cg_events),
-                Timing {
-                    boot: Duration::from_millis(120),
-                    exec_wall: Duration::from_millis(42),
-                },
+                Timing::new(Duration::from_millis(120), Duration::from_millis(42)),
                 vec![],
             )
         };
@@ -1091,10 +1102,7 @@ mod tests {
             None,
             ResourceSummary::default(),
             SyscallFootprint::from_events(CG, &[ev(Syscall::Execve as u32, CG, b"/init", "init")]),
-            Timing {
-                boot: Duration::from_millis(100),
-                exec_wall: Duration::ZERO,
-            },
+            Timing::new(Duration::from_millis(100), Duration::ZERO),
             vec![AxisGap::Network("no NIC on this sandbox".into())],
         );
         assert!(record.network.is_none());
@@ -1111,10 +1119,7 @@ mod tests {
                 ..crate::CgroupStats::default()
             },
         };
-        let timing = Timing {
-            boot: Duration::from_millis(88),
-            exec_wall: Duration::from_millis(9),
-        };
+        let timing = Timing::new(Duration::from_millis(88), Duration::from_millis(9));
         let record = RunRecord::from_parts(
             RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
             None,
@@ -1125,5 +1130,29 @@ mod tests {
         );
         assert_eq!(record.resources, resources);
         assert_eq!(record.timing, timing);
+    }
+
+    /// `Timing` is caller-constructed and `#[non_exhaustive]`, so a caller outside this crate
+    /// reaches it only through these two doors. Pin what each one puts where: `new` is positional,
+    /// and swapping its arguments is the silent failure the assertion below exists to catch.
+    #[test]
+    fn timing_is_reachable_by_constructor_and_default_only() {
+        let t = Timing::new(Duration::from_millis(88), Duration::from_millis(9));
+        assert_eq!(
+            t.boot,
+            Duration::from_millis(88),
+            "boot is the first argument"
+        );
+        assert_eq!(
+            t.exec_wall,
+            Duration::from_millis(9),
+            "exec_wall is the second argument"
+        );
+        // All-zero reads as "unmeasured", the starting point for a caller that has only some of
+        // the measurements; a future field joins it without touching this assertion.
+        assert_eq!(
+            Timing::default(),
+            Timing::new(Duration::ZERO, Duration::ZERO)
+        );
     }
 }

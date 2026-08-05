@@ -287,10 +287,7 @@ mod tests {
                     ev(1, 0x42, b"/etc/hosts", "sh"),
                 ],
             ),
-            Timing {
-                boot: Duration::from_millis(120),
-                exec_wall: Duration::from_millis(42),
-            },
+            Timing::new(Duration::from_millis(120), Duration::from_millis(42)),
             vec![AxisGap::Cpu("meter lock poisoned".into())],
         )
     }
@@ -321,10 +318,7 @@ audit trail (host-observed, from outside the guest)
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
-            Timing {
-                boot: Duration::ZERO,
-                exec_wall: Duration::ZERO,
-            },
+            Timing::new(Duration::ZERO, Duration::ZERO),
             vec![],
         );
         let text = render(&record);

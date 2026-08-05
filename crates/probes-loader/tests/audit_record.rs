@@ -142,10 +142,7 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
     // this run's cgroup from the shared tracer + meter, and returns the fused record.
     let record = probes.collect(
         RecordSubject::new(vm.name().to_string(), 0),
-        Timing {
-            boot: vm.boot_latency(),
-            exec_wall: out.metrics.wall,
-        },
+        Timing::new(vm.boot_latency(), out.metrics.wall),
     );
 
     // --- The network touch shows up *exactly* --------------------------------------------------------
@@ -272,10 +269,7 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
 
     let record = probes.collect(
         RecordSubject::new(vm.name().to_string(), 0),
-        Timing {
-            boot: vm.boot_latency(),
-            exec_wall: out.metrics.wall,
-        },
+        Timing::new(vm.boot_latency(), out.metrics.wall),
     );
 
     let network = record

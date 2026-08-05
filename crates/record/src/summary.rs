@@ -409,10 +409,7 @@ mod tests {
             Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
             resources,
             host_syscalls,
-            Timing {
-                boot: Duration::from_millis(120),
-                exec_wall: Duration::from_millis(42),
-            },
+            Timing::new(Duration::from_millis(120), Duration::from_millis(42)),
             vec![AxisGap::Cpu("meter lock poisoned".into())],
         )
     }
@@ -555,10 +552,7 @@ mod tests {
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
-            Timing {
-                boot: Duration::ZERO,
-                exec_wall: Duration::ZERO,
-            },
+            Timing::new(Duration::ZERO, Duration::ZERO),
             vec![AxisGap::Network("tab\tand \"quote\"".into())],
         );
         let json = record.to_summary_json();
@@ -604,10 +598,7 @@ mod tests {
             Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
             ResourceSummary::default(),
             SyscallFootprint::from_events(0x42, &events),
-            Timing {
-                boot: Duration::from_millis(1),
-                exec_wall: Duration::from_millis(1),
-            },
+            Timing::new(Duration::from_millis(1), Duration::from_millis(1)),
             vec![],
         );
         let full = record.to_json().len();

@@ -183,10 +183,7 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     // Finalize the fused record while the sandbox is still alive.
     let record = probes.collect(
         RecordSubject::new(vm.name().to_string(), 0),
-        Timing {
-            boot: vm.boot_latency(),
-            exec_wall: out.metrics.wall,
-        },
+        Timing::new(vm.boot_latency(), out.metrics.wall),
     );
     let network = record
         .network
@@ -328,10 +325,7 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
 
     let record = probes.collect(
         RecordSubject::new(vm.name().to_string(), 0),
-        Timing {
-            boot: vm.boot_latency(),
-            exec_wall: out.metrics.wall,
-        },
+        Timing::new(vm.boot_latency(), out.metrics.wall),
     );
 
     // The host kept recording through the guest's probing: the guest's own packets are in the
@@ -523,10 +517,7 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     std::thread::sleep(Duration::from_millis(100));
     let record = probes.collect(
         RecordSubject::new(vm.name().to_string(), 0),
-        Timing {
-            boot: vm.boot_latency(),
-            exec_wall: hog_out.metrics.wall,
-        },
+        Timing::new(vm.boot_latency(), hog_out.metrics.wall),
     );
     let network = record
         .network

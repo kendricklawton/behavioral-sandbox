@@ -5,10 +5,10 @@ use ekvm_record::{HostKey, RecordSubject, RunRecord, Timing, record_hash, verify
 
 fn sample_record() -> RunRecord {
     let subject = RecordSubject::new("sb-bench-12345".to_string(), 1_700_000_000_000_000_000);
-    let timing = Timing {
-        boot: std::time::Duration::from_millis(120),
-        exec_wall: std::time::Duration::from_millis(15),
-    };
+    let timing = Timing::new(
+        std::time::Duration::from_millis(120),
+        std::time::Duration::from_millis(15),
+    );
     RunRecord::from_parts(
         subject,
         None,
