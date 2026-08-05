@@ -1,0 +1,6 @@
+# Allowlist: the Containerfile COPYs only ${DIST}/ (a dist/ subdirectory), so nothing else enters
+# the build context. Without this, `docker build .` ships the whole repo to the daemon, and target/
+# alone is tens of GB. A future COPY of anything new must be added here, and forgetting that fails
+# loudly (COPY: not found), which is the right direction.
+*
+!dist/
