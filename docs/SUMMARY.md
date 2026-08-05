@@ -15,6 +15,7 @@
   - [Configuration](./cli-config.md)
 - [Using the `ekvm serve` daemon](./daemon.md)
   - [The wire protocol](./daemon-protocol.md)
+  - [Conformance for a wire client](./daemon-conformance.md)
   - [Observability for the hoster](./daemon-observability.md)
 - [Using the engine API](./embedding.md)
   - [Recipes](./embedding-recipes.md)
