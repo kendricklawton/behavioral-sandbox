@@ -10,16 +10,23 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ekvm_probes_common::{PolicyRule, PolicyRule6, Protocol};
 
-/// A rejected egress-policy input, caught by construction (`parse, don't validate`) so an illegal policy
-/// can't reach the kernel map: an out-of-range CIDR prefix, or more rules than the map holds. Distinct
-/// from [`crate::ProbeError`]'s eBPF-runtime failures. `#[non_exhaustive]`: a richer policy vocabulary adds
-/// new rejection classes as new variants.
+/// A rejected egress-policy input, refused before it can reach the kernel map. An out-of-range
+/// CIDR prefix is caught at construction (`parse, don't validate`: [`Ipv4Cidr::new`] /
+/// [`Ipv6Cidr::new`]); a rule count over the map's capacity is caught when the policy is
+/// installed, before any rule is written ([`EgressPolicy`]'s `allow` builders are infallible).
+/// Distinct from [`crate::ProbeError`]'s eBPF-runtime failures. `#[non_exhaustive]`: a richer
+/// policy vocabulary adds new rejection classes as new variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PolicyError {
-    /// A CIDR prefix length over its family maximum (the given value): rejected by [`Ipv4Cidr::new`]
-    /// (max 32) or [`Ipv6Cidr::new`] (max 128).
-    PrefixTooLong(u8),
+    /// A CIDR prefix length over its family maximum: rejected by [`Ipv4Cidr::new`] or
+    /// [`Ipv6Cidr::new`].
+    PrefixTooLong {
+        /// The prefix length the caller supplied.
+        got: u8,
+        /// The family maximum it exceeded (32 for IPv4, 128 for IPv6).
+        max: u8,
+    },
     /// More allow-rules than the kernel `POLICY` map holds: the requested count and the cap.
     TooManyRules {
         /// The number of rules the caller supplied.
@@ -32,10 +39,10 @@ pub enum PolicyError {
 impl std::fmt::Display for PolicyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::PrefixTooLong(len) => {
+            Self::PrefixTooLong { got, max } => {
                 write!(
                     f,
-                    "CIDR prefix length {len} is over its family maximum (/32 for IPv4, /128 for IPv6)"
+                    "CIDR prefix length {got} is over its family maximum /{max}"
                 )
             }
             Self::TooManyRules { got, max } => {
@@ -78,7 +85,10 @@ impl Ipv4Cidr {
     /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds 32.
     pub fn new(network: Ipv4Addr, prefix_len: u8) -> Result<Self, PolicyError> {
         if prefix_len > 32 {
-            return Err(PolicyError::PrefixTooLong(prefix_len));
+            return Err(PolicyError::PrefixTooLong {
+                got: prefix_len,
+                max: 32,
+            });
         }
         Ok(Self {
             network,
@@ -142,7 +152,10 @@ impl Ipv6Cidr {
     /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds 128.
     pub fn new(network: Ipv6Addr, prefix_len: u8) -> Result<Self, PolicyError> {
         if prefix_len > 128 {
-            return Err(PolicyError::PrefixTooLong(prefix_len));
+            return Err(PolicyError::PrefixTooLong {
+                got: prefix_len,
+                max: 128,
+            });
         }
         Ok(Self {
             network,
@@ -304,9 +317,12 @@ mod tests {
     #[test]
     fn ipv4_cidr_rejects_an_out_of_range_prefix() {
         // parse-don't-validate: an over-/32 prefix can't be constructed, so it never reaches the map.
-        assert_eq!(
-            Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 40),
-            Err(PolicyError::PrefixTooLong(40))
+        let err = Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 40).expect_err("40 is over /32");
+        assert_eq!(err, PolicyError::PrefixTooLong { got: 40, max: 32 });
+        // The error names the family maximum it exceeded, not a both-families hedge.
+        assert!(
+            err.to_string().contains("maximum /32"),
+            "a v4 prefix error names /32, got: {err}"
         );
         assert!(Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 8).is_ok());
         assert!(Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 32).is_ok());
@@ -355,9 +371,12 @@ mod tests {
 
     #[test]
     fn ipv6_cidr_rejects_an_out_of_range_prefix() {
-        assert_eq!(
-            Ipv6Cidr::new("fd00:200::".parse().unwrap(), 200),
-            Err(PolicyError::PrefixTooLong(200))
+        let err = Ipv6Cidr::new("fd00:200::".parse().unwrap(), 200).expect_err("200 is over /128");
+        assert_eq!(err, PolicyError::PrefixTooLong { got: 200, max: 128 });
+        // The error names the family maximum it exceeded, not a both-families hedge.
+        assert!(
+            err.to_string().contains("maximum /128"),
+            "a v6 prefix error names /128, got: {err}"
         );
         assert!(Ipv6Cidr::new("fd00:200::".parse().unwrap(), 64).is_ok());
         assert!(Ipv6Cidr::new("fd00:200::1".parse().unwrap(), 128).is_ok());
