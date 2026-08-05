@@ -2,45 +2,42 @@
 
 Where the pieces sit, and which boundaries a run crosses:
 
-```mermaid
-flowchart TB
-    subgraph Host["Linux Host (cgroup.kill, else Kernel >= 5.15)"]
-        subgraph Userspace["Host Userspace"]
-            Client["ekvm CLI / Client SDK"]
-            Daemon["ekvm serve Daemon"]
-            VMM["Firecracker VMM (Jailed & Chrooted)"]
-        end
+```text
+LINUX HOST  (a kernel providing cgroup.kill, else >= 5.15)
 
-        subgraph HostKernel["Host Kernel Space"]
-            KVM["Linux KVM (/dev/kvm)"]
-            
-            subgraph eBPF["Host-Side eBPF (aya)"]
-                Tracepoints["sys_enter_* Tracepoints"]
-                TCEnforcer["tc clsact Egress Classifier"]
-                CPUMeter["sched_switch CPU Meter"]
-            end
-        end
-
-        subgraph MicroVM["KVM Hardware Boundary"]
-            subgraph GuestSpace["Guest Memory & OS"]
-                GuestKernel["Guest Kernel"]
-                GuestAgent["guest-agent (static musl)"]
-                UntrustedCode["Untrusted Code"]
-            end
-        end
-    end
-
-    Client -->|Unix Socket Wire API| Daemon
-    Daemon -->|ekvm-engine API| VMM
-    VMM -->|KVM ioctl| KVM
-    KVM -->|Hardware Exec| MicroVM
-    Daemon <-->|vsock / channel| GuestAgent
-    GuestAgent -->|execve / stdio| UntrustedCode
-    MicroVM -->|Host Syscalls| Tracepoints
-    MicroVM -->|TAP Packets| TCEnforcer
-    Tracepoints -->|Ring Buffer| Daemon
-    TCEnforcer -->|Flow & Deny Events| Daemon
+  HOST USERSPACE
+    ekvm CLI / client SDK
+        |  unix socket wire API
+        v
+    ekvm serve daemon  <-------------------------------+
+        |  ekvm-engine API                             |
+        v                                    ring buffer, flow and
+    Firecracker VMM (jailed, chrooted)         deny events
+        |  KVM ioctl                                   |
+        v                                              |
+  HOST KERNEL                                          |
+    Linux KVM (/dev/kvm)                    HOST-SIDE eBPF (aya)
+        |  hardware exec                      sys_enter_* tracepoints
+        |                                     tc clsact egress classifier
+        |                                     sched_switch CPU meter
+        |                                              ^
+        |                                              |
+        |                              host syscalls (the VMM's own),
+        |                              tap packets, per-sandbox cgroup
+        v                                              |
+  ================= KVM HARDWARE BOUNDARY =============|=============
+        |                                              |
+    GUEST MEMORY AND OS                                 (observed from
+      guest kernel                                       the host side)
+      guest-agent (static musl)  <--- vsock / channel ---> daemon
+        |  execve, stdio
+        v
+      untrusted code
 ```
+
+The eBPF programs sit on the **host** side of that boundary: they attach to host-kernel hooks and
+observe the VMM's host footprint, the guest's tap, and its cgroup, never the guest's own syscalls
+(a microVM services those in its own kernel).
 
 ## Host requirements
 
@@ -62,27 +59,26 @@ the guest emit those packets so the classifier can judge them; it builds nothing
 uplink to the namespace and allocating the addresses that takes is the hoster's, per
 [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster).
 
-```mermaid
-flowchart LR
-    subgraph GuestNetns["Per-VM Network Namespace"]
-        GuestApp["Untrusted Guest App"]
-        Eth0["eth0 (10.200.0.2/30)"]
-        Tap["fc0 TAP (10.200.0.1/30)"]
-    end
-
-    subgraph HostNet["Host Network Enforcement"]
-        TCLink["tc clsact Egress Hook"]
-        Map["eBPF BPF_MAP_TYPE_HASH\n(IP / CIDR / Port Allow Rules)"]
-        HostInterface["Host Network / Internet"]
-        AuditLog["Audit Record (Denial Event)"]
-    end
-
-    GuestApp --> Eth0
-    Eth0 --> Tap
-    Tap --> TCLink
-    TCLink -->|Lookup Destination| Map
-    Map -->|Match Allowed Rule| HostInterface
-    Map -->|No Match (Deny)| AuditLog
+```text
+PER-VM NETWORK NAMESPACE          |  HOST-SIDE ENFORCEMENT
+                                  |
+  untrusted guest app             |
+        |                         |
+        v                         |
+  eth0 (10.200.0.2/30)            |
+        |                         |
+        v                         |
+  fc0 tap (10.200.0.1/30)  ---->  |  tc clsact egress hook
+                                  |        |  look up the destination
+                                  |        v
+                                  |  eBPF hash map
+                                  |  (IP / CIDR / port allow rules)
+                                  |        |
+                                  |        +-- match  --> host network / uplink
+                                  |        |
+                                  |        +-- no match (deny by default)
+                                  |                 --> dropped, and the denial
+                                  |                     lands in the audit record
 ```
 
 ## Storage
@@ -97,19 +93,23 @@ collected. Bulk data rides block devices instead: a read-only ext4 built from
 `input_dir`, and a writable one extracted after teardown for `output_dir`. `read_only_root`,
 `input_dir`, and `output_dir` are all embedding-API fields rather than CLI flags.
 
-```mermaid
-flowchart TB
-    subgraph StorageLayout["Sandbox Storage Layering (a read_only_root boot; the default copies the base per VM instead)"]
-        BaseFS["Read-Only Base Rootfs\n(artifacts/rootfs-guest.ext4)"]
-        TmpfsOverlay["Per-Run Writable tmpfs Overlay\n(Size capped at 50% RAM)"]
-        MergedRoot["Merged Guest Root (/)\noverlay-init"]
-        
-        InputBlock["Input Block Device\n(read-only ext4 from input_dir, /dev/vdb)"]
-        OutputBlock["Output Block Device\n(writable ext4 for output_dir,\nmounted by label ekvm-output: the /dev/vdX letter varies)"]
-    end
+```text
+SANDBOX STORAGE LAYERING  (a read_only_root boot; the default gives each VM its
+                           own read-write copy of the base instead)
 
-    BaseFS -->|Lower Layer| MergedRoot
-    TmpfsOverlay -->|Upper Layer| MergedRoot
-    InputBlock -->|Mounted at| GuestInput["/input"]
-    OutputBlock -->|Mounted at| GuestOutput["/output"]
+  read-only base rootfs                per-run writable tmpfs overlay
+  (artifacts/rootfs-guest.ext4)        (capped at 50% of guest RAM)
+            |                                       |
+            +--------- lower layer   upper layer ---+
+                             |
+                             v
+                merged guest root (/), by overlay-init
+
+  input block device                    output block device
+  (read-only ext4 from input_dir,       (writable ext4 for output_dir, mounted by
+   /dev/vdb)                             the label ekvm-output: the /dev/vdX
+            |                            letter varies)
+            v                                       |
+        /input in the guest                         v
+                                            /output in the guest
 ```
