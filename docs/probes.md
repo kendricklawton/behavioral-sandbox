@@ -233,10 +233,12 @@ only by plain values; the record itself (its types, JSON, and signing/verificati
   global, so each is loaded **once** for the host, as `SharedMeter` and `SharedTracer` (the share-one-
   program wrappers over the meter above and the per-event syscall tracer introduced below), and every
   sandbox registers its cgroup as a *target* on both (bounded overhead). The tap monitor is per-VM.
-- **One post-boot attach.** `SandboxProbes::attach(vmm_pid, netns, tap, egress, gateway, &tracer,
-  &meter)` runs once after `Sandbox::open`: it resolves the VMM's cgroup, registers it on the shared
-  tracer + meter, and attaches the tap in the sandbox's netns (enforcing an egress policy if given;
-  the gateway rides into the record's egress posture). Every axis is fail-open,
+- **One post-boot attach.** `SandboxProbes::attach(params, &tracer, &meter)` runs once after
+  `Sandbox::open`, its per-run inputs carried in an `AttachParams` (built from the VMM pid; the
+  optional NIC, egress policy, and gateway are fields, with the netns and tap names paired in one
+  `Nic` value so half a NIC is unrepresentable): it resolves the VMM's cgroup, registers it on the
+  shared tracer + meter, and attaches the tap in the sandbox's netns (enforcing an egress policy if
+  given; the gateway rides into the record's egress posture). Every axis is fail-open,
   a missing cap/BTF/object degrades to a recorded `AxisGap`, never a blocked run.
 - **Finalize + detach on close.** `SandboxProbes::collect(subject, timing)` reads the three probes into
   a `RunRecord` (the `RecordSubject` is the identity stamped first into its JSON; the CLI wrapper
