@@ -152,6 +152,13 @@ pub enum ProbeError {
     Attach(String),
     /// Reading a program's map failed.
     Map(String),
+    /// Resolving a process's cgroup failed (its `/proc/<pid>/cgroup` unified line, or the cgroup
+    /// dir's metadata): the pid-to-cgroup attribution bridge, not an eBPF map read. Includes the
+    /// cgroup-v1-only host, which has no `0::` line to resolve.
+    Cgroup(String),
+    /// A shared probe's lock was poisoned (a panic in another thread while it held the lock),
+    /// reported as a typed error per the no-panic host path rather than propagated.
+    Poisoned(String),
     /// The egress policy the caller asked to install is invalid (e.g. more rules than the map holds),
     /// a caller-input error, distinct from a map I/O failure. See [`PolicyError`].
     Policy(PolicyError),
@@ -165,6 +172,8 @@ impl std::fmt::Display for ProbeError {
             Self::Load(e) => write!(f, "eBPF load failed: {e}"),
             Self::Attach(e) => write!(f, "eBPF attach failed: {e}"),
             Self::Map(e) => write!(f, "eBPF map read failed: {e}"),
+            Self::Cgroup(e) => write!(f, "cgroup resolution failed: {e}"),
+            Self::Poisoned(e) => write!(f, "shared probe state poisoned: {e}"),
             Self::Policy(e) => write!(f, "invalid egress policy: {e}"),
         }
     }
@@ -252,7 +261,7 @@ fn load_object() -> Result<Ebpf, ProbeError> {
 /// cgroup id. Pure `std` fs, no `unsafe`. Sugar over [`cgroup_dir_of_pid`] + a stat.
 ///
 /// # Errors
-/// [`ProbeError::Map`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
+/// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read, has no unified (`0::`) line (a
 /// cgroup-v1-only host), or the cgroup dir can't be stat'd.
 pub fn cgroup_id_of_pid(pid: u32) -> Result<u64, ProbeError> {
     cgroup_id_of_dir(&cgroup_dir_of_pid(pid)?)
@@ -265,18 +274,18 @@ pub fn cgroup_id_of_pid(pid: u32) -> Result<u64, ProbeError> {
 /// all three resource axes to that one sandbox's cgroup. Pure `std` fs, no `unsafe`.
 ///
 /// # Errors
-/// [`ProbeError::Map`] if `/proc/<pid>/cgroup` can't be read or has no unified (`0::`) line (a
+/// [`ProbeError::Cgroup`] if `/proc/<pid>/cgroup` can't be read or has no unified (`0::`) line (a
 /// cgroup-v1-only host).
 pub fn cgroup_dir_of_pid(pid: u32) -> Result<PathBuf, ProbeError> {
     let proc_path = format!("/proc/{pid}/cgroup");
     let text = std::fs::read_to_string(&proc_path)
-        .map_err(|e| ProbeError::Map(format!("read {proc_path}: {e}")))?;
+        .map_err(|e| ProbeError::Cgroup(format!("read {proc_path}: {e}")))?;
     // The cgroup v2 unified controller is the `0::<path>` line; `<path>` is rooted at the cgroup mount.
     let rel = text
         .lines()
         .find_map(|l| l.strip_prefix("0::"))
         .ok_or_else(|| {
-            ProbeError::Map(format!(
+            ProbeError::Cgroup(format!(
                 "{proc_path} has no unified (0::) cgroup line — a cgroup v2 host is required"
             ))
         })?
@@ -289,7 +298,7 @@ pub fn cgroup_dir_of_pid(pid: u32) -> Result<PathBuf, ProbeError> {
 /// [`ResourceMeter::summary_for_pid`], so the pid → dir → id resolution lives once.
 fn cgroup_id_of_dir(dir: &Path) -> Result<u64, ProbeError> {
     let meta = std::fs::metadata(dir)
-        .map_err(|e| ProbeError::Map(format!("stat cgroup dir {}: {e}", dir.display())))?;
+        .map_err(|e| ProbeError::Cgroup(format!("stat cgroup dir {}: {e}", dir.display())))?;
     Ok(meta.ino())
 }
 
@@ -447,6 +456,10 @@ mod tests {
         match cgroup_id_of_self() {
             Ok(id) => assert!(id > 0, "a real cgroup id is nonzero (got {id})"),
             Err(e) => {
+                assert!(
+                    matches!(e, ProbeError::Cgroup(_)),
+                    "a resolver failure is a Cgroup error, got: {e:?}"
+                );
                 let s = e.to_string();
                 assert!(
                     s.contains("cgroup v2") || s.contains("0::"),
@@ -454,6 +467,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_missing_pid_is_a_cgroup_error_not_a_map_error() {
+        // u32::MAX can never be a live pid (the kernel's pid_max tops out at 2^22), so the
+        // resolver's /proc read fails; the failure is the attribution bridge's, not a map read's.
+        let err = cgroup_id_of_pid(u32::MAX).expect_err("no /proc entry for a pid past pid_max");
+        assert!(
+            matches!(err, ProbeError::Cgroup(_)),
+            "cgroup resolution failures carry their own variant, got: {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains(&format!("/proc/{}/cgroup", u32::MAX)),
+            "the error names the proc path it read, got: {err}"
+        );
     }
 
     #[test]

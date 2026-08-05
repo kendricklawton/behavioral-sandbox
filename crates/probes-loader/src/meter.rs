@@ -286,9 +286,10 @@ impl ResourceMeter {
     /// while the run executed; the memory/IO figures are the kernel's regardless.
     ///
     /// # Errors
-    /// [`ProbeError::Map`] if `/proc/<pid>/cgroup` can't be read or has no unified (`0::`) line (a
-    /// cgroup-v1-only host), the cgroup dir can't be stat'd for its id, or the CPU map read fails. The
-    /// cgroup v2 file reads inside [`CgroupStats::read`] are best-effort and never fail the call.
+    /// [`ProbeError::Cgroup`] if the pid's cgroup can't be resolved (`/proc/<pid>/cgroup` unreadable
+    /// or without a unified `0::` line on a cgroup-v1-only host, or the dir un-stat'able);
+    /// [`ProbeError::Map`] if the CPU map read fails. The cgroup v2 file reads inside
+    /// [`CgroupStats::read`] are best-effort and never fail the call.
     pub fn summary_for_pid(&self, pid: u32) -> Result<ResourceSummary, ProbeError> {
         let dir = cgroup_dir_of_pid(pid)?;
         let cgroup_id = cgroup_id_of_dir(&dir)?;

@@ -109,12 +109,13 @@ impl SharedTracer {
     /// dead run's fold would misattribute its events onto the new run).
     ///
     /// # Errors
-    /// [`ProbeError`] if the lock is poisoned or the target write fails (the caller records a gap).
+    /// [`ProbeError::Poisoned`] if the lock is poisoned, or the target write's error (the caller
+    /// records a gap either way).
     fn register(&self, cgroup_id: u64) -> Result<(), ProbeError> {
         let mut inner = self
             .0
             .lock()
-            .map_err(|_| ProbeError::Map("shared tracer lock poisoned".to_string()))?;
+            .map_err(|_| ProbeError::Poisoned("shared tracer lock".to_string()))?;
         drain_route(&mut inner);
         inner.tracer.add_target(cgroup_id)?;
         inner.folds.insert(cgroup_id, SyscallFold::new(cgroup_id));
