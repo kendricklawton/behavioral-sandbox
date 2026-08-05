@@ -109,7 +109,7 @@ pub use tracer::{ExecveCounter, SyscallTracer};
 /// shared meter, per-VM tap) and roll up a record; detach + finalize on close.
 mod observer;
 
-pub use observer::{LiveSnapshot, SandboxProbes, SharedMeter, SharedTracer};
+pub use observer::{AttachParams, LiveSnapshot, Nic, SandboxProbes, SharedMeter, SharedTracer};
 
 // The record itself (its types, deterministic JSON, summary projection, and the signing/verify
 // surface) lives in `ekvm-record`, aya-free so a consumer can verify a record off-host without

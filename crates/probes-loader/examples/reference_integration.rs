@@ -29,7 +29,9 @@ use std::error::Error;
 use std::time::Duration;
 
 use ekvm_engine::{BootConfig, Limits, Sandbox};
-use ekvm_probes_loader::{RecordSubject, SandboxProbes, SharedMeter, SharedTracer, Timing};
+use ekvm_probes_loader::{
+    AttachParams, Nic, RecordSubject, SandboxProbes, SharedMeter, SharedTracer, Timing,
+};
 
 fn main() -> Result<(), Box<dyn Error>> {
     // The untrusted workload: the tokens after a `--`, or a small default.
@@ -58,19 +60,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         sandbox.boot_latency().as_millis()
     );
 
-    // 4. Attach the observers to THIS sandbox by the plain values it exposes. `None` egress =
-    //    deny-by-default networking, observe-only; `Some(&policy)` would enforce a per-VM allow-list
-    //    at the tap. Each axis that can't attach degrades to a recorded coverage gap.
-    let probes = SandboxProbes::attach(
-        sandbox.vmm_pid(),
-        sandbox.netns(),
-        sandbox.tap_name(),
-        None,
-        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
-        None,
-        &tracer,
-        &meter,
-    );
+    // 4. Attach the observers to THIS sandbox by the plain values it exposes, carried in
+    //    `AttachParams`: `egress` left `None` = deny-by-default networking, observe-only
+    //    (`Some(&policy)` would enforce a per-VM allow-list at the tap), `gateway` left `None`
+    //    because these boots configure none, so the record says so rather than leaving it unread.
+    //    Each axis that can't attach degrades to a recorded coverage gap.
+    let mut params = AttachParams::new(sandbox.vmm_pid());
+    params.nic = match (sandbox.netns(), sandbox.tap_name()) {
+        (Some(netns), Some(tap)) => Some(Nic { netns, tap }),
+        _ => None, // a NIC-less boot: the record's network section is simply absent
+    };
+    let probes = SandboxProbes::attach(params, &tracer, &meter);
 
     // 5. Run the untrusted code. Synchronous; a `RunResult`, never a panic/hang/leak, whatever the
     //    guest does. A non-zero command exit is a normal result, not an error.

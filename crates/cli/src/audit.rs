@@ -14,7 +14,7 @@
 
 use ekvm_engine::VmmError;
 use ekvm_probes_loader::{
-    AxisGap, EgressPolicy, LiveSnapshot, RecordSubject, ResourceSummary, RunRecord, SandboxProbes,
+    AttachParams, AxisGap, LiveSnapshot, RecordSubject, ResourceSummary, RunRecord, SandboxProbes,
     SharedMeter, SharedTracer, SyscallFootprint, Timing,
 };
 
@@ -56,9 +56,10 @@ impl Observability {
         }
     }
 
-    /// Bind the probes to one booted sandbox (post-boot, by plain values). With both shared probes
-    /// live this is [`SandboxProbes::attach`], passing `egress` through: `Some(policy)` arms
-    /// enforcement on the tap (armed before it goes live), `None` is observe-only.
+    /// Bind the probes to one booted sandbox (post-boot, by the plain values in `params`). With
+    /// both shared probes live this is [`SandboxProbes::attach`], passing `params.egress` through:
+    /// `Some(policy)` arms enforcement on the tap (armed before it goes live), `None` is
+    /// observe-only.
     ///
     /// **Observation fails open; enforcement does not.** Without the shared probes the bundle
     /// simply doesn't attach and the record's coverage explains every unbound axis (a thinner but
@@ -68,15 +69,11 @@ impl Observability {
     /// silently unapplied.
     ///
     /// # Errors
-    /// [`VmmError::Vmm`] when `egress` is `Some` but enforcement could not be armed.
+    /// [`VmmError::Vmm`] when `params.egress` is `Some` but enforcement could not be armed.
     pub fn attach(
         &self,
         sandbox_id: &str,
-        vmm_pid: u32,
-        netns: Option<&str>,
-        tap: Option<&str>,
-        egress: Option<&EgressPolicy>,
-        gateway: Option<std::net::Ipv4Addr>,
+        params: AttachParams<'_>,
     ) -> Result<RunProbes, VmmError> {
         // Stamped here, not at collect: attaching the probes *is* the start of observation, so this
         // is when the run began. A host with an unreadable clock yields 0, the same fail-open
@@ -84,11 +81,10 @@ impl Observability {
         let subject = RecordSubject::new(sandbox_id.to_string(), unix_nanos_now());
         match (&self.tracer, &self.meter) {
             (Some(tracer), Some(meter)) => {
-                let probes =
-                    SandboxProbes::attach(vmm_pid, netns, tap, egress, gateway, tracer, meter);
+                let probes = SandboxProbes::attach(params, tracer, meter);
                 // Enforcement is all-or-nothing: a policed tap that gapped (missing CAP_NET_ADMIN,
                 // a tc attach failure) must refuse, not degrade to an unenforced run.
-                if egress.is_some()
+                if params.egress.is_some()
                     && let Some(reason) = probes.coverage().iter().find_map(network_gap_reason)
                 {
                     return Err(VmmError::Vmm(format!(
@@ -103,7 +99,7 @@ impl Observability {
                 })
             }
             _ => {
-                if egress.is_some() {
+                if params.egress.is_some() {
                     return Err(VmmError::Vmm(format!(
                         "--allow requested egress enforcement, but the host-side probes could not \
                          load: {}",
@@ -123,7 +119,7 @@ impl Observability {
                         "shared probes incomplete; meter not attached".into(),
                     ));
                 }
-                if netns.is_some() && tap.is_some() {
+                if params.nic.is_some() {
                     gaps.push(AxisGap::Network(
                         "shared probes unavailable; tap monitor not attached".into(),
                     ));

@@ -554,14 +554,16 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         || args.watch
         || egress.is_some();
     let probes = if observing {
-        Some(audit::Observability::load().attach(
-            sandbox.name(),
-            sandbox.vmm_pid(),
-            sandbox.netns(),
-            sandbox.tap_name(),
-            egress.as_ref(),
-            gateway,
-        )?)
+        let mut params = ekvm_probes_loader::AttachParams::new(sandbox.vmm_pid());
+        // Both names derive from the engine's single tap field, so this pairing is faithful; the
+        // named-field `Nic` is what keeps the two same-typed strings unswappable.
+        params.nic = match (sandbox.netns(), sandbox.tap_name()) {
+            (Some(netns), Some(tap)) => Some(ekvm_probes_loader::Nic { netns, tap }),
+            _ => None,
+        };
+        params.egress = egress.as_ref();
+        params.gateway = gateway;
+        Some(audit::Observability::load().attach(sandbox.name(), params)?)
     } else {
         None
     };

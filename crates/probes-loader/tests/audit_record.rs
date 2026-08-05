@@ -26,8 +26,8 @@ use std::time::Duration;
 
 use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
 use ekvm_probes_loader::{
-    AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes, SharedMeter, SharedTracer,
-    Timing, check_support, object_path,
+    AttachParams, AxisGap, EgressPolicy, Nic, Protocol, RecordSubject, SandboxProbes, SharedMeter,
+    SharedTracer, Timing, check_support, object_path,
 };
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
@@ -79,6 +79,65 @@ fn networked_agent_config() -> BootConfig {
     cfg
 }
 
+/// The [`networked_agent_config`] boot without its NIC, for the no-NIC attach path, where the
+/// record's network section must be absent rather than gapped.
+fn nicless_agent_config() -> BootConfig {
+    let mut cfg = networked_agent_config();
+    cfg.enable_network = false;
+    cfg
+}
+
+#[test]
+#[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_nicless_run_omits_the_network_section_without_a_gap() {
+    if let Some(why) = skip_reason() {
+        eprintln!("skipping a_nicless_run_omits_the_network_section_without_a_gap: {why}");
+        return;
+    }
+
+    let tracer = SharedTracer::load().expect("load the shared syscall tracer");
+    let meter = SharedMeter::load().expect("load the shared CPU meter");
+
+    let vm = Vm::boot(nicless_agent_config()).expect("a NIC-less agent microVM should boot");
+
+    // The sealed posture: a bare `new`, no `Nic`. "No NIC" and "the network axis failed" are
+    // different records, and this pins the first: section absent, coverage clean.
+    let probes = SandboxProbes::attach(AttachParams::new(vm.vmm_pid()), &tracer, &meter);
+    assert!(
+        probes.coverage().is_empty(),
+        "a NIC-less attach on a capable host gaps nothing: {:?}",
+        probes.coverage()
+    );
+
+    let out = vm
+        .exec(&["/bin/echo".into(), "quiet".into()], b"")
+        .expect("exec in the NIC-less sandbox");
+    assert_eq!(
+        out.exit_code,
+        0,
+        "guest workload exited {}: {}",
+        out.exit_code,
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let record = probes.collect(
+        RecordSubject::new(vm.name().to_string(), 0),
+        Timing::new(vm.boot_latency(), out.metrics.wall),
+    );
+
+    assert!(
+        record.network.is_none(),
+        "no NIC means the network section is absent, not empty or gapped"
+    );
+    assert!(
+        record.coverage.is_empty(),
+        "absence of a NIC is not a coverage gap, and the other axes bound: {:?}",
+        record.coverage
+    );
+
+    vm.shutdown().expect("shut the sandbox down");
+}
+
 #[test]
 #[ignore = "needs /dev/kvm + CAP_BPF/CAP_PERFMON/CAP_NET_ADMIN + BTF + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
@@ -99,16 +158,12 @@ fn a_networked_file_touching_run_yields_a_faithful_audit_record() {
 
     // Attach the bundle to *this* sandbox by the plain values the driver exposes, the exact
     // arm-free, single post-boot `attach` a caller will use. Observe-only (no egress policy).
-    let probes = SandboxProbes::attach(
-        vm.vmm_pid(),
-        vm.netns(),
-        vm.tap_name(),
-        None,
-        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
-        None,
-        &tracer,
-        &meter,
-    );
+    let mut params = AttachParams::new(vm.vmm_pid());
+    params.nic = Some(Nic {
+        netns: vm.netns().expect("a networked boot names its netns"),
+        tap: vm.tap_name().expect("a networked boot names its tap"),
+    });
+    let probes = SandboxProbes::attach(params, &tracer, &meter);
     // Every axis we asked for must have bound, a networked sandbox on a capable host has no reason to
     // gap the network or host-syscall axis. (Absence here is the fail-open honesty working.)
     assert!(
@@ -229,16 +284,13 @@ fn an_ipv6_run_shows_its_flows_and_a_v6_denial_in_the_record() {
     // in-kernel, so the guest can still resolve the host end). Attaching with `Some(policy)` arms enforcement
     // before the tap goes live, the same no-un-enforced-window path the v4 tests use.
     let policy = EgressPolicy::deny_all().allow_host6(host_ip6, Some(9999), Some(Protocol::Udp));
-    let probes = SandboxProbes::attach(
-        vm.vmm_pid(),
-        vm.netns(),
-        vm.tap_name(),
-        Some(&policy),
-        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
-        None,
-        &tracer,
-        &meter,
-    );
+    let mut params = AttachParams::new(vm.vmm_pid());
+    params.nic = Some(Nic {
+        netns: vm.netns().expect("a networked boot names its netns"),
+        tap: vm.tap_name().expect("a networked boot names its tap"),
+    });
+    params.egress = Some(&policy);
+    let probes = SandboxProbes::attach(params, &tracer, &meter);
     assert!(
         probes.coverage().is_empty(),
         "all axes should bind on a capable host (this also proves the v6 datapath loaded + verified); \

@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
 use ekvm_probes_loader::{
-    AxisGap, EgressPolicy, Protocol, RecordSubject, SandboxProbes, SharedMeter, SharedTracer,
-    Timing, check_support, object_path,
+    AttachParams, AxisGap, EgressPolicy, Nic, Protocol, RecordSubject, SandboxProbes, SharedMeter,
+    SharedTracer, Timing, check_support, object_path,
 };
 use ekvm_test_support::{LimitCgroup, have_real_root, process_threads};
 
@@ -110,16 +110,13 @@ fn a_hostile_guest_is_contained_and_the_record_shows_it() {
     // go live, so there is no un-enforced window for the guest's first packet.
     let egress =
         EgressPolicy::deny_all().allow_host(host_ip, Some(ALLOWED_PORT), Some(Protocol::Udp));
-    let probes = SandboxProbes::attach(
-        vm.vmm_pid(),
-        vm.netns(),
-        vm.tap_name(),
-        Some(&egress),
-        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
-        None,
-        &tracer,
-        &meter,
-    );
+    let mut params = AttachParams::new(vm.vmm_pid());
+    params.nic = Some(Nic {
+        netns: vm.netns().expect("a networked boot names its netns"),
+        tap: vm.tap_name().expect("a networked boot names its tap"),
+    });
+    params.egress = Some(&egress);
+    let probes = SandboxProbes::attach(params, &tracer, &meter);
     assert!(
         probes.coverage().is_empty(),
         "all axes should bind on a capable host; gaps: {:?}",
@@ -272,16 +269,12 @@ fn a_guest_cannot_see_or_disable_the_host_side_probes() {
     let host_u32 = u32::from(host_ip);
 
     // Observe-only (no egress policy): the point is visibility of the probe, not enforcement.
-    let probes = SandboxProbes::attach(
-        vm.vmm_pid(),
-        vm.netns(),
-        vm.tap_name(),
-        None,
-        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
-        None,
-        &tracer,
-        &meter,
-    );
+    let mut params = AttachParams::new(vm.vmm_pid());
+    params.nic = Some(Nic {
+        netns: vm.netns().expect("a networked boot names its netns"),
+        tap: vm.tap_name().expect("a networked boot names its tap"),
+    });
+    let probes = SandboxProbes::attach(params, &tracer, &meter);
     assert!(
         probes.coverage().is_empty(),
         "all axes should bind on a capable host; gaps: {:?}",
@@ -395,16 +388,13 @@ fn all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy() {
     cg.enter(vm.vmm_pid());
     let egress =
         EgressPolicy::deny_all().allow_host(host_ip, Some(ALLOWED_PORT), Some(Protocol::Udp));
-    let probes = SandboxProbes::attach(
-        vm.vmm_pid(),
-        vm.netns(),
-        vm.tap_name(),
-        Some(&egress),
-        // No gateway: these boots configure none, so the record says so rather than leaving it unread.
-        None,
-        &tracer,
-        &meter,
-    );
+    let mut params = AttachParams::new(vm.vmm_pid());
+    params.nic = Some(Nic {
+        netns: vm.netns().expect("a networked boot names its netns"),
+        tap: vm.tap_name().expect("a networked boot names its tap"),
+    });
+    params.egress = Some(&egress);
+    let probes = SandboxProbes::attach(params, &tracer, &meter);
     assert!(
         probes.coverage().is_empty(),
         "all axes should bind on a capable host; gaps: {:?}",

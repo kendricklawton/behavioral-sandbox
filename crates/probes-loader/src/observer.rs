@@ -2,9 +2,10 @@
 //! output into a [`RunRecord`], and detach + finalize on close.
 //!
 //! `ekvm` stays independent of this crate, so the bundle takes **plain
-//! values** the driver already exposes, the VMM pid (→ its cgroup, for the syscall tracer and the CPU
-//! meter) and the netns + tap names (for the network monitor), never a `Sandbox`. The composition is
-//! the caller's (the CLI/daemon later): a short launch sequence around `Sandbox::open`.
+//! values** the driver already exposes, carried in [`AttachParams`]: the VMM pid (→ its cgroup, for
+//! the syscall tracer and the CPU meter) and the [`Nic`] names (for the network monitor), never a
+//! `Sandbox`. The composition is the caller's (the CLI/daemon later): a short launch sequence
+//! around `Sandbox::open`.
 //!
 //! **Both host-wide probes are shared, not per-VM.** The `sched_switch` meter and
 //! the three `sys_enter_*` tracepoints are *global*: a fresh copy per sandbox would run *N* programs on
@@ -215,6 +216,55 @@ fn loss_gap(
     }
 }
 
+/// One sandbox's NIC as the driver names it: the netns and the tap device inside it, **both or
+/// neither**, so the mixed state a positional `(Option<&str>, Option<&str>)` pair admitted (which
+/// silently read as "no NIC", with no gap) is unrepresentable.
+///
+/// Deliberately exhaustive, no `#[non_exhaustive]` (the one exception to the crate's rule, on
+/// purpose): foreign named-field literal construction is the anti-swap mechanism for two
+/// same-typed strings, and a constructor would reintroduce the positional pair this replaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Nic<'a> {
+    /// The sandbox's network namespace name (the driver's `netns()`).
+    pub netns: &'a str,
+    /// The tap device name inside that netns (the driver's `tap_name()`, typically `fc0`).
+    pub tap: &'a str,
+}
+
+/// The per-run inputs to [`SandboxProbes::attach`]. [`new`](Self::new) takes the one required
+/// value; the optional fields start at the sealed posture (no NIC, no policy, no route) and are
+/// set on the value, so a new knob lands additively (`#[non_exhaustive]`) instead of as the silent
+/// every-caller break a positional parameter spliced mid-list was.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct AttachParams<'a> {
+    /// The VMM's host pid, resolved to its cgroup (the tracer + meter axis).
+    pub vmm_pid: u32,
+    /// The per-VM NIC to bind the tap monitor to; `None` = no NIC, so the record's network
+    /// section is simply absent (not a gap).
+    pub nic: Option<Nic<'a>>,
+    /// `Some(policy)` arms enforcement before the tc programs go live on the tap; `None` is
+    /// observe-only.
+    pub egress: Option<&'a EgressPolicy>,
+    /// The default route the driver configured, carried through to the record. The tap cannot
+    /// see it (it is on the guest's command line, not on the wire), and the record needs it
+    /// because an allowance means something different with a route than without.
+    pub gateway: Option<std::net::Ipv4Addr>,
+}
+
+impl<'a> AttachParams<'a> {
+    /// Params for one run at the sealed posture: no NIC, no egress policy, no gateway.
+    #[must_use]
+    pub fn new(vmm_pid: u32) -> Self {
+        Self {
+            vmm_pid,
+            nic: None,
+            egress: None,
+            gateway: None,
+        }
+    }
+}
+
 /// Live bundle for one VM: a target registration on the shared tracer + meter, the per-VM tap, and the
 /// coverage gaps seen so far. [`collect`](Self::collect) finalizes it into a [`RunRecord`] while
 /// the sandbox is still alive; dropping without collecting detaches (RAII) and unregisters both shared
@@ -245,32 +295,24 @@ pub struct SandboxProbes {
 }
 
 impl SandboxProbes {
-    /// Post-boot: bind every available probe to this one VM by plain values:
+    /// Post-boot: bind every available probe to this one VM by the plain values in `params` (the
+    /// loader stays independent of `ekvm`, so they are pids and names, never a `Sandbox`):
     /// - resolve the VMM's cgroup id and register it on the shared syscall tracer (its host-syscall
     ///   footprint accrues from here);
-    /// - if `netns` + `tap` are present, attach a per-VM tap monitor, enforcing `egress` (armed before
-    ///   the tc programs go live) when given, else observe-only;
+    /// - if a [`Nic`] is given, attach a per-VM tap monitor, enforcing `params.egress` (armed
+    ///   before the tc programs go live) when given, else observe-only;
     /// - register the cgroup as a target on the shared meter.
-    ///
-    /// `gateway` is the default route the driver gave the guest, or `None` for the sealed posture.
-    /// A plain value like `vmm_pid`/`netns`/`tap`, for the same reason: the loader stays independent
-    /// of `ekvm`. The tap cannot observe it (it is on the guest's command line, not on the wire), and
-    /// the record needs it because an allowance means something different with a route than without.
     ///
     /// Each sub-attach degrades to a recorded [`AxisGap`]; the returned bundle is always valid.
     pub fn attach(
-        vmm_pid: u32,
-        netns: Option<&str>,
-        tap: Option<&str>,
-        egress: Option<&EgressPolicy>,
-        gateway: Option<std::net::Ipv4Addr>,
+        params: AttachParams<'_>,
         tracer: &SharedTracer,
         meter: &SharedMeter,
     ) -> SandboxProbes {
         let mut gaps: Vec<AxisGap> = Vec::new();
 
         // The cgroup id is the tracer + meter axis; resolve it from the pid (the plain-value bridge).
-        let cgroup_id = match cgroup_id_of_pid(vmm_pid) {
+        let cgroup_id = match cgroup_id_of_pid(params.vmm_pid) {
             Ok(id) => Some(id),
             Err(e) => {
                 gaps.push(AxisGap::Cpu(format!("resolve cgroup: {e}").into()));
@@ -297,24 +339,21 @@ impl SandboxProbes {
             }
         };
 
-        // Attach the per-VM tap monitor. Absent netns/tap = no NIC: the network section is simply absent
+        // Attach the per-VM tap monitor. No `Nic` = no NIC: the network section is simply absent
         // (not a gap); an attach failure is a gap.
-        let tap_mon = match (netns, tap) {
-            (Some(ns), Some(iface)) => {
-                let attached = match egress {
-                    Some(policy) => TapMonitor::enforce_in_netns(ns, iface, policy),
-                    None => TapMonitor::attach_in_netns(ns, iface),
-                };
-                match attached {
-                    Ok(m) => Some(m),
-                    Err(e) => {
-                        gaps.push(AxisGap::Network(format!("attach tap: {e}").into()));
-                        None
-                    }
+        let tap_mon = params.nic.and_then(|nic| {
+            let attached = match params.egress {
+                Some(policy) => TapMonitor::enforce_in_netns(nic.netns, nic.tap, policy),
+                None => TapMonitor::attach_in_netns(nic.netns, nic.tap),
+            };
+            match attached {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    gaps.push(AxisGap::Network(format!("attach tap: {e}").into()));
+                    None
                 }
             }
-            _ => None,
-        };
+        });
 
         // Register the cgroup as a target on the shared meter (the CPU axis).
         let metered = match cgroup_id {
@@ -333,8 +372,8 @@ impl SandboxProbes {
         };
 
         SandboxProbes {
-            vmm_pid,
-            gateway,
+            vmm_pid: params.vmm_pid,
+            gateway: params.gateway,
             cgroup_id,
             tracer: tracer.clone(),
             traced,
@@ -645,8 +684,19 @@ impl Drop for SandboxProbes {
 
 #[cfg(test)]
 mod tests {
-    // Host-safe: the loss-counter delta rule on plain values, no aya, no kernel.
-    use super::loss_gap;
+    // Host-safe: the loss-counter delta rule and the params posture, no aya, no kernel.
+    use super::{AttachParams, loss_gap};
+
+    #[test]
+    fn attach_params_new_is_the_sealed_posture() {
+        // A bare `new` must mean the sealed sandbox: no NIC, no allowance, no route. A default
+        // that opened anything would arm probes (or claim a route) no caller asked for.
+        let params = AttachParams::new(4242);
+        assert_eq!(params.vmm_pid, 4242);
+        assert!(params.nic.is_none());
+        assert!(params.egress.is_none());
+        assert!(params.gateway.is_none());
+    }
 
     #[test]
     fn a_counter_increase_between_attach_and_collect_is_a_gap() {

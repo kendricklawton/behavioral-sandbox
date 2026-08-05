@@ -155,14 +155,14 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // exists is the operator's posture, like the jail.
     let gateway = server.base.egress.map(|e| e.gateway());
     let enforcing = net.egress.is_some();
-    let probes = match server.observ.attach(
-        vm.name(),
-        vm.vmm_pid(),
-        vm.netns(),
-        vm.tap_name(),
-        net.egress.as_ref(),
-        gateway,
-    ) {
+    let mut attach_params = ekvm_probes_loader::AttachParams::new(vm.vmm_pid());
+    attach_params.nic = match (vm.netns(), vm.tap_name()) {
+        (Some(netns), Some(tap)) => Some(ekvm_probes_loader::Nic { netns, tap }),
+        _ => None,
+    };
+    attach_params.egress = net.egress.as_ref();
+    attach_params.gateway = gateway;
+    let probes = match server.observ.attach(vm.name(), attach_params) {
         Ok(p) => Some(p),
         Err(e) => {
             // Enforcement does not fail open. If the session asked for an egress policy and the tap
