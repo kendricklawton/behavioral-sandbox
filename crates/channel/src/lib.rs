@@ -212,7 +212,14 @@ impl std::fmt::Debug for Request {
 }
 
 /// A guest→host message. The host reads these until a terminal [`Exit`](Response::Exit) or
-/// [`Error`](Response::Error). `#[non_exhaustive]` for the same forward-compat reason as [`Request`].
+/// [`Error`](Response::Error).
+///
+/// `#[non_exhaustive]` here buys **Rust** match-site compatibility, not the wire forward-compat
+/// [`Request`]'s does: this decoder is deliberately the stricter of the two. An unknown *request*
+/// tag becomes [`Request::Unknown`], because the agent can answer a host it doesn't understand
+/// with a typed "unsupported"; an unknown *response* tag is a fatal [`ChannelError::Protocol`],
+/// because responses arrive from an untrusted guest and continuing to read a stream the host
+/// cannot interpret is worse than ending the run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Response {
@@ -223,13 +230,15 @@ pub enum Response {
     /// A requested artifact read back from the working dir (sent before [`Exit`](Response::Exit)).
     /// A missing artifact is simply omitted. Each file is one `≤ MAX_PAYLOAD` frame.
     File { path: String, data: Vec<u8> },
-    /// The command finished. Struct-form so a later revision can add a field (e.g. a separate
-    /// `signal`) without a breaking change; `code` is `128 + signal` on signal death today.
+    /// The command finished. `code` is `128 + signal` on signal death today. Struct-form leaves
+    /// room to *name* a second field later (a separate `signal`), but adding one would not be
+    /// free: this frame's body decodes as exactly 4 bytes, so a new field is a wire change and a
+    /// [`PROTOCOL_VERSION`] bump like any other, and the variant's readers destructure it by name.
     Exit { code: i32 },
     /// The command exceeded its `timeout_ms` deadline and was killed by the agent, terminal, no
     /// exit follows. Distinct from a channel timeout: the command ran, it just ran too long.
-    /// Struct-form (like [`Exit`](Response::Exit)) so fields can be added without a break; carries
-    /// the actual runtime the agent measured.
+    /// Carries the actual runtime the agent measured. Struct-form on the same terms as
+    /// [`Exit`](Response::Exit): room to name a field, not a free one.
     TimedOut { elapsed_ms: u32 },
     /// The agent could not run the command at all (e.g. spawn failed), terminal, no exit follows.
     Error(String),
