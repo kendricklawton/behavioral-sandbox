@@ -446,9 +446,21 @@ pub(crate) fn wait_bounded(
 /// only ends at the child's stdout EOF) can skip that work instead of blocking on it.
 pub(crate) fn kill_and_reap_briefly(child: &mut Child, what: &str, grace: Duration) -> bool {
     let _ = child.kill();
+    reap_briefly(|| child.try_wait(), what, grace)
+}
+
+/// The reap loop of [`kill_and_reap_briefly`], over any `try_wait`. A child SIGKILL genuinely
+/// cannot reach needs a wedged FUSE/NFS mount to produce, so the detach arm is reachable in a test
+/// only through this seam: a `try_wait` that answers `Ok(None)` is the D-state child's whole
+/// observable behavior here.
+fn reap_briefly(
+    mut try_wait: impl FnMut() -> std::io::Result<Option<ExitStatus>>,
+    what: &str,
+    grace: Duration,
+) -> bool {
     let deadline = Instant::now() + grace;
     loop {
-        match child.try_wait() {
+        match try_wait() {
             Ok(Some(_)) => return true,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
             _ => {
@@ -686,10 +698,49 @@ mod tests {
     #[test]
     fn an_unreapable_child_is_detached_rather_than_waited_on() {
         // The `false` return of `kill_and_reap_briefly`, which teardown uses to decide whether to
-        // skip `console.join()`. A real D-state child needs a wedged FUSE/NFS mount; a zero grace
-        // reaches the same arm, since the reap loop gives up before its first sleep. The race (the
-        // kernel delivering SIGKILL *and* the process being reaped between `kill` and one
-        // `try_wait`) is vanishingly small, and a flake here would itself be worth knowing about.
+        // skip `console.join()`. A `try_wait` that never yields a status is what a D-state child
+        // looks like from here, and driving it directly makes the arm a decision rather than a
+        // scheduling outcome: a live child racing SIGKILL delivery could be reaped either way.
+        let mut polls = 0u32;
+        let started = Instant::now();
+        let reaped = reap_briefly(
+            || {
+                polls += 1;
+                Ok(None)
+            },
+            "wedged",
+            Duration::from_millis(50),
+        );
+        assert!(!reaped, "a child that never reaps must report the detach");
+        assert!(polls >= 2, "the grace must be polled, not skipped: {polls}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "detaching must be prompt, never a wait on the child"
+        );
+    }
+
+    #[test]
+    fn a_wait_error_detaches_instead_of_looping_on_it() {
+        // The other half of the `_` arm: an `Err` from `try_wait` is unrecoverable, so retrying it
+        // for the whole grace would just spend the budget to reach the same answer.
+        let started = Instant::now();
+        let reaped = reap_briefly(
+            || Err(std::io::Error::other("no child processes")),
+            "erroring",
+            Duration::from_secs(30),
+        );
+        assert!(!reaped, "a wait error cannot be a successful reap");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "an error is final: it must not be retried across the grace"
+        );
+    }
+
+    #[test]
+    fn a_killable_child_is_reaped_within_the_real_grace() {
+        // The `true` return, over a live child. Unlike the detach arm this direction is decidable:
+        // a SIGKILLed `sleep` is reapable well inside `HELPER_REAP_GRACE`, and the loop keeps
+        // polling until it is.
         let mut child = Command::new("sleep")
             .arg("30")
             .stdin(Stdio::null())
@@ -698,16 +749,14 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let started = Instant::now();
-        let reaped = kill_and_reap_briefly(&mut child, "sleep", Duration::ZERO);
         assert!(
-            !reaped,
-            "a zero grace cannot reap: it must report the detach"
+            kill_and_reap_briefly(&mut child, "sleep", HELPER_REAP_GRACE),
+            "a killable child must be reaped, never left to the detach arm"
         );
         assert!(
             started.elapsed() < Duration::from_secs(1),
-            "detaching must be prompt, never a wait on the child"
+            "the reap must land inside the grace, not wait out the child"
         );
-        let _ = child.wait(); // this test's own cleanup, not the code under test
     }
 
     #[test]
