@@ -751,8 +751,10 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
 /// the packet. Every byte position it reads is a `const` from [`ekvm_probes_common`], the same ones
 /// [`ekvm_probes_common::parse_ipv4_5tuple`] reads through its slice, so the two cannot disagree on
 /// where a field lives. The surrounding *logic* (the fragment gate, the protocol check) is still
-/// mirrored by hand: this half runs only under the verifier and cannot be unit-tested on the host,
-/// so the pure parser is the tested one and this is read against it.
+/// mirrored by hand: this half runs only under the verifier, so a host unit test cannot call it.
+/// `crates/probes-loader/tests/differential.rs` is the enforcer for that mirror: it hands the loaded
+/// program a frame through `BPF_PROG_TEST_RUN` and asserts the key this writes into `FLOWS` is the
+/// one the pure parser returns for the same bytes.
 #[inline(always)]
 fn parse(ctx: &TcContext) -> Option<FlowKey> {
     let ethertype = u16::from_be(ctx.load::<u16>(ETHERTYPE_OFFSET).ok()?);
