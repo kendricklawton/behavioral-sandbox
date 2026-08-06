@@ -149,7 +149,13 @@ fn rand_request(rng: &mut Rng) -> Request {
             stdin: rng.bytes_upto(64),
             env,
             artifacts,
-            timeout_ms: rng.next_u64() as u32,
+            // Draw the ceiling sentinel deliberately: relying on a random u32 landing on
+            // zero would exercise the `None` mapping once in 2^32 generated requests.
+            timeout_ms: if rng.below(4) == 0 {
+                None
+            } else {
+                NonZeroU32::new(rng.next_u64() as u32)
+            },
         }
     }
 }

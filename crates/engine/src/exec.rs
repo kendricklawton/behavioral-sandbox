@@ -4,6 +4,7 @@
 //! error, never a host hang or leak.
 
 use std::io::{Read, Write};
+use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
@@ -153,17 +154,15 @@ pub(crate) struct ExecBounds {
     pub(crate) max_output: usize,
 }
 
-/// Encode a command budget as the wire `timeout_ms`, **floored at 1 ms**. The guest reads a
-/// `timeout_ms` of `0` as "no limit, use my 1 h `MAX_EXEC_TIMEOUT` ceiling" (`budget_from`), so a
-/// nonzero-but-sub-millisecond budget (e.g. `Duration::from_micros(500)`) must not truncate to `0`
-/// and silently become *unbounded*, inverting the timeout ladder, the host's `ExecUnresponsive`
-/// backstop would then be what cuts the run, not the cooperative `ExecTimeout`. The host never means
-/// "unlimited" (every exec carries a real budget), so the floor is unconditional: a real budget
-/// always encodes to a real, nonzero limit. Saturates rather than wraps for absurd budgets.
-fn wire_timeout_ms(timeout: Duration) -> u32 {
-    u32::try_from(timeout.as_millis())
-        .unwrap_or(u32::MAX)
-        .max(1)
+/// Encode a command budget as the wire `timeout_ms`, **floored at 1 ms**. The host never means
+/// "unlimited" (every exec carries a real budget), which is why this returns [`NonZeroU32`] and the
+/// caller wraps it in `Some`: the channel spells "use the agent's ceiling" as `None`, so a budget
+/// encoded here cannot become one. The floor is what keeps a sub-millisecond budget (e.g.
+/// `Duration::from_micros(500)`) meaning "very short" rather than truncating away to nothing.
+/// Saturates rather than wraps for absurd budgets.
+fn wire_timeout_ms(timeout: Duration) -> NonZeroU32 {
+    NonZeroU32::new(u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX))
+        .unwrap_or(NonZeroU32::MIN)
 }
 
 /// Whether a send failure is the guest *disconnecting* mid-write (EPIPE / ECONNRESET / EOF), the only
@@ -207,7 +206,14 @@ pub(crate) fn run_exec<S: Read + Write>(
         for (path, data) in files_in {
             conn.send_put_file(path.as_ref(), data)?;
         }
-        conn.send_exec(argv, stdin, env, artifacts, wire_timeout_ms(bounds.timeout))?;
+        // `Some`, always: the engine sends a real budget, never the agent's ceiling.
+        conn.send_exec(
+            argv,
+            stdin,
+            env,
+            artifacts,
+            Some(wire_timeout_ms(bounds.timeout)),
+        )?;
         Ok(())
     })();
 
@@ -705,16 +711,18 @@ mod tests {
 
     #[test]
     fn wire_timeout_never_encodes_a_real_budget_as_unlimited() {
-        // The bug: a sub-millisecond budget truncates to 0 ms, which the guest reads as "unlimited".
-        // The floor keeps a real budget a real limit.
-        assert_eq!(wire_timeout_ms(Duration::from_micros(500)), 1);
-        assert_eq!(wire_timeout_ms(Duration::ZERO), 1);
+        // A sub-millisecond budget must not truncate away to nothing; the floor keeps a real
+        // budget a real limit. (`NonZeroU32` is what stops it reaching the wire's ceiling
+        // sentinel at all, so this now pins the floor's *value*, not its existence.)
+        let nz = |n: u32| NonZeroU32::new(n).expect("a nonzero budget");
+        assert_eq!(wire_timeout_ms(Duration::from_micros(500)), NonZeroU32::MIN);
+        assert_eq!(wire_timeout_ms(Duration::ZERO), NonZeroU32::MIN);
         // Whole-millisecond budgets pass through unchanged.
-        assert_eq!(wire_timeout_ms(Duration::from_millis(1)), 1);
-        assert_eq!(wire_timeout_ms(Duration::from_millis(1500)), 1500);
-        assert_eq!(wire_timeout_ms(Duration::from_secs(3600)), 3_600_000);
+        assert_eq!(wire_timeout_ms(Duration::from_millis(1)), nz(1));
+        assert_eq!(wire_timeout_ms(Duration::from_millis(1500)), nz(1500));
+        assert_eq!(wire_timeout_ms(Duration::from_secs(3600)), nz(3_600_000));
         // An absurd budget saturates rather than wrapping back toward (or to) zero.
-        assert_eq!(wire_timeout_ms(Duration::from_secs(u64::MAX)), u32::MAX);
+        assert_eq!(wire_timeout_ms(Duration::from_secs(u64::MAX)), nz(u32::MAX));
     }
 
     #[test]

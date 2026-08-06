@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
+use std::num::NonZeroU32;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -375,12 +376,13 @@ enum Waited {
 }
 
 /// The command's wall-clock budget from the host's `timeout_ms`, clamped to [`MAX_EXEC_TIMEOUT`] so
-/// a buggy host can't ask the agent to wait effectively forever. `0` means "use the ceiling".
-fn budget_from(timeout_ms: u32) -> Duration {
-    match timeout_ms {
-        0 => MAX_EXEC_TIMEOUT,
-        ms => Duration::from_millis(u64::from(ms)).min(MAX_EXEC_TIMEOUT),
-    }
+/// a buggy host can't ask the agent to wait effectively forever. [`None`] is the host asking for
+/// that ceiling rather than naming a limit; the wire spells it `0`, and the channel's
+/// [`NonZeroU32`] keeps it from colliding with a real budget.
+fn budget_from(timeout_ms: Option<NonZeroU32>) -> Duration {
+    timeout_ms.map_or(MAX_EXEC_TIMEOUT, |ms| {
+        Duration::from_millis(u64::from(ms.get())).min(MAX_EXEC_TIMEOUT)
+    })
 }
 
 /// Wait for the child, but no longer than `deadline`. Polls `try_wait` (so the output pumps keep
@@ -680,18 +682,20 @@ fn exit_code(status: &std::process::ExitStatus) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::{MAX_EXEC_TIMEOUT, budget_from};
+    use std::num::NonZeroU32;
     use std::time::Duration;
 
     #[test]
-    fn budget_clamps_and_treats_zero_as_ceiling() {
-        assert_eq!(budget_from(1500), Duration::from_millis(1500));
+    fn budget_clamps_and_treats_none_as_ceiling() {
+        let nz = |n: u32| NonZeroU32::new(n).expect("a nonzero budget");
+        assert_eq!(budget_from(Some(nz(1500))), Duration::from_millis(1500));
         assert_eq!(
-            budget_from(0),
+            budget_from(None),
             MAX_EXEC_TIMEOUT,
-            "0 means the ceiling, not no-time"
+            "no named budget means the ceiling, not no-time"
         );
         assert_eq!(
-            budget_from(u32::MAX),
+            budget_from(Some(nz(u32::MAX))),
             MAX_EXEC_TIMEOUT,
             "an over-ceiling ask is clamped"
         );

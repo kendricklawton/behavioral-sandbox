@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
+use std::num::NonZeroU32;
 
 use zeroize::Zeroize;
 
@@ -154,13 +155,16 @@ pub enum Request {
     /// is one `≤ MAX_PAYLOAD` frame); values are secrets by presumption, neither peer may log one
     /// or echo one into an error (an error may name a *key*). `timeout_ms` bounds the
     /// command's wall-clock runtime, the agent kills it and replies [`Response::TimedOut`] past
-    /// the deadline; **`0` means "use the agent's ceiling"**, not "no time". Empty argv is rejected.
+    /// the deadline; [`None`] asks for the agent's own ceiling instead of naming a limit. The
+    /// wire spells that request as `0`, and [`NonZeroU32`] is what keeps the two apart: a caller
+    /// cannot write a budget that means "no time" and have it arrive as "as long as you like".
+    /// Empty argv is rejected.
     Exec {
         argv: Vec<String>,
         stdin: Vec<u8>,
         env: Vec<(String, String)>,
         artifacts: Vec<String>,
-        timeout_ms: u32,
+        timeout_ms: Option<NonZeroU32>,
     },
     /// A well-framed request whose tag this build doesn't know, a *newer* host speaking a request
     /// type we don't implement. Not a protocol error; the agent replies with a typed "unsupported".
@@ -438,7 +442,7 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
     stdin: &[u8],
     env: &[(K, V)],
     artifacts: &[R],
-    timeout_ms: u32,
+    timeout_ms: Option<NonZeroU32>,
 ) -> Result<(), ChannelError> {
     let cap = 4 // argv count
         + argv.iter().map(|a| blob_len(a.as_ref().as_bytes())).sum::<usize>()
@@ -469,7 +473,9 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
     for path in artifacts {
         put_blob(&mut payload, path.as_ref().as_bytes());
     }
-    put_u32(&mut payload, timeout_ms);
+    // `None` (use the agent's ceiling) is the wire's `0`; `NonZeroU32` is why no real budget can
+    // land on that value. `budget_from` in the guest agent reads the other end of this.
+    put_u32(&mut payload, timeout_ms.map_or(0, NonZeroU32::get));
     put_u32(&mut payload, env.len() as u32);
     for (key, value) in env {
         put_blob(&mut payload, key.as_ref().as_bytes());
@@ -504,7 +510,9 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
             for _ in 0..artc {
                 artifacts.push(body.string()?);
             }
-            let timeout_ms = body.u32()?;
+            // The wire's `0` decodes to `None` (the agent's ceiling), so the sentinel never
+            // reaches a caller as a number it could mistake for a budget.
+            let timeout_ms = NonZeroU32::new(body.u32()?);
             let envc = body.u32()? as usize;
             let mut env = Vec::new();
             for _ in 0..envc {
@@ -669,7 +677,7 @@ impl<S: Read + Write> ClientConnection<S> {
         stdin: &[u8],
         env: &[(K, V)],
         artifacts: &[R],
-        timeout_ms: u32,
+        timeout_ms: Option<NonZeroU32>,
     ) -> Result<(), ChannelError> {
         write_exec(&mut self.stream, argv, stdin, env, artifacts, timeout_ms)
     }
@@ -912,7 +920,7 @@ mod tests {
                 stdin: b"stdin-secret-material".to_vec(),
                 env: vec![("API_KEY".into(), "hunter2-value".into())],
                 artifacts: vec!["out.txt".into()],
-                timeout_ms: 1_000,
+                timeout_ms: NonZeroU32::new(1_000),
             }
         );
         assert!(!exec.contains("hunter2-value"), "env value leaked: {exec}");
@@ -960,7 +968,7 @@ mod tests {
                 stdin: vec![],
                 env: vec![],
                 artifacts: vec![],
-                timeout_ms: 30_000,
+                timeout_ms: NonZeroU32::new(30_000),
             },
             Request::Exec {
                 argv: vec!["/bin/π".into(), "a b\tc".into(), String::new()],
@@ -971,14 +979,14 @@ mod tests {
                     ("UNICODE_π".into(), "väl ue".into()),
                 ],
                 artifacts: vec!["out.txt".into(), "sub/dir.bin".into()],
-                timeout_ms: 1,
+                timeout_ms: NonZeroU32::new(1),
             },
             Request::Exec {
                 argv: vec![],
                 stdin: vec![0u8, 1, 2, 255],
                 env: vec![],
                 artifacts: vec![],
-                timeout_ms: 0,
+                timeout_ms: None,
             },
             Request::PutFile {
                 path: "in/data.csv".into(),
@@ -993,6 +1001,41 @@ mod tests {
             write_request(&mut buf, &req).unwrap();
             assert_eq!(read_request(&mut buf.as_slice()).unwrap(), req);
         }
+    }
+
+    #[test]
+    fn the_ceiling_sentinel_is_none_on_both_sides() {
+        // The wire asks for the agent's ceiling with a zero `timeout_ms`, which is the byte
+        // `budget_from` reads in the guest agent. Pin both directions on the exact bytes so
+        // neither half can start spelling the request as a budget the other would misread.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // argc
+        body.extend_from_slice(&0u32.to_le_bytes()); // stdin length
+        body.extend_from_slice(&0u32.to_le_bytes()); // artifact count
+        body.extend_from_slice(&0u32.to_le_bytes()); // timeout_ms: the ceiling sentinel
+        body.extend_from_slice(&0u32.to_le_bytes()); // env count
+        let mut framed = vec![TAG_EXEC];
+        framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&body);
+
+        // Decoding: the zero arrives as `None`, never as a number a caller could read as a budget.
+        let decoded = read_request(&mut framed.as_slice()).unwrap();
+        assert_eq!(
+            decoded,
+            Request::Exec {
+                argv: vec![],
+                stdin: vec![],
+                env: vec![],
+                artifacts: vec![],
+                timeout_ms: None,
+            }
+        );
+
+        // Encoding: `None` writes that same zero back, so what the host asked for is what the
+        // agent's ceiling arm sees.
+        let mut written = Vec::new();
+        write_request(&mut written, &decoded).unwrap();
+        assert_eq!(written, framed);
     }
 
     #[test]
@@ -1156,7 +1199,7 @@ mod tests {
             stdin: vec![],
             env: vec![("HOME".into(), "/tmp".into())],
             artifacts: vec![],
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         };
         let expected = req.clone();
         let server = std::thread::spawn(move || {
@@ -1181,7 +1224,7 @@ mod tests {
                 stdin: b"input".to_vec(),
                 env: vec![("SECRET".into(), "s3kr1t".into())],
                 artifacts: vec!["out.txt".into()],
-                timeout_ms: 1234,
+                timeout_ms: NonZeroU32::new(1234),
             },
             Request::PutFile {
                 path: "in.txt".into(),

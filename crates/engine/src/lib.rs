@@ -357,9 +357,9 @@ pub struct Limits {
     /// [`ExecUnresponsive`](VmmError::ExecUnresponsive) liveness backstop, is derived from it
     /// (budget + kill slack), so raising the budget moves both together and a long quiet command is
     /// never cut off by the transport. Should be a realistic duration: it is also the boot deadline,
-    /// and on the exec side a zero or sub-millisecond wall is floored to a **1 ms** command budget on
-    /// the wire (the guest reads a truncated-to-zero `timeout_ms` as its 1 h ceiling, so the floor
-    /// keeps a tiny wall meaning "very short", never "unlimited"). At the top end the guest agent
+    /// and on the exec side a zero or sub-millisecond wall is floored to a **1 ms** command budget
+    /// on the wire, so a tiny wall still means "very short" rather than truncating away to nothing.
+    /// At the top end the guest agent
     /// clamps any exec budget to a **1 h** ceiling (`MAX_EXEC_TIMEOUT`), so a `wall` above an hour
     /// kills the command at one hour, the effective exec budget is `min(wall, 1 h)` even though the
     /// reported [`ExecTimeout`](VmmError::ExecTimeout) names the configured `wall`. (A caller that

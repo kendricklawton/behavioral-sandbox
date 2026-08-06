@@ -6,6 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::Write;
+use std::num::NonZeroU32;
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ fn run(argv: &[&str]) -> (Vec<u8>, Vec<u8>, Result<i32, String>) {
             stdin: Vec::new(),
             env: Vec::new(),
             artifacts: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         })
         .expect("send request");
 
@@ -105,7 +106,7 @@ fn stdin_is_fed_to_the_command() {
             stdin: b"piped input\n".to_vec(),
             env: Vec::new(),
             artifacts: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         })
         .expect("send request");
 
@@ -141,7 +142,7 @@ fn env_reaches_the_command_but_never_the_agents_own_process() {
             stdin: Vec::new(),
             env: vec![(key.to_string(), "from-the-host".into())],
             artifacts: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         })
         .expect("send request");
 
@@ -187,7 +188,7 @@ fn injected_file_is_read_by_the_command_and_artifact_returned() {
             stdin: Vec::new(),
             env: Vec::new(),
             artifacts: vec!["copy.txt".into()],
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         })
         .expect("exec");
 
@@ -235,7 +236,7 @@ fn session_state_persists_across_connections() {
             stdin: Vec::new(),
             env: Vec::new(),
             artifacts: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         })
         .expect("exec 1");
     loop {
@@ -258,7 +259,7 @@ fn session_state_persists_across_connections() {
             stdin: Vec::new(),
             env: Vec::new(),
             artifacts: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         })
         .expect("exec 2");
     let mut out = Vec::new();
@@ -299,7 +300,7 @@ fn a_relative_program_built_in_the_session_runs_by_its_path() {
                 stdin: Vec::new(),
                 env: Vec::new(),
                 artifacts: Vec::new(),
-                timeout_ms: 30_000,
+                timeout_ms: NonZeroU32::new(30_000),
             })
             .expect("exec");
         let mut out = Vec::new();
@@ -347,7 +348,7 @@ fn hung_command_is_killed_at_its_deadline() {
             stdin: Vec::new(),
             env: Vec::new(),
             artifacts: Vec::new(),
-            timeout_ms: 300,
+            timeout_ms: NonZeroU32::new(300),
         })
         .expect("send request");
 
@@ -376,7 +377,7 @@ fn command_under_its_deadline_is_not_falsely_killed() {
             stdin: Vec::new(),
             env: Vec::new(),
             artifacts: Vec::new(),
-            timeout_ms: 5_000,
+            timeout_ms: NonZeroU32::new(5_000),
         })
         .expect("send request");
 
@@ -457,7 +458,7 @@ fn stalled_host_does_not_wedge_the_guest() {
             stdin: Vec::new(),
             env: Vec::new(),
             artifacts: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: NonZeroU32::new(30_000),
         })
         .expect("send request");
     // Deliberately never read a response, the guest's send buffer fills and its forward blocks.
