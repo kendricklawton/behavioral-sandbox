@@ -45,8 +45,7 @@ fn execs_a_command_in_the_microvm() {
 #[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
 fn jailed_exec_runs_a_command() {
     // The convergence proof: a VM confined by the jailer (chroot + dropped uid/gid + mount namespace
-    // + cgroup limits + seccomp) can *also* run code. Before this, the exec channel (vsock) and the
-    // jail were mutually exclusive, you got a code channel or VMM confinement, never both. Now the
+    // + cgroup limits + seccomp) can *also* run code. The
     // vsock unix socket is bound chroot-relative under the dropped uid, so `exec` round-trips through
     // the same jailed VMM. Needs real root (the jailer `mknod`s device nodes); skip rather than fail
     // where KVM is available but real root isn't (the `unshare -Urn` trick can't `mknod`).
@@ -478,9 +477,9 @@ fn collects_outputs_via_block_device() {
 #[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn reaps_the_whole_process_tree_so_a_daemon_cannot_wedge_exec() {
     // Tree reaping (closes the daemon gap): a command double-forks a `setsid` daemon that escapes the process
-    // group and inherits the command's stdout, then the parent exits 0. Before tree reaping that daemon kept
-    // the stdout pipe's write end open, so the agent's output pumps never saw EOF and the exec wedged
-    // until the daemon died (~30s here). Now the agent runs each command in its own cgroup and reaps
+    // group and inherits the command's stdout, then the parent exits 0. An unreaped daemon holds the stdout pipe's
+    // write end open, so the agent's output pumps never see EOF and the exec wedges until the
+    // daemon dies. The agent runs each command in its own cgroup and reaps
     // the whole tree via `cgroup.kill`, so the exec returns immediately with the parent's exit code
     // and the daemon is actually gone. `cgroup.kill` catches the `setsid` process a `killpg` would
     // miss, which is the whole point of using the cgroup rather than the process group.

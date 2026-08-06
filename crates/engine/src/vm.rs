@@ -1241,8 +1241,8 @@ mod tests {
         assert!(err.contains("192.168.1.1"), "names the bad value: {err}");
         assert!(err.contains("10.200.0.1"), "names the working one: {err}");
         // The operator reads this string. A multi-line `format!` without trailing `\` bakes the
-        // source indentation into it, which is how this message shipped with 14-space runs in the
-        // middle of two sentences and nothing noticed: the assertions above still passed.
+        // source indentation into it, and the assertions above would not catch it: they check the
+        // message's content, not its whitespace.
         assert!(
             !err.contains("  "),
             "no run of source indentation in an operator-facing message: {err:?}"

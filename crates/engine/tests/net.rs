@@ -356,8 +356,8 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
 #[test]
 #[ignore = "needs /dev/kvm + CAP_NET_ADMIN + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn two_networked_vms_run_in_isolated_netns() {
-    // Under the netns model: per-VM isolation is now **kernel-enforced** by a per-VM network
-    // namespace, not the earlier unique-/30 reservation. Two concurrently-booted networked VMs hold
+    // Under the netns model: per-VM isolation is **kernel-enforced** by a per-VM network
+    // namespace rather than by address separation. Two concurrently-booted networked VMs hold
     // identically-named taps on the *same* fixed /30, yet share no path: each is its own network
     // stack. This is strictly stronger than L3-unreachability (it holds even for identical addresses).
     if !have_net_admin() {

@@ -371,8 +371,8 @@ struct BaseMount {
 ///
 /// Scoped to this process's own workdir (`/ekvm-<ourpid>-`), not the first shape-matching line
 /// host-wide: mountinfo is host-global, and a bind mount leaked by an earlier killed run satisfies
-/// the shape while pinning the *pre-rebuild* artifact's deleted inode, which failed the inode
-/// assertion against a boot that was doing everything right.
+/// the shape while pinning the *pre-rebuild* artifact's deleted inode, which would fail the
+/// inode assertion against a correct boot.
 fn jailed_base_mount() -> Option<BaseMount> {
     let ours = format!("/ekvm-{}-", std::process::id());
     let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
@@ -452,8 +452,8 @@ fn boot_exec_shutdown(net: bool) -> u32 {
 }
 
 /// Measured soak cycles: `EKVM_SOAK_CYCLES` for a real endurance run, else a default
-/// sized so the serial privileged gate stays fast (~2-3 min at agent-boot speed). Floored at 2 so
-/// the test never proves less than the two-cycle version it replaced.
+/// sized so the serial privileged gate stays fast (~2-3 min at agent-boot speed). Floored at 2, since a single cycle
+/// proves nothing about what leaks *across* cycles.
 fn soak_cycles() -> usize {
     std::env::var("EKVM_SOAK_CYCLES")
         .ok()

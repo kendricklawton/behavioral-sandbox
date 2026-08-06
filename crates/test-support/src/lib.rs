@@ -60,8 +60,7 @@ fn serial_requested(args: &[String], env: Option<&str>) -> bool {
 }
 
 /// A host scratch dir reclaimed on drop, so a panicking assertion or an early `?` return can't leak
-/// it. Unique per (pid, tag, sequence) so parallel tests in one process never collide (the
-/// collision the CLI copy had to fix). [`new`](Self::new) only *reserves* the path (clearing any
+/// it. Unique per (pid, tag, sequence) so parallel tests in one process never collide. [`new`](Self::new) only *reserves* the path (clearing any
 /// stale copy) without creating the dir, for callers that hand it to code that creates it (a
 /// snapshot bundle, a sandbox output dir); [`created`](Self::created) also `mkdir`s it for callers
 /// that write into it directly.
@@ -553,7 +552,7 @@ mod tests {
 
     #[test]
     fn cap_eff_reads_low_64_bits_of_a_hypothetically_wider_field() {
-        // The finding this helper exists for: a `CapEff` wider than 16 hex digits must not overflow
+        // A `CapEff` wider than 16 hex digits must not overflow
         // the `u64` parse into `None`, which a skip-gated test would read as "no caps" and
         // silently skip on a fully capable host. Only the low 64 bits (where CAP_NET_ADMIN lives)
         // are read.

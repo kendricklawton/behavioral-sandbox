@@ -179,11 +179,10 @@ fn api_socket_under(dir: &Path, depth: u32) -> Option<PathBuf> {
 /// milliseconds over a unix socket.
 /// The boot thread, joined on drop. What that buys: a panic anywhere in the helper (every one of its
 /// diagnostic paths) unwinds through this guard **before** the scratch `TmpDir` drops, so the boot
-/// runs to its own deadline and `abort()` unmounts the chroot's binds. Without it, a panicking test
-/// abandoned the mid-boot thread, the process exited without teardown, and the leaked bind mount
-/// both defeated `TmpDir`'s `remove_dir_all` (EBUSY) and poisoned mountinfo for every later run:
-/// `jailed_overlay_is_dense_and_base_is_untouched` failed against a stale mount pinning a rebuilt
-/// artifact's deleted inode. The cost is that a *failing* run waits out the boot deadline; a leak
+/// runs to its own deadline and `abort()` unmounts the chroot's binds. Without it a panicking test
+/// abandons the mid-boot thread, the process exits without teardown, and the leaked bind mount
+/// both defeats `TmpDir`'s `remove_dir_all` (EBUSY) and poisons mountinfo for every later run,
+/// pinning a rebuilt artifact's deleted inode. The cost is that a *failing* run waits out the boot deadline; a leak
 /// that outlives the process is worse than a slow failure.
 struct BootJoin(
     Option<std::thread::JoinHandle<Result<ekvm_engine::RunningVm, ekvm_engine::VmmError>>>,
@@ -242,8 +241,8 @@ fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> ekvm_engine::VmmError {
 
     let pid = match vmm_pid_under(&scratch) {
         Some(pid) => pid,
-        // Two unrelated failures used to wear the same face here ("the VMM died on its own"), which
-        // is a guess dressed as a fact. Separate them: a boot that has already returned says what
+        // Two unrelated failures would otherwise wear the same face here ("the VMM died on its
+        // own"), which is a guess dressed as a fact. Separate them: a boot that has already returned says what
         // went wrong in its own error, while a boot still in progress means this test cannot *see*
         // its VMM, which is a defect in the `/proc` match and not in the engine at all.
         None if booting.is_finished() => panic_with_boot_outcome(booting.take()),
@@ -561,7 +560,7 @@ fn scratch_dirs_of(base: &Path, pid: u32) -> usize {
 #[ignore = "needs /dev/kvm + artifacts + CAP_NET_ADMIN (run via `cargo xtask ci-privileged`)"]
 fn sweep_reclaims_a_crashed_drivers_netns_and_scratch_dir() {
     // The sweep's claim under the netns model: a networked VM's residue is a per-VM network namespace
-    // (holding an orphan tap), left behind when its driver dies without teardown. It is no longer a
+    // (holding an orphan tap), left behind when its driver dies without teardown. It is not a
     // finite-pool reservation (each netns reuses a fixed /30), but still residue worth reclaiming. The
     // sweep must reclaim a dead driver's netns + scratch dir while sparing a concurrently-live
     // driver's, ownership by liveness, not by pattern.

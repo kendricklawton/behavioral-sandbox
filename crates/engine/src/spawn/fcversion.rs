@@ -26,7 +26,7 @@ pub(crate) const MIN_SUPPORTED_FC_VERSION: (u64, u64) = (1, 15);
 /// is actually tested, which is why the range is documented as "supported" and this one as "tested".
 ///
 /// **The single source of this pin.** `doctor` reports it and `install.sh` mirrors its sha256; a
-/// second copy is how the pair sat on v1.9 for 21 months while only one of them was bumped.
+/// second copy of the number is how the pair drifts.
 pub(crate) const PINNED_FC_VERSION: (u64, u64) = (1, 16);
 
 /// First release accepting `clock_realtime` on `PUT /snapshot/load`. Firecracker rejects unknown

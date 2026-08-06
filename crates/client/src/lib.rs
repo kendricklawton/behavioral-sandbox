@@ -37,8 +37,8 @@ use ekvm_protocol::{
 };
 
 // The session-knobs struct is the protocol's, re-exported so a caller of this client names one
-// type and a new knob is written once (the field list lived here as `OpenOptions` until it was
-// hoisted into `ekvm-protocol`, where the wire shape and the Rust shape can't drift apart).
+// type and a new knob is written once (it lives in `ekvm-protocol`, where the wire shape and
+// the Rust shape can't drift apart).
 pub use ekvm_protocol::OpenParams;
 
 /// Everything a client call can fail with, typed, never a panic.

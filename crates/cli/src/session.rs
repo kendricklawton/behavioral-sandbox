@@ -411,9 +411,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     break;
                 }
             }
-            // `Request` is `#[non_exhaustive]`, so this arm exists and the compiler can no longer
-            // tell us a verb went unhandled: the check that used to be a build error is now this
-            // runtime reply. Unreachable from the wire (an unknown `op` fails at decode), so getting
+            // `Request` is `#[non_exhaustive]`, so this arm exists and the compiler cannot tell
+            // us a verb went unhandled; that check is this runtime reply instead of a build error.
+            // Unreachable from the wire (an unknown `op` fails at decode), so getting
             // here means `ekvm-protocol` grew a verb the daemon never wired up. Loud on purpose.
             Ok(Some(other)) => {
                 server.metrics.protocol_error();
@@ -1403,8 +1403,8 @@ mod tests {
     #[test]
     fn a_vmm_error_kind_maps_onto_the_wire_kind() {
         // The daemon computes the engine's pinned bucket and must hand it to the client intact:
-        // before this, `kind()` was computed only to derive `fatal` and then discarded, leaving an
-        // SDK to string-match `message`. A drift here is a silently wrong SDK branch, not a
+        // discarding it after deriving `fatal` would leave an SDK string-matching `message`.
+        // A drift here is a silently wrong SDK branch, not a
         // compile error, so pin all three.
         assert_eq!(wire_kind(ErrorKind::Infra), FaultKind::Infra);
         assert_eq!(wire_kind(ErrorKind::Transport), FaultKind::Transport);
@@ -1415,7 +1415,7 @@ mod tests {
     fn fatal_and_kind_answer_different_questions() {
         // `fatal` says "is this session over", `kind` says "whose fault is it". A guest fault is
         // non-fatal (send another command); an infra fault ends the session but is not the
-        // caller's to fix. Collapsing the two is exactly the bug this field fixes.
+        // caller's to fix. Collapsing the two loses that distinction.
         let guest = nonfatal("no such binary", FaultKind::Guest);
         assert!(
             matches!(

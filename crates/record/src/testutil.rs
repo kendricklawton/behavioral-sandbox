@@ -1,8 +1,8 @@
 //! Synthetic inputs shared by the unit tests in `record`, `json`, and `summary`.
 //!
 //! These build `#[repr(C)]` wire structs field by field, so a new field on one of them is a change
-//! every builder has to answer. Held once here so the answer is given once: three copies drifted
-//! before this module existed, and one of them was already carrying a stale comment.
+//! every builder has to answer. Held once here so the answer is given once, rather than
+//! per test module where the copies drift apart.
 //!
 //! Nothing here reaches the kernel. `SyscallEvent`'s fields are public, so a test can name the
 //! bytes the probe would have written without eBPF, KVM, or caps.

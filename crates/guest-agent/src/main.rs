@@ -143,8 +143,8 @@ fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
     // whole-tree reap that ends an exec is best-effort (it needs cgroup v2 in the guest), so on an
     // off-spec guest a command that double-forks a daemon holds the output pipes open and its
     // `pump` never sees EOF; served inline, that one stuck exec would block `accept` and wedge
-    // every later exec too, not just its own. The session dir stays shared on purpose (it is the
-    // session's state, not any one exec's), which is the same sharing the sequential path had.
+    // every later exec too, not just its own. The session dir stays shared on purpose: it is the
+    // session's state, not any one exec's.
     let spawned = std::thread::Builder::new()
         .name("ekvm-session".to_string())
         .spawn(move || {

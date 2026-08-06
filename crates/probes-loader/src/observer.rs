@@ -217,12 +217,12 @@ fn loss_gap(
 }
 
 /// One sandbox's NIC as the driver names it: the netns and the tap device inside it, **both or
-/// neither**, so the mixed state a positional `(Option<&str>, Option<&str>)` pair admitted (which
-/// silently read as "no NIC", with no gap) is unrepresentable.
+/// neither**, so the mixed state a bare pair of `Option<&str>`s admits (which would read as
+/// "no NIC", with no gap recorded) is unrepresentable.
 ///
 /// Deliberately exhaustive, no `#[non_exhaustive]` (the one exception to the crate's rule, on
 /// purpose): foreign named-field literal construction is the anti-swap mechanism for two
-/// same-typed strings, and a constructor would reintroduce the positional pair this replaces.
+/// same-typed strings, and a constructor would reintroduce that positional pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Nic<'a> {
     /// The sandbox's network namespace name (the driver's `netns()`).
@@ -233,8 +233,8 @@ pub struct Nic<'a> {
 
 /// The per-run inputs to [`SandboxProbes::attach`]. [`new`](Self::new) takes the one required
 /// value; the optional fields start at the sealed posture (no NIC, no policy, no route) and are
-/// set on the value, so a new knob lands additively (`#[non_exhaustive]`) instead of as the silent
-/// every-caller break a positional parameter spliced mid-list was.
+/// set on the value, so a new knob lands additively (`#[non_exhaustive]`) rather than as the silent
+/// every-caller break a positional parameter spliced mid-list would be.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct AttachParams<'a> {

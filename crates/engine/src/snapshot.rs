@@ -162,8 +162,7 @@ impl RunningVm {
         // channel is supported (restore re-binds its baked-in relative socket), and a NIC is supported
         // too: under the netns model restore recreates the recorded tap in a fresh per-VM
         // netns, where the snapshot's baked-in identity is already correct, no re-addressing, so a
-        // networked snapshot no longer needs vsock (that requirement existed only to carry the
-        // re-addressing).
+        // networked snapshot does not need vsock.
         if self.output.is_some() || self.has_input {
             return Err(VmmError::Vmm(
                 "snapshot of a VM with an input/output device is not yet supported".into(),

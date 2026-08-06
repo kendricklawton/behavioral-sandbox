@@ -504,8 +504,8 @@ impl SyscallFold {
         }
         // Probe with the borrowed render (`Cow`): the common repeat path (`get_mut` by `&str`)
         // allocates nothing per event; the owned `String` key (and the comm) are built only on a
-        // vacant, under-cap insert. This fold runs once per streamed ring-buffer event, so the
-        // per-repeat allocation was the record path's one avoidable hot-loop cost.
+        // vacant, under-cap insert. This fold runs once per streamed ring-buffer event, so a
+        // per-repeat allocation would be the record path's one avoidable hot-loop cost.
         let detail = ev.detail_display_cow();
         let inner = self.notable.entry(kind).or_default();
         if let Some(acc) = inner.get_mut(detail.as_ref()) {
@@ -647,9 +647,9 @@ mod tests {
 
     #[test]
     fn a_path_cut_at_the_cap_is_marked_not_passed_off_as_whole() {
-        // The attack this closes: a path longer than the probe's buffer used to be recorded as its
-        // own prefix, in exactly the shape of a path that fit, so the record asserted an open that
-        // never happened. Simulate what the probe produces for an over-long path (a full buffer,
+        // The attack this closes: without the flag a path longer than the probe's buffer records
+        // as its own prefix, in exactly the shape of a path that fit, so the record would assert
+        // an open that never happened. Simulate what the probe produces for an over-long path (a full buffer,
         // NUL-terminated inside it, so `detail_len` is the cap minus the NUL).
         let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
         let mut fold = SyscallFold::new(CG);

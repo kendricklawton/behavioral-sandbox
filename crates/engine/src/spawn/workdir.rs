@@ -35,8 +35,8 @@ pub(crate) fn check_sun_path(socket: &Path) -> Result<(), VmmError> {
 /// The per-VM scratch/jail dir name prefix. Deliberately **short**, not the crate name: the jailer
 /// embeds this dir name **twice** in the API socket path
 /// (`<scratch>/<name>/firecracker/<name>/root/run/firecracker.socket`), which must fit `sun_path`
-/// (~108 bytes, [`SUN_PATH_MAX`]); a long prefix plus a real scratch dir overflows it (spelling the
-/// project name out here is what first blew the limit). Single-sourced with the sweep's `owner_pid`,
+/// (~108 bytes, [`SUN_PATH_MAX`]); a long prefix plus a real scratch dir overflows it.
+/// Single-sourced with the sweep's `owner_pid`,
 /// which parses it back to find residue, so mint and match can't drift.
 pub(crate) const VM_DIR_PREFIX: &str = "ekvm";
 

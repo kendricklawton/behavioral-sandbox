@@ -166,7 +166,7 @@ impl HostKey {
             .open(tmp.path())
             .map_err(KeyError::Io)?;
         // The seed's transient copies stay under `Zeroizing`, and the newline is a second write
-        // rather than a `push` into the exactly-sized hex string: that push forced a
+        // rather than a `push` into the exactly-sized hex string: a push would force a
         // reallocation, freeing the old buffer with the full hex seed in it un-zeroized
         // (`Zeroizing` scrubs only the final buffer it drops).
         let seed = Zeroizing::new(self.signing.to_bytes());
@@ -629,8 +629,8 @@ mod tests {
 
     /// The envelope embeds the record as a JSON string, so the bytes it escapes are the bytes that
     /// get signed. Two escapers would be two chances to be wrong about them; assert there is one.
-    /// The control characters below are exactly where the old pair disagreed: the record escaper
-    /// had dedicated `\b`/`\f` arms and the envelope escaper fell through to the `\u00XX` form.
+    /// The control characters below are where two escapers most easily diverge: a dedicated
+    /// `\b`/`\f` arm against a fall-through to the `\u00XX` form.
     #[test]
     fn the_envelope_escapes_a_string_exactly_as_the_record_does() {
         let hostile = "tab\tnl\nquote\"backslash\\bs\u{08}ff\u{0C}nul\u{00}";
@@ -696,7 +696,7 @@ mod tests {
         let back = TrustedKey::from_spki_pem(&pem).expect("decodes");
         assert_eq!(back.key_id(), key.key_id(), "PEM round-trip keeps the key");
         // Pinned against the exact bytes `openssl pkeyutl -pubin -inkey` consumes (cross-checked
-        // against OpenSSL 3.x during implementation), so a dalek encoding regression is loud.
+        // against OpenSSL 3.x), so a dalek encoding regression is loud.
         assert_eq!(
             pem,
             "-----BEGIN PUBLIC KEY-----\n\

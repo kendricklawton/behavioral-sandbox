@@ -614,8 +614,8 @@ mod tests {
         use crate::record::EgressPosture;
         use ekvm_probes_common::{PolicyRule, PolicyRule6};
 
-        // Two runs whose *observations* are identical: no traffic, no denials. Before the posture
-        // field these rendered the same bytes, so a reader could not tell a sandbox that reached
+        // Two runs whose *observations* are identical: no traffic, no denials. Without the posture
+        // field they render the same bytes, and a reader cannot tell a sandbox that reached
         // nothing from one that was allowed everything and simply stayed quiet.
         let quiet = || NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0);
 

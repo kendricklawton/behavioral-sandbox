@@ -1,10 +1,10 @@
 //! Cgroup-owned VM lifetime: make **host-process death unable to leak a VM**, and give the
 //! embedder a **kill handle** that forces teardown from outside a blocked call.
 //!
-//! Until this module, teardown was `Drop`-based: correct on every path the driver *survives*, but a
-//! `SIGKILL`ed / OOM-killed / Ctrl-C'd driver never runs `Drop`, and the Firecracker child lived on.
-//! No in-process mechanism can fix that (a signal handler can't catch `SIGKILL`), so the fix is
-//! crash-only design: the VM's lifetime is owned by things that survive the driver's death.
+//! `Drop`-based teardown is correct on every path the driver *survives*, but a `SIGKILL`ed /
+//! OOM-killed / Ctrl-C'd driver never runs `Drop`, and its Firecracker child would live on. No
+//! in-process mechanism can fix that (a signal handler can't catch `SIGKILL`), so teardown is
+//! crash-only: the VM's lifetime is owned by things that survive the driver's death.
 //!
 //! - **A per-VM lifetime cgroup.** Each directly-spawned VMM is enrolled in a fresh child cgroup of
 //!   the driver's own cgroup (`cgroup.procs`; no controllers enabled, so the cgroup v2

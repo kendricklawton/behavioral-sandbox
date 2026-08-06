@@ -1010,7 +1010,7 @@ mod tests {
             err.kind()
         );
         // The real proof: it returned near the 200ms deadline, far under the 5s per-read
-        // `SCRAPE_TIMEOUT` the old code let a one-byte-per-4.9s drip reset indefinitely.
+        // `SCRAPE_TIMEOUT`, which a one-byte-per-4.9s drip would otherwise reset indefinitely.
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "returned near the deadline, not after a full per-read timeout: {:?}",

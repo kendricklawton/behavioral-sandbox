@@ -115,10 +115,10 @@ impl<T> Envelope<T> {
 ///
 /// **A verb gaining a field is not a source break either.** Each payload-carrying verb holds a
 /// dedicated params struct whose fields inline on the wire beside `op` (an internally-tagged
-/// newtype variant), so the JSON is unchanged from when these were inline fields:
+/// newtype variant), so the JSON is identical to inline fields:
 /// `the_wire_bytes_of_every_message_shape_are_pinned` holds that. The structs are
 /// `#[non_exhaustive]`, built from [`Default`]/`new` plus field assignment, so an additive wire
-/// field is additive for a Rust caller too, where a struct literal's new field was a break the
+/// field is additive for a Rust caller too, where a struct literal's new field is a break the
 /// wire rules never intended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -212,7 +212,7 @@ pub struct OpenParams {
     #[serde(default)]
     pub output_cap: Option<u64>,
     /// Give the session's guest a NIC (a per-VM tap the host-side probes observe); omitted is
-    /// no NIC, which is the posture every release so far shipped over the wire.
+    /// no NIC, the sealed default.
     ///
     /// A NIC on its own reaches nothing beyond the host end of its /30. Whether a route out
     /// exists is the **daemon's** launch-time choice, like the jail: a client can ask for a
@@ -552,8 +552,8 @@ fn unknown_fault() -> FaultKind {
 /// encoder, and the `NAMED` table the decoder walks all come from this one list, so a new kind
 /// cannot be spelled in one place and forgotten in another. That is the whole reason the macro
 /// exists: with the list written out by hand, a variant missing from `NAMED` would still compile,
-/// still serialize, and silently decode as [`FaultKind::Unknown`], which is exactly the drift the
-/// hand-written `Deserialize` was introduced to prevent. The enum's own rustdoc lives inside the
+/// still serialize, and silently decode as [`FaultKind::Unknown`], which is the drift the
+/// hand-written `Deserialize` prevents. The enum's own rustdoc lives inside the
 /// expansion (the type is public API, and a doc comment out here would document the macro instead).
 macro_rules! fault_kinds {
     ($( $(#[$doc:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
@@ -626,7 +626,7 @@ fault_kinds! {
 
 /// Hand-written so the degrade-don't-fail promise above holds for **any** JSON, not just strings.
 /// The derived `untagged` `Unknown(String)` only catches strings, so a `kind` that is a number,
-/// `null`, or an object failed the whole error reply as `Malformed`: the client would lose the
+/// `null`, or an object would fail the whole error reply as `Malformed`: the client would lose the
 /// daemon's `message` and, per this crate's rule that an undecodable reply desyncs the session,
 /// throw away a session over a field that exists purely to be advisory.
 impl<'de> Deserialize<'de> for FaultKind {
@@ -1304,8 +1304,8 @@ mod tests {
         // The bound is the line's content, the newline excluded, on the write side exactly as on
         // the read side (`read_line_capped` drops the terminator before counting): a message whose
         // line is exactly [`MAX_MESSAGE_BYTES`] encodes and decodes, one more byte is refused by
-        // the writer before any byte moves. Pinned because the writer used to count the newline
-        // too, refusing an at-cap line its own peer would have accepted.
+        // the writer before any byte moves. Pinned so the writer cannot start counting the
+        // newline too and refuse an at-cap line its own peer accepts.
         let overhead = {
             let mut w = Vec::new();
             write_message(
@@ -1359,10 +1359,9 @@ mod tests {
 
     #[test]
     fn an_overlong_line_resyncs_so_the_next_message_parses() {
-        // The desync bug: an over-cap line left its tail (and newline) in the stream, so a session
-        // that treats `TooLarge` as per-request resumed mid-line and emitted a cascade of spurious
-        // errors. The fix drains to the newline, so exactly one `TooLarge` is reported and the very
-        // next line decodes normally.
+        // An over-cap line is drained through its newline, so a session that treats `TooLarge` as
+        // per-request never resumes mid-line: exactly one `TooLarge` is reported and the very next
+        // line decodes normally.
         let mut wire = vec![b'x'; MAX_MESSAGE_BYTES + 1];
         wire.push(b'\n'); // the oversize line *is* newline-terminated
         wire.extend_from_slice(b"{\"schema\":1,\"op\":\"close\"}\n"); // a valid message right after
@@ -1484,8 +1483,7 @@ mod tests {
     #[test]
     fn output_cap_is_fixed_width_on_the_wire() {
         // A 32-bit client and a 64-bit daemon must agree on this number, so it cannot be `usize`.
-        // A value above `u32::MAX` has to survive the round trip: on a 32-bit peer it would
-        // previously have failed to decode at all.
+        // A value above `u32::MAX` has to survive the round trip on a 32-bit peer.
         let over_32_bits = u64::from(u32::MAX) + 1;
         let req = Request::Open(OpenParams {
             vcpus: None,
@@ -1569,8 +1567,8 @@ mod tests {
             "var count should render: {rendered}"
         );
 
-        // `put` carries file content, which the engine's contract treats as a secret too. This
-        // variant predates the env field and was already leaking through the derived `Debug`.
+        // `put` carries file content, which the engine's contract treats as a secret too. A derived `Debug`
+        // would print it.
         let put = Request::Put(PutParams {
             path: "creds.json".into(),
             content: "very-secret-file-body".into(),

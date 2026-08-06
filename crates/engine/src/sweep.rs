@@ -203,10 +203,7 @@ fn detach_mounts_under(dir: &Path) {
 /// [`RESTORE_STAGING_MARKER`] names a pid that is alive. Liveness is [`pid_alive`], the same
 /// primitive the dir partition trusts, so a crashed stager (dead pid) or a dead driver's own boot
 /// disk (no marker at all) never defers reclamation. A recycled stager pid reads as alive and
-/// defers, the conservative direction, until that unrelated process exits. This replaced an mtime
-/// grace on the staged disk itself, which could not tell a staged disk from a dead driver's own
-/// boot disk (`<workdir>/rootfs.ext4`, the same name), so a driver that crashed within the grace
-/// of booting left a dir no sweep would reclaim.
+/// defers, the conservative direction, until that unrelated process exits.
 fn restore_staging_in(dir: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(dir.join(RESTORE_STAGING_MARKER)) else {
         return false;
@@ -404,7 +401,7 @@ mod tests {
 
     #[test]
     fn sweep_reclaims_a_dead_drivers_dir_despite_its_own_fresh_boot_disk() {
-        // The regression the hosted CI run caught: a writable-root boot leaves the driver's own
+        // A writable-root boot leaves the driver's own
         // `rootfs.ext4` in its workdir, and a driver that crashes soon after booting must not have
         // its dir mistaken for an in-flight restore stage and left behind.
         let base = ScratchDir::created("ekvm-sweep-owndisk");

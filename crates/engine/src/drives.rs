@@ -295,7 +295,7 @@ fn fsck_output_image(image: &Path, deadline: Instant) -> Result<(), VmmError> {
 ///
 /// **Not a pipe.** Nothing reads a pipe until the child has exited, so a helper that emits more than
 /// the ~64 KiB pipe buffer blocks on its own write and is only freed by the deadline kill: a
-/// 120-second wedge with no diagnostic, which is worse than the bare exit code this capture replaced.
+/// 120-second wedge with no diagnostic.
 /// `debugfs` reports per failed file and the tree is guest-controlled, so that volume is reachable on
 /// purpose, not just in theory. A file has no such limit and the read stays bounded either way.
 ///
@@ -663,8 +663,8 @@ mod tests {
 
     #[test]
     fn a_signal_killed_host_tool_is_named_by_its_status_not_a_bare_colon() {
-        // `run_host_tool`'s live failure path. A tool killed by a signal writes no stderr, and the
-        // error used to be built from stderr alone, so it ended at the colon and named no cause.
+        // `run_host_tool`'s live failure path. A tool killed by a signal writes no stderr, so an
+        // error built from stderr alone would end at the colon and name no cause.
         // `sh -c 'kill -9 $$'` stands in for the OOM killer or a deadline kill reaching `mke2fs`.
         let err = run_host_tool(
             "sh",
@@ -832,9 +832,7 @@ mod tests {
         // Zero headroom, not a comfortable margin. What a 256 MiB ext4 costs on disk is an
         // e2fsprogs question, not a constant: recent versions punch holes where they used to write
         // the zeroed inode table and journal, so the image's *allocated* size is metadata only and
-        // has been shrinking. This test left 256 KiB and passed here (e2fsprogs 1.47.4 needs
-        // exactly that much) while mke2fs finished inside it on the hosted privileged runner,
-        // failing the gate on the version difference. A full filesystem is the one precondition no
+        // has been shrinking. A full filesystem is the one precondition no
         // version can satisfy, and `truncate` is sparse, so it still gets as far as mke2fs.
         fs.fill_leaving(0);
 
@@ -868,9 +866,10 @@ mod tests {
     #[test]
     #[ignore = "mounts a tmpfs; needs real root (run via `cargo xtask ci-privileged`)"]
     fn a_full_output_dir_names_debugfs_as_the_cause() {
-        // `debugfs` and `e2fsck` used to discard their stderr, so a readback into a full output dir
-        // reported `(exit 1)` and nothing else. The image here is legitimate; only the destination
-        // is out of space, which is precisely the failure an exit code cannot distinguish.
+        // `debugfs` and `e2fsck` must not discard their stderr: a readback into a full output dir
+        // would then report `(exit 1)` and nothing else. The image here is legitimate; only the
+        // destination is out of space, which is precisely the failure an exit code cannot
+        // distinguish.
         let Some(fs) = ekvm_test_support::SmallFs::create(8, "rdump-full") else {
             eprintln!("skipping a_full_output_dir_names_debugfs_as_the_cause: needs real root");
             return;

@@ -129,7 +129,10 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   pointing at it. A drift claim that *enumerates* what it covers ("shared by A, B and C") has made
   one more copy, the list, and it drifts like every copy: name the mechanism a reader can grep
   instead and let the set be whatever that admits. State the threat-model framing once per module
-  (rustdoc on the item that owns it), not at every call site.
+  (rustdoc on the item that owns it), not at every call site. A comment states its constraint in the
+  **present tense**, never the story of how it was found: past-tense narration of prior code ("the
+  earlier design", "used to", "no longer", "this replaced"), incident anecdotes, and regression
+  backstories belong in the commit that fixed them, where git keeps them attached to the diff.
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
   `ekvm run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`EKVM_*`) >
   file (`.ekvm.toml`, the nearest one walking up from the cwd) > defaults**.

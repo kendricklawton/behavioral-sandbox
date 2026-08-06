@@ -308,7 +308,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
         "the session survives a snapshot: {post_snap}"
     );
 
-    // trace: the host-observed audit record, now a signed envelope. The wire `record`
+    // trace: the host-observed audit record, a signed envelope. The wire `record`
     // field carries the schema-2 envelope; the record itself rides inside as a string.
     client.send("{\"op\":\"trace\"}");
     let traced = client.recv();

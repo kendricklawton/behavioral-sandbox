@@ -212,7 +212,7 @@ fn run_via_daemon(client: &mut Client, argv: &[String], stdin: &str) -> RunOutco
 fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
     // `ekvm run … 0<&-` closes fd 0 outright, which reads back as EBADF, not as an empty pipe.
     // A failed stdin read is otherwise a hard error (running the guest on silently truncated input
-    // and calling the record complete is the bug that made it one), so this one errno has to stay
+    // and calling the record complete would corrupt the record), so this one errno has to stay
     // the "no stdin" case a terminal already is. Closing fd 0 needs a shell: `Stdio::null()` opens
     // /dev/null, which is a perfectly readable fd and would not exercise this at all.
     if let Some(why) = skip_reason() {

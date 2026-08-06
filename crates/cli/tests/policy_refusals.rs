@@ -66,8 +66,8 @@ fn require_record_refuses_a_run_that_would_leave_no_audit_record() {
     );
 
     // A `--record-summary`-only run leaves a summary, which is an unsigned *projection* of the
-    // record, not the record: still refused. Before this test, the gate accepted it, so a
-    // require_record host could serve runs whose only trace was unverifiable.
+    // record, not the record: still refused. Accepting it would let a require_record host serve
+    // runs whose only trace is unverifiable.
     let (code, stderr) = run_in(&dir, &["--record-summary", "s.json"]);
     assert_eq!(code, Some(2), "summary-only must be a refusal: {stderr}");
     assert!(

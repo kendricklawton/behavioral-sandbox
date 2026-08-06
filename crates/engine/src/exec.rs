@@ -337,8 +337,8 @@ pub(crate) fn run_exec<S: Read + Write>(
 /// whose every component is a plain name or `.`, no absolute root, no `..` climb. The guest names
 /// these paths and the guest agent is not the trust boundary, so this is the public API's containment
 /// guarantee: `RunResult.files` never carries a path that would write outside a caller's working
-/// tree. Mirrors the check the CLI's `write_artifacts` used to be the sole owner of, lifted here so
-/// every embedder is covered once.
+/// tree. The CLI's `write_artifacts` relies on this rather than
+/// repeating it, so every embedder is covered once.
 fn artifact_path_is_safe(path: &str) -> bool {
     !path.is_empty()
         && Path::new(path)
@@ -553,7 +553,7 @@ mod tests {
     #[test]
     fn connect_retries_through_a_handshake_close() {
         // The other face: the ack arrives but the peer closes before the channel handshake. Same
-        // transient condition, same retry, previously a fatal `Vmm` error.
+        // transient condition, same retry.
         let (_dir, uds, server) =
             flaky_vsock_agent("ekvm-vsock-flaky-postack", 2, DropPhase::AfterAck);
         let conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5));

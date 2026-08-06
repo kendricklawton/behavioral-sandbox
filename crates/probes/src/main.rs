@@ -403,7 +403,7 @@ static DENIAL_DROPS: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 /// [`FlowKey`] *or* a [`FlowKey6`], so they'd vanish from the flow view silently: an 802.1Q VLAN tag,
 /// or a truncated IPv4/IPv6 frame a parse ran off. The loader reads it and gaps the network section
 /// when nonzero. ARP is deliberately *not* counted (expected on-link, not a flow), and a well-formed
-/// IPv6 frame is now parsed into [`FLOWS6`] rather than counted here; a nonzero
+/// IPv6 frame is parsed into [`FLOWS6`], not counted here; a nonzero
 /// count is a guest emitting frames the audit still can't otherwise show.
 #[map]
 static UNPARSED_L3: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
@@ -461,10 +461,9 @@ static POLICY: Array<PolicyRule> = Array::with_max_entries(MAX_POLICY_RULES as u
 #[map]
 static POLICY6: Array<PolicyRule6> = Array::with_max_entries(MAX_POLICY_RULES as u32, 0);
 
-/// Enforcement toggle: slot 0 is `0` for **observe-only** (accept every packet, the original
-/// behavior) or `1` for **deny-by-default egress** (guest-sent IPv4 packets must match [`POLICY`]).
-/// Zero-initialized at load, so a monitor enforces nothing until the loader opts in, existing
-/// observation keeps working unchanged, and every allowance is explicit.
+/// Enforcement toggle: slot 0 is `0` for **observe-only** (accept every packet) or `1` for **deny-by-default egress** (guest-sent IPv4 packets must match [`POLICY`]).
+/// Zero-initialized at load, so a monitor enforces nothing until the loader opts in, and
+/// every allowance is explicit.
 #[map]
 static ENFORCE: Array<u32> = Array::with_max_entries(1, 0);
 
@@ -483,8 +482,8 @@ enum Direction {
 #[classifier]
 pub fn tap_ingress(ctx: TcContext) -> i32 {
     // Parse the 5-tuple **once** and hand it to both the counter and the verdict: on the enforcement
-    // hot path this halves the per-packet `bpf_skb_load_bytes` calls (the old shape parsed in `count`
-    // and again in `egress_verdict`). IPv4 first (the common path), then IPv6,
+    // hot path this halves the per-packet `bpf_skb_load_bytes` calls against parsing
+    // once in `count` and again in `egress_verdict`. IPv4 first (the common path), then IPv6,
     // each family with its own flow map + policy; a frame that is neither falls through to the
     // non-IP handling (VLAN counted as unparsed, ARP spared, everything else deny-by-default).
     if let Some(key) = parse(&ctx) {
@@ -579,8 +578,8 @@ fn record_denial(key: &FlowKey) {
     // per-destination, and keying on the guest's ephemeral source port would spread one blocked
     // endpoint across a row per port, filling the 4096-entry map far faster (hitting `DENIAL_DROPS`)
     // and diluting the "which endpoint was blocked" trail. A guest hammering one denied dst from many
-    // source ports now stays a single, incrementing row. (The loader already aggregates by dst, so
-    // this only changes what the kernel *stores*, not the record's shape.)
+    // source ports stays a single, incrementing row, which is also the shape the loader aggregates
+    // to.
     let dst = FlowKey::new(0, key.dst_addr, 0, key.dst_port, key.proto);
     // SAFETY: the map helpers are the verifier-checked BPF ops; the returned pointer is dereferenced
     // only inside the `Some` arm (the mandatory null-check) and never held across a helper call.
@@ -650,7 +649,7 @@ fn policy_allows6(dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
 /// Add one packet to its flow's per-direction counters. `key` is the caller's single parse of the
 /// frame (`None` for a non-IPv4 or truncated one, which a flow can't represent and this skips, the
 /// caller still accepts it). `#[inline(always)]` so each classifier stays one self-contained program
-/// (no BPF-to-BPF call), the verifier profile the earlier programs established.
+/// (no BPF-to-BPF call), which is the verifier profile every program in this object keeps.
 #[inline(always)]
 fn count(ctx: &TcContext, dir: Direction, key: Option<FlowKey>) {
     let Some(key) = key else {

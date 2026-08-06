@@ -310,8 +310,8 @@ impl TapMonitor {
         apply_policy(&mut self.ebpf, policy)
     }
 
-    /// Turn egress enforcement off again, back to observe-only (accept every packet), the pre-enforcement
-    /// behavior. Leaves the `POLICY` rules in place (harmless while `ENFORCE` is 0), so re-enforcing is a
+    /// Turn egress enforcement off again, back to observe-only (accept every packet).
+    /// Leaves the `POLICY` rules in place (harmless while `ENFORCE` is 0), so re-enforcing is a
     /// single [`set_egress_policy`](Self::set_egress_policy) away.
     ///
     /// # Errors
@@ -554,7 +554,7 @@ fn attach_classifiers(
     // clsact gives a device both a `tc` ingress and egress hook. Idempotent: an already-present
     // clsact is fine; any other failure (no CAP_NET_ADMIN, or the interface is gone) is a typed
     // error. aya models "already there" as its own variant, so this matches on the variant rather
-    // than on a raw `EEXIST` errno, which is what the pre-0.14 code had to do.
+    // than on a raw `EEXIST` errno.
     if let Err(e) = tc::qdisc_add_clsact(interface)
         && !matches!(e, aya::programs::TcError::AlreadyAttached)
     {
@@ -609,10 +609,10 @@ fn attach_classifiers(
 /// Run `f` inside the network namespace at `netns_handle`, on a **short-lived scoped thread** that
 /// enters the netns and then dies with it, so a `tc` attach lands in a sandbox's netns without moving
 /// the calling thread (or the process) at all. The worker's `setns` affects only *that* thread, and
-/// because it simply exits afterward there is **no restore step to fail**: the earlier design moved
-/// the caller's own thread and `?`-propagated the restore `setns`, so a failed restore stranded the
-/// caller permanently in the sandbox's (about-to-be-torn-down) netns. Here a failure just ends the
-/// worker, the caller's thread was never in the sandbox netns. `f`'s result (and any panic) crosses
+/// because it simply exits afterward there is **no restore step to fail**: moving the caller's own
+/// thread would need a restore `setns` whose failure strands the caller in the sandbox's
+/// (about-to-be-torn-down) netns. Here a failure just ends the worker, and the caller's thread was
+/// never in the sandbox netns. `f`'s result (and any panic) crosses
 /// the join. Uses nix's *safe* `setns`, so the loader stays `#![forbid(unsafe_code)]`.
 fn with_netns<T: Send>(
     netns_handle: &Path,

@@ -228,7 +228,8 @@ impl ResourceMeter {
     /// The raw accumulated on-CPU **nanoseconds** for `cgroup_id` (0 if absent). A **keyed lookup**:
     /// aya 0.13 returns a typed `MapError::KeyNotFound`, so a missing key is an unambiguous `0` (never
     /// scheduled, or not the metered target) with no scan, distinct from a real read error. (Under
-    /// `meter_all` the map can hold up to `MAX_CGROUPS` rows, which the old full scan walked every read.)
+    /// `meter_all` the map can hold up to `MAX_CGROUPS` rows, which a full scan would walk every
+    /// read.)
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the map is missing or the read fails for a reason other than a missing key.

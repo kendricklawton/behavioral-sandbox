@@ -36,10 +36,9 @@ use zeroize::Zeroize;
 pub(crate) const MAGIC: [u8; 4] = *b"AGCH";
 
 /// The wire-protocol version. Bump on any breaking framing/message change; the handshake rejects a
-/// peer that doesn't match. v2 added `env` to [`Request::Exec`], a mismatched peer would otherwise
-/// silently run the command *without* its environment (an old agent's parser ignores trailing
-/// bytes), which for injected secrets/config is a correctness failure, so the skew must fail the
-/// handshake, not degrade.
+/// peer that doesn't match. A skewed peer must fail there rather than degrade: a parser that
+/// ignores trailing bytes would silently run a command *without* the `env` it was sent, which for
+/// injected secrets and config is a correctness failure.
 pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Upper bound on a single frame's payload. Output is streamed in chunks well under this; the cap
@@ -88,10 +87,9 @@ pub const VSOCK_PORT: u32 = 1024;
 
 /// The scheme half of the agent's listen spec, so the init line the rootfs build writes
 /// (`vsock:<port>`) and the spec the agent parses are one definition rather than two spellings.
-/// [`VSOCK_PORT`] alone was not enough: the port was shared while the word in front of it was a
-/// literal on the build side and a private const in the agent, so a rename on either side left the
-/// guest booting into an agent that refuses its own command line, and the first thing to notice
-/// would have been a boot timeout under the privileged gate.
+/// Sharing [`VSOCK_PORT`] alone leaves the word in front of it as two copies, and a rename on
+/// either side strands the guest booting into an agent that refuses its own command line, which
+/// surfaces only as a boot timeout under the privileged gate.
 pub const VSOCK_SCHEME: &str = "vsock";
 
 /// Filesystem labels the driver stamps on the data block devices it attaches, and the guest mounts
@@ -127,12 +125,12 @@ pub const GUEST_OVERLAY_INIT: &str = "/sbin/overlay-init";
 pub const GUEST_IP6_CMDLINE_KEY: &str = "guest_ip6";
 
 /// The frame tags, in one enum so the wire numbers have a single home and the compiler owns their
-/// uniqueness: two variants sharing a discriminant is `E0081`, where two `const`s sharing a value
-/// was something only a round-trip test would notice, and only for the messages it covered. The
+/// uniqueness: two variants sharing a discriminant is `E0081`, where loose `const`s sharing a
+/// value would surface only in whichever round-trip test happened to cover them. The
 /// discriminants **are** the wire bytes, so reordering the variants is free and renumbering them
 /// is a protocol change (`tag_discriminants_are_the_wire_numbers` pins each one).
 ///
-/// Requests and responses share the one numbering space they already shared as constants. Each
+/// Requests and responses share one numbering space. Each
 /// direction still decodes only its own subset, so an unrecognized tag is handled per direction
 /// (gracefully for requests, fatally for responses; see [`Response`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -836,8 +834,8 @@ impl<'a> Body<'a> {
     /// Assert the body is fully consumed after the last parsed field. Trailing bytes mean the peer
     /// encoded a field this version doesn't parse, an additive change whose `PROTOCOL_VERSION` bump
     /// was forgotten (the handshake should have rejected the skew, this is the loud backstop for when
-    /// it wasn't). Failing here beats silently dropping the field, the exact degradation the v1→v2
-    /// `env` addition would have been (see `PROTOCOL_VERSION`).
+    /// it wasn't). Failing here beats silently dropping the field (see
+    /// [`PROTOCOL_VERSION`]).
     fn finish(&self) -> Result<(), ChannelError> {
         if self.pos == self.buf.len() {
             Ok(())
@@ -922,8 +920,7 @@ pub mod fuzz {
     /// [`decode_frame`] alone cannot reach past the bounds check. Its `len` is a `u32` read
     /// straight from fuzz bytes, so it exceeds [`MAX_PAYLOAD`] for all but ~0.02% of inputs and
     /// exceeds the input's own remaining length for all but ~0.0001%. Mutation therefore explores
-    /// two reject branches and never the payload read, which is what left this target's coverage
-    /// flat across 19.7M executions.
+    /// two reject branches and never the payload read.
     pub fn decode_frame_wellformed(data: &[u8]) {
         frame_and(data, |mut framed| {
             let _ = read_frame(&mut framed);
@@ -960,8 +957,9 @@ mod tests {
     fn bulk_device_labels_fit_ext4_and_stay_distinct() {
         // ext4's volume label is 16 bytes; `mke2fs -L` silently truncates past it (exit 0), so a
         // longer constant here means the on-disk label never matches and the guest's mount-by-label
-        // silently skips every bulk device. Regression guard: the de-brand once grew both labels
-        // past the limit, and their truncations *collided* into one identical 16-byte prefix.
+        // silently skips every bulk device. Two labels that truncate to the same 16 bytes are
+        // indistinguishable to `findfs`, so they must stay distinct within the limit, not just
+        // under it.
         const EXT4_LABEL_MAX: usize = 16;
         assert!(INPUT_LABEL.len() <= EXT4_LABEL_MAX, "{INPUT_LABEL}");
         assert!(OUTPUT_LABEL.len() <= EXT4_LABEL_MAX, "{OUTPUT_LABEL}");
@@ -1127,7 +1125,7 @@ mod tests {
     fn a_frame_body_with_trailing_bytes_is_rejected() {
         // Trailing bytes after the last parsed field mean an additive field a forgotten
         // `PROTOCOL_VERSION` bump would have introduced: it must fail loudly, not be silently
-        // dropped (the v1→v2 `env` degradation). Encode a valid message, bump the frame length, and
+        // dropped. Encode a valid message, bump the frame length, and
         // append a stray byte.
         let append_trailing = |buf: &mut Vec<u8>| {
             let len = u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]);

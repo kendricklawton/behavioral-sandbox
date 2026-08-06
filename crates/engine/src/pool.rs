@@ -108,7 +108,7 @@ impl Pool {
             // The one cheap liveness signal left is the VMM process itself: a clone whose VMM died
             // while pooled is discarded like a failed probe, not handed out to fail on first use.
             // `try_wait` (not a `/proc/<pid>` probe): the pooled VMM is nobody's `wait()`, so a dead
-            // one is an unreaped zombie that keeps its `/proc` entry, which the old probe read as
+            // one is an unreaped zombie that keeps its `/proc` entry, which a `/proc` probe reads as
             // alive; `try_wait` sees the real exit and reaps it.
             if !self.snapshot.has_vsock {
                 let pid = vm.vmm_pid();
@@ -181,8 +181,8 @@ impl Pool {
 
     /// Gracefully shut down every pooled clone. Ask **every** guest to power off first, then poll them
     /// all against **one** shared grace window, so a pool of N clones pays one power-off grace
-    /// (`POWER_OFF_TIMEOUT`), not N (the old per-clone `vm.shutdown()` serialized the grace, a 50-clone
-    /// pool of guests ignoring `SendCtrlAltDel` took ~N×3 s). A guest
+    /// (`POWER_OFF_TIMEOUT`), not N: shutting each down in turn serializes the grace, so a pool of
+    /// guests ignoring `SendCtrlAltDel` would pay it per clone. A guest
     /// still alive at the deadline is hard-killed by its `Drop` when `self.ready` drops below, the same
     /// no-leak guarantee `drop(pool)` gives, just without the polite ask.
     pub fn shutdown(mut self) {

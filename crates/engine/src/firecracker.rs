@@ -449,11 +449,11 @@ pub(crate) enum MemBackendType {
 /// Connect to a Unix domain socket with a deadline, so a wedged listener is a typed timeout rather
 /// than a parked host thread.
 ///
-/// **Thread-free by construction.** `std`'s `UnixStream::connect` blocks, so bounding it used to
-/// mean handing the connect to a throwaway thread and abandoning it on timeout: one detached,
-/// never-joined thread per dial (and this is called for *every* Firecracker API request and every
-/// exec dial), each stuck in `connect` for as long as the peer stayed wedged, holding its fd. A
-/// non-blocking socket needs no thread at all.
+/// **Thread-free by construction.** `std`'s `UnixStream::connect` blocks, so bounding it with a
+/// throwaway thread abandoned on timeout would leak one detached, never-joined thread per dial
+/// (and this is called for *every* Firecracker API request and every exec dial), each stuck in
+/// `connect` for as long as the peer stays wedged, holding its fd. A non-blocking socket needs no
+/// thread at all.
 ///
 /// The retry loop is the AF_UNIX shape: for a unix socket, `connect` either completes or fails
 /// **immediately** (`ECONNREFUSED` with no listener, so the callers' "nothing is accepting"
@@ -593,10 +593,10 @@ mod tests {
             "a full backlog is the deadline's case, not an error passthrough: {err}"
         );
 
-        // The leak this function was rewritten to close: the old implementation abandoned a
-        // thread parked in `connect` on every timeout, so a wedged peer (a hung Firecracker API
-        // socket) stranded one thread *and its fd* per dial, forever, with nothing to reap them.
-        // The backlog is full now, so each of these dials is that case. A few threads of drift
+        // A timed-out dial against a wedged peer (a hung Firecracker API socket) must strand no
+        // thread and no fd: a thread parked in `connect` and abandoned on timeout holds both for
+        // as long as the peer stays wedged, with nothing to reap them.
+        // The backlog is full here, so each of these dials is that case. A few threads of drift
         // from the parallel test harness are tolerable; sixteen are the bug.
         const WEDGED_DIALS: usize = 16;
         let threads_before = process_threads();
@@ -624,8 +624,8 @@ mod tests {
             snapshot_api_timeout(256),
             API_TIMEOUT + Duration::from_secs(8)
         );
-        // A multi-GiB guest gets a bound far past the old fixed 5s (the bug: a valid snapshot that
-        // takes ~tens of seconds to write must not spuriously time out).
+        // A multi-GiB guest gets a bound far past a fixed 5s: a valid snapshot that takes ~tens
+        // of seconds to write must not spuriously time out.
         assert_eq!(
             snapshot_api_timeout(4096),
             API_TIMEOUT + Duration::from_secs(128)

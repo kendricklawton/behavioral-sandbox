@@ -88,7 +88,7 @@ pub(crate) struct Spawned {
 
 /// Whether a `PUT /drives/{id}` attaches the boot disk or a data device, one half of the typed
 /// pair `put_drive` takes in place of Firecracker's two positional booleans (`is_root_device`,
-/// `is_read_only`), whose bare `true`/`false` call sites were silently swappable.
+/// `is_read_only`), whose bare `true`/`false` call sites are silently swappable.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DriveKind {
     Root,
@@ -954,8 +954,8 @@ fn network_boot_args(
     v6: Option<GuestLink<Ipv6Addr>>,
     egress: Option<GuestEgress>,
 ) -> String {
-    // Both render empty when unset, which is what keeps the sealed string byte-identical to the one
-    // every release so far has booted.
+    // Both render empty when unset, which is what keeps the sealed string byte-identical when no
+    // gateway is configured.
     let gateway = egress.map(|e| e.gateway().to_string()).unwrap_or_default();
     let dns = egress
         .and_then(|e| e.resolver())
@@ -988,7 +988,7 @@ impl PollBackoff {
     /// The first interval: tight enough to catch near-immediate readiness within ~a millisecond.
     const INITIAL: Duration = Duration::from_millis(1);
     /// The interval cap: coarse enough to poll cheaply through the long waits (a cold boot to
-    /// userspace), still 4x finer than the fixed 20 ms tick it replaced.
+    /// userspace), still fine enough that a fast boot is not rounded up.
     const CAP: Duration = Duration::from_millis(5);
 
     /// Start at [`INITIAL`](Self::INITIAL), so a near-immediate readiness is caught almost at once.
@@ -1136,7 +1136,7 @@ mod tests {
         //
         // Run against a short injected wall, not the production five seconds. What is under test is
         // that the probe gives up *at its wall*, which a 100 ms wall demonstrates exactly as well
-        // and in 1/50th the time: this one test used to be the entire unit suite's wall clock. The
+        // and in 1/50th the time. The
         // shipped default is the wrapper's business, and it is named in exactly one place.
         let dir = ScratchDir::created("fcver-hang");
         let hang = script(&dir, "fc-hang", "sleep 60");
@@ -1551,8 +1551,8 @@ mod tests {
     fn jailed_disk_staging_leaves_the_leaf_to_the_privacy_contract() {
         // The jailed-restore sequence for a private disk, host-safe (own uid stands in for the
         // jail's): the traversal chain is pre-created, but the staging *leaf* must be left for
-        // `stage_restore_disk` to create 0700. Regression: pre-creating the leaf (default 0755)
-        // made the privacy check refuse every jailed private-disk restore, the daemon's whole
+        // `stage_restore_disk` to create 0700. A pre-created leaf (default 0755) fails the 0700
+        // privacy check, refusing every jailed private-disk restore and so the daemon's whole
         // `--prewarm` path.
         use std::os::unix::fs::PermissionsExt;
         let base = ScratchDir::created("ekvm-stage-jail");
@@ -1580,7 +1580,7 @@ mod tests {
             b"private disk bytes"
         );
 
-        // The old sequence's shape stays refused: a pre-created (0755) leaf is not adoptable.
+        // A pre-created (0755) leaf is not adoptable.
         let pre_created = root.join("var/tmp/ekvm-55555-0/rootfs.ext4");
         let bad_leaf = pre_created.parent().expect("leaf");
         std::fs::create_dir_all(bad_leaf).expect("pre-create leaf");
@@ -1806,7 +1806,7 @@ mod tests {
 
     #[test]
     fn the_default_scratch_dirs_leave_room_for_the_jailer_socket_path() {
-        // Regression guard for the sun_path overflow the de-brand introduced: the jailer nests the
+        // The `sun_path` budget: the jailer nests the
         // per-VM dir name **twice** (`<scratch>/<name>/firecracker/<name>/root/run/firecracker.socket`),
         // so a long VM_DIR_PREFIX plus a real scratch dir overflows `sun_path`. Pin that the prefix and
         // the shipped scratch defaults (the ci-privileged wrapper's and the guided install's) fit, even

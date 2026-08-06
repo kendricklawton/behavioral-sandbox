@@ -840,9 +840,10 @@ mod tests {
 
     #[test]
     fn a_missing_firecracker_defers_the_rows_that_would_judge_it() {
-        // Field-found on a fresh host: with no binary at all, the version and sha256 rows used to
-        // warn "custom or unpinned binary; verify provenance", judging a binary that does not
-        // exist. They must defer to the FAIL row instead of pretending to have checked something.
+        // With no binary at all, the version and sha256 rows have nothing to judge: warning
+        // "custom or unpinned binary; verify provenance" would be a verdict on a binary that does
+        // not exist. They must defer to the FAIL row instead of pretending to have checked
+        // something.
         let cfg = BootConfig {
             firecracker: "definitely-not-a-real-binary-xyzzy".into(),
             ..Default::default()

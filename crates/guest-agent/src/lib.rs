@@ -392,7 +392,7 @@ fn budget_from(timeout_ms: Option<NonZeroU32>) -> Duration {
 /// This kills only the *direct* child; the command's wider process tree (double-forked grandchildren,
 /// `setsid` daemons that would otherwise keep the output pipes open) is reaped by [`serve`] through
 /// the per-exec [`ExecCgroup`] after this returns, on both the exit and timeout paths. So a
-/// hung or double-forking command can no longer wedge the agent's connection.
+/// hung or double-forking command cannot wedge the agent's connection.
 fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited> {
     let mut backoff = WaitBackoff::new();
     loop {

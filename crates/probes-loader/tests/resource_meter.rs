@@ -162,7 +162,7 @@ fn a_cpu_heavy_run_reports_more_cpu_than_an_idle_one_attributed_to_the_sandbox()
         "the sandbox cgroup {cgroup} must carry the charged CPU, got {all:?}"
     );
 
-    // The map-capacity fix: `clear` frees the cgroup's `CPU_NS` row entirely (not just zeroes it
+    // `clear` frees the cgroup's `CPU_NS` row entirely (not just zeroes it
     // like `reset`), so a long-lived shared meter doesn't accumulate dead cgroups against the
     // fixed `MAX_CGROUPS`. After clearing the one live row, the map holds nothing.
     meter

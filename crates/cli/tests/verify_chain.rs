@@ -114,8 +114,8 @@ fn a_chain_file_verifies_and_a_reordered_or_tampered_one_fails() {
 
 #[test]
 fn a_single_envelope_file_still_verifies_as_before() {
-    // The regression guard: one line stays today's single-record verification, byte for byte the
-    // same code path a `--record` file takes.
+    // One line stays single-record verification, byte for byte the same code path a `--record`
+    // file takes.
     let key = HostKey::from_seed([7u8; 32]);
     let dir = ChainDir::new("single");
     let one = dir.0.join("run.json");

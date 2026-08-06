@@ -435,8 +435,8 @@ fn bad_handshake_is_rejected_not_hung() {
 
 #[test]
 fn stalled_host_does_not_wedge_the_guest() {
-    // The regression test for the bug this pass fixes: a host that handshakes and requests, then
-    // STOPS reading, against a command that floods output. With a write deadline on the guest
+    // A host that handshakes and requests, then STOPS reading, against a command that floods
+    // output. With a write deadline on the guest
     // stream, `serve` must return an Err in bounded time (the pump's forward times out → drain-and-
     // discard → child exits) rather than hang forever.
     let (host, guest) = UnixStream::pair().expect("socketpair");

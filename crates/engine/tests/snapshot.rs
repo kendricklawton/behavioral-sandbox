@@ -320,7 +320,7 @@ fn restored_networked_clones_coexist_each_in_its_own_netns() {
         .expect("networked prewarmed snapshot should succeed");
     source.shutdown().expect("source shutdown");
 
-    // Two clones, live simultaneously, impossible before this box.
+    // Two clones, live simultaneously, which only the per-VM netns makes possible.
     let clone_a = Vm::restore(&snap, &cfg).expect("networked clone A should resume");
     let clone_b = Vm::restore(&snap, &cfg).expect("networked clone B should resume");
 
@@ -468,9 +468,9 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
     // The daemon's `--prewarm` shape, distinct from the shared-base test above: a `Sandbox` pool
     // source copies its rootfs per-VM into the workdir, so its bundle carries a **private** disk
     // and every jailed clone *stages* that disk into the chroot instead of bind-mounting a shared
-    // base. Regression: the staging leaf used to be pre-created along with the traversal chain
-    // (default 0755), which the 0700 privacy check then refused, so every jailed private-disk
-    // restore failed and a jailed daemon could never keep a pool.
+    // base. The staging leaf must be left for the restore to create 0700: pre-created
+    // along with the traversal chain (default 0755) it fails the privacy check, and a jailed
+    // daemon could never keep a pool.
     if !have_jailer_privileges() {
         eprintln!(
             "skipping restores_a_private_disk_snapshot_under_the_jailer: needs real root (euid 0)"

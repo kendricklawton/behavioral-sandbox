@@ -374,7 +374,7 @@ pub struct Limits {
 
 impl Default for Limits {
     /// Conservative defaults (see the type doc): 1 vCPU, 256 MiB, a 30 s wall (boot deadline and
-    /// exec budget alike, 30 s was both fixed values before they were knobs), a 16 MiB output
+    /// exec budget alike), a 16 MiB output
     /// cap. Treat these as a stable floor, raising any of them is a breaking change for embedders.
     fn default() -> Self {
         Self {
