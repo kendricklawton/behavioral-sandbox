@@ -146,8 +146,12 @@ the guest *sends*) now also consults a per-sandbox allow-list, the `POLICY`/`POL
 `crates/probes-common` next to the flow record. When the `ENFORCE` toggle is on, a guest-sent packet
 (v4 or v6) whose destination matches no active rule returns `TC_ACT_SHOT` (dropped at the tap, never
 leaves the host); a match returns `TC_ACT_OK`. The per-rule test (`rule_matches`/`rule_matches6`, a
-masked-CIDR + wildcard-port/proto compare, byte-wise for v6 since eBPF has no `u128`) is shared by the
-kernel scan and a host-unit-tested `egress_allowed`/`egress_allowed6`, so the verdict can't drift. The
+masked-CIDR + wildcard-port/proto compare, byte-wise for v6 since eBPF has no `u128`) is one function,
+called by the kernel scan and by the host-unit-tested `egress_allowed`/`egress_allowed6` alike. The scan
+around it is mirrored by hand; for v4, `crates/probes-loader/tests/differential.rs` hands the loaded
+classifier a synthetic frame and asserts its verdict is the one `egress_allowed` gives for the same
+destination, and `observe_only_passes_every_frame_enforcement_would_drop` is the control that keeps that
+comparison from passing on a classifier that drops everything. The
 program scans the fixed `MAX_POLICY_RULES` array in a **bounded loop** (the verifier's compile-time
 cap), and the v4 mask is built so the shift operand is always `< 32` (an out-of-range shift is a
 verifier reject).

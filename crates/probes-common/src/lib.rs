@@ -458,9 +458,11 @@ impl FlowCounts {
 
 /// Parse the IPv4 5-tuple out of an Ethernet `frame` (addresses and ports in host order), or `None` if
 /// it is not IPv4-over-Ethernet or is truncated. TCP/UDP carry their ports; any other protocol reports
-/// ports 0. The tc program in `crates/probes` mirrors this exact logic with `ctx.load` at the same
-/// offsets (single-sourced so the kernel and this can't drift); this pure, slice-based form is what the
-/// host gate unit-tests, since the in-kernel reads need a live packet and the verifier.
+/// ports 0. The tc program in `crates/probes` mirrors this with `ctx.load` at the same offsets, which
+/// are `const`s both halves read, so only the logic around them is mirrored by hand. The in-kernel
+/// reads need a live packet and the verifier, so this pure, slice-based form is the one the host gate
+/// unit-tests, and `crates/probes-loader/tests/differential.rs` runs it as the oracle the loaded
+/// program's own parse is compared against.
 #[must_use]
 pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     let ethertype = u16::from_be_bytes([
@@ -594,9 +596,10 @@ pub fn rule_matches(rule: &PolicyRule, dst_addr: u32, dst_port: u16, proto: u8) 
 }
 
 /// Whether a sandbox's egress allow-list `rules` admits the destination `(dst_addr, dst_port, proto)`:
-/// **any** active rule matching means allow, none matching means deny (deny-by-default). The
-/// host-side convenience over [`rule_matches`]; the tc program applies the same any-match logic reading
-/// its policy map. An empty allow-list allows nothing.
+/// **any** active rule matching means allow, none matching means deny (deny-by-default). The scan over
+/// [`rule_matches`]; the tc program applies the same any-match logic reading its policy map, and
+/// `crates/probes-loader/tests/differential.rs` runs this as the oracle that classifier's verdict is
+/// compared against. An empty allow-list allows nothing.
 #[must_use]
 pub fn egress_allowed(rules: &[PolicyRule], dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     rules
