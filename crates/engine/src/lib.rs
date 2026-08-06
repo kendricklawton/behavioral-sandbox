@@ -359,8 +359,8 @@ pub struct Limits {
     /// never cut off by the transport. Should be a realistic duration: it is also the boot deadline,
     /// and on the exec side a zero or sub-millisecond wall is floored to a **1 ms** command budget
     /// on the wire, so a tiny wall still means "very short" rather than truncating away to nothing.
-    /// At the top end the guest agent
-    /// clamps any exec budget to a **1 h** ceiling (`MAX_EXEC_TIMEOUT`), so a `wall` above an hour
+    /// At the top end the guest agent clamps any exec budget to a **1 h** ceiling
+    /// (`MAX_EXEC_TIMEOUT`), so a `wall` above an hour
     /// kills the command at one hour, the effective exec budget is `min(wall, 1 h)` even though the
     /// reported [`ExecTimeout`](VmmError::ExecTimeout) names the configured `wall`. (A caller that
     /// genuinely needs different boot and exec ceilings sets [`BootConfig::boot_timeout`] /
