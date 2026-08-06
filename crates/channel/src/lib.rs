@@ -7,8 +7,10 @@
 //! **Shape (why it's built this way).**
 //! - A **handshake** first: a 4-byte magic + a `u16` version. Both peers *send then receive*, so a
 //!   version skew between a separately-built host and guest agent fails fast and clearly instead of
-//!   mis-parsing later. New message types are added as new tags (the enums are `#[non_exhaustive]`),
-//!   so the two halves can evolve without a lockstep release.
+//!   mis-parsing later. A new *request* tag is the one change an older peer absorbs on its own: it
+//!   decodes as [`Request::Unknown`] and the agent answers "unsupported". Everything else, a new
+//!   response tag or a new field on an existing message, is a [`PROTOCOL_VERSION`] bump, since the
+//!   host deliberately refuses a response it cannot interpret (see [`Response`]).
 //! - Every message is a **length-prefixed frame**, `tag(u8) · len(u32-le) · payload`, never a
 //!   read-to-EOF or a delimiter scan. `len` is checked against [`MAX_PAYLOAD`] *before* allocating,
 //!   so a hostile or buggy peer cannot drive an unbounded read (the same discipline as the HTTP
