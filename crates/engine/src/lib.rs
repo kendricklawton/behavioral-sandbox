@@ -665,8 +665,8 @@ impl Sandbox {
 /// `mdbook test` cannot do this job. It passes only `-L`, never `--extern`, so a 2018-edition
 /// `use ekvm_engine::…` does not resolve; making it work at all needs a hidden `extern crate` line in each
 /// block plus a library path with exactly one candidate rlib. The book still gets `mdbook test` in
-/// `docs.yml` for the rest of its blocks, which is what catches an untagged fence being compiled as
-/// Rust (four ASCII diagrams were, until 2026-08-01).
+/// `docs.yml` for the rest of its blocks, which is what catches an untagged fence (an ASCII
+/// diagram, say) being compiled as Rust.
 ///
 /// `#[cfg(doctest)]` keeps this out of the built library and out of the rendered docs; it exists
 /// only while rustdoc is collecting tests.

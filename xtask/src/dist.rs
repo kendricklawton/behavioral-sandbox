@@ -658,8 +658,7 @@ mod tests {
     /// Same drift guard, for the Firecracker pin. `install.sh` carries its own copy of the pinned
     /// release sha256 (installers run it before this repo is built, so it cannot call into `ekvm`),
     /// and `doctor.rs` carries the one the engine checks at runtime. Two copies of a security-
-    /// relevant hash drift silently: the pair sat on v1.9 for 21 months, about a year past
-    /// upstream's support window, and nothing compared them.
+    /// relevant hash drift silently, and nothing but this compares them.
     #[test]
     fn install_sh_firecracker_pin_matches_doctor() {
         let repo = workspace_root();
@@ -821,9 +820,8 @@ mod tests {
     }
 
     /// Same drift guard, for the **third** copy of the Firecracker pin: the container image's
-    /// `FC_VERSION` build arg. The install.sh/doctor.rs pair drifted for 21 months before their
-    /// test existed; this file was missed in that sweep and sat on v1.9.1 (below the supported
-    /// floor, so the image bundled a VMM upstream no longer patches) until 2026-07-29.
+    /// `FC_VERSION` build arg. Unchecked, it can sit below the supported floor and bundle a VMM
+    /// upstream no longer patches into the image.
     #[test]
     fn containerfile_firecracker_is_the_pinned_series() {
         let repo = workspace_root();
@@ -1040,11 +1038,9 @@ mod tests {
 
     /// The sharper half of the question above. A workflow that greps a constant out of a source
     /// file depends on two things: the file existing (checked above) *and* the pattern still
-    /// matching inside it. Only the second one caught the real case. Splitting `spawn.rs` left the
-    /// file in place and moved `MIN_SUPPORTED_FC_VERSION` out of it, so a path check stayed green
-    /// while the parser matched nothing. Runs each workflow's own `grep -oE` against its own
-    /// target and requires a hit, which is the parser's contract stated as a test rather than
-    /// discovered on a Wednesday.
+    /// matching inside it. Moving a constant out of a file that itself stays in place satisfies the
+    /// path check while the parser matches nothing. Runs each workflow's own `grep -oE` against its
+    /// own target and requires a hit, so the parser's contract is a test rather than a surprise.
     #[test]
     fn workflow_source_parsers_still_match() {
         let repo = workspace_root();

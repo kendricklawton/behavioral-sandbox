@@ -217,8 +217,8 @@ enum Cmd {
     /// signed-record envelope, the eBPF-boundary parsers) with `cargo fuzz` (libFuzzer), the deep,
     /// nightly-only counterpart to the in-gate mutation tests. Seeds are folded in from
     /// `fuzz/seeds/<target>/`. Needs `cargo install cargo-fuzz` + a nightly toolchain; never part of
-    /// `ci`. `--help` lists the targets, generated from [`FUZZ_TARGETS`]: this comment used to
-    /// restate them and was three short by the time anyone noticed.
+    /// `ci`. `--help` lists the targets, generated from [`FUZZ_TARGETS`] rather than restated
+    /// here, where the copy would drift.
     Fuzz {
         /// The libFuzzer target to run.
         #[arg(default_value = "channel_response", value_parser = fuzz_target_parser())]
@@ -375,9 +375,8 @@ fn fuzz(target: &str, seconds: u64) -> Result<()> {
 
 /// Warn about a `fuzz/corpus/<name>` directory that is not a [`FUZZ_TARGETS`] entry, with how many
 /// inputs it holds. Renaming a target leaves its corpus behind under the old name and cargo-fuzz
-/// starts the new one from empty, so accumulated coverage goes *quiet* rather than missing, which is
-/// why nothing noticed: `agent_config` became `ekvm_config` in `0afde19` and 480 unique inputs sat
-/// unused until 2026-08-01.
+/// starts the new one from empty, so accumulated coverage goes *quiet* rather than missing: the
+/// inputs are still on disk, just under a name nothing reads.
 ///
 /// A warning from a dev command rather than an assertion in `ci`, because `fuzz/corpus/` is
 /// gitignored working data. A gate reading it would pass or fail on whatever the developer happened
@@ -486,10 +485,9 @@ fn ci() -> Result<()> {
     // the same class the drift lint catches for repo paths. The rendered HTML is not the point and
     // is never published (`.github/workflows/docs.yml` builds the mdBook, not rustdoc).
     //
-    // This used to emit "output filename collision at target/doc/ekvm", because a bin named `ekvm`
-    // in one package and a lib named `ekvm` in another rendered to the same path. Giving the CLI
-    // package the bare name put both targets in one package, where cargo resolves them, so the
-    // warning is gone rather than suppressed; `target/doc/` now holds one directory per crate.
+    // A bin and a lib both named `ekvm` in *different* packages would render to the same path and
+    // collide here. Both live in the CLI package, where cargo resolves them, so `target/doc/` holds
+    // one directory per crate and nothing is suppressed.
     cargo_env(
         &["doc", "--no-deps", "--workspace", "--locked"],
         &[("RUSTDOCFLAGS", "-D warnings")],
@@ -688,9 +686,9 @@ fn deny_detached_workspaces(root: &Path) -> Result<()> {
 /// and lockfile) and it takes the rest of the tree by path, so a dependency edit in the main
 /// workspace ages it. Nothing built it with `--locked`: `cargo xtask fuzz` lets cargo repair the
 /// lockfile in place, which turns drift into a silent rewrite on every run instead of a report.
-/// `crates/probes` is detached the same way but its build *does* pass `--locked`, which is why only
-/// this one rotted: adding clap's `wrap_help` pulled in `terminal_size`, and `fuzz/Cargo.lock`
-/// stopped resolving from then until 2026-08-01 while the nightly job kept passing.
+/// `crates/probes` is detached the same way but its build *does* pass `--locked`, so only this one
+/// can rot unobserved: a new transitive dependency in the main workspace leaves `fuzz/Cargo.lock`
+/// unresolvable while the nightly job keeps passing.
 ///
 /// Resolution is the whole check. Building the targets needs nightly plus cargo-fuzz, neither of
 /// which belongs in a host-safe gate that has to run everywhere.
@@ -1521,8 +1519,8 @@ fn cargo(args: &[&str]) -> Result<()> {
 /// A release build carries no debug info, but `panic!` location strings are baked in regardless,
 /// and for std and every registry dependency those are absolute paths under this host's
 /// `CARGO_HOME` and rustup directory. Two hosts building the same commit therefore emit different
-/// bytes. On 2026-08-02 that was the whole of why `rootfs-guest.ext4` hashed `71a79914…` on a dev
-/// box and `4772f3fb…` on the CI runner, same pinned toolchain, same mke2fs, same package closure.
+/// bytes, which is enough on its own to give `rootfs-guest.ext4` a different hash on two hosts
+/// running the same pinned toolchain, the same mke2fs, and the same package closure.
 ///
 /// Uses `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS` so a home directory containing a space
 /// cannot split one flag into two. Either form *replaces* configured `rustflags` rather than

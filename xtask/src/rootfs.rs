@@ -273,9 +273,8 @@ pub(crate) fn alpine_artifact() -> Result<Artifact> {
 ///
 /// **Fetched from our own mirror, because the upstream URL expires.** An Alpine branch repo carries
 /// only the newest revision of each package, so a pinned `pkg-ver-rN` filename 404s the day upstream
-/// publishes the next one: `3.0.6-r0` did exactly that on 2026-08-02, breaking every fresh clone and
-/// every clean CI run while cached hosts kept building, which is why nobody noticed for hours. The
-/// version cannot simply float either, since this is the installer itself and the sha256 is the only
+/// publishes the next one, breaking every fresh clone and every clean CI run while cached hosts keep
+/// building off theirs. The version cannot simply float either, since this is the installer itself and the sha256 is the only
 /// thing between a fresh clone and executing an unverified binary as part of the build.
 ///
 /// The mirror is the `build-inputs` release (a pre-release, so it stays out of `releases/latest`,
@@ -606,8 +605,7 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
     // failure that looks healthy right up until a run hangs.
     let inittab = std::fs::read_to_string(in_staging(staging, INITTAB_PATH))
         .with_context(|| format!("guest-image contract: read {INITTAB_PATH}"))?;
-    // Both halves from `ekvm-channel`: the port was already shared, the scheme used to be a literal
-    // here and a private const in the agent.
+    // Both halves from `ekvm-channel`, so this spelling and the agent's own parser cannot drift.
     let vsock_arg = format!(
         "{}:{}",
         ekvm_channel::VSOCK_SCHEME,

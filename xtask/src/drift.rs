@@ -94,10 +94,9 @@ pub fn check(root: &Path) -> Result<()> {
                     violations.push(format!("{rel}:{line_no}: links to missing file {target}"));
                 }
             }
-            // A `#fragment` has to name a heading that exists. This is the one prose pointer the
-            // lint used to leave to review, and `RELEASES.md` spent from 8f2df03 to a0be144
-            // pointing at a Semver section that had moved to another page: the file resolved, so
-            // the link check above was satisfied and nothing looked at the rest of the URL.
+            // A `#fragment` has to name a heading that exists. The link check above is satisfied
+            // as soon as the *file* resolves, so a fragment naming a section that has moved to
+            // another page passes it while pointing at nothing.
             for (line_no, target, frag) in markdown_anchor_links(&text) {
                 let page = if target.is_empty() {
                     root.join(rel)
