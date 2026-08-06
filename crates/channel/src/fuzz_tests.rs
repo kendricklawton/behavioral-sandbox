@@ -110,15 +110,17 @@ fn framed(tag: u8, body: &[u8]) -> Vec<u8> {
 #[test]
 fn decoders_never_panic_on_well_framed_random_bodies() {
     let mut rng = Rng::new(0xD1B5_4A32_D192_ED03);
+    // Every real tag, plus two the decoders must reject: `framed` deliberately keeps taking a raw
+    // `u8` so `0` and `255` can drive the unknown-tag paths.
     let tags = [
-        TAG_EXEC,
-        TAG_PUTFILE,
-        TAG_STDOUT,
-        TAG_STDERR,
-        TAG_FILE,
-        TAG_EXIT,
-        TAG_TIMEDOUT,
-        TAG_ERROR,
+        Tag::Exec.as_u8(),
+        Tag::PutFile.as_u8(),
+        Tag::Stdout.as_u8(),
+        Tag::Stderr.as_u8(),
+        Tag::File.as_u8(),
+        Tag::Exit.as_u8(),
+        Tag::TimedOut.as_u8(),
+        Tag::Error.as_u8(),
         0,
         255,
     ];

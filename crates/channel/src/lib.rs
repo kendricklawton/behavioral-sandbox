@@ -124,14 +124,50 @@ pub const GUEST_OVERLAY_INIT: &str = "/sbin/overlay-init";
 /// the driver's writer and the guest's reader can't drift.
 pub const GUEST_IP6_CMDLINE_KEY: &str = "guest_ip6";
 
-const TAG_EXEC: u8 = 1;
-const TAG_STDOUT: u8 = 2;
-const TAG_STDERR: u8 = 3;
-const TAG_EXIT: u8 = 4;
-const TAG_ERROR: u8 = 5;
-const TAG_PUTFILE: u8 = 6;
-const TAG_FILE: u8 = 7;
-const TAG_TIMEDOUT: u8 = 8;
+/// The frame tags, in one enum so the wire numbers have a single home and the compiler owns their
+/// uniqueness: two variants sharing a discriminant is `E0081`, where two `const`s sharing a value
+/// was something only a round-trip test would notice, and only for the messages it covered. The
+/// discriminants **are** the wire bytes, so reordering the variants is free and renumbering them
+/// is a protocol change (`tag_discriminants_are_the_wire_numbers` pins each one).
+///
+/// Requests and responses share the one numbering space they already shared as constants. Each
+/// direction still decodes only its own subset, so an unrecognized tag is handled per direction
+/// (gracefully for requests, fatally for responses; see [`Response`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum Tag {
+    Exec = 1,
+    Stdout = 2,
+    Stderr = 3,
+    Exit = 4,
+    Error = 5,
+    PutFile = 6,
+    File = 7,
+    TimedOut = 8,
+}
+
+impl Tag {
+    /// The tag a frame header's byte names, or `None` if this build doesn't know it (a peer
+    /// speaking a message type we don't implement, or a corrupt/hostile frame).
+    fn from_u8(tag: u8) -> Option<Self> {
+        match tag {
+            1 => Some(Self::Exec),
+            2 => Some(Self::Stdout),
+            3 => Some(Self::Stderr),
+            4 => Some(Self::Exit),
+            5 => Some(Self::Error),
+            6 => Some(Self::PutFile),
+            7 => Some(Self::File),
+            8 => Some(Self::TimedOut),
+            _ => None,
+        }
+    }
+
+    /// The wire byte for this tag.
+    fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
 
 /// A host→guest message. `#[non_exhaustive]`: new request types are added as new tags without
 /// breaking an older guest agent, an unknown tag becomes [`Unknown`](Request::Unknown), which the
@@ -264,10 +300,19 @@ impl std::fmt::Display for ChannelError {
             ChannelError::Io(e) => write!(f, "channel io: {e}"),
             ChannelError::Protocol(m) => write!(f, "channel protocol error: {m}"),
             ChannelError::PayloadTooLarge { tag, len } => {
-                write!(
-                    f,
-                    "channel frame (tag {tag}) length {len} exceeds {MAX_PAYLOAD}"
-                )
+                // Name the tag when this build knows it, so an operator reads "tag 6/PutFile"
+                // rather than grepping the source for what 6 was. A hostile or newer peer's tag
+                // may be none of ours, hence the bare number as the fallback.
+                match Tag::from_u8(*tag) {
+                    Some(known) => write!(
+                        f,
+                        "channel frame (tag {tag}/{known:?}) length {len} exceeds {MAX_PAYLOAD}"
+                    ),
+                    None => write!(
+                        f,
+                        "channel frame (tag {tag}) length {len} exceeds {MAX_PAYLOAD}"
+                    ),
+                }
             }
         }
     }
@@ -430,14 +475,14 @@ pub(crate) fn write_put_file(
     let cap = blob_len(path.as_bytes()) + blob_len(data);
     if cap > MAX_PAYLOAD {
         return Err(ChannelError::PayloadTooLarge {
-            tag: TAG_PUTFILE,
+            tag: Tag::PutFile.as_u8(),
             len: cap,
         });
     }
     let mut payload = Vec::with_capacity(cap);
     put_blob(&mut payload, path.as_bytes());
     put_blob(&mut payload, data);
-    let sent = write_frame(w, TAG_PUTFILE, &payload);
+    let sent = write_frame(w, Tag::PutFile.as_u8(), &payload);
     payload.zeroize();
     sent
 }
@@ -468,7 +513,7 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
     // copy of stdin + every env value that would only be built to be thrown away.
     if cap > MAX_PAYLOAD {
         return Err(ChannelError::PayloadTooLarge {
-            tag: TAG_EXEC,
+            tag: Tag::Exec.as_u8(),
             len: cap,
         });
     }
@@ -490,7 +535,7 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
         put_blob(&mut payload, key.as_ref().as_bytes());
         put_blob(&mut payload, value.as_ref().as_bytes());
     }
-    let sent = write_frame(w, TAG_EXEC, &payload);
+    let sent = write_frame(w, Tag::Exec.as_u8(), &payload);
     payload.zeroize();
     sent
 }
@@ -504,8 +549,8 @@ pub(crate) fn write_exec<A: AsRef<str>, K: AsRef<str>, V: AsRef<str>, R: AsRef<s
 pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
     let (tag, payload) = read_frame(r)?;
     let mut body = Body::new(&payload);
-    match tag {
-        TAG_EXEC => {
+    match Tag::from_u8(tag) {
+        Some(Tag::Exec) => {
             let argc = body.u32()? as usize;
             // Don't pre-size from the peer's count: each entry still costs real bytes to read, so a
             // lying count just runs the body dry and errors.
@@ -536,13 +581,15 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
                 timeout_ms,
             })
         }
-        TAG_PUTFILE => {
+        Some(Tag::PutFile) => {
             let path = body.string()?;
             let data = body.blob()?.to_vec();
             body.finish()?;
             Ok(Request::PutFile { path, data })
         }
-        other => Ok(Request::Unknown { tag: other }),
+        // Unknown to this build, or a tag that only travels the other way: not a protocol error,
+        // the agent answers it with a typed "unsupported" (see [`Request::Unknown`]).
+        _ => Ok(Request::Unknown { tag }),
     }
 }
 
@@ -553,28 +600,28 @@ pub(crate) fn read_request(r: &mut impl Read) -> Result<Request, ChannelError> {
 /// on a write failure.
 pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), ChannelError> {
     match resp {
-        Response::Stdout(b) => write_frame(w, TAG_STDOUT, b),
-        Response::Stderr(b) => write_frame(w, TAG_STDERR, b),
+        Response::Stdout(b) => write_frame(w, Tag::Stdout.as_u8(), b),
+        Response::Stderr(b) => write_frame(w, Tag::Stderr.as_u8(), b),
         Response::File { path, data } => {
             // Sized and size-checked before building, like the request writers: an oversize
             // artifact is refused without first copying it into a growing buffer.
             let cap = blob_len(path.as_bytes()) + blob_len(data);
             if cap > MAX_PAYLOAD {
                 return Err(ChannelError::PayloadTooLarge {
-                    tag: TAG_FILE,
+                    tag: Tag::File.as_u8(),
                     len: cap,
                 });
             }
             let mut payload = Vec::with_capacity(cap);
             put_blob(&mut payload, path.as_bytes());
             put_blob(&mut payload, data);
-            write_frame(w, TAG_FILE, &payload)
+            write_frame(w, Tag::File.as_u8(), &payload)
         }
-        Response::Exit { code } => write_frame(w, TAG_EXIT, &code.to_le_bytes()),
+        Response::Exit { code } => write_frame(w, Tag::Exit.as_u8(), &code.to_le_bytes()),
         Response::TimedOut { elapsed_ms } => {
-            write_frame(w, TAG_TIMEDOUT, &elapsed_ms.to_le_bytes())
+            write_frame(w, Tag::TimedOut.as_u8(), &elapsed_ms.to_le_bytes())
         }
-        Response::Error(msg) => write_frame(w, TAG_ERROR, msg.as_bytes()),
+        Response::Error(msg) => write_frame(w, Tag::Error.as_u8(), msg.as_bytes()),
     }
 }
 
@@ -585,17 +632,17 @@ pub(crate) fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), 
 /// from reading the frame.
 pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError> {
     let (tag, payload) = read_frame(r)?;
-    match tag {
-        TAG_STDOUT => Ok(Response::Stdout(payload)),
-        TAG_STDERR => Ok(Response::Stderr(payload)),
-        TAG_FILE => {
+    match Tag::from_u8(tag) {
+        Some(Tag::Stdout) => Ok(Response::Stdout(payload)),
+        Some(Tag::Stderr) => Ok(Response::Stderr(payload)),
+        Some(Tag::File) => {
             let mut body = Body::new(&payload);
             let path = body.string()?;
             let data = body.blob()?.to_vec();
             body.finish()?;
             Ok(Response::File { path, data })
         }
-        TAG_EXIT => {
+        Some(Tag::Exit) => {
             let bytes: [u8; 4] = payload
                 .as_slice()
                 .try_into()
@@ -604,7 +651,7 @@ pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError>
                 code: i32::from_le_bytes(bytes),
             })
         }
-        TAG_TIMEDOUT => {
+        Some(Tag::TimedOut) => {
             let bytes: [u8; 4] = payload
                 .as_slice()
                 .try_into()
@@ -613,13 +660,15 @@ pub(crate) fn read_response(r: &mut impl Read) -> Result<Response, ChannelError>
                 elapsed_ms: u32::from_le_bytes(bytes),
             })
         }
-        TAG_ERROR => {
+        Some(Tag::Error) => {
             let msg = String::from_utf8(payload)
                 .map_err(|_| ChannelError::Protocol("error frame is not valid UTF-8".into()))?;
             Ok(Response::Error(sanitize_error_msg(&msg)))
         }
-        other => Err(ChannelError::Protocol(format!(
-            "unknown response tag {other}"
+        // Unknown to this build, or a tag that only travels the other way. Fatal on purpose: see
+        // the asymmetry note on [`Response`].
+        _ => Err(ChannelError::Protocol(format!(
+            "unknown response tag {tag}"
         ))),
     }
 }
@@ -1013,6 +1062,31 @@ mod tests {
     }
 
     #[test]
+    fn tag_discriminants_are_the_wire_numbers() {
+        // The enum's discriminants are the bytes on the wire, and the peer on the other end of a
+        // vsock may be a separately built binary, so renumbering one is a protocol change, not a
+        // refactor. Pinned here rather than left to the round-trip tests, which would only catch
+        // a collision among the messages they happen to cover.
+        for (tag, wire) in [
+            (Tag::Exec, 1u8),
+            (Tag::Stdout, 2),
+            (Tag::Stderr, 3),
+            (Tag::Exit, 4),
+            (Tag::Error, 5),
+            (Tag::PutFile, 6),
+            (Tag::File, 7),
+            (Tag::TimedOut, 8),
+        ] {
+            assert_eq!(tag.as_u8(), wire, "{tag:?} moved on the wire");
+            assert_eq!(Tag::from_u8(wire), Some(tag), "{wire} no longer decodes");
+        }
+        // Nothing outside the assigned range decodes; 0 and 255 are the fuzz corpus's probes.
+        assert_eq!(Tag::from_u8(0), None);
+        assert_eq!(Tag::from_u8(9), None);
+        assert_eq!(Tag::from_u8(255), None);
+    }
+
+    #[test]
     fn the_ceiling_sentinel_is_none_on_both_sides() {
         // The wire asks for the agent's ceiling with a zero `timeout_ms`, which is the byte
         // `budget_from` reads in the guest agent. Pin both directions on the exact bytes so
@@ -1023,7 +1097,7 @@ mod tests {
         body.extend_from_slice(&0u32.to_le_bytes()); // artifact count
         body.extend_from_slice(&0u32.to_le_bytes()); // timeout_ms: the ceiling sentinel
         body.extend_from_slice(&0u32.to_le_bytes()); // env count
-        let mut framed = vec![TAG_EXEC];
+        let mut framed = vec![Tag::Exec.as_u8()];
         framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
         framed.extend_from_slice(&body);
 
@@ -1152,7 +1226,7 @@ mod tests {
     fn decoded_guest_error_is_sanitized() {
         // The decode path applies the sanitizer, so a control-char message never reaches a caller raw.
         let evil = "x\x1by";
-        let mut framed = vec![TAG_ERROR];
+        let mut framed = vec![Tag::Error.as_u8()];
         framed.extend_from_slice(&(evil.len() as u32).to_le_bytes());
         framed.extend_from_slice(evil.as_bytes());
         assert_eq!(
@@ -1164,7 +1238,7 @@ mod tests {
     #[test]
     fn oversized_length_is_rejected_before_allocating() {
         // A frame header claiming ~4 GiB: must be a typed error, not a 4 GiB `vec![0; len]`.
-        let mut framed = vec![TAG_STDOUT];
+        let mut framed = vec![Tag::Stdout.as_u8()];
         framed.extend_from_slice(&u32::MAX.to_le_bytes());
         assert!(matches!(
             read_response(&mut framed.as_slice()),
@@ -1175,7 +1249,7 @@ mod tests {
     #[test]
     fn truncated_frame_is_typed_error() {
         // Header promises 10 bytes; only 3 follow.
-        let mut framed = vec![TAG_STDOUT];
+        let mut framed = vec![Tag::Stdout.as_u8()];
         framed.extend_from_slice(&10u32.to_le_bytes());
         framed.extend_from_slice(b"abc");
         assert!(matches!(
@@ -1190,7 +1264,7 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(&1u32.to_le_bytes()); // argc = 1
         body.extend_from_slice(&99u32.to_le_bytes()); // arg len = 99, but no bytes follow
-        let mut framed = vec![TAG_EXEC];
+        let mut framed = vec![Tag::Exec.as_u8()];
         framed.extend_from_slice(&(body.len() as u32).to_le_bytes());
         framed.extend_from_slice(&body);
         assert!(matches!(
