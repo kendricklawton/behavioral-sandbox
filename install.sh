@@ -74,7 +74,7 @@ blocks_jail() {
 write_pinned_release_key() {
     cat > "$1" <<'PIN_EOF'
 -----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEAWcVk7c7luMX7nqzuNc7Zs/wlnWY05Sim2xbCluSXuKw=
+MCowBQYDK2VwAyEAklT+9QWZ32ifg9N2FjCyt7Lr3hhKn1UxZ2z/GR0Y4pw=
 -----END PUBLIC KEY-----
 PIN_EOF
 }

@@ -70,6 +70,10 @@ supported release; pin a git rev.
   larger than the channel's frame cap.
 - **The repository is `kendricklawton/behavioral-sandbox`**, and release assets are named
   `bsx-<version>-x86_64-linux.tar.gz`. The `v0.0.1` and `v0.0.2` assets carry the previous name.
+- **BREAKING: the release signing key is rotated.** `release-key.pem`, and the copy pinned in
+  `install.sh` that `install_sh_pinned_key_matches_release_key_pem` holds byte-identical to it,
+  carry a new public key. A signature made by the previous key does not verify against this repo's
+  pinned copy, and the `v0.0.1` and `v0.0.2` assets were signed by that previous key.
 - **The signed record format is unchanged**: `AUDIT_SCHEMA_VERSION` 1, envelope `schema` 2. A
   `sandbox_id` carries a `bsx-` prefix, which is a value rather than a schema field, so
   `crates/record/tests/durability.rs` still holds today's canonicalization to an envelope signed
