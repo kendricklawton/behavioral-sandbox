@@ -15,10 +15,17 @@ use std::time::Duration;
 use ekvm_record::{
     AxisGap, FlowCounts, FlowKey, HostKey, NetSection, NetStats, RecordSubject, ResourceSummary,
     RunRecord, SyscallEvent, SyscallFootprint, Timing, TrustedKey, record_hash, verify,
+    verify_chain,
 };
 
 /// The frozen envelope. Regenerate only on a deliberate schema bump (`regenerate_fixture`).
 const ENVELOPE: &str = include_str!("fixtures/run-record.envelope.json");
+/// The frozen **chain**: two envelopes, one per line, the shape a daemon session writes (every
+/// `trace` reply after the first is signed chained). Frozen separately from [`ENVELOPE`] because a
+/// chained record signs `prev + "\n" + canonical`, and that framing is a distinct part of the signed
+/// surface: nothing about the single-record fixture covers it, so a change to it would reach
+/// backwards through every session record on disk with the single-record pin still green.
+const CHAIN: &str = include_str!("fixtures/run-record.chain.jsonl");
 /// The public half of the throwaway fixture key ([`fixture_key`]); not a secret, the seed is in
 /// this file. What matters is that `verify` accepts the frozen envelope under it.
 const PUBKEY_HEX: &str = "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c";
@@ -120,6 +127,36 @@ fn fixture_record() -> RunRecord {
     )
 }
 
+/// The chain's second record: the fixture record with a different exec time, so the two canonical
+/// strings differ and the link between them commits to something rather than to itself.
+fn fixture_record_two() -> RunRecord {
+    let mut record = fixture_record();
+    record.timing = Timing::new(Duration::from_millis(7), Duration::from_millis(9));
+    record
+}
+
+#[test]
+fn a_frozen_chain_still_verifies() {
+    let trusted = TrustedKey::from_hex(PUBKEY_HEX).expect("fixture pubkey");
+    let entries: Vec<&str> = CHAIN
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(entries.len(), 2, "the frozen chain is two records");
+    let records = verify_chain(&entries, &[trusted]).expect(
+        "the frozen chain must still verify: the `prev + \\n + canonical` framing is signed, so a \
+         change to it invalidates every session record already on disk",
+    );
+    assert_eq!(records[0], fixture_record().to_json());
+    assert_eq!(records[1], fixture_record_two().to_json());
+    assert_eq!(
+        record_hash(&records[0]),
+        CANONICAL_HASH,
+        "the anchor is the same record the single-envelope fixture carries"
+    );
+}
+
 #[test]
 fn a_frozen_envelope_still_verifies() {
     let trusted = TrustedKey::from_hex(PUBKEY_HEX).expect("fixture pubkey");
@@ -164,6 +201,14 @@ fn regenerate_fixture() {
     let canonical = fixture_record().to_json();
     println!("--- fixtures/run-record.envelope.json ---");
     println!("{envelope}");
+    let r1 = fixture_record().to_json();
+    let r2 = fixture_record_two().to_json();
+    println!("--- fixtures/run-record.chain.jsonl ---");
+    println!("{}", key.sign_canonical_chained(&r1, None));
+    println!(
+        "{}",
+        key.sign_canonical_chained(&r2, Some(&record_hash(&r1)))
+    );
     println!("--- PUBKEY_HEX ---");
     println!("{}", key.key_id());
     println!("--- CANONICAL_HASH ---");

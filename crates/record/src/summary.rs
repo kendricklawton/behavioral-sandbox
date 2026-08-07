@@ -366,6 +366,55 @@ mod tests {
         assert_eq!(json, expected);
     }
 
+    /// The projection is hand-rolled like the record, and its golden is re-blessed the same way, so
+    /// it needs the same guard a golden cannot give: a parser's verdict. See
+    /// `the_rendered_record_parses_as_json` for the reasoning.
+    #[test]
+    fn the_rendered_summary_parses_as_json() {
+        use crate::record::{EgressPosture, RecordSubject};
+        use ekvm_probes_common::{PolicyRule, PolicyRule6};
+
+        let hostile = "q\"uote \\slash \u{1}ctl \n nl";
+        let mut record = sample(vec![flow(
+            [10, 200, 0, 2],
+            40000,
+            [8, 8, 8, 8],
+            443,
+            IPPROTO_TCP,
+        )]);
+        record.subject = RecordSubject::new(hostile.into(), 1);
+        record.host_syscalls =
+            SyscallFootprint::from_events(0x42, &[ev(1, 0x42, hostile.as_bytes(), "sh")]);
+        record.coverage = vec![AxisGap::HostSyscalls(hostile.into())];
+        // Posture on, so the `allowed`/`routed`/`enforcing` arm renders too rather than the nulls.
+        record.network = record.network.map(|n| {
+            n.with_posture(EgressPosture {
+                enforcing: true,
+                allowed: vec![PolicyRule::allow(0x0A00_0000, 8, 0, 0)],
+                allowed6: vec![PolicyRule6::allow([0xfd; 16], 64, 443, IPPROTO_TCP)],
+                gateway: Some(std::net::Ipv4Addr::new(10, 200, 0, 1)),
+            })
+        });
+
+        let json = record.to_summary_json();
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json);
+        assert!(
+            parsed.is_ok(),
+            "the summary must be parseable JSON: {parsed:?}\n{json}"
+        );
+        let v = parsed.expect("checked just above");
+
+        assert_eq!(v["gaps"][0], format!("host_syscalls: {hostile}"));
+        assert_eq!(v["network"]["reached"][0], "8.8.8.8:443/tcp");
+        assert_eq!(v["network"]["allowed"][0], "10.0.0.0/8:*/*");
+        assert!(
+            v["host_syscalls"]["notable"][0]
+                .as_str()
+                .is_some_and(|s| s.contains(hostile)),
+            "the notable line survives escaping: {v}"
+        );
+    }
+
     #[test]
     fn summary_is_byte_stable_across_input_order() {
         let a = sample(vec![

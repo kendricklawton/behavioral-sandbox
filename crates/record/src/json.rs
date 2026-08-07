@@ -576,6 +576,51 @@ mod tests {
         assert!(json.contains("\"truncated\":true"), "{json}");
     }
 
+    /// The writer is hand-rolled: two hundred lines of `push_str` deciding its own commas and
+    /// braces. The two artifacts that guard it, the byte golden above and
+    /// `tests/durability.rs`'s fixture, are both **re-blessed** when the record legitimately
+    /// changes, so an edit that adds a field and drops a comma passes both once they are reissued.
+    /// A parser cannot be re-blessed, so it is the guard that survives that workflow.
+    ///
+    /// Every string-typed field carries JSON metacharacters here, since those are what a hand-rolled
+    /// escaper gets wrong, and they are also the fields a guest can influence.
+    #[test]
+    fn the_rendered_record_parses_as_json() {
+        let hostile = "q\"uote \\slash \u{1}ctl \n nl \t tab";
+        let mut record = sample(vec![flow(
+            [10, 200, 0, 2],
+            40000,
+            [1, 1, 1, 1],
+            53,
+            IPPROTO_UDP,
+        )]);
+        record.subject = RecordSubject::new(hostile.into(), 1_700_000_000_000_000_000);
+        record.host_syscalls =
+            SyscallFootprint::from_events(0x42, &[ev(1, 0x42, hostile.as_bytes(), "sh\"comm")]);
+        record.coverage = vec![
+            AxisGap::HostSyscalls(hostile.into()),
+            AxisGap::Network(hostile.into()),
+            AxisGap::Cpu(hostile.into()),
+        ];
+
+        let json = record.to_json();
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json);
+        assert!(
+            parsed.is_ok(),
+            "the record must be parseable JSON: {parsed:?}\n{json}"
+        );
+        let v = parsed.expect("checked just above");
+
+        // Parsed, and the values survive the escaping: parseability alone would also be satisfied
+        // by a writer that dropped every string it could not render.
+        assert_eq!(v["subject"]["sandbox_id"], hostile);
+        assert_eq!(v["host_syscalls"]["notable"][0]["detail"], hostile);
+        assert_eq!(v["host_syscalls"]["notable"][0]["comm"], "sh\"comm");
+        assert_eq!(v["coverage"][0]["axis"], "host_syscalls");
+        assert_eq!(v["coverage"][0]["reason"], hostile);
+        assert_eq!(v["network"]["flows"][0]["dst"], "1.1.1.1");
+    }
+
     #[test]
     fn json_is_byte_stable_across_input_order() {
         let a = sample(vec![
