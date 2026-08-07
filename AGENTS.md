@@ -1,4 +1,4 @@
-# bsx: engineering disciplines
+# BSX: engineering disciplines
 
 **A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and

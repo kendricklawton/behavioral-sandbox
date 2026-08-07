@@ -26,7 +26,7 @@ body:
     attributes:
       label: "`bsx doctor` output"
       description: >
-        All of it. bsx probes host capabilities rather than distributions, so these rows
+        All of it. BSX probes host capabilities rather than distributions, so these rows
         usually identify the problem outright.
       render: console
     validations:
@@ -64,6 +64,6 @@ body:
         - label: This is not a security report.
           required: true
         - label: >
-            I understand bsx is pre-release and unaudited, with one maintainer, and that a reply
+            I understand BSX is pre-release and unaudited, with one maintainer, and that a reply
             may take a few days.
           required: true

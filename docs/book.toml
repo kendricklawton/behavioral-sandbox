@@ -1,7 +1,7 @@
 [book]
 authors = ["Kendrick Lawton"]
 src = "."
-title = "bsx"
+title = "BSX"
 
 
 [output.html]

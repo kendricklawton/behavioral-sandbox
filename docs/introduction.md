@@ -1,6 +1,6 @@
 # Introduction
 
-**bsx** is a self-hostable engine for running untrusted code in hardware isolation, with a
+**BSX** is a self-hostable engine for running untrusted code in hardware isolation, with a
 host-observed record of what the host was able to see it do.
 
 Untrusted code runs inside a **Firecracker** microVM, so the isolation boundary is the CPU's,
@@ -74,7 +74,7 @@ conventions.
 
 ## License
 
-bsx is licensed under the **Apache License 2.0**, copyright 2026 Kendrick Lawton. The full text is
+BSX is licensed under the **Apache License 2.0**, copyright 2026 Kendrick Lawton. The full text is
 [`LICENSE`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/LICENSE) in the
 repository. Contributions are accepted inbound under that same license, and a pull request asserts
 that per commit with a `Signed-off-by` line under the [Developer Certificate of

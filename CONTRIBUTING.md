@@ -1,4 +1,4 @@
-# Contributing to bsx
+# Contributing to BSX
 
 Thanks for your interest. **Outside contributions are welcome.** A few things are worth knowing
 before you spend time on one.

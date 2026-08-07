@@ -8,7 +8,7 @@
 
 ## v0.1.0 (Unreleased, planned)
 
-The first supported release of bsx: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
+The first supported release of BSX: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
 
 ### Added
 - **Hardware Isolation Driver (`bsx-engine`, `crates/engine`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
@@ -152,7 +152,7 @@ never enters the repo or `dist/`.
 Firecracker range, floor through pin (v0.1.0 supports v1.15 through v1.16). The line stays
 supported for as long as any Firecracker series in that range is still under upstream
 support; once the last of them ages out (about one Firecracker release cycle, roughly six
-months, after the next bsx minor ships), every VMM the line can drive is unpatched, and
+months, after the next BSX minor ships), every VMM the line can drive is unpatched, and
 continuing to "support" it would bless untrusted code on an unmaintained isolation
 boundary, the same threat-model reasoning behind `bsx doctor`'s host kernel floor. The
 weekly `firecracker-pin` workflow watches upstream's support table, so the end of a window

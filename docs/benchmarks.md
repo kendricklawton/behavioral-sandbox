@@ -31,7 +31,7 @@ is the only thing a benchmark ever tells you.
   cargo xtask bench-warm --runs 100  # or a single bench at a sharper n for publication-grade tails
   ```
 
-  The KVM benches need `/dev/kvm` + the built bsx rootfs; the eBPF benches need
+  The KVM benches need `/dev/kvm` + the built BSX rootfs; the eBPF benches need
   `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes` (not KVM). `bench-all` records the host it ran
   on and skips any section it can't run, with the reason, so a report says exactly what it measured.
 
@@ -68,7 +68,7 @@ Each section below exists and runs today; only the published result tables are w
 | `bench-scale` | Whether per-event cost changes with the number of watched sandboxes |
 | `bench-sign` | Record signing and verification cost |
 
-The KVM benches need `/dev/kvm` and the built bsx rootfs; the eBPF benches need
+The KVM benches need `/dev/kvm` and the built BSX rootfs; the eBPF benches need
 `CAP_BPF`+`CAP_PERFMON` and `cargo xtask build-probes`, but not KVM.
 
 ## How the suite guards against measuring nothing

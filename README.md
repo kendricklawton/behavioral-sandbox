@@ -1,5 +1,5 @@
 <div align="center">
-  <h1><code>bsx</code></h1>
+  <h1>BSX</h1>
 
   <p>
     <strong>A self-hostable sandbox for running untrusted code in a hardware-isolated
@@ -27,7 +27,7 @@
 
 ## Warning
 
-bsx is pre-release and unaudited. Version `0.0.3` is a checkpoint that exercises the release path,
+BSX is pre-release and unaudited. Version `0.0.3` is a checkpoint that exercises the release path,
 not a supported release: one maintainer, no external review, and no outside users. The API changes
 without notice, so if you build on it, pin a git rev. It has been run on two kernels, neither of
 them enterprise. Benchmark numbers are withdrawn pending re-measurement.
@@ -65,7 +65,7 @@ sandbox at this stage, and everything below is written to make that possible.
                                                          `bsx-probes-common`
 ```
 
-bsx runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU
+BSX runs untrusted code inside a Firecracker microVM, so the boundary is enforced by the CPU
 through KVM rather than by guest-side software. Around that microVM, host-side eBPF (via
 [aya](https://aya-rs.dev/)) observes and enforces what the code does from the host side of that
 boundary: the programs are loaded by a host process and attached to host-kernel hooks, where they
