@@ -106,12 +106,12 @@ const _: () = assert!(MAX_RESPONSE_BYTES > MAX_REQUEST_BYTES);
 /// leading `schema` field plus the flattened [`Request`]/[`Response`] body, so a line reads
 /// `{"schema":1,"op":"exec",...}` and the version is legible before the body.
 ///
-/// Built by [`new`](Self::new), which stamps [`WIRE_SCHEMA`], the only version this crate speaks.
-/// The *gate* is the read side ([`read_request`]/[`read_response`]): deserializing an `Envelope`
-/// directly checks nothing, so a
-/// stamp this crate would refuse is representable here, on purpose, since a test or a probe wants
-/// to read a foreign stamp, but only ever *minted* through `new`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Built by [`new`](Self::new), which stamps [`WIRE_SCHEMA`], the only version this crate speaks,
+/// and that is the type's whole job: **the decode side never builds one.** The read side checks the
+/// stamp on the parsed value before the body is trusted ([`read_request`]/[`read_response`], through
+/// `decode_message`), so an `Envelope` that could carry a foreign stamp would only be a second,
+/// ungated way in. `Serialize` with no `Deserialize` is what keeps the type one-way.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct Envelope<T> {
     /// The [`WIRE_SCHEMA`] the sender speaks.
@@ -123,8 +123,8 @@ pub struct Envelope<T> {
 
 impl<T> Envelope<T> {
     /// Stamp `body` with the one schema this crate speaks. There is no way to mint any other
-    /// number here; a peer's foreign stamp exists only on the decode side, where
-    /// [`read_request`]/[`read_response`] refuse it.
+    /// number here, and no `Deserialize` to mint one from a peer's bytes; a foreign stamp exists
+    /// only on the decode side, where [`read_request`]/[`read_response`] refuse it.
     #[must_use]
     pub fn new(body: T) -> Self {
         Self {
@@ -772,6 +772,14 @@ fn read_message<T: DeserializeOwned>(
 
 /// Decode one already-framed line into a `T`, enforcing the schema gate. Split out so the framing
 /// (bounded line read) and the decoding (schema + body) are each unit-testable in isolation.
+///
+/// The direction's cap bounds the **line**, not this: parsing to a `Value` first costs a DOM some
+/// multiple of the line's size (one `Value` per token, so a line of small scalars is the worst
+/// ratio), which makes a session's peak that multiple of its cap rather than the cap itself.
+/// Bounded, not unbounded, since the cap and `--max-sessions` bound it on both axes. Depth is
+/// bounded separately by `serde_json`'s own 128-deep recursion limit, which is what makes a line of
+/// nothing but `[` a [`ProtocolError::Malformed`] rather than a stack overflow;
+/// `nesting_past_the_json_recursion_limit_is_a_typed_error` holds that.
 fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
     // Parse once to a generic value so the `schema` can be checked *before* the body is trusted,
     // a wrong-version peer is a clean `Schema` error even if its body is a shape we don't know yet.
@@ -1432,6 +1440,35 @@ mod tests {
             Err(ProtocolError::TooLarge { .. })
         ));
         assert!(wire.is_empty(), "refused before any byte moved");
+    }
+
+    #[test]
+    fn nesting_past_the_json_recursion_limit_is_a_typed_error() {
+        // The decode allocates a `Value` DOM before it builds a `T`, so depth is a separate axis
+        // from the line cap: 100k open brackets is a small line. `serde_json`'s default recursion
+        // limit is what keeps it a value rather than a blown stack, and this crate relies on that
+        // default (the `unbounded_depth` feature is off), which is worth a test rather than a
+        // footnote.
+        // Balanced on both sides, and carried in a field the message ignores, so **only** the depth
+        // differs between the two halves: an unbalanced line would be malformed at any depth and
+        // this would pass without touching the limit at all.
+        let nest = |depth: usize| {
+            format!(
+                "{{\"schema\":1,\"op\":\"open\",\"deep\":{}{}}}\n",
+                "[".repeat(depth),
+                "]".repeat(depth)
+            )
+        };
+        let shallow = nest(8);
+        assert!(
+            matches!(read_request(&mut shallow.as_bytes()), Ok(Some(_))),
+            "the same shape inside the limit decodes, so the deep case below is about depth"
+        );
+        let deep = nest(100_000);
+        assert!(matches!(
+            read_request(&mut deep.as_bytes()),
+            Err(ProtocolError::Malformed(_))
+        ));
     }
 
     #[test]
