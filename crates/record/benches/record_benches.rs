@@ -1,21 +1,88 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ekvm_record::{HostKey, RecordSubject, RunRecord, Timing, record_hash, verify, verify_chain};
+use ekvm_record::{
+    AxisGap, COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, HostKey, NetSection, NetStats,
+    RecordSubject, RunRecord, SyscallEvent, SyscallFootprint, Timing, record_hash, verify,
+    verify_chain,
+};
 
+const IPPROTO_TCP: u8 = 6;
+
+fn ev(syscall: u32, detail: &[u8]) -> SyscallEvent {
+    let mut d = [0u8; DETAIL_CAP];
+    let n = detail.len().min(d.len());
+    d[..n].copy_from_slice(&detail[..n]);
+    let mut c = [0u8; COMM_CAP];
+    c[..2].copy_from_slice(b"sh");
+    SyscallEvent {
+        cgroup_id: 0x42,
+        pid: 7,
+        tid: 7,
+        syscall,
+        detail_len: n as u32,
+        comm: c,
+        detail: d,
+    }
+}
+
+/// A **populated** record: 64 flows and a full notable set, so `to_json` is timed on what the engine
+/// actually serializes. An empty record measures the cheapest path through both renderers and
+/// reports a number that does not describe either (design rule 6).
 fn sample_record() -> RunRecord {
-    let subject = RecordSubject::new("sb-bench-12345".to_string(), 1_700_000_000_000_000_000);
-    let timing = Timing::new(
-        std::time::Duration::from_millis(120),
-        std::time::Duration::from_millis(15),
-    );
+    let counts = FlowCounts {
+        ingress_packets: 2,
+        ingress_bytes: 120,
+        egress_packets: 3,
+        egress_bytes: 200,
+    };
+    let flows: Vec<_> = (0..64u16)
+        .map(|i| {
+            (
+                FlowKey::new(
+                    u32::from_be_bytes([10, 200, 0, 2]),
+                    u32::from_be_bytes([8, 8, (i >> 8) as u8, i as u8]),
+                    40000 + i,
+                    443,
+                    IPPROTO_TCP,
+                ),
+                counts,
+            )
+        })
+        .collect();
+    let denials: Vec<_> = (0..8u16)
+        .map(|i| {
+            (
+                FlowKey::new(
+                    0,
+                    u32::from_be_bytes([9, 9, 0, i as u8]),
+                    0,
+                    443,
+                    IPPROTO_TCP,
+                ),
+                4,
+            )
+        })
+        .collect();
+    let events: Vec<SyscallEvent> = (0..64u32)
+        .map(|i| ev(1, format!("/usr/lib/some/path/number-{i:03}.so").as_bytes()))
+        .collect();
     RunRecord::from_parts(
-        subject,
-        None,
+        RecordSubject::new("sb-bench-12345".to_string(), 1_700_000_000_000_000_000),
+        Some(NetSection::from_tap(
+            flows,
+            NetStats::default(),
+            denials,
+            0,
+            0,
+        )),
         Default::default(),
-        Default::default(),
-        timing,
-        vec![],
+        SyscallFootprint::from_events(0x42, &events),
+        Timing::new(
+            std::time::Duration::from_millis(120),
+            std::time::Duration::from_millis(15),
+        ),
+        vec![AxisGap::Cpu("meter lock poisoned".into())],
     )
 }
 
@@ -56,13 +123,22 @@ fn bench_record_signing_and_verification(c: &mut Criterion) {
 fn bench_record_chaining(c: &mut Criterion) {
     let host_key = HostKey::from_seed([7u8; 32]);
     let trusted_key = host_key.verifying_key();
-    let record_json = sample_record().to_json();
 
-    let e0 = host_key.sign_canonical_chained(&record_json, None);
-    let h0 = record_hash(&record_json);
-    let e1 = host_key.sign_canonical_chained(&record_json, Some(&h0));
-    let h1 = record_hash(&record_json);
-    let e2 = host_key.sign_canonical_chained(&record_json, Some(&h1));
+    // Three *distinct* records, each link committing to the one before it. Signing the same record
+    // three times makes every hash equal, so the chain would verify whatever the links said.
+    let records: Vec<String> = (0..3)
+        .map(|i| {
+            let mut r = sample_record();
+            r.timing = Timing::new(
+                std::time::Duration::from_millis(100 + i),
+                std::time::Duration::from_millis(i),
+            );
+            r.to_json()
+        })
+        .collect();
+    let e0 = host_key.sign_canonical_chained(&records[0], None);
+    let e1 = host_key.sign_canonical_chained(&records[1], Some(&record_hash(&records[0])));
+    let e2 = host_key.sign_canonical_chained(&records[2], Some(&record_hash(&records[1])));
 
     let chain = [e0, e1, e2];
     let chain_refs: Vec<&str> = chain.iter().map(|s| s.as_str()).collect();
