@@ -2,24 +2,24 @@
 
 Three crates, split by what can depend on what:
 
-- **`ekvm-probes`** is the eBPF programs themselves: `#![no_std]`, built for `bpfel-unknown-none` via
+- **`bsx-probes`** is the eBPF programs themselves: `#![no_std]`, built for `bpfel-unknown-none` via
   `bpf-linker`, carrying BTF in the object (no program reads kernel struct fields yet, so no CO-RE
   field relocations are in play; the crate's header says when those arrive). Syscall tracepoints, tc
   classifiers on the VM's tap, and cgroup accounting.
-- **`ekvm-probes-common`** holds the `#[repr(C)]` plain-old-data records that cross the kernel/user
+- **`bsx-probes-common`** holds the `#[repr(C)]` plain-old-data records that cross the kernel/user
   boundary. **Zero dependencies, single-sourced**, so the program writing a record and the loader
   reading it cannot disagree about layout.
-- **`ekvm-probes-loader`** is the userspace half, on `aya`: attach to a specific sandbox, read the maps,
+- **`bsx-probes-loader`** is the userspace half, on `aya`: attach to a specific sandbox, read the maps,
   fold events, and assemble the `RunRecord`.
 
-**`ekvm-record` is deliberately not one of them.** It owns the record itself: its types (`RunRecord`,
+**`bsx-record` is deliberately not one of them.** It owns the record itself: its types (`RunRecord`,
 `AxisGap`), the deterministic JSON, the summary projection, and the ed25519 signing and
 verification. It links no aya, and the dependency runs one way, the loader onto the record, never
 back. That is what lets a consumer parse and verify a record on a machine with no eBPF loader, no
 KVM, and no reason to trust the host that produced it. The two share only
-`ekvm-probes-common`, the record's own vocabulary.
+`bsx-probes-common`, the record's own vocabulary.
 
-`ekvm-probes-loader` is one module per subsystem, which is the map to read it by:
+`bsx-probes-loader` is one module per subsystem, which is the map to read it by:
 
 | Module | What it owns |
 |---|---|

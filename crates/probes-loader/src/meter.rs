@@ -6,7 +6,7 @@ use std::time::Duration;
 use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap, MapData};
 use aya::programs::TracePoint;
-use ekvm_record::{CgroupStats, ResourceSummary};
+use bsx_record::{CgroupStats, ResourceSummary};
 
 use crate::{ProbeError, cgroup_dir_of_pid, cgroup_id_of_dir, check_support, load_object};
 
@@ -281,7 +281,7 @@ impl ResourceMeter {
     /// A whole [`ResourceSummary`] for the sandbox whose VMM is `pid`: resolve its cgroup
     /// once (id **and** dir, from `/proc/<pid>/cgroup`), read the eBPF CPU total for that cgroup id, and
     /// read the native cgroup v2 memory/IO counters from that cgroup dir. The per-run summary a caller
-    /// ships alongside the run's `RunResult` (no link: this crate is deliberately free of `ekvm`,
+    /// ships alongside the run's `RunResult` (no link: this crate is deliberately free of `bsx`,
     /// and nothing here is on docs.rs), the CPU figure is meaningful
     /// only if this cgroup was [`add_target`](Self::add_target)ed (or [`meter_all`](Self::meter_all) is on)
     /// while the run executed; the memory/IO figures are the kernel's regardless.
@@ -294,7 +294,7 @@ impl ResourceMeter {
     pub fn summary_for_pid(&self, pid: u32) -> Result<ResourceSummary, ProbeError> {
         let dir = cgroup_dir_of_pid(pid)?;
         let cgroup_id = cgroup_id_of_dir(&dir)?;
-        // `ResourceSummary` is `#[non_exhaustive]` (defined in `ekvm-record`), so it is built
+        // `ResourceSummary` is `#[non_exhaustive]` (defined in `bsx-record`), so it is built
         // through `Default` + field assignment rather than a struct literal.
         let mut summary = ResourceSummary::default();
         summary.cpu_time = self.cpu_time(cgroup_id)?;

@@ -19,7 +19,7 @@ mod common;
 
 use std::time::Duration;
 
-use ekvm_engine::{RunningVm, Vm};
+use bsx_engine::{RunningVm, Vm};
 
 use common::{TmpDir, have_jailer_privileges, jailed_overlay_config};
 

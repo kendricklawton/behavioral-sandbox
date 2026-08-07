@@ -1,4 +1,4 @@
-//! `ekvm-channel`, the host↔guest wire protocol for the exec channel.
+//! `bsx-channel`, the host↔guest wire protocol for the exec channel.
 //!
 //! One command in, its `stdout`/`stderr`/exit out, over a single bidirectional byte stream (vsock
 //! in the guest, a unix socket in tests, the protocol doesn't care). This crate is only the framing, so it stays near dependency-free (one `no_std` crate,
@@ -14,7 +14,7 @@
 //! - Every message is a **length-prefixed frame**, `tag(u8) · len(u32-le) · payload`, never a
 //!   read-to-EOF or a delimiter scan. `len` is checked against [`MAX_PAYLOAD`] *before* allocating,
 //!   so a hostile or buggy peer cannot drive an unbounded read (the same discipline as the HTTP
-//!   client in `ekvm`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
+//!   client in `bsx`). Every failure is a typed [`ChannelError`] carrying its `io::Error`
 //!   source; nothing here panics.
 //!
 //! **The API is type-state, not free functions.** [`ClientConnection`] (host) and
@@ -103,9 +103,9 @@ pub const VSOCK_SCHEME: &str = "vsock";
 /// longer one (exit 0, a warning on stderr nobody reads), so the on-disk label stops matching this
 /// constant and the guest's `findfs` finds nothing: every bulk mount silently vanishes. A test below
 /// pins the limit, and that the two stay distinct even so.
-pub const INPUT_LABEL: &str = "ekvm-input";
+pub const INPUT_LABEL: &str = "bsx-input";
 /// See [`INPUT_LABEL`]. The output device is writable; the guest mounts it read-write at `/output`.
-pub const OUTPUT_LABEL: &str = "ekvm-output";
+pub const OUTPUT_LABEL: &str = "bsx-output";
 
 /// The guest path of the **overlay init**, the PID 1 a read-only-root boot hands off to (it stacks
 /// a per-run tmpfs over the shared read-only base, then execs the real init). Like the vsock port

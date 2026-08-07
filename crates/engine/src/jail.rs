@@ -521,7 +521,7 @@ fn resolve_exec(firecracker: &Path) -> Result<PathBuf, VmmError> {
 /// `--cgroup-version 2` with no `--parent-cgroup` places the VMM at
 /// `<cgroup root>/<exec-file name>/<id>`. The name component is whatever the resolved binary is
 /// called: the jailer accepts any exec-file name since v1.13, so an embedder pointing
-/// `EKVM_FIRECRACKER` at, say, `/opt/fc` gets a `fc` component. Reading it off the resolved path rather than assuming a literal is what keeps
+/// `BSX_FIRECRACKER` at, say, `/opt/fc` gets a `fc` component. Reading it off the resolved path rather than assuming a literal is what keeps
 /// this correct either way. Precomputing it lets the lifetime sentinel
 /// watch the cgroup from the moment the jailer is spawned instead of after boot; `run_boot` still
 /// learns the *actual* dir from `/proc` and warns if they ever disagree.
@@ -722,11 +722,11 @@ mod tests {
         // **succeed**, and the leak assertion below would fire on a mount the test itself made, so
         // root gets a destination that does not exist (ENOENT for everyone). Either way the branch
         // under test is "mount returned non-zero", and either way nothing may be left mounted.
-        let dir = std::env::temp_dir().join(format!("ekvm-bindro-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-bindro-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let src = dir.join("src");
         std::fs::write(&src, b"base").expect("write src");
-        let dst = if ekvm_test_support::have_real_root() {
+        let dst = if bsx_test_support::have_real_root() {
             dir.join("no-such-dst")
         } else {
             let dst = dir.join("dst");
@@ -763,10 +763,10 @@ mod tests {
         assert!(mount_is_shared(MOUNTINFO, Path::new("/tmp")));
         assert!(mount_is_shared(
             MOUNTINFO,
-            Path::new("/tmp/ekvm-42-0/firecracker")
+            Path::new("/tmp/bsx-42-0/firecracker")
         ));
         // The root is shared, so a path on no more-specific mount inherits its propagation.
-        assert!(mount_is_shared(MOUNTINFO, Path::new("/var/lib/ekvm")));
+        assert!(mount_is_shared(MOUNTINFO, Path::new("/var/lib/bsx")));
     }
 
     #[test]

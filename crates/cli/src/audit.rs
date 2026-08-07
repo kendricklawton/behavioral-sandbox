@@ -1,5 +1,5 @@
 //! The CLI's audit face: compose the two tracks the way the engine intends, boot the sandbox
-//! (`ekvm-engine`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
+//! (`bsx-engine`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
 //! (`vmm_pid`/`netns`/`tap_name`) and fuse their output into the per-run [`RunRecord`].
 //!
 //! This is the caller-side launch sequence the loader specifies:
@@ -12,8 +12,8 @@
 //! *policy* (`--allow`) is the exception: it is a security control, so a run that asked to enforce
 //! one and couldn't arm the tap is a typed refusal, never a silent unenforced run.
 
-use ekvm_engine::VmmError;
-use ekvm_probes_loader::{
+use bsx_engine::VmmError;
+use bsx_probes_loader::{
     AttachParams, AxisGap, LiveSnapshot, RecordSubject, ResourceSummary, RunRecord, SandboxProbes,
     SharedMeter, SharedTracer, SyscallFootprint, Timing,
 };
@@ -248,7 +248,7 @@ mod tests {
         // The fail-open path a capability-less host takes: no bundle, gaps carried through.
         let probes = RunProbes {
             probes: None,
-            subject: RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            subject: RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             gaps: vec![
                 AxisGap::HostSyscalls("load shared tracer: no BTF".into()),
                 AxisGap::Cpu("load shared meter: no BTF".into()),

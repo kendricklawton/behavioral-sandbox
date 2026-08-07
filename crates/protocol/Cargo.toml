@@ -1,5 +1,5 @@
 [package]
-name = "ekvm-protocol"
+name = "bsx-protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,10 +7,10 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The agent wire protocol: the versioned newline-JSON contract the daemon and its clients (the reference client, the polyglot SDKs) share."
+description = "The agent wire protocol: the versioned newline-JSON contract the daemon and its clients share."
 
-# Deliberately a leaf: serde only, **no `ekvm`**. The wire is the contract, not shared Rust
-# internals, so a non-Rust SDK reimplements these JSON shapes without linking the engine. The one
+# Deliberately a leaf: serde only, **no `bsx`**. The wire is the contract, not shared Rust
+# internals, so a non-Rust client reimplements these JSON shapes without linking the engine. The one
 # adversarial concern is design rule 5 (bounded, typed decode), which is pure std.
 [dependencies]
 serde = { workspace = true }

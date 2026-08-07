@@ -2,7 +2,7 @@
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches an enforcing
 //! `tc` program inside the VM's netns (needs `CAP_BPF`+`CAP_NET_ADMIN` + BTF + the built object). Run via
-//! `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so the loader library
+//! `cargo xtask ci-privileged`. Uses `bsx` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a netns name and a tap name).
 //!
 //! The proof is at the enforcement point (the tap): the guest sends UDP to two ports of its host end, one
@@ -14,8 +14,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
-use ekvm_probes_loader::{EgressPolicy, Protocol, TapMonitor, check_support, object_path};
+use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use bsx_probes_loader::{EgressPolicy, Protocol, TapMonitor, check_support, object_path};
 
 /// IP protocol number for UDP, for the raw flow-key comparisons the loader doesn't re-export a const for.
 const IPPROTO_UDP: u8 = Protocol::Udp as u8;
@@ -58,7 +58,7 @@ fn skip_reason() -> Option<String> {
 fn networked_agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("EKVM_KERNEL").is_none() {
+    if std::env::var_os("BSX_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
     cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");
@@ -183,7 +183,7 @@ fn a_gateway_moves_a_refusal_from_inside_the_guest_to_the_audit_trail() {
     // The reachable set is unchanged either way: nothing here builds an uplink, so the packet dies
     // in the netns. What changes is that the host can now see it was tried.
     let mut cfg = networked_agent_config();
-    let host_end = ekvm_engine::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
+    let host_end = bsx_engine::GuestEgress::via(std::net::Ipv4Addr::new(10, 200, 0, 1));
     cfg.egress = Some(host_end);
     let vm = Vm::boot(cfg).expect("a networked agent microVM with a gateway should boot");
     let netns = vm

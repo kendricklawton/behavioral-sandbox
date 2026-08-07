@@ -19,11 +19,11 @@ use aya::maps::{Array, HashMap as AyaHashMap};
 use aya::programs::tc::SchedClassifier;
 use aya::programs::{TestRun, TestRunOptions};
 use aya::{Ebpf, EbpfLoader};
-use ekvm_probes_common::{
+use bsx_probes_common::{
     ETH_HLEN, ETH_P_ARP, ETH_P_IP, FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, FlowKey, IPPROTO_TCP,
     IPPROTO_UDP, MAX_POLICY_RULES, POLICY_RULE_SIZE, PolicyRule, egress_allowed, parse_ipv4_5tuple,
 };
-use ekvm_probes_loader::{EgressPolicy, Protocol, check_support, object_path};
+use bsx_probes_loader::{EgressPolicy, Protocol, check_support, object_path};
 
 /// `TC_ACT_OK`: the classifier accepted the frame.
 const TC_ACT_OK: u32 = 0;

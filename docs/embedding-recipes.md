@@ -3,18 +3,18 @@
 ## One shot: open, run, read the result
 
 ```rust,no_run
-# extern crate ekvm_engine;
-use ekvm_engine::{BootConfig, Sandbox, VmmError};
+# extern crate bsx_engine;
+use bsx_engine::{BootConfig, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
-    // 1. Resolve boot configuration from environment (EKVM_KERNEL, EKVM_ROOTFS, etc.)
+    // 1. Resolve boot configuration from environment (BSX_KERNEL, BSX_ROOTFS, etc.)
     let config = BootConfig::from_env();
 
     // 2. Open a sandbox (confined by default under the jailer)
     let sandbox = Sandbox::open(config)?;
 
     // 3. Execute a command in the sandbox
-    let result = sandbox.exec(&["python3".into(), "-c".into(), "print('Hello from eKVM!')".into()], b"")?;
+    let result = sandbox.exec(&["python3".into(), "-c".into(), "print('Hello from bsx!')".into()], b"")?;
 
     println!("Exit code: {}", result.exit_code);
     println!("Stdout: {}", String::from_utf8_lossy(&result.stdout));
@@ -28,10 +28,10 @@ fn main() -> Result<(), VmmError> {
 ## Budgets and files on the call
 
 ```rust,no_run
-# extern crate ekvm_engine;
+# extern crate bsx_engine;
 use std::num::{NonZeroU32, NonZeroU8};
 use std::time::Duration;
-use ekvm_engine::{BootConfig, Limits, Sandbox, VmmError};
+use bsx_engine::{BootConfig, Limits, Sandbox, VmmError};
 
 fn main() -> Result<(), VmmError> {
     // 2 vCPU, 512 MiB RAM, 60s wall. `Limits` is `#[non_exhaustive]`, so a downstream crate
@@ -64,8 +64,8 @@ fn main() -> Result<(), VmmError> {
 ## The pre-warmed pool
 
 ```rust,no_run
-# extern crate ekvm_engine;
-use ekvm_engine::{BootConfig, Jail, Pool, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID};
+# extern crate bsx_engine;
+use bsx_engine::{BootConfig, Jail, Pool, Snapshot, Vm, VmmError, DEFAULT_GUEST_CID};
 
 fn main() -> Result<(), VmmError> {
     // 1. Boot an unjailed source VM to prepare a pre-warmed snapshot. `from_env` leaves the vsock
@@ -76,8 +76,8 @@ fn main() -> Result<(), VmmError> {
     let source_vm = Vm::boot(source_cfg)?;
 
     // Any directory you own works; a snapshot bundle is just files. `tempfile` would do, but it is
-    // not a dependency of `ekvm-engine`, so this stays on `std` rather than sending you to add one.
-    let snap_dir = std::env::temp_dir().join("ekvm-pool-snapshot");
+    // not a dependency of `bsx-engine`, so this stays on `std` rather than sending you to add one.
+    let snap_dir = std::env::temp_dir().join("bsx-pool-snapshot");
     std::fs::create_dir_all(&snap_dir).expect("create the snapshot dir");
     let snapshot = source_vm.snapshot(&snap_dir)?;
 
@@ -121,13 +121,13 @@ a visible bump, never drift.
 For the whole lifecycle in one small file, embedding the engine end to end (load the host-side
 observers, `open` a jailed sandbox, attach the probes, `exec`, `collect` the audit record,
 `shutdown`, then print both the `RunResult` and the JSON record), see the runnable example
-[`crates/probes-loader/examples/reference_integration.rs`](https://github.com/ekvm-rs/ekvm/blob/main/crates/probes-loader/examples/reference_integration.rs).
+[`crates/probes-loader/examples/reference_integration.rs`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/crates/probes-loader/examples/reference_integration.rs).
 It composes the driver and the loader the way a downstream host application would.
 
 ## The CLI is the reference embedder
 
-`ekvm run` is the lifecycle in one command: piped stdin, `--env`, `--put`/`--get`, `--wall`,
+`bsx run` is the lifecycle in one command: piped stdin, `--env`, `--put`/`--get`, `--wall`,
 `--output-cap`, `--json` (the structured result as one JSON object on stdout, stderr carries the
-logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `ekvm shell` holds one sandbox
-open as an interactive stateful session. If you're writing an SDK, start from the daemon's
-[reference client](./daemon.md#the-reference-client) (`ekvm-client`), which exists for exactly that.
+logs, so pipelines stay clean), `--unjailed` as the loud opt-out. `bsx shell` holds one sandbox
+open as an interactive stateful session. If you're writing a client, start from the daemon's
+[reference client](./daemon.md#the-reference-client) (`bsx-client`), which exists for exactly that.

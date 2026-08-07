@@ -329,7 +329,7 @@ fn endpoint6(out: &mut String, addr: [u8; 16], port: u16, proto: u8) {
 mod tests {
     use std::time::Duration;
 
-    use ekvm_probes_common::{IPPROTO_TCP, IPPROTO_UDP, SyscallEvent};
+    use bsx_probes_common::{IPPROTO_TCP, IPPROTO_UDP, SyscallEvent};
 
     use super::SUMMARY_NOTABLE_CAP;
     use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
@@ -340,7 +340,7 @@ mod tests {
     fn a_path_cut_at_the_cap_is_marked_in_the_summary() {
         // The summary is the projection a person skims, and it has no field to carry a flag, so the
         // marker rides in the text. A prefix shown bare reads as the whole path.
-        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
+        let long = vec![b'a'; bsx_probes_common::DETAIL_CAP - 1];
         let mut record = sample(vec![]);
         record.host_syscalls = SyscallFootprint::from_events(0x42, &[ev(1, 0x42, &long, "sh")]);
         let json = record.to_summary_json();
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn the_rendered_summary_parses_as_json() {
         use crate::record::{EgressPosture, RecordSubject};
-        use ekvm_probes_common::{PolicyRule, PolicyRule6};
+        use bsx_probes_common::{PolicyRule, PolicyRule6};
 
         let hostile = "q\"uote \\slash \u{1}ctl \n nl";
         let mut record = sample(vec![flow(
@@ -437,7 +437,7 @@ mod tests {
     fn the_summary_says_what_the_sandbox_may_reach_not_only_what_it_did() {
         use crate::record::EgressPosture;
         use crate::summary::net_summary;
-        use ekvm_probes_common::{PolicyRule, PolicyRule6};
+        use bsx_probes_common::{PolicyRule, PolicyRule6};
 
         let net = NetSection::from_tap(vec![], NetStats::default(), vec![], 0, 0).with_posture(
             EgressPosture {
@@ -519,7 +519,7 @@ mod tests {
     #[test]
     fn no_network_renders_null_and_gaps_escape() {
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -565,7 +565,7 @@ mod tests {
             egress_bytes: 999,
         };
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
             ResourceSummary::default(),
             SyscallFootprint::from_events(0x42, &events),

@@ -197,6 +197,107 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsx"
+version = "0.0.3"
+dependencies = [
+ "bsx-client",
+ "bsx-engine",
+ "bsx-probes-loader",
+ "bsx-protocol",
+ "bsx-record",
+ "bsx-test-support",
+ "clap",
+ "nix 0.31.3",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bsx-channel"
+version = "0.0.3"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "bsx-client"
+version = "0.0.3"
+dependencies = [
+ "bsx-protocol",
+ "serde_json",
+]
+
+[[package]]
+name = "bsx-engine"
+version = "0.0.3"
+dependencies = [
+ "bsx-channel",
+ "bsx-guest-agent",
+ "bsx-test-support",
+ "nix 0.31.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bsx-guest-agent"
+version = "0.0.3"
+dependencies = [
+ "bsx-channel",
+ "tracing",
+ "tracing-subscriber",
+ "vsock",
+]
+
+[[package]]
+name = "bsx-probes-common"
+version = "0.0.3"
+
+[[package]]
+name = "bsx-probes-loader"
+version = "0.0.3"
+dependencies = [
+ "aya",
+ "bsx-engine",
+ "bsx-probes-common",
+ "bsx-record",
+ "bsx-test-support",
+ "nix 0.31.3",
+]
+
+[[package]]
+name = "bsx-protocol"
+version = "0.0.3"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bsx-record"
+version = "0.0.3"
+dependencies = [
+ "bsx-probes-common",
+ "criterion",
+ "ed25519-dalek",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
+name = "bsx-test-support"
+version = "0.0.3"
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -672,107 +773,6 @@ name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
-
-[[package]]
-name = "ekvm"
-version = "0.0.2"
-dependencies = [
- "clap",
- "ekvm-client",
- "ekvm-engine",
- "ekvm-probes-loader",
- "ekvm-protocol",
- "ekvm-record",
- "ekvm-test-support",
- "nix 0.31.3",
- "ratatui",
- "serde",
- "serde_json",
- "signal-hook",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ekvm-channel"
-version = "0.0.2"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "ekvm-client"
-version = "0.0.2"
-dependencies = [
- "ekvm-protocol",
- "serde_json",
-]
-
-[[package]]
-name = "ekvm-engine"
-version = "0.0.2"
-dependencies = [
- "ekvm-channel",
- "ekvm-guest-agent",
- "ekvm-test-support",
- "nix 0.31.3",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ekvm-guest-agent"
-version = "0.0.2"
-dependencies = [
- "ekvm-channel",
- "tracing",
- "tracing-subscriber",
- "vsock",
-]
-
-[[package]]
-name = "ekvm-probes-common"
-version = "0.0.2"
-
-[[package]]
-name = "ekvm-probes-loader"
-version = "0.0.2"
-dependencies = [
- "aya",
- "ekvm-engine",
- "ekvm-probes-common",
- "ekvm-record",
- "ekvm-test-support",
- "nix 0.31.3",
-]
-
-[[package]]
-name = "ekvm-protocol"
-version = "0.0.2"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ekvm-record"
-version = "0.0.2"
-dependencies = [
- "criterion",
- "ed25519-dalek",
- "ekvm-probes-common",
- "serde_json",
- "sha2 0.11.0",
- "zeroize",
-]
-
-[[package]]
-name = "ekvm-test-support"
-version = "0.0.2"
 
 [[package]]
 name = "equivalent"
@@ -2589,13 +2589,13 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xtask"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
+ "bsx-channel",
+ "bsx-engine",
+ "bsx-probes-loader",
  "clap",
- "ekvm-channel",
- "ekvm-engine",
- "ekvm-probes-loader",
 ]
 
 [[package]]

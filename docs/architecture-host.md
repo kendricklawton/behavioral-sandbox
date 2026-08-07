@@ -6,11 +6,11 @@ Where the pieces sit, and which boundaries a run crosses:
 LINUX HOST  (a kernel providing cgroup.kill, else >= 5.15)
 
   HOST USERSPACE
-    ekvm CLI / client SDK
+    bsx CLI / client
         |  unix socket wire API
         v
-    ekvm serve daemon  <-------------------------------+
-        |  ekvm-engine API                             |
+    bsx serve daemon   <-------------------------------+
+        |  bsx-engine API                              |
         v                                    ring buffer, flow and
     Firecracker VMM (jailed, chrooted)         deny events
         |  KVM ioctl                                   |
@@ -41,9 +41,9 @@ observe the VMM's host footprint, the guest's tap, and its cgroup, never the gue
 
 ## Host requirements
 
-- **OS & Kernel**: Linux host with a kernel providing `cgroup.kill`. `ekvm doctor` probes for the primitive rather than trusting a version string, falling back to `>= 5.15` only where there is no cgroup v2 hierarchy to probe.
+- **OS & Kernel**: Linux host with a kernel providing `cgroup.kill`. `bsx doctor` probes for the primitive rather than trusting a version string, falling back to `>= 5.15` only where there is no cgroup v2 hierarchy to probe.
 - **Architecture**: `x86_64` with hardware virtualization extensions (`/dev/kvm`).
-- **Permissions**: real root (euid 0) for jailed boots, because the jailer mknod's device nodes into its chroot; `CAP_NET_ADMIN` for the per-VM netns and tap; `CAP_BPF` + `CAP_PERFMON` plus kernel BTF for the eBPF observability. `ekvm doctor` renders each as its own row.
+- **Permissions**: real root (euid 0) for jailed boots, because the jailer mknod's device nodes into its chroot; `CAP_NET_ADMIN` for the per-VM netns and tap; `CAP_BPF` + `CAP_PERFMON` plus kernel BTF for the eBPF observability. `bsx doctor` renders each as its own row.
 
 ## Networking
 
@@ -107,7 +107,7 @@ SANDBOX STORAGE LAYERING  (a read_only_root boot; the default gives each VM its
 
   input block device                    output block device
   (read-only ext4 from input_dir,       (writable ext4 for output_dir, mounted by
-   /dev/vdb)                             the label ekvm-output: the /dev/vdX
+   /dev/vdb)                             the label bsx-output: the /dev/vdX
             |                            letter varies)
             v                                       |
         /input in the guest                         v

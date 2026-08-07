@@ -28,7 +28,7 @@ path, not the payload.
   toolchain), synchronous (no async runtime, matching the driver). Its public shape is a typed handle
   (`ExecveCounter::{load, count, counts_by_pid}`) returning a typed `ProbeError`, the eBPF analogue
   of the driver's `VmmError`. It reads the compiled object from a **path** (`cargo xtask build-probes`
-  output, or `EKVM_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
+  output, or `BSX_PROBES_OBJECT`), never `include_bytes!`/`build.rs`, so the host workspace stays on
   stable and `cargo xtask ci` runs everywhere.
 
 ## eBPF program types
@@ -229,9 +229,9 @@ first is attributed more CPU than the second. The engine *measures*; the hoster 
 
 The sections above each drive one probe standalone; the fused record binds all three to a launched
 sandbox and fuses their output into one per-run **audit record**, host-observed from outside the
-guest. The attach bundle lives in `ekvm-probes-loader` (not `ekvm-engine`), bridged to the driver
+guest. The attach bundle lives in `bsx-probes-loader` (not `bsx-engine`), bridged to the driver
 only by plain values; the record itself (its types, JSON, and signing/verification) lives in
-`ekvm-record`, aya-free so a consumer verifies it off-host:
+`bsx-record`, aya-free so a consumer verifies it off-host:
 
 - **Two shared probes + a per-VM tap.** The `sched_switch` meter and the `sys_enter_*` tracepoints are
   global, so each is loaded **once** for the host, as `SharedMeter` and `SharedTracer` (the share-one-
@@ -253,8 +253,8 @@ only by plain values; the record itself (its types, JSON, and signing/verificati
   (`ResourceSummary`), and the VMM's bounded host-syscall footprint, with `coverage` gaps for whatever was
   unavailable. Its core is network + resources + denials, the signals host eBPF observes strongly.
 - **Deterministic JSON.** `RunRecord::to_json` is a hand-rolled, compact, byte-stable serializer (fixed
-  key order, arrays pre-sorted, integer-nanosecond durations), the machine-readable audit surface the
-  planned language SDKs will parse and the CLI's `--trace` pretty-prints today. Pinned by a golden test.
+  key order, arrays pre-sorted, integer-nanosecond durations), the machine-readable audit surface a
+  client parses and the CLI's `--trace` pretty-prints today. Pinned by a golden test.
 
 The privileged `audit_record.rs` exercises this end to end: it boots a guest that touches the network
 and reads a file, then asserts the record's flows carry that network activity and that the
@@ -265,7 +265,7 @@ and collect, `SandboxProbes::snapshot` gives a watcher a live reading
 (`LiveSnapshot`: the tap now, the meter now, a *clone* of the syscall fold-so-far, so the fold the
 record finalizes from is left in place), what the
 CLI's `--watch` live view redraws from. The CLI face of all of this
-(`ekvm run --net --trace --record run.json --watch`) is documented in [Observing a run](./cli-observe.md).
+(`bsx run --net --trace --record run.json --watch`) is documented in [Observing a run](./cli-observe.md).
 
 ## The hardware-isolation consequence (the honest limit)
 
@@ -281,7 +281,7 @@ syscall introspection the boundary can't deliver.
 
 ```console
 cargo xtask build-probes                       # builds the object (with BTF); asserts .BTF present
-cargo build -p ekvm-probes-loader --example count_execve
+cargo build -p bsx-probes-loader --example count_execve
 sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/count_execve
 target/debug/examples/count_execve             # unprivileged, with just the two caps
 ```
@@ -290,7 +290,7 @@ Or the privileged test, which spawns processes and asserts the counter moved and
 leaves no pinned residue:
 
 ```console
-cargo test -p ekvm-probes-loader --test counter --no-run
+cargo test -p bsx-probes-loader --test counter --no-run
 sudo <the-printed-binary> --ignored --test-threads=1
 ```
 
@@ -300,7 +300,7 @@ byte/packet counters the section above describes. It needs `CAP_NET_ADMIN` on to
 caps, per the qdisc requirement above, so this one is shown under `sudo`:
 
 ```console
-cargo build -p ekvm-probes-loader --example monitor_tap
+cargo build -p bsx-probes-loader --example monitor_tap
 sudo target/debug/examples/monitor_tap <interface>
 ```
 
@@ -339,15 +339,15 @@ turns that into a real **stream of per-event records**:
   it to a callback as it arrives, until a caller predicate stops it. `cgroup_id_of_pid` closes the loop
   with the Firecracker track: it resolves a VMM pid to its cgroup id (the inode of the cgroup dir,
   which equals `bpf_get_current_cgroup_id`), so `watch_cgroup(cgroup_id_of_pid(vmm_pid)?)` scopes the
-  trace to exactly one sandbox. The bridge is plain values, so `ekvm-probes-loader` never depends on
-  `ekvm-engine`.
+  trace to exactly one sandbox. The bridge is plain values, so `bsx-probes-loader` never depends on
+  `bsx-engine`.
 
 The honest limit from
 [the hardware-isolation consequence](#the-hardware-isolation-consequence-the-honest-limit)
 holds here unchanged: these are the **host's** syscalls, never the guest's.
 
 ```console
-cargo build -p ekvm-probes-loader --example trace_syscalls
+cargo build -p bsx-probes-loader --example trace_syscalls
 sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/trace_syscalls
 target/debug/examples/trace_syscalls           # whole-host, 5s; args: [seconds] [pid-to-filter]
 ```

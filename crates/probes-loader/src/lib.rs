@@ -1,4 +1,4 @@
-//! `ekvm-probes-loader`, the userspace side of the eBPF story: load and attach the probes from
+//! `bsx-probes-loader`, the userspace side of the eBPF story: load and attach the probes from
 //! `crates/probes`, read their maps, and stream events into the audit log. The first probe attaches the
 //! one host-global `sys_enter_execve` tracepoint (scoped to nothing); binding a program to a
 //! *specific* sandbox (its cgroup, its tap device) arrives with the per-VM taps.
@@ -83,7 +83,7 @@ use std::path::{Path, PathBuf};
 
 use aya::Ebpf;
 
-pub use ekvm_probes_common::{
+pub use bsx_probes_common::{
     COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, FlowKey6, MAX_POLICY_RULES, PolicyRule, PolicyRule6,
     Protocol, Syscall, SyscallEvent,
 };
@@ -112,11 +112,11 @@ mod observer;
 pub use observer::{AttachParams, LiveSnapshot, Nic, SandboxProbes, SharedMeter, SharedTracer};
 
 // The record itself (its types, deterministic JSON, summary projection, and the signing/verify
-// surface) lives in `ekvm-record`, aya-free so a consumer can verify a record off-host without
+// surface) lives in `bsx-record`, aya-free so a consumer can verify a record off-host without
 // linking this loader. Re-exported here because these types appear in the attach surface's own
 // signatures (`SandboxProbes::collect` returns a `RunRecord`), so a caller of this crate needs them
 // in scope without a second dependency.
-pub use ekvm_record::{
+pub use bsx_record::{
     AUDIT_SCHEMA_VERSION, AxisGap, CgroupStats, ChainError, DenialRecord, DenialRecord6,
     EgressPosture, FlowRecord, FlowRecord6, HostKey, KeyError, MAX_ENVELOPE_BYTES, MAX_NOTABLE,
     NetSection, NetStats, NotableSyscall, RecordSubject, ResourceSummary, RunRecord,
@@ -128,7 +128,7 @@ pub use ekvm_record::{
 /// Env override for the compiled BPF object's location, for a vendored / installed deployment where
 /// the object doesn't sit in the source tree's `target/`. Defaults to the `cargo xtask build-probes`
 /// output (see [`object_path`]).
-const OBJECT_ENV: &str = "EKVM_PROBES_OBJECT";
+const OBJECT_ENV: &str = "BSX_PROBES_OBJECT";
 
 /// A typed failure from loading/attaching/reading the probes, the loader's analogue of the driver's
 /// `VmmError`: a missing prerequisite, a missing object, a kernel load/verify/permission failure, an
@@ -197,7 +197,7 @@ impl std::error::Error for ProbeError {
     }
 }
 
-/// Where the compiled BPF object lives, in precedence order: the `EKVM_PROBES_OBJECT` override, the
+/// Where the compiled BPF object lives, in precedence order: the `BSX_PROBES_OBJECT` override, the
 /// `cargo xtask build-probes` output under the source tree
 /// (`crates/probes/target/bpfel-unknown-none/release/probes`), then the installed copy under the
 /// per-host data dir. The object is a *build artifact* (like the guest kernel/rootfs), built
@@ -211,7 +211,7 @@ impl std::error::Error for ProbeError {
 pub fn object_path() -> PathBuf {
     let built = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../probes/target/bpfel-unknown-none/release/probes");
-    let installed = ekvm_record::data_dir().join("probes");
+    let installed = bsx_record::data_dir().join("probes");
     pick_object_path(
         std::env::var_os(OBJECT_ENV).map(PathBuf::from),
         built.is_file().then_some(built.as_path()),
@@ -502,7 +502,7 @@ mod tests {
             built
         );
         // The packaged case: no source tree on the host, so the installed copy is found with no
-        // EKVM_PROBES_OBJECT set. This is what makes an install work unconfigured.
+        // BSX_PROBES_OBJECT set. This is what makes an install work unconfigured.
         assert_eq!(
             pick_object_path(None, None, Some(installed), built),
             installed

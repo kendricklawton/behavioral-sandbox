@@ -1,13 +1,13 @@
-//! The `ekvm` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
+//! The `bsx` CLI, drive the sandbox lifecycle: boot a microVM, run one command in it (`run`),
 //! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
 //! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch`, see [`audit`]).
 //!
 //! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
-//! or the `--json` structured result / audit log), so `ekvm run … 2>/dev/null` stays
+//! or the `--json` structured result / audit log), so `bsx run … 2>/dev/null` stays
 //! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
-//! flags > env (`EKVM_LOG`) > file > default. Both subcommands run
+//! flags > env (`BSX_LOG`) > file > default. Both subcommands run
 //! **jailed by default** with `--unjailed` as the explicit opt-out, and both point
-//! at the env-layered artifacts (`EKVM_ROOTFS`/`EKVM_KERNEL`/`EKVM_MARKER`, exec needs the
+//! at the env-layered artifacts (`BSX_ROOTFS`/`BSX_KERNEL`/`BSX_MARKER`, exec needs the
 //! guest rootfs from `cargo xtask build-rootfs`).
 #![forbid(unsafe_code)]
 
@@ -30,12 +30,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::policy::{AllowRule, Policy, Requested, parse_allow};
-use clap::{Parser, Subcommand};
-use ekvm_engine::{
+use bsx_engine::{
     Artifact, BootConfig, ErrorKind, Limits, MAX_PAYLOAD, Sandbox, VmmError, sweep_orphans,
 };
-use ekvm_engine::{MAX_VCPUS, vcpus_supported};
-use ekvm_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
+use bsx_engine::{MAX_VCPUS, vcpus_supported};
+use bsx_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
+use clap::{Parser, Subcommand};
 
 /// Exit code for an operational failure (a boot/exec/channel error, as opposed to the guest
 /// command's own exit code): conventional "2", named so the intent is legible at the
@@ -43,7 +43,7 @@ use ekvm_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The version of the `--json` **run-result** contract (exit code, streams, artifacts, metrics,
-/// limits). Distinct from the audit record's `ekvm_probes_loader::AUDIT_SCHEMA_VERSION`: two
+/// limits). Distinct from the audit record's `bsx_probes_loader::AUDIT_SCHEMA_VERSION`: two
 /// surfaces, two independent versions. Same policy, additive within a version, a rename/removal
 /// bumps it (docs/cli.md).
 const RUN_RESULT_SCHEMA: u32 = 1;
@@ -51,7 +51,7 @@ const RUN_RESULT_SCHEMA: u32 = 1;
 /// A CLI-layer failure, kept distinct from the engine's [`VmmError`] so the library's typed error
 /// (and its `kind()` buckets, pinned by embedders) is never minted for faults that are the CLI's
 /// own: a bad flag combination, a refused artifact path, a local file write. `Engine` passes the
-/// driver's error through untouched (`?` converts via `From`); both print as `ekvm: <reason>` and
+/// driver's error through untouched (`?` converts via `From`); both print as `bsx: <reason>` and
 /// exit 2, the taxonomy is for honesty, not for different handling.
 #[derive(Debug)]
 enum CliError {
@@ -104,8 +104,8 @@ impl From<VmmError> for CliError {
 
 #[derive(Parser)]
 #[command(
-    name = "ekvm",
-    // The crate version, which release tags mirror (`RELEASES.md`): `ekvm --version` exists so an
+    name = "bsx",
+    // The crate version, which release tags mirror (`RELEASES.md`): `bsx --version` exists so an
     // installed binary can be told from a stale one, which is a different question from "which
     // release is this".
     version,
@@ -114,17 +114,17 @@ impl From<VmmError> for CliError {
     // then the two run forms differ only by whether this host can jail.
     after_help = "\
 Getting started:
-  ekvm doctor                          check what this host can do
-  sudo -E ekvm run -- echo hello       run a command in a sandbox (jailed, the default)
-  ekvm run --unjailed -- echo hello    same, without the jailer (needs no root)
-  ekvm run --trace -- <cmd>            run it and print the audit trail
+  bsx doctor                          check what this host can do
+  sudo -E bsx run -- echo hello       run a command in a sandbox (jailed, the default)
+  bsx run --unjailed -- echo hello    same, without the jailer (needs no root)
+  bsx run --trace -- <cmd>            run it and print the audit trail
 
-Config layers, highest first: flags, EKVM_* env, .ekvm.toml, defaults."
+Config layers, highest first: flags, BSX_* env, .bsx.toml, defaults."
 )]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
-    /// Log filter for stderr (overrides `EKVM_LOG`), e.g. `info`, `debug`.
+    /// Log filter for stderr (overrides `BSX_LOG`), e.g. `info`, `debug`.
     #[arg(long, global = true, value_name = "FILTER")]
     log: Option<String>,
 }
@@ -132,7 +132,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     // Each variant's doc comment is user-facing help, so the first line is a one-line summary (what
-    // `ekvm --help` lists) and the detail follows after a blank line (what `ekvm <cmd> --help`
+    // `bsx --help` lists) and the detail follows after a blank line (what `bsx <cmd> --help`
     // shows). Rationale about the *code* belongs in `//` comments, which clap never renders.
     /// Run one command in a microVM.
     ///
@@ -143,11 +143,11 @@ enum Cmd {
     // the whole `Cmd` enum isn't sized to it (the `clippy::large_enum_variant` this would trip).
     #[command(after_help = "\
 Examples:
-  ekvm run -- echo hello
-  ekvm run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
-  ekvm run --put main.rs --get a.out -- rustc main.rs -o a.out
-  ekvm run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
-  ekvm run --record run.json -- ./untrusted && ekvm verify run.json
+  bsx run -- echo hello
+  bsx run --vcpus 2 --mem 512 --wall 60 -- ./build.sh
+  bsx run --put main.rs --get a.out -- rustc main.rs -o a.out
+  bsx run --net --allow 1.1.1.1:443/tcp --trace -- curl https://1.1.1.1
+  bsx run --record run.json -- ./untrusted && bsx verify run.json
 
 Everything after `--` is the guest command, so its own flags are never parsed here.")]
     Run(Box<RunArgs>),
@@ -156,14 +156,14 @@ Everything after `--` is the guest command, so its own flags are never parsed he
     /// One command per line. State persists on the session's filesystem until you exit; shell
     /// process state (a `cd`, a variable) does not, because each line is its own exec.
     ///
-    /// The operator policy (`.ekvm.toml` ceilings, `require_jail`, `require_record`) binds
+    /// The operator policy (`.bsx.toml` ceilings, `require_jail`, `require_record`) binds
     /// exactly as it does for `run`.
     Shell(ShellArgs),
     /// Check whether this host can run the engine.
     ///
     /// Reports KVM, the jailer, host tools, the guest artifacts, and eBPF capabilities, saying what
     /// will work, degrade, or refuse before the first sandbox, and names a first command that works
-    /// on this host. Exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm
+    /// on this host. Exits non-zero when a hard prerequisite is missing, so `bsx doctor && bsx
     /// run …` gates correctly.
     Doctor(doctor::DoctorArgs),
     /// Verify a signed audit record.
@@ -194,8 +194,8 @@ struct RunArgs {
     unjailed: bool,
     /// Refuse the boot if the cgroup caps can't be applied.
     /// Instead of the default warn-and-boot-uncapped. Needs the jailer (so not with
-    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `EKVM_REQUIRE_LIMITS`
-    /// or `.ekvm.toml`.
+    /// `--unjailed`) and delegated cgroup v2 controllers; also settable via `BSX_REQUIRE_LIMITS`
+    /// or `.bsx.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
     /// Guest vCPUs, 1 or an even number up to 32 [default: 1].
@@ -273,7 +273,7 @@ struct RunArgs {
     trace: bool,
     /// Write the run's deterministic audit record to a file.
     /// Attaches the host-side probes and writes one line of JSON, the machine surface, for later
-    /// inspection or `ekvm verify`.
+    /// inspection or `bsx verify`.
     #[arg(
         long,
         value_name = "FILE",
@@ -325,41 +325,41 @@ struct ShellArgs {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    // The daemon owns its own logging (info default, optional JSON) and reads no `.ekvm.toml`
+    // The daemon owns its own logging (info default, optional JSON) and reads no `.bsx.toml`
     // (its config is flags + environment), so `serve` dispatches *before* the CLI's project-file
     // discovery and tracing init below, which are the run/shell/doctor conveniences. It still
     // receives the shared global `--log` filter.
     if let Cmd::Serve(args) = cli.cmd {
         return serve::serve(*args, cli.log);
     }
-    // The `.ekvm.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
+    // The `.bsx.toml` file layer is discovered once, from the cwd, a mistyped key is a loud
     // failure here, before any boot (config typos must not silently no-op).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let file = match config::EkvmToml::discover(&cwd) {
+    let file = match config::BsxToml::discover(&cwd) {
         Ok(f) => f,
         Err(e) => {
-            let _ = writeln!(std::io::stderr(), "ekvm: {e}");
+            let _ = writeln!(std::io::stderr(), "bsx: {e}");
             return ExitCode::from(EXIT_OPERATIONAL);
         }
     };
     // Log filter resolves flags > env > file > default.
     if let Err(e) = init_tracing(config::resolve_log(cli.log.as_deref(), file.as_ref()).as_deref())
     {
-        let _ = writeln!(std::io::stderr(), "ekvm: {e}");
+        let _ = writeln!(std::io::stderr(), "bsx: {e}");
         return ExitCode::from(EXIT_OPERATIONAL);
     }
     match run(cli.cmd, file.as_ref()) {
         Ok(code) => code,
         Err(e) => {
             // `eprintln!` panics on a closed stderr; a diagnostics write error is not our failure.
-            let _ = writeln!(std::io::stderr(), "ekvm: {e}");
+            let _ = writeln!(std::io::stderr(), "bsx: {e}");
             // An infra-bucket failure means the host couldn't stand the microVM up, so point at the
             // tool that explains the host. Keyed on the `kind()` bucket rather than on variants, so
             // the hint can't drift as `VmmError` (which is `#[non_exhaustive]`) grows.
             if matches!(&e, CliError::Engine(err) if err.kind() == ErrorKind::Infra) {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "ekvm: the host may not be ready, run `ekvm doctor`"
+                    "bsx: the host may not be ready, run `bsx doctor`"
                 );
             }
             ExitCode::from(EXIT_OPERATIONAL)
@@ -367,7 +367,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cmd: Cmd, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
+fn run(cmd: Cmd, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
     match cmd {
         Cmd::Run(args) => {
             sweep_vm_residue(file);
@@ -388,13 +388,13 @@ fn run(cmd: Cmd, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> 
     }
 }
 
-/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `ekvm`
+/// Reclaim the per-VM residue (scratch dirs + network namespaces) a **crashed** prior `bsx`
 /// run left: a `Ctrl-C`/SIGKILL of a boot subcommand skips `Drop`, so the lifetime sentinel reaps
 /// the VM process but the scratch dir and netns are out of its scope. Run once before a
 /// boot subcommand as the boot-time GC the engine owes its host. Best-effort and
 /// conservative: [`sweep_orphans`] only reclaims this euid's dead-pid dirs, so it never touches a
 /// concurrent run's live sandbox.
-fn sweep_vm_residue(file: Option<&config::EkvmToml>) {
+fn sweep_vm_residue(file: Option<&config::BsxToml>) {
     match sweep_orphans(&base_config(file).scratch_dir) {
         Ok(r) if r.dirs_reclaimed + r.netns_reclaimed > 0 => tracing::info!(
             dirs = r.dirs_reclaimed,
@@ -407,21 +407,21 @@ fn sweep_vm_residue(file: Option<&config::EkvmToml>) {
 }
 
 /// The env+file-layered base config, `env > file > defaults`, over which each subcommand applies
-/// its flags. Composes a single lookup that prefers the real environment, then the `.ekvm.toml`
+/// its flags. Composes a single lookup that prefers the real environment, then the `.bsx.toml`
 /// value, then (inside [`BootConfig::from_env_with`]) the pinned default, so the three lower layers
-/// stay one vocabulary keyed by the `EKVM_*` names.
-fn base_config(file: Option<&config::EkvmToml>) -> BootConfig {
+/// stay one vocabulary keyed by the `BSX_*` names.
+fn base_config(file: Option<&config::BsxToml>) -> BootConfig {
     BootConfig::from_env_with(|key| {
         std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
     })
 }
 
-/// `ekvm run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
+/// `bsx run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
 /// `--record-summary`/`--watch`, fail-open) → one exec with the flag-supplied inputs (live-viewed
 /// under `--watch`) → write the requested artifacts → finalize the audit record while the sandbox is
 /// alive → close → report (raw relay or the `--json` structured result, then the `--trace` human trail
 /// / `--record` full JSON / `--record-summary` model-legible projection, the three faces of one record).
-fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
+fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
     // The run's root span: boot, exec, and the audit-record events all nest under it, so one run's
     // telemetry is greppable as a unit. `vmm_pid` is recorded once the sandbox is up, the id that
     // ties these log lines to the audit record and the host's own process table.
@@ -476,7 +476,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         None
     } else {
         let policy = build_egress(&args.allow)?;
-        if let Err(e) = ekvm_probes_loader::check_support() {
+        if let Err(e) = bsx_probes_loader::check_support() {
             return Err(CliError::Cli(format!(
                 "--allow requested egress enforcement, but this host can't load the eBPF probes: {e}"
             )));
@@ -501,7 +501,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     // not do. Loading is idempotent: the write path reloads the same key.
     if record_path.is_some() {
         let key_path = config::signing_key_path(file);
-        ekvm_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+        bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
             CliError::Cli(format!(
                 "signing key {} is unusable, so this run could not be recorded: {e}",
                 key_path.display()
@@ -510,10 +510,10 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     }
     let mut config = base_config(file).with_limits(limits);
     config.enable_network = args.net;
-    // Flags win over the `EKVM_GATEWAY`/`EKVM_RESOLVER` + file layers `base_config` already resolved,
+    // Flags win over the `BSX_GATEWAY`/`BSX_RESOLVER` + file layers `base_config` already resolved,
     // so a run can override the host's uplink without editing its config.
     if let Some(gateway) = args.gateway {
-        let mut egress = ekvm_engine::GuestEgress::via(gateway);
+        let mut egress = bsx_engine::GuestEgress::via(gateway);
         if let Some(resolver) = args.resolver {
             egress = egress.with_resolver(resolver);
         }
@@ -531,7 +531,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     span.record("vmm_pid", sandbox.vmm_pid());
     if args.demo_boot {
         // The run result goes to stdout (stderr is reserved for logs). Not `println!`,
-        // it panics on a closed pipe (`ekvm run … | head -0`).
+        // it panics on a closed pipe (`bsx run … | head -0`).
         let _ = writeln!(
             std::io::stdout(),
             "booted microVM to userspace in {} ms",
@@ -543,9 +543,9 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
             .map_err(CliError::from);
     }
 
-    // The audit surface, when a flag asked for it (a plain `ekvm run` pays nothing): load the shared
+    // The audit surface, when a flag asked for it (a plain `bsx run` pays nothing): load the shared
     // probes and bind them to this sandbox by the plain values it exposes, the launch sequence the
-    // `ekvm-probes-loader` documents, composed here in the caller. `--allow` enforces (arming the tap before
+    // `bsx-probes-loader` documents, composed here in the caller. `--allow` enforces (arming the tap before
     // it goes live) and pulls in the bundle even without an observation flag; observation is fail-open,
     // enforcement is a typed refusal (`attach`).
     let observing = args.trace
@@ -554,11 +554,11 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         || args.watch
         || egress.is_some();
     let probes = if observing {
-        let mut params = ekvm_probes_loader::AttachParams::new(sandbox.vmm_pid());
+        let mut params = bsx_probes_loader::AttachParams::new(sandbox.vmm_pid());
         // Both names derive from the engine's single tap field, so this pairing is faithful; the
         // named-field `Nic` is what keeps the two same-typed strings unswappable.
         params.nic = match (sandbox.netns(), sandbox.tap_name()) {
-            (Some(netns), Some(tap)) => Some(ekvm_probes_loader::Nic { netns, tap }),
+            (Some(netns), Some(tap)) => Some(bsx_probes_loader::Nic { netns, tap }),
             _ => None,
         };
         params.egress = egress.as_ref();
@@ -606,7 +606,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
         if !done.load(Ordering::Acquire) {
             let _ = writeln!(
                 std::io::stderr(),
-                "ekvm: live view closed; waiting for the command to finish"
+                "bsx: live view closed; waiting for the command to finish"
             );
         }
         let (sandbox, result) = worker
@@ -698,7 +698,7 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
                 "records_dir"
             };
             let key_path = config::signing_key_path(file);
-            let key = ekvm_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
+            let key = bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
                 VmmError::Vmm(format!("load signing key {}: {e}", key_path.display()))
             })?;
             std::fs::write(path, key.sign_record(&record) + "\n")
@@ -716,11 +716,11 @@ fn run_command(args: RunArgs, file: Option<&config::EkvmToml>) -> Result<ExitCod
     Ok(ExitCode::from(u8::try_from(result.exit_code).unwrap_or(1)))
 }
 
-/// `ekvm shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
+/// `bsx shell`: one sandbox held open, one `sh -c` exec per input line, a stateful session
 /// (every exec shares the guest's session working directory, so files persist across lines;
 /// process state like `cd` and shell variables does not). The prompt and diagnostics go to stderr,
 /// command output to stdout, so a piped script of lines stays clean.
-fn shell(args: ShellArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
+fn shell(args: ShellArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
     let limits = shell_policy(&args, &config::policy_of(file))?;
     let mut config = base_config(file).with_limits(limits);
     if args.require_limits {
@@ -730,20 +730,20 @@ fn shell(args: ShellArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, C
     let mut err_out = std::io::stderr();
     let _ = writeln!(
         err_out,
-        "ekvm shell: microVM up in {} ms; one command per line, files persist across lines, \
+        "bsx shell: microVM up in {} ms; one command per line, files persist across lines, \
          `exit` (or EOF) to quit",
         sandbox.boot_latency().as_millis()
     );
     let stdin = std::io::stdin();
     loop {
-        let _ = write!(err_out, "ekvm> ");
+        let _ = write!(err_out, "bsx> ");
         let _ = err_out.flush();
         let mut line = String::new();
         match stdin.read_line(&mut line) {
             Ok(0) => break, // EOF
             Ok(_) => {}
             Err(e) => {
-                let _ = writeln!(err_out, "ekvm: read stdin: {e}");
+                let _ = writeln!(err_out, "bsx: read stdin: {e}");
                 break;
             }
         }
@@ -767,10 +767,10 @@ fn shell(args: ShellArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, C
             // line; the session survives it. Infra/transport means the VM itself is gone, end the
             // session with the typed error.
             Err(e) if e.kind() == ErrorKind::Guest => {
-                let _ = writeln!(err_out, "ekvm: {e}");
+                let _ = writeln!(err_out, "bsx: {e}");
             }
             Err(e) => {
-                let _ = writeln!(err_out, "ekvm: session lost: {e}");
+                let _ = writeln!(err_out, "bsx: session lost: {e}");
                 let _ = sandbox.shutdown();
                 return Err(e.into());
             }
@@ -821,7 +821,7 @@ fn default_record_path(dir: &Path) -> PathBuf {
     dir.join(format!("run-{secs}-{}.json", std::process::id()))
 }
 
-/// Resolve `ekvm shell`'s limits and posture against the operator policy: the same boundary
+/// Resolve `bsx shell`'s limits and posture against the operator policy: the same boundary
 /// `run_command` enforces, so switching subcommand cannot bypass a ceiling, `require_jail`, or
 /// `require_record`. Operator *defaults* apply too: an unset `--vcpus`/`--mem` takes the host's
 /// default profile, not the bare engine default. Shell has no `--net`, so the net/egress checks
@@ -996,10 +996,10 @@ fn confined_dest(base: &Path, rel: &Path) -> Result<PathBuf, CliError> {
     Ok(cur)
 }
 
-/// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `ekvm run`
+/// The bytes piped into our stdin, or empty when stdin is the terminal (an interactive `bsx run`
 /// shouldn't block waiting for EOF). The read is **bounded at one frame + 1 byte**: the exec request
 /// is a single frame, so anything past the channel's cap is rejected as a typed `PayloadTooLarge`
-/// regardless, reading it all first would let `cat 10GB.bin | ekvm run …` balloon host RAM before
+/// regardless, reading it all first would let `cat 10GB.bin | bsx run …` balloon host RAM before
 /// the same error. The `+ 1` still overshoots the cap by a byte so the oversize case is caught rather
 /// than silently truncated to exactly the cap. Bulk data belongs on the block-device path anyway.
 fn piped_stdin() -> Result<Vec<u8>, CliError> {
@@ -1010,7 +1010,7 @@ fn piped_stdin() -> Result<Vec<u8>, CliError> {
     let mut buf = Vec::new();
     // A failed read is a hard error, never a shrug: proceeding with whatever arrived would run
     // the guest on silently truncated input and sign a record that calls it complete. The one
-    // exception is a *closed* fd 0 (`ekvm run … 0<&-`), which is not a truncated read but no
+    // exception is a *closed* fd 0 (`bsx run … 0<&-`), which is not a truncated read but no
     // stdin at all, the same thing a terminal means here.
     /// `EBADF`. Named because `io::ErrorKind` has no stable variant for it (it arrives as
     /// `Uncategorized`), so the raw errno is the only way to tell "fd 0 is closed" from a real
@@ -1030,7 +1030,7 @@ fn piped_stdin() -> Result<Vec<u8>, CliError> {
 }
 
 /// Initialize stderr logging from the filter [`config::resolve_log`] already resolved
-/// (`flag > EKVM_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
+/// (`flag > BSX_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
 /// environment: the precedence is single-sourced in `resolve_log`, this only applies the result.
 ///
 /// A filter `tracing` cannot parse is a **typed refusal**, the same loudness the file layer gives
@@ -1046,7 +1046,7 @@ fn init_tracing(filter: Option<&str>) -> Result<(), CliError> {
     let env_filter = tracing_subscriber::EnvFilter::try_new(filter).map_err(|e| {
         CliError::Cli(format!(
             "invalid log filter {filter:?}: {e} (a level like warn|info|debug, or a tracing \
-             directive like \"ekvm=debug\")"
+             directive like \"bsx=debug\")"
         ))
     })?;
     let _ = tracing_subscriber::fmt()
@@ -1063,13 +1063,13 @@ mod tests {
         AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, build_egress, parse_allow,
         parse_env_pair, parse_mem_mib, parse_vcpus, shell_policy, write_artifacts_in,
     };
+    use bsx_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
+    use bsx_test_support::ScratchDir;
     use clap::CommandFactory;
-    use ekvm_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
-    use ekvm_test_support::ScratchDir;
 
     /// A `///` on a clap field **is** the user interface, so it has to survive being rendered at a
     /// real terminal width. Clap wraps nothing unless the `wrap_help` feature is on, and it was not:
-    /// `ekvm run -h` printed 19 lines past 80 columns, running off the edge of any normal terminal.
+    /// `bsx run -h` printed 19 lines past 80 columns, running off the edge of any normal terminal.
     /// Rendering every subcommand narrow is what catches that, because the overflow is invisible at
     /// the width a developer happens to be using.
     #[test]
@@ -1094,7 +1094,7 @@ mod tests {
                 let worst = text.lines().map(str::len).max().unwrap_or(0);
                 assert!(
                     worst <= width,
-                    "`ekvm {name} --help` renders {worst} columns at a {width}-column terminal"
+                    "`bsx {name} --help` renders {worst} columns at a {width}-column terminal"
                 );
             }
         }
@@ -1253,7 +1253,7 @@ mod tests {
 
     #[test]
     fn default_record_path_lands_under_records_dir_with_a_unique_name() {
-        let dir = std::path::Path::new("/var/log/ekvm");
+        let dir = std::path::Path::new("/var/log/bsx");
         let path = super::default_record_path(dir);
         assert!(path.starts_with(dir), "joins under the operator's dir");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();

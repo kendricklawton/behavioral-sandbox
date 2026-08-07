@@ -1,5 +1,5 @@
 //! The pre-boot refusals (operator policy, config), host-safe: every check here fires **before any
-//! boot**, so these tests spawn the real `ekvm` binary with `EKVM_FIRECRACKER` pointed at a path
+//! boot**, so these tests spawn the real `bsx` binary with `BSX_FIRECRACKER` pointed at a path
 //! that does not exist. A run the gate admits then fails on the missing VMM (a distinct message),
 //! and a run it refuses never reaches it, which is what lets the assertions tell the two apart
 //! without KVM, a rootfs, or root, on any host the host-safe gate runs on.
@@ -10,17 +10,17 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-/// A scratch cwd holding the test's `.ekvm.toml`, removed on drop. Its own `.ekvm.toml` is the
+/// A scratch cwd holding the test's `.bsx.toml`, removed on drop. Its own `.bsx.toml` is the
 /// nearest one, so discovery never reaches a stray file higher up the temp tree.
 struct PolicyDir(PathBuf);
 
 impl PolicyDir {
     fn with_toml(name: &str, toml: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("ekvm-policy-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-policy-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
-        std::fs::write(dir.join(".ekvm.toml"), toml)
-            .unwrap_or_else(|e| panic!("write .ekvm.toml: {e}"));
+        std::fs::write(dir.join(".bsx.toml"), toml)
+            .unwrap_or_else(|e| panic!("write .bsx.toml: {e}"));
         Self(dir)
     }
 }
@@ -31,20 +31,20 @@ impl Drop for PolicyDir {
     }
 }
 
-/// Run `ekvm run <args> -- true` in `dir`, returning `(exit_code, stderr)`. The VMM path is bogus
+/// Run `bsx run <args> -- true` in `dir`, returning `(exit_code, stderr)`. The VMM path is bogus
 /// on purpose: reaching it at all means the policy gate admitted the run.
 fn run_in(dir: &PolicyDir, args: &[&str]) -> (Option<i32>, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_ekvm"))
+    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .arg("run")
         .args(args)
         .arg("--unjailed") // never ask for root; the run must die before the VMM either way
         .arg("--")
         .arg("true")
         .current_dir(&dir.0)
-        .env("EKVM_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
-        .env("EKVM_SIGNING_KEY", dir.0.join("signing.key"))
+        .env("BSX_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
+        .env("BSX_SIGNING_KEY", dir.0.join("signing.key"))
         .output()
-        .unwrap_or_else(|e| panic!("spawn ekvm: {e}"));
+        .unwrap_or_else(|e| panic!("spawn bsx: {e}"));
     (
         out.status.code(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -95,27 +95,27 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
     let dir = PolicyDir::with_toml("badlog", "");
 
     // The CLI: refused before anything else happens.
-    let out = Command::new(env!("CARGO_BIN_EXE_ekvm"))
-        .args(["--log", "ekvm=notalevel", "run", "--unjailed", "--", "true"])
+    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
+        .args(["--log", "bsx=notalevel", "run", "--unjailed", "--", "true"])
         .current_dir(&dir.0)
-        .env("EKVM_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
+        .env("BSX_FIRECRACKER", "/nonexistent/firecracker-for-this-test")
         .output()
-        .unwrap_or_else(|e| panic!("spawn ekvm run: {e}"));
+        .unwrap_or_else(|e| panic!("spawn bsx run: {e}"));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "a bad filter exits 2: {stderr}");
     assert!(
-        stderr.contains("log filter") && stderr.contains("ekvm=notalevel"),
+        stderr.contains("log filter") && stderr.contains("bsx=notalevel"),
         "the refusal names the filter it could not parse: {stderr}"
     );
 
     // The daemon: refuses to start, same loudness (it would otherwise serve with logging the
     // operator did not choose).
-    let out = Command::new(env!("CARGO_BIN_EXE_ekvm"))
-        .args(["serve", "--log", "ekvm=notalevel", "--socket"])
+    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
+        .args(["serve", "--log", "bsx=notalevel", "--socket"])
         .arg(dir.0.join("never-bound.sock"))
         .current_dir(&dir.0)
         .output()
-        .unwrap_or_else(|e| panic!("spawn ekvm serve: {e}"));
+        .unwrap_or_else(|e| panic!("spawn bsx serve: {e}"));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(
         out.status.code(),
@@ -123,7 +123,7 @@ fn an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn() {
         "the daemon refuses to start: {stderr}"
     );
     assert!(
-        stderr.contains("log filter") && stderr.contains("ekvm=notalevel"),
+        stderr.contains("log filter") && stderr.contains("bsx=notalevel"),
         "the daemon's refusal names the filter too: {stderr}"
     );
     assert!(

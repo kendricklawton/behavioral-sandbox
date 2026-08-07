@@ -1,17 +1,17 @@
-//! The `.ekvm.toml` **file layer** of the config precedence `flags > env (EKVM_*) > file >
+//! The `.bsx.toml` **file layer** of the config precedence `flags > env (BSX_*) > file >
 //! defaults`.
 //!
-//! The env layer already lives in [`ekvm_engine::BootConfig::from_env`], and the flags layer is the
+//! The env layer already lives in [`bsx_engine::BootConfig::from_env`], and the flags layer is the
 //! CLI's own arguments; this module inserts a file between env and defaults. **One vocabulary:** the
-//! file's keys mirror the `EKVM_*` env names 1:1 (minus the prefix, lowercased), so a value is
+//! file's keys mirror the `BSX_*` env names 1:1 (minus the prefix, lowercased), so a value is
 //! spelled the same whether it comes from a flag, the environment, or the file. Discovery is the
-//! **nearest `.ekvm.toml` walking up from the cwd** (like `.gitignore`/`.editorconfig`), so a
+//! **nearest `.bsx.toml` walking up from the cwd** (like `.gitignore`/`.editorconfig`), so a
 //! project pins its engine config beside its code.
 //!
 //! **Typos are a typed error, never a silent no-op:** the file is parsed with
 //! `deny_unknown_fields`, so a misspelled key (`kernal = …`) fails loudly rather than being ignored.
 //!
-//! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](ekvm_engine::BootConfig::from_env_with): return the
+//! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](bsx_engine::BootConfig::from_env_with): return the
 //! real env var if set, else the file's value, which resolves `env > file > defaults` for the
 //! artifact/scratch keys with zero duplication of the engine's env-key logic or defaults. The `log`
 //! key has no `BootConfig` field (it drives `tracing`), so the CLI reads it from here directly.
@@ -21,50 +21,50 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};
 
-use ekvm_engine::VmmError;
-use ekvm_probes_loader::{Ipv4Cidr, Ipv6Cidr};
+use bsx_engine::VmmError;
+use bsx_probes_loader::{Ipv4Cidr, Ipv6Cidr};
 use serde::Deserialize;
 
 use crate::policy::Policy;
 
 /// The file name discovered up from the cwd.
-const FILE_NAME: &str = ".ekvm.toml";
+const FILE_NAME: &str = ".bsx.toml";
 
-/// A parsed `.ekvm.toml`. Every field is optional (an absent key falls through to the env/default
-/// layer); every key mirrors an `EKVM_*` env name. Unknown keys are rejected so a typo can't
+/// A parsed `.bsx.toml`. Every field is optional (an absent key falls through to the env/default
+/// layer); every key mirrors an `BSX_*` env name. Unknown keys are rejected so a typo can't
 /// silently no-op.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EkvmToml {
-    /// Mirrors `EKVM_FIRECRACKER`.
+pub struct BsxToml {
+    /// Mirrors `BSX_FIRECRACKER`.
     firecracker: Option<PathBuf>,
-    /// Mirrors `EKVM_KERNEL`.
+    /// Mirrors `BSX_KERNEL`.
     kernel: Option<PathBuf>,
-    /// Mirrors `EKVM_ROOTFS`.
+    /// Mirrors `BSX_ROOTFS`.
     rootfs: Option<PathBuf>,
-    /// Mirrors `EKVM_MARKER`.
+    /// Mirrors `BSX_MARKER`.
     marker: Option<String>,
-    /// Mirrors `EKVM_SCRATCH_DIR`.
+    /// Mirrors `BSX_SCRATCH_DIR`.
     scratch_dir: Option<PathBuf>,
-    /// Mirrors `EKVM_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied).
+    /// Mirrors `BSX_REQUIRE_LIMITS` (fail closed when cgroup caps can't be applied).
     require_limits: Option<bool>,
-    /// Mirrors `EKVM_GATEWAY`: the default route this host hands its guests. A host fact, so it
+    /// Mirrors `BSX_GATEWAY`: the default route this host hands its guests. A host fact, so it
     /// belongs in the file rather than on every command line; `--gateway` overrides it.
     gateway: Option<Ipv4Addr>,
-    /// Mirrors `EKVM_RESOLVER`: the resolver this host's guests are told to use. Read only when a
+    /// Mirrors `BSX_RESOLVER`: the resolver this host's guests are told to use. Read only when a
     /// gateway resolved, since a resolver the guest cannot route to is inert.
     resolver: Option<Ipv4Addr>,
-    /// Mirrors `EKVM_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
+    /// Mirrors `BSX_LOG` (the stderr `tracing` filter). No `BootConfig` field; the CLI reads it.
     log: Option<String>,
-    /// Mirrors `EKVM_SIGNING_KEY` (the host record-signing key path). No `BootConfig`
+    /// Mirrors `BSX_SIGNING_KEY` (the host record-signing key path). No `BootConfig`
     /// field; the CLI reads it to sign `--record`.
     signing_key: Option<PathBuf>,
-    /// Mirrors `EKVM_TRUSTED_KEYS`: public keys (`key_id` hex) `ekvm verify` trusts *in addition*
+    /// Mirrors `BSX_TRUSTED_KEYS`: public keys (`key_id` hex) `bsx verify` trusts *in addition*
     /// to the current signing key, so rotating the host key doesn't invalidate already-signed records.
     /// No `BootConfig` field.
     trusted_keys: Option<Vec<String>>,
 
-    // Operator policy. These do **not** mirror `EKVM_*` env keys: they are the
+    // Operator policy. These do **not** mirror `BSX_*` env keys: they are the
     // host's posture, not a per-invocation knob, and the ceilings exist precisely to bound what a
     // caller may ask for, so routing them through the flags > env > file precedence would let the
     // caller they bound edit them. See `crate::policy` for where this binds and where it is only a
@@ -125,8 +125,8 @@ impl TryFrom<String> for CidrV6 {
     }
 }
 
-impl EkvmToml {
-    /// Discover and parse the nearest `.ekvm.toml` walking up from `start`, or `None` if none
+impl BsxToml {
+    /// Discover and parse the nearest `.bsx.toml` walking up from `start`, or `None` if none
     /// exists between `start` and the filesystem root.
     /// # Errors
     /// [`VmmError::Vmm`] if a file is found but can't be read or has an unknown/mistyped key or bad
@@ -143,46 +143,46 @@ impl EkvmToml {
         Ok(None)
     }
 
-    /// Read + parse one `.ekvm.toml`, naming the file in any error.
+    /// Read + parse one `.bsx.toml`, naming the file in any error.
     fn parse_file(path: &Path) -> Result<Self, VmmError> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| VmmError::Vmm(format!("read {}: {e}", path.display())))?;
         Self::parse(&text).map_err(|e| VmmError::Vmm(format!("{}: {e}", path.display())))
     }
 
-    /// Parse TOML text into an [`EkvmToml`], surfacing an unknown-key/type error as a plain string
+    /// Parse TOML text into an [`BsxToml`], surfacing an unknown-key/type error as a plain string
     /// (the pure core the file reader and the unit tests share).
     fn parse(text: &str) -> Result<Self, String> {
         toml::from_str(text).map_err(|e| e.message().to_string())
     }
 
-    /// The file's value for an `EKVM_*` env key, as an [`OsString`], or `None` if the key is unset
-    /// in the file, the shape [`from_env_with`](ekvm_engine::BootConfig::from_env_with) consumes, so
+    /// The file's value for an `BSX_*` env key, as an [`OsString`], or `None` if the key is unset
+    /// in the file, the shape [`from_env_with`](bsx_engine::BootConfig::from_env_with) consumes, so
     /// the file slots in *under* the environment in one composed lookup.
     #[must_use]
     pub fn env_value(&self, key: &str) -> Option<OsString> {
         match key {
-            "EKVM_FIRECRACKER" => self
+            "BSX_FIRECRACKER" => self
                 .firecracker
                 .as_ref()
                 .map(|p| p.as_os_str().to_os_string()),
-            "EKVM_KERNEL" => self.kernel.as_ref().map(|p| p.as_os_str().to_os_string()),
-            "EKVM_ROOTFS" => self.rootfs.as_ref().map(|p| p.as_os_str().to_os_string()),
-            "EKVM_MARKER" => self.marker.as_ref().map(OsString::from),
-            "EKVM_SCRATCH_DIR" => self
+            "BSX_KERNEL" => self.kernel.as_ref().map(|p| p.as_os_str().to_os_string()),
+            "BSX_ROOTFS" => self.rootfs.as_ref().map(|p| p.as_os_str().to_os_string()),
+            "BSX_MARKER" => self.marker.as_ref().map(OsString::from),
+            "BSX_SCRATCH_DIR" => self
                 .scratch_dir
                 .as_ref()
                 .map(|p| p.as_os_str().to_os_string()),
 
             // A bool rendered as the canonical token `from_env_with`'s `parse_env_bool` accepts, so
             // the file slots under the env in the same composed lookup as the string keys.
-            "EKVM_REQUIRE_LIMITS" => self
+            "BSX_REQUIRE_LIMITS" => self
                 .require_limits
                 .map(|b| OsString::from(if b { "true" } else { "false" })),
             // Rendered back to the dotted-quad text `from_env_with` parses, so the file slots under
             // the env in the same composed lookup rather than needing a second path into the config.
-            "EKVM_GATEWAY" => self.gateway.map(|a| OsString::from(a.to_string())),
-            "EKVM_RESOLVER" => self.resolver.map(|a| OsString::from(a.to_string())),
+            "BSX_GATEWAY" => self.gateway.map(|a| OsString::from(a.to_string())),
+            "BSX_RESOLVER" => self.resolver.map(|a| OsString::from(a.to_string())),
             _ => None,
         }
     }
@@ -287,7 +287,7 @@ fn parse_v6_cidr(s: &str) -> Result<Ipv6Cidr, String> {
     }
 }
 
-/// The operator policy for this process: the nearest `.ekvm.toml`'s, or the permissive default when
+/// The operator policy for this process: the nearest `.bsx.toml`'s, or the permissive default when
 /// there is no file. `run` and `shell` both source policy through here, so the two CLI paths agree.
 ///
 /// The daemon deliberately does **not**: `serve` builds its [`Policy`] from its own flags, because a
@@ -295,29 +295,29 @@ fn parse_v6_cidr(s: &str) -> Result<Ipv6Cidr, String> {
 /// That divergence is the design, not drift, so this function is the CLI's single source and not the
 /// process's.
 #[must_use]
-pub fn policy_of(file: Option<&EkvmToml>) -> Policy {
-    file.map(EkvmToml::policy).unwrap_or_default()
+pub fn policy_of(file: Option<&BsxToml>) -> Policy {
+    file.map(BsxToml::policy).unwrap_or_default()
 }
 
-/// Resolve the host record-signing key path with `env (EKVM_SIGNING_KEY) > file > default`
+/// Resolve the host record-signing key path with `env (BSX_SIGNING_KEY) > file > default`
 /// Like `log`, this has no `BootConfig` field, so its precedence is mirrored here.
-/// The default is [`ekvm_probes_loader::default_key_path`] (a data-dir path, generated on first use).
+/// The default is [`bsx_probes_loader::default_key_path`] (a data-dir path, generated on first use).
 #[must_use]
-pub fn signing_key_path(file: Option<&EkvmToml>) -> PathBuf {
-    std::env::var_os("EKVM_SIGNING_KEY")
+pub fn signing_key_path(file: Option<&BsxToml>) -> PathBuf {
+    std::env::var_os("BSX_SIGNING_KEY")
         .map(PathBuf::from)
-        .or_else(|| file.and_then(EkvmToml::signing_key).map(Path::to_path_buf))
-        .unwrap_or_else(ekvm_probes_loader::default_key_path)
+        .or_else(|| file.and_then(BsxToml::signing_key).map(Path::to_path_buf))
+        .unwrap_or_else(bsx_probes_loader::default_key_path)
 }
 
-/// The configured set of extra trusted public keys (`key_id` hex) for `ekvm verify`, the **union**
-/// of `EKVM_TRUSTED_KEYS` (comma-separated) and the file's `trusted_keys` list. A set, not an
+/// The configured set of extra trusted public keys (`key_id` hex) for `bsx verify`, the **union**
+/// of `BSX_TRUSTED_KEYS` (comma-separated) and the file's `trusted_keys` list. A set, not an
 /// override: every configured key stays trusted so a record signed before a key rotation still
 /// verifies. Parsing/validation is the caller's (`TrustedKey::from_hex`).
 #[must_use]
-pub fn trusted_key_hexes(file: Option<&EkvmToml>) -> Vec<String> {
+pub fn trusted_key_hexes(file: Option<&BsxToml>) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(v) = std::env::var_os("EKVM_TRUSTED_KEYS") {
+    if let Some(v) = std::env::var_os("BSX_TRUSTED_KEYS") {
         out.extend(
             v.to_string_lossy()
                 .split(',')
@@ -332,14 +332,14 @@ pub fn trusted_key_hexes(file: Option<&EkvmToml>) -> Vec<String> {
     out
 }
 
-/// Resolve the stderr log filter with the full precedence `flag > env (EKVM_LOG) > file > default`.
+/// Resolve the stderr log filter with the full precedence `flag > env (BSX_LOG) > file > default`.
 /// The `BootConfig` layers can't carry `log` (it has no field), so this mirrors that precedence for
 /// the one config value that drives `tracing` instead of the engine.
 #[must_use]
-pub fn resolve_log(flag: Option<&str>, file: Option<&EkvmToml>) -> Option<String> {
+pub fn resolve_log(flag: Option<&str>, file: Option<&BsxToml>) -> Option<String> {
     flag.map(str::to_string)
-        .or_else(|| std::env::var("EKVM_LOG").ok())
-        .or_else(|| file.and_then(EkvmToml::log).map(str::to_string))
+        .or_else(|| std::env::var("BSX_LOG").ok())
+        .or_else(|| file.and_then(BsxToml::log).map(str::to_string))
 }
 
 #[cfg(test)]
@@ -349,7 +349,7 @@ mod tests {
     #[test]
     fn unknown_key_is_a_typed_error_not_a_silent_no_op() {
         // A typo (`kernal`) must fail loudly, per the deny-unknown-fields contract.
-        let err = EkvmToml::parse("kernal = \"/x/vmlinux\"\n").expect_err("typo must error");
+        let err = BsxToml::parse("kernal = \"/x/vmlinux\"\n").expect_err("typo must error");
         assert!(
             err.contains("kernal") || err.contains("unknown"),
             "names the bad key: {err}"
@@ -358,21 +358,21 @@ mod tests {
 
     #[test]
     fn known_keys_parse_into_env_values() {
-        let toml = EkvmToml::parse(
+        let toml = BsxToml::parse(
             "kernel = \"/k/vmlinux\"\nrootfs = \"/r/root.ext4\"\nmarker = \"UP\"\nlog = \"debug\"\n",
         )
         .expect("valid toml parses");
         assert_eq!(
-            toml.env_value("EKVM_KERNEL"),
+            toml.env_value("BSX_KERNEL"),
             Some(OsString::from("/k/vmlinux"))
         );
         assert_eq!(
-            toml.env_value("EKVM_ROOTFS"),
+            toml.env_value("BSX_ROOTFS"),
             Some(OsString::from("/r/root.ext4"))
         );
-        assert_eq!(toml.env_value("EKVM_MARKER"), Some(OsString::from("UP")));
+        assert_eq!(toml.env_value("BSX_MARKER"), Some(OsString::from("UP")));
         assert_eq!(
-            toml.env_value("EKVM_FIRECRACKER"),
+            toml.env_value("BSX_FIRECRACKER"),
             None,
             "unset key falls through"
         );
@@ -383,36 +383,36 @@ mod tests {
     fn require_limits_bool_renders_the_env_token_from_env_parses() {
         // The file bool slots under the env in one composed lookup: `env_value` renders the canonical
         // token, and `BootConfig::from_env_with` parses it back onto the posture (env > file > default).
-        let on = EkvmToml::parse("require_limits = true\n").expect("valid toml parses");
+        let on = BsxToml::parse("require_limits = true\n").expect("valid toml parses");
         assert_eq!(
-            on.env_value("EKVM_REQUIRE_LIMITS"),
+            on.env_value("BSX_REQUIRE_LIMITS"),
             Some(OsString::from("true"))
         );
-        assert!(ekvm_engine::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
+        assert!(bsx_engine::BootConfig::from_env_with(|k| on.env_value(k)).require_limits);
 
-        let off = EkvmToml::parse("require_limits = false\n").expect("valid toml parses");
+        let off = BsxToml::parse("require_limits = false\n").expect("valid toml parses");
         assert_eq!(
-            off.env_value("EKVM_REQUIRE_LIMITS"),
+            off.env_value("BSX_REQUIRE_LIMITS"),
             Some(OsString::from("false"))
         );
-        assert!(!ekvm_engine::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
+        assert!(!bsx_engine::BootConfig::from_env_with(|k| off.env_value(k)).require_limits);
 
         // Unset in the file falls through to the default.
-        let bare = EkvmToml::parse("marker = \"UP\"\n").expect("valid toml parses");
-        assert_eq!(bare.env_value("EKVM_REQUIRE_LIMITS"), None);
+        let bare = BsxToml::parse("marker = \"UP\"\n").expect("valid toml parses");
+        assert_eq!(bare.env_value("BSX_REQUIRE_LIMITS"), None);
     }
 
     #[test]
     fn signing_key_parses_from_the_file_layer() {
         let toml =
-            EkvmToml::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
+            BsxToml::parse("signing_key = \"/keys/host.ed25519\"\n").expect("valid toml parses");
         assert_eq!(
             toml.signing_key(),
             Some(Path::new("/keys/host.ed25519")),
             "the file layer carries the record-signing key path"
         );
         assert_eq!(
-            EkvmToml::default().signing_key(),
+            BsxToml::default().signing_key(),
             None,
             "unset falls through"
         );
@@ -420,10 +420,10 @@ mod tests {
 
     #[test]
     fn trusted_keys_parse_as_a_list_from_the_file_layer() {
-        let toml = EkvmToml::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
+        let toml = BsxToml::parse("trusted_keys = [\"aa\", \"bb\"]\n").expect("valid toml parses");
         assert_eq!(toml.trusted_keys(), ["aa".to_string(), "bb".to_string()]);
         assert!(
-            EkvmToml::default().trusted_keys().is_empty(),
+            BsxToml::default().trusted_keys().is_empty(),
             "unset is an empty set, not an error"
         );
     }
@@ -432,51 +432,48 @@ mod tests {
     fn env_beats_file_beats_default_via_the_composed_lookup() {
         // The layering `BootConfig::from_env_with` sees: env wins over file, file over default. Model
         // that composition here without a real process env or a real BootConfig.
-        let file = EkvmToml::parse("kernel = \"/file/vmlinux\"\nrootfs = \"/file/root\"\n")
-            .expect("valid");
+        let file =
+            BsxToml::parse("kernel = \"/file/vmlinux\"\nrootfs = \"/file/root\"\n").expect("valid");
         // A fake environment that only sets the kernel.
         let env = |key: &str| -> Option<OsString> {
             match key {
-                "EKVM_KERNEL" => Some(OsString::from("/env/vmlinux")),
+                "BSX_KERNEL" => Some(OsString::from("/env/vmlinux")),
                 _ => None,
             }
         };
         // The composed lookup: env first, then file.
         let composed = |key: &str| env(key).or_else(|| file.env_value(key));
         // kernel: env wins over the file.
-        assert_eq!(
-            composed("EKVM_KERNEL"),
-            Some(OsString::from("/env/vmlinux"))
-        );
+        assert_eq!(composed("BSX_KERNEL"), Some(OsString::from("/env/vmlinux")));
         // rootfs: only the file has it → file wins over the default.
-        assert_eq!(composed("EKVM_ROOTFS"), Some(OsString::from("/file/root")));
+        assert_eq!(composed("BSX_ROOTFS"), Some(OsString::from("/file/root")));
         // marker: neither sets it → None, so the BootConfig default stands.
-        assert_eq!(composed("EKVM_MARKER"), None);
+        assert_eq!(composed("BSX_MARKER"), None);
     }
 
     #[test]
     fn malformed_egress_ceiling_is_a_typed_error_not_a_dropped_entry() {
         // A dropped ceiling entry *widens* the ceiling (empty means unrestricted in
         // `Policy::check_egress`), so a typo must refuse the whole file, loudly, at parse time.
-        let err = EkvmToml::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
+        let err = BsxToml::parse("max_egress_v4 = [\"10.0.0.0-8\"]\n")
             .expect_err("a malformed CIDR entry must fail the parse");
         assert!(
             err.contains("10.0.0.0-8") && err.contains("max_egress_v4"),
             "error names the entry and the key: {err}"
         );
 
-        let err = EkvmToml::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
+        let err = BsxToml::parse("max_egress_v4 = [\"10.0.0.0/33\"]\n")
             .expect_err("an out-of-range prefix must fail the parse");
         assert!(err.contains("10.0.0.0/33"), "error names the entry: {err}");
 
-        let err = EkvmToml::parse("max_egress_v6 = [\"fd00::/129\"]\n")
+        let err = BsxToml::parse("max_egress_v6 = [\"fd00::/129\"]\n")
             .expect_err("an out-of-range v6 prefix must fail the parse");
         assert!(err.contains("fd00::/129"), "error names the entry: {err}");
     }
 
     #[test]
     fn egress_ceilings_parse_into_the_policy_unabridged() {
-        let toml = EkvmToml::parse(
+        let toml = BsxToml::parse(
             "max_egress_v4 = [\"10.0.0.0/8\", \"192.0.2.7\"]\nmax_egress_v6 = [\"fd00::/8\"]\n",
         )
         .expect("valid ceilings parse");
@@ -484,17 +481,17 @@ mod tests {
         assert_eq!(
             policy.max_egress_v4,
             vec![
-                ekvm_probes_loader::Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap(),
-                ekvm_probes_loader::Ipv4Cidr::host("192.0.2.7".parse().unwrap()),
+                bsx_probes_loader::Ipv4Cidr::new("10.0.0.0".parse().unwrap(), 8).unwrap(),
+                bsx_probes_loader::Ipv4Cidr::host("192.0.2.7".parse().unwrap()),
             ],
             "every entry reaches the policy: a bare host reads as /32"
         );
         assert_eq!(
             policy.max_egress_v6,
-            vec![ekvm_probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
+            vec![bsx_probes_loader::Ipv6Cidr::new("fd00::".parse().unwrap(), 8).unwrap()]
         );
         // Absent keys stay "no restriction": the permissive default, explicitly chosen.
-        let bare = EkvmToml::parse("marker = \"UP\"\n").expect("valid");
+        let bare = BsxToml::parse("marker = \"UP\"\n").expect("valid");
         assert!(bare.policy().max_egress_v4.is_empty());
         assert!(bare.policy().max_egress_v6.is_empty());
     }
@@ -502,24 +499,24 @@ mod tests {
     #[test]
     fn discover_walks_up_from_the_cwd_and_finds_the_nearest() {
         // A three-level temp tree with a file at the top; discovery from the leaf finds it.
-        let base = std::env::temp_dir().join(format!("ekvm-cfg-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("bsx-cfg-{}", std::process::id()));
         let leaf = base.join("a/b");
         std::fs::create_dir_all(&leaf).expect("mkdirs");
-        std::fs::write(base.join(".ekvm.toml"), "marker = \"FROMFILE\"\n").expect("write");
+        std::fs::write(base.join(".bsx.toml"), "marker = \"FROMFILE\"\n").expect("write");
         // A nearer file shadows the farther one.
-        std::fs::write(base.join("a/.ekvm.toml"), "marker = \"NEARER\"\n").expect("write nearer");
-        let found = EkvmToml::discover(&leaf)
+        std::fs::write(base.join("a/.bsx.toml"), "marker = \"NEARER\"\n").expect("write nearer");
+        let found = BsxToml::discover(&leaf)
             .expect("discover ok")
             .expect("a file exists");
         assert_eq!(found.log(), None);
         assert_eq!(
-            found.env_value("EKVM_MARKER"),
+            found.env_value("BSX_MARKER"),
             Some(OsString::from("NEARER"))
         );
         // None above the tree.
-        let empty = std::env::temp_dir().join(format!("ekvm-cfg-empty-{}", std::process::id()));
+        let empty = std::env::temp_dir().join(format!("bsx-cfg-empty-{}", std::process::id()));
         std::fs::create_dir_all(&empty).expect("mkdir empty");
-        assert_eq!(EkvmToml::discover(&empty).expect("ok"), None);
+        assert_eq!(BsxToml::discover(&empty).expect("ok"), None);
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_dir_all(&empty);
     }

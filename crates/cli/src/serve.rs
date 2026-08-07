@@ -1,13 +1,13 @@
-//! `ekvm`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
-//! [wire API](ekvm_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
-//! socket**, so a local client drives microVMs without linking the `ekvm-engine` library. This
+//! `bsx`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
+//! [wire API](bsx_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
+//! socket**, so a local client drives microVMs without linking the `bsx-engine` library. This
 //! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
 //! use: no tenancy, no auth, no billing, no scheduler (those are the
 //! hoster's, above this).
 //!
 //! **Shape.** One connection is one sandbox **session** (the VM *is* the session),
 //! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`ekvm_protocol`] crate;
+//! is the versioned newline-JSON contract in the shared [`bsx_protocol`] crate;
 //! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
 //! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
 //!
@@ -54,12 +54,12 @@ use std::num::{NonZeroU8, NonZeroU32};
 
 use crate::audit::Observability;
 use crate::policy::Policy;
-use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, Limits, Pool, Sandbox, VmmError, sweep_orphans};
+use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, Limits, Pool, Sandbox, VmmError, sweep_orphans};
 
 use crate::metrics::Metrics;
 
 // The operational-failure exit code (a bad socket path, a bind failure) is the CLI's own
-// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `ekvm` binary.
+// `crate::EXIT_OPERATIONAL`, one source now that the daemon shares the `bsx` binary.
 use crate::EXIT_OPERATIONAL;
 
 /// How long an accept loop pauses after a **resource-exhaustion** accept error, so a condition
@@ -82,8 +82,8 @@ pub(crate) fn accept_error_is_exhaustion(e: &std::io::Error) -> bool {
         || e.kind() == std::io::ErrorKind::OutOfMemory
 }
 
-/// `ekvm serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
-/// is the shared global flag on the `ekvm` CLI, so it is not repeated here.
+/// `bsx serve`, drive the sandbox lifecycle over a unix socket (the daemon). The `--log` filter
+/// is the shared global flag on the `bsx` CLI, so it is not repeated here.
 #[derive(clap::Args)]
 pub struct ServeArgs {
     /// The unix socket to listen on. Its directory's permissions are the access control (the daemon
@@ -103,7 +103,7 @@ pub struct ServeArgs {
     /// Refuse to boot a session's VMM when the cpu/memory cgroup caps can't be applied, instead of
     /// the default warn-and-boot-uncapped. Makes the resource envelope load-bearing on a
     /// multi-tenant host; needs the jailer (so not with `--unjailed`) and delegated cgroup v2
-    /// controllers. Also settable via `EKVM_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
+    /// controllers. Also settable via `BSX_REQUIRE_LIMITS`. A hoster posture, no client chooses it.
     #[arg(long)]
     require_limits: bool,
     /// Serve a Prometheus metrics endpoint at this address (e.g. `127.0.0.1:9920`) for the hoster to
@@ -112,7 +112,7 @@ pub struct ServeArgs {
     #[arg(long, value_name = "ADDR")]
     metrics: Option<SocketAddr>,
     /// Emit stderr logs as JSON lines (for a log shipper) instead of human-readable text. Also
-    /// enabled by `EKVM_LOG_FORMAT=json`.
+    /// enabled by `BSX_LOG_FORMAT=json`.
     #[arg(long)]
     log_json: bool,
     /// The ceiling on concurrent sessions. Every session is a full microVM (guest RAM, a tap, a
@@ -167,14 +167,14 @@ pub struct ServeArgs {
 /// optional pre-warmed pool, and a monotonic source of snapshot-bundle directories.
 // `pub(crate)` (not private) because the `session` module is a crate-root sibling of `serve` (both
 // flat under `src/`), so it reaches the daemon context through crate visibility, not the ancestor
-// visibility a submodule would have. Still crate-internal, this is the `ekvm` binary, not a library.
+// visibility a submodule would have. Still crate-internal, this is the `bsx` binary, not a library.
 pub(crate) struct Server {
     /// The env-layered base config; a session's `open` folds its resource knobs on top.
     pub(crate) base: BootConfig,
     /// `true` unless launched `--unjailed`, the confinement posture no client can weaken.
     pub(crate) jailed: bool,
     /// The operator's per-run policy, built from the daemon's own flags at startup (a daemon
-    /// deliberately reads no `.ekvm.toml` out of its cwd; see [`serve`]). This is the enforcing
+    /// deliberately reads no `.bsx.toml` out of its cwd; see [`serve`]). This is the enforcing
     /// copy: a client controls neither those flags nor this process's environment, so the ceilings
     /// here bound what any `open` may ask for.
     pub(crate) policy: Policy,
@@ -182,7 +182,7 @@ pub(crate) struct Server {
     pub(crate) observ: Observability,
     /// The host record-signing key: the `trace` reply signs the finalized record with
     /// it so a client detects post-hoc alteration. Host-side; the guest never sees it.
-    pub(crate) signing_key: ekvm_probes_loader::HostKey,
+    pub(crate) signing_key: bsx_probes_loader::HostKey,
     /// The pre-warmed pool for fast `open`, or `None` (cold boots) when `--prewarm` was off or the
     /// pool could not be built. Behind a `Mutex`: `take`/`refill` need `&mut`, and sessions run on
     /// many threads.
@@ -227,26 +227,26 @@ impl Server {
     }
 }
 
-/// Run the daemon (`ekvm serve`): the `--log` filter comes from the CLI's shared global flag, the
+/// Run the daemon (`bsx serve`): the `--log` filter comes from the CLI's shared global flag, the
 /// rest of the knobs from [`ServeArgs`]. Its own tracing init (info default, optional JSON) and its
-/// own config (flags + environment, no `.ekvm.toml`), so the CLI dispatches this **before** its
+/// own config (flags + environment, no `.bsx.toml`), so the CLI dispatches this **before** its
 /// project-file/tracing setup ([`crate::main`]).
 pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     let log_json = args.log_json
-        || std::env::var("EKVM_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+        || std::env::var("BSX_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     if let Err(e) = init_tracing(log.as_deref(), log_json) {
         // tracing is not up (that is the failure), so the refusal goes to stderr directly.
         use std::io::Write as _;
-        let _ = writeln!(std::io::stderr(), "ekvm: {e}");
+        let _ = writeln!(std::io::stderr(), "bsx: {e}");
         return ExitCode::from(EXIT_OPERATIONAL);
     }
 
     // The env-layered base config every session boots from (`with_limits` folds each `open`'s knobs
-    // on top). The daemon has no `.ekvm.toml` cwd discovery, that's a CLI-in-a-project convenience;
+    // on top). The daemon has no `.bsx.toml` cwd discovery, that's a CLI-in-a-project convenience;
     // a daemon's config is its own flags + environment. Computed up front so the signal handler and
     // the startup sweep both know where this daemon's guest-memory-sized bundle dirs live.
     let mut base = BootConfig::from_env();
-    // Flag layer over `EKVM_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
+    // Flag layer over `BSX_REQUIRE_LIMITS` (read by `from_env`): the flag can only *strengthen* the
     // hardening posture, so an absent flag leaves an env-set `true` intact (it never forces `false`).
     if args.require_limits {
         base.require_limits = true;
@@ -256,11 +256,11 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     // Fail fast on the static contradiction: `require_limits` caps the *jailed* VMM's cgroup, so an
     // unjailed daemon could never satisfy it and would accept connections only to refuse every
     // session with `LimitsUnavailable`. Reject it at startup (covers the flag and
-    // `EKVM_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
+    // `BSX_REQUIRE_LIMITS`) rather than run a daemon that looks healthy but serves nothing.
     if base.require_limits && !jailed {
         tracing::error!(
             "require_limits needs the jailer, but this daemon is --unjailed; an unjailed VMM has no \
-             cgroup to cap. Drop --unjailed (and EKVM_REQUIRE_LIMITS) or don't require limits."
+             cgroup to cap. Drop --unjailed (and BSX_REQUIRE_LIMITS) or don't require limits."
         );
         return ExitCode::from(EXIT_OPERATIONAL);
     }
@@ -309,15 +309,15 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         );
     }
     // Snapshot bundles are guest-memory-sized, so they live under the engine's own scratch knob
-    // (`EKVM_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
+    // (`BSX_SCRATCH_DIR`, `BootConfig::scratch_dir`), not a hardcoded `$TMPDIR`: on a host where
     // `/tmp` is a size-limited tmpfs the operator points scratch at real disk once and every
     // large artifact (boot scratch, prewarm, snapshots) follows.
     let snapshot_base = snapshots_dir(&base.scratch_dir);
     // Load (or generate on first use) the host record-signing key, so the `trace` reply carries a
     // signed envelope. Fail-closed like the metrics bind: refuse to start rather than
-    // serve records that claim to be verifiable but aren't signed. The daemon has no `.ekvm.toml`
-    // layer (env + flags only), so the path resolves from `EKVM_SIGNING_KEY` or the default.
-    let signing_key = match ekvm_probes_loader::HostKey::load_or_generate(
+    // serve records that claim to be verifiable but aren't signed. The daemon has no `.bsx.toml`
+    // layer (env + flags only), so the path resolves from `BSX_SIGNING_KEY` or the default.
+    let signing_key = match bsx_probes_loader::HostKey::load_or_generate(
         &crate::config::signing_key_path(None),
     ) {
         Ok(k) => k,
@@ -351,7 +351,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         );
         return ExitCode::from(EXIT_OPERATIONAL);
     }
-    // The daemon takes policy from its flags, not from a discovered `.ekvm.toml`: a daemon must not
+    // The daemon takes policy from its flags, not from a discovered `.bsx.toml`: a daemon must not
     // read a security control out of whatever directory it happened to be started in. Jail and
     // networking are already daemon-wide and client-immutable (`--unjailed` above), so only the
     // ceilings need to travel to the session boundary.
@@ -394,7 +394,7 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
         jailed,
         prewarmed = server.pool.is_some(),
         metrics = args.metrics.as_ref().map(tracing::field::display),
-        "ekvm listening"
+        "bsx listening"
     );
 
     // Accept forever, one thread per connection. A daemon runs until its supervisor stops it; the
@@ -427,12 +427,12 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
     let registry = Arc::clone(&server.metrics);
     let sampled = Arc::clone(server);
     let spawned = std::thread::Builder::new()
-        .name("ekvm-metrics".into())
+        .name("bsx-metrics".into())
         .spawn(move || {
             crate::metrics::serve(listener, registry, move || {
                 // `try_lock`, never a blocking acquire: the scrape must not stall behind a
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
-                // this scrape, `ekvm_pool_ready` is momentarily absent, the same absent-not-zero
+                // this scrape, `bsx_pool_ready` is momentarily absent, the same absent-not-zero
                 // shape the endpoint already uses for a daemon with no pool, rather than the
                 // visibility surface freezing under the load it exists to report on. The committed
                 // gauges read the live admission atomics, always available.
@@ -467,7 +467,7 @@ fn spawn_session(stream: UnixStream, server: Arc<Server>) {
         return;
     };
     let spawned = std::thread::Builder::new()
-        .name("ekvm-session".into())
+        .name("bsx-session".into())
         .spawn(move || {
             // The ticket lives exactly as long as the session: its `Drop` releases the slot
             // however `serve` ends (clean close, client hang-up, or a panic unwinding).
@@ -630,13 +630,13 @@ pub(crate) fn release_pool_clones(server: &Server, n: usize, clone: &Limits) {
         .fetch_sub(n * u64::from(clone.vcpus.get()), Ordering::Relaxed);
 }
 
-/// Backoff hint sent with an [`ekvm_protocol::Response::AtCapacity`] refusal. A hint only: the daemon
+/// Backoff hint sent with an [`bsx_protocol::Response::AtCapacity`] refusal. A hint only: the daemon
 /// cannot know when a slot frees, and a fleet dispatcher typically fails over to another host rather
 /// than waiting, so this is a modest "come back shortly" value, not a promise.
 pub(crate) const AT_CAPACITY_RETRY_MS: u64 = 1000;
 
 /// Refuse a connection that arrived past the `--max-sessions` ceiling: one typed
-/// [`ekvm_protocol::Response::AtCapacity`] (the client's `open` reads it as the reply, a distinct
+/// [`bsx_protocol::Response::AtCapacity`] (the client's `open` reads it as the reply, a distinct
 /// backpressure signal a dispatcher fails over on), then the connection drops. The
 /// write is timeout-bounded so a stalled client can't park the accept loop, and best-effort, the
 /// refusal itself must never take the daemon down.
@@ -648,18 +648,18 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     );
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     let mut stream = stream;
-    let refusal = ekvm_protocol::Response::at_capacity(AT_CAPACITY_RETRY_MS);
-    let _ = ekvm_protocol::write_response(&mut stream, &refusal);
+    let refusal = bsx_protocol::Response::at_capacity(AT_CAPACITY_RETRY_MS);
+    let _ = bsx_protocol::write_response(&mut stream, &refusal);
 }
 
 /// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
 fn prewarm_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("ekvm-prewarm-{}", std::process::id()))
+    scratch.join(format!("bsx-prewarm-{}", std::process::id()))
 }
 
 /// This daemon's session-snapshot bundle dir (holds each session's `snap-N`), under the scratch knob.
 fn snapshots_dir(scratch: &Path) -> PathBuf {
-    scratch.join(format!("ekvm-snapshots-{}", std::process::id()))
+    scratch.join(format!("bsx-snapshots-{}", std::process::id()))
 }
 
 /// The effective uid this process runs as, so the startup sweep only reclaims bundle dirs *it* owns
@@ -670,14 +670,14 @@ fn own_euid() -> Option<u32> {
     uid.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// Reclaim this-user `ekvm-prewarm-<pid>` / `ekvm-snapshots-<pid>` bundle dirs left by **dead**
+/// Reclaim this-user `bsx-prewarm-<pid>` / `bsx-snapshots-<pid>` bundle dirs left by **dead**
 /// prior daemons: their guest-memory-sized files are pure leak once the daemon that owned them is
 /// gone (SIGKILL/OOM skips the signal-handler cleanup). Best-effort, per-entry: a dir we can't stat
 /// or remove is logged and skipped. Skips our own pid and any live pid (a concurrently-running
 /// daemon of the same user). A dead daemon's pid is genuinely absent from `/proc` (it's not our
 /// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
 /// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
-/// ([`ekvm_engine::sweep_orphans`]), logging what it reclaimed. The complement of
+/// ([`bsx_engine::sweep_orphans`]), logging what it reclaimed. The complement of
 /// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
 /// read failure on the scratch base is logged, never fatal.
 fn sweep_orphaned_vms(scratch: &Path, metrics: Option<&Metrics>) {
@@ -710,8 +710,8 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         let Some(pid) = name
-            .strip_prefix("ekvm-prewarm-")
-            .or_else(|| name.strip_prefix("ekvm-snapshots-"))
+            .strip_prefix("bsx-prewarm-")
+            .or_else(|| name.strip_prefix("bsx-snapshots-"))
         else {
             continue; // not a bundle dir this daemon mints
         };
@@ -730,12 +730,12 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
         match std::fs::remove_dir_all(entry.path()) {
             Ok(()) => tracing::info!(
                 dir = %entry.path().display(),
-                "swept a stale ekvm bundle dir from a dead daemon"
+                "swept a stale bsx bundle dir from a dead daemon"
             ),
             Err(e) => tracing::warn!(
                 dir = %entry.path().display(),
                 error = %e,
-                "could not sweep a stale ekvm bundle dir"
+                "could not sweep a stale bsx bundle dir"
             ),
         }
     }
@@ -747,7 +747,7 @@ fn sweep_stale_agent_bundles(scratch: &Path) {
 /// VMs; the next start clears the stale socket and the startup sweep reclaims the leaked bundle dirs).
 fn install_signal_handler(socket: PathBuf, cleanup_dirs: Vec<PathBuf>) {
     let spawned = std::thread::Builder::new()
-        .name("ekvm-signals".into())
+        .name("bsx-signals".into())
         .spawn(move || {
             let mut signals = match signal_hook::iterator::Signals::new([
                 signal_hook::consts::SIGTERM,
@@ -809,7 +809,7 @@ fn build_optional_pool(
 /// daemon's confinement posture. The clones carry the default profile, which is why only a
 /// bare-default `open` is pool-eligible (`crate::session::boot_session_vm`).
 fn build_pool(base: &BootConfig, jailed: bool, target: usize) -> Result<Pool, VmmError> {
-    // Snapshot into a per-daemon dir under the engine's scratch knob (`EKVM_SCRATCH_DIR`), the same
+    // Snapshot into a per-daemon dir under the engine's scratch knob (`BSX_SCRATCH_DIR`), the same
     // routing as the session bundles: guest-memory-sized files belong where the operator pointed
     // scratch, never a hardcoded `$TMPDIR`. On a **successful** build the pool's clones reference this
     // bundle, so it must live until shutdown (the signal handler / startup sweep reclaim it); on any
@@ -870,7 +870,7 @@ fn build_pool_from(
 }
 
 /// Bind the listener at `socket`, clearing a **stale** socket file first but refusing to clobber a
-/// **live** daemon. If the path exists, a successful connect means another `ekvm` is already
+/// **live** daemon. If the path exists, a successful connect means another `bsx` is already
 /// listening (a typed refusal); a refused connect means the file is leftover from a dead daemon, so
 /// remove it and bind. The parent directory must already exist (the hoster's to create, with the
 /// permissions that gate access).
@@ -893,7 +893,7 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
         }
         if UnixStream::connect(socket).is_ok() {
             return Err(format!(
-                "another ekvm daemon is already listening on {}",
+                "another bsx daemon is already listening on {}",
                 socket.display()
             ));
         }
@@ -982,7 +982,7 @@ impl Drop for StagedPath {
     }
 }
 
-/// stderr logging, filter from `--log` else `EKVM_LOG` else `info`. `info` (not the CLI's `warn`):
+/// stderr logging, filter from `--log` else `BSX_LOG` else `info`. `info` (not the CLI's `warn`):
 /// a daemon's per-session boot/close lines are its operational trace. `json` switches the *encoding*
 /// of the same structured events, one JSON object per line, fields intact, for a log shipper, the
 /// events themselves are identical either way. A filter `tracing` cannot parse refuses the start,
@@ -994,12 +994,12 @@ impl Drop for StagedPath {
 fn init_tracing(flag: Option<&str>, json: bool) -> Result<(), String> {
     let filter = flag
         .map(str::to_string)
-        .or_else(|| std::env::var("EKVM_LOG").ok())
+        .or_else(|| std::env::var("BSX_LOG").ok())
         .unwrap_or_else(|| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter).map_err(|e| {
         format!(
             "invalid log filter {filter:?}: {e} (a level like warn|info|debug, or a tracing \
-             directive like \"ekvm=debug\")"
+             directive like \"bsx=debug\")"
         )
     })?;
     let builder = tracing_subscriber::fmt()
@@ -1026,7 +1026,7 @@ mod tests {
         // The daemon reclaims a stale socket by removing it, and it often runs as root, so a
         // `--socket` naming a real file (a config, a database) would have been a deletion of
         // whatever root can write. What matters here is not the error, it is the survival.
-        let dir = std::env::temp_dir().join(format!("ekvm-bind-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-bind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let victim = dir.join("precious.toml");
         std::fs::write(&victim, b"do not delete me").expect("write the victim");
@@ -1087,11 +1087,11 @@ mod tests {
         max_committed_vcpus: u64,
     ) -> Arc<Server> {
         Arc::new(Server {
-            base: ekvm_engine::BootConfig::default(),
+            base: bsx_engine::BootConfig::default(),
             jailed: false,
             policy: Policy::default(),
             observ: Observability::load(),
-            signing_key: ekvm_probes_loader::HostKey::from_seed([7u8; 32]),
+            signing_key: bsx_probes_loader::HostKey::from_seed([7u8; 32]),
             pool: None,
             snapshot_base: std::env::temp_dir(),
             snapshot_seq: AtomicU64::new(0),
@@ -1262,7 +1262,7 @@ mod tests {
         // The leak `StagedPath` closes: a panic between staging the temp socket (or a pool's
         // bundle dir) and publishing it must not strand the path. Both file and dir flavors, and
         // the disarm: a published path must survive the guard's drop.
-        let base = std::env::temp_dir().join(format!("ekvm-staged-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("bsx-staged-{}", std::process::id()));
         std::fs::create_dir_all(&base).expect("mkdir");
 
         let file = base.join("sock.tmp");
@@ -1297,11 +1297,11 @@ mod tests {
         let started = Instant::now();
         refuse_at_capacity(daemon_end, &server);
         let mut reader = std::io::BufReader::new(client);
-        let reply = ekvm_protocol::read_response(&mut reader)
+        let reply = bsx_protocol::read_response(&mut reader)
             .expect("the refusal parses")
             .expect("the refusal is a message, not EOF");
         assert!(
-            matches!(&reply, ekvm_protocol::Response::AtCapacity { retry_after_ms, .. } if *retry_after_ms > 0),
+            matches!(&reply, bsx_protocol::Response::AtCapacity { retry_after_ms, .. } if *retry_after_ms > 0),
             "expected the typed at-capacity refusal, got {reply:?}"
         );
         assert!(

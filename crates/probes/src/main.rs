@@ -79,7 +79,7 @@ use aya_ebpf::{
     maps::{Array, HashMap, PerCpuArray, RingBuf},
     programs::{TcContext, TracePointContext},
 };
-use ekvm_probes_common::{
+use bsx_probes_common::{
     DETAIL_CAP, ETH_HLEN, ETH_P_8021Q, ETH_P_ARP, ETH_P_IP, ETH_P_IPV6, ETHERTYPE_OFFSET,
     FlowCounts, FlowKey, FlowKey6, IPPROTO_ICMPV6, IPPROTO_TCP, IPPROTO_UDP, IPV4_DST_OFFSET,
     IPV4_FRAG_OFFSET, IPV4_MIN_IHL, IPV4_PROTO_OFFSET, IPV4_SRC_OFFSET, IPV6_DST_OFFSET, IPV6_HLEN,
@@ -290,7 +290,7 @@ fn record(
                 // Everything shorter than a `sockaddr_in6` reads the `sockaddr_in` size, so a
                 // still-shorter family (`sockaddr_nl` is 12) keeps naming its family instead of
                 // vanishing from the record as "nothing captured". The floor is 8 because that
-                // is what `ekvm_probes_common::describe_sockaddr` needs to name a family at all: a
+                // is what `bsx_probes_common::describe_sockaddr` needs to name a family at all: a
                 // shorter capture would render as "too short", which is the same silence with
                 // more steps.
                 // SAFETY: as above, the shorter constant-size copy.
@@ -748,8 +748,8 @@ fn count6(ctx: &TcContext, dir: Direction, key: &FlowKey6) {
 
 /// Read the frame's IPv4 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes` at a
 /// constant, or `ihl`-bounded, offset), or `None` if it is not IPv4-over-Ethernet or a read runs off
-/// the packet. Every byte position it reads is a `const` from [`ekvm_probes_common`], the same ones
-/// [`ekvm_probes_common::parse_ipv4_5tuple`] reads through its slice, so the two cannot disagree on
+/// the packet. Every byte position it reads is a `const` from [`bsx_probes_common`], the same ones
+/// [`bsx_probes_common::parse_ipv4_5tuple`] reads through its slice, so the two cannot disagree on
 /// where a field lives. The surrounding *logic* (the fragment gate, the protocol check) is still
 /// mirrored by hand: this half runs only under the verifier, so a host unit test cannot call it.
 /// `crates/probes-loader/tests/differential.rs` is the enforcer for that mirror: it hands the loaded
@@ -772,7 +772,7 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
     // The low 13 bits of the flags/fragment-offset field (IP header bytes 6..8) are the fragment
     // offset. A non-first fragment (offset != 0) has no L4 header, so reading "ports" there would
     // interpret payload bytes; leave them zero so a guest can't mint bogus 5-tuples with fragments
-    // (mirrors `ekvm_probes_common::parse_ipv4_5tuple`).
+    // (mirrors `bsx_probes_common::parse_ipv4_5tuple`).
     let frag_off = u16::from_be(ctx.load::<u16>(ETH_HLEN + IPV4_FRAG_OFFSET).ok()?) & 0x1fff;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
     if frag_off == 0 && (proto == IPPROTO_TCP || proto == IPPROTO_UDP) {
@@ -785,7 +785,7 @@ fn parse(ctx: &TcContext) -> Option<FlowKey> {
 
 /// Read the frame's IPv6 5-tuple with `ctx.load` (each a verifier-bounded `bpf_skb_load_bytes`), or
 /// `None` if it is not IPv6-over-Ethernet or a read runs off the packet. Mirrors
-/// [`ekvm_probes_common::parse_ipv6_5tuple`], reading the same offset consts so neither can move a
+/// [`bsx_probes_common::parse_ipv6_5tuple`], reading the same offset consts so neither can move a
 /// field without the other. Extension headers are not walked (a first cut): a next-header
 /// that isn't TCP/UDP directly after the fixed 40-byte header leaves the ports 0, the same honest
 /// shape as the v4 parser's fragment handling.
@@ -818,7 +818,7 @@ fn parse6(ctx: &TcContext) -> Option<FlowKey6> {
 // ---------------------------------------------------------------------------
 
 /// Per-cgroup accumulated on-CPU time in **nanoseconds**, keyed by cgroup id
-/// (`bpf_get_current_cgroup_id`), the same id [`ekvm_probes_loader::cgroup_id_of_pid`] resolves from
+/// (`bpf_get_current_cgroup_id`), the same id [`bsx_probes_loader::cgroup_id_of_pid`] resolves from
 /// a VMM pid, so the loader reads exactly the sandbox it means. Bounded at [`MAX_CGROUPS`]; with a
 /// target cgroup set (the common case, one sandbox) it holds a single entry. Best-effort like the flow
 /// counters: the read-modify-write is per-CPU-serialized by the scheduler hook but the add across CPUs

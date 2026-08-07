@@ -34,7 +34,7 @@ pub(crate) const IP_TIMEOUT: Duration = Duration::from_secs(10);
 /// one.
 pub(crate) const IMAGE_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The wall the one-shot `firecracker --version` probe gets. Without it, an `EKVM_FIRECRACKER`
+/// The wall the one-shot `firecracker --version` probe gets. Without it, an `BSX_FIRECRACKER`
 /// pointed at a binary that hangs on `--version` hangs **every** boot with no typed error, since
 /// the probe runs before any deadline is consulted.
 pub(crate) const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -169,7 +169,7 @@ pub(crate) fn scratch_pair(tag: &str) -> std::io::Result<(std::fs::File, std::fs
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.subsec_nanos());
         let path = dir.join(format!(
-            "ekvm-{tag}-{}-{stamp}-{attempt}",
+            "bsx-{tag}-{}-{stamp}-{attempt}",
             std::process::id()
         ));
         match std::fs::OpenOptions::new()

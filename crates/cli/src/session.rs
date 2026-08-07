@@ -1,9 +1,9 @@
-//! One client connection = one sandbox **session**. Mirrors `ekvm shell`'s lifecycle over the wire:
+//! One client connection = one sandbox **session**. Mirrors `bsx shell`'s lifecycle over the wire:
 //! the first message opens the sandbox (jailed by default, the daemon's launch posture, never the
 //! client's to weaken), then each verb acts on it, sharing one working directory (the VM *is* the
 //! session), until `close` (or a hung-up connection) tears it down.
 //!
-//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](ekvm_engine::Sandbox), so a warm clone
+//! The session runs on an owned [`RunningVm`], not a [`Sandbox`](bsx_engine::Sandbox), so a warm clone
 //! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
@@ -28,10 +28,10 @@ use std::time::{Duration, Instant};
 
 use crate::audit::RunProbes;
 use crate::policy::{Policy, Requested, parse_allow};
-use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, ErrorKind, Limits, RunningVm, Vm, VmmError};
-use ekvm_engine::{MAX_VCPUS, vcpus_supported};
-use ekvm_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
-use ekvm_protocol::{
+use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, ErrorKind, Limits, RunningVm, Vm, VmmError};
+use bsx_engine::{MAX_VCPUS, vcpus_supported};
+use bsx_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
+use bsx_protocol::{
     ExecParams, FaultKind, GetParams, OpenParams, ProtocolError, PutParams, Request, Response,
     read_request, write_response,
 };
@@ -155,9 +155,9 @@ pub fn serve(stream: UnixStream, server: &Server) {
     // exists is the operator's posture, like the jail.
     let gateway = server.base.egress.map(|e| e.gateway());
     let enforcing = net.egress.is_some();
-    let mut attach_params = ekvm_probes_loader::AttachParams::new(vm.vmm_pid());
+    let mut attach_params = bsx_probes_loader::AttachParams::new(vm.vmm_pid());
     attach_params.nic = match (vm.netns(), vm.tap_name()) {
-        (Some(netns), Some(tap)) => Some(ekvm_probes_loader::Nic { netns, tap }),
+        (Some(netns), Some(tap)) => Some(bsx_probes_loader::Nic { netns, tap }),
         _ => None,
     };
     attach_params.egress = net.egress.as_ref();
@@ -372,7 +372,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                         let envelope = server
                             .signing_key
                             .sign_canonical_chained(&canonical, record_chain.as_deref());
-                        record_chain = Some(ekvm_probes_loader::record_hash(&canonical));
+                        record_chain = Some(bsx_probes_loader::record_hash(&canonical));
                         Response::trace(record_to_value(&envelope))
                     }
                     None => {
@@ -411,7 +411,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
             // `Request` is `#[non_exhaustive]`, so this arm exists and the compiler cannot tell
             // us a verb went unhandled; that check is this runtime reply instead of a build error.
             // Unreachable from the wire (an unknown `op` fails at decode), so getting
-            // here means `ekvm-protocol` grew a verb the daemon never wired up. Loud on purpose.
+            // here means `bsx-protocol` grew a verb the daemon never wired up. Loud on purpose.
             Ok(Some(other)) => {
                 server.metrics.protocol_error();
                 tracing::error!(request = ?other, "unhandled wire verb; the daemon is behind its own protocol crate");
@@ -466,11 +466,11 @@ pub fn serve(stream: UnixStream, server: &Server) {
 fn serve_run(
     w: &mut UnixStream,
     metrics: &Metrics,
-    result: Result<ekvm_engine::RunResult, VmmError>,
+    result: Result<bsx_engine::RunResult, VmmError>,
     wall: Duration,
     total_exec_wall: &mut Duration,
     is_command: bool,
-    to_response: impl FnOnce(&ekvm_engine::RunResult) -> Response,
+    to_response: impl FnOnce(&bsx_engine::RunResult) -> Response,
 ) -> bool {
     // Only a real `exec` counts as a guest command. `put`/`get` ride a no-op `true` purely to carry a
     // file, so folding their wall into the `guest_command` histogram or the trace `exec_wall` would
@@ -563,7 +563,7 @@ fn boot_session_vm(
 }
 
 /// Cold-boot a `RunningVm` with the daemon's confinement posture, replicating what
-/// [`Sandbox::open`](ekvm_engine::Sandbox::open) does before booting, force the vsock exec channel on,
+/// [`Sandbox::open`](bsx_engine::Sandbox::open) does before booting, force the vsock exec channel on,
 /// and set (or clear) the jail, so a cold session and a pooled one are the same shape of VM.
 fn cold_boot(mut config: BootConfig, jailed: bool) -> Result<RunningVm, VmmError> {
     config.jail = if jailed {
@@ -592,7 +592,7 @@ fn do_snapshot(server: &Server, vm: &RunningVm) -> Result<String, VmmError> {
 }
 
 /// Tear the session down: detach the probes, shut the VM, and top the pool back up (off the hot path,
-/// between sessions, the moment the [`Pool`](ekvm_engine::Pool) doc reserves for restore cost).
+/// between sessions, the moment the [`Pool`](bsx_engine::Pool) doc reserves for restore cost).
 /// The refill is **best-effort and non-blocking**: `try_lock`, and skip if the pool is
 /// contended. A close never waits on the pool lock, so a burst of closes can't queue up behind one
 /// another's restore. Stock recovers on the next uncontended close (the holder refills all the way to
@@ -651,7 +651,7 @@ fn end_session(server: &Server, vm: RunningVm, probes: Option<RunProbes>, _poole
 /// (docs/daemon-protocol.md): [`Malformed`](Self::Malformed) is the client's own message (a value
 /// the VMM could never boot, a contradiction like allowances without a NIC), which goes out as
 /// [`FaultKind::Protocol`]; [`Policy`](Self::Policy) is a well-formed ask the operator's posture
-/// declines, which goes out as [`FaultKind::Refused`], so an SDK branching on the table repairs
+/// declines, which goes out as [`FaultKind::Refused`], so a client branching on the table repairs
 /// the right thing (its own message vs its ask).
 /// `an_operator_ceiling_refusal_is_kind_refused_on_the_wire` pins the split.
 #[derive(Debug, PartialEq, Eq)]
@@ -764,7 +764,7 @@ fn open_network(req: &Request, policy: &Policy) -> Result<SessionNet, OpenRefusa
 /// Also reports whether the `open` was **bare** (every knob defaulted), which decides pool
 /// eligibility. A non-`Open` first message is the caller's error too.
 /// This is the daemon's policy boundary, not a convenience: a client arrives over a socket and
-/// controls neither this process's environment nor its `.ekvm.toml`, so bounding the request here
+/// controls neither this process's environment nor its `.bsx.toml`, so bounding the request here
 /// is what makes an operator ceiling real. Asking past a ceiling is refused, never
 /// quietly clamped.
 fn open_limits(req: &Request, policy: &Policy) -> Result<(Limits, bool), OpenRefusal> {
@@ -888,7 +888,7 @@ fn oversize_reply(resp: &Response) -> (&'static str, FaultKind) {
     }
 }
 
-/// UTF-8-lossy rendering of captured bytes, matching `ekvm run --json`.
+/// UTF-8-lossy rendering of captured bytes, matching `bsx run --json`.
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -918,7 +918,7 @@ fn exec_watching_for_cancel(
     stdin: &str,
     env: &[(String, String)],
     socket: &UnixStream,
-) -> (Result<ekvm_engine::RunResult, VmmError>, bool) {
+) -> (Result<bsx_engine::RunResult, VmmError>, bool) {
     let kill = vm.kill_handle();
     std::thread::scope(|scope| {
         // `exec_with_files` rather than `exec`: same call, but it carries the session's env. No
@@ -1058,11 +1058,11 @@ fn ms(d: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ekvm_protocol::{MAX_RESPONSE_BYTES, write_request};
+    use bsx_protocol::{MAX_RESPONSE_BYTES, write_request};
 
     #[test]
     fn the_wire_can_carry_the_default_output_cap() {
-        // The enforcer for `MAX_RESPONSE_BYTES`, which lives here because `ekvm-protocol` is
+        // The enforcer for `MAX_RESPONSE_BYTES`, which lives here because `bsx-protocol` is
         // engine-free and cannot read `Limits::default()` itself. A `result` carrying the default
         // cap's worth of ordinary text must encode: bounding a reply below what the engine will
         // capture is what makes a legitimate run's own output undeliverable.
@@ -1322,7 +1322,7 @@ mod tests {
         // An egress rule outside the operator's ceiling: well-formed, declined, `Policy`.
         let ceiling = Policy {
             max_egress_v4: vec![
-                ekvm_probes_loader::Ipv4Cidr::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8)
+                bsx_probes_loader::Ipv4Cidr::new(std::net::Ipv4Addr::new(10, 0, 0, 0), 8)
                     .expect("valid /8"),
             ],
             ..Policy::default()
@@ -1512,8 +1512,8 @@ mod tests {
     #[test]
     fn a_vmm_error_kind_maps_onto_the_wire_kind() {
         // The daemon computes the engine's pinned bucket and must hand it to the client intact:
-        // discarding it after deriving `fatal` would leave an SDK string-matching `message`.
-        // A drift here is a silently wrong SDK branch, not a
+        // discarding it after deriving `fatal` would leave a client string-matching `message`.
+        // A drift here is a silently wrong client branch, not a
         // compile error, so pin all three.
         assert_eq!(wire_kind(ErrorKind::Infra), FaultKind::Infra);
         assert_eq!(wire_kind(ErrorKind::Transport), FaultKind::Transport);

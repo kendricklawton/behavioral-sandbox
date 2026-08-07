@@ -1,5 +1,5 @@
 //! The plain measurement values the record embeds: per-VM network totals and the per-run
-//! resource summary. The probes in `ekvm-probes-loader` *produce* these (the tap monitor sums
+//! resource summary. The probes in `bsx-probes-loader` *produce* these (the tap monitor sums
 //! flows into a [`NetStats`], the resource meter assembles a [`ResourceSummary`]); they live here
 //! because the record's shape owns them, and the two crates bridge only by plain values.
 
@@ -180,7 +180,7 @@ mod tests {
         // Point `read` at a temp dir standing in for a cgroup dir: it collects the files that exist and
         // leaves the rest None (best-effort), never failing. No eBPF, no real cgroup, host-safe.
         let dir = std::env::temp_dir().join(format!(
-            "ekvm-cgstats-{}-{}",
+            "bsx-cgstats-{}-{}",
             std::process::id(),
             // vary by a fixed nonce; no clock/rng on the host path here, and one dir per test run is fine
             "t"

@@ -4,12 +4,12 @@ body:
       value: |
         **Do not report security issues here.** If you think you have found a sandbox escape, or
         anything that weakens the isolation or the audit record, report it privately through
-        [GitHub Security Advisories](https://github.com/ekvm-rs/ekvm/security/advisories/new).
-        See [`SECURITY.md`](https://github.com/ekvm-rs/ekvm/blob/main/SECURITY.md).
+        [GitHub Security Advisories](https://github.com/kendricklawton/behavioral-sandbox/security/advisories/new).
+        See [`SECURITY.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/SECURITY.md).
 
         Most first-run failures are already answered in the pinned **Common first failures** post
         and in the [troubleshooting
-        table](https://github.com/ekvm-rs/ekvm/blob/main/docs/cli-install.md#troubleshooting).
+        table](https://github.com/kendricklawton/behavioral-sandbox/blob/main/docs/cli-install.md#troubleshooting).
         Worth a look before you write this up.
 
   - type: textarea
@@ -24,9 +24,9 @@ body:
   - type: textarea
     id: doctor
     attributes:
-      label: "`ekvm doctor` output"
+      label: "`bsx doctor` output"
       description: >
-        All of it. eKVM probes host capabilities rather than distributions, so these rows
+        All of it. bsx probes host capabilities rather than distributions, so these rows
         usually identify the problem outright.
       render: console
     validations:
@@ -47,11 +47,11 @@ body:
       label: Which part
       options:
         - Installing or building
-        - Booting a sandbox (ekvm run / ekvm shell)
+        - Booting a sandbox (bsx run / bsx shell)
         - eBPF observability (--trace / --record / --watch)
         - Networking (--net / --allow)
-        - The daemon (ekvm serve)
-        - Embedding the ekvm-engine library
+        - The daemon (bsx serve)
+        - Embedding the bsx-engine library
         - Something else
     validations:
       required: true
@@ -64,6 +64,6 @@ body:
         - label: This is not a security report.
           required: true
         - label: >
-            I understand eKVM is pre-release and unaudited, with one maintainer, and that a reply
+            I understand bsx is pre-release and unaudited, with one maintainer, and that a reply
             may take a few days.
           required: true

@@ -10,7 +10,7 @@ use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // A lying or truncated header: the bounds check and the short-read path.
-    ekvm_channel::fuzz::decode_frame(data);
+    bsx_channel::fuzz::decode_frame(data);
     // A header that agrees with its payload: everything past the bounds check.
-    ekvm_channel::fuzz::decode_frame_wellformed(data);
+    bsx_channel::fuzz::decode_frame_wellformed(data);
 });

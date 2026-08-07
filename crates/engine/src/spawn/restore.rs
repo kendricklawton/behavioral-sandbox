@@ -458,7 +458,7 @@ pub(crate) fn stage_restore_disk(copy: &Path, backing: &Path) -> Result<(), VmmE
 
 /// Create the restore-disk staging dir private (mode `0700`, owned by us), or, if it already exists,
 /// adopt it only after verifying it is ours and `0700`. The baked-in path is predictable
-/// (`/tmp/ekvm-<srcpid>-<seq>`, from the snapshot's source) and `/tmp` is world-writable, so a
+/// (`/tmp/bsx-<srcpid>-<seq>`, from the snapshot's source) and `/tmp` is world-writable, so a
 /// blind `create_dir_all` would silently adopt an attacker-planted world-writable dir, letting a
 /// local user rename-swap the staged disk before `PUT /snapshot/load` opens it (guest boots an
 /// attacker's rootfs). This mirrors `create_workdir`'s posture; the only pre-existing dir it may

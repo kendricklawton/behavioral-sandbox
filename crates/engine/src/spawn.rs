@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ekvm_channel::VSOCK_PORT;
+use bsx_channel::VSOCK_PORT;
 
 use crate::VmmError;
 use crate::console::{Console, last_lines};
@@ -585,7 +585,7 @@ impl Spawned {
             )?;
         }
         // Bulk writable output: attach the blank image read-write. The guest mounts it by
-        // label (`ekvm-output`), so the `/dev/vdX` letter this lands on doesn't matter, a boot may
+        // label (`bsx-output`), so the `/dev/vdX` letter this lands on doesn't matter, a boot may
         // attach input, output, both, or neither. Durability of the guest's writes is the guest's
         // `-o sync` mount plus a clean unmount on shutdown; `collect_outputs` reads it after the VMM
         // exits (never while it holds the file open, see `RunningVm::collect_outputs`).
@@ -911,14 +911,14 @@ fn overlay_size_mib(mem_mib: NonZeroU32) -> u32 {
 /// `overlay-init` reads `$overlay_size` without mounting `/proc` first.
 ///
 /// Split out of the boot sequence so the one line naming a *guest* path is testable without a VM:
-/// [`ekvm_channel::GUEST_OVERLAY_INIT`] is written here and by the rootfs build, and a boot into a path
+/// [`bsx_channel::GUEST_OVERLAY_INIT`] is written here and by the rootfs build, and a boot into a path
 /// nothing occupies reads as a kernel panic rather than as a mismatch.
 fn overlay_boot_args(config: &BootConfig) -> String {
     if config.read_only_root {
         format!(
             "{} init={} overlay_size={}M",
             config.boot_args,
-            ekvm_channel::GUEST_OVERLAY_INIT,
+            bsx_channel::GUEST_OVERLAY_INIT,
             overlay_size_mib(config.mem_mib)
         )
     } else {
@@ -965,7 +965,7 @@ fn network_boot_args(
     match v6 {
         Some(v6) => format!(
             "{args} {}={}/{}",
-            ekvm_channel::GUEST_IP6_CMDLINE_KEY,
+            bsx_channel::GUEST_IP6_CMDLINE_KEY,
             v6.guest,
             v6.prefix_len
         ),
@@ -1116,10 +1116,10 @@ mod version_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ekvm_test_support::ScratchDir;
+    use bsx_test_support::ScratchDir;
 
     /// Write an executable shell script into the scratch dir and hand back its path. Stands in for
-    /// an `EKVM_FIRECRACKER` pointed at a wrapper, which is the whole reason the probe is bounded.
+    /// an `BSX_FIRECRACKER` pointed at a wrapper, which is the whole reason the probe is bounded.
     fn script(dir: &ScratchDir, name: &str, body: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt as _;
         let path = dir.path().join(name);
@@ -1165,7 +1165,7 @@ mod tests {
         let flood = script(
             &dir,
             "fc-flood",
-            "echo 'Firecracker v1.16.1'\nyes ekvm-flood | head -c 3000000",
+            "echo 'Firecracker v1.16.1'\nyes bsx-flood | head -c 3000000",
         );
         // Bound and printed, like the hang test above. This assertion failed once during a gate run
         // and reported nothing but "assertion failed", so the variant is what the next occurrence
@@ -1203,7 +1203,7 @@ mod tests {
         std::fs::read_dir(std::env::temp_dir())
             .map(|d| {
                 d.filter_map(Result::ok)
-                    .filter(|e| e.file_name().to_string_lossy().starts_with("ekvm-fcver-"))
+                    .filter(|e| e.file_name().to_string_lossy().starts_with("bsx-fcver-"))
                     .count()
             })
             .unwrap_or(0)
@@ -1229,7 +1229,7 @@ mod tests {
         // A "firecracker" that exits immediately, complaining on stderr: `sh --api-sock <path>`
         // rejects the flag. Boot must fail fast with the exit surfaced, not wait out the whole
         // deadline, and carry the stderr tail. Needs no KVM, so it runs in the host gate.
-        let dir = ScratchDir::created("ekvm-fake-fc");
+        let dir = ScratchDir::created("bsx-fake-fc");
         let kernel = dir.path().join("vmlinux");
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
@@ -1266,7 +1266,7 @@ mod tests {
         // is the cleanup: this error is the one path that reaches `abort` with a child that died on
         // its own, and a scratch dir left behind per failed boot is a slow leak nothing sweeps until
         // the next `sweep_orphans`.
-        let dir = ScratchDir::created("ekvm-dying-fc");
+        let dir = ScratchDir::created("bsx-dying-fc");
         let kernel = dir.path().join("vmlinux");
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&kernel, b"not a kernel").expect("fake kernel");
@@ -1318,8 +1318,8 @@ mod tests {
     #[test]
     fn staging_dir_is_created_private_and_adopts_only_its_own() {
         use std::os::unix::fs::PermissionsExt;
-        let base = ScratchDir::created("ekvm-stage-priv");
-        let dir = base.path().join("ekvm-99999-0");
+        let base = ScratchDir::created("bsx-stage-priv");
+        let dir = base.path().join("bsx-99999-0");
         // Fresh create: private 0700, regardless of umask.
         ensure_private_staging_dir(&dir).expect("create the staging dir");
         let mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
@@ -1327,7 +1327,7 @@ mod tests {
         // A second call adopts our own 0700 dir (the lingering-empty-from-a-prior-restore case).
         ensure_private_staging_dir(&dir).expect("adopt our own private dir");
         // A world-writable pre-existing dir (an attacker's plant) is refused.
-        let squatted = base.path().join("ekvm-88888-0");
+        let squatted = base.path().join("bsx-88888-0");
         std::fs::create_dir(&squatted).expect("create squatted dir");
         std::fs::set_permissions(&squatted, std::fs::Permissions::from_mode(0o777))
             .expect("widen mode");
@@ -1340,11 +1340,11 @@ mod tests {
     #[test]
     fn a_squatted_workdir_name_is_skipped_never_adopted() {
         use std::os::unix::fs::PermissionsExt;
-        // The workdir name is predictable (`ekvm-<pid>-<seq>`: the pid is public, the seq counts
+        // The workdir name is predictable (`bsx-<pid>-<seq>`: the pid is public, the seq counts
         // up), and the scratch base is world-writable, so a hostile local user can pre-create the
         // names a boot is about to mint. The mint must advance past every plant, never adopt one:
         // the rootfs copy and API socket go into this dir.
-        let base = ScratchDir::created("ekvm-squat");
+        let base = ScratchDir::created("bsx-squat");
         let first = ScratchDir::adopt(create_workdir(base.path()).expect("first workdir"));
         let name = first
             .path()
@@ -1412,8 +1412,8 @@ mod tests {
             eprintln!("skipping an_attacker_owned_staging_dir_is_refused: needs real root");
             return;
         }
-        let base = ScratchDir::created("ekvm-stage-owner");
-        let dir = base.path().join("ekvm-66666-0");
+        let base = ScratchDir::created("bsx-stage-owner");
+        let dir = base.path().join("bsx-66666-0");
         std::fs::create_dir(&dir).expect("create the dir to disown");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
             .expect("set the expected mode");
@@ -1427,10 +1427,10 @@ mod tests {
     #[test]
     fn a_staged_restore_disk_is_private_and_never_clobbers() {
         use std::os::unix::fs::PermissionsExt;
-        let base = ScratchDir::created("ekvm-stage-disk");
+        let base = ScratchDir::created("bsx-stage-disk");
         let src = base.path().join("bundle-disk");
         std::fs::write(&src, b"snapshot disk bytes").expect("write source disk");
-        let backing = base.path().join("ekvm-77777-0/rootfs.ext4");
+        let backing = base.path().join("bsx-77777-0/rootfs.ext4");
         stage_restore_disk(&src, &backing).expect("stage the disk");
         assert_eq!(
             std::fs::read(&backing).expect("read staged disk"),
@@ -1457,7 +1457,7 @@ mod tests {
         // at the snapshot's baked-in path is worse than a failed restore: `create_new` would then
         // refuse every later restore of that snapshot, reporting a concurrent restore that is not
         // happening.
-        let Some(fs) = ekvm_test_support::SmallFs::create(8, "stage-full") else {
+        let Some(fs) = bsx_test_support::SmallFs::create(8, "stage-full") else {
             eprintln!("skipping a_disk_full_mid_stage_leaves_nothing_behind: needs real root");
             return;
         };
@@ -1502,7 +1502,7 @@ mod tests {
         // warns about (a tmpfs `/tmp` charges it to host RAM). The copy fails before any spawn, so
         // this needs no KVM; what must hold is that `WorkdirGuard` reclaims the half-written copy
         // rather than leaving scratch to accumulate one per failed boot.
-        let Some(fs) = ekvm_test_support::SmallFs::create(8, "boot-full") else {
+        let Some(fs) = bsx_test_support::SmallFs::create(8, "boot-full") else {
             eprintln!(
                 "skipping a_full_scratch_dir_fails_the_boot_without_stranding_a_partial_rootfs: \
                  needs real root"
@@ -1539,7 +1539,7 @@ mod tests {
             .expect("read the fixture")
             .filter_map(Result::ok)
             .map(|e| e.file_name())
-            .filter(|n| n != "ekvm-filler")
+            .filter(|n| n != "bsx-filler")
             .collect();
         assert!(
             leftovers.is_empty(),
@@ -1555,13 +1555,13 @@ mod tests {
         // privacy check, refusing every jailed private-disk restore and so the daemon's whole
         // `--prewarm` path.
         use std::os::unix::fs::PermissionsExt;
-        let base = ScratchDir::created("ekvm-stage-jail");
+        let base = ScratchDir::created("bsx-stage-jail");
         let root = base.path().join("chroot-root"); // stands in for <jail>/root
         let src = base.path().join("bundle-disk");
         std::fs::write(&src, b"private disk bytes").expect("write source disk");
 
-        // Baked-in path /var/tmp/ekvm-66666-0/rootfs.ext4, re-rooted into the chroot.
-        let disk_target = root.join("var/tmp/ekvm-66666-0/rootfs.ext4");
+        // Baked-in path /var/tmp/bsx-66666-0/rootfs.ext4, re-rooted into the chroot.
+        let disk_target = root.join("var/tmp/bsx-66666-0/rootfs.ext4");
         let parent = disk_target.parent().expect("leaf dir");
         let chain = parent.parent().expect("traversal chain");
         std::fs::create_dir_all(chain).expect("create traversal chain");
@@ -1581,7 +1581,7 @@ mod tests {
         );
 
         // A pre-created (0755) leaf is not adoptable.
-        let pre_created = root.join("var/tmp/ekvm-55555-0/rootfs.ext4");
+        let pre_created = root.join("var/tmp/bsx-55555-0/rootfs.ext4");
         let bad_leaf = pre_created.parent().expect("leaf");
         std::fs::create_dir_all(bad_leaf).expect("pre-create leaf");
         // Pin the mode explicitly so the assertion doesn't depend on the runner's umask.
@@ -1599,7 +1599,7 @@ mod tests {
         // The leak the guard closes: a panic mid-staging (rootfs copy, an image build) must not
         // strand the scratch dir. And the disarm half: a dir handed off to the netns-aware path
         // must survive the guard's drop.
-        let base = std::env::temp_dir().join(format!("ekvm-workdir-unwind-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("bsx-workdir-unwind-{}", std::process::id()));
         std::fs::create_dir_all(&base).expect("mkdir");
 
         let doomed = base.join("staging");
@@ -1631,7 +1631,7 @@ mod tests {
         // `StagedDisk`'s rustdoc promises the panic-unwind cover for the out-of-workdir staged
         // restore disk; pin it: an armed guard dropped by an unwind unstages the file (and its
         // staging marker + now-empty parent), a `take`n one leaves the disk alone.
-        let base = std::env::temp_dir().join(format!("ekvm-disk-unwind-{}", std::process::id()));
+        let base = std::env::temp_dir().join(format!("bsx-disk-unwind-{}", std::process::id()));
         let staging = base.join("stage");
         std::fs::create_dir_all(&staging).expect("mkdir");
         let disk = staging.join("rootfs.ext4");
@@ -1680,7 +1680,7 @@ mod tests {
     }
 
     /// The one boot-arg that names a **guest** path. The rootfs build writes the file at
-    /// `ekvm_channel::GUEST_OVERLAY_INIT` and this puts `init=` on the command line, so the two are one
+    /// `bsx_channel::GUEST_OVERLAY_INIT` and this puts `init=` on the command line, so the two are one
     /// constant; a boot into a path nothing occupies reads as a kernel panic, not as a mismatch.
     /// Host-safe, since the overlay itself is only reachable through a jailed boot (real root).
     #[test]
@@ -1700,12 +1700,12 @@ mod tests {
             args,
             format!(
                 "console=ttyS0 init={} overlay_size=128M",
-                ekvm_channel::GUEST_OVERLAY_INIT
+                bsx_channel::GUEST_OVERLAY_INIT
             )
         );
         // Spelled out too: the assertion above would still pass if the constant became empty or
         // relative, and the kernel needs an absolute path to an executable.
-        assert!(ekvm_channel::GUEST_OVERLAY_INIT.starts_with('/'));
+        assert!(bsx_channel::GUEST_OVERLAY_INIT.starts_with('/'));
     }
 
     /// The guest's mask and the host tap's prefix are one value: `net.rs` owns the prefix, the link
@@ -1745,7 +1745,7 @@ mod tests {
             network_boot_args(&link(30), Some(v6), None),
             format!(
                 "ip=10.200.0.2:::255.255.255.252::eth0:off {}=fd00:200::2/64",
-                ekvm_channel::GUEST_IP6_CMDLINE_KEY
+                bsx_channel::GUEST_IP6_CMDLINE_KEY
             )
         );
     }
@@ -1788,7 +1788,7 @@ mod tests {
             network_boot_args(&link, Some(v6), Some(GuestEgress::via(gw))),
             format!(
                 "ip=10.200.0.2::10.200.0.1:255.255.255.252::eth0:off {}=fd00:200::2/64",
-                ekvm_channel::GUEST_IP6_CMDLINE_KEY
+                bsx_channel::GUEST_IP6_CMDLINE_KEY
             )
         );
     }
@@ -1797,11 +1797,11 @@ mod tests {
     fn overlong_socket_path_is_a_clear_error_not_a_cryptic_bind_failure() {
         // A short path is fine; a path past the kernel's sun_path limit is rejected up front with an
         // actionable message (name the knob), not a bind failure surfacing as a boot timeout.
-        assert!(check_sun_path(Path::new("/tmp/ekvm-1-0/fc.sock")).is_ok());
+        assert!(check_sun_path(Path::new("/tmp/bsx-1-0/fc.sock")).is_ok());
         let long = PathBuf::from(format!("/{}/fc.sock", "x".repeat(SUN_PATH_MAX)));
         let err = check_sun_path(&long).unwrap_err().to_string();
         assert!(err.contains("too long"), "explains the limit: {err}");
-        assert!(err.contains("EKVM_SCRATCH_DIR"), "names the fix: {err}");
+        assert!(err.contains("BSX_SCRATCH_DIR"), "names the fix: {err}");
     }
 
     #[test]
@@ -1813,7 +1813,7 @@ mod tests {
         // at the widest pid and a long-lived daemon's high sequence. A much longer $HOME can still
         // exceed it, by design: `check_sun_path` then refuses with the fix.
         let name = format!("{VM_DIR_PREFIX}-{}-{}", u32::MAX, 99_999);
-        for scratch in ["/var/tmp/ekvm", "/home/operator/.ekvm"] {
+        for scratch in ["/var/tmp/bsx", "/home/operator/.bsx"] {
             let socket = Path::new(scratch)
                 .join(&name)
                 .join("firecracker")

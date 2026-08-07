@@ -2,7 +2,7 @@
 //!
 //! It defines the shape of "what a run did" as observed from *outside* the guest, and the
 //! aggregation that folds the three probes' raw output into it. The attach machinery that produces
-//! those inputs lives in `ekvm-probes-loader`'s `observer`; keeping the record pure means its whole
+//! those inputs lives in `bsx-probes-loader`'s `observer`; keeping the record pure means its whole
 //! aggregation is unit-tested on the host gate with synthetic inputs, no KVM or caps.
 //!
 //! The record's **core is network + resources + denials**, the signals host-side eBPF observes
@@ -17,7 +17,7 @@ use std::collections::btree_map::BTreeMap;
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use ekvm_probes_common::{
+use bsx_probes_common::{
     FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Syscall, SyscallEvent,
 };
 
@@ -42,7 +42,7 @@ pub const MAX_NOTABLE: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordSubject {
-    /// The sandbox's name, `RunningVm::name` (`ekvm-<pid>-<seq>`). The same handle as its scratch
+    /// The sandbox's name, `RunningVm::name` (`bsx-<pid>-<seq>`). The same handle as its scratch
     /// dir and its netns, so a record can be correlated with on-disk residue and with the host's
     /// own view. Unique among live VMs; pair it with [`started_unix_ns`](Self::started_unix_ns)
     /// for a durable identity, since pids are reused after a driver exits.
@@ -81,7 +81,7 @@ pub struct RunRecord {
     /// The VMM's **host** syscall footprint, not in-guest syscalls. Bounded.
     pub host_syscalls: SyscallFootprint,
     /// Boot + exec wall time, supplied by the caller as plain [`Duration`]s (the record never depends
-    /// on `ekvm` to learn them).
+    /// on `bsx` to learn them).
     pub timing: Timing,
     /// Which axes were unavailable, and why, fail-open honesty, so a partial record is legible rather
     /// than silently thin.
@@ -605,7 +605,7 @@ impl SyscallFold {
 }
 
 /// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from
-/// `Sandbox::boot_latency` and `RunResult::metrics.wall`, so the record never depends on `ekvm`.
+/// `Sandbox::boot_latency` and `RunResult::metrics.wall`, so the record never depends on `bsx`.
 ///
 /// A further measurement lands as a new field plus a `with_*` method, never as a wider
 /// [`new`](Self::new): the two-argument constructor is the pair every run has, and
@@ -664,7 +664,7 @@ mod tests {
         // as its own prefix, in exactly the shape of a path that fit, so the record would assert
         // an open that never happened. Simulate what the probe produces for an over-long path (a full buffer,
         // NUL-terminated inside it, so `detail_len` is the cap minus the NUL).
-        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
+        let long = vec![b'a'; bsx_probes_common::DETAIL_CAP - 1];
         let mut fold = SyscallFold::new(CG);
         fold.record(&ev(Syscall::Openat as u32, CG, &long, "sh"));
         let short = fold_one(b"/etc/hostname");
@@ -699,7 +699,7 @@ mod tests {
         // Distinct paths sharing a prefix fold into one row, so a row can mix a cut capture with an
         // exactly-fitting one. "Certain" merged with "cut" is "cut": the alternative lets one
         // complete capture clear the doubt on a row that also stands for something longer.
-        let at_cap = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
+        let at_cap = vec![b'a'; bsx_probes_common::DETAIL_CAP - 1];
         let mut fold = SyscallFold::new(CG);
         fold.record(&ev(Syscall::Openat as u32, CG, &at_cap, "sh"));
         fold.record(&ev(Syscall::Openat as u32, CG, &at_cap, "sh"));
@@ -869,7 +869,7 @@ mod tests {
         fold.record(&ev(Syscall::Execve as u32, CG, b"/bin/sh", "sh"));
         fold.record(&ev(Syscall::Openat as u32, CG, b"/etc/hosts", "sh"));
         fold.record(&ev(Syscall::Openat as u32, CG, b"/etc/hosts", "zsh")); // repeat, comm contest
-        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
+        let long = vec![b'a'; bsx_probes_common::DETAIL_CAP - 1];
         fold.record(&ev(Syscall::Openat as u32, CG, &long, "sh")); // truncated capture
         fold.record(&ev(999, CG, b"", "sh")); // unknown discriminant
         for i in 0..MAX_NOTABLE + 2 {
@@ -929,7 +929,7 @@ mod tests {
                     dst,
                     sport,
                     443,
-                    ekvm_probes_common::IPPROTO_TCP,
+                    bsx_probes_common::IPPROTO_TCP,
                 ),
                 count,
             )
@@ -957,7 +957,7 @@ mod tests {
                     dst,
                     sport,
                     443,
-                    ekvm_probes_common::IPPROTO_TCP,
+                    bsx_probes_common::IPPROTO_TCP,
                 ),
                 count,
             )
@@ -979,7 +979,7 @@ mod tests {
 
     #[test]
     fn with_v6_folds_totals_sorts_flows_and_aggregates_denials() {
-        use ekvm_probes_common::IPPROTO_TCP;
+        use bsx_probes_common::IPPROTO_TCP;
         let ula = |n: u8| {
             let mut a = [0u8; 16];
             a[0] = 0xfd;
@@ -1073,7 +1073,7 @@ mod tests {
             40000,
             dst,
             dport,
-            ekvm_probes_common::IPPROTO_TCP,
+            bsx_probes_common::IPPROTO_TCP,
         )
     }
 
@@ -1124,7 +1124,7 @@ mod tests {
         let totals = NetStats::default();
         let build = |flows: Vec<(FlowKey, FlowCounts)>| {
             RunRecord::from_parts(
-                RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+                RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
                 Some(NetSection::from_tap(flows, totals, vec![], 0, 0)),
                 ResourceSummary::default(),
                 SyscallFootprint::from_events(CG, &cg_events),
@@ -1140,7 +1140,7 @@ mod tests {
     #[test]
     fn no_network_sandbox_yields_none_with_a_gap() {
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::from_events(CG, &[ev(Syscall::Execve as u32, CG, b"/init", "init")]),
@@ -1163,7 +1163,7 @@ mod tests {
         };
         let timing = Timing::new(Duration::from_millis(88), Duration::from_millis(9));
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             resources,
             SyscallFootprint::default(),

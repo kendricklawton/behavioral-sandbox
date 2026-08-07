@@ -1,16 +1,16 @@
 # Commands and options
 
-The four verbs: [`ekvm run`](#ekvm-run) for one sandbox and one command, [`ekvm shell`](#ekvm-shell)
-for a stateful session, [`ekvm doctor`](#ekvm-doctor) to check a host before the first sandbox, and
-[`ekvm verify`](#ekvm-verify) to check a signed audit record. The daemon,
-[`ekvm serve`](./daemon.md), has its own chapter.
+The four verbs: [`bsx run`](#bsx-run) for one sandbox and one command, [`bsx shell`](#bsx-shell)
+for a stateful session, [`bsx doctor`](#bsx-doctor) to check a host before the first sandbox, and
+[`bsx verify`](#bsx-verify) to check a signed audit record. The daemon,
+[`bsx serve`](./daemon.md), has its own chapter.
 
-## `ekvm run`
+## `bsx run`
 
 One sandbox, one command, everything as flags:
 
 ```console
-ekvm run [FLAGS] -- <cmd> [args…]
+bsx run [FLAGS] -- <cmd> [args…]
 ```
 
 | Flag | What it does |
@@ -31,7 +31,7 @@ ekvm run [FLAGS] -- <cmd> [args…]
 | `--gateway IP` | Give the guest a default route via this address, which must be the host end of its /30 (the only other address on the link). An off-link value is refused up front, since the guest could not ARP it and would come up sealed. Names a path rather than creating one: the engine builds no uplink, so where nothing has furnished the netns the reachable set is unchanged. What it changes is that the attempt now crosses the tap, so `--allow` can bound it and the record can show it. Requires `--net`; see [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster). |
 | `--resolver IP` | Tell the guest to resolve names at this address. Reaching it needs an allowance like any other destination, and the engine runs no resolver. Requires `--gateway`. |
 | `--trace` | Attach the host-side probes and print the run's **audit trail** (human-readable) on stdout after the run. Conflicts with `--json` (machine consumers use `--record`). |
-| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope, so alteration is detectable; check it with [`ekvm verify`](#ekvm-verify). |
+| `--record FILE` | Attach the probes and write the run's deterministic **audit record** to `FILE`, signed with the host key in a schema-2 envelope, so alteration is detectable; check it with [`bsx verify`](#bsx-verify). |
 | `--record-summary FILE` | Attach the probes and write the run's **model-legible summary** to `FILE`: a compact projection of the audit record shaped for an agent's observe-then-act loop. |
 | `--watch` | Watch the run **live**: a full-screen view on stderr. Needs stderr on a terminal; `q` closes the view and the run continues. |
 | `--log FILTER` | Log filter for stderr (overrides [`log`](./cli-config.md#setting-log)), e.g. `info`, `debug`. |
@@ -45,19 +45,19 @@ The four observability flags are covered in [Observing a run](./cli-observe.md).
 ### Streams and exit codes
 
 Logs go to **stderr**; the run's output (raw relay, or the `--json` result object) goes to **stdout**,
-so `ekvm run … 2>/dev/null` stays pipe-clean and `--json | jq` just works.
+so `bsx run … 2>/dev/null` stays pipe-clean and `--json | jq` just works.
 
-The guest command's exit code becomes `ekvm run`'s own: a crash *inside* the sandbox is a result, not
+The guest command's exit code becomes `bsx run`'s own: a crash *inside* the sandbox is a result, not
 an error, and death by signal comes back as `128 + signal`. Exit code **2** is reserved for an
 operational failure of the engine itself (no KVM, a missing artifact, a boot timeout, a broken
 channel).
 
 ```console
-$ echo 'hi' | ekvm run --json -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
+$ echo 'hi' | bsx run --json -- python3 -c 'import sys; print(sys.stdin.read().upper())' 2>/dev/null
 {"schema":1,"exit_code":0,"stdout":"HI\n", …, "metrics":{…},"limits":{…}}
 ```
 
-## `ekvm shell`
+## `bsx shell`
 
 One sandbox held open as an interactive, stateful session: one `sh -c` exec per input line, every line
 sharing the guest's working directory and (via the boot overlay) the wider filesystem, so a file
@@ -65,14 +65,14 @@ written on line 1, or a package installed on line 2, is there on line 3.
 
 Shell *process* state (`cd`, variables) does not persist: each line is its own exec. The prompt and
 diagnostics go to stderr and command output to stdout, so a piped script of lines stays clean.
-`--unjailed`, `--vcpus`, `--mem`, and `--require-limits` work the same as on [`run`](#ekvm-run).
+`--unjailed`, `--vcpus`, `--mem`, and `--require-limits` work the same as on [`run`](#bsx-run).
 
-`ekvm shell` cannot record, so a host that sets
+`bsx shell` cannot record, so a host that sets
 [`require_record`](./cli-config.md#setting-require_record) refuses it.
 
-## `ekvm doctor`
+## `bsx doctor`
 
-Check this host's readiness *before* the first sandbox. `ekvm doctor` prints one line per
+Check this host's readiness *before* the first sandbox. `bsx doctor` prints one line per
 prerequisite: the architecture (`x86_64`), KVM, the jailer and real root, `firecracker` plus its
 pinned sha256, iproute2 and e2fsprogs, a scratch dir that is not `nodev`/`noexec`, cgroup
 delegation, the kernel's `cgroup.kill` capability, the boot artifacts, the eBPF
@@ -85,13 +85,13 @@ Each row is marked one of three ways:
 - **`warn`**, a fail-open degradation or an advisory, with the consequence named on the row.
 - **`FAIL`**, a hard miss: no boot without it.
 
-It exits non-zero when a hard prerequisite is missing, so `ekvm doctor && ekvm run …` gates cleanly. A
+It exits non-zero when a hard prerequisite is missing, so `bsx doctor && bsx run …` gates cleanly. A
 footer tallies the rows.
 
 ```console
-ekvm doctor              # the report
-ekvm doctor --explain    # plus the full fails-open-vs-hard-error matrix
-ekvm doctor --json       # machine-readable (schema 1), for a host report you can send on
+bsx doctor              # the report
+bsx doctor --explain    # plus the full fails-open-vs-hard-error matrix
+bsx doctor --json       # machine-readable (schema 1), for a host report you can send on
 ```
 
 `--explain` keeps the matrix off the default report so the rows stay scannable; each non-`ok` row
@@ -105,15 +105,15 @@ where there is no cgroup v2 hierarchy to probe, and the Firecracker row checks t
 release range. The rationale is
 [design decision 8](./architecture-decisions.md#8-portability-is-a-capability-question-not-a-distro-question).
 
-## `ekvm verify`
+## `bsx verify`
 
-`ekvm run --record` and the daemon's `trace` reply sign the finalized record with a **host key**
+`bsx run --record` and the daemon's `trace` reply sign the finalized record with a **host key**
 that never crosses into the guest (the key loads in the host process; only the detached `ed25519`
 signature over the canonical record bytes reaches the file), so a consumer can
 detect any alteration made *after* the producing host. The record file is a schema-2 envelope,
 `{schema, key_id, signature, record}`, with the record carried inside as a string.
 
-`ekvm verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
+`bsx verify <record>` re-reads the canonical bytes and checks the signature, exiting non-zero on any
 mismatch. The input is treated as untrusted (that is the point of verifying) and is bounded: a file
 over 16 MiB is rejected as "not a signed record" without being read in, since a real envelope is
 kilobytes.
@@ -131,9 +131,9 @@ keeps each record's authenticity and loses the ordering property. Dropping the *
 undetectable either way without an external anchor.
 
 ```console
-ekvm verify run.json                      # trusts this host's own signing key
-ekvm verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
-ekvm verify session.jsonl                 # several lines: the session chain, order and all
+bsx verify run.json                      # trusts this host's own signing key
+bsx verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)
+bsx verify session.jsonl                 # several lines: the session chain, order and all
 ```
 
 The trust root is the host signing key. This detects post-hoc alteration; it does **not** prove a
@@ -141,15 +141,15 @@ The trust root is the host signing key. This detects post-hoc alteration; it doe
 path resolves from [`signing_key`](./cli-config.md#setting-signing_key), generated on first use, and a
 record's `key_id` names the key that signed it.
 
-**Key rotation.** `ekvm verify` trusts a *set* of keys, so rotating the host key doesn't invalidate
+**Key rotation.** `bsx verify` trusts a *set* of keys, so rotating the host key doesn't invalidate
 records already signed. Keep the retired public keys (their `key_id`s) listed in
-[`trusted_keys`](./cli-config.md#setting-trusted_keys), and `ekvm verify` trusts that set together
+[`trusted_keys`](./cli-config.md#setting-trusted_keys), and `bsx verify` trusts that set together
 with the current signing key and any `--key` given, so old and new records both verify.
 
-**Session hash-chain.** A one-shot `ekvm run --record` writes a single, unchained record. Within a
+**Session hash-chain.** A one-shot `bsx run --record` writes a single, unchained record. Within a
 **session** (the [daemon](./daemon.md)'s `trace` verb), each record additionally commits to the
 previous one's hash (a `prev` field), so the *sequence* is tamper-evident as a whole: a client that
-saves the records one per line can hand the file to `ekvm verify` (or call the library's
+saves the records one per line can hand the file to `bsx verify` (or call the library's
 `verify_chain`) and detect a reordered, inserted, or deleted one, not just a single-record edit.
 Truncating the tail of a chain is not detectable without an external
 anchor, which is the append-only limitation.

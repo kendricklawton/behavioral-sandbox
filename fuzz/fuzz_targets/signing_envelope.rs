@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use ekvm_record::{HostKey, TrustedKey, verify, verify_chain};
+use bsx_record::{HostKey, TrustedKey, verify, verify_chain};
 use libfuzzer_sys::fuzz_target;
 
 /// A fixed trusted set (the unit tests' deterministic key) so per-iteration cost stays low and a

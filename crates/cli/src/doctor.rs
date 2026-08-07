@@ -1,19 +1,19 @@
-//! `ekvm doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
-//! checks ([`ekvm_engine::doctor`]) plus the eBPF-observability capability row (owned by the probe
-//! loader, out of `ekvm-engine`), so a fresh host reads exactly what will work, degrade, or refuse
+//! `bsx doctor`: the operator-facing host-readiness report. Renders the shared engine-runtime
+//! checks ([`bsx_engine::doctor`]) plus the eBPF-observability capability row (owned by the probe
+//! loader, out of `bsx-engine`), so a fresh host reads exactly what will work, degrade, or refuse
 //! *before* the first sandbox. `cargo xtask setup` renders the same shared checks, one source of
 //! truth for "ready", two entry points.
 
 use std::io::{IsTerminal, Write};
 use std::process::ExitCode;
 
-use ekvm_engine::BootConfig;
-use ekvm_engine::doctor::{self, Check, CheckStatus};
+use bsx_engine::BootConfig;
+use bsx_engine::doctor::{self, Check, CheckStatus};
 
 /// Whether to emit ANSI colour on a stream.
 ///
 /// Gated on the stream actually being a terminal, because this report is a **stdout result** and
-/// stdout stays pipe-clean: escape sequences must never reach `ekvm doctor | …` or a file. On top of
+/// stdout stays pipe-clean: escape sequences must never reach `bsx doctor | …` or a file. On top of
 /// that, `NO_COLOR` (any value, per the informal standard) and `TERM=dumb` both turn it off.
 fn colour_enabled(is_tty: bool, no_color: bool, term: Option<&str>) -> bool {
     is_tty && !no_color && term != Some("dumb")
@@ -45,7 +45,7 @@ impl Paint {
     }
 }
 
-/// Flags for `ekvm doctor`.
+/// Flags for `bsx doctor`.
 #[derive(clap::Args)]
 pub struct DoctorArgs {
     /// Also print what each missing item means at runtime.
@@ -60,14 +60,14 @@ pub struct DoctorArgs {
     ///
     /// Exists so a host you do not own can report back: an operator runs one command and sends the
     /// output, and you have exactly what their kernel offers instead of a screenshot. The exit code
-    /// is unchanged, so `ekvm doctor --json && …` still gates.
+    /// is unchanged, so `bsx doctor --json && …` still gates.
     #[arg(long, conflicts_with = "explain")]
     pub json: bool,
 }
 
 /// Render `checks` as a JSON object: the verdict, then one entry per row.
 ///
-/// Hand-rolled rather than derived, so `ekvm-engine`'s `Check` carries no `Serialize` impl for one
+/// Hand-rolled rather than derived, so `bsx-engine`'s `Check` carries no `Serialize` impl for one
 /// caller's diagnostic rendering. The only values interpolated are this binary's own labels and
 /// notes, so [`json_escape`] covers the quoting.
 fn checks_as_json(checks: &[Check]) -> String {
@@ -118,7 +118,7 @@ fn json_escape(s: &str) -> String {
 /// Print the readiness report for `config` (resolved `flags`-free, i.e. `env > file > defaults`, so
 /// the artifact paths checked are the ones a run would boot). Returns the process exit code: success
 /// when the engine can boot *something* (every hard prerequisite met), a failure code when a hard
-/// requirement is missing, so `ekvm doctor && ekvm run …` gates correctly.
+/// requirement is missing, so `bsx doctor && bsx run …` gates correctly.
 #[must_use]
 pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     let mut out = std::io::stdout();
@@ -137,7 +137,7 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     }
 
     let paint = Paint::for_stream(out.is_terminal());
-    let _ = writeln!(out, "{}\n", paint.wrap("1", "ekvm doctor: host readiness"));
+    let _ = writeln!(out, "{}\n", paint.wrap("1", "bsx doctor: host readiness"));
 
     for c in &checks {
         // The rows a reader must act on are the ones that aren't `ok`, so those carry the colour;
@@ -162,7 +162,7 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
     } else if checks.iter().any(|c| !matches!(c.status, CheckStatus::Ok)) {
         let _ = writeln!(
             out,
-            "  What a missing item means at runtime: `ekvm doctor --explain`"
+            "  What a missing item means at runtime: `bsx doctor --explain`"
         );
     }
 
@@ -178,15 +178,15 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
         // reading this, while the sudo form needs rights a fresh operator account may lack.
         // That sudo form re-injects the caller's PATH via `env`: sudoers `secure_path` (on by
         // default on the common distros) overrides PATH even under `-E`, which hides both a
-        // user-local `ekvm` and the firecracker/jailer binaries the engine itself resolves.
+        // user-local `bsx` and the firecracker/jailer binaries the engine itself resolves.
         if doctor::jailed_run_available() {
-            let _ = writeln!(out, "\nTry it:\n  ekvm run -- echo hello");
+            let _ = writeln!(out, "\nTry it:\n  bsx run -- echo hello");
         } else {
             let _ = writeln!(
                 out,
                 "\nTry it (the default jails the VMM, which needs real root):\
-                 \n  ekvm run --unjailed -- echo hello                 # no root needed: still behind KVM, VMM unconfined\
-                 \n  sudo -E env \"PATH=$PATH\" ekvm run -- echo hello   # jailed, the supported posture"
+                 \n  bsx run --unjailed -- echo hello                 # no root needed: still behind KVM, VMM unconfined\
+                 \n  sudo -E env \"PATH=$PATH\" bsx run -- echo hello   # jailed, the supported posture"
             );
         }
         ExitCode::SUCCESS
@@ -201,8 +201,8 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
             "{}",
             err_paint.wrap(
                 "1;31",
-                "ekvm: not ready, a hard prerequisite above is missing (see the FAIL rows above, \
-                 each names its fix), then re-run `ekvm doctor`"
+                "bsx: not ready, a hard prerequisite above is missing (see the FAIL rows above, \
+                 each names its fix), then re-run `bsx doctor`"
             )
         );
         ExitCode::from(2)
@@ -232,7 +232,7 @@ fn tally(checks: &[Check], paint: Paint) -> String {
 /// `CAP_PERFMON` + kernel BTF). A degradation, not hard: without it, `--trace`/`--watch` still run
 /// (recording a coverage gap) and only `--allow` *enforcement* refuses.
 fn ebpf_check() -> Check {
-    match ekvm_probes_loader::check_support() {
+    match bsx_probes_loader::check_support() {
         Ok(()) => Check {
             label: "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)".to_string(),
             status: CheckStatus::Ok,

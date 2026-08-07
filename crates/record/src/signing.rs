@@ -249,7 +249,7 @@ impl HostKey {
 
     /// Sign arbitrary bytes as a **raw detached** `ed25519` signature (64 bytes, no envelope).
     /// The release-manifest scheme uses this so a stock `openssl pkeyutl -verify -rawin` can check
-    /// the signature without any ekvm binary in the loop; audit records keep the envelope.
+    /// the signature without any bsx binary in the loop; audit records keep the envelope.
     #[must_use]
     pub fn sign_detached(&self, msg: &[u8]) -> [u8; 64] {
         self.signing.sign(msg).to_bytes()
@@ -299,7 +299,7 @@ impl TrustedKey {
     }
 
     /// This key as an SPKI **PEM** block, the encoding stock `openssl` consumes (`-pubin -inkey`),
-    /// so a release signature is verifiable with no ekvm binary in the loop.
+    /// so a release signature is verifiable with no bsx binary in the loop.
     /// # Errors
     /// [`KeyError::Malformed`] if the DER/PEM encoding fails (a library-internal failure; an
     /// `ed25519` public key always has a valid SPKI form).
@@ -333,8 +333,8 @@ impl TrustedKey {
     }
 }
 
-/// The engine's per-host data directory: `$XDG_DATA_HOME/ekvm` (falling back to
-/// `$HOME/.local/share/ekvm`, then `/var/lib/ekvm`). This is where an installed deployment keeps
+/// The engine's per-host data directory: `$XDG_DATA_HOME/bsx` (falling back to
+/// `$HOME/.local/share/bsx`, then `/var/lib/bsx`). This is where an installed deployment keeps
 /// host **state** and runtime artifacts, and is the directory `install.sh` writes into.
 #[must_use]
 pub fn data_dir() -> PathBuf {
@@ -343,12 +343,12 @@ pub fn data_dir() -> PathBuf {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("share")))
         .unwrap_or_else(|| PathBuf::from("/var/lib"));
-    base.join("ekvm")
+    base.join("bsx")
 }
 
-/// The default host-key path when neither a flag, `EKVM_SIGNING_KEY`, nor a config file sets one:
-/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/ekvm`, else
-/// `$HOME/.local/share/ekvm`, else `/var/lib/ekvm`). A signing key is host **state**, so it lives
+/// The default host-key path when neither a flag, `BSX_SIGNING_KEY`, nor a config file sets one:
+/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/bsx`, else
+/// `$HOME/.local/share/bsx`, else `/var/lib/bsx`). A signing key is host **state**, so it lives
 /// under a data dir, not a config dir.
 #[must_use]
 pub fn default_key_path() -> PathBuf {
@@ -763,7 +763,7 @@ mod tests {
     #[test]
     fn detached_sign_verify_round_trips_and_rejects_a_flipped_byte() {
         let key = test_key();
-        let msg = b"deadbeef  ekvm-0.1.0-x86_64-linux.tar.gz\n";
+        let msg = b"deadbeef  bsx-0.1.0-x86_64-linux.tar.gz\n";
         let sig = key.sign_detached(msg);
         key.verifying_key()
             .verify_detached(msg, &sig)
@@ -1030,7 +1030,7 @@ mod tests {
 
     #[test]
     fn concurrent_first_run_generation_converges_on_one_key() {
-        let dir = std::env::temp_dir().join(format!("ekvm-key-race-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-key-race-{}", std::process::id()));
         let path = dir.join("record-signing.ed25519");
         let _ = std::fs::remove_dir_all(&dir);
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
@@ -1071,7 +1071,7 @@ mod tests {
         // The leak `StagingFile` closes: a panic between creating the staging temp and publishing
         // it must not strand a `<key>.tmp.<n>` orphan. Catch an unwind out of a scope holding a
         // live guard and assert the file is gone.
-        let dir = std::env::temp_dir().join(format!("ekvm-key-unwind-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-key-unwind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let tmp = dir.join("record-signing.ed25519.tmp.0");
         std::fs::write(&tmp, b"seed").expect("write staging");
@@ -1091,7 +1091,7 @@ mod tests {
 
     #[test]
     fn load_or_generate_persists_then_reloads_the_same_key() {
-        let dir = std::env::temp_dir().join(format!("ekvm-key-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-key-{}", std::process::id()));
         let path = dir.join("record-signing.ed25519");
         let _ = std::fs::remove_dir_all(&dir);
         let first = HostKey::load_or_generate(&path).expect("generates");
@@ -1120,9 +1120,11 @@ mod ed25519_wire_compat {
     /// bytes are fixed by the standard rather than by the implementation. Pinned as literals so a
     /// dependency bump that changed key derivation or signature encoding fails here instead of
     /// silently invalidating `release-key.pem`, every previously signed `RunRecord`, and every
-    /// `ekvm verify` a consumer has already run.
+    /// `bsx verify` a consumer has already run.
     ///
-    /// The values were produced under ed25519-dalek 2.2.0 and must not move.
+    /// Both literals reproduce under OpenSSL 3.6.3 from the same seed, so they are checkable
+    /// against an implementation this workspace does not build. The fixture message carries no
+    /// project name: it is a pinned input, and a rename must not be able to move a signature.
     #[test]
     fn a_fixed_seed_yields_a_fixed_key_id_and_signature() {
         let key = HostKey::from_seed([7u8; 32]);
@@ -1132,14 +1134,14 @@ mod ed25519_wire_compat {
             "the public key derived from a fixed seed moved: a consumer's trusted-key list is \
              keyed on this"
         );
-        let sig = key.sign_detached(b"ekvm signing wire-compat fixture");
+        let sig = key.sign_detached(b"record signing wire-compat fixture");
         assert_eq!(
             sig.iter().fold(String::new(), |mut s, b| {
                 use std::fmt::Write as _;
                 let _ = write!(s, "{b:02x}");
                 s
             }),
-            "b3211b1cdcecf34704e347b53041aa10facd97e0ba13f6ec6df8c9f51496a4c0e68851002a93cb2c3da3968c6ad03388da8831c3c3af9fb308aaeff791f40707",
+            "02792eeb720cafe7cd7ef7bdd99d3bacc817057ff957a78644b237c2b4b1f9fe72a979223ca5ebe054dc2a109ca3d69e9939c076e5e857c56a019188862bde00",
             "the detached signature over a fixed message moved: every record signed before this \
              bump would stop verifying"
         );

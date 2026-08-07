@@ -4,8 +4,8 @@
 //! **Where this binds, and where it is only a guardrail.** A caller of the CLI is *trusted* (see
 //! `docs/security.md`, "the caller harming the caller" is not a security bug): they own the config
 //! file and the environment, so policy there is a house default that keeps honest runs consistent,
-//! not a boundary. The boundary is `ekvm serve`: its clients arrive over a socket
-//! and control neither the daemon's environment nor its `.ekvm.toml`, so the same policy applied to
+//! not a boundary. The boundary is `bsx serve`: its clients arrive over a socket
+//! and control neither the daemon's environment nor its `.bsx.toml`, so the same policy applied to
 //! a client's `open` is real enforcement. That asymmetry is deliberate, and it is why the resolution
 //! below lives in one shared place instead of in flag parsing.
 //!
@@ -22,8 +22,8 @@ use std::num::{NonZeroU8, NonZeroU32};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use ekvm_engine::Limits;
-use ekvm_probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
+use bsx_engine::Limits;
+use bsx_probes_loader::{EgressPolicy, Ipv4Cidr, Ipv6Cidr, Protocol};
 
 /// One parsed `--allow` allowance: a validated destination CIDR with optional port/protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +84,7 @@ pub struct Requested {
 }
 
 /// The operator's policy for this host: defaults, ceilings, and postures.
-/// Every field is optional/false by default, so an absent `.ekvm.toml` leaves the engine's existing
+/// Every field is optional/false by default, so an absent `.bsx.toml` leaves the engine's existing
 /// behavior exactly as it was.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Policy {
@@ -130,7 +130,7 @@ pub struct Policy {
 pub enum PolicyError {
     /// A resource request exceeded its ceiling.
     Ceiling {
-        /// The knob's name as an operator writes it in `.ekvm.toml`.
+        /// The knob's name as an operator writes it in `.bsx.toml`.
         knob: &'static str,
         /// What the caller asked for.
         asked: u64,
@@ -160,24 +160,24 @@ impl fmt::Display for PolicyError {
             } => write!(
                 f,
                 "{knob} {asked} exceeds this host's limit of {ceiling} (operator policy: \
-                 `max_{knob}` in .ekvm.toml)"
+                 `max_{knob}` in .bsx.toml)"
             ),
             Self::JailRequired => f.write_str(
                 "this host requires the jail: `--unjailed` is refused (operator policy: \
-                 `require_jail` in .ekvm.toml)",
+                 `require_jail` in .bsx.toml)",
             ),
             Self::NetForbidden => f.write_str(
                 "this host does not permit guest networking: `--net` is refused (operator policy: \
-                 `allow_net = false` in .ekvm.toml)",
+                 `allow_net = false` in .bsx.toml)",
             ),
             Self::RecordRequired => f.write_str(
                 "this host requires an audit record: omitting --record is refused (operator policy: \
-                 `require_record = true` in .ekvm.toml)",
+                 `require_record = true` in .bsx.toml)",
             ),
             Self::EgressNotAllowed { asked } => write!(
                 f,
                 "requested egress CIDR {asked} extends beyond this host's operator ceiling \
-                 (operator policy: `max_egress_v4`/`max_egress_v6` in .ekvm.toml)"
+                 (operator policy: `max_egress_v4`/`max_egress_v6` in .bsx.toml)"
             ),
         }
     }
@@ -187,7 +187,7 @@ impl std::error::Error for PolicyError {}
 
 impl PolicyError {
     /// The refusal phrased for a **daemon's** wire client: the same message, but the pointer names
-    /// the `ekvm serve` flag that set the posture rather than `.ekvm.toml`, which a daemon
+    /// the `bsx serve` flag that set the posture rather than `.bsx.toml`, which a daemon
     /// deliberately never reads (its policy is its own flags; see `config::policy_of`). `Display`
     /// stays the CLI flavor, where the file *is* where the posture lives.
     #[must_use]
@@ -199,7 +199,7 @@ impl PolicyError {
                 ceiling,
             } => format!(
                 "{knob} {asked} exceeds this host's limit of {ceiling} (operator policy: \
-                 `--max-{}` on ekvm serve)",
+                 `--max-{}` on bsx serve)",
                 knob.replace('_', "-")
             ),
             // Unreachable from today's daemon (it sets no such posture), phrased without the file
@@ -648,8 +648,8 @@ mod tests {
     #[test]
     fn the_daemon_flavor_names_the_serve_flag_not_the_file() {
         // Two renderings of one refusal, each naming where the posture actually lives: `Display`
-        // is the CLI's (`.ekvm.toml` governs), `daemon_message` the daemon's (its own flags do; it
-        // reads no `.ekvm.toml`). Pointing a wire client at the file would name a control surface
+        // is the CLI's (`.bsx.toml` governs), `daemon_message` the daemon's (its own flags do; it
+        // reads no `.bsx.toml`). Pointing a wire client at the file would name a control surface
         // that does not govern its daemon.
         for (knob, flag) in [
             ("vcpus", "--max-vcpus"),
@@ -663,12 +663,12 @@ mod tests {
                 ceiling: 2,
             };
             assert!(
-                err.to_string().contains(".ekvm.toml"),
+                err.to_string().contains(".bsx.toml"),
                 "the CLI flavor names the file: {err}"
             );
             let daemon = err.daemon_message();
             assert!(
-                daemon.contains(flag) && !daemon.contains(".ekvm.toml"),
+                daemon.contains(flag) && !daemon.contains(".bsx.toml"),
                 "the daemon flavor names {flag}, never the file: {daemon}"
             );
             // Both carry the same substance: the knob, the ask, and the bound.

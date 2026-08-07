@@ -4,7 +4,7 @@
 
 #![no_main]
 
-use ekvm::policy::parse_allow;
+use bsx::policy::parse_allow;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

@@ -1,4 +1,4 @@
-//! The `ekvm serve` daemon end to end, as tests (the wire API, docs/daemon.md): drive the
+//! The `bsx serve` daemon end to end, as tests (the wire API, docs/daemon.md): drive the
 //! real daemon over its unix socket through the full
 //! **versioned wire API**, `open` → (`exec` | `put` | `get` | `snapshot` | `trace` |
 //! `trace_summary`)\* → `close`.
@@ -8,13 +8,13 @@
 //!    (parsed with `serde_json::Value`, no access to the daemon's Rust types), the proof the wire is
 //!    hand-debuggable and every message carries its `schema`.
 //! 2. [`the_reference_client_drives_a_full_session`] drives the same daemon through the **reference
-//!    client** ([`ekvm_client::Client`]), the proof a caller needs only the wire contract
-//!    (the client links no `ekvm`).
+//!    client** ([`bsx_client::Client`]), the proof a caller needs only the wire contract
+//!    (the client links no `bsx`).
 //! 3. [`a_prewarmed_open_is_served_from_the_pool`] launches `agent --prewarm 1` and asserts a bare
 //!    `open` comes back `pooled: true`, the pre-warmed-pool fast path (docs/daemon.md).
 //!
 //! `#[ignore]`d: each spawns the daemon, which boots real microVMs (needs `/dev/kvm` + the guest-agent
-//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Unjailed
+//! rootfs). Run via `cargo xtask ci-privileged` or `cargo test -p bsx -- --ignored`. Unjailed
 //! on purpose, the proof is the wire API, not the jailer (that has its own suite), and unjailed
 //! doesn't need root, except [`a_jailed_daemon_serves_prewarmed_opens`], which exists precisely
 //! because the jailed daemon composes pieces no other suite drives together (it self-skips
@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ekvm_client::{Client, OpenParams};
+use bsx_client::{Client, OpenParams};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -50,7 +50,7 @@ fn skip_reason() -> Option<String> {
     None
 }
 
-/// A spawned `ekvm serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
+/// A spawned `bsx serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
 /// session VMs are then reaped by the lifetime sentinel; the socket file it leaves is cleared on the
 /// next bind).
 struct Daemon {
@@ -96,7 +96,7 @@ fn scrape_metrics(port: u16) -> String {
     response
 }
 
-/// Launch `ekvm serve` on a private socket, pointed at the workspace's guest rootfs. `prewarm` becomes
+/// Launch `bsx serve` on a private socket, pointed at the workspace's guest rootfs. `prewarm` becomes
 /// `--prewarm N` when set (the pool path); `metrics_port` becomes `--metrics 127.0.0.1:PORT`.
 /// Returns once the socket is connectable.
 fn launch_daemon(prewarm: Option<usize>, metrics_port: Option<u16>) -> (Daemon, PathBuf) {
@@ -117,14 +117,14 @@ fn launch_daemon_opts(
     // them.
     static LAUNCH_SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let seq = LAUNCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("ekvm-e2e-{}-{seq}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("bsx-e2e-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
     }
-    let socket = dir.join("ekvm.sock");
+    let socket = dir.join("bsx.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ekvm"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
     cmd.arg("serve");
     if !jailed {
         cmd.arg("--unjailed");
@@ -137,19 +137,19 @@ fn launch_daemon_opts(
         cmd.arg("--metrics").arg(format!("127.0.0.1:{port}"));
     }
     cmd.args(extra_args);
-    cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+    cmd.env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("EKVM_MARKER", ekvm_engine::GUEST_READY_MARKER)
+        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
         // Keep the daemon's generated record-signing key inside the test's socket dir.
-        .env("EKVM_SIGNING_KEY", dir.join("signing.key"))
-        .env("EKVM_LOG", "warn")
+        .env("BSX_SIGNING_KEY", dir.join("signing.key"))
+        .env("BSX_LOG", "warn")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    if std::env::var_os("EKVM_KERNEL").is_none() {
-        cmd.env("EKVM_KERNEL", root.join("artifacts/vmlinux"));
+    if std::env::var_os("BSX_KERNEL").is_none() {
+        cmd.env("BSX_KERNEL", root.join("artifacts/vmlinux"));
     }
-    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn ekvm: {e}"));
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn bsx: {e}"));
     let daemon = Daemon { child, dir };
 
     // Wait for the daemon to bind and start accepting. A prewarmed daemon boots a source + clones
@@ -162,7 +162,7 @@ fn launch_daemon_opts(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("ekvm never began accepting on {}", socket.display());
+    panic!("bsx never began accepting on {}", socket.display());
 }
 
 /// A tiny **raw-JSON** client over the daemon's newline protocol: send a request line, read one
@@ -175,7 +175,7 @@ struct RawClient {
 
 impl RawClient {
     fn connect(socket: &PathBuf) -> Self {
-        let stream = UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect to ekvm: {e}"));
+        let stream = UnixStream::connect(socket).unwrap_or_else(|e| panic!("connect to bsx: {e}"));
         if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(45))) {
             panic!("set read timeout: {e}");
         }
@@ -214,7 +214,7 @@ impl RawClient {
 }
 
 #[test]
-#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping agent_serves_the_full_wire_api_over_a_unix_socket: {why}");
@@ -327,11 +327,11 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     // the shape check). Envelope-level field order doesn't matter to `verify`; the signed bytes are
     // the embedded record string, which survives the reply's serde round-trip.
     let envelope = serde_json::to_string(&traced["record"]).expect("re-serialize envelope");
-    let signer = ekvm_probes_loader::TrustedKey::from_hex(
+    let signer = bsx_probes_loader::TrustedKey::from_hex(
         traced["record"]["key_id"].as_str().expect("key_id string"),
     )
     .expect("key_id parses as an ed25519 public key");
-    ekvm_probes_loader::verify(&envelope, &[signer])
+    bsx_probes_loader::verify(&envelope, &[signer])
         .expect("the daemon's signed record verifies against the key it names");
     let inner: serde_json::Value =
         serde_json::from_str(traced["record"]["record"].as_str().expect("record string"))
@@ -356,7 +356,7 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let traced2 = client.recv();
     assert_eq!(
         traced2["record"]["prev"].as_str(),
-        Some(ekvm_probes_loader::record_hash(&first_record).as_str()),
+        Some(bsx_probes_loader::record_hash(&first_record).as_str()),
         "the second trace commits to the first record's hash: {traced2}"
     );
 
@@ -428,37 +428,34 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let scraped = loop {
         let body = scrape_metrics(metrics_port);
-        if body.contains("ekvm_sessions_active 0") || Instant::now() >= deadline {
+        if body.contains("bsx_sessions_active 0") || Instant::now() >= deadline {
             break body;
         }
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(
-        scraped.contains("ekvm_sessions_opened_total{pooled=\"false\"} 2"),
+        scraped.contains("bsx_sessions_opened_total{pooled=\"false\"} 2"),
         "{scraped}"
     );
-    assert!(scraped.contains("ekvm_sessions_active 0"), "{scraped}");
+    assert!(scraped.contains("bsx_sessions_active 0"), "{scraped}");
     assert!(
-        scraped.contains("ekvm_requests_total{verb=\"put\"} 1"),
-        "{scraped}"
-    );
-    assert!(
-        scraped.contains("ekvm_requests_total{verb=\"snapshot\"} 1"),
+        scraped.contains("bsx_requests_total{verb=\"put\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("ekvm_request_errors_total{kind=\"guest\"} 1"),
+        scraped.contains("bsx_requests_total{verb=\"snapshot\"} 1"),
         "{scraped}"
     );
     assert!(
-        scraped.contains("ekvm_protocol_errors_total 1"),
+        scraped.contains("bsx_request_errors_total{kind=\"guest\"} 1"),
         "{scraped}"
     );
-    assert!(scraped.contains("ekvm_boot_seconds_count 2"), "{scraped}");
+    assert!(scraped.contains("bsx_protocol_errors_total 1"), "{scraped}");
+    assert!(scraped.contains("bsx_boot_seconds_count 2"), "{scraped}");
 }
 
 #[test]
-#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_run_whose_output_outgrows_a_request_line_still_reaches_the_client() {
     if let Some(why) = skip_reason() {
         eprintln!(
@@ -503,7 +500,7 @@ fn a_run_whose_output_outgrows_a_request_line_still_reaches_the_client() {
 }
 
 #[test]
-#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_reference_client_drives_a_full_session() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_reference_client_drives_a_full_session: {why}");
@@ -511,7 +508,7 @@ fn the_reference_client_drives_a_full_session() {
     }
     let (_daemon, socket) = launch_daemon(None, None);
 
-    // The whole session over the reference client, the exact surface a non-Rust SDK reimplements.
+    // The whole session over the reference client, the exact surface a non-Rust client reimplements.
     let mut client = Client::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
     if let Err(e) = client.set_read_timeout(Some(Duration::from_secs(45))) {
         panic!("set read timeout: {e}");
@@ -529,8 +526,8 @@ fn the_reference_client_drives_a_full_session() {
     assert_eq!(run.exit_code, 0, "echo exits 0");
     assert_eq!(run.stdout, "hello\n", "exec returns stdout");
 
-    // `env` over the wire: the CLI could always set variables (`ekvm run --env`), but no wire client
-    // could, so an SDK had no way to pass configuration to a command. Prove both halves of the
+    // `env` over the wire: the CLI could always set variables (`bsx run --env`), but no wire client
+    // could, so a client had no way to pass configuration to a command. Prove both halves of the
     // contract, since the second is the one that matters.
     let print_var = vec![
         "sh".to_string(),
@@ -612,7 +609,7 @@ fn the_reference_client_drives_a_full_session() {
 }
 
 #[test]
-#[ignore = "spawns ekvm --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns bsx --prewarm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_prewarmed_open_is_served_from_the_pool() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_prewarmed_open_is_served_from_the_pool: {why}");
@@ -645,13 +642,13 @@ fn a_jailed_daemon_serves_prewarmed_opens() {
     // The composition the rest of this (deliberately unjailed) suite never drives: `serve
     // --prewarm` under the jailer. The daemon's pool source is a Sandbox, so its bundle carries a
     // private disk, and every jailed clone stages that disk into its chroot; a staging regression
-    // there once killed every jailed pool build while the unjailed suite and the `ekvm`-level
+    // there once killed every jailed pool build while the unjailed suite and the `bsx`-level
     // shared-base pool test both stayed green. This is the missing gate.
     if let Some(why) = skip_reason() {
         eprintln!("skipping a_jailed_daemon_serves_prewarmed_opens: {why}");
         return;
     }
-    if !ekvm_test_support::have_real_root() {
+    if !bsx_test_support::have_real_root() {
         eprintln!(
             "skipping a_jailed_daemon_serves_prewarmed_opens: needs real root (the jailer mknods \
              device nodes)"
@@ -697,7 +694,7 @@ fn cancel_reclaims_a_session_wedged_in_a_long_exec() {
 
     let mut stream = UnixStream::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
     // A second handle so the cancel can be written while the first is blocked awaiting the reply,
-    // which is exactly the shape a real SDK needs (the blocked call owns the connection).
+    // which is exactly the shape a real client needs (the blocked call owns the connection).
     let mut canceller = stream
         .try_clone()
         .unwrap_or_else(|e| panic!("clone the connection: {e}"));
@@ -830,7 +827,7 @@ fn open_reply(socket: &PathBuf, open_body: &str) -> String {
 fn an_operator_ceiling_refusal_is_kind_refused_on_the_wire() {
     // The book's fault table (docs/daemon-protocol.md): `refused` is "understood and declined: an
     // operator-chosen posture"; `protocol` is "the client's own message". An ask past an operator
-    // ceiling is a well-formed request this host declines, so it must arrive as `refused`: an SDK
+    // ceiling is a well-formed request this host declines, so it must arrive as `refused`: a client
     // branching on the table would otherwise read a policy refusal as its own malformed message.
     let (_daemon, socket) = launch_daemon_opts(None, None, false, &["--max-vcpus", "2"]);
 
@@ -844,10 +841,10 @@ fn an_operator_ceiling_refusal_is_kind_refused_on_the_wire() {
         "an operator ceiling is the daemon declining, not a malformed message: {line}"
     );
     // The refusal points at the knob the operator actually set. This daemon's policy is its own
-    // flags (it deliberately reads no `.ekvm.toml`), so naming that file would send the client's
+    // flags (it deliberately reads no `.bsx.toml`), so naming that file would send the client's
     // operator to a file that does not govern this daemon.
     assert!(
-        !line.contains(".ekvm.toml"),
+        !line.contains(".bsx.toml"),
         "a daemon refusal must not point at a file the daemon never reads: {line}"
     );
     assert!(

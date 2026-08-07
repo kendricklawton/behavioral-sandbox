@@ -1,4 +1,4 @@
-//! The `guest-agent` binary: listen for connections and [`serve`](ekvm_guest_agent::serve) one command
+//! The `guest-agent` binary: listen for connections and [`serve`](bsx_guest_agent::serve) one command
 //! each.
 //!
 //! **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`), the in-VM
@@ -7,7 +7,7 @@
 //! with no VM. `serve` is transport-agnostic (any `Read`+`Write`); only the listener differs.
 //!
 //! `tracing` goes to stderr. The agent writes exactly one line to **stdout**, the readiness
-//! sentinel ([`GUEST_READY_MARKER`](ekvm_channel::GUEST_READY_MARKER)) emitted once its vsock
+//! sentinel ([`GUEST_READY_MARKER`](bsx_channel::GUEST_READY_MARKER)) emitted once its vsock
 //! listener is bound, because the guest's stdout is the serial console the host scans to learn the
 //! agent is up. One connection = one command, so the loop just accepts, serves, logs, and continues;
 //! every connection serves from the same working directory ([`session_dir`]), so repeated execs
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use vsock::{VMADDR_CID_ANY, VsockListener};
 
-use ekvm_guest_agent::serve_session;
+use bsx_guest_agent::serve_session;
 
 /// Read/write deadline on each served connection. Liveness is the transport's job: with a deadline
 /// set, a dead-or-stalled host surfaces as a typed timeout in `serve` instead of hanging the agent.
@@ -35,10 +35,10 @@ const EXIT_OPERATIONAL: u8 = 2;
 
 /// The listen-spec scheme tokens, shared by the parser and the readiness announcement so the
 /// `vsock:<port>` the host scans for is one definition, not a spelling on each side. The vsock one
-/// comes from [`ekvm_channel`] because the *rootfs build* writes it into the guest's init line too,
+/// comes from [`bsx_channel`] because the *rootfs build* writes it into the guest's init line too,
 /// which is a third side this crate cannot reach; `unix:` is host-side dev transport only, so it
 /// stays local.
-use ekvm_channel::VSOCK_SCHEME;
+use bsx_channel::VSOCK_SCHEME;
 const UNIX_SCHEME: &str = "unix";
 
 fn main() -> ExitCode {
@@ -46,9 +46,9 @@ fn main() -> ExitCode {
 
     let spec = std::env::args()
         .nth(1)
-        .or_else(|| std::env::var("EKVM_GUEST_LISTEN").ok());
+        .or_else(|| std::env::var("BSX_GUEST_LISTEN").ok());
     let Some(spec) = spec else {
-        eprintln!("usage: guest-agent <vsock:<port>|unix:<path>>   (or set EKVM_GUEST_LISTEN)");
+        eprintln!("usage: guest-agent <vsock:<port>|unix:<path>>   (or set BSX_GUEST_LISTEN)");
         return ExitCode::from(EXIT_OPERATIONAL);
     };
 
@@ -87,7 +87,7 @@ fn run_vsock(port: u32) -> Result<(), String> {
     for conn in listener.incoming() {
         match conn {
             // Refuse a connection we can't bound, the no-hang guarantee depends on the deadline
-            // (see `ekvm_guest_agent::serve`). `VsockStream`'s setters return `nix::Error`.
+            // (see `bsx_guest_agent::serve`). `VsockStream`'s setters return `nix::Error`.
             Ok(stream) => match stream
                 .set_read_timeout(Some(IO_TIMEOUT))
                 .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
@@ -132,7 +132,7 @@ fn run_unix(path: &str) -> Result<(), String> {
 /// one `/tmp`, in a guest it changes nothing (and a snapshot clone keeps its pid, so the path is
 /// stable across restore).
 fn session_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("ekvm-session-{}", std::process::id()))
+    std::env::temp_dir().join(format!("bsx-session-{}", std::process::id()))
 }
 
 /// Serve one connection, logging (not propagating) a failure so one bad peer never ends the loop.
@@ -146,7 +146,7 @@ fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
     // every later exec too, not just its own. The session dir stays shared on purpose: it is the
     // session's state, not any one exec's.
     let spawned = std::thread::Builder::new()
-        .name("ekvm-session".to_string())
+        .name("bsx-session".to_string())
         .spawn(move || {
             if let Err(e) = serve_session(stream, &session_dir()) {
                 tracing::warn!("connection failed: {e}");
@@ -160,14 +160,14 @@ fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
 }
 
 /// Print the readiness sentinel to stdout (the serial console) and flush, so the host's console scan
-/// fires exactly once the vsock listener is accepting. See [`ekvm_channel::GUEST_READY_MARKER`].
+/// fires exactly once the vsock listener is accepting. See [`bsx_channel::GUEST_READY_MARKER`].
 /// `writeln!` (not `println!`) so a closed console is ignored, never a panic.
 fn announce_ready(port: u32) {
     let mut out = std::io::stdout();
     let _ = writeln!(
         out,
         "{} {VSOCK_SCHEME}:{port}",
-        ekvm_channel::GUEST_READY_MARKER
+        bsx_channel::GUEST_READY_MARKER
     );
     let _ = out.flush();
 }
@@ -195,11 +195,11 @@ fn parse_listen(spec: &str) -> Result<Listen<'_>, String> {
     }
 }
 
-/// stderr logging, filter from `EKVM_LOG` else `info`. `info` (not the CLI's `warn`) is deliberate:
+/// stderr logging, filter from `BSX_LOG` else `info`. `info` (not the CLI's `warn`) is deliberate:
 /// the agent's per-command `exec` span is the guest's operational trace, captured off the serial
 /// console. `try_init` + an explicit fallback so a bad filter or a double-init never panics the run.
 fn init_tracing() {
-    let filter = std::env::var("EKVM_LOG").unwrap_or_else(|_| "info".to_string());
+    let filter = std::env::var("BSX_LOG").unwrap_or_else(|_| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()

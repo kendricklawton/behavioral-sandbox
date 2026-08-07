@@ -341,7 +341,7 @@ mod tests {
         // The leak the guard closes: a panic between the snapshot-create API call and the disarm
         // must not strand torn, guest-RAM-sized bundle files a later restore would half-open. And
         // the disarm half: a completed bundle survives the guard.
-        let dir = std::env::temp_dir().join(format!("ekvm-bundle-unwind-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-bundle-unwind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let state = dir.join("snapshot.state");
         let mem = dir.join("snapshot.mem");

@@ -345,7 +345,7 @@ pub(crate) struct MachineConfig {
 
 /// `PUT /actions`, an instance action. The closed set of actions the driver issues, modelled as an
 /// enum so the wire discriminant can't be mistyped; serializes to `{"action_type": "<PascalCase>"}`,
-/// matching Firecracker's schema (mirrors how `ekvm-channel` centralizes its `TAG_*` wire discriminants).
+/// matching Firecracker's schema (mirrors how `bsx-channel` centralizes its `TAG_*` wire discriminants).
 #[derive(Serialize)]
 #[serde(tag = "action_type")]
 pub(crate) enum Action {
@@ -514,7 +514,7 @@ mod tests {
         // `Limits::wall = Duration::MAX` ("no limit") reaches this dial through the exec path,
         // and the bare `Instant + Duration` add panicked before the first connect attempt, so
         // surviving to the typed error IS the assertion.
-        let missing = Path::new("/nonexistent/ekvm-no-such-dir/agent.sock");
+        let missing = Path::new("/nonexistent/bsx-no-such-dir/agent.sock");
         let err = connect_with_timeout(missing, Duration::MAX).expect_err("nothing listens there");
         assert_ne!(
             err.kind(),
@@ -544,7 +544,7 @@ mod tests {
             AddressFamily, Backlog, SockFlag, SockType, UnixAddr, bind, listen, socket,
         };
         use std::os::fd::AsRawFd as _;
-        let dir = ekvm_test_support::ScratchDir::created("fc-connect-wedged");
+        let dir = bsx_test_support::ScratchDir::created("fc-connect-wedged");
 
         // No listener at all: callers classify `ConnectionRefused` as "nothing is accepting", so
         // the non-blocking dial must still surface exactly that, not a timeout.
@@ -844,11 +844,11 @@ mod tests {
     fn vsock_serializes_to_expected_fields() {
         let json = serde_json::to_value(Vsock {
             guest_cid: 3,
-            uds_path: "/tmp/ekvm-1-0/v.sock",
+            uds_path: "/tmp/bsx-1-0/v.sock",
         })
         .unwrap();
         assert_eq!(json["guest_cid"], 3);
-        assert_eq!(json["uds_path"], "/tmp/ekvm-1-0/v.sock");
+        assert_eq!(json["uds_path"], "/tmp/bsx-1-0/v.sock");
     }
 
     #[test]

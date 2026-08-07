@@ -15,9 +15,9 @@ malformed or oversize line is a reported error or a drop rather than a parse the
 One connection is one sandbox **session**: the VM *is* the session, so repeated verbs share one
 working directory, and closing the connection tears the sandbox down.
 
-The shared wire contract lives in the `ekvm-protocol` crate (serde-only, no `ekvm`), so the
-daemon, the [reference client](./daemon.md#the-reference-client), and the future polyglot SDKs all speak exactly
-the same shapes.
+The shared wire contract lives in the `bsx-protocol` crate (serde-only, no `bsx`), so the
+daemon, the [reference client](./daemon.md#the-reference-client), and anything else written
+against it all speak exactly the same shapes.
 
 ## Requests
 
@@ -42,11 +42,11 @@ the same shapes.
 | Response | Meaning |
 |---|---|
 | `{"schema":1,"reply":"opened","boot_ms":118,"pooled":false}` | The sandbox booted; `pooled` says whether it came from the pre-warmed pool. |
-| `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `ekvm run --json`; a non-zero `exit_code` is a *result*, not an error). |
+| `{"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}` | A command finished (`stdout`/`stderr` lossy UTF-8, like `bsx run --json`; a non-zero `exit_code` is a *result*, not an error). |
 | `{"schema":1,"reply":"put","path":"in.txt"}` | A `put` landed. |
 | `{"schema":1,"reply":"got","path":"out.txt","content":"data\n","present":true,"lossy":false}` | A `get`'s contents (`present:false` + empty `content` when the file is absent). `content` is lossy UTF-8; `lossy:true` flags that the file's bytes were not valid UTF-8, so replacement characters stand in and the original bytes are not recoverable from this reply. Absent (an older daemon) reads as `false`. |
-| `{"schema":1,"reply":"snapshotted","dir":"/tmp/ekvm-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
-| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `ekvm verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained**: each after the first carries a `prev` field (the SHA-256 of the previous record; the first is the unchained anchor), so the sequence is tamper-evident, not just each record alone. Save the replies one per line and `ekvm verify` checks the whole chain, order and all; the library form is `verify_chain` in `ekvm-record`. |
+| `{"schema":1,"reply":"snapshotted","dir":"/tmp/bsx-snapshots-…/snap-0"}` | A snapshot bundle was written to that **daemon-host** directory. |
+| `{"schema":1,"reply":"trace","record":{…}}` | The audit record as a **signed envelope**: `{schema, key_id, signature, record}`, where `record` is the canonical record JSON carried as a string. Verify it with `bsx verify` or the trusted public key. Within a session, successive `trace` replies are **hash-chained**: each after the first carries a `prev` field (the SHA-256 of the previous record; the first is the unchained anchor), so the sequence is tamper-evident, not just each record alone. Save the replies one per line and `bsx verify` checks the whole chain, order and all; the library form is `verify_chain` in `bsx-record`. |
 | `{"schema":1,"reply":"trace_summary","summary":{…}}` | The record summary as its own JSON object (with its own leading `schema`, the *summary* version). |
 | `{"schema":1,"reply":"cancelled"}` | The in-flight request was abandoned and the sandbox torn down, acknowledging `cancel`. Always the connection's last message; whatever the cancelled request had produced is discarded. |
 | `{"schema":1,"reply":"closed"}` | The session ended cleanly. |
@@ -68,23 +68,23 @@ failed boot is fatal yet nothing about the caller's request was wrong.
 | `refused` | Understood and declined: an operator-chosen posture (an `open` past an operator ceiling, a withdrawn NIC, snapshotting a jailed session) or a capability this session lacks (no probes attached). | Don't retry as-is. |
 
 `infra` / `transport` / `guest` are the wire form of the engine's own pinned error taxonomy
-(`ekvm_engine::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same
+(`bsx_engine::ErrorKind`), so a wire client and a Rust embedder classify the same failure the same
 way.
 
 **Treat an unrecognized `kind` as `infra`.** The set may grow; a value your client predates means
 "unclassified", and assuming the host rather than the caller is the conservative read. An absent
 `kind` (a daemon older than the field) reads the same way.
 
-## Compatibility rules (what an SDK must do)
+## Compatibility rules (what a client must do)
 
-The engine's own client is written in Rust with serde, but nothing here depends on that: an SDK in
+The engine's own client is written in Rust with serde, but nothing here depends on that: a client in
 any language faces these questions independently, so the answers are the protocol's, not the
 implementation's. Three rules, in decreasing order of how often you will hit them.
 
 **1. Ignore fields you do not recognize.** Messages may grow fields within a `schema`, so a decoder
 must not reject an object because it carries something extra. This is how the wire evolves without a
 version bump: a new optional field is invisible to older clients and meaningful to newer ones. An
-SDK that rejects unknown fields (a strict struct decoder, a `deny_unknown_fields`-style setting)
+client that rejects unknown fields (a strict struct decoder, a `deny_unknown_fields`-style setting)
 will break on a routine daemon upgrade. Note the direction: **omitted** optional fields keep the
 documented default, so absence and unfamiliarity are both safe.
 
@@ -108,7 +108,7 @@ fails immediately instead of half-understanding a session.
 
 ## Line size bounds
 
-The two directions carry **different** bounds, and an SDK implements both.
+The two directions carry **different** bounds, and a client implements both.
 
 | Direction | Bound | What it bounds |
 |---|---|---|
@@ -119,7 +119,7 @@ The reply bound is not `output_cap` and cannot be derived from it: JSON escaping
 guest printed, six bytes for a C0 control byte and three for a byte that is not valid UTF-8, so
 33 MiB carries the default 16 MiB cap's worth of ordinary text but not a cap's worth of either.
 Output that expands past the bound comes back as a `guest` error naming the number, never as a
-silently truncated `result` and never as a dropped connection, so an SDK surfaces it like any other
+silently truncated `result` and never as a dropped connection, so a client surfaces it like any other
 flooded-output fault.
 
 ## Protocol examples
@@ -131,7 +131,7 @@ $ printf '%s\n' \
     '{"schema":1,"op":"open"}' \
     '{"schema":1,"op":"exec","argv":["echo","hi"]}' \
     '{"schema":1,"op":"close"}' \
-  | socat - UNIX-CONNECT:./ekvm.sock
+  | socat - UNIX-CONNECT:./bsx.sock
 {"schema":1,"reply":"opened","boot_ms":118,"pooled":false}
 {"schema":1,"reply":"result","exit_code":0,"stdout":"hi\n","stderr":"","exec_wall_ms":7}
 {"schema":1,"reply":"closed"}

@@ -1,10 +1,10 @@
-# Configuration of `ekvm`
+# Configuration of `bsx`
 
-Configuration layers **flags > environment (`EKVM_*`) > file (`.ekvm.toml`) > defaults**. The file
-layer is the nearest `.ekvm.toml` walking up from the current directory (the `.gitignore` convention),
+Configuration layers **flags > environment (`BSX_*`) > file (`.bsx.toml`) > defaults**. The file
+layer is the nearest `.bsx.toml` walking up from the current directory (the `.gitignore` convention),
 so a project pins its engine config beside its code.
 
-The file uses the [toml] format. Its keys mirror the environment names 1:1, minus the `EKVM_` prefix
+The file uses the [toml] format. Its keys mirror the environment names 1:1, minus the `BSX_` prefix
 and lowercased, and an **unknown key is a typed error, never a silent no-op**.
 
 All settings are **optional**. If a setting is not specified, the **default** value is used. *Thus, if
@@ -13,9 +13,9 @@ you don't know what value to use, don't specify it.* The defaults might be tuned
 Example config:
 
 ```toml
-# .ekvm.toml: pinned beside a project's code
-kernel = "/srv/ekvm/vmlinux"
-rootfs = "/srv/ekvm/rootfs-guest.ext4"
+# .bsx.toml: pinned beside a project's code
+kernel = "/srv/bsx/vmlinux"
+rootfs = "/srv/bsx/rootfs-guest.ext4"
 marker = "GUEST-READY"
 log = "info"
 ```
@@ -23,7 +23,7 @@ log = "info"
 **What is deliberately not a knob.** The read-only base plus per-run tmpfs overlay, bulk read-only
 input via a second block device, and bulk writable output via a third (pulled back with
 `RunningVm::collect_outputs`) are per-VM boot inputs a caller sets on `BootConfig`, not layered
-config. There is no `EKVM_READONLY`, `EKVM_INPUT`, or `EKVM_OUTPUT` to go looking for; the reasoning
+config. There is no `BSX_READONLY`, `BSX_INPUT`, or `BSX_OUTPUT` to go looking for; the reasoning
 is in [Architecture and design](./architecture.md).
 
 [toml]: https://toml.io/
@@ -33,20 +33,20 @@ is in [Architecture and design](./architecture.md).
 
 ## Setting `firecracker`
 
-- **env**: `EKVM_FIRECRACKER`
+- **env**: `BSX_FIRECRACKER`
 - **type**: string (path or command name)
 - **default**: `firecracker` (resolved on `PATH`)
 
 The Firecracker binary the engine drives. The engine does not bundle it, so an upstream security patch
 never waits on a release of this engine. v1.15 through v1.16 are supported and v1.16.1 is the pinned,
-tested, hash-verified release; [`ekvm doctor`](./cli-commands.md#ekvm-doctor) reports both the version
+tested, hash-verified release; [`bsx doctor`](./cli-commands.md#bsx-doctor) reports both the version
 and whether the binary's sha256 matches the pin.
 
 [`firecracker`]: #setting-firecracker
 
 ## Setting `kernel`
 
-- **env**: `EKVM_KERNEL`
+- **env**: `BSX_KERNEL`
 - **type**: string (path)
 - **default**: `artifacts/vmlinux`
 
@@ -57,7 +57,7 @@ own. A missing kernel is a hard failure, not a degradation: there is nothing to 
 
 ## Setting `rootfs`
 
-- **env**: `EKVM_ROOTFS`
+- **env**: `BSX_ROOTFS`
 - **type**: string (path)
 - **default**: `artifacts/rootfs-guest.ext4`
 
@@ -70,7 +70,7 @@ explicitly collected.
 
 ## Setting `marker`
 
-- **env**: `EKVM_MARKER`
+- **env**: `BSX_MARKER`
 - **type**: string
 - **default**: `GUEST-READY`
 
@@ -82,7 +82,7 @@ prompt.
 
 ## Setting `scratch_dir`
 
-- **env**: `EKVM_SCRATCH_DIR`
+- **env**: `BSX_SCRATCH_DIR`
 - **type**: string (path)
 - **default**: `/tmp`, or `/var/tmp` when `/tmp` is unusable (see below)
 
@@ -103,13 +103,13 @@ which the kernel caps at roughly 108 bytes.
 
 ## Setting `log`
 
-- **env**: `EKVM_LOG`
+- **env**: `BSX_LOG`
 - **type**: string (`tracing` filter syntax)
 - **default**: `warn`
 
 The stderr log filter, for example `info` or `debug`. Logs go to stderr and only there (the one
 `tracing` subscriber is initialized with a stderr writer), so
-`ekvm run … 2>/dev/null` stays pipe-clean. The `--log` flag overrides this per run. A filter
+`bsx run … 2>/dev/null` stays pipe-clean. The `--log` flag overrides this per run. A filter
 `tracing` cannot parse is refused up front, the same loudness as a mistyped key in this file; a
 bare unknown word is not that case, since the filter grammar reads it as a target name.
 
@@ -117,7 +117,7 @@ bare unknown word is not that case, since the filter grammar reads it as a targe
 
 ## Setting `require_limits`
 
-- **env**: `EKVM_REQUIRE_LIMITS`
+- **env**: `BSX_REQUIRE_LIMITS`
 - **type**: boolean
 - **default**: `false`
 
@@ -132,7 +132,7 @@ The `--require-limits` flag sets it per run.
 
 ## Setting `gateway` and `resolver`
 
-- **env**: `EKVM_GATEWAY`, `EKVM_RESOLVER`
+- **env**: `BSX_GATEWAY`, `BSX_RESOLVER`
 - **type**: IPv4 address
 - **default**: unset (the guest gets no default route and no nameserver)
 
@@ -161,59 +161,59 @@ warning naming the key, so a typo reads as a misconfiguration rather than as a b
 
 ## Setting `signing_key`
 
-- **env**: `EKVM_SIGNING_KEY`
+- **env**: `BSX_SIGNING_KEY`
 - **type**: string (path)
 - **default**: a path under the data directory, generated on first use
 
 The host `ed25519` key that signs finalized audit records. The key stays in the host process; what
 reaches anything guest-visible is the detached signature. A record's
 `key_id` names the key that signed it, and key custody and rotation are the hoster's responsibility.
-See [`ekvm verify`](./cli-commands.md#ekvm-verify).
+See [`bsx verify`](./cli-commands.md#bsx-verify).
 
 [`signing_key`]: #setting-signing_key
 
 ## Setting `trusted_keys`
 
-- **env**: `EKVM_TRUSTED_KEYS`
+- **env**: `BSX_TRUSTED_KEYS`
 - **type**: array of 64-hex public keys in the file (`trusted_keys = ["aa..", "bb.."]`);
   comma-separated in the environment variable
 - **default**: empty
 
-Additional public keys `ekvm verify` should trust, alongside the current signing key and any `--key`
+Additional public keys `bsx verify` should trust, alongside the current signing key and any `--key`
 given on the command line. Keep retired public keys listed here so rotating the host key does not
 invalidate records already signed.
 
 [`trusted_keys`]: #setting-trusted_keys
 
-## Setting `EKVM_PROBES_OBJECT`
+## Setting `BSX_PROBES_OBJECT`
 
-- **env**: `EKVM_PROBES_OBJECT` (**environment only**, no `.ekvm.toml` key)
+- **env**: `BSX_PROBES_OBJECT` (**environment only**, no `.bsx.toml` key)
 - **type**: string (path)
 - **default**: the `cargo xtask build-probes` output, else the installed copy under the data directory
 
 An override for the built eBPF object, rarely needed. Deliberately env-only: it is a build-tree detail
 rather than project configuration.
 
-[`EKVM_PROBES_OBJECT`]: #setting-ekvm_probes_object
+[`BSX_PROBES_OBJECT`]: #setting-bsx_probes_object
 
-## Setting `EKVM_LOG_FORMAT`
+## Setting `BSX_LOG_FORMAT`
 
-- **env**: `EKVM_LOG_FORMAT` (**environment only**, daemon-scoped)
+- **env**: `BSX_LOG_FORMAT` (**environment only**, daemon-scoped)
 - **type**: `json`
 - **default**: human-readable
 
-Switches `ekvm serve`'s stderr logs to JSON encoding (`--log-json` is the per-launch flag form);
+Switches `bsx serve`'s stderr logs to JSON encoding (`--log-json` is the per-launch flag form);
 the one-shot commands do not read it. The daemon's log fields are documented in
 [Observability for the hoster](./daemon-observability.md).
 
-[`EKVM_LOG_FORMAT`]: #setting-ekvm_log_format
+[`BSX_LOG_FORMAT`]: #setting-bsx_log_format
 
 ---
 
 ## Operator policy
 
-A second group of `.ekvm.toml` keys sets the **host's** posture rather than a per-run knob. These have
-**no `EKVM_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling whose
+A second group of `.bsx.toml` keys sets the **host's** posture rather than a per-run knob. These have
+**no `BSX_*` mirror** and deliberately sit outside the flags > env > file precedence: a ceiling whose
 bounded party can override it is not a ceiling.
 
 ```toml
@@ -286,7 +286,7 @@ stronger statement than the default posture: no guest networking at all.
 - **type**: boolean
 - **default**: `false`
 
-Refuses any run that would leave no audit record, including [`ekvm shell`](./cli-commands.md#ekvm-shell),
+Refuses any run that would leave no audit record, including [`bsx shell`](./cli-commands.md#bsx-shell),
 which cannot record. Satisfied on its own by [`records_dir`](#setting-records_dir). A
 `--record-summary` alone does not satisfy it: the summary is an unsigned projection of the record,
 not the record, so a summary-only run still refuses
@@ -311,7 +311,7 @@ path.
 For the CLI this is a **guardrail**: a local caller owns this file, and
 [Security](./security.md#what-is-not-a-security-bug) already treats them as trusted.
 
-The real boundary is [`ekvm serve`](./daemon.md), whose clients control neither the daemon's config nor
+The real boundary is [`bsx serve`](./daemon.md), whose clients control neither the daemon's config nor
 its environment. It therefore takes its ceilings as **explicit flags** (the per-run `--max-vcpus`,
 `--max-mem-mib`, `--max-wall-secs`, `--max-output-cap`, plus the daemon-wide `--max-sessions` and
 committed-resource ceilings) rather than from a discovered file: a daemon must not read a

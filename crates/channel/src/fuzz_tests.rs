@@ -8,7 +8,7 @@
 //! [`ChannelError`], never panic, never loop unboundedly, and never allocate past
 //! [`MAX_PAYLOAD`](crate::MAX_PAYLOAD).
 //!
-//! **Dependency-free on purpose.** `ekvm-channel` is near dependency-free by design and the supply-chain
+//! **Dependency-free on purpose.** `bsx-channel` is near dependency-free by design and the supply-chain
 //! gate keeps a tight license allowlist, so rather than pull in `proptest`/`arbitrary` (and their
 //! trees) as dev-dependencies, the generator is a tiny deterministic PRNG. Fixed seeds mean a
 //! failure reproduces exactly and the gate never flakes.

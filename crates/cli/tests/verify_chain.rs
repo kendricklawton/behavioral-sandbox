@@ -1,4 +1,4 @@
-//! `ekvm verify` on a **chain file**: one envelope per line, the shape a daemon client saves its
+//! `bsx verify` on a **chain file**: one envelope per line, the shape a daemon client saves its
 //! `trace` replies in (each reply commits to the previous one's hash). Host-safe: signing and
 //! verification are pure key operations, no VM, no KVM, so this runs in the everyday gate.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's
@@ -8,15 +8,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ekvm_probes_loader::{HostKey, record_hash};
+use bsx_probes_loader::{HostKey, record_hash};
 
-/// A scratch dir for the chain file, removed on drop; also the spawn cwd, so a `.ekvm.toml`
+/// A scratch dir for the chain file, removed on drop; also the spawn cwd, so a `.bsx.toml`
 /// higher up the tree can't leak configuration into the run.
 struct ChainDir(PathBuf);
 
 impl ChainDir {
     fn new(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("ekvm-chain-{}-{name}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-chain-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap_or_else(|e| panic!("create {}: {e}", dir.display()));
         Self(dir)
@@ -43,15 +43,15 @@ fn chain_of_three(key: &HostKey) -> [String; 3] {
     [e0, e1, e2]
 }
 
-/// Run `ekvm verify <file> --key <hex>` from `dir`, returning `(exit_code, stdout, stderr)`.
+/// Run `bsx verify <file> --key <hex>` from `dir`, returning `(exit_code, stdout, stderr)`.
 fn verify_in(dir: &ChainDir, file: &Path, key_hex: &str) -> (Option<i32>, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_ekvm"))
+    let out = Command::new(env!("CARGO_BIN_EXE_bsx"))
         .arg("verify")
         .arg(file)
         .args(["--key", key_hex])
         .current_dir(&dir.0)
         .output()
-        .unwrap_or_else(|e| panic!("spawn ekvm verify: {e}"));
+        .unwrap_or_else(|e| panic!("spawn bsx verify: {e}"));
     (
         out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),

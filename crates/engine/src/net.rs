@@ -285,7 +285,7 @@ pub(crate) fn netns_path(name: &str) -> PathBuf {
     Path::new("/run/netns").join(name)
 }
 
-/// `ip netns add <name>`, creating the per-VM network namespace. The name is `ekvm-<pid>-<seq>` with
+/// `ip netns add <name>`, creating the per-VM network namespace. The name is `bsx-<pid>-<seq>` with
 /// **our own** pid (`std::process::id()`), so a collision can only be residue from a *prior* process
 /// that shared our pid, necessarily dead, since pids are unique among the living, and its teardown
 /// left the netns behind (e.g. a dir-less orphan the sweep never saw). So on collision we reclaim the
@@ -447,6 +447,6 @@ mod tests {
 
     #[test]
     fn netns_path_is_the_iproute2_handle() {
-        assert_eq!(netns_path("ekvm-42-0"), Path::new("/run/netns/ekvm-42-0"));
+        assert_eq!(netns_path("bsx-42-0"), Path::new("/run/netns/bsx-42-0"));
     }
 }

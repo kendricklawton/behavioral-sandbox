@@ -1,5 +1,5 @@
 [package]
-name = "ekvm-probes-loader"
+name = "bsx-probes-loader"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -17,27 +17,27 @@ aya = "0.14"
 
 # The wire record read out of the ring buffer (`SyscallEvent`), shared with the kernel writer in
 # `crates/probes`. `std` on for the ergonomic `comm_lossy` helper on the host side.
-ekvm-probes-common = { path = "../probes-common", features = ["std"] }
+bsx-probes-common = { path = "../probes-common", features = ["std"] }
 
 # The audit record this loader assembles: its types, JSON, and signing/verify surface. A separate,
 # aya-free crate so a consumer can parse and verify a record off-host without linking this loader.
-ekvm-record = { path = "../record" }
+bsx-record = { path = "../record" }
 
 # Enter a sandbox's network namespace to attach the tap monitor to its `fc0`.
 # `setns` has no `std` wrapper; nix's is a *safe* function, so the loader stays
 # `#![forbid(unsafe_code)]`. `sched` only (setns + CloneFlags), default features off to stay small.
-# Pinned to the same 0.31 the workspace already carries (via `vsock` under `ekvm`) so the build
+# Pinned to the same 0.31 the workspace already carries (via `vsock` under `bsx`) so the build
 # links one copy of nix, not two.
 nix = { version = "0.31", default-features = false, features = ["sched"] }
 
 [dev-dependencies]
 # The Firecracker driver, for the end-to-end integration tests only (boot a real sandbox, attach
 # the probes, prove what the guest did shows up). A dev-dependency so the loader library
-# stays independent of `ekvm`: the eBPF track and the driver track bridge only by plain values.
-ekvm-engine = { path = "../engine" }
+# stays independent of `bsx`: the eBPF track and the driver track bridge only by plain values.
+bsx-engine = { path = "../engine" }
 # Cross-crate test helpers (the cgroup-cap harness, host-capability probes), shared with the driver's
 # confinement tests so they aren't copy-pasted. Dev-only, never shipped.
-ekvm-test-support = { path = "../test-support" }
+bsx-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

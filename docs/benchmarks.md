@@ -11,9 +11,9 @@ average) were added *afterwards*. The numbers may well have been roughly right; 
 nobody can tell. Publishing a number nobody can defend is worse than publishing none, so they are
 parked until a re-run on a host whose quiet state is verified.
 
-The suite lives in [`xtask`](https://github.com/ekvm-rs/ekvm/tree/main/xtask) and runs via
-`cargo xtask bench-all`. Run it on your own host; that result is about your host, which is the only
-thing a benchmark ever tells you.
+The suite lives in [`xtask`](https://github.com/kendricklawton/behavioral-sandbox/tree/main/xtask)
+and runs via `cargo xtask bench-all`. Run it on your own host; that result is about your host, which
+is the only thing a benchmark ever tells you.
 
 ## Methodology
 
@@ -26,12 +26,12 @@ thing a benchmark ever tells you.
 - **Reproduce.** Two commands run the benchmarking suites:
 
   ```console
-  cargo bench -p ekvm-record         # Criterion micro-benchmarks: record signing, verification, hash-chaining, JSON
+  cargo bench -p bsx-record         # Criterion micro-benchmarks: record signing, verification, hash-chaining, JSON
   cargo xtask bench-all              # the full system suite; skips sections whose host prereq is missing
   cargo xtask bench-warm --runs 100  # or a single bench at a sharper n for publication-grade tails
   ```
 
-  The KVM benches need `/dev/kvm` + the built ekvm rootfs; the eBPF benches need
+  The KVM benches need `/dev/kvm` + the built bsx rootfs; the eBPF benches need
   `CAP_BPF`+`CAP_PERFMON` + `cargo xtask build-probes` (not KVM). `bench-all` records the host it ran
   on and skips any section it can't run, with the reason, so a report says exactly what it measured.
 
@@ -68,7 +68,7 @@ Each section below exists and runs today; only the published result tables are w
 | `bench-scale` | Whether per-event cost changes with the number of watched sandboxes |
 | `bench-sign` | Record signing and verification cost |
 
-The KVM benches need `/dev/kvm` and the built ekvm rootfs; the eBPF benches need
+The KVM benches need `/dev/kvm` and the built bsx rootfs; the eBPF benches need
 `CAP_BPF`+`CAP_PERFMON` and `cargo xtask build-probes`, but not KVM.
 
 ## How the suite guards against measuring nothing

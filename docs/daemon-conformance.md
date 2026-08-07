@@ -1,21 +1,21 @@
 # Conformance for a wire client
 
-One wire, several clients: the Rust reference client (`ekvm-client`), the language SDKs
-(`ekvm-sdk-python`, `ekvm-sdk-js`, `ekvm-sdk-go`), and whatever an operator writes against
-[the protocol](./daemon-protocol.md). Each reimplements the same JSON shapes without sharing code,
-so "the SDK works" needs one meaning rather than three. This page is that meaning: the scenarios a
-client is expected to handle, what each one is checking, and the reply that says it did.
+One wire, more than one decoder: the Rust reference client (`bsx-client`) and whatever an
+operator writes against [the protocol](./daemon-protocol.md). Each reimplements the same JSON
+shapes without sharing code, so "the client works" needs one meaning rather than one per
+implementation. This page is that meaning: the scenarios a client is expected to handle, what
+each one is checking, and the reply that says it did.
 
 It is a checklist, not a harness. Nothing here runs the scenarios for you, and passing them says
 the cases below behaved as described against the daemon you ran, on the day you ran it.
 
 ## Running them
 
-Every scenario drives a real `ekvm serve` over its unix socket. Two groups, because they need
+Every scenario drives a real `bsx serve` over its unix socket. Two groups, because they need
 different hosts:
 
 - **Pre-boot scenarios** (1, 8, 9, 10, 11, 12) are answered before any VM exists, so they run on a
-  host with no `/dev/kvm` and no guest rootfs. Put these in the everyday CI of an SDK repo: they
+  host with no `/dev/kvm` and no guest rootfs. Put these in a client's everyday CI: they
   cover the framing, the schema gate, and the fault taxonomy, which is where a hand-written decoder
   actually breaks.
 - **Booting scenarios** (2 through 7) need `/dev/kvm` plus the guest artifacts, the same
@@ -24,7 +24,7 @@ different hosts:
 A daemon for the pre-boot group needs no artifacts at all:
 
 ```console
-ekvm serve --socket ./ekvm.sock --max-vcpus 2 --max-sessions 1
+bsx serve --socket ./bsx.sock --max-vcpus 2 --max-sessions 1
 ```
 
 ## The scenarios
@@ -42,7 +42,7 @@ omits `schema` gets a `protocol` error naming the missing field, which is worth 
 `{"schema":1,"op":"exec","argv":["sh","-c","echo out; echo err >&2; exit 3"]}` answers with
 `result` carrying `exit_code: 3`, `stdout`, `stderr`, and `exec_wall_ms`.
 
-The distinction that trips SDK authors: a non-zero `exit_code` is a *result*, not a failure. A
+The distinction that trips client authors: a non-zero `exit_code` is a *result*, not a failure. A
 client that raises on it cannot report what the guest actually did. Failures arrive as `error`.
 
 ### 3. Files round-trip, and a missing file is not an error
@@ -124,7 +124,7 @@ of half-understanding a session.
 
 ## Also worth covering
 
-Not scenarios every client needs, but each is a real edge an SDK will eventually meet:
+Not scenarios every client needs, but each is a real edge a client will eventually meet:
 
 - **Backpressure.** A daemon at `--max-sessions` answers a new connection with `at_capacity` and a
   `retry_after_ms` hint. It is always session-ending, and distinct from `error` so a dispatcher can

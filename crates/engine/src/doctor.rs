@@ -1,10 +1,10 @@
 //! Host readiness check: does this machine have what the engine needs to boot and confine a
-//! sandbox? [`checks`] is the **single implementation** behind two entry points, the `ekvm doctor`
+//! sandbox? [`checks`] is the **single implementation** behind two entry points, the `bsx doctor`
 //! subcommand an operator runs on a fresh host and `cargo xtask setup` for a dev box, so the two ask
 //! the host the same questions and get the same per-row [`CheckStatus`] back.
 //!
 //! What each does with those rows is its own, and the shared list does not make them agree on it:
-//! only `ekvm doctor` renders the three states apart, calls [`can_boot`], and exits non-zero when a
+//! only `bsx doctor` renders the three states apart, calls [`can_boot`], and exits non-zero when a
 //! hard requirement is missing; `setup` prints a flat checklist in which a [`Warn`](CheckStatus::Warn)
 //! is indistinguishable from a [`Fail`](CheckStatus::Fail), and never fails. Each also appends the
 //! eBPF row itself, since that check lives in the probe loader rather than here.
@@ -157,16 +157,16 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
         ),
         // The boot artifacts, hard: nothing boots without a kernel + rootfs at the configured paths.
         Check::new(
-            "guest kernel present (EKVM_KERNEL)",
+            "guest kernel present (BSX_KERNEL)",
             config.kernel.is_file(),
             false,
-            "no kernel to boot: `cargo xtask fetch-artifacts`, or point EKVM_KERNEL at one",
+            "no kernel to boot: `cargo xtask fetch-artifacts`, or point BSX_KERNEL at one",
         ),
         Check::new(
-            "guest rootfs present (EKVM_ROOTFS)",
+            "guest rootfs present (BSX_ROOTFS)",
             config.rootfs.is_file(),
             false,
-            "no rootfs to boot: build one (`cargo xtask build-rootfs`) or set EKVM_ROOTFS",
+            "no rootfs to boot: build one (`cargo xtask build-rootfs`) or set BSX_ROOTFS",
         ),
         Check::new(
             &format!("firecracker on PATH ({fc})"),
@@ -175,7 +175,7 @@ pub fn checks(config: &BootConfig) -> Vec<Check> {
             &format!(
                 "no VMM to launch: install firecracker + jailer ({}) from \
                  https://github.com/firecracker-microvm/firecracker/releases, or set \
-                 EKVM_FIRECRACKER",
+                 BSX_FIRECRACKER",
                 supported_range()
             ),
         ),
@@ -309,7 +309,7 @@ pub fn matrix() -> Vec<&'static str> {
         "  firecracker sha256 unpinned  -> boots continue; verify custom binary out of band",
         "  no real root / no jailer     -> the jailed default fails; --unjailed runs unconfined",
         "  cgroup v2 not delegated      -> jailed VMs run WITHOUT cpu/memory caps",
-        "  scratch dir nodev/noexec     -> jailed chroot can't open /dev/kvm or exec the VMM; repoint EKVM_SCRATCH_DIR",
+        "  scratch dir nodev/noexec     -> jailed chroot can't open /dev/kvm or exec the VMM; repoint BSX_SCRATCH_DIR",
         "  ip / mke2fs / e2fsprogs      -> only --net or bulk-I/O runs fail; others are unaffected",
         "  SMT / KSM / CPU vulns        -> advisory hardening baseline: docs/security-threat-model.md",
         "  a MAC LSM is loaded          -> selinux/apparmor denials arrive as a bare EPERM naming",
@@ -715,7 +715,7 @@ mod tests {
     /// operator staring at a failed boot, so the row distinguishes them.
     #[test]
     fn selinux_reports_enforcing_separately_from_permissive() {
-        let tmp = ekvm_test_support::ScratchDir::created("doctor-lsm");
+        let tmp = bsx_test_support::ScratchDir::created("doctor-lsm");
         let lsm = tmp.path().join("lsm");
         let enforce = tmp.path().join("enforce");
 
@@ -768,7 +768,7 @@ mod tests {
     /// would report absent on every host that has it.
     #[test]
     fn cgroup_kill_is_found_one_level_down_not_at_the_root() {
-        let tmp = ekvm_test_support::ScratchDir::created("doctor-cgkill");
+        let tmp = bsx_test_support::ScratchDir::created("doctor-cgkill");
         let root = tmp.path();
         assert!(!cgroup_kill_under(root), "empty root must not qualify");
 
@@ -787,7 +787,7 @@ mod tests {
     /// A probed capability outranks the version string: that is what admits RHEL 9.
     #[test]
     fn a_probed_cgroup_kill_qualifies_a_kernel_below_the_fallback_floor() {
-        let tmp = ekvm_test_support::ScratchDir::created("doctor-verdict");
+        let tmp = bsx_test_support::ScratchDir::created("doctor-verdict");
         let scope = tmp.path().join("init.scope");
         std::fs::create_dir(&scope).expect("mkdir");
         std::fs::write(scope.join("cgroup.kill"), "").expect("write");
@@ -800,7 +800,7 @@ mod tests {
 
         // With nothing to probe, the verdict falls back to the version floor. This host is above
         // it, so the assertion is that the fallback *ran*, not that any host passes.
-        let empty = ekvm_test_support::ScratchDir::created("doctor-empty");
+        let empty = bsx_test_support::ScratchDir::created("doctor-empty");
         assert_ne!(
             kernel_verdict(empty.path()),
             KernelVerdict::CapabilityVerified,
@@ -863,7 +863,7 @@ mod tests {
                 .note
                 .as_deref()
                 .is_some_and(|n| n.contains("https://")),
-            "the FAIL row itself says where to get a release, not `see ekvm doctor` circularly"
+            "the FAIL row itself says where to get a release, not `see bsx doctor` circularly"
         );
         for needle in ["supported release", "binary sha256"] {
             let dependent = row(needle);
@@ -895,29 +895,29 @@ mod tests {
 42 21 0:24 / /opt rw,nosuid,noexec shared:5 - ext4 /dev/sda4 rw";
         // The jailer's chroot /dev/kvm under /tmp is on the nodev fs, the exact failure case.
         assert_eq!(
-            mount_flags_in(mi, Path::new("/tmp/ekvm-1/root/dev/kvm")),
+            mount_flags_in(mi, Path::new("/tmp/bsx-1/root/dev/kvm")),
             Some(MountFlags {
                 nodev: true,
                 noexec: false
             })
         );
         // A scratch dir under $HOME carries neither flag, the recommended fix.
-        assert_eq!(mount_flags_in(mi, Path::new("/home/k/.ekvm")), Some(CLEAR));
+        assert_eq!(mount_flags_in(mi, Path::new("/home/k/.bsx")), Some(CLEAR));
         // Longest-prefix wins: `/tmp` (nodev), not the `/` root it also sits under.
         assert!(mount_flags_in(mi, Path::new("/tmp")).is_some_and(MountFlags::blocks_jail));
         // A flag-free path falls through to the unrestricted root.
-        assert_eq!(mount_flags_in(mi, Path::new("/var/lib/ekvm")), Some(CLEAR));
+        assert_eq!(mount_flags_in(mi, Path::new("/var/lib/bsx")), Some(CLEAR));
         // `noexec` alone blocks a jail (the chrooted firecracker copy can't exec), and both
         // flags together read as both.
         assert_eq!(
-            mount_flags_in(mi, Path::new("/opt/ekvm")),
+            mount_flags_in(mi, Path::new("/opt/bsx")),
             Some(MountFlags {
                 nodev: false,
                 noexec: true
             })
         );
         assert_eq!(
-            mount_flags_in(mi, Path::new("/srv/ekvm")),
+            mount_flags_in(mi, Path::new("/srv/bsx")),
             Some(MountFlags {
                 nodev: true,
                 noexec: true
@@ -931,7 +931,7 @@ mod tests {
         let mi = "50 21 0:23 / /mnt/my\\040scratch rw,nodev shared:4 - ext4 /dev/sdb rw\n\
                   21 30 0:20 / / rw,relatime shared:1 - ext4 /dev/root rw";
         assert!(
-            mount_flags_in(mi, Path::new("/mnt/my scratch/ekvm-1"))
+            mount_flags_in(mi, Path::new("/mnt/my scratch/bsx-1"))
                 .is_some_and(|f| f.nodev && !f.noexec)
         );
     }
@@ -1002,7 +1002,7 @@ mod tests {
 
     #[test]
     fn vulnerable_entries_reports_only_files_that_say_vulnerable() {
-        let dir = ekvm_test_support::ScratchDir::created("vulns");
+        let dir = bsx_test_support::ScratchDir::created("vulns");
         let write = |name: &str, content: &str| {
             std::fs::write(dir.path().join(name), content).expect("write fixture");
         };

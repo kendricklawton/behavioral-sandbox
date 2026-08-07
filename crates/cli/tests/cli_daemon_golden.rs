@@ -1,18 +1,18 @@
-//! CLI/daemon parity golden (the wire API): the **CLI** (`ekvm run --json`) and the
-//! **daemon wire API** (`ekvm serve`, driven
-//! through the reference [`ekvm_client::Client`]) render the *same* command **identically**, same
-//! exit code, same stdout, same stderr. The two faces are thin hosts of one `ekvm-engine` lifecycle,
+//! CLI/daemon parity golden (the wire API): the **CLI** (`bsx run --json`) and the
+//! **daemon wire API** (`bsx serve`, driven
+//! through the reference [`bsx_client::Client`]) render the *same* command **identically**, same
+//! exit code, same stdout, same stderr. The two faces are thin hosts of one `bsx-engine` lifecycle,
 //! so a run must never depend on which door it came through; this pins that invariant against drift
 //! (a stream captured differently, an exit code mapped differently, a default limit that diverged).
 //!
 //! It compares only what is a *run result* on both faces: a command that **runs** and returns a
-//! `RunResult` (`ekvm-engine`), exit code (zero or not), stdout, stderr. A guest fault that never
+//! `RunResult` (`bsx-engine`), exit code (zero or not), stdout, stderr. A guest fault that never
 //! produces a result (an unspawnable binary) is deliberately *out* of scope: the CLI renders it as an
 //! operational error (exit 2, a stderr diagnostic), the daemon as a non-fatal `error` reply, two
 //! faithful renderings of a non-result, not a golden mismatch.
 //!
 //! `#[ignore]`d: boots real microVMs (needs `/dev/kvm` + the guest rootfs). Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm -- --ignored`. Both faces run
+//! `cargo xtask ci-privileged` or `cargo test -p bsx -- --ignored`. Both faces run
 //! **unjailed**, the golden is the run-result rendering, not the jailer (that has its own suite),
 //! and unjailed needs no root.
 // A test binary: `panic!`/`expect` is the idiomatic assertion, which the workspace's `clippy::panic`
@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ekvm_client::{Client, OpenParams};
+use bsx_client::{Client, OpenParams};
 
 /// The workspace root, from this crate's manifest dir, so the artifact paths are cwd-independent.
 fn workspace_root() -> PathBuf {
@@ -91,7 +91,7 @@ fn cases() -> Vec<(Vec<String>, String, RunOutcome)> {
     ]
 }
 
-/// A spawned `ekvm serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
+/// A spawned `bsx serve` that is SIGKILLed on drop, so a panicking assertion can't leak the daemon (its
 /// session VM is then reaped by the lifetime sentinel; the socket file is cleared on the next bind).
 struct Daemon {
     child: Child,
@@ -109,26 +109,26 @@ impl Drop for Daemon {
 /// The env the two faces share: the same rootfs, kernel, and readiness marker, so any difference in
 /// the result is the *rendering*, not the inputs.
 fn shared_env(cmd: &mut Command, root: &std::path::Path) {
-    cmd.env("EKVM_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
+    cmd.env("BSX_ROOTFS", root.join("artifacts/rootfs-guest.ext4"))
         // The guest rootfs signals readiness with its own marker, not a getty `login:`.
-        .env("EKVM_MARKER", ekvm_engine::GUEST_READY_MARKER)
-        .env("EKVM_LOG", "warn");
-    if std::env::var_os("EKVM_KERNEL").is_none() {
-        cmd.env("EKVM_KERNEL", root.join("artifacts/vmlinux"));
+        .env("BSX_MARKER", bsx_engine::GUEST_READY_MARKER)
+        .env("BSX_LOG", "warn");
+    if std::env::var_os("BSX_KERNEL").is_none() {
+        cmd.env("BSX_KERNEL", root.join("artifacts/vmlinux"));
     }
 }
 
-/// Launch `ekvm serve --unjailed` on a private socket, returning once the socket is connectable.
+/// Launch `bsx serve --unjailed` on a private socket, returning once the socket is connectable.
 fn launch_daemon() -> (Daemon, PathBuf) {
     let root = workspace_root();
-    let dir = std::env::temp_dir().join(format!("ekvm-golden-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("bsx-golden-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the daemon's socket dir: {e}");
     }
-    let socket = dir.join("ekvm.sock");
+    let socket = dir.join("bsx.sock");
 
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ekvm"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
     cmd.arg("serve")
         .arg("--unjailed")
         .arg("--socket")
@@ -137,7 +137,7 @@ fn launch_daemon() -> (Daemon, PathBuf) {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn ekvm: {e}"));
+    let child = cmd.spawn().unwrap_or_else(|e| panic!("spawn bsx: {e}"));
     let daemon = Daemon { child, dir };
 
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -147,15 +147,15 @@ fn launch_daemon() -> (Daemon, PathBuf) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("ekvm never began accepting on {}", socket.display());
+    panic!("bsx never began accepting on {}", socket.display());
 }
 
-/// Run one command through the **CLI** face: `ekvm run --unjailed --json -- <argv>`, feeding
+/// Run one command through the **CLI** face: `bsx run --unjailed --json -- <argv>`, feeding
 /// `stdin`, and read the structured result off stdout (stderr carries only logs, so stdout is the one
 /// JSON object).
 fn run_via_cli(argv: &[String], stdin: &str) -> RunOutcome {
     let root = workspace_root();
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_ekvm"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_bsx"));
     cmd.arg("run").arg("--unjailed").arg("--json").arg("--");
     cmd.args(argv);
     shared_env(&mut cmd, &root);
@@ -163,22 +163,20 @@ fn run_via_cli(argv: &[String], stdin: &str) -> RunOutcome {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
 
-    let mut child = cmd
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn ekvm run: {e}"));
+    let mut child = cmd.spawn().unwrap_or_else(|e| panic!("spawn bsx run: {e}"));
     child
         .stdin
         .take()
-        .unwrap_or_else(|| panic!("ekvm run has no stdin handle"))
+        .unwrap_or_else(|| panic!("bsx run has no stdin handle"))
         .write_all(stdin.as_bytes())
-        .unwrap_or_else(|e| panic!("feed stdin to ekvm run: {e}"));
+        .unwrap_or_else(|e| panic!("feed stdin to bsx run: {e}"));
     let out = child
         .wait_with_output()
-        .unwrap_or_else(|e| panic!("wait for ekvm run: {e}"));
+        .unwrap_or_else(|e| panic!("wait for bsx run: {e}"));
 
     let body = String::from_utf8_lossy(&out.stdout);
     let json: serde_json::Value = serde_json::from_str(body.trim())
-        .unwrap_or_else(|e| panic!("ekvm --json result is one JSON object ({e}): {body:?}"));
+        .unwrap_or_else(|e| panic!("bsx --json result is one JSON object ({e}): {body:?}"));
     RunOutcome {
         exit_code: json["exit_code"]
             .as_i64()
@@ -208,9 +206,9 @@ fn run_via_daemon(client: &mut Client, argv: &[String], stdin: &str) -> RunOutco
 }
 
 #[test]
-#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
-    // `ekvm run … 0<&-` closes fd 0 outright, which reads back as EBADF, not as an empty pipe.
+    // `bsx run … 0<&-` closes fd 0 outright, which reads back as EBADF, not as an empty pipe.
     // A failed stdin read is otherwise a hard error (running the guest on silently truncated input
     // and calling the record complete would corrupt the record), so this one errno has to stay
     // the "no stdin" case a terminal already is. Closing fd 0 needs a shell: `Stdio::null()` opens
@@ -223,7 +221,7 @@ fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
     let mut cmd = Command::new("sh");
     cmd.current_dir(&root).arg("-c").arg(format!(
         "exec 0<&-; exec {} run --unjailed -- echo closed-stdin-ok",
-        env!("CARGO_BIN_EXE_ekvm")
+        env!("CARGO_BIN_EXE_bsx")
     ));
     shared_env(&mut cmd, &root);
     let out = cmd.output().unwrap_or_else(|e| panic!("spawn sh: {e}"));
@@ -242,7 +240,7 @@ fn a_closed_stdin_is_no_stdin_not_a_failed_run() {
 }
 
 #[test]
-#[ignore = "spawns ekvm + ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+#[ignore = "spawns bsx + bsx; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_cli_and_the_daemon_render_a_run_identically() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_cli_and_the_daemon_render_a_run_identically: {why}");

@@ -5,7 +5,7 @@
 //! boot artifacts. `install.sh` (repo root, also packed into the tarball) consumes the result.
 //!
 //! Every step reuses the tested building blocks the individual `xtask` commands use, so this is
-//! orchestration, not a second build path. Vendor-aware like `self-host`: with `EKVM_VENDOR_DIR`
+//! orchestration, not a second build path. Vendor-aware like `self-host`: with `BSX_VENDOR_DIR`
 //! set the whole assembly runs offline.
 
 use std::path::{Path, PathBuf};
@@ -16,8 +16,8 @@ use anyhow::{Context, Result, bail};
 use crate::artifacts::sha256_of;
 use crate::{build_probes, cargo_reproducible, guest_rootfs_path, kernel_path, workspace_root};
 
-/// The packaged eBPF object's name inside `share/ekvm/` (the loader finds it via
-/// `EKVM_PROBES_OBJECT`, which `install.sh` and the container image point here).
+/// The packaged eBPF object's name inside `share/bsx/` (the loader finds it via
+/// `BSX_PROBES_OBJECT`, which `install.sh` and the container image point here).
 const PROBES_NAME: &str = "probes";
 
 /// The target the **shipped** binary is built for: static musl, so the package carries no libc
@@ -48,7 +48,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         None => default_version(),
     };
     version_matches_manifest(&version, env!("CARGO_PKG_VERSION"))?;
-    let name = format!("ekvm-{version}-x86_64-linux");
+    let name = format!("bsx-{version}-x86_64-linux");
     println!("dist: assembling {name}\n");
 
     println!("== 1/5  obtain the pinned guest kernel ==");
@@ -100,7 +100,7 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         "--release",
         "--locked",
         "-p",
-        "ekvm",
+        "bsx",
         "--target",
         DIST_TARGET,
     ])
@@ -111,11 +111,11 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
     })?;
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map_or_else(|| workspace_root().join("target"), PathBuf::from);
-    let bin = target.join(DIST_TARGET).join("release/ekvm");
+    let bin = target.join(DIST_TARGET).join("release/bsx");
     if !bin.is_file() {
         bail!("built binary {} not found", bin.display());
     }
-    crate::guest_bins::verify_static(&bin, "ekvm host binary")?;
+    crate::guest_bins::verify_static(&bin, "bsx host binary")?;
 
     println!("\n== 5/5  stage + checksum + tar ==");
     let dist_dir = workspace_root().join("dist");
@@ -124,11 +124,11 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
         std::fs::remove_dir_all(&stage)
             .with_context(|| format!("clear stale stage {}", stage.display()))?;
     }
-    let share = stage.join("share/ekvm");
+    let share = stage.join("share/bsx");
     std::fs::create_dir_all(stage.join("bin")).context("create stage bin/")?;
-    std::fs::create_dir_all(&share).context("create stage share/ekvm/")?;
+    std::fs::create_dir_all(&share).context("create stage share/bsx/")?;
 
-    copy_mode(&bin, &stage.join("bin/ekvm"), 0o755)?;
+    copy_mode(&bin, &stage.join("bin/bsx"), 0o755)?;
     copy_mode(&kernel, &share.join("vmlinux"), 0o644)?;
     copy_mode(
         &guest_rootfs_path(),
@@ -165,25 +165,25 @@ pub(crate) fn dist(version: Option<String>) -> Result<()> {
             "    {}.sig  (detached ed25519, key_id {id})",
             sums.display()
         ),
-        None => println!("    (UNSIGNED: no EKVM_RELEASE_SIGNING_KEY; do not publish)"),
+        None => println!("    (UNSIGNED: no BSX_RELEASE_SIGNING_KEY; do not publish)"),
     }
     println!(
         "  install it (any host):   sh {}/install.sh",
         stage.display()
     );
     println!(
-        "  or from the tarball:     EKVM_DIST_TARBALL={} sh install.sh",
+        "  or from the tarball:     BSX_DIST_TARBALL={} sh install.sh",
         tarball.display()
     );
     println!(
-        "  container image:         docker build -f Containerfile --build-arg DIST=dist/{name} -t ekvm:{version} ."
+        "  container image:         docker build -f Containerfile --build-arg DIST=dist/{name} -t bsx:{version} ."
     );
     Ok(())
 }
 
 /// A release version names the tarball but does *not* set what the binary reports: that comes from
 /// the workspace `version`, compiled in. `v0.0.1` shipped with the two disagreeing, so
-/// `ekvm-0.0.1-x86_64-linux.tar.gz` answered `ekvm --version` with `0.0.0`. Release CI passes
+/// `bsx-0.0.1-x86_64-linux.tar.gz` answered `bsx --version` with `0.0.0`. Release CI passes
 /// `--version` from the pushed tag, so packaging is where the tag meets the manifest: refuse rather
 /// than ship a binary that misreports itself.
 ///
@@ -319,10 +319,10 @@ pub(crate) fn release_pubkey_path() -> PathBuf {
     workspace_root().join("release-key.pem")
 }
 
-/// Sign `dist/SHA256SUMS` with the operator's release key (`EKVM_RELEASE_SIGNING_KEY`, a key-file
-/// path; distinct from `EKVM_SIGNING_KEY`, the *audit-record* key), writing `dist/SHA256SUMS.sig`:
+/// Sign `dist/SHA256SUMS` with the operator's release key (`BSX_RELEASE_SIGNING_KEY`, a key-file
+/// path; distinct from `BSX_SIGNING_KEY`, the *audit-record* key), writing `dist/SHA256SUMS.sig`:
 /// a raw detached `ed25519` signature over the manifest's exact bytes, so a stock
-/// `openssl pkeyutl -verify -rawin` checks it with no ekvm binary in the loop. Fail-closed by
+/// `openssl pkeyutl -verify -rawin` checks it with no bsx binary in the loop. Fail-closed by
 /// construction: no key means an *unsigned* dist with a loud warning (release CI separately
 /// refuses to publish one), never a generated throwaway key, and never key material under
 /// `dist/`; a key that doesn't match the pinned `release-key.pem` is refused.
@@ -336,13 +336,13 @@ fn sign_release_manifest(dist_dir: &Path) -> Result<Option<String>> {
         );
     }
 
-    let Some(key_path) = std::env::var_os("EKVM_RELEASE_SIGNING_KEY") else {
-        println!("  ! dist is UNSIGNED (set EKVM_RELEASE_SIGNING_KEY=<key file> to sign)");
+    let Some(key_path) = std::env::var_os("BSX_RELEASE_SIGNING_KEY") else {
+        println!("  ! dist is UNSIGNED (set BSX_RELEASE_SIGNING_KEY=<key file> to sign)");
         println!("  ! do not publish an unsigned dist; release CI refuses one");
         return Ok(None);
     };
     let key_path = PathBuf::from(key_path);
-    let key = ekvm_probes_loader::HostKey::open(&key_path)
+    let key = bsx_probes_loader::HostKey::open(&key_path)
         .with_context(|| format!("load release signing key from {}", key_path.display()))?;
 
     // The signing key must be the pinned release identity, not merely *a* key: a dist signed by
@@ -350,7 +350,7 @@ fn sign_release_manifest(dist_dir: &Path) -> Result<Option<String>> {
     let pin_path = release_pubkey_path();
     let pin_pem = std::fs::read_to_string(&pin_path)
         .with_context(|| format!("read the pinned release public key {}", pin_path.display()))?;
-    let pin = ekvm_probes_loader::TrustedKey::from_spki_pem(&pin_pem)
+    let pin = bsx_probes_loader::TrustedKey::from_spki_pem(&pin_pem)
         .map_err(|e| anyhow::anyhow!("parse {}: {e}", pin_path.display()))?;
     if pin.key_id() != key.key_id() {
         bail!(
@@ -368,7 +368,7 @@ fn sign_release_manifest(dist_dir: &Path) -> Result<Option<String>> {
 /// The env-free signing core (what the tests call directly): a raw detached signature over the
 /// manifest's exact bytes, nothing re-serialized in between, so the bytes `sha256sum -c` reads
 /// are the bytes the signature covers.
-fn sign_manifest_bytes(dist_dir: &Path, key: &ekvm_probes_loader::HostKey) -> Result<()> {
+fn sign_manifest_bytes(dist_dir: &Path, key: &bsx_probes_loader::HostKey) -> Result<()> {
     let sums_path = dist_dir.join("SHA256SUMS");
     let content =
         std::fs::read(&sums_path).with_context(|| format!("read {}", sums_path.display()))?;
@@ -389,7 +389,7 @@ pub(crate) fn release_key(path: &Path) -> Result<()> {
             dist_dir.display()
         );
     }
-    let key = ekvm_probes_loader::HostKey::load_or_generate(path)
+    let key = bsx_probes_loader::HostKey::load_or_generate(path)
         .map_err(|e| anyhow::anyhow!("load or generate {}: {e}", path.display()))?;
     let pem = key
         .verifying_key()
@@ -405,7 +405,7 @@ pub(crate) fn release_key(path: &Path) -> Result<()> {
     );
     println!("                  (the dist test asserts the two match)");
     println!(
-        "  2. CI secret:   gh secret set EKVM_RELEASE_SIGNING_KEY < {}",
+        "  2. CI secret:   gh secret set BSX_RELEASE_SIGNING_KEY < {}",
         path.display()
     );
     println!("  3. keep custody: the key file stays outside the repo; rotating = repeat 1-2");
@@ -473,7 +473,7 @@ mod tests {
             "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef  test.tar.gz\n";
         std::fs::write(path.join("SHA256SUMS"), sample_manifest).unwrap();
 
-        let key = ekvm_probes_loader::HostKey::from_seed([7u8; 32]);
+        let key = bsx_probes_loader::HostKey::from_seed([7u8; 32]);
         sign_manifest_bytes(&path, &key).unwrap();
 
         let sig = std::fs::read(path.join("SHA256SUMS.sig")).unwrap();
@@ -577,7 +577,7 @@ mod tests {
         );
     }
 
-    /// The same drift guard, for the guest's IPv6 link. `ekvm-probes-common` needs the prefix as a
+    /// The same drift guard, for the guest's IPv6 link. `bsx-probes-common` needs the prefix as a
     /// `#![no_std]` constant ([`GUEST_LINK6`]) because the in-kernel ICMPv6 spare decides on-link
     /// versus routable without a map lookup; `crates/engine/src/net.rs` owns the addresses it
     /// actually assigns. The engine does not depend on `probes-common`, and its address constants
@@ -656,7 +656,7 @@ mod tests {
     }
 
     /// Same drift guard, for the Firecracker pin. `install.sh` carries its own copy of the pinned
-    /// release sha256 (installers run it before this repo is built, so it cannot call into `ekvm`),
+    /// release sha256 (installers run it before this repo is built, so it cannot call into `bsx`),
     /// and `doctor.rs` carries the one the engine checks at runtime. Two copies of a security-
     /// relevant hash drift silently, and nothing but this compares them.
     #[test]
@@ -1139,6 +1139,6 @@ mod tests {
             "install.sh's embedded key must be byte-identical to release-key.pem"
         );
         // And the pin is a real ed25519 SPKI key, not a placeholder.
-        ekvm_probes_loader::TrustedKey::from_spki_pem(&pinned).expect("release-key.pem parses");
+        bsx_probes_loader::TrustedKey::from_spki_pem(&pinned).expect("release-key.pem parses");
     }
 }

@@ -1,4 +1,4 @@
-//! `ekvm-engine`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
+//! `bsx-engine`, the Firecracker driver: microVM lifecycle, rootfs, networking, snapshots, and the
 //! [`Sandbox`] lifecycle API.
 //!
 //! The host path is `unsafe`-free; a hostile or crashing guest is a typed [`VmmError`], never a
@@ -30,9 +30,9 @@ mod vm;
 use std::num::{NonZeroU8, NonZeroU32};
 use std::time::Duration;
 
-use ekvm_channel::ChannelError;
+use bsx_channel::ChannelError;
 
-pub use ekvm_channel::{ClientConnection, GUEST_READY_MARKER, MAX_PAYLOAD, Request, Response};
+pub use bsx_channel::{ClientConnection, GUEST_READY_MARKER, MAX_PAYLOAD, Request, Response};
 pub use jail::{DEFAULT_JAIL_GID, DEFAULT_JAIL_UID, Jail, VMM_PIDS_MAX};
 pub use lifetime::KillHandle;
 pub use net::{GuestEgress, GuestLink};
@@ -43,7 +43,7 @@ pub use vm::{BootConfig, DEFAULT_GUEST_CID, RunningVm, Snapshot, VSOCK_PORT, Vm}
 #[cfg(test)]
 mod tests {
     use super::{ErrorKind, VmmError};
-    use ekvm_channel::ChannelError;
+    use bsx_channel::ChannelError;
     use std::time::Duration;
 
     #[test]
@@ -153,14 +153,14 @@ pub enum VmmError {
     /// load-bearing. A host-configuration fault, not the guest's, so it buckets [`Infra`](ErrorKind::Infra):
     /// fix the delegation (or drop the jail-less boot) and retry.
     LimitsUnavailable(String),
-    /// A **jailed** boot was asked for, but the scratch dir (`EKVM_SCRATCH_DIR`) is on a `nodev`
+    /// A **jailed** boot was asked for, but the scratch dir (`BSX_SCRATCH_DIR`) is on a `nodev`
     /// mount, so the `/dev/kvm` device node the jailer mknods inside its chroot is inert and
     /// Firecracker cannot open KVM. Caught **before** the spawn, so the boot fails with this typed
     /// pointer at the fix instead of a raw Firecracker "creating KVM object: Permission denied" deep
     /// in boot. A host-configuration fault (repoint the scratch dir), so it buckets
     /// [`Infra`](ErrorKind::Infra); unjailed boots have no jailer chroot and are never affected.
     ScratchDirNodev(std::path::PathBuf),
-    /// A **jailed** boot was asked for, but the scratch dir (`EKVM_SCRATCH_DIR`) is on a `noexec`
+    /// A **jailed** boot was asked for, but the scratch dir (`BSX_SCRATCH_DIR`) is on a `noexec`
     /// mount, so the firecracker copy the jailer places inside its chroot cannot be exec'd: the
     /// same jailed-boot killer as [`ScratchDirNodev`](Self::ScratchDirNodev), one mount flag over
     /// (a hardened-baseline `/tmp` carries both). Caught **before** the spawn, a
@@ -202,13 +202,13 @@ impl std::fmt::Display for VmmError {
             VmmError::ScratchDirNodev(dir) => write!(
                 f,
                 "scratch dir {} is on a nodev mount: the jailer's chroot /dev/kvm can't be opened \
-                 there, so a jailed boot fails; set EKVM_SCRATCH_DIR to a path off a nodev mount",
+                 there, so a jailed boot fails; set BSX_SCRATCH_DIR to a path off a nodev mount",
                 dir.display()
             ),
             VmmError::ScratchDirNoexec(dir) => write!(
                 f,
                 "scratch dir {} is on a noexec mount: the firecracker copy in the jailer's chroot \
-                 can't be exec'd there, so a jailed boot fails; set EKVM_SCRATCH_DIR to a path off \
+                 can't be exec'd there, so a jailed boot fails; set BSX_SCRATCH_DIR to a path off \
                  a noexec mount",
                 dir.display()
             ),
@@ -663,7 +663,7 @@ impl Sandbox {
 /// no new tool in the gate, and `--extern` handled by cargo rather than by hand.
 ///
 /// `mdbook test` cannot do this job. It passes only `-L`, never `--extern`, so a 2018-edition
-/// `use ekvm_engine::…` does not resolve; making it work at all needs a hidden `extern crate` line in each
+/// `use bsx_engine::…` does not resolve; making it work at all needs a hidden `extern crate` line in each
 /// block plus a library path with exactly one candidate rlib. The book still gets `mdbook test` in
 /// `docs.yml` for the rest of its blocks, which is what catches an untagged fence (an ASCII
 /// diagram, say) being compiled as Rust.

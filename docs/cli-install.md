@@ -1,9 +1,9 @@
 # Installation
 
 The engine is **Linux-only** (it needs KVM). Two paths: build from source (`self-host`, below), or
-install a packaged release (tarball / `install.sh` / container), which `v0.0.2` publishes as a
-checkpoint rather than as a supported release; `cargo xtask setup` (or
-`ekvm doctor` once installed) tells you what your host is missing at every step.
+install a packaged release (tarball / `install.sh` / container), which `v0.0.3` publishes as a
+checkpoint rather than as a supported release; `cargo xtask setup` (or `bsx doctor` once installed)
+tells you what your host is missing at every step.
 
 ## Preparing the host
 
@@ -20,7 +20,7 @@ diverge.
 
 ```console
 uname -m                      # must print x86_64
-uname -r                      # informational only: `ekvm doctor` probes for cgroup.kill itself
+uname -r                      # informational only: `bsx doctor` probes for cgroup.kill itself
 ls -l /dev/kvm                # must exist
 ls /sys/kernel/btf/vmlinux    # needed for the eBPF half; most distro kernels ship it
 ```
@@ -83,7 +83,7 @@ id -nG | tr ' ' '\n' | grep -x kvm   # prints kvm once the group is in effect
 
 The engine drives Firecracker, it does not bundle it (the container image is the one exception), so
 both binaries have to be on `PATH`. Two versions matter, and both track upstream's own patch
-window: the **pinned** release (currently **v1.16.1**) is what CI tests and what `ekvm doctor`
+window: the **pinned** release (currently **v1.16.1**) is what CI tests and what `bsx doctor`
 checks the on-`PATH` binary's sha256 against (the hash lives in `install.sh` and
 `crates/engine/src/doctor.rs`, with `install_sh_firecracker_pin_matches_doctor` holding the two in
 step, so this page states no third copy), and the
@@ -106,14 +106,14 @@ sudo install -m0755 "/tmp/release-${VER}-${ARCH}/jailer-${VER}-${ARCH}"      /us
 firecracker --version
 ```
 
-Both `install.sh` and `ekvm doctor` check a Firecracker binary found on `PATH` against the
+Both `install.sh` and `bsx doctor` check a Firecracker binary found on `PATH` against the
 pinned v1.16 release sha256 and warn on a mismatch (advisory: your Firecracker is your call, but
 the pinned build is what CI exercises).
 
 On Arch, `firecracker` is also in the AUR, but the release binaries above are what CI and the
 pinned-version check are exercised against, so prefer them.
 
-Now pick an install path below, and run `ekvm doctor` afterwards to confirm these four steps
+Now pick an install path below, and run `bsx doctor` afterwards to confirm these four steps
 took.
 
 ### Distro differences that bite
@@ -161,22 +161,22 @@ findmnt -no OPTIONS -T /tmp | tr , '\n' | grep -E 'nodev|noexec'   # prints the 
 If it prints `nodev` or `noexec`, the engine already falls back to `/var/tmp` on its own: the
 default scratch dir is chosen by probing `/tmp`'s mount flags, not assumed. You only need to set one
 yourself if `/var/tmp` is *also* mounted with those flags, or if you have pinned `scratch_dir` or
-`EKVM_SCRATCH_DIR` at a blocked path. To set one, put it in a `.ekvm.toml`. Discovery walks up from
-the working directory, so `~/.ekvm.toml` covers everything you run from under your home directory,
+`BSX_SCRATCH_DIR` at a blocked path. To set one, put it in a `.bsx.toml`. Discovery walks up from
+the working directory, so `~/.bsx.toml` covers everything you run from under your home directory,
 and a nearer file shadows it.
 Keep the path **short**: a jailed boot nests this dir name twice inside its API socket path, which the
 kernel caps at ~108 bytes (an over-long one surfaces as a boot error, not a doctor row), so a
-short dir like `~/.ekvm` beats a long one:
+short dir like `~/.bsx` beats a long one:
 
 ```toml
-scratch_dir = "/home/you/.ekvm"
+scratch_dir = "/home/you/.bsx"
 ```
 
-The packaged `install.sh` and `cargo xtask self-host` **write this line for you** (as `~/.ekvm`) when
+The packaged `install.sh` and `cargo xtask self-host` **write this line for you** (as `~/.bsx`) when
 they detect a `nodev` or `noexec` `/tmp`, so a guided install already boots jailed; the manual form
 above is for a from-source run, or a config you wrote yourself.
 
-`ekvm doctor` checks most of these against your actual host, so treat it as the authority and this
+`bsx doctor` checks most of these against your actual host, so treat it as the authority and this
 table as orientation. Two rows it does not cover: it checks that `mke2fs` and friends are *present*,
 not their version, so the e2fsprogs floor is `cargo xtask setup`'s row (and a hard failure in
 `build-rootfs --verify` and `dist`); and the build toolchain has no doctor row at all, since it is a
@@ -184,25 +184,27 @@ from-source concern rather than a runtime one.
 
 ## Install from a release package
 
-> **`v0.0.2` is a checkpoint, not a supported release.** It was tagged to exercise the release path
-> end to end, so the URLs in this section resolve and the signature checks below are real. Nothing
-> about the API, the CLI, or the artifact layout is stable until v0.1.0.
+> **`v0.0.3` is a checkpoint, not a supported release.** It is tagged to exercise the release path
+> end to end, so the URLs in this section resolve and the signature checks below are real once its
+> assets are published. The `v0.0.1` and `v0.0.2` assets carry this project's previous name and do
+> not match the paths below. Nothing about the API, the CLI, or the artifact layout is stable until
+> v0.1.0.
 
 Each release ships one `x86_64` release package tarball (`cargo xtask dist` refuses to package any
 other architecture) plus `SHA256SUMS` and its detached ed25519 signature `SHA256SUMS.sig`. Inside
-the tarball: the `ekvm` binary, the guest kernel, the guest rootfs, the eBPF object, a per-file
+the tarball: the `bsx` binary, the guest kernel, the guest rootfs, the eBPF object, a per-file
 `MANIFEST.sha256`, and a copy of `install.sh` and `LICENSE`. Two first-class installation methods
 are supported:
 
 ### Option A: the installer script
 
 ```console
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/ekvm-rs/ekvm/main/install.sh)"
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/kendricklawton/behavioral-sandbox/main/install.sh)"
 ```
 
 `curl … | sh` resolves its own location the same way: neither form lets the script see its own
 path, so both answer the "am I inside an already-extracted package?" test against the **current
-directory**. In a directory that happens to hold a `bin/ekvm` and a `MANIFEST.sha256`, either form
+directory**. In a directory that happens to hold a `bin/bsx` and a `MANIFEST.sha256`, either form
 installs *that* instead of downloading a release, and says so on the first line of its output. Run
 it from somewhere else if that is not what you want.
 
@@ -215,15 +217,15 @@ line, so a truncated stream is a no-op rather than a half-install;
 ### Option B: verify and extract by hand
 
 For manual inspection, or to check the signature yourself before anything runs. Substitute the
-version you want (`0.0.2` is what is published today):
+version you want:
 
 ```console
-VER=0.0.2
+VER=0.0.3
 
 # Download release tarball, checksum manifest, and its detached signature
-curl -LO "https://github.com/ekvm-rs/ekvm/releases/download/v$VER/ekvm-$VER-x86_64-linux.tar.gz"
-curl -LO "https://github.com/ekvm-rs/ekvm/releases/download/v$VER/SHA256SUMS"
-curl -LO "https://github.com/ekvm-rs/ekvm/releases/download/v$VER/SHA256SUMS.sig"
+curl -LO "https://github.com/kendricklawton/behavioral-sandbox/releases/download/v$VER/bsx-$VER-x86_64-linux.tar.gz"
+curl -LO "https://github.com/kendricklawton/behavioral-sandbox/releases/download/v$VER/SHA256SUMS"
+curl -LO "https://github.com/kendricklawton/behavioral-sandbox/releases/download/v$VER/SHA256SUMS.sig"
 
 # Verify the manifest's signature against the release key pinned in the repo.
 # Obtain release-key.pem out of band, never from the release assets: from a clone of the
@@ -231,53 +233,53 @@ curl -LO "https://github.com/ekvm-rs/ekvm/releases/download/v$VER/SHA256SUMS.sig
 openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig
 
 # Then verify integrity against the now-trusted SHA256SUMS
-grep "ekvm-$VER-x86_64-linux.tar.gz$" SHA256SUMS | sha256sum -c -
+grep "bsx-$VER-x86_64-linux.tar.gz$" SHA256SUMS | sha256sum -c -
 
 # Extract and install (running install.sh inside the package installs with zero network calls)
-tar -xzf "ekvm-$VER-x86_64-linux.tar.gz"
-cd "ekvm-$VER-x86_64-linux"
+tar -xzf "bsx-$VER-x86_64-linux.tar.gz"
+cd "bsx-$VER-x86_64-linux"
 sh ./install.sh
 ```
 
-The installer knobs for this layer: `EKVM_RELEASE_PUBKEY` (an SPKI PEM path or the PEM text
+The installer knobs for this layer: `BSX_RELEASE_PUBKEY` (an SPKI PEM path or the PEM text
 itself) overrides the key pinned inside `install.sh`, and is the stronger anchor when supplied
-out of band; `EKVM_INSECURE_SKIP_SIGNATURE=1` skips the signature check (for a host whose `openssl`
+out of band; `BSX_INSECURE_SKIP_SIGNATURE=1` skips the signature check (for a host whose `openssl`
 cannot do ed25519, or a release predating the signing scheme; the sha256 and manifest checks still
 run).
 
 Or for a package assembled locally from source:
 
 ```console
-cargo xtask dist                                            # assemble dist/ekvm-<ver>-x86_64-linux.tar.gz
-EKVM_DIST_TARBALL=dist/ekvm-<ver>-x86_64-linux.tar.gz sh install.sh
+cargo xtask dist                                            # assemble dist/bsx-<ver>-x86_64-linux.tar.gz
+BSX_DIST_TARBALL=dist/bsx-<ver>-x86_64-linux.tar.gz sh install.sh
 ```
 
-Knobs (env): `EKVM_INSTALL_PREFIX` (binary dir), `EKVM_DATA_DIR` (artifact dir), `EKVM_VERSION`
-(a specific release), `EKVM_NO_TOML=1` (skip the config write). Firecracker v1.16 stays a host
+Knobs (env): `BSX_INSTALL_PREFIX` (binary dir), `BSX_DATA_DIR` (artifact dir), `BSX_VERSION`
+(a specific release), `BSX_NO_TOML=1` (skip the config write). Firecracker v1.16 stays a host
 prerequisite (the engine drives it, it doesn't bundle it). eBPF observability needs no configuration:
 the engine finds the installed `probes` object under the data dir on its own, so
-`EKVM_PROBES_OBJECT` is only needed if you relocated the install with `EKVM_DATA_DIR`.
+`BSX_PROBES_OBJECT` is only needed if you relocated the install with `BSX_DATA_DIR`.
 
 ## Your first run
 
-`ekvm doctor` is the tool that explains the host: every row it flags names its own fix, and when the
+`bsx doctor` is the tool that explains the host: every row it flags names its own fix, and when the
 host is ready it prints the exact run command **for this host**. Run it first.
 
 The one thing worth knowing before you do: a run is **jailed by default**, and the jailer needs real
 root (it creates device nodes in the chroot). So on a normal user account the first command is either
 
 ```console
-ekvm run --unjailed -- echo hello                 # no root needed: still behind KVM, but the VMM runs unconfined
-sudo -E env "PATH=$PATH" ekvm run -- echo hello   # jailed, the supported posture
+bsx run --unjailed -- echo hello                 # no root needed: still behind KVM, but the VMM runs unconfined
+sudo -E env "PATH=$PATH" bsx run -- echo hello   # jailed, the supported posture
 ```
 
 The `env "PATH=$PATH"` is not decoration: sudoers `secure_path` (on by default on Ubuntu and most
-distros) overrides PATH even under `-E`, which hides both a `~/.local/bin` install of `ekvm` and the
+distros) overrides PATH even under `-E`, which hides both a `~/.local/bin` install of `bsx` and the
 firecracker/jailer binaries the engine resolves at spawn time.
 
 There is deliberately no silent fallback between the two: dropping the jail is something you ask for,
 never something the engine does quietly for you. If a run fails on a host-readiness cause, the error
-points you back at `ekvm doctor`.
+points you back at `bsx doctor`.
 
 ## Run it as a container
 
@@ -286,9 +288,9 @@ rebuilt filesystem) but never the KVM boundary, which is always the host's:
 
 ```console
 cargo xtask dist
-docker build -f Containerfile --build-arg DIST=dist/ekvm-<ver>-x86_64-linux -t ekvm:<ver> .
-docker run --rm ekvm:<ver>                                            # doctor: what this host can do
-docker run --rm --device /dev/kvm ekvm:<ver> run --unjailed -- echo hi
+docker build -f Containerfile --build-arg DIST=dist/bsx-<ver>-x86_64-linux -t bsx:<ver> .
+docker run --rm bsx:<ver>                                            # doctor: what this host can do
+docker run --rm --device /dev/kvm bsx:<ver> run --unjailed -- echo hi
 ```
 
 The jailed default and eBPF observation need more of the host (real root, CAP_BPF/CAP_PERFMON,
@@ -302,29 +304,29 @@ From a clone of the repo with a Rust toolchain installed (see `AGENTS.md`), plus
 
 ```console
 cargo xtask self-host           # obtain the pinned kernel + rootfs, build the guest image + eBPF
-                                # object, install `ekvm`, then boot one sandbox to prove it
+                                # object, install `bsx`, then boot one sandbox to prove it
 ```
 
-It installs the `ekvm` binary into `~/.local/bin` (override with `--prefix DIR`) and,
+It installs the `bsx` binary into `~/.local/bin` (override with `--prefix DIR`) and,
 on a host with `/dev/kvm`, boots a throwaway sandbox and runs a command as an end-to-end check. On a
 host without KVM it does everything except the boot and prints the exact command to run the proof on a
 KVM box. `--no-run` skips the boot proof (build + install only). Like `install.sh`, it writes a starter
-`~/.ekvm.toml` (absolute kernel/rootfs paths, and a `scratch_dir` off `nodev`/`noexec` when your
-`/tmp` carries either flag) unless one already exists; `EKVM_NO_TOML=1` skips it.
+`~/.bsx.toml` (absolute kernel/rootfs paths, and a `scratch_dir` off `nodev`/`noexec` when your
+`/tmp` carries either flag) unless one already exists; `BSX_NO_TOML=1` skips it.
 
 To build **offline**, reaching none of those upstreams, point it at a vendored mirror first
 (see [Vendoring for offline builds](#vendoring-for-offline-builds)):
 
 ```console
 cargo xtask vendor                                  # snapshot every pinned input into ./vendor
-EKVM_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
+BSX_VENDOR_DIR=./vendor cargo xtask self-host     # build the whole engine from the mirror
 ```
 
 ## Supported platforms
 
 The engine runs untrusted code, so its platform floor is part of its security posture, not just a
 compatibility note: the parts the isolation-and-audit thesis rests on are **hard requirements**, the
-rest **degrade with a stated consequence**. `ekvm doctor` reports exactly where your host sits and
+rest **degrade with a stated consequence**. `bsx doctor` reports exactly where your host sits and
 exits non-zero if a hard requirement is missing.
 
 **Hard requirements** (off these, the host is not supported):
@@ -336,7 +338,7 @@ exits non-zero if a hard requirement is missing.
 | **Host kernel** | `cgroup.kill` present; **≥ 5.15** only where there is no cgroup v2 to probe | `cgroup.kill` is the crash-safe teardown primitive the engine needs, so the engine asks for it directly instead of inferring it from a version. Neither signal establishes that the kernel is *patched*: that is the operator's |
 | **Virtualization** | `/dev/kvm` present and writable | there is no software isolation fallback |
 | **Firecracker** | present on `PATH` | no VMM to launch (the *jailer*'s absence is a degradation, not a hard miss: it drops you to `--unjailed`) |
-| **Boot artifacts** | guest kernel (`EKVM_KERNEL`) and guest rootfs (`EKVM_ROOTFS`) present | nothing to boot; `cargo xtask fetch-artifacts` and `build-rootfs` produce them |
+| **Boot artifacts** | guest kernel (`BSX_KERNEL`) and guest rootfs (`BSX_ROOTFS`) present | nothing to boot; `cargo xtask fetch-artifacts` and `build-rootfs` produce them |
 
 **Supported / tested versions:** Firecracker per
 [step 4 above](#4-install-firecracker-and-its-jailer) (v1.15 through v1.16, one nightly CI lane per
@@ -351,7 +353,7 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
 - **The privileged path** (microVM boot, the jailer, the eBPF probes, the end-to-end integration
   suite) runs in CI on a GitHub-hosted **Ubuntu 24.04** runner (`x86_64`, nested KVM) and by hand
   on **Arch Linux** (rolling) during development, both with **Firecracker v1.16**. Other distros
-  are supported per the checks above but not continuously exercised; `ekvm doctor` names exactly
+  are supported per the checks above but not continuously exercised; `bsx doctor` names exactly
   what a given host is missing.
 - **`aarch64` is not supported at this time**: it was never privileged-tested (no arm64 KVM
   hardware or CI lane, and no pinned arm boot artifacts), so the claim was dropped rather than
@@ -365,7 +367,7 @@ Firecracker periodically retires old guest kernels, so a fresh build tracks thei
   the jailer or Firecracker in ways that look like an engine bug. If a jailed boot fails for a reason
   none of the checks above explain, read `dmesg | grep -i apparmor` before chasing it further.
 
-**Degradations** (the run still works, minus the named capability). `ekvm doctor --explain` prints
+**Degradations** (the run still works, minus the named capability). `bsx doctor --explain` prints
 the canonical matrix; these are the ones worth knowing before you start:
 
 - No **BTF** / `CAP_BPF`+`CAP_PERFMON` → `--trace`/`--watch` report a coverage gap; **`--allow`
@@ -386,17 +388,17 @@ the canonical matrix; these are the ones worth knowing before you start:
 
 ## Troubleshooting
 
-Some of these are `ekvm doctor` rows, which you can check before a run; the rest surface only as a
+Some of these are `bsx doctor` rows, which you can check before a run; the rest surface only as a
 boot error, and are marked as such.
 
 | Symptom | Root cause | Fix |
 |---|---|---|
 | **`/dev/kvm` missing or permission denied** | No virtualization exposed (stock cloud VMs lack nested virt), or the user is not in the `kvm` group. | Check nested virtualization on cloud VMs. Add user to `kvm` group:<br>`sudo usermod -aG kvm $USER && newgrp kvm` |
-| **`ScratchDirNodev` (jailed boot fails at KVM open)** | `/tmp` is mounted with the `nodev` mount option, making the jailer's chrooted `/dev/kvm` inert. | Set scratch dir to a non-`nodev` filesystem:<br>`export EKVM_SCRATCH_DIR=/var/tmp`<br>or set `scratch_dir = "/var/tmp"` in `.ekvm.toml`. |
-| **`ScratchDirNoexec` (jailed boot fails at the VMM exec)** | `/tmp` is mounted with the `noexec` mount option, so the firecracker copy in the jailer's chroot cannot be exec'd. | Same fix: a scratch dir off `noexec`, e.g. `EKVM_SCRATCH_DIR=/var/tmp`. |
+| **`ScratchDirNodev` (jailed boot fails at KVM open)** | `/tmp` is mounted with the `nodev` mount option, making the jailer's chrooted `/dev/kvm` inert. | Set scratch dir to a non-`nodev` filesystem:<br>`export BSX_SCRATCH_DIR=/var/tmp`<br>or set `scratch_dir = "/var/tmp"` in `.bsx.toml`. |
+| **`ScratchDirNoexec` (jailed boot fails at the VMM exec)** | `/tmp` is mounted with the `noexec` mount option, so the firecracker copy in the jailer's chroot cannot be exec'd. | Same fix: a scratch dir off `noexec`, e.g. `BSX_SCRATCH_DIR=/var/tmp`. |
 | **`cgroup v2 cpu+memory delegated` Warn** | cgroup v2 `cpu` and `memory` controllers are not delegated to unprivileged users space by systemd. | Run under `sudo` or enable delegation in systemd:<br>`systemctl edit user@$UID.service`<br>and add `[Service]` -> `Delegate=yes`. |
-| **`unix socket path is too long (> 108 bytes)`** (boot error only, no doctor row) | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export EKVM_SCRATCH_DIR=/var/tmp` |
-| **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v ekvm)`<br>or run with `sudo -E`. |
+| **`unix socket path is too long (> 108 bytes)`** (boot error only, no doctor row) | Kernel `sockaddr_un.sun_path` limit (~108 bytes) exceeded by a deep scratch path under jailing. | Use a short scratch directory path:<br>`export BSX_SCRATCH_DIR=/var/tmp` |
+| **`CAP_BPF` / `CAP_PERFMON` Warn or Refusal** | Running without root or missing eBPF capabilities to load tracepoints and `tc` filters. | Grant binary capabilities without root:<br>`sudo setcap cap_bpf,cap_perfmon+ep $(command -v bsx)`<br>or run with `sudo -E`. |
 | **`eBPF observability` Warn** naming kernel BTF | Host kernel built without `CONFIG_DEBUG_INFO_BTF=y`, so `/sys/kernel/btf/vmlinux` is absent. | Boot a kernel built with that option (check with `ls /sys/kernel/btf/vmlinux`); most general-purpose distribution kernels enable it, custom and minimal ones often do not. |
 
 ## Prerequisites
@@ -409,7 +411,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
   and your user in the `kvm` group (or root). Kernel **BTF** (`/sys/kernel/btf/vmlinux`) is required
   for CO-RE eBPF, most modern distros ship it.
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on
-  `PATH` or named via `EKVM_FIRECRACKER`.
+  `PATH` or named via `BSX_FIRECRACKER`.
 - **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
   rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
   loopback, no `sudo`). A missing tool is a clear typed error. The **reproducible** rootfs build
@@ -428,7 +430,7 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
 
 How much of the engine you get depends on what the process is allowed to do, and this is the part
 that most often surprises a first-time operator. Nothing here degrades silently: a capability you
-lack either names itself in `ekvm doctor` or produces a typed refusal.
+lack either names itself in `bsx doctor` or produces a typed refusal.
 
 | What you want | What it needs | Without it |
 |---|---|---|
@@ -441,7 +443,7 @@ lack either names itself in `ekvm doctor` or produces a typed refusal.
 Root covers every row. To keep the eBPF half off root, grant the binary just those two capabilities:
 
 ```console
-sudo setcap cap_bpf,cap_perfmon+ep "$(command -v ekvm)"
+sudo setcap cap_bpf,cap_perfmon+ep "$(command -v bsx)"
 ```
 
 The jailer's requirement cannot be narrowed the same way: it needs **real root** (euid 0) because it
@@ -450,8 +452,8 @@ substitutes. A jailed run therefore looks like this, with `-E` to keep your envi
 explicit scratch dir if `/tmp` is `nodev` or `noexec`:
 
 ```console
-mkdir -p ~/.ekvm
-sudo -E env EKVM_SCRATCH_DIR="$HOME/.ekvm" "$(command -v ekvm)" run -- echo hello
+mkdir -p ~/.bsx
+sudo -E env BSX_SCRATCH_DIR="$HOME/.bsx" "$(command -v bsx)" run -- echo hello
 ```
 
 (The short dir name is deliberate: the ~108-byte socket-path cap under
@@ -465,7 +467,7 @@ To drive the individual steps instead, or to work on the engine itself, `AGENTS.
 toolchain (the Rust version policy, the probes crate's pinned nightly and `bpf-linker`), the
 artifact commands, and the two test gates.
 
-Once you have a binary, head to [Using the eKVM CLI](./cli.md) to run something.
+Once you have a binary, head to [Using the bsx CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 
@@ -485,11 +487,11 @@ cargo xtask vendor --dir /srv/mirror  # populate a mirror elsewhere
 cargo xtask vendor --verify           # re-check an existing mirror against its manifest (offline)
 ```
 
-Then set `EKVM_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
+Then set `BSX_VENDOR_DIR` to the mirror and every build path resolves from it, no network:
 
 ```console
-EKVM_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
-EKVM_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
+BSX_VENDOR_DIR=./vendor cargo xtask self-host      # the whole stand-up, offline
+BSX_VENDOR_DIR=./vendor cargo xtask build-rootfs    # just the guest image, offline
 ```
 
 The mirror is **not** committed (it holds downloaded images, like `artifacts/`); it is a self-hoster's
@@ -503,10 +505,10 @@ manifest hashes.
 The engine's whole footprint is four paths, so removal is four commands, no tool needed:
 
 ```console
-rm ~/.local/bin/ekvm            # the binary (or your EKVM_INSTALL_PREFIX)
-rm -rf ~/.local/share/ekvm      # kernel, rootfs, probes object (or your EKVM_DATA_DIR)
-rm ~/.ekvm.toml                 # the starter config, if the install wrote one
-rm -rf ~/.ekvm                  # the jail-usable scratch dir, if the install set one up
+rm ~/.local/bin/bsx            # the binary (or your BSX_INSTALL_PREFIX)
+rm -rf ~/.local/share/bsx      # kernel, rootfs, probes object (or your BSX_DATA_DIR)
+rm ~/.bsx.toml                 # the starter config, if the install wrote one
+rm -rf ~/.bsx                  # the jail-usable scratch dir, if the install set one up
 ```
 
 Nothing else outlives the runs: per-VM scratch under `scratch_dir` is reclaimed at teardown, and a

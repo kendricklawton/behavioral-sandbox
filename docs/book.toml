@@ -1,15 +1,16 @@
 [book]
-authors = ["eKVM Contributors"]
+authors = ["Kendrick Lawton"]
 src = "."
-title = "eKVM"
+title = "bsx"
 
 
 [output.html]
-git-repository-url = "https://github.com/ekvm-rs/ekvm"
-edit-url-template = "https://github.com/ekvm-rs/ekvm/edit/main/docs/{path}"
+git-repository-url = "https://github.com/kendricklawton/behavioral-sandbox"
+edit-url-template = "https://github.com/kendricklawton/behavioral-sandbox/edit/main/docs/{path}"
 # Only affects 404.html, which gets `<base href>` from this so its relative
 # asset and nav links resolve from any subdirectory. A path, not an absolute
-# URL: the site serves at the apex (docs/CNAME pins the domain), so "/" is
-# correct without baking the domain into the generated page.
-site-url = "/"
+# URL, so the generated page carries no hostname: this is a GitHub Pages
+# *project* site, so the path is the repository name. A site served at the
+# apex of a domain would use "/" instead.
+site-url = "/behavioral-sandbox/"
 

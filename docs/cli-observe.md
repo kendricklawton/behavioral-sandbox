@@ -6,7 +6,7 @@ boundary: the probes are loaded by a host process and attached to host-kernel ho
 
 ```console
 # Watch it live, read the trail after, keep the machine record and the model-legible summary:
-ekvm run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
+bsx run --unjailed --net --watch --trace --record run.json --record-summary run.sum.json -- python3 -c '…'
 ```
 
 ## Four faces, one record
@@ -20,8 +20,8 @@ ekvm run --unjailed --net --watch --trace --record run.json --record-summary run
   resources, notable host syscalls, and a `gap` line for any axis that couldn't bind.
 
 - **`--record FILE`**, the machine surface: the record as one line of deterministic, byte-stable JSON
-  (integer nanoseconds, no floats; addresses and protocols by name). This is the format downstream
-  SDKs will parse. The pretty trail makes no stability promise.
+  (integer nanoseconds, no floats; addresses and protocols by name). This is the format a downstream
+  client parses. The pretty trail makes no stability promise.
 
 - **`--record-summary FILE`**, the **model-legible** face: a compact projection of the same record for
   an agent's observe-then-act loop. What it *reached* (distinct destinations, flows collapsed to their
@@ -30,7 +30,7 @@ ekvm run --unjailed --net --watch --trace --record run.json --record-summary run
   new observation: compact, deterministic, and byte-stable, so an agent gets a small, stable summary to
   feed into its next turn.
 
-Check a `--record` file with [`ekvm verify`](./cli-commands.md#ekvm-verify).
+Check a `--record` file with [`bsx verify`](./cli-commands.md#bsx-verify).
 
 **The record says what was permitted, not only what was refused.** The network section's `posture`
 carries the rules the classifier actually holds (read back from the kernel after attach, so it
@@ -71,7 +71,7 @@ repeatable `--allow`, which requires `--net`:
 
 ```console
 # Allow one port on the host end; everything else is dropped at the tap and recorded.
-ekvm run --net \
+bsx run --net \
     --allow 10.200.0.1:9000/udp --record run.json -- ...
 ```
 
@@ -95,7 +95,7 @@ appears in the record**.
 ```console
 # A route, a resolver, and allowances for both things a fetch touches: the resolver, and the
 # index itself. Each is named by address, because the tap policy matches addresses, not names.
-ekvm run --net --gateway 10.200.0.1 --resolver 10.200.0.53 \
+bsx run --net --gateway 10.200.0.1 --resolver 10.200.0.53 \
     --allow 10.200.0.53:53/udp \
     --allow 10.0.0.0/8:443/tcp \
     --record run.json -- pip install --index-url https://pypi.internal/simple somepkg

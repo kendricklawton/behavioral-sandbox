@@ -2,7 +2,7 @@
 //! the Python/Node/static-native runtimes, and the bulk input/output block devices.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p bsx-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -12,7 +12,7 @@ mod common;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ekvm_engine::Vm;
+use bsx_engine::Vm;
 
 use common::{
     TmpDir, guest_rootfs_config, have_jailer_privileges, jailed_agent_config,
@@ -66,7 +66,7 @@ fn jailed_exec_runs_a_command() {
         });
     assert_eq!(
         uid.as_deref(),
-        Some(ekvm_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        Some(bsx_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
         "the exec'ing VMM should be the dropped jail uid, proving it is confined"
     );
     let out = vm
@@ -119,7 +119,7 @@ fn jailed_bulk_io_round_trips_through_the_chroot() {
         });
     assert_eq!(
         uid.as_deref(),
-        Some(ekvm_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
+        Some(bsx_engine::DEFAULT_JAIL_UID.to_string()).as_deref(),
         "the bulk-I/O VMM should be the dropped jail uid, proving the jail held"
     );
 
@@ -342,7 +342,7 @@ fn injects_a_large_file_via_block_device() {
     // A whole-working-dir / large-file input path the vsock channel can't carry. Stage a file
     // **larger than the 1 MiB channel frame cap** (the whole point) in a host dir, inject it as a
     // read-only block device, and prove the guest reads it back byte-for-byte from `/input`.
-    let dir = std::env::temp_dir().join(format!("ekvm-p34-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("bsx-p34-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("input dir");
     let payload: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect(); // 4 MiB, > 1 MiB
     std::fs::write(dir.join("big.bin"), &payload).expect("write input file");

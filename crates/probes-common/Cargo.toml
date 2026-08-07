@@ -6,7 +6,7 @@
 # a normal workspace member on the host side, so `cargo xtask ci` builds, clippies, and unit-tests the
 # parser everywhere (`#![cfg_attr(not(test), no_std)]` lets its own tests use `std`).
 [package]
-name = "ekvm-probes-common"
+name = "bsx-probes-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

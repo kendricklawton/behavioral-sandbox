@@ -8,7 +8,7 @@ the code, a run from boot to teardown, the eBPF half, and the numbered decisions
 
 ### What this is
 
-`eKVM` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a
+`bsx` is a self-hostable, isolated code-execution sandbox engine. Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via Linux KVM). **Host-side eBPF** (`aya`) observes and
 enforces what it does from the host side of the KVM boundary: network flows and resource accounting
 directly, syscalls only as the VMM's host footprint, since a microVM services guest syscalls in its
@@ -18,7 +18,7 @@ drives four crossings, enumerated in the [threat model](./security-threat-model.
 BPF program or map.
 
 Every execution yields a host-observed **audit record** of what the host was able to see, and the
-paths that persist one sign it with a host key (`ekvm run --record` or an operator's `records_dir`,
+paths that persist one sign it with a host key (`bsx run --record` or an operator's `records_dir`,
 and the daemon's `trace` reply). What a signature does and does not establish is stated in
 [Record integrity beyond the guest](./security-threat-model.md#record-integrity-beyond-the-guest).
 
@@ -36,8 +36,8 @@ verified outcome.
    responsible for containing the guest is a design error.
 3. **Deny by default.** A sandbox with no explicit policy is configured with no network route out
    and minimal capability, and each allowance is recorded in the audit log.
-4. **Engine, not platform.** A self-hostable runtime and a driver API. Tenancy, auth, billing, fleet
-   scheduling, and dashboards belong to whoever hosts the engine.
+4. **Engine, not platform.** A self-hostable runtime and a driver API. Tenancy, auth, billing, and
+   fleet scheduling belong to whoever hosts the engine.
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
    broken channel should surface as a typed error. This is what the code is written against and what
    the confinement suite exercises; it is an aim, not a proven property.
@@ -50,51 +50,51 @@ verified outcome.
 ```text
                      CONSUMER ENTRY POINTS & API SURFACES
 
-    [ Rust Embedder ]     [ Polyglot SDK / Daemon Client ]    [ Audit Verifier ]
+    [ Rust Embedder ]            [ Daemon Client ]            [ Audit Verifier ]
             |                            |                             |
             v (In-Process)               v (Unix Socket: schema 1)     v (Off-Host)
-     `ekvm-engine`                `ekvm-protocol`               `ekvm-record`
+     `bsx-engine`                 `bsx-protocol`                `bsx-record`
   (Sandbox, BootConfig, Vm)   (JSON Request / Response lines)  (ed25519 verify/chain)
             |                            |
             |                            v
-            |               `ekvm serve` / `ekvm` CLI
-            |            (a thin host of the same `ekvm-engine`)
+            |               `bsx serve` / `bsx` CLI
+            |            (a thin host of the same `bsx-engine`)
             |                            |
             +----------------------------+
                                          |
                +-------------------------+-------------------------+
                | (Driver / Lifecycle)                              | (Observation)
                v                                                   v
-     Firecracker microVM                                 `ekvm-probes-loader` (aya)
+     Firecracker microVM                                 `bsx-probes-loader` (aya)
    +-----------------------+                             +------------------------+
    | KVM Hardware Isolation|                             | Attach TC / Tracepoints|
    | In-Guest Agent        |<======(vsock channel)======>| Assemble RunRecord     |
-   +-----------------------+   (`ekvm-channel` framing)  +------------------------+
+   +-----------------------+   (`bsx-channel` framing)   +------------------------+
                                                                    ^
                                                                    |
-                                                         `ekvm-probes` (eBPF)
-                                                         `ekvm-probes-common`
+                                                         `bsx-probes` (eBPF)
+                                                         `bsx-probes-common`
 ```
 
 ## Index of crates
 
-Directories stay short and packages carry the `ekvm-` prefix, so a package is its directory plus that
-prefix, with one exception: `crates/cli` builds `ekvm`, the bare name going to the command a user
+Directories stay short and packages carry the `bsx-` prefix, so a package is its directory plus that
+prefix, with one exception: `crates/cli` builds `bsx`, the bare name going to the command a user
 types. `cargo … -p` takes the **package**, a path takes the **directory**.
 
 | Crate | Directory | Role |
 |---|---|---|
-| `ekvm-engine` | `crates/engine` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
-| `ekvm-channel` | `crates/channel` | The host/guest wire protocol. Near dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by driver and agent. |
-| `ekvm-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
-| `ekvm-probes` | `crates/probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. Its object keeps the bare name `probes`. |
-| `ekvm-probes-common` | `crates/probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
-| `ekvm-probes-loader` | `crates/probes-loader` | The aya userspace half: attach the probes, read their maps, assemble the record. |
-| `ekvm-record` | `crates/record` | The signed audit record: its types, deterministic JSON, summary projection, and ed25519 signing/verification. No aya, so a record verifies off-host. |
-| `ekvm-protocol` | `crates/protocol` | The daemon's wire types, versioned. |
-| `ekvm-client` | `crates/client` | The Rust reference client for `ekvm serve`. |
-| `ekvm` | `crates/cli` | The `ekvm` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. Package, binary, and command all share the name. |
-| `ekvm-test-support` | `crates/test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
+| `bsx-engine` | `crates/engine` | The engine and the embedder-facing API. The Firecracker driver, the jail, networking, snapshots, the pool, and every teardown path. |
+| `bsx-channel` | `crates/channel` | The host/guest wire protocol. Near dependency-free framing (`zeroize`, for the post-send secret wipe, is the one dependency), shared verbatim by driver and agent. |
+| `bsx-guest-agent` | `crates/guest-agent` | The in-guest agent. One command per connection, static musl, baked into the rootfs. Not a security boundary. Its binary keeps the bare name `guest-agent`. |
+| `bsx-probes` | `crates/probes` | The eBPF programs. `no_std`, built for `bpfel-unknown-none`, the one crate allowed `unsafe`. Its object keeps the bare name `probes`. |
+| `bsx-probes-common` | `crates/probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero dependencies, single-sourced. |
+| `bsx-probes-loader` | `crates/probes-loader` | The aya userspace half: attach the probes, read their maps, assemble the record. |
+| `bsx-record` | `crates/record` | The signed audit record: its types, deterministic JSON, summary projection, and ed25519 signing/verification. No aya, so a record verifies off-host. |
+| `bsx-protocol` | `crates/protocol` | The daemon's wire types, versioned. |
+| `bsx-client` | `crates/client` | The Rust reference client for `bsx serve`. |
+| `bsx` | `crates/cli` | The `bsx` binary: `run`, `shell`, `doctor`, `verify`, and the `serve` daemon. Package, binary, and command all share the name. |
+| `bsx-test-support` | `crates/test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, and never renamed: `cargo xtask` is a `--package xtask` alias. |
 
 ## The rest of this section

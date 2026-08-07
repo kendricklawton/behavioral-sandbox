@@ -1,5 +1,5 @@
 //! Test-only helpers shared by the privileged integration-test binaries **across crates**
-//! (`ekvm` and `ekvm-probes-loader` tests). Rust compiles each `tests/*.rs` as its own crate,
+//! (`bsx` and `bsx-probes-loader` tests). Rust compiles each `tests/*.rs` as its own crate,
 //! so a helper used by more than one has to live in a real (dev-)dependency crate rather than be
 //! copy-pasted: this is that crate.
 //!
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 ///
 /// libtest runs tests **in parallel by default**, one thread per CPU, and `--test-threads=1` is the
 /// override that turns that off. A test asserting on open fds, thread count, mounts, or every
-/// `ekvm-<pid>-*` scratch dir is measuring the whole test *binary*: `std::process::id()` is shared
+/// `bsx-<pid>-*` scratch dir is measuring the whole test *binary*: `std::process::id()` is shared
 /// by every test in the process, so a concurrent sibling's live VM is indistinguishable from a leak
 /// and its open sockets are indistinguishable from an fd leak.
 ///
@@ -35,7 +35,7 @@ pub fn require_serial(what: &str) {
         return;
     }
     panic!(
-        "{what} asserts on process-global state (fds, threads, mounts, or every ekvm-<pid>-* dir), \
+        "{what} asserts on process-global state (fds, threads, mounts, or every bsx-<pid>-* dir), \
          so it cannot run beside another test in this binary, and libtest runs tests in parallel by \
          default. Re-run with `--test-threads=1`, or use `cargo xtask ci-privileged`, which passes \
          it for you."
@@ -77,7 +77,7 @@ impl ScratchDir {
         use std::sync::atomic::{AtomicU32, Ordering};
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "ekvm-{tag}-{}-{}",
+            "bsx-{tag}-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -153,7 +153,7 @@ impl LimitCgroup {
 
     fn create_with_quota(cpu_quota_us: u64, mem_mib: u32, tag: &str) -> Option<Self> {
         let parent =
-            PathBuf::from("/sys/fs/cgroup").join(format!("ekvm-test-{}-{tag}", std::process::id()));
+            PathBuf::from("/sys/fs/cgroup").join(format!("bsx-test-{}-{tag}", std::process::id()));
         std::fs::create_dir(&parent).ok()?;
         let this = Self {
             dir: parent.join("leaf"),
@@ -324,7 +324,7 @@ impl SmallFs {
     /// than a full disk, the idiomatic test assertion.
     pub fn fill_leaving(&self, headroom: u64) {
         use std::io::Write as _;
-        let path = self.path().join("ekvm-filler");
+        let path = self.path().join("bsx-filler");
         let mut file = match std::fs::File::create(&path) {
             Ok(f) => f,
             Err(e) => panic!("create the filler in {}: {e}", self.path().display()),
@@ -440,7 +440,7 @@ pub fn have_cap(cap: u32) -> bool {
 
 /// The low 64 bits of the `CapEff:` hex mask out of `/proc/<pid>/status` text, or `None` when the
 /// line is absent or unparseable. Mirrors the loader's audited production parse
-/// (`ekvm-probes-loader`'s `parse_cap_eff`, which the host path can't share with a dev-only
+/// (`bsx-probes-loader`'s `parse_cap_eff`, which the host path can't share with a dev-only
 /// crate): only the **trailing 16 hex digits** (bits 0–63, where every capability lives) are read,
 /// so a hypothetically wider future field can't overflow the `u64` parse into a false "no caps".
 /// Pure (takes the text), so the guard is unit-tested without a live `/proc`.

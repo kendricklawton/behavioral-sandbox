@@ -5,7 +5,7 @@ use std::time::Duration;
 use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap, MapData, PerCpuArray, RingBuf};
 use aya::programs::TracePoint;
-use ekvm_probes_common::SyscallEvent;
+use bsx_probes_common::SyscallEvent;
 
 use crate::meter::TARGET_PRESENT;
 use crate::{ProbeError, check_support, load_object};
@@ -430,7 +430,7 @@ fn decode_or_count(bytes: &[u8], undecodable: &mut u64) -> Option<SyscallEvent> 
 mod tests {
     // Host-safe: the decode-or-count decision on raw bytes, no aya, no kernel.
     use super::decode_or_count;
-    use ekvm_probes_common::EVENT_SIZE;
+    use bsx_probes_common::EVENT_SIZE;
 
     #[test]
     fn a_short_ring_record_is_counted_not_silently_dropped() {

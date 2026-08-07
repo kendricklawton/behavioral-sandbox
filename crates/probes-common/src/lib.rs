@@ -44,7 +44,7 @@ pub const SOCKADDR_SNAP_V4: usize = 16;
 /// this iterates exactly as one keyed on the raw `u32` wire value does, and reordering these arms
 /// moves nothing. The audit record's `notable` ordering rests on that, which ties it to the wire
 /// numbering the probe writes rather than to how this file is laid out
-/// (`notable_kinds_are_ordered_by_the_syscall_discriminants` in `ekvm-record` holds it).
+/// (`notable_kinds_are_ordered_by_the_syscall_discriminants` in `bsx-record` holds it).
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Syscall {
@@ -858,7 +858,7 @@ pub fn egress_allowed6(
 /// `/64`). Fixed rather than per-sandbox because the per-VM netns supplies uniqueness, which is
 /// what lets a `#![no_std]` in-kernel program know the link without a map lookup.
 ///
-/// The engine owns the addresses themselves (`ekvm-engine`'s `net.rs`); this pair is the *shape*
+/// The engine owns the addresses themselves (`bsx-engine`'s `net.rs`); this pair is the *shape*
 /// the eBPF policy needs, and `the_guest_v6_link_is_the_same_in_the_engine_and_the_probes` in
 /// `xtask` reads both files and fails if the two ever disagree.
 pub const GUEST_LINK6: ([u8; 16], u8) = (

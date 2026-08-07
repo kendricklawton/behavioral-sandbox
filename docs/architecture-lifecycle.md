@@ -31,7 +31,7 @@ even starts.
 
 **4. `Spawned::launch`** does the host-side staging, all of it under that deadline:
 
-- `create_workdir` (in `spawn/workdir.rs`) mints `<scratch>/ekvm-<pid>-<seq>` **fail-if-exists at mode 0700**, advancing the
+- `create_workdir` (in `spawn/workdir.rs`) mints `<scratch>/bsx-<pid>-<seq>` **fail-if-exists at mode 0700**, advancing the
   sequence on collision. Both properties matter: the scratch base is world-writable and the name is
   predictable, so a pre-existing directory must never be adopted. The name is also deliberately
   *short*, because the jailer nests it **twice** inside the API socket path, which must fit
@@ -61,7 +61,7 @@ a little-endian `u32` length) and then a payload, with **the length checked agai
 (1 MiB) before anything is allocated**. That ordering is the whole defense against a hostile guest
 declaring a 4 GiB frame.
 
-`ekvm-channel` is near dependency-free (`zeroize`, giving the post-send secret wipe a volatile store,
+`bsx-channel` is near dependency-free (`zeroize`, giving the post-send secret wipe a volatile store,
 is the one dependency; its `Cargo.toml` states why), and is shared verbatim by the driver and the
 in-guest agent, so a wire-format change reaches both sides in the same commit.
 
@@ -105,11 +105,11 @@ because the driver must never hang waiting on its own cleanup helper.
 
 **`cgroup.kill`** is what makes the kill itself atomic and complete: one write takes down the entire
 VMM process tree without enumerating pids, which is why it is also the capability
-[`ekvm doctor` probes for](./cli-commands.md#ekvm-doctor) rather than inferring from a kernel version.
+[`bsx doctor` probes for](./cli-commands.md#bsx-doctor) rather than inferring from a kernel version.
 
 **The orphan sweep** (`sweep.rs`, public as `sweep_orphans`) is the backstop for residue that outlived
 everything above, from a driver killed in a way that defeated even the sentinel. It scans the scratch
-base for `ekvm-<pid>-<seq>` directories whose owning pid is gone, detaches any mounts underneath (a
+base for `bsx-<pid>-<seq>` directories whose owning pid is gone, detaches any mounts underneath (a
 leaked bind mount would otherwise make removal fail with `EBUSY` and silently poison later mountinfo
 scans), and reclaims them.
 

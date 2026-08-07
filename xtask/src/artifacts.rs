@@ -50,7 +50,7 @@ pub(crate) fn artifacts() -> Result<Vec<Artifact>> {
             },
         ]),
         other => bail!(
-            "no pinned artifacts for arch {other} yet (x86_64 only) — set EKVM_KERNEL/EKVM_ROOTFS \
+            "no pinned artifacts for arch {other} yet (x86_64 only) — set BSX_KERNEL/BSX_ROOTFS \
              to your own uncompressed vmlinux + ext4 rootfs"
         ),
     }
@@ -66,11 +66,11 @@ pub(crate) fn fetch_artifacts() -> Result<()> {
     Ok(())
 }
 
-/// Obtain one artifact into place. **Vendor-aware:** if `EKVM_VENDOR_DIR` is set, the artifact is
+/// Obtain one artifact into place. **Vendor-aware:** if `BSX_VENDOR_DIR` is set, the artifact is
 /// restored from the local vendor mirror (a sha-verified copy, no network); otherwise it is
 /// downloaded from its pinned upstream URL. Either way the sha256 is the contract, so a corrupt or
 /// substituted file fails here. Every build path (`build-rootfs`, `fetch-artifacts`, `self-host`)
-/// goes through here, so setting `EKVM_VENDOR_DIR` takes all of them offline at once.
+/// goes through here, so setting `BSX_VENDOR_DIR` takes all of them offline at once.
 pub(crate) fn fetch_one(a: &Artifact) -> Result<()> {
     match vendor_dir() {
         Some(v) => restore_from_vendor(a, &v),
@@ -101,7 +101,7 @@ fn restore_from_vendor(a: &Artifact, vendor: &Path) -> Result<()> {
     if !src.is_file() {
         bail!(
             "vendored input {name} not found in {} — run `cargo xtask vendor` to populate the \
-             mirror (or unset EKVM_VENDOR_DIR to fetch from upstream)",
+             mirror (or unset BSX_VENDOR_DIR to fetch from upstream)",
             vendor.display()
         );
     }

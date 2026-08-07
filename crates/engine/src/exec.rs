@@ -1,6 +1,6 @@
 //! The host side of the guest-agent exec channel: dial Firecracker's vsock Unix socket, speak its
 //! `CONNECT <port>` handshake, and drive one bounded exec (output cap, guest budget, host wall
-//! deadline) over the `ekvm-channel` protocol. Every bound exists so a hostile guest is a typed
+//! deadline) over the `bsx-channel` protocol. Every bound exists so a hostile guest is a typed
 //! error, never a host hang or leak.
 
 use std::io::{Read, Write};
@@ -9,7 +9,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Component, Path};
 use std::time::{Duration, Instant};
 
-use ekvm_channel::{ChannelError, ClientConnection, Response};
+use bsx_channel::{ChannelError, ClientConnection, Response};
 
 use crate::{Artifact, ExecMetrics, RunResult, VmmError};
 
@@ -184,7 +184,7 @@ pub(crate) fn run_exec<S: Read + Write>(
     bounds: ExecBounds,
 ) -> Result<RunResult, VmmError> {
     // Host-side trace of the exec (the guest's own `exec` span goes to the serial console, not the
-    // operator's stderr), keyed by argv so `ekvm run` failures are diagnosable host-side. The env
+    // operator's stderr), keyed by argv so `bsx run` failures are diagnosable host-side. The env
     // *count* only, never a value, and not even the key list, per the secret-hygiene contract.
     let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _span = span.enter();
@@ -445,9 +445,9 @@ fn read_connect_ack(stream: &mut UnixStream, port: u32) -> Result<(), VmmError> 
 mod tests {
     use super::*;
     use crate::vm::VSOCK_UDS;
-    use ekvm_channel::VSOCK_PORT;
-    use ekvm_guest_agent::serve_session;
-    use ekvm_test_support::ScratchDir;
+    use bsx_channel::VSOCK_PORT;
+    use bsx_guest_agent::serve_session;
+    use bsx_test_support::ScratchDir;
     use std::path::PathBuf;
 
     /// Stand up a fake Firecracker vsock socket: accept, answer the `CONNECT <port>` handshake, then
@@ -469,7 +469,7 @@ mod tests {
                 }
             }
             stream.write_all(b"OK 10000\n").expect("write ack");
-            let _ = serve_session(stream, &std::env::temp_dir().join("ekvm-session-test"));
+            let _ = serve_session(stream, &std::env::temp_dir().join("bsx-session-test"));
         });
         (dir, uds, handle)
     }
@@ -519,7 +519,7 @@ mod tests {
                 }
             }
             stream.write_all(b"OK 10000\n").expect("write ack");
-            let _ = serve_session(stream, &std::env::temp_dir().join("ekvm-session-test"));
+            let _ = serve_session(stream, &std::env::temp_dir().join("bsx-session-test"));
         });
         (dir, uds, handle)
     }
@@ -529,7 +529,7 @@ mod tests {
         // A peer close before the ack must not kill the caller (in the daemon: the session): the
         // dial retries within its window and the request proceeds on the surviving connection.
         let (_dir, uds, server) =
-            flaky_vsock_agent("ekvm-vsock-flaky-preack", 2, DropPhase::BeforeAck);
+            flaky_vsock_agent("bsx-vsock-flaky-preack", 2, DropPhase::BeforeAck);
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5))
             .expect("retry through two dropped dials");
         let result = run_exec(
@@ -555,7 +555,7 @@ mod tests {
         // The other face: the ack arrives but the peer closes before the channel handshake. Same
         // transient condition, same retry.
         let (_dir, uds, server) =
-            flaky_vsock_agent("ekvm-vsock-flaky-postack", 2, DropPhase::AfterAck);
+            flaky_vsock_agent("bsx-vsock-flaky-postack", 2, DropPhase::AfterAck);
         let conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5));
         assert!(
             conn.is_ok(),
@@ -571,7 +571,7 @@ mod tests {
         // A peer that never serves: the retry window must expire with the typed retryable error,
         // within the documented bound (~timeout + retry cap), never hang.
         use std::os::unix::net::UnixListener;
-        let dir = ScratchDir::created("ekvm-vsock-dead");
+        let dir = ScratchDir::created("bsx-vsock-dead");
         let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let dead = std::thread::spawn(move || {
@@ -603,7 +603,7 @@ mod tests {
     fn a_single_shot_probe_fails_fast_on_a_dead_socket() {
         // The pool's health check must discard a corpse in microseconds, not spend the dial-retry
         // window on it: `connect_agent_once` (what `probe_agent` uses) never retries.
-        let dir = ScratchDir::created("ekvm-vsock-stale");
+        let dir = ScratchDir::created("bsx-vsock-stale");
         let uds = dir.path().join(VSOCK_UDS);
         // A socket file nothing listens on: the SIGKILLed-clone shape (instant ECONNREFUSED).
         {
@@ -629,7 +629,7 @@ mod tests {
     fn exec_over_fake_vsock_runs_a_command() {
         // Happy path: `exec("echo hi")` → `hi`, exit 0, through the *real* agent (only the
         // Firecracker vsock UDS is faked).
-        let (_dir, uds, server) = fake_vsock_agent("ekvm-vsock-echo");
+        let (_dir, uds, server) = fake_vsock_agent("bsx-vsock-echo");
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn exec_over_fake_vsock_feeds_stdin() {
-        let (_dir, uds, server) = fake_vsock_agent("ekvm-vsock-stdin");
+        let (_dir, uds, server) = fake_vsock_agent("bsx-vsock-stdin");
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
@@ -680,7 +680,7 @@ mod tests {
     fn exec_injects_files_and_returns_artifacts() {
         // Put a file in, run a command that reads it and writes an output file, pull the artifact
         // back. Exercises PutFile + working-dir cwd + artifact return end to end against the agent.
-        let (_dir, uds, server) = fake_vsock_agent("ekvm-vsock-files");
+        let (_dir, uds, server) = fake_vsock_agent("bsx-vsock-files");
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
@@ -774,7 +774,7 @@ mod tests {
         // speaks the channel protocol directly and returns a `File` whose path climbs out of the
         // working tree. The public API must reject it as a `GuestProtocol` fault (bucket `Guest`) rather
         // than pass the escaping path up in `RunResult.files` for an embedder to write to disk.
-        use ekvm_channel::ServerConnection;
+        use bsx_channel::ServerConnection;
         let (client, server) = UnixStream::pair().expect("socketpair");
         let hostile = std::thread::spawn(move || {
             let mut srv = ServerConnection::accept(server).expect("accept");
@@ -861,7 +861,7 @@ mod tests {
         };
 
         let sink = LogSink::default();
-        let dir = ScratchDir::created("ekvm-vsock-leak");
+        let dir = ScratchDir::created("bsx-vsock-leak");
         let uds = dir.path().join(VSOCK_UDS);
         let listener = UnixListener::bind(&uds).expect("bind fake vsock");
         let agent_sink = sink.clone();
@@ -877,7 +877,7 @@ mod tests {
                         }
                     }
                     stream.write_all(b"OK 10000\n").expect("write ack");
-                    let _ = serve_session(stream, &std::env::temp_dir().join("ekvm-session-test"));
+                    let _ = serve_session(stream, &std::env::temp_dir().join("bsx-session-test"));
                 }
             });
         });
@@ -949,7 +949,7 @@ mod tests {
         // A command the guest can't run ("crashing" in the agent-fault sense) comes back as a
         // terminal `Error` frame → the typed `VmmError::GuestExec`, end to end through the real
         // agent (which reports the spawn failure), not via a hand-crafted `Error` response.
-        let (_dir, uds, server) = fake_vsock_agent("ekvm-vsock-crash");
+        let (_dir, uds, server) = fake_vsock_agent("bsx-vsock-crash");
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let err = run_exec(
             &mut conn,
@@ -975,7 +975,7 @@ mod tests {
         // `kill -9 $$`) is NOT a `VmmError`, the agent maps signal death to `128+sig` and the host
         // returns a faithful `RunResult{exit_code: 137}`. This pins the *host*-side mapping in
         // `run_exec`; the guest-agent-layer version lives in crates/guest-agent/tests/exec.rs.
-        let (_dir, uds, server) = fake_vsock_agent("ekvm-vsock-signal");
+        let (_dir, uds, server) = fake_vsock_agent("bsx-vsock-signal");
         let mut conn = connect_agent_at(&uds, VSOCK_PORT, Duration::from_secs(5)).expect("connect");
         let result = run_exec(
             &mut conn,
@@ -996,14 +996,14 @@ mod tests {
     }
 
     /// A fake vsock peer that answers `CONNECT`, does the channel handshake, then hands the
-    /// [`ServerConnection`](ekvm_channel::ServerConnection) to `handler`, so a test can craft the
+    /// [`ServerConnection`](bsx_channel::ServerConnection) to `handler`, so a test can craft the
     /// exact response stream (unlike `fake_vsock_agent`, which runs the real agent).
     fn fake_vsock_server<F>(
         tag: &str,
         handler: F,
     ) -> (ScratchDir, PathBuf, std::thread::JoinHandle<()>)
     where
-        F: FnOnce(ekvm_channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
+        F: FnOnce(bsx_channel::ServerConnection<std::os::unix::net::UnixStream>) + Send + 'static,
     {
         use std::os::unix::net::UnixListener;
         let dir = ScratchDir::created(tag);
@@ -1019,7 +1019,7 @@ mod tests {
                 }
             }
             stream.write_all(b"OK 10000\n").expect("write ack");
-            let conn = ekvm_channel::ServerConnection::accept(stream).expect("server handshake");
+            let conn = bsx_channel::ServerConnection::accept(stream).expect("server handshake");
             handler(conn);
         });
         (dir, uds, handle)
@@ -1029,7 +1029,7 @@ mod tests {
     fn exec_surfaces_a_guest_error_as_typed_error() {
         // The agent reports a spawn failure with a terminal `Error` frame → `VmmError::GuestExec`,
         // distinct from a transport fault.
-        let (_dir, uds, server) = fake_vsock_server("ekvm-vsock-err", |mut conn| {
+        let (_dir, uds, server) = fake_vsock_server("bsx-vsock-err", |mut conn| {
             let _ = conn.recv_request();
             let _ = conn.send_response(&Response::Error("no such binary".into()));
         });
@@ -1059,7 +1059,7 @@ mod tests {
         // `VmmError::Channel`. Every *other* channel-ish fault is at connect time (→ `Vmm`), so this
         // is the only test that exercises the steady-state `Channel` arm and the `From<ChannelError>`
         // conversion at the vmm layer.
-        let (_dir, uds, server) = fake_vsock_server("ekvm-vsock-drop", |mut conn| {
+        let (_dir, uds, server) = fake_vsock_server("bsx-vsock-drop", |mut conn| {
             let _ = conn.recv_request();
             drop(conn); // no response frames, the host's next read sees a clean EOF
         });
@@ -1088,7 +1088,7 @@ mod tests {
     #[test]
     fn exec_output_cap_is_enforced() {
         // A guest that floods stdout must trip the cap as a typed error, not grow host memory.
-        let (_dir, uds, server) = fake_vsock_server("ekvm-vsock-flood", |mut conn| {
+        let (_dir, uds, server) = fake_vsock_server("bsx-vsock-flood", |mut conn| {
             let _ = conn.recv_request();
             // Keep sending until the host drops the connection (cap exceeded → our writes error).
             while conn
@@ -1124,7 +1124,7 @@ mod tests {
     fn exec_maps_guest_timeout_to_typed_timeout() {
         // The agent's terminal `TimedOut` (command killed at its deadline) becomes the distinct
         // VmmError::ExecTimeout, not conflated with a channel/transport timeout.
-        let (_dir, uds, server) = fake_vsock_server("ekvm-vsock-timeout", |mut conn| {
+        let (_dir, uds, server) = fake_vsock_server("bsx-vsock-timeout", |mut conn| {
             let _ = conn.recv_request();
             let _ = conn.send_response(&Response::TimedOut { elapsed_ms: 1000 });
         });
@@ -1151,7 +1151,7 @@ mod tests {
     fn output_cap_counts_file_path_bytes_not_just_data() {
         // Regression: a guest flooding File frames whose budget is spent on `path` (empty `data`)
         // must still trip the cap, path bytes and a per-frame floor count toward it.
-        let (_dir, uds, server) = fake_vsock_server("ekvm-vsock-pathflood", |mut conn| {
+        let (_dir, uds, server) = fake_vsock_server("bsx-vsock-pathflood", |mut conn| {
             let _ = conn.recv_request();
             let big_path = "p".repeat(4096);
             while conn
@@ -1187,7 +1187,7 @@ mod tests {
         // A guest that keeps the per-read idle timer alive with tiny well-formed frames but never
         // sends its terminal Exit/TimedOut would, without a host wall deadline, park exec forever
         // under the output cap. The host's own `wall` must give up with `ExecUnresponsive`, fast.
-        let (_dir, uds, server) = fake_vsock_server("ekvm-vsock-dribble", |mut conn| {
+        let (_dir, uds, server) = fake_vsock_server("bsx-vsock-dribble", |mut conn| {
             let _ = conn.recv_request();
             // Dribble every 50 ms, well under the 200 ms idle timeout, so the idle timer never
             // fires; only the host's wall deadline can end this.
@@ -1256,7 +1256,7 @@ mod tests {
 
     #[test]
     fn connect_ack_refused_is_typed_error() {
-        let (_d, uds, server) = fake_connect_target("ekvm-ack-refuse", |mut s| {
+        let (_d, uds, server) = fake_connect_target("bsx-ack-refuse", |mut s| {
             let _ = s.write_all(b"NOPE\n");
         });
         let err = vsock_connect(&uds, VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
@@ -1270,7 +1270,7 @@ mod tests {
 
     #[test]
     fn connect_ack_peer_close_is_typed_error() {
-        let (_d, uds, server) = fake_connect_target("ekvm-ack-close", drop);
+        let (_d, uds, server) = fake_connect_target("bsx-ack-close", drop);
         let err = vsock_connect(&uds, VSOCK_PORT, Duration::from_secs(2)).unwrap_err();
         // The canonical agent-not-up signal: typed retryable, so a pool can discard-and-retry.
         assert!(
@@ -1282,7 +1282,7 @@ mod tests {
 
     #[test]
     fn connect_ack_too_long_is_typed_error() {
-        let (_d, uds, server) = fake_connect_target("ekvm-ack-long", |mut s| {
+        let (_d, uds, server) = fake_connect_target("bsx-ack-long", |mut s| {
             let _ = s.write_all(&[b'x'; 100]); // 100 bytes, no newline
             std::thread::sleep(Duration::from_millis(200)); // keep the stream open past the read
         });
@@ -1296,7 +1296,7 @@ mod tests {
 
     #[test]
     fn connect_ack_timeout_is_typed_error() {
-        let (_d, uds, server) = fake_connect_target("ekvm-ack-timeout", |s| {
+        let (_d, uds, server) = fake_connect_target("bsx-ack-timeout", |s| {
             std::thread::sleep(Duration::from_millis(300)); // never send; outlive the client deadline
             drop(s);
         });

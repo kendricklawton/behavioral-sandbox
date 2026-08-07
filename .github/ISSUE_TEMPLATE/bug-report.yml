@@ -8,7 +8,7 @@ body:
         Thanks for the report. One check first: if this is a **suspected vulnerability** (an
         isolation escape, a way to tamper with the audit log, a host-path panic from guest input),
         please use the private
-        [security-advisory form](https://github.com/ekvm-rs/ekvm/security/advisories/new)
+        [security-advisory form](https://github.com/kendricklawton/behavioral-sandbox/security/advisories/new)
         instead of a public issue.
 
   - type: textarea
@@ -24,10 +24,10 @@ body:
     attributes:
       label: How to reproduce it
       description: >-
-        The exact command line (`ekvm run …` / `ekvm shell …` / `ekvm serve` + client verbs) or the
+        The exact command line (`bsx run …` / `bsx shell …` / `bsx serve` + client verbs) or the
         embedding code, plus the workload that triggers it. The smaller the repro, the faster the fix.
       placeholder: |
-        ekvm run --net -- python3 -c '...'
+        bsx run --net -- python3 -c '...'
       render: shell
     validations:
       required: true
@@ -35,7 +35,7 @@ body:
   - type: textarea
     id: doctor
     attributes:
-      label: "`ekvm doctor` output"
+      label: "`bsx doctor` output"
       description: >-
         Paste the full output: it captures KVM, Firecracker, jailer, cgroup, and eBPF readiness in
         one shot, which answers most environment questions up front.
@@ -58,8 +58,8 @@ body:
       options:
         - CLI, jailed (the default)
         - CLI, --unjailed
-        - ekvm serve (daemon)
-        - embedded (the `ekvm` library API)
+        - bsx serve (daemon)
+        - embedded (the `bsx` library API)
       multiple: true
     validations:
       required: true

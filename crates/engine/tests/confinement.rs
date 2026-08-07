@@ -4,7 +4,7 @@
 //! driver's netns + scratch dir without touching a live sibling's.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p bsx-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -15,21 +15,21 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ekvm_engine::{BootConfig, VMM_PIDS_MAX, Vm, VmmError, sweep_orphans};
+use bsx_engine::{BootConfig, VMM_PIDS_MAX, Vm, VmmError, sweep_orphans};
 
+use bsx_test_support::{LimitCgroup, ScratchDir as TmpDir, process_threads};
 use common::{
     cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
     jailed_agent_config, jailed_overlay_config,
 };
-use ekvm_test_support::{LimitCgroup, ScratchDir as TmpDir, process_threads};
 
 /// The env var that turns `helper_boot_and_park` from a no-op into the crash-test victim. Without
 /// it the helper returns immediately, so the ordinary `--ignored` sweep isn't wedged by it.
-const HELPER_ENV: &str = "EKVM_CONFINEMENT_HELPER";
+const HELPER_ENV: &str = "BSX_CONFINEMENT_HELPER";
 
 /// The env var that turns `helper_boot_networked_and_park` into the sweep test's victim: a
 /// **networked** boot, so the crash leaves the residue that matters, a per-VM netns holding a tap.
-const HELPER_NET_ENV: &str = "EKVM_CONFINEMENT_HELPER_NET";
+const HELPER_NET_ENV: &str = "BSX_CONFINEMENT_HELPER_NET";
 
 /// Whether `pid` is still a live `firecracker` process (same discipline as `boot.rs`: keyed on the
 /// specific pid via `comm`, so a reaped-then-recycled pid running something else reads as gone).
@@ -57,17 +57,17 @@ fn eventually(timeout: Duration, mut cond: impl FnMut() -> bool) -> bool {
 ///
 /// Deliberately not [`TmpDir::created`], which uses `std::env::temp_dir()`: `/tmp` is `nodev` on a
 /// systemd host, and the jailer cannot make its chroot's device nodes there. `ci-privileged.sh`
-/// exports `EKVM_SCRATCH_DIR` for exactly this reason, so a test that hard-codes `/tmp` throws that
+/// exports `BSX_SCRATCH_DIR` for exactly this reason, so a test that hard-codes `/tmp` throws that
 /// away and refuses the boot before a VMM ever spawns.
 ///
 /// This nesting also puts the dir where the engine's orphan sweep **does not look** (the tag makes
-/// the name miss the `ekvm-<pid>-<seq>` workdir pattern the sweep scans for), so stale residue from
+/// the name miss the `bsx-<pid>-<seq>` workdir pattern the sweep scans for), so stale residue from
 /// a killed prior run is this helper's own problem: it reclaims every same-tag sibling up front,
 /// detaching any mounts a dead run's chroot left first, since `remove_dir_all` alone would `EBUSY`
 /// on a leaked bind mount and silently leave it to poison mountinfo for every later test.
 // A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
 fn scratch_under(base: &Path, tag: &str) -> TmpDir {
-    let prefix = format!("ekvm-{tag}-");
+    let prefix = format!("bsx-{tag}-");
     if let Ok(entries) = std::fs::read_dir(base) {
         for stale in entries
             .filter_map(Result::ok)
@@ -81,7 +81,7 @@ fn scratch_under(base: &Path, tag: &str) -> TmpDir {
             let _ = std::fs::remove_dir_all(&stale);
         }
     }
-    let dir = base.join(format!("ekvm-{tag}-{}", std::process::id()));
+    let dir = base.join(format!("bsx-{tag}-{}", std::process::id()));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         panic!("create the test scratch dir {}: {e}", dir.display());
     }
@@ -136,7 +136,7 @@ fn vmm_pid_under(scratch: &Path) -> Option<u32> {
         })
 }
 
-/// The name of the single per-VM workdir the driver laid down under `scratch` (`ekvm-<pid>-<seq>`),
+/// The name of the single per-VM workdir the driver laid down under `scratch` (`bsx-<pid>-<seq>`),
 /// which is both the lifetime-cgroup name and the jail id. `None` before the boot has created it.
 fn per_vm_workdir_name(scratch: &Path) -> Option<String> {
     std::fs::read_dir(scratch)
@@ -144,7 +144,7 @@ fn per_vm_workdir_name(scratch: &Path) -> Option<String> {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().into_owned())
-        .find(|name| name.starts_with("ekvm-"))
+        .find(|name| name.starts_with("bsx-"))
 }
 
 /// The API socket of the boot staged under `scratch`, found by walking the tree rather than by
@@ -185,14 +185,13 @@ fn api_socket_under(dir: &Path, depth: u32) -> Option<PathBuf> {
 /// pinning a rebuilt artifact's deleted inode. The cost is that a *failing* run waits out the boot deadline; a leak
 /// that outlives the process is worse than a slow failure.
 struct BootJoin(
-    Option<std::thread::JoinHandle<Result<ekvm_engine::RunningVm, ekvm_engine::VmmError>>>,
+    Option<std::thread::JoinHandle<Result<bsx_engine::RunningVm, bsx_engine::VmmError>>>,
 );
 
 impl BootJoin {
     fn take(
         &mut self,
-    ) -> Option<std::thread::JoinHandle<Result<ekvm_engine::RunningVm, ekvm_engine::VmmError>>>
-    {
+    ) -> Option<std::thread::JoinHandle<Result<bsx_engine::RunningVm, bsx_engine::VmmError>>> {
         self.0.take()
     }
     fn is_finished(&self) -> bool {
@@ -211,7 +210,7 @@ impl Drop for BootJoin {
 }
 
 // A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
-fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> ekvm_engine::VmmError {
+fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> bsx_engine::VmmError {
     let scratch = cfg.scratch_dir.clone();
     let mut booting = BootJoin(Some(std::thread::spawn(move || Vm::boot(cfg))));
 
@@ -271,7 +270,7 @@ fn kill_the_vmm_awaiting_userspace(cfg: BootConfig) -> ekvm_engine::VmmError {
 /// names the cause, where "no VMM here" only names the symptom.
 // A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
 fn panic_with_boot_outcome(
-    booting: Option<std::thread::JoinHandle<Result<ekvm_engine::RunningVm, ekvm_engine::VmmError>>>,
+    booting: Option<std::thread::JoinHandle<Result<bsx_engine::RunningVm, bsx_engine::VmmError>>>,
 ) -> ! {
     match booting.map(std::thread::JoinHandle::join) {
         Some(Ok(Err(e))) => panic!("the boot failed before a VMM could be killed: {e}"),
@@ -285,7 +284,7 @@ fn panic_with_boot_outcome(
 }
 
 /// A marker no guest prints, so the driver waits out its whole boot deadline in `await_userspace`.
-const UNREACHABLE_MARKER: &str = "ekvm-marker-that-no-guest-will-ever-print";
+const UNREACHABLE_MARKER: &str = "bsx-marker-that-no-guest-will-ever-print";
 
 #[test]
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
@@ -298,7 +297,7 @@ fn a_vmm_killed_while_awaiting_userspace_leaks_nothing() {
     // next `sweep_orphans`, and one accumulates per killed boot.
     let mut cfg = config();
     // A private dir *under* the configured base, not a replacement for it: the base is what
-    // `EKVM_SCRATCH_DIR` points off a `nodev` `/tmp`, and the per-test dir is only there to make the
+    // `BSX_SCRATCH_DIR` points off a `nodev` `/tmp`, and the per-test dir is only there to make the
     // `/proc` match below unambiguous.
     let scratch = scratch_under(&cfg.scratch_dir, "killboot");
     cfg.scratch_dir = scratch.path().to_path_buf();
@@ -347,7 +346,7 @@ fn a_jailed_vmm_killed_mid_boot_leaves_no_mounts_behind() {
     }
     let mut cfg = jailed_overlay_config();
     // The jailer makes device nodes in its chroot, so this dir must inherit the configured base
-    // (`EKVM_SCRATCH_DIR`, off `nodev`). Hard-coding `/tmp` here is what failed the first run.
+    // (`BSX_SCRATCH_DIR`, off `nodev`). Hard-coding `/tmp` here is what failed the first run.
     let scratch = scratch_under(&cfg.scratch_dir, "killjail");
     cfg.scratch_dir = scratch.path().to_path_buf();
     cfg.userspace_marker = UNREACHABLE_MARKER.to_string();
@@ -486,7 +485,7 @@ fn driver_death_cannot_leak_a_vm() {
         // which is exactly this test's failure mode. Disambiguate by probing writability directly:
         // if this host can create a cgroup, enrollment had no excuse, so fail, never skip.
         let probe =
-            Path::new("/sys/fs/cgroup").join(format!("ekvm-degraded-probe-{}", std::process::id()));
+            Path::new("/sys/fs/cgroup").join(format!("bsx-degraded-probe-{}", std::process::id()));
         if std::fs::create_dir(&probe).is_ok() {
             let _ = std::fs::remove_dir(&probe);
             panic!(
@@ -546,7 +545,7 @@ fn netns_exists(name: &str) -> bool {
 
 /// How many per-VM scratch dirs under `base` belong to driver `pid`.
 fn scratch_dirs_of(base: &Path, pid: u32) -> usize {
-    let prefix = format!("ekvm-{pid}-");
+    let prefix = format!("bsx-{pid}-");
     std::fs::read_dir(base)
         .map(|rd| {
             rd.flatten()
@@ -1071,7 +1070,7 @@ impl FlaggedMount {
     /// posture (`nodev` on systemd, `noexec` on hardened baselines) is irrelevant underneath.
     // A free helper (not a `#[test]` fn): explicit panics are the idiomatic assertion here.
     fn tmpfs(name: &str, options: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!("ekvm-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bsx-{name}-{}", std::process::id()));
         if let Err(e) = std::fs::create_dir_all(&dir) {
             panic!("create the mount point {}: {e}", dir.display());
         }

@@ -3,7 +3,7 @@
 //! `Pool`, and the restore-beats-cold-boot payoff.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p bsx-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -13,7 +13,7 @@ mod common;
 use std::num::NonZeroU8;
 use std::time::Duration;
 
-use ekvm_engine::{DEFAULT_JAIL_UID, Jail, Pool, Vm};
+use bsx_engine::{DEFAULT_JAIL_UID, Jail, Pool, Vm};
 
 use common::{
     TmpDir, cgroup_of, config, guest_rootfs_config, have_jailer_privileges, have_net_admin,
@@ -63,7 +63,7 @@ fn a_snapshot_onto_a_full_disk_leaves_a_bundle_or_nothing() {
     //
     // The second claim is the one a caller actually depends on: the *source VM keeps running*.
     // `snapshot` pauses, creates, and resumes, and the resume must survive the create failing.
-    let Some(fs) = ekvm_test_support::SmallFs::create(64, "snap-full") else {
+    let Some(fs) = bsx_test_support::SmallFs::create(64, "snap-full") else {
         eprintln!(
             "skipping a_snapshot_onto_a_full_disk_leaves_a_bundle_or_nothing: needs real root"
         );
@@ -484,7 +484,7 @@ fn restores_a_private_disk_snapshot_under_the_jailer() {
     // test silently drifts onto the shared-base branch the previous test already covers.
     let mut source_cfg = guest_rootfs_config();
     source_cfg.read_only_root = false;
-    let source = ekvm_engine::Sandbox::open_unjailed(source_cfg).expect("pool source should boot");
+    let source = bsx_engine::Sandbox::open_unjailed(source_cfg).expect("pool source should boot");
     let snap = source.snapshot(bundle.path()).expect("snapshot the source");
     source.shutdown().expect("source shutdown");
     assert!(
@@ -712,7 +712,7 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
 /// assert version-documented behavior instead of failing on it. `None` (probe or parse failed)
 /// reads as the pinned series: a broken probe must not quietly switch which posture is asserted.
 fn vmm_version() -> Option<(u64, u64)> {
-    let out = std::process::Command::new(ekvm_engine::BootConfig::from_env().firecracker)
+    let out = std::process::Command::new(bsx_engine::BootConfig::from_env().firecracker)
         .arg("--version")
         .output()
         .ok()?;
@@ -731,7 +731,7 @@ fn pool_serves_prewarmed_clones_and_discards_dead_ones() {
     // health probe, not a cold boot. A clone that died while pooled is a typed GuestUnavailable
     // from the probe, so `take` discards it and serves the next (or restores inline when dry)
     // instead of surfacing an infra failure, the retry semantics the deferral promised.
-    use ekvm_engine::Pool;
+    use bsx_engine::Pool;
 
     let bundle = TmpDir::new("snap-pool");
     let (snap, cold_boot) = prewarmed_python_snapshot(&bundle);

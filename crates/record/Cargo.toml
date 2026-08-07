@@ -1,5 +1,5 @@
 [package]
-name = "ekvm-record"
+name = "bsx-record"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ description = "The signed audit record: its types, deterministic JSON, summary p
 [dependencies]
 # The probe-side vocabulary the record embeds (`FlowKey`, `PolicyRule`, `Syscall`, ...), shared
 # with the kernel writer in `crates/probes`. `std` on for the host-side `comm_lossy` helper.
-ekvm-probes-common = { path = "../probes-common", features = ["std"] }
+bsx-probes-common = { path = "../probes-common", features = ["std"] }
 
 # Record integrity: an `ed25519` detached signature over the canonical record bytes,
 # so a consumer detects post-hoc alteration off-host. The signing key is host-side (the guest never

@@ -1,4 +1,4 @@
-//! Fuzz the daemon's untrusted-client wire: `read_message` over the newline-JSON protocol. `ekvm
+//! Fuzz the daemon's untrusted-client wire: `read_message` over the newline-JSON protocol. `bsx
 //! serve` decodes exactly these bytes off its unix socket from *any* client, the outermost
 //! untrusted-input boundary the engine exposes (unlike the channel decoder, which only sees a guest
 //! already contained inside a VM). Hostile bytes here must always land in a value or a typed
@@ -6,7 +6,7 @@
 
 #![no_main]
 
-use ekvm_protocol::fuzz::{read_requests, read_responses};
+use bsx_protocol::fuzz::{read_requests, read_responses};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

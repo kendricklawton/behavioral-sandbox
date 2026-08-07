@@ -2,15 +2,15 @@
 //!
 //! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches a `tc`
 //! program inside the VM's netns (needs `CAP_BPF`+`CAP_NET_ADMIN` + BTF + the built object). Run via
-//! `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so the loader library
+//! `cargo xtask ci-privileged`. Uses `bsx` as a **dev-dependency only**, so the loader library
 //! stays independent of the driver: the two tracks bridge by plain values (a netns name and a tap name).
 #![allow(clippy::panic)]
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
-use ekvm_probes_loader::{TapMonitor, check_support, object_path};
+use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use bsx_probes_loader::{TapMonitor, check_support, object_path};
 
 /// IP protocol number for UDP (the loader re-exports the flow types but not this constant).
 const IPPROTO_UDP: u8 = 17;
@@ -49,7 +49,7 @@ fn skip_reason() -> Option<String> {
 fn networked_agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("EKVM_KERNEL").is_none() {
+    if std::env::var_os("BSX_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
     cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");

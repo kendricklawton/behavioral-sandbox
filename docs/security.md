@@ -1,10 +1,10 @@
 # Security
 
-The engine's whole reason to exist is running code you don't trust and getting a truthful account
-of what it did. This page states what is trusted, what counts as a security bug (and what does
-not), how to report one, and what happens after a report. The reporting mechanism also lives
-in [`SECURITY.md`](https://github.com/ekvm-rs/ekvm/blob/main/SECURITY.md) at the repo root
-(GitHub surfaces it in the Security tab).
+The engine's whole reason to exist is running code you don't trust and getting a truthful account of
+what it did. This page states what is trusted, what counts as a security bug (and what does not),
+how to report one, and what happens after a report. The reporting mechanism also lives in
+[`SECURITY.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/SECURITY.md) at the
+repo root (GitHub surfaces it in the Security tab).
 
 ## No supported release yet
 
@@ -24,7 +24,7 @@ network and holds minimal capability, and every allowance is explicit and record
 
 ## Record integrity (host-signed)
 
-The finalized audit record is signed with an Ed25519 host key. Verification via `ekvm verify <record>` validates signature validity against the host key. The threat model details [record verification boundaries](./security-threat-model.md#record-integrity-beyond-the-guest).
+The finalized audit record is signed with an Ed25519 host key. Verification via `bsx verify <record>` validates signature validity against the host key. The threat model details [record verification boundaries](./security-threat-model.md#record-integrity-beyond-the-guest).
 
 Each record includes `sandbox_id` and `started_unix_ns` in the signed payload to correlate the audit event with host execution state.
 
@@ -41,7 +41,7 @@ The trust boundary of this scheme:
 
 - **The anchor is the GitHub repo plus its Actions secrets.** A `curl | sh` of `install.sh` is
   same-origin with the pin, so the pin defeats a tampered *release asset*, not a compromised
-  repo or CI secret. Supplying `EKVM_RELEASE_PUBKEY` out of band is the stronger anchor.
+  repo or CI secret. Supplying `BSX_RELEASE_PUBKEY` out of band is the stronger anchor.
 - **No rollback or freshness protection.** An attacker controlling the download path can serve
   an older, validly signed release wholesale.
 - **No revocation or expiry.** Rotation is committing a new pin; installers already distributed
@@ -49,7 +49,7 @@ The trust boundary of this scheme:
 - **Self-attested modes.** Installing from an extracted package verifies only the per-file
   manifest inside the artifact (and says so); a local dev tarball without a sibling `.sig`
   verifies hashes only.
-- `EKVM_INSECURE_SKIP_SIGNATURE=1` is the explicit, loudly-warned opt-out (deny by default,
+- `BSX_INSECURE_SKIP_SIGNATURE=1` is the explicit, loudly-warned opt-out (deny by default,
   every allowance explicit), needed only for pre-scheme releases.
 
 ## What counts as a security bug
@@ -61,7 +61,7 @@ Given those aims, a security bug is anything that breaks one of them:
 - A guest evading, disabling, or forging the host-side observation (the eBPF probes or the records
   they produce).
 - A signed record that verifies **after** being altered, or a forged signature accepted by
-  `ekvm verify` without the host key (the record-integrity aim).
+  `bsx verify` without the host key (the record-integrity aim).
 - A hostile guest causing a host panic, hang, or resource leak through the driver's public API. The engine is written against a no-panic rule on the host path; a case that breaks it is a bug worth reporting, not an expected limitation.
 - Injected secrets (`--env` values, injected file contents) appearing in logs, errors, or the
   serial console.
@@ -78,7 +78,7 @@ The mirror list, so reports stay signal:
   uid are trusted; an attacker who already has them has everything, no sandbox can claim
   otherwise.
 - **Hosts below the supported floor.** An unsupported architecture, or a host kernel with neither
-  `cgroup.kill` nor a version above the fallback floor, is refused by `ekvm doctor`; weaknesses that require running there
+  `cgroup.kill` nor a version above the fallback floor, is refused by `bsx doctor`; weaknesses that require running there
   anyway are the operator's acceptance, not an engine bug. The same goes for an *unpatched* host
   kernel within the floor: patching the substrate is the operator's half of the contract.
 - **`--unjailed` weakening the VMM's own confinement.** That flag is the documented dev-box
@@ -102,9 +102,9 @@ The mirror list, so reports stay signal:
 ## After a report: how a fix ships
 
 The reporting mechanics and response expectations live in
-[`SECURITY.md`](https://github.com/ekvm-rs/ekvm/blob/main/SECURITY.md) (private GitHub
-advisory, acknowledgement within about a week, no bounty). What happens next, honestly scoped to a
-pre-`v0.1.0` single-maintainer project:
+[`SECURITY.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/SECURITY.md) (private
+GitHub advisory, acknowledgement within about a week, no bounty). What happens next, honestly scoped
+to a pre-`v0.1.0` single-maintainer project:
 
 1. **Confirm** the report against the model above, with a reproduction where possible; the
    discussion stays in the private advisory.
@@ -112,12 +112,12 @@ pre-`v0.1.0` single-maintainer project:
    regular commit, with a regression test on the gate wherever the bug class allows one.
 3. **Disclose together.** The timeline is agreed with the reporter in the advisory; the default
    ask is that the fix lands before publication. When it does, the GitHub advisory is published,
-   [`RELEASES.md`](https://github.com/ekvm-rs/ekvm/blob/main/RELEASES.md) notes it, and
-   the reporter is credited if they want to be.
+   [`RELEASES.md`](https://github.com/kendricklawton/behavioral-sandbox/blob/main/RELEASES.md) notes
+   it, and the reporter is credited if they want to be.
 
 ## Reporting a vulnerability
 
-Report privately via GitHub's security advisories: the
-[Security tab](https://github.com/ekvm-rs/ekvm/security), or
-[this direct link](https://github.com/ekvm-rs/ekvm/security/advisories/new) to the
-reporting form. Please do not open a public issue for a suspected vulnerability.
+Report privately via GitHub's security advisories: the [Security
+tab](https://github.com/kendricklawton/behavioral-sandbox/security), or [this direct
+link](https://github.com/kendricklawton/behavioral-sandbox/security/advisories/new) to the reporting
+form. Please do not open a public issue for a suspected vulnerability.

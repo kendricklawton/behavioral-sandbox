@@ -80,8 +80,8 @@ const ROOTFS_BUDGET_MIB: u64 = 160;
 /// below (a file at the path, and an init or script line naming it), so a literal spelled twice is a
 /// rename away from a guest that boots into a missing helper. `verify_guest_contract` reads these
 /// same constants back off the staged tree, so a half-applied rename fails the build rather than
-/// shipping. The one path the *driver* also writes lives in `ekvm-channel` instead
-/// ([`ekvm_channel::GUEST_OVERLAY_INIT`]), where both sides consume the one definition.
+/// shipping. The one path the *driver* also writes lives in `bsx-channel` instead
+/// ([`bsx_channel::GUEST_OVERLAY_INIT`]), where both sides consume the one definition.
 const GUEST_AGENT_PATH: &str = "/usr/local/bin/guest-agent";
 const MOUNT_DRIVES_PATH: &str = "/sbin/mount-drives";
 const NET_UP_PATH: &str = "/sbin/net-up";
@@ -113,7 +113,7 @@ fn in_staging(staging: &Path, guest_path: &str) -> PathBuf {
 /// own). `sysinit` mounts the pseudo-filesystems a fresh ext4 lacks, a rootless `mke2fs -d` seeds
 /// no device nodes, so `devtmpfs` is what provides `/dev/ttyS0` + the vsock device (the guest kernel
 /// must auto-mount it, `CONFIG_DEVTMPFS_MOUNT`, for PID 1's own console). The agent then respawns on
-/// the contract vsock port (`ekvm_channel::VSOCK_PORT`, the same constant the host dials,
+/// the contract vsock port (`bsx_channel::VSOCK_PORT`, the same constant the host dials,
 /// so the two sides can't drift), attached to `ttyS0` so its readiness line reaches the serial
 /// console the host scans.
 fn rootfs_inittab() -> String {
@@ -142,8 +142,8 @@ ttyS0::respawn:{agent} {scheme}:{port}
         mount_drives = MOUNT_DRIVES_PATH,
         net_up = NET_UP_PATH,
         agent = GUEST_AGENT_PATH,
-        scheme = ekvm_channel::VSOCK_SCHEME,
-        port = ekvm_channel::VSOCK_PORT
+        scheme = bsx_channel::VSOCK_SCHEME,
+        port = bsx_channel::VSOCK_PORT
     )
 }
 
@@ -154,7 +154,7 @@ ttyS0::respawn:{agent} {scheme}:{port}
 /// yields an empty result, so that mount is silently skipped and a plain boot is unaffected. `-t ext4`
 /// because busybox `mount`'s type autodetection is weaker than util-linux's; the output mount is
 /// `-o sync` so a command's writes are flushed straight to the device, surviving a hard-kill teardown.
-/// Labels come from `ekvm-channel`, the one definition the driver (which stamps them) also uses.
+/// Labels come from `bsx-channel`, the one definition the driver (which stamps them) also uses.
 fn mount_drives_script() -> String {
     format!(
         "\
@@ -163,8 +163,8 @@ fn mount_drives_script() -> String {
 in=$(findfs LABEL={in_label} 2>/dev/null) && [ -n \"$in\" ] && /bin/mount -t ext4 -o ro \"$in\" {in_dir}
 out=$(findfs LABEL={out_label} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t ext4 -o sync \"$out\" {out_dir}
 ",
-        in_label = ekvm_channel::INPUT_LABEL,
-        out_label = ekvm_channel::OUTPUT_LABEL,
+        in_label = bsx_channel::INPUT_LABEL,
+        out_label = bsx_channel::OUTPUT_LABEL,
         in_dir = INPUT_DIR,
         out_dir = OUTPUT_DIR,
     )
@@ -174,7 +174,7 @@ out=$(findfs LABEL={out_label} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t 
 /// `ip=`/`CONFIG_IP_PNP` param configures the guest's v4 `eth0` before userspace but has **no** IPv6
 /// form, so the driver passes the guest v6 address as an `<key>=<addr>/<plen>` kernel cmdline token
 /// (`spawn.rs`) and this reads it back from `/proc/cmdline` and assigns it. The key is
-/// `ekvm_channel::GUEST_IP6_CMDLINE_KEY`, the one host↔guest definition the driver's writer and this
+/// `bsx_channel::GUEST_IP6_CMDLINE_KEY`, the one host↔guest definition the driver's writer and this
 /// reader share, so they can't drift (the address itself is never baked into the image, the host owns
 /// it). Best-effort by construction: a plain (no-NIC) boot has no `eth0` and exits cleanly, and a
 /// missing token is a clean no-op, so a non-networked boot is unaffected. v6 gets only the connected
@@ -202,7 +202,7 @@ echo 0 > /proc/sys/net/ipv6/conf/eth0/accept_dad 2>/dev/null
 ip addr add \"$addr\" dev eth0 2>/dev/null || ifconfig eth0 add \"$addr\" 2>/dev/null
 exit 0
 ",
-        key = ekvm_channel::GUEST_IP6_CMDLINE_KEY,
+        key = bsx_channel::GUEST_IP6_CMDLINE_KEY,
     )
 }
 
@@ -221,7 +221,7 @@ const ALPINE_BRANCH: &str = "v3.24";
 /// vendoring the `.apk` closure as sha-pinned artifacts (a later hardening step).
 const GUEST_PACKAGES: &[&str] = &["python3", "nodejs"];
 
-/// The overlay init ([`ekvm_channel::GUEST_OVERLAY_INIT`]), run as PID 1 when the driver boots this image
+/// The overlay init ([`bsx_channel::GUEST_OVERLAY_INIT`]), run as PID 1 when the driver boots this image
 /// **read-only** (`BootConfig::read_only_root`). It stacks a per-run tmpfs over the read-only base
 /// so `/` is writable but the base is never mutated, then `pivot_root`s in and `exec`s the real
 /// init. `pivot_root` (not `switch_root`): the base stays mounted as the overlay lowerdir, shadowed
@@ -293,7 +293,7 @@ pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
         "x86_64" => Ok(Artifact {
-            url: "https://github.com/ekvm-rs/ekvm/releases/download/build-inputs/\
+            url: "https://github.com/kendricklawton/behavioral-sandbox/releases/download/build-inputs/\
                   apk-tools-static-3.0.7-r0.tgz"
                 .to_string(),
             sha256: "ed1c5e82177844249b7c4ecc2653b78eed096be20496b7fb860a9e165b2e5ce1",
@@ -369,9 +369,9 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
     // per-run tmpfs over the RO base so `/` is writable, then hands off to the real init. The
     // mountpoint must exist in the image because the root is read-only at that point, you can't
     // `mkdir` a mountpoint on a read-only `/`.
-    let overlay_init = in_staging(&staging, ekvm_channel::GUEST_OVERLAY_INIT);
+    let overlay_init = in_staging(&staging, bsx_channel::GUEST_OVERLAY_INIT);
     std::fs::write(&overlay_init, overlay_init_script())
-        .with_context(|| format!("write {}", ekvm_channel::GUEST_OVERLAY_INIT))?;
+        .with_context(|| format!("write {}", bsx_channel::GUEST_OVERLAY_INIT))?;
     set_mode_0755(&overlay_init)?;
     std::fs::create_dir_all(in_staging(&staging, OVERLAY_DIR))
         .with_context(|| format!("create {OVERLAY_DIR} mountpoint"))?;
@@ -531,7 +531,7 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
              would time out waiting for the readiness marker",
         ),
         (
-            ekvm_channel::GUEST_OVERLAY_INIT,
+            bsx_channel::GUEST_OVERLAY_INIT,
             "the driver puts `init=<this>` on the kernel command line for a read-only-root boot, so \
              the kernel would panic on a missing init",
         ),
@@ -605,12 +605,8 @@ fn verify_guest_contract(staging: &Path) -> Result<()> {
     // failure that looks healthy right up until a run hangs.
     let inittab = std::fs::read_to_string(in_staging(staging, INITTAB_PATH))
         .with_context(|| format!("guest-image contract: read {INITTAB_PATH}"))?;
-    // Both halves from `ekvm-channel`, so this spelling and the agent's own parser cannot drift.
-    let vsock_arg = format!(
-        "{}:{}",
-        ekvm_channel::VSOCK_SCHEME,
-        ekvm_channel::VSOCK_PORT
-    );
+    // Both halves from `bsx-channel`, so this spelling and the agent's own parser cannot drift.
+    let vsock_arg = format!("{}:{}", bsx_channel::VSOCK_SCHEME, bsx_channel::VSOCK_PORT);
     for needle in [
         GUEST_AGENT_PATH,
         MOUNT_DRIVES_PATH,
@@ -771,9 +767,9 @@ pub(crate) fn build_rootfs(verify: bool, update_lock: bool) -> Result<()> {
 
     // The full runnable hint, printed from the contract constants so it can't drift from the code.
     println!(
-        "  exec inside a microVM with:\n  EKVM_ROOTFS={} EKVM_MARKER={} cargo run -p ekvm -- run -- echo hi",
+        "  exec inside a microVM with:\n  BSX_ROOTFS={} BSX_MARKER={} cargo run -p bsx -- run -- echo hi",
         out.display(),
-        ekvm_channel::GUEST_READY_MARKER
+        bsx_channel::GUEST_READY_MARKER
     );
     Ok(())
 }
@@ -881,7 +877,7 @@ enum ApkSource<'a> {
 }
 
 /// Install [`GUEST_PACKAGES`] into the staging root with the pinned `apk.static`, no chroot, no
-/// root, no host `apk`. Vendor-aware: with `EKVM_VENDOR_DIR` set it installs offline from the
+/// root, no host `apk`. Vendor-aware: with `BSX_VENDOR_DIR` set it installs offline from the
 /// vendored apk cache, otherwise it fetches from the pinned Alpine CDN. The `.apk` is a tarball; its
 /// `sbin/apk.static` is extracted to a scratch dir removed after the install (the packages land in
 /// `staging`, the tool is ephemeral).
@@ -1097,8 +1093,7 @@ mod tests {
         }
     }
     fn temp_dir(name: &str) -> TempDir {
-        let path =
-            std::env::temp_dir().join(format!("ekvm_contract_{name}_{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("bsx_contract_{name}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("create temp staging");
         TempDir(path)
@@ -1113,7 +1108,7 @@ mod tests {
         std::os::unix::fs::symlink(KERNEL_PNP_PATH, &resolv).unwrap();
         for path in [
             GUEST_AGENT_PATH,
-            ekvm_channel::GUEST_OVERLAY_INIT,
+            bsx_channel::GUEST_OVERLAY_INIT,
             MOUNT_DRIVES_PATH,
             NET_UP_PATH,
         ] {
@@ -1243,8 +1238,8 @@ mod tests {
     #[test]
     fn net_up_reads_the_shared_cmdline_key() {
         let script = net_up_script();
-        let key = ekvm_channel::GUEST_IP6_CMDLINE_KEY;
-        // The guest parses the *same* token key the driver writes (single-sourced in `ekvm-channel`),
+        let key = bsx_channel::GUEST_IP6_CMDLINE_KEY;
+        // The guest parses the *same* token key the driver writes (single-sourced in `bsx-channel`),
         // so the two sides can't drift: the case pattern that matches it and the `${tok#…}` that
         // strips it both carry the key.
         assert!(script.contains(&format!("{key}=*)")));

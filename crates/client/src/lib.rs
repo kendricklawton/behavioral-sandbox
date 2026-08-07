@@ -1,21 +1,21 @@
-//! The reference **Rust client** for the `ekvm` wire API: drive a sandbox **session**
+//! The reference **Rust client** for the `bsx` wire API: drive a sandbox **session**
 //! over a unix socket, `open` → (`exec` | `put` | `get` | `snapshot` | `trace`)\* → `close`, using
-//! nothing but the shared wire contract ([`ekvm_protocol`]) and a JSON value for the opaque trace
+//! nothing but the shared wire contract ([`bsx_protocol`]) and a JSON value for the opaque trace
 //! record.
 //!
-//! **This is the proof.** The proof: it links **no `ekvm`**, so it demonstrates
+//! **This is the proof.** The proof: it links **no `bsx`**, so it demonstrates
 //! that a caller drives the daemon with only a JSON library and a unix socket, the exact surface a
 //! caller in any language has.
 
 //!
 //! **Synchronous and blocking**, matching the daemon: one [`Client`] owns one connection (one
 //! session), each call sends a request line and blocks for the one response line. Errors are typed
-//! ([`ClientError`]), a decode fault, a remote [`Error`](ekvm_protocol::Response::Error), or an
+//! ([`ClientError`]), a decode fault, a remote [`Error`](bsx_protocol::Response::Error), or an
 //! unexpected reply, never a panic.
 //!
 //! ```no_run
-//! use ekvm_client::Client;
-//! let mut client = Client::connect("/run/ekvm/ekvm.sock")?;
+//! use bsx_client::Client;
+//! let mut client = Client::connect("/run/bsx/bsx.sock")?;
 //! client.open(Default::default())?;                 // boot the session's sandbox
 //! let run = client.exec(&["echo".into(), "hi".into()], "")?;
 //! assert_eq!(run.stdout, "hi\n");
@@ -31,15 +31,15 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-use ekvm_protocol::{
+use bsx_protocol::{
     ExecParams, FaultKind, GetParams, ProtocolError, PutParams, Request, Response, read_response,
     write_request,
 };
 
 // The session-knobs struct is the protocol's, re-exported so a caller of this client names one
-// type and a new knob is written once (it lives in `ekvm-protocol`, where the wire shape and
+// type and a new knob is written once (it lives in `bsx-protocol`, where the wire shape and
 // the Rust shape can't drift apart).
-pub use ekvm_protocol::OpenParams;
+pub use bsx_protocol::OpenParams;
 
 /// Everything a client call can fail with, typed, never a panic.
 #[derive(Debug)]
@@ -128,7 +128,7 @@ pub struct ExecOutcome {
     pub exec_wall_ms: u64,
 }
 
-/// One connection to a running `ekvm serve`, i.e. one sandbox session. Dropping it hangs up the
+/// One connection to a running `bsx serve`, i.e. one sandbox session. Dropping it hangs up the
 /// connection, which tears the session's sandbox down daemon-side (the same as [`close`](Self::close)
 /// without the acknowledgement).
 #[derive(Debug)]
@@ -276,7 +276,7 @@ impl Client {
     }
 
     /// Fetch the session's host-observed audit record so far, as the `RunRecord` JSON object. Carried
-    /// opaquely so this client stays free of the `ekvm-probes-loader` types; parse it with `serde_json`.
+    /// opaquely so this client stays free of the `bsx-probes-loader` types; parse it with `serde_json`.
     /// # Errors
     /// [`ClientError`] on a decode fault or a remote error.
     pub fn trace(&mut self) -> Result<serde_json::Value, ClientError> {

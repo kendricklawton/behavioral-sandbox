@@ -75,8 +75,8 @@ risk](#assumptions-and-residual-risk).
 
 | Attack | Contained by | Exercised by |
 |--------|--------------|-----------|
-| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, namespaces) plus Firecracker's own built-in per-thread seccomp filters, which the driver never disables (it passes no `--no-seccomp`), as defense in depth | the jail-escape tests in `ekvm-engine`'s `confinement.rs`; `boots_under_the_jailer` reads `Seccomp: 2` back from the running VMM |
-| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter); guest processes run against the guest kernel's scheduler, not as host threads | the fork-bomb/mem-hog tests in `confinement.rs`; `all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy` in `ekvm-probes-loader`'s `hardening.rs` |
+| Escape the isolation boundary | Hardware virtualization (KVM); the jailer (chroot, uid/gid drop, namespaces) plus Firecracker's own built-in per-thread seccomp filters, which the driver never disables (it passes no `--no-seccomp`), as defense in depth | the jail-escape tests in `bsx-engine`'s `confinement.rs`; `boots_under_the_jailer` reads `Seccomp: 2` back from the running VMM |
+| Resource exhaustion (memory / CPU / pids / IO) | The per-VM cgroup (`memory.max`, `cpu.max`, `pids.max`); a derived per-drive IO-bandwidth bound (a virtio-blk rate limiter); guest processes run against the guest kernel's scheduler, not as host threads | the fork-bomb/mem-hog tests in `confinement.rs`; `all_exhaustion_vectors_are_bounded_by_the_cgroup_and_egress_policy` in `bsx-probes-loader`'s `hardening.rs` |
 | Network exfiltration / flood | Deny-by-default egress policy enforced in-kernel at the tap, armed before the guest's first packet; drops are counted | `net_enforce.rs`; the hostile-guest and flood tests in `confinement.rs` |
 | Evade / disable the observation | The probes run in the **host** kernel and the tap monitor on the **host** end of the tap, so no guest crossing addresses a BPF program or map | `a_guest_cannot_see_or_disable_the_host_side_probes` (`hardening.rs`) boots a guest, has it list `/sys/fs/bpf` (0 entries), and asserts its UDP flow was still recorded with no coverage gap |
 | Leak a run on driver death | A cgroup-owned lifetime + sentinel kills the VM when its driver dies; an own-euid orphan sweep reclaims residue | the sentinel and orphan-sweep tests in `confinement.rs` |
@@ -133,12 +133,12 @@ The row above (observation the guest does not address) is one half of
 otherwise assumes: a party that alters the record **after** it leaves the producing host, a
 compromised relay, an operator, or the transport a supervisor reads it over. To close that gap a
 finalized record is **signed with a host key the guest has no path to** (an `ed25519` detached
-signature over the canonical record bytes), and a verify path ships with it (`ekvm verify`, the
+signature over the canonical record bytes), and a verify path ships with it (`bsx verify`, the
 library `verify`, and the daemon's signed `trace` reply).
 
 Signing is the *caller's* step, not the loader's: `SandboxProbes::collect` returns an unsigned
 `RunRecord`, and `HostKey` signs it in the CLI's record path and in the daemon's `trace`. An
-embedder driving `ekvm-probes-loader` directly gets no signature. A run signs when it writes a
+embedder driving `bsx-probes-loader` directly gets no signature. A run signs when it writes a
 record at all, which is `--record` or an operator's `records_dir`.
 
 - **What a verifier establishes:** `verify_entry` fails closed on a bad signature, a malformed
@@ -154,17 +154,17 @@ record at all, which is `--record` or an operator's `records_dir`.
   names the signing key, so a rotated key doesn't invalidate records already signed.
 - **Append-only, so tail truncation is undetectable in isolation.** A daemon session's records form
   a hash chain: the first is an unchained anchor and each one after it commits to the prior record's
-  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run: `ekvm
+  hash, so `verify_chain` rejects an edited, reordered, inserted, or middle-deleted run: `bsx
   verify` runs that check on a file holding the sequence one envelope per line, and the library
-  form is `verify_chain` in `ekvm-record`. One limit on the chain's reach: only the daemon's
-  `trace` path chains (`ekvm run --record` writes one standalone record). What the chain
+  form is `verify_chain` in `bsx-record`. One limit on the chain's reach: only the daemon's
+  `trace` path chains (`bsx run --record` writes one standalone record). What the chain
   cannot catch even then is **truncation of the tail**: a
   consumer handed only a truncated prefix cannot distinguish it from the whole sequence, since every
   link it holds is intact. Detecting a dropped tail needs an out-of-band anchor, the latest expected
   record hash or run count tracked by the consumer, which is the hoster's, the same custody line as
   the signing key.
 
-See [`ekvm verify`](./cli-commands.md#ekvm-verify) for the verify path.
+See [`bsx verify`](./cli-commands.md#bsx-verify) for the verify path.
 
 ## Assumptions and residual risk
 
@@ -202,7 +202,7 @@ Explicitly assumed sound, and therefore *out* of the boundary:
   Egress *enforcement* is the deliberate exception: `--allow` that cannot arm the tap is a refusal.
 - **Fuzzing is nightly, not continuous.** Ten libFuzzer targets cover the untrusted-input decoders
   (the guest channel, the daemon wire, the signed-record envelope, the eBPF-boundary parsers, the
-  egress rule parser, and the `.ekvm.toml` config parser) on a nightly schedule, bounded per target
+  egress rule parser, and the `.bsx.toml` config parser) on a nightly schedule, bounded per target
   at fifteen minutes. There is no OSS-Fuzz or equivalent
   continuous tier, and some corpora are thin, so depth on any one target is limited.
 
@@ -225,7 +225,7 @@ When hosting mutually-distrusting workloads on shared hardware: dedicate the wor
 execution; disable SMT or enable core scheduling, so microVMs can't share a physical core's
 micro-architectural state; keep KSM off, so page dedup can't become a cross-VM timing channel; and
 keep CPU mitigations (`mitigations=auto`) and host microcode current. These are the hoster's
-knobs, not the engine's (side channels sit in residual risk above); `ekvm doctor` flags each one
+knobs, not the engine's (side channels sit in residual risk above); `bsx doctor` flags each one
 it can check.
 
 ---
@@ -236,7 +236,7 @@ Every *artifact* the build downloads is pinned by sha256 and verified on fetch: 
 the demo boot rootfs (`xtask/src/artifacts.rs`), the Alpine minirootfs and `apk-tools-static`
 (`xtask/src/rootfs.rs`). The guest package closure `apk` then installs on top of that base is the
 exception, covered below. The Firecracker binary is pinned too but never fetched by this project:
-the operator installs it, and `ekvm doctor` compares what is on `PATH` against the pin.
+the operator installs it, and `bsx doctor` compares what is on `PATH` against the pin.
 
 One of them is served from this project rather than from its origin. `apk-tools-static` is the
 static `apk` the build executes on the host to populate the guest image, and an Alpine branch repo
@@ -289,7 +289,7 @@ which is a check rather than a claim.
 What the release does rest on is the signed manifest: `install.sh` verifies `SHA256SUMS.sig` against
 a pinned public key and never rebuilds anything. That pin ships in the same repo as the script, so
 it defeats a tampered release *asset*, not a compromised repo, and
-`EKVM_INSECURE_SKIP_SIGNATURE=1` turns the check off for anyone who sets it. `EKVM_RELEASE_PUBKEY`,
+`BSX_INSECURE_SKIP_SIGNATURE=1` turns the check off for anyone who sets it. `BSX_RELEASE_PUBKEY`,
 supplied out of band, is the stronger anchor.
 
 `cargo xtask vendor` snapshots the whole input set, the resolved `.apk` closure included, into an

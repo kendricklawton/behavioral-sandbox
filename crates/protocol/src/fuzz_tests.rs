@@ -1,7 +1,7 @@
 //! Dependency-light fuzz-style property tests for the wire message reader, the in-gate half of this
 //! crate's fuzzing (the deep, nightly `cargo fuzz` half lives in `fuzz/`).
 //!
-//! **Why here.** The daemon (`ekvm serve`) reads these bytes off its unix socket from *any* client:
+//! **Why here.** The daemon (`bsx serve`) reads these bytes off its unix socket from *any* client:
 //! this is the outermost untrusted-input boundary the engine exposes, unlike the channel decoder,
 //! which only sees a guest already contained inside a VM. A hostile or buggy peer must be
 //! a typed [`ProtocolError`], never a host panic, hang, or leak. These tests assert exactly that: for

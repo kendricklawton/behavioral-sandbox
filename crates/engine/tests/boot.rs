@@ -2,7 +2,7 @@
 //! the read-only base + overlay, and the no-leak guarantee across repeated boots.
 //!
 //! `#[ignore]`d because they need `/dev/kvm` and the fetched artifacts. Run via
-//! `cargo xtask ci-privileged` or `cargo test -p ekvm-engine -- --ignored`.
+//! `cargo xtask ci-privileged` or `cargo test -p bsx-engine -- --ignored`.
 // A test binary: `panic!` (in non-`#[test]` helpers and on boot-setup failure) is the idiomatic
 // assertion, which the workspace's `clippy::panic` deny doesn't auto-exempt outside `#[test]` fns.
 #![allow(clippy::panic)]
@@ -12,7 +12,7 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{DEFAULT_GUEST_CID, DEFAULT_JAIL_UID, Jail, Vm};
+use bsx_engine::{DEFAULT_GUEST_CID, DEFAULT_JAIL_UID, Jail, Vm};
 
 use common::{
     config, guest_rootfs_config, have_jailer_privileges, have_net_admin, jailed_overlay_config,
@@ -215,11 +215,11 @@ fn boots_under_the_jailer() {
     vm.shutdown().expect("jailed shutdown should succeed");
 
     // Teardown reclaims the chroot (it lives in the scratch dir) and the jailer's cgroup, no
-    // `ekvm-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
-    // via `from_env`, so `EKVM_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
+    // `bsx-<pid>-*` survives under the scratch root. Scan the *configured* root (the VMs boot
+    // via `from_env`, so `BSX_SCRATCH_DIR` moves it), and treat an unreadable root as a failure,
     // not zero leaks.
-    let prefix = format!("ekvm-{}-", std::process::id());
-    let scratch_root = ekvm_engine::BootConfig::from_env().scratch_dir;
+    let prefix = format!("bsx-{}-", std::process::id());
+    let scratch_root = bsx_engine::BootConfig::from_env().scratch_dir;
     let scratch_leaks = std::fs::read_dir(&scratch_root)
         .expect("scan the scratch root for leaks")
         .flatten()
@@ -369,12 +369,12 @@ struct BaseMount {
 /// located in `/proc/self/mountinfo` by its `.../firecracker/<id>/root/rootfs.ext4` mount point
 /// (field 5). The per-mount options (field 6) carry `ro` for a read-only mount.
 ///
-/// Scoped to this process's own workdir (`/ekvm-<ourpid>-`), not the first shape-matching line
+/// Scoped to this process's own workdir (`/bsx-<ourpid>-`), not the first shape-matching line
 /// host-wide: mountinfo is host-global, and a bind mount leaked by an earlier killed run satisfies
 /// the shape while pinning the *pre-rebuild* artifact's deleted inode, which would fail the
 /// inode assertion against a correct boot.
 fn jailed_base_mount() -> Option<BaseMount> {
-    let ours = format!("/ekvm-{}-", std::process::id());
+    let ours = format!("/bsx-{}-", std::process::id());
     let info = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
     for line in info.lines() {
         let fields: Vec<&str> = line.split(' ').collect();
@@ -408,11 +408,11 @@ fn path_is_mounted(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Per-VM network namespaces this process owns that are currently present (`/run/netns/ekvm-<pid>-*`),
+/// Per-VM network namespaces this process owns that are currently present (`/run/netns/bsx-<pid>-*`),
 /// for the leak assertion below. Under the netns model the tap lives inside the netns, so a leaked
 /// *netns*, not a host `fc*` interface, is the network residue to check for.
 fn agent_netns() -> std::collections::BTreeSet<String> {
-    let prefix = format!("ekvm-{}-", std::process::id());
+    let prefix = format!("bsx-{}-", std::process::id());
     std::fs::read_dir("/run/netns")
         .map(|rd| {
             rd.flatten()
@@ -451,11 +451,11 @@ fn boot_exec_shutdown(net: bool) -> u32 {
     pid
 }
 
-/// Measured soak cycles: `EKVM_SOAK_CYCLES` for a real endurance run, else a default
+/// Measured soak cycles: `BSX_SOAK_CYCLES` for a real endurance run, else a default
 /// sized so the serial privileged gate stays fast (~2-3 min at agent-boot speed). Floored at 2, since a single cycle
 /// proves nothing about what leaks *across* cycles.
 fn soak_cycles() -> usize {
-    std::env::var("EKVM_SOAK_CYCLES")
+    std::env::var("BSX_SOAK_CYCLES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(24)
@@ -470,9 +470,9 @@ const CHURN_EVERY: usize = 8;
 #[test]
 #[ignore = "needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn repeated_boots_leave_no_leaks() {
-    // Counts this *process's* fds, threads, and ekvm-<pid>-* dirs, all of which a concurrent
+    // Counts this *process's* fds, threads, and bsx-<pid>-* dirs, all of which a concurrent
     // sibling test would contribute to. Refuse rather than measure it.
-    ekvm_test_support::require_serial("repeated_boots_leave_no_leaks");
+    bsx_test_support::require_serial("repeated_boots_leave_no_leaks");
     // The endurance form of the no-leak claim: after N boot/exec/teardown cycles under periodic
     // concurrent churn, nothing this test spawned may survive, no per-VM scratch dir, no orphaned
     // firecracker VMM process, and (with CAP_NET_ADMIN) no per-VM netns. The netns is the one
@@ -480,8 +480,8 @@ fn repeated_boots_leave_no_leaks() {
     // without the capability, networking is off and the soak still covers the other axes.
     let net = have_net_admin();
     let cycles = soak_cycles();
-    let prefix = format!("ekvm-{}-", std::process::id());
-    let scratch_root = ekvm_engine::BootConfig::from_env().scratch_dir;
+    let prefix = format!("bsx-{}-", std::process::id());
+    let scratch_root = bsx_engine::BootConfig::from_env().scratch_dir;
     let netns_before = agent_netns();
     let mut vmm_pids = Vec::new();
 
@@ -504,7 +504,7 @@ fn repeated_boots_leave_no_leaks() {
         "at least this thread; /proc read failed?"
     );
 
-    // This process's per-VM scratch dirs (`ekvm-<pid>-<n>` under the configured scratch root);
+    // This process's per-VM scratch dirs (`bsx-<pid>-<n>` under the configured scratch root);
     // an unreadable root is a failure, not zero leaks.
     let scratch_leftovers = |scratch_root: &Path, prefix: &str| -> usize {
         std::fs::read_dir(scratch_root)
@@ -714,13 +714,13 @@ fn open_fds() -> usize {
 #[ignore = "needs /dev/kvm + artifacts (run via `cargo xtask ci-privileged`)"]
 fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     // The fd baseline is the process's, so a sibling test's open socket reads as this test's leak.
-    ekvm_test_support::require_serial("fd_footprint_per_vm_stays_within_budget_and_never_leaks");
+    bsx_test_support::require_serial("fd_footprint_per_vm_stays_within_budget_and_never_leaks");
     // Each live VM costs the embedder driver-side fds; at the default 1024 soft ulimit an
     // unstated budget fails as an illegible mid-boot EMFILE a few hundred VMs in. This pins the
     // budget (`FDS_PER_VM`) per start path, cold, networked, prewarmed restore, and, just as
     // load-bearing, asserts teardown hands every fd back (an fd leak per run would walk any
     // long-lived embedder into EMFILE regardless of the per-VM budget).
-    use ekvm_engine::{FDS_PER_VM, sweep_orphans};
+    use bsx_engine::{FDS_PER_VM, sweep_orphans};
 
     let baseline = open_fds();
 
@@ -789,5 +789,5 @@ fn fd_footprint_per_vm_stays_within_budget_and_never_leaks() {
     }
 
     // Keep the host tidy for the suite's other leak checks (and dogfood the sweep's live-skip).
-    let _ = sweep_orphans(&ekvm_engine::BootConfig::from_env().scratch_dir);
+    let _ = sweep_orphans(&bsx_engine::BootConfig::from_env().scratch_dir);
 }

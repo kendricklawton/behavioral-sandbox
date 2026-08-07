@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use ekvm_record::{
+use bsx_record::{
     AxisGap, FlowCounts, FlowKey, HostKey, NetSection, NetStats, RecordSubject, ResourceSummary,
     RunRecord, SyscallEvent, SyscallFootprint, Timing, TrustedKey, record_hash, verify,
     verify_chain,
@@ -47,10 +47,10 @@ fn fixture_key() -> HostKey {
 /// **public** API is what makes this suite evidence that an outside consumer can reconstruct the
 /// signed bytes.
 fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-    let mut d = [0u8; ekvm_record::DETAIL_CAP];
+    let mut d = [0u8; bsx_record::DETAIL_CAP];
     let n = detail.len().min(d.len());
     d[..n].copy_from_slice(&detail[..n]);
-    let mut c = [0u8; ekvm_record::COMM_CAP];
+    let mut c = [0u8; bsx_record::COMM_CAP];
     let m = comm.len().min(c.len());
     c[..m].copy_from_slice(&comm.as_bytes()[..m]);
     SyscallEvent {
@@ -122,6 +122,10 @@ fn fixture_record() -> RunRecord {
     );
 
     RunRecord::from_parts(
+        // A frozen input: this string sits inside the signed bytes, so the fixture verifies only
+        // for this exact value. It is deliberately not today's sandbox-id prefix. The artifact
+        // stands for a record an earlier build wrote, and `sandbox_id` is an opaque string, so a
+        // prefix change is not a schema change and must not regenerate the fixture.
         RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
         Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
         resources,
@@ -189,7 +193,7 @@ fn todays_canonicalization_reproduces_the_frozen_bytes() {
 /// constants above to paste in:
 ///
 /// ```console
-/// EKVM_REGENERATE_FIXTURE=1 cargo test -p ekvm-record --test durability regenerate -- --nocapture
+/// BSX_REGENERATE_FIXTURE=1 cargo test -p bsx-record --test durability regenerate -- --nocapture
 /// ```
 ///
 /// Gated on the variable rather than `#[ignore]`, because in this repo `#[ignore]` means "needs KVM
@@ -197,7 +201,7 @@ fn todays_canonicalization_reproduces_the_frozen_bytes() {
 /// suite that is release evidence. Inert everywhere until asked for.
 #[test]
 fn regenerate_fixture() {
-    if std::env::var_os("EKVM_REGENERATE_FIXTURE").is_none() {
+    if std::env::var_os("BSX_REGENERATE_FIXTURE").is_none() {
         return;
     }
     let key = fixture_key();

@@ -1,8 +1,8 @@
-//! The live view (`ekvm run --watch`): a full-screen terminal UI over one running sandbox,
+//! The live view (`bsx run --watch`): a full-screen terminal UI over one running sandbox,
 //! its network flows and denials, its resources, the VMM's host-syscall footprint, and a running
 //! timeline of what changed. Drawn on **stderr** (stdout stays reserved for the run's result, the
 //! pipe-clean convention), redrawn from non-destructive [`LiveSnapshot`] polls, so watching never
-//! disturbs the record that [`collect`](ekvm_probes_loader::SandboxProbes::collect) finalizes.
+//! disturbs the record that [`collect`](bsx_probes_loader::SandboxProbes::collect) finalizes.
 //!
 //! The guest command runs on a worker thread the whole time; this view is a *reader*. `q`/`Esc`
 //! closes the view (the run continues headless), it never cancels the run.
@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use ekvm_engine::VmmError;
-use ekvm_probes_loader::LiveSnapshot;
-use ekvm_record::Syscall;
+use bsx_engine::VmmError;
+use bsx_probes_loader::LiveSnapshot;
+use bsx_record::Syscall;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
@@ -160,7 +160,7 @@ fn install_view_signal_restore()
     };
     let handle = signals.handle();
     let thread = std::thread::Builder::new()
-        .name("ekvm-watch-signals".into())
+        .name("bsx-watch-signals".into())
         .spawn(move || {
             if let Some(sig) = signals.forever().next() {
                 let _ = disable_raw_mode();
@@ -363,7 +363,7 @@ fn draw_header(f: &mut Frame, area: Rect, meta: &WatchMeta, elapsed: Duration, f
         )),
     ];
     f.render_widget(
-        Paragraph::new(lines).block(titled("ekvm watch · hardware-isolated run")),
+        Paragraph::new(lines).block(titled("bsx watch · hardware-isolated run")),
         area,
     );
 }
@@ -503,7 +503,7 @@ fn draw_timeline(f: &mut Frame, area: Rect, timeline: &Timeline) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ekvm_probes_loader::{
+    use bsx_probes_loader::{
         DETAIL_CAP, FlowCounts, FlowKey, NetSection, NetStats, SyscallFootprint,
     };
 
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn timeline_emits_new_notable_syscalls_once() {
-        use ekvm_probes_loader::{Syscall, SyscallEvent};
+        use bsx_probes_loader::{Syscall, SyscallEvent};
         let mk = |detail: &[u8]| {
             let mut d = [0u8; DETAIL_CAP];
             d[..detail.len()].copy_from_slice(detail);
@@ -566,7 +566,7 @@ mod tests {
                 tid: 1,
                 syscall: Syscall::Openat as u32,
                 detail_len: detail.len() as u32,
-                comm: [0; ekvm_probes_loader::COMM_CAP],
+                comm: [0; bsx_probes_loader::COMM_CAP],
                 detail: d,
             }
         };

@@ -8,12 +8,12 @@ use std::path::Path;
 use aya::Ebpf;
 use aya::maps::{Array, HashMap as AyaHashMap};
 use aya::programs::{SchedClassifier, TcAttachType, tc};
-use ekvm_probes_common::{
+use bsx_probes_common::{
     FLOW_COUNTS_SIZE, FLOW_KEY_SIZE, FLOW_KEY6_SIZE, FlowCounts, FlowKey, FlowKey6,
     MAX_POLICY_RULES, POLICY_RULE_SIZE, POLICY_RULE6_SIZE, PolicyRule, PolicyRule6,
 };
 
-use ekvm_record::{EgressPosture, NetStats};
+use bsx_record::{EgressPosture, NetStats};
 
 use crate::egress::{EgressPolicy, PolicyError};
 use crate::tracer::per_cpu_sum;
@@ -365,7 +365,7 @@ impl TapMonitor {
     /// [`ProbeError::Map`] if a map is missing, cannot be opened as an array, or holds a slot whose
     /// bytes do not decode as the shared record (which would mean the kernel struct drifted).
     pub fn posture(&self, gateway: Option<Ipv4Addr>) -> Result<EgressPosture, ProbeError> {
-        // `EgressPosture` is `#[non_exhaustive]` (defined in `ekvm-record`), so it is built
+        // `EgressPosture` is `#[non_exhaustive]` (defined in `bsx-record`), so it is built
         // through `Default` + field assignment rather than a struct literal.
         let mut posture = EgressPosture::default();
         posture.enforcing = self.enforcing()?;

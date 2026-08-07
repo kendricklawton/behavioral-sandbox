@@ -1,5 +1,5 @@
 [package]
-name = "ekvm"
+name = "bsx"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,41 +7,41 @@ rust-version.workspace = true
 repository.workspace = true
 authors.workspace = true
 publish = false
-description = "The eKVM CLI (`ekvm`): drive the Firecracker + aya code-execution sandbox."
+description = "The bsx CLI (`bsx`): drive the Firecracker + aya code-execution sandbox."
 
-# One entrypoint: `ekvm`, the canonical command, built from `src/main.rs`. The driver
-# daemon is the `ekvm serve` subcommand (`src/serve.rs`, with its `session`/`metrics`
+# One entrypoint: `bsx`, the canonical command, built from `src/main.rs`. The driver
+# daemon is the `bsx serve` subcommand (`src/serve.rs`, with its `session`/`metrics`
 # modules), not a separate binary.
 [[bin]]
-name = "ekvm"
+name = "bsx"
 path = "src/main.rs"
 
 [dependencies]
 # The audit face (`--trace`/`--record`/`--watch`): the CLI is the caller that composes the two
 # tracks: it bridges `Sandbox`'s plain values (pid/netns/tap) into the probes' attach bundle.
-ekvm-probes-loader = { path = "../probes-loader" }
-# `ekvm verify`'s half of the audit face: the record's signing/verify surface, named directly
+bsx-probes-loader = { path = "../probes-loader" }
+# `bsx verify`'s half of the audit face: the record's signing/verify surface, named directly
 # because verification is the off-host path and depends on no eBPF loader.
-ekvm-record = { path = "../record" }
-ekvm-engine = { path = "../engine" }
-# The `ekvm` daemon's wire protocol: the versioned newline-JSON contract it shares with the
-# reference client and the polyglot SDKs. A serde-only leaf, no engine internals.
-ekvm-protocol = { path = "../protocol" }
+bsx-record = { path = "../record" }
+bsx-engine = { path = "../engine" }
+# The `bsx` daemon's wire protocol: the versioned newline-JSON contract it shares with the
+# reference client and any non-Rust client. A serde-only leaf, no engine internals.
+bsx-protocol = { path = "../protocol" }
 clap = { workspace = true }
-# `ekvm run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
+# `bsx run --watch`: the live TUI, drawn on stderr (stdout stays the run's result).
 ratatui = { workspace = true }
-# `.ekvm.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
+# `.bsx.toml` config file layer (`flags > env > file > defaults`): serde-derived, unknown keys
 # denied so a config typo is a typed error, not a silent no-op.
 serde = { workspace = true }
-# `ekvm run --json`: the structured run result is one JSON object on stdout.
+# `bsx run --json`: the structured run result is one JSON object on stdout.
 serde_json = { workspace = true }
-# `ekvm`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
+# `bsx`'s SIGTERM/SIGINT handler (log, unlink the socket, exit cleanly for a supervisor).
 # Already in the dependency tree transitively (crossterm), so no new crate enters the tree.
 # A **non-destructive** readability check on the session socket, so the daemon can notice a
 # `cancel` (or a hang-up) while an exec is in flight. `UnixStream::peek` is still unstable, and
 # nix's `recv(MSG_PEEK)` is a *safe* function, so the CLI needs no `unsafe` (the same reasoning
-# that put nix in `ekvm` for a bounded connect and `ekvm-probes-loader` for `setns`). Already in the
-# tree via `ekvm`, so no new crate enters it.
+# that put nix in `bsx` for a bounded connect and `bsx-probes-loader` for `setns`). Already in the
+# tree via `bsx`, so no new crate enters it.
 nix = { version = "0.31", default-features = false, features = ["socket"] }
 signal-hook = "0.3"
 toml = { workspace = true }
@@ -50,17 +50,17 @@ tracing-subscriber.workspace = true
 
 [features]
 # Exposes the attacker-facing parsers (`config`, `policy`) as library items for the fuzz harness
-# in `fuzz/`; without it the library target is empty and the package is just the `ekvm` binary.
+# in `fuzz/`; without it the library target is empty and the package is just the `bsx` binary.
 fuzzing = []
 
 [dev-dependencies]
 # The reference client for the versioned wire API (docs/daemon.md), used by the
-# daemon's e2e demo to prove a caller drives `ekvm` over the wire alone. A dev-dep so the daemon
-# crate can spawn `ekvm` (it owns the artifacts)
-# while the client itself stays free of `ekvm`.
-ekvm-client = { path = "../client" }
+# daemon's e2e demo to prove a caller drives `bsx` over the wire alone. A dev-dep so the daemon
+# crate can spawn `bsx` (it owns the artifacts)
+# while the client itself stays free of `bsx`.
+bsx-client = { path = "../client" }
 # The shared scratch-dir guard for the unit tests and the trace e2e (one copy, not four).
-ekvm-test-support = { path = "../test-support" }
+bsx-test-support = { path = "../test-support" }
 
 [lints]
 workspace = true

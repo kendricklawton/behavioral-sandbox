@@ -14,7 +14,7 @@
 //!
 //! ```console
 //! cargo xtask build-probes
-//! cargo build -p ekvm-probes-loader --example trace_syscalls
+//! cargo build -p bsx-probes-loader --example trace_syscalls
 //! sudo setcap cap_bpf,cap_perfmon+ep target/debug/examples/trace_syscalls
 //! target/debug/examples/trace_syscalls 5           # whole host, 5s
 //! target/debug/examples/trace_syscalls 5 $(pgrep -n firecracker)   # one sandbox
@@ -26,7 +26,7 @@
 use std::error::Error;
 use std::time::{Duration, Instant};
 
-use ekvm_probes_loader::{SyscallTracer, cgroup_id_of_pid};
+use bsx_probes_loader::{SyscallTracer, cgroup_id_of_pid};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args().skip(1);

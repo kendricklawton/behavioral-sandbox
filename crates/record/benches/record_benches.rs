@@ -1,11 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use ekvm_record::{
+use bsx_record::{
     AxisGap, COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, HostKey, NetSection, NetStats,
     RecordSubject, RunRecord, SyscallEvent, SyscallFootprint, Timing, record_hash, verify,
     verify_chain,
 };
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 const IPPROTO_TCP: u8 = 6;
 

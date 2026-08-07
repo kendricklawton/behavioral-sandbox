@@ -5,7 +5,7 @@
 # `cargo xtask fuzz` (or `cargo fuzz run <target>`).
 [package]
 name = "fuzz"
-version = "0.0.2"
+version = "0.0.3"
 publish = false
 edition = "2024"
 
@@ -17,30 +17,30 @@ libfuzzer-sys = "0.4"
 serde_json = "1"
 toml = "0.8"
 
-[dependencies.ekvm-channel]
+[dependencies.bsx-channel]
 path = "../crates/channel"
 features = ["fuzzing"]
 
 # The signed-record envelope surface (`verify`/`verify_chain`/`TrustedKey::from_hex`); the public
-# API is exactly the fuzz surface, so no feature flag is needed. Named from `ekvm-record`, the
+# API is exactly the fuzz surface, so no feature flag is needed. Named from `bsx-record`, the
 # record's own crate, rather than through the eBPF loader's re-exports.
-[dependencies.ekvm-record]
+[dependencies.bsx-record]
 path = "../crates/record"
 
 # The daemon's untrusted-client wire (`read_message` over the newline-JSON contract). The `fuzzing`
 # feature exposes the internal line reader + schema gate behind module `fuzz`.
-[dependencies.ekvm-protocol]
+[dependencies.bsx-protocol]
 path = "../crates/protocol"
 features = ["fuzzing"]
 
 # The shared eBPF-boundary parsers (`SyscallEvent::from_bytes`, `parse_ipv4_5tuple`). `std` gives the
 # host-side formatting helpers; the parse surface itself is public, so no feature flag is needed.
-[dependencies.ekvm-probes-common]
+[dependencies.bsx-probes-common]
 path = "../crates/probes-common"
 features = ["std"]
 
-# CLI policy and config parsers (`parse_allow`, `EkvmToml`).
-[dependencies.ekvm]
+# CLI policy and config parsers (`parse_allow`, `BsxToml`).
+[dependencies.bsx]
 path = "../crates/cli"
 # The CLI's library target is empty by default; this exposes the parsers these targets fuzz.
 features = ["fuzzing"]
@@ -118,8 +118,8 @@ doc = false
 bench = false
 
 [[bin]]
-name = "ekvm_config"
-path = "fuzz_targets/ekvm_config.rs"
+name = "bsx_config"
+path = "fuzz_targets/bsx_config.rs"
 test = false
 doc = false
 bench = false

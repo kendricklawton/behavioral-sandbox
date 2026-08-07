@@ -28,14 +28,14 @@ gets its own instance. Latency figures are withdrawn pending a re-measurement on
 see [Benchmarks](./benchmarks.md).
 
 ## 5. Host-signed audit records
-Audit records captured by `ekvm-probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. Whichever path persists a record signs it with a host-held ed25519 key, so alteration after the run is detectable off-host (`ekvm verify`).
+Audit records captured by `bsx-probes-loader` carry the VMM's host-side syscall footprint, the guest's network flows, and its resource usage for a run. Whichever path persists a record signs it with a host-held ed25519 key, so alteration after the run is detectable off-host (`bsx verify`).
 
 ## 6. Versioned newline-JSON daemon protocol
-The `ekvm serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals; polyglot SDKs drive the wire, not the crate.
+The `bsx serve` daemon uses a versioned newline-delimited JSON wire protocol over a Unix socket. This isolates client applications from Rust engine internals; a non-Rust client drives the wire, not the crate.
 
 ## 7. Synchronous engine, no async runtime
 The driver and the daemon are **synchronous**: blocking I/O, one thread per session, no `tokio` or
-other executor anywhere in `ekvm-engine`, `ekvm-channel`, or `ekvm serve`. This is a decision, not an
+other executor anywhere in `bsx-engine`, `bsx-channel`, or `bsx serve`. This is a decision, not an
 accident of how the code grew, and it rests on three arguments. `deny.toml` bans the common runtimes
 outright, so one arriving transitively fails `cargo deny check` in the gate rather than landing as a
 lockfile diff.
@@ -47,7 +47,7 @@ before thread stacks are worth a thought. Thread-per-session at this scale is fr
 stack trace readable end to end.
 
 **The dependency surface is a security property.** This engine's pitch is that a hoster can audit
-what runs untrusted code. `ekvm-engine` is `#![forbid(unsafe_code)]` with a deliberately small dependency
+what runs untrusted code. `bsx-engine` is `#![forbid(unsafe_code)]` with a deliberately small dependency
 graph gated by `cargo deny`; pulling an executor and its ecosystem into that crate would enlarge
 the supply-chain surface of exactly the component whose minimalism is the point.
 
@@ -71,9 +71,9 @@ than on taste:
 None of these are planned, so the engine stays synchronous.
 
 **This does not constrain downstream.** Async is the right choice in plenty of places that consume
-this engine, and the architecture keeps them outside this repo: the polyglot SDKs (a Python SDK
-should ship an `async` variant, since the agent frameworks calling it are async) and any hoster's
-platform layer multiplexing many daemons. They speak the wire protocol, which is transport-agnostic
+this engine, and the architecture keeps them outside this repo: a non-Rust client (an `async`
+variant suits an agent loop, since the frameworks calling it are async) and any hoster's platform
+layer multiplexing many daemons. They speak the wire protocol, which is transport-agnostic
 and says nothing about how either side schedules its work.
 
 ## 8. Portability is a capability question, not a distro question
@@ -85,7 +85,7 @@ difference matters, the engine asks the kernel what it can *do* and reports the 
 The worked example is the host-kernel floor. It began as `>= 5.15`, a version number standing in for
 "a security-maintained LTS". That proxy fails on enterprise kernels: RHEL 9 ships `5.14.0-*.el9` and
 Red Hat backports security fixes to it for a decade, so a version test refuses a patched, supported
-kernel for no safety gain. `ekvm doctor` now probes for `cgroup.kill` (the crash-safe teardown
+kernel for no safety gain. `bsx doctor` now probes for `cgroup.kill` (the crash-safe teardown
 primitive `lifetime.rs` needs, kernel 5.14+) and keeps the version only as a fallback for hosts with
 no cgroup v2 hierarchy to probe. Same argument as the Firecracker floor: reject *unpatched*, not
 *old*.

@@ -11,10 +11,10 @@ production-ready.
 
 ## Reporting a vulnerability
 
-Report privately via GitHub's security advisories: the
-[Security tab](https://github.com/ekvm-rs/ekvm/security), or
-[this direct link](https://github.com/ekvm-rs/ekvm/security/advisories/new) to the
-reporting form. Please do not open a public issue for a suspected vulnerability.
+Report privately via GitHub's security advisories: the [Security
+tab](https://github.com/kendricklawton/behavioral-sandbox/security), or [this direct
+link](https://github.com/kendricklawton/behavioral-sandbox/security/advisories/new) to the reporting
+form. Please do not open a public issue for a suspected vulnerability.
 
 ## What to expect
 

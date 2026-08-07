@@ -27,7 +27,7 @@ members = [
 exclude = ["crates/probes", "fuzz"]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 # The minimum supported Rust version: the downstream MSRV floor. Kept in step with the exact
 # toolchain pinned in `rust-toolchain.toml`, so local, CI, and this floor are one Rust version and a
@@ -35,8 +35,8 @@ edition = "2024"
 # back-support burden this early), never incidental drift; a support window is revisited at v0.1.0.
 rust-version = "1.97"
 license = "Apache-2.0"
-authors = ["eKVM Contributors"]
-repository = "https://github.com/ekvm-rs/ekvm"
+authors = ["Kendrick Lawton"]
+repository = "https://github.com/kendricklawton/behavioral-sandbox"
 
 # Dependency-light by design. The host/driver path is `unsafe`-free; the Firecracker API is JSON
 # over a unix socket (serde), the CLI parses with clap, logs with tracing.
@@ -45,14 +45,14 @@ anyhow = "1"
 # `wrap_help` costs one crate (`terminal_size`) and is what makes `--help` legible: without it clap
 # wraps at no width at all, so a flag whose doc comment runs long prints off the right edge of any
 # terminal. That is not hypothetical here, since a `///` on a clap field *is* the user interface,
-# and `ekvm run -h` ran 19 lines past 80 columns before this was set.
+# and `bsx run -h` ran 19 lines past 80 columns before this was set.
 clap = { version = "4", features = ["derive", "wrap_help"] }
-# The CLI's live view (`ekvm run --watch`), rendered to **stderr** so stdout stays pipe-clean.
+# The CLI's live view (`bsx run --watch`), rendered to **stderr** so stdout stays pipe-clean.
 # Terminal I/O rides ratatui's re-exported crossterm, so the two can't version-skew.
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# The CLI's `.ekvm.toml` config file layer. Parse-only; keys mirror the `EKVM_*` env names.
+# The CLI's `.bsx.toml` config file layer. Parse-only; keys mirror the `BSX_*` env names.
 toml = "1"
 # Record integrity: an `ed25519` detached signature over the canonical record bytes,
 # so a consumer detects post-hoc alteration off-host. The audited, standard implementation, never a

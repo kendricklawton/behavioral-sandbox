@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use ekvm_probes_common::{COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, IPPROTO_TCP, SyscallEvent};
+use bsx_probes_common::{COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, IPPROTO_TCP, SyscallEvent};
 
 use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
 use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
@@ -20,7 +20,7 @@ use crate::{AxisGap, CgroupStats, NetStats, ResourceSummary};
 /// `detail` and `comm` are truncated to their caps rather than rejected, which is what the probe's
 /// fixed buffers do to an over-long path.
 ///
-/// [`Syscall`]: ekvm_probes_common::Syscall
+/// [`Syscall`]: bsx_probes_common::Syscall
 pub(crate) fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
     let mut d = [0u8; DETAIL_CAP];
     let n = detail.len().min(d.len());
@@ -98,7 +98,7 @@ pub(crate) fn sample(flows: Vec<(FlowKey, FlowCounts)>) -> RunRecord {
         ],
     );
     RunRecord::from_parts(
-        RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+        RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
         Some(NetSection::from_tap(flows, totals, denials, 0, 0)),
         resources,
         host_syscalls,

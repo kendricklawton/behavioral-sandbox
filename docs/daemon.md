@@ -1,7 +1,7 @@
-# Using the `ekvm serve` daemon
+# Using the `bsx serve` daemon
 
-`ekvm serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
-lifecycle over a **unix socket**, so a local client drives microVMs without linking the `ekvm-engine`
+`bsx serve` is the engine's **programmatic interface**: a long-lived daemon that exposes the sandbox
+lifecycle over a **unix socket**, so a local client drives microVMs without linking the `bsx-engine`
 library. It is a thin host of the same public API the [CLI](./cli.md) and [embedders](./embedding.md)
 use, and it stays **engine, not platform**: what sits above that line is a recorded non-goal, listed
 in [Where the engine ends](./embedding-scope.md).
@@ -13,21 +13,21 @@ in [Where the engine ends](./embedding-scope.md).
 ## Run it
 
 ```console
-ekvm serve --socket /run/ekvm/ekvm.sock                  # jailed by default (needs root + the jailer)
-ekvm serve --socket ./ekvm.sock --unjailed              # dev host that can't jail
-ekvm serve --socket ./ekvm.sock --prewarm 4             # a pre-warmed pool of 4 clones for fast `open`
+bsx serve --socket /run/bsx/bsx.sock                  # jailed by default (needs root + the jailer)
+bsx serve --socket ./bsx.sock --unjailed              # dev host that can't jail
+bsx serve --socket ./bsx.sock --prewarm 4             # a pre-warmed pool of 4 clones for fast `open`
 ```
 
-Logs go to **stderr** (`--log` / `EKVM_LOG`, default `info`); the socket carries only the protocol.
-The guest kernel/rootfs come from the environment (`EKVM_KERNEL` / `EKVM_ROOTFS` / `EKVM_MARKER`),
-the same `EKVM_*` layer the CLI reads, a daemon has no `.ekvm.toml` cwd discovery. That last part
-matters for `EKVM_GATEWAY` / `EKVM_RESOLVER`: the environment is the *only* way to give a daemon's
+Logs go to **stderr** (`--log` / `BSX_LOG`, default `info`); the socket carries only the protocol.
+The guest kernel/rootfs come from the environment (`BSX_KERNEL` / `BSX_ROOTFS` / `BSX_MARKER`),
+the same `BSX_*` layer the CLI reads, a daemon has no `.bsx.toml` cwd discovery. That last part
+matters for `BSX_GATEWAY` / `BSX_RESOLVER`: the environment is the *only* way to give a daemon's
 sessions a route, since the file layer the CLI would read is not consulted here.
 
 **Confinement is the daemon's, not the client's.** A connection cannot ask for `--unjailed`; the
 jail posture is fixed when the daemon launches, and no field of the wire's `open` carries a jail
 knob, so weakening it is not expressible on the wire. The same holds for
-`--require-limits` (also `EKVM_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
+`--require-limits` (also `BSX_REQUIRE_LIMITS`): with it set, a session whose cpu/memory cgroup caps
 can't be applied is refused rather than booted uncapped (fail-open is the default), so a
 hoster can make the resource envelope load-bearing on a shared host. Both are hoster postures, not
 per-session wire fields; the prewarm source clears `require_limits` (it must be unjailed to snapshot,
@@ -73,27 +73,25 @@ without `--prewarm`) cold-boots. Building the pool needs KVM (and root, for jail
 
 ## The reference client
 
-`ekvm-client` is the **reference Rust client**: a `Client` type that drives the whole session
+`bsx-client` is the **reference Rust client**: a `Client` type that drives the whole session
 (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`trace_summary`/`cancel`/`close`) over the socket. It
 depends on
-`ekvm-protocol` and a JSON value **only, never `ekvm-engine`**, which is the point: it demonstrates that a
-caller can drive the daemon with nothing but the wire contract, the exact surface a non-Rust SDK has.
-A language SDK is this client's method set hardened per language. Python first, since the caller
-driving a sandbox is usually an agent loop, then Go and Node; **none is written**. The wire protocol
-is documented so any language can drive it without one.
+`bsx-protocol` and a JSON value **only, never `bsx-engine`**, which is the point: it demonstrates that a
+caller can drive the daemon with nothing but the wire contract, the exact surface a non-Rust
+client has. The wire protocol is documented so any language can drive it directly.
 
-It pins the same way the engine does (`ekvm-client = { git = "https://github.com/ekvm-rs/ekvm",
-rev = "…" }`, directory `crates/client`). Its manifest carries `publish = false`, as every crate
-here does, so nothing is published from this repo today. What is worth noting is that the argument
-*against* publishing does not apply to this one: the support-window reasoning in [Where the engine
-ends](./embedding-scope.md) is computed from Firecracker's, and this crate's whole dependency list
-is `ekvm-protocol` and `serde_json`. Whether that line ever gets lifted is a question for the
-version sweep, not a promise here.
+It pins the same way the engine does (`bsx-client = { git =
+"https://github.com/kendricklawton/behavioral-sandbox", rev = "…" }`, directory `crates/client`).
+Its manifest carries `publish = false`, as every crate here does, so nothing is published from this
+repo today. What is worth noting is that the argument *against* publishing does not apply to this
+one: the support-window reasoning in [Where the engine ends](./embedding-scope.md) is computed from
+Firecracker's, and this crate's whole dependency list is `bsx-protocol` and `serde_json`. Whether
+that line ever gets lifted is a question for the version sweep, not a promise here.
 
 ```rust,ignore
-use ekvm_client::{Client, OpenParams};
+use bsx_client::{Client, OpenParams};
 
-let mut client = Client::connect("/run/ekvm/ekvm.sock")?;
+let mut client = Client::connect("/run/bsx/bsx.sock")?;
 client.open(OpenParams::default())?;                // boot the session's sandbox
 let run = client.exec(&["echo".into(), "hi".into()], "")?;
 assert_eq!(run.stdout, "hi\n");
@@ -113,7 +111,7 @@ an `allow` without `net` names the contradiction, and a
 rule set past the kernel map's fixed count is caught with the cap named. The refusal's `kind` field
 says which side must move: a malformed ask is `protocol` (fix the client), a posture the operator
 declined is `refused` (don't retry as-is); the [fault table](./daemon-protocol.md#error-kinds)
-draws the whole taxonomy. The `.ekvm.toml` operator
+draws the whole taxonomy. The `.bsx.toml` operator
 policy (`allow_net`, the `max_egress_*` ceilings) is the *CLI's* enforcement surface. The daemon
 runs the same checks, but nothing sets those values: it reads no config file and has no flag for
 them, so what actually binds a session is the flag ceilings the daemon was launched with plus the
@@ -123,7 +121,7 @@ invariants below.
 `EgressPolicy::deny_all` and adds allowances to it, so there is no path through that produces an
 unarmed tap; `open_network_resolves_the_wire_request_against_the_operators_ceilings` opens a bare
 NIC and reads the armed policy back. This is the one place the daemon is
-deliberately stricter than the CLI. A bare `ekvm run --net` attaches observe-only, and that is safe
+deliberately stricter than the CLI. A bare `bsx run --net` attaches observe-only, and that is safe
 there because the caller is local and owns the config file. A wire client is neither, so leaving it
 observe-only would mean a session could ask for a NIC with no allowances and get an unpoliced tap:
 unrestricted egress on any host that configured a gateway and furnished an uplink.
@@ -174,7 +172,7 @@ drain of in-flight sessions on shutdown is a later operational concern.
 
 ## The rest of this chapter
 
-- **[The wire protocol](./daemon-protocol.md)**, the versioned newline-JSON surface an SDK drives:
+- **[The wire protocol](./daemon-protocol.md)**, the versioned newline-JSON surface a client drives:
   requests, responses, error kinds, the compatibility rules, and worked exchanges.
 - **[Observability for the hoster](./daemon-observability.md)**, the structured logs and the
   Prometheus metrics a long-lived daemon exposes.

@@ -9,14 +9,14 @@
 //! reclaiming. [`sweep_orphans`] reclaims both dir and netns, the garbage collection a long-running
 //! runtime owes its host for the residue a crashed sibling leaves behind.
 //!
-//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`ekvm-<pid>-<n>`). The netns
+//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`bsx-<pid>-<n>`). The netns
 //! is named after the dir it belongs to, so no separate record is needed and no cross-ownership
 //! confusion arises (a restored clone's netns is named after *its own* dir, not the snapshot source's).
 //!
 //! Conservative by construction:
 //! - Only dirs **owned by the sweeping euid** are candidates. The scratch base (`/tmp` by
 //!   default) is world-writable, so a hostile local user could plant a dead-looking
-//!   `ekvm-<pid>-<n>` dir naming a *victim's* live netns; `create_workdir` makes real per-VM dirs
+//!   `bsx-<pid>-<n>` dir naming a *victim's* live netns; `create_workdir` makes real per-VM dirs
 //!   `0700`, driver-owned, so ownership is the authorship proof. The flip side is deliberate: each
 //!   uid sweeps its own residue (root sweeps root's jailed dirs, a user sweeps their user-driver
 //!   dirs), never another's.
@@ -143,7 +143,7 @@ pub fn sweep_orphans(scratch_dir: &Path) -> Result<SweepReport, VmmError> {
             }
         }
         // Defer removing a dir a live restore is staging into: a cross-process restore stages the
-        // source's disk into this dead-source-pid dir (the baked-in `ekvm-<srcpid>-<n>/rootfs.ext4`),
+        // source's disk into this dead-source-pid dir (the baked-in `bsx-<srcpid>-<n>/rootfs.ext4`),
         // and `remove_dir_all` mid-copy would flake it. The stager's pid marker is the witness (a
         // dead driver's own boot disk carries no marker, so it never defers). The netns above is
         // still reclaimed; only the dir removal waits.
@@ -212,8 +212,8 @@ fn restore_staging_in(dir: &Path) -> bool {
 }
 
 /// The owner pid embedded in a per-VM scratch-dir name, iff `name` matches the exact
-/// `ekvm-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else,
-/// including the test suite's `ekvm-<tag>-<pid>` temp dirs, is not a sweep candidate.
+/// `bsx-<pid>-<seq>` pattern `create_workdir` mints (both fields numeric). Anything else,
+/// including the test suite's `bsx-<tag>-<pid>` temp dirs, is not a sweep candidate.
 fn owner_pid(name: &str) -> Option<u32> {
     let rest = name.strip_prefix(VM_DIR_PREFIX)?.strip_prefix('-')?;
     let (pid, seq) = rest.split_once('-')?;
@@ -296,7 +296,7 @@ fn protected_identities(dir: &Path) -> BTreeSet<(u64, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ekvm_test_support::ScratchDir;
+    use bsx_test_support::ScratchDir;
 
     /// A pid guaranteed dead: spawn a short-lived child and reap it. Immediate recycling of a
     /// just-freed pid is effectively impossible (the kernel allocates pids cyclically).
@@ -311,10 +311,10 @@ mod tests {
 
     #[test]
     fn sweep_reclaims_dead_dirs_and_spares_live_and_foreign_ones() {
-        let base = ScratchDir::created("ekvm-sweep-base");
-        let dead = base.path().join(format!("ekvm-{}-0", dead_pid()));
-        let live = base.path().join(format!("ekvm-{}-0", std::process::id()));
-        let foreign = base.path().join("ekvm-bundle-1234"); // the test suite's TmpDir shape
+        let base = ScratchDir::created("bsx-sweep-base");
+        let dead = base.path().join(format!("bsx-{}-0", dead_pid()));
+        let live = base.path().join(format!("bsx-{}-0", std::process::id()));
+        let foreign = base.path().join("bsx-bundle-1234"); // the test suite's TmpDir shape
         for d in [&dead, &live, &foreign] {
             std::fs::create_dir(d).expect("create test dir");
         }
@@ -335,15 +335,15 @@ mod tests {
 
     #[test]
     fn owner_pid_parses_only_the_workdir_pattern() {
-        assert_eq!(owner_pid("ekvm-1234-0"), Some(1234));
-        assert_eq!(owner_pid("ekvm-1234-56"), Some(1234));
+        assert_eq!(owner_pid("bsx-1234-0"), Some(1234));
+        assert_eq!(owner_pid("bsx-1234-56"), Some(1234));
         for miss in [
-            "ekvm-1234",        // no sequence
-            "ekvm-bundle-1234", // a TmpDir tag, not a pid
-            "ekvm-1234-x",      // non-numeric sequence
-            "ekvm--0",          // empty pid
-            "other-1234-0",     // wrong prefix
-            "ekvm-1234-0-x",    // trailing junk in the seq field
+            "bsx-1234",        // no sequence
+            "bsx-bundle-1234", // a TmpDir tag, not a pid
+            "bsx-1234-x",      // non-numeric sequence
+            "bsx--0",          // empty pid
+            "other-1234-0",    // wrong prefix
+            "bsx-1234-0-x",    // trailing junk in the seq field
         ] {
             assert_eq!(owner_pid(miss), None, "{miss} must not parse");
         }
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn restore_staging_is_witnessed_only_by_a_live_stagers_marker() {
-        let dir = ScratchDir::created("ekvm-stage-marker");
+        let dir = ScratchDir::created("bsx-stage-marker");
         // No marker: nothing staging (a plain orphan, or a dead driver's own boot disk).
         assert!(!restore_staging_in(dir.path()));
         std::fs::write(dir.path().join("rootfs.ext4"), b"disk").expect("write a disk");
@@ -381,8 +381,8 @@ mod tests {
     fn sweep_defers_a_dead_dir_a_live_restore_is_staging_into() {
         // A cross-process restore stages the source's disk into the source's now-dead-pid dir; the
         // sweep must not `remove_dir_all` it mid-copy. The witness is the stager's live-pid marker.
-        let base = ScratchDir::created("ekvm-sweep-stage");
-        let staging = base.path().join(format!("ekvm-{}-0", dead_pid()));
+        let base = ScratchDir::created("bsx-sweep-stage");
+        let staging = base.path().join(format!("bsx-{}-0", dead_pid()));
         std::fs::create_dir(&staging).expect("create staging dir");
         std::fs::write(staging.join("rootfs.ext4"), b"disk").expect("stage a disk");
         std::fs::write(
@@ -404,8 +404,8 @@ mod tests {
         // A writable-root boot leaves the driver's own
         // `rootfs.ext4` in its workdir, and a driver that crashes soon after booting must not have
         // its dir mistaken for an in-flight restore stage and left behind.
-        let base = ScratchDir::created("ekvm-sweep-owndisk");
-        let dir = base.path().join(format!("ekvm-{}-0", dead_pid()));
+        let base = ScratchDir::created("bsx-sweep-owndisk");
+        let dir = base.path().join(format!("bsx-{}-0", dead_pid()));
         std::fs::create_dir(&dir).expect("create dead driver dir");
         std::fs::write(dir.join("rootfs.ext4"), b"disk").expect("write its boot disk");
         let report = sweep_orphans(base.path()).expect("sweep");
@@ -420,7 +420,7 @@ mod tests {
         // a dir this process creates (like every real workdir) must pass the filter. (The
         // rejection side, a foreign-uid decoy, needs a second uid, so it can't be unit-tested
         // unprivileged; the filter's equality is the whole mechanism.)
-        let dir = ScratchDir::created("ekvm-sweep-uid");
+        let dir = ScratchDir::created("bsx-sweep-uid");
         let dir_uid = std::fs::metadata(dir.path()).expect("stat test dir").uid();
         assert_eq!(own_euid(), Some(dir_uid));
     }

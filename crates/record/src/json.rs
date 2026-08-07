@@ -2,7 +2,7 @@
 //! *outside* the guest.
 //!
 //! Hand-rolled, dependency-free, and **compact** (no incidental whitespace), for the same reasons the
-//! host↔guest wire is hand-framed: the audit-log format is a contract downstream SDKs
+//! host↔guest wire is hand-framed: the audit-log format is a contract downstream clients
 //! parse, so pinning the exact bytes here, rather than trusting a derive's field order, is the
 //! point. The output is **byte-stable**: object keys are written in a fixed order and every array the
 //! record carries is already sorted by its builder ([`NetSection::from_tap`](crate::NetSection),
@@ -14,13 +14,13 @@
 //! names, so the record reads without a decoder ring. Durations are clamped to **u64 nanoseconds**
 //! (a ~584-year ceiling, the numeric bound consumers can rely on; parse these with 64-bit integers,
 //! not doubles). The human-facing view (a TUI, a pretty-printer) is the live view's job; this is the
-//! machine surface it and the SDKs build on.
+//! machine surface it and any client build on.
 
 use std::fmt::Display;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ekvm_probes_common::{FlowKey, FlowKey6, Syscall};
+use bsx_probes_common::{FlowKey, FlowKey6, Syscall};
 
 use crate::record::{AxisGap, EgressPosture, NetSection, RunRecord, SyscallFootprint};
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
@@ -28,14 +28,14 @@ use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
 /// The version of the audit-record JSON schema, emitted as the leading `schema` field of
 /// [`RunRecord::to_json`]. **Compatibility policy:** within a version, changes are *additive only*
 /// (a new field a consumer may ignore); renaming or removing a field, or changing a value's meaning,
-/// bumps this integer. A parser keys on this to know which shape it is reading. This is the seed the
-/// wire API and the language-SDK freeze harden, versioned *before* anything external parses it.
+/// bumps this integer. A parser keys on this to know which shape it is reading, and it is versioned
+/// *before* anything external parses it.
 pub const AUDIT_SCHEMA_VERSION: u32 = 1;
 
 impl RunRecord {
     /// Render this record as one line of deterministic, compact JSON, the structured output. The
     /// schema is stable and byte-for-byte reproducible across map-iteration order (see the module doc);
-    /// The live view pretty-prints it for people, and the language SDKs parse it as the audit-log format.
+    /// The live view pretty-prints it for people, and a client parses it as the audit-log format.
     /// The leading `schema` field ([`AUDIT_SCHEMA_VERSION`]) versions the format.
     #[must_use]
     pub fn to_json(&self) -> String {
@@ -351,8 +351,8 @@ fn gap_to_json(out: &mut String, gap: &AxisGap) {
 
 pub(crate) fn proto_name(out: &mut String, proto: u8) {
     match proto {
-        ekvm_probes_common::IPPROTO_TCP => out.push_str("tcp"),
-        ekvm_probes_common::IPPROTO_UDP => out.push_str("udp"),
+        bsx_probes_common::IPPROTO_TCP => out.push_str("tcp"),
+        bsx_probes_common::IPPROTO_UDP => out.push_str("udp"),
         p => {
             let _ = write!(out, "proto {p}");
         }
@@ -429,7 +429,7 @@ pub(crate) fn json_escape_into(out: &mut String, s: &str) {
 mod tests {
     use std::time::Duration;
 
-    use ekvm_probes_common::{IPPROTO_TCP, IPPROTO_UDP};
+    use bsx_probes_common::{IPPROTO_TCP, IPPROTO_UDP};
 
     use crate::record::{NetSection, RecordSubject, RunRecord, SyscallFootprint, Timing};
     use crate::testutil::{ev, flow, sample};
@@ -439,8 +439,8 @@ mod tests {
     fn a_path_cut_at_the_cap_is_marked_in_the_record() {
         // A path past the probe's capture buffer is recorded as its own prefix. Unflagged, the
         // record asserts an open that never happened, in the same shape as one that did, so the
-        // SDKs parsing this format need the flag beside the path, not a marker inside it.
-        let long = vec![b'a'; ekvm_probes_common::DETAIL_CAP - 1];
+        // A client parsing this format needs the flag beside the path, not a marker inside it.
+        let long = vec![b'a'; bsx_probes_common::DETAIL_CAP - 1];
         let mut record = sample(vec![]);
         record.host_syscalls = SyscallFootprint::from_events(0x42, &[ev(1, 0x42, &long, "sh")]);
         let json = record.to_json();
@@ -464,7 +464,7 @@ mod tests {
         ]);
         let json = record.to_json();
         let expected = concat!(
-            "{\"schema\":1,\"subject\":{\"sandbox_id\":\"ekvm-4242-0\",\"started_unix_ns\":1700000000000000000},\"timing\":{\"boot_ns\":120000000,\"exec_wall_ns\":42000000}",
+            "{\"schema\":1,\"subject\":{\"sandbox_id\":\"bsx-4242-0\",\"started_unix_ns\":1700000000000000000},\"timing\":{\"boot_ns\":120000000,\"exec_wall_ns\":42000000}",
             ",\"network\":{\"totals\":{\"ingress_packets\":2,\"ingress_bytes\":120,",
             "\"egress_packets\":3,\"egress_bytes\":200},\"flows\":[",
             "{\"src\":\"10.200.0.2\",\"src_port\":40000,\"dst\":\"1.1.1.1\",\"dst_port\":53,",
@@ -493,7 +493,7 @@ mod tests {
         // The additive-only freeze as its own pin (the compatibility policy on `to_json`): within
         // schema v1, an existing key may never be renamed or removed, only new keys added. The
         // byte-golden above legitimately *changes* on an additive extension, so this list is the
-        // part that must never shrink; a key vanishing here means an SDK built against v1 breaks
+        // part that must never shrink; a key vanishing here means a client built against v1 breaks
         // without a schema bump.
         let json = sample(vec![flow(
             [10, 200, 0, 2],
@@ -593,12 +593,12 @@ mod tests {
 
     /// Two renderings that only production reaches, so neither had a test: every gap the suite
     /// built was `Network` or `Cpu`, and every flow used TCP or UDP. Both strings land inside the
-    /// signed bytes, and both are what an SDK matches on.
+    /// signed bytes, and both are what a client matches on.
     #[test]
     fn every_gap_axis_and_an_unnamed_protocol_render() {
         // All three axes, so a typo in either renderer's arm is caught rather than two of three.
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1),
+            RecordSubject::new("bsx-4242-0".into(), 1),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -658,7 +658,7 @@ mod tests {
             "dropped_flows > 0 must mark truncation"
         );
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             Some(dropped),
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -731,7 +731,7 @@ mod tests {
     #[test]
     fn no_network_renders_null_and_control_chars_escape() {
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -751,7 +751,7 @@ mod tests {
     fn the_posture_distinguishes_a_sealed_run_from_a_routed_one() {
         use crate::json::net_to_json;
         use crate::record::EgressPosture;
-        use ekvm_probes_common::{PolicyRule, PolicyRule6};
+        use bsx_probes_common::{PolicyRule, PolicyRule6};
 
         // Two runs whose *observations* are identical: no traffic, no denials. Without the posture
         // field they render the same bytes, and a reader cannot tell a sandbox that reached
@@ -832,7 +832,7 @@ mod tests {
         // inside the signed bytes, which is why this is pinned rather than left to the golden test:
         // the golden test would happily be updated to a record with no subject at all.
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-777-3".into(), 1_700_000_000_123_456_789),
+            RecordSubject::new("bsx-777-3".into(), 1_700_000_000_123_456_789),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),
@@ -841,7 +841,7 @@ mod tests {
         );
         let json = record.to_json();
         assert!(
-            json.contains(r#""sandbox_id":"ekvm-777-3""#),
+            json.contains(r#""sandbox_id":"bsx-777-3""#),
             "a record must name its sandbox: {json}"
         );
         assert!(
@@ -856,7 +856,7 @@ mod tests {
         // gets a record, stamped 0, which reads as "unstamped" rather than as the Unix epoch. The
         // alternative (refusing to record) would lose the observation entirely, which is worse.
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-777-4".into(), 0),
+            RecordSubject::new("bsx-777-4".into(), 0),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),

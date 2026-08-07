@@ -1,9 +1,9 @@
-//! The eKVM wire protocol: a **versioned, newline-delimited JSON** contract. A client sends one
+//! The bsx wire protocol: a **versioned, newline-delimited JSON** contract. A client sends one
 //! [`Request`] line, the daemon answers with one or more [`Response`] lines; every message carries a
 //! leading [`schema`](Envelope::schema) field, so the two sides agree on the shape before either
 //! trusts the other's bytes.
 //!
-//! **Compatibility: fields grow, values grow, replies do not.** The rule set every SDK must
+//! **Compatibility: fields grow, values grow, replies do not.** The rule set every client must
 //! implement, stated here because each one reimplements these shapes without serde and would
 //! otherwise each invent its own answer (`docs/daemon-protocol.md` "Compatibility rules" is the
 //! same statement for a non-Rust reader):
@@ -20,14 +20,12 @@
 //!    exists: it decodes to [`Unknown`](FaultKind::Unknown), read as
 //!    [`Infra`](FaultKind::Infra).
 //!
-//! **This is the SDK contract seed.** It is the one artifact the daemon
-//! ([`ekvm serve`](../ekvm/index.html)), the reference client (`ekvm-client`), and the eventual
-//! polyglot SDKs all share, so it lives in its own **engine-free** crate: the wire is the
-//! contract, not shared Rust internals, and a non-Rust caller reimplements these JSON shapes without
-//! linking the engine. Freezing and formally speccing it comes with the polyglot SDKs (separate
-//! repos); until then the shape may still change,
-//! which is exactly why [`WIRE_SCHEMA`] is stamped on every message and mismatches are rejected up
-//! front rather than silently mis-decoded.
+//! **This is the client contract.** It is the one artifact the daemon
+//! ([`bsx serve`](../bsx/index.html)), the reference client (`bsx-client`), and any non-Rust
+//! client share, so it lives in its own **engine-free** crate: the wire is the contract, not
+//! shared Rust internals, and a non-Rust caller reimplements these JSON shapes without linking
+//! the engine. The shape may still change, which is exactly why [`WIRE_SCHEMA`] is stamped on
+//! every message and mismatches are rejected up front rather than silently mis-decoded.
 //!
 //! **Why JSON, not gRPC.** The daemon is synchronous, thread-per-connection, with no
 //! async runtime on the host path; gRPC would drag `tonic`/`prost` and a `tokio` stack into that
@@ -46,7 +44,7 @@
 //! whoever reaches its socket.
 //!
 //! **Text, not binary.** `stdin`, `put`/`get` `content`, and the returned `stdout`/`stderr` are
-//! **UTF-8 strings**, lossy on the way out exactly like `ekvm run --json` (so the daemon and the CLI
+//! **UTF-8 strings**, lossy on the way out exactly like `bsx run --json` (so the daemon and the CLI
 //! render a run identically). Bulk or binary I/O is the block-device path
 //! (`BootConfig::input_dir`/`output_dir`), an embedding-API concern, never this per-message line.
 //!
@@ -78,7 +76,7 @@ pub const WIRE_SCHEMA: u32 = 1;
 /// sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an unbounded
 /// read. This is the bound on *untrusted* input. Generous: a per-message `stdin`/`content` string
 /// plus its JSON envelope fits, while the exec channel still enforces the real
-/// `ekvm_engine::MAX_PAYLOAD` on the bytes that reach the guest, so this is a DoS bound, not the
+/// `bsx_engine::MAX_PAYLOAD` on the bytes that reach the guest, so this is a DoS bound, not the
 /// input-size contract.
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
@@ -162,7 +160,7 @@ pub enum Request {
     /// confinement posture (jailed vs unjailed, and whether a route out exists at all) is the
     /// daemon's launch-time choice, never a client's, so a caller can't downgrade the jail or
     /// route itself out of the sandbox. Any omitted field keeps the conservative
-    /// `ekvm_engine::Limits` default.
+    /// `bsx_engine::Limits` default.
     Open(OpenParams),
     /// Run one command in the open sandbox ([`ExecParams`]), feeding `stdin` (UTF-8 text) to it.
     /// Repeated `exec`s share the session's working directory.
@@ -257,7 +255,7 @@ pub struct OpenParams {
     /// deny-by-default policy armed before the tap goes live; omitted is deny-all.
     ///
     /// Requires [`net`](Self::net). Strings rather than a structured type so the wire
-    /// spells a rule exactly as `ekvm run --allow` does, and one parser serves both. The daemon
+    /// spells a rule exactly as `bsx run --allow` does, and one parser serves both. The daemon
     /// validates each against its own operator ceilings and refuses the session if enforcement
     /// cannot be armed, since egress policy is a security control and does not fail open.
     #[serde(default)]
@@ -269,7 +267,7 @@ pub struct OpenParams {
 /// (`#[non_exhaustive]`, like [`OpenParams`]).
 ///
 /// `Debug` is **hand-written and redacting**, not derived, for the same reason
-/// `ekvm_channel::Request`'s is: `stdin` and the `env` *values* are secret-bearing, and the daemon
+/// `bsx_channel::Request`'s is: `stdin` and the `env` *values* are secret-bearing, and the daemon
 /// does log a request on its unhandled-verb path. A derived `Debug` would put them in that log
 /// line; this one renders sizes, env keys, and argv only, mirroring the engine's stated contract
 /// (an error may name a file *path* or an env *key*, never a value).
@@ -405,7 +403,7 @@ pub enum Response {
         pooled: bool,
     },
     /// A command finished. `exit_code` is the guest command's own code (non-zero is a *result*, not
-    /// an error); `stdout`/`stderr` are lossy UTF-8 like `ekvm run --json`.
+    /// an error); `stdout`/`stderr` are lossy UTF-8 like `bsx run --json`.
     #[non_exhaustive]
     Result {
         /// The guest command's exit code (`128 + signal` on signal death).
@@ -449,7 +447,7 @@ pub enum Response {
         dir: String,
     },
     /// The session's audit record (answering [`Request::Trace`]), as the **signed record envelope**,
-    /// carried opaquely here so this crate stays free of the `ekvm-probes-loader` types.
+    /// carried opaquely here so this crate stays free of the `bsx-probes-loader` types.
     #[non_exhaustive]
     Trace {
         /// The signed envelope as a JSON object: `{schema, key_id, signature, record}`, where its
@@ -592,16 +590,16 @@ macro_rules! fault_kinds {
     ($( $(#[$doc:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
         /// Which layer faulted, so a client branches on a **value** rather than on the prose in
         /// [`Response::Error`]'s `message`. The wire form of the engine's pinned error taxonomy
-        /// (`ekvm_engine::ErrorKind`), restated here because this crate stays `ekvm`-free; the daemon maps
+        /// (`bsx_engine::ErrorKind`), restated here because this crate stays `bsx`-free; the daemon maps
         /// one onto the other, and a test pins the mapping.
         ///
         /// The `fatal` flag answers "is this session over?"; this answers "whose fault, and what
-        /// should I do?", which is the question an SDK caller actually has: a different host may
+        /// should I do?", which is the question a client caller actually has: a different host may
         /// serve an [`Infra`](Self::Infra) fault, a retry never fixes a [`Guest`](Self::Guest) one.
         ///
         /// **Unknown kinds degrade, they don't fail.** A client built against this schema that
         /// meets a kind added later decodes it as [`Unknown`](Self::Unknown) carrying the raw
-        /// string, so the enum can grow without a schema bump breaking every existing SDK. Treat
+        /// string, so the enum can grow without a schema bump breaking every existing client. Treat
         /// `Unknown` like [`Infra`](Self::Infra) (conservative: assume the host, not the caller).
         #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
         #[non_exhaustive]
@@ -639,14 +637,14 @@ macro_rules! fault_kinds {
 
 fault_kinds! {
     /// The host couldn't stand the sandbox up, or a bounded wait expired. Not the caller's fault:
-    /// retry, or try another host. (`ekvm_engine::ErrorKind::Infra`.)
+    /// retry, or try another host. (`bsx_engine::ErrorKind::Infra`.)
     Infra => "infra",
     /// A framing or I/O fault on an already-established exec channel, or a guest that went silent
     /// past its deadline. The sandbox is unreliable: retire it rather than blame the command.
-    /// (`ekvm_engine::ErrorKind::Transport`.)
+    /// (`bsx_engine::ErrorKind::Transport`.)
     Transport => "transport",
     /// The run is at fault: the command couldn't be spawned, outran its budget, or flooded output.
-    /// Retrying the same command unchanged gets the same answer. (`ekvm_engine::ErrorKind::Guest`.)
+    /// Retrying the same command unchanged gets the same answer. (`bsx_engine::ErrorKind::Guest`.)
     Guest => "guest",
     /// The client's own message was the problem: wrong [`WIRE_SCHEMA`], undecodable, oversize, or
     /// out of order (an `open` on an already-open session). Fix the client.
@@ -923,7 +921,7 @@ fn write_message<T: Serialize>(
 
 /// Fuzzing entry points behind the off-by-default `fuzzing` feature: they hand attacker-controlled
 /// bytes to the daemon's untrusted-client parse path (the hand-rolled line reader + schema gate,
-/// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`ekvm serve`)
+/// then `serde_json`) so a `cargo fuzz` (libFuzzer) target can explore it. The daemon (`bsx serve`)
 /// reads exactly these bytes off its socket from any client, so a panic, hang, or unbounded
 /// allocation on any input is the bug being hunted. Not built by default; the harness
 /// lives in `fuzz/` (excluded from the workspace). The in-gate, dependency-light counterpart is
@@ -935,7 +933,7 @@ pub mod fuzz {
     use crate::{read_request, read_response};
 
     /// Read a stream of `Request`s from `data` (the daemon's view of a client's bytes), the
-    /// highest-value target: `ekvm serve` decodes exactly this off its socket. Drains to EOF so a
+    /// highest-value target: `bsx serve` decodes exactly this off its socket. Drains to EOF so a
     /// lying length, a blank-line flood, or a mid-line truncation are all exercised.
     pub fn read_requests(data: &[u8]) {
         let mut cur = Cursor::new(data);
@@ -1035,7 +1033,7 @@ mod tests {
                 lossy: false,
             },
             Response::Snapshotted {
-                dir: "/var/lib/ekvm/snap-1".into(),
+                dir: "/var/lib/bsx/snap-1".into(),
             },
             Response::Trace {
                 record: serde_json::json!({"schema": 1, "timing": {}}),
@@ -1085,7 +1083,7 @@ mod tests {
     /// The wire's compatibility contract, as bytes: the exact line every message shape serializes
     /// to, fully populated (plus the all-omitted `open`, whose absent knobs render as `null`s).
     /// This is what "the wire does not change" means mechanically, so a red assertion here is a
-    /// **wire change**: either revert it, or bump [`WIRE_SCHEMA`] and update every SDK, never
+    /// **wire change**: either revert it, or bump [`WIRE_SCHEMA`] and update every client, never
     /// re-bless the string. The Rust-side shape of these types is free to move (params structs,
     /// constructors, variant attributes) exactly as long as this test cannot tell.
     #[test]
@@ -1196,9 +1194,9 @@ mod tests {
             ),
             (
                 Response::Snapshotted {
-                    dir: "/var/lib/ekvm/snap-1".into(),
+                    dir: "/var/lib/bsx/snap-1".into(),
                 },
-                "{\"schema\":1,\"reply\":\"snapshotted\",\"dir\":\"/var/lib/ekvm/snap-1\"}\n",
+                "{\"schema\":1,\"reply\":\"snapshotted\",\"dir\":\"/var/lib/bsx/snap-1\"}\n",
             ),
             (
                 Response::Trace {
@@ -1536,7 +1534,7 @@ mod tests {
 
     #[test]
     fn a_fault_kind_this_client_predates_decodes_instead_of_failing() {
-        // The whole point of `Unknown`: a daemon that grows a new kind must not break every SDK
+        // The whole point of `Unknown`: a daemon that grows a new kind must not break every client
         // built before it. The raw string survives so the fault is still loggable.
         let line = br#"{"schema":1,"reply":"error","message":"x","fatal":true,"kind":"quota"}"#;
         let resp: Response = read_response(&mut &line[..])
@@ -1569,7 +1567,7 @@ mod tests {
 
     #[test]
     fn the_known_fault_kinds_are_snake_case_on_the_wire() {
-        // The wire spelling is the SDK contract: these strings are what Python/Node/Go match on.
+        // The wire spelling is the client contract: these strings are what a non-Rust decoder matches on.
         for (kind, want) in [
             (FaultKind::Infra, "infra"),
             (FaultKind::Transport, "transport"),
@@ -1618,7 +1616,7 @@ mod tests {
         // `Unknown` is untagged, so it is the *decoder's* fallback, not a distinct wire value: a
         // peer that sends "guest" gets `Guest`, which is the point. The consequence worth pinning
         // is that `Unknown` does not round-trip for names that collide with known variants, so
-        // nothing (a generator, an SDK) should construct one that way.
+        // nothing (a generator, a client) should construct one that way.
         let shadowed = serde_json::to_string(&FaultKind::Unknown("guest".into()))
             .expect("a fault kind serializes");
         assert_eq!(
@@ -1659,7 +1657,7 @@ mod tests {
         // Compatibility rule 1, and the only one that is currently a serde *default* rather than
         // an explicit attribute: nothing here sets `deny_unknown_fields`, so a client predating a
         // field the daemon added still decodes the message. Pinned because turning that default
-        // around is a one-character change that would silently break every deployed SDK on the
+        // around is a one-character change that would silently break every deployed client on the
         // next daemon upgrade.
         let line =
             br#"{"schema":1,"reply":"opened","boot_ms":7,"pooled":true,"cpu_model":"future"}"#;

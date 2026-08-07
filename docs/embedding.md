@@ -1,7 +1,7 @@
 # Using the engine API
 
 The sandbox-lifecycle contract, and where the engine ends. This is the embedder's document: what
-the `ekvm-engine` library promises when you pin it and build on it, stated once, against the real
+the `bsx-engine` library promises when you pin it and build on it, stated once, against the real
 API. The rustdoc on each item is the reference; this is the contract's shape and the reasoning.
 [Where the engine ends](./embedding-scope.md) draws the line this project refuses to cross, and
 [Recipes](./embedding-recipes.md) is the same lifecycle in runnable code.
@@ -13,11 +13,11 @@ The engine is not distributed through crates.io and
 
 ```toml
 [dependencies]
-ekvm-engine = { git = "https://github.com/ekvm-rs/ekvm", rev = "<40-char sha>" }
+bsx-engine = { git = "https://github.com/kendricklawton/behavioral-sandbox", rev = "<40-char sha>" }
 ```
 
-The package is `ekvm-engine`; its directory is `crates/engine`, and a git dependency resolves by
-**package name**, so the path never appears. The bare `ekvm` is the **CLI**, a different crate that
+The package is `bsx-engine`; its directory is `crates/engine`, and a git dependency resolves by
+**package name**, so the path never appears. The bare `bsx` is the **CLI**, a different crate that
 happens to live in the same repository, so depending on it gets you the command-line tool's
 internals rather than the engine. Take the rev from a tag or a commit you have read, not from a
 branch: a moving `branch = "main"` re-resolves on every `cargo update`, which is the opposite of a
@@ -45,7 +45,7 @@ jail (no real root, no `jailer` binary) is the *differently named constructor*
 `Sandbox::open_unjailed`, so an unconfined sandbox is greppable in your source and can never happen
 by a forgotten flag ([decision 3](./architecture-decisions.md#3-jailed-execution-by-default)).
 Artifacts (kernel, rootfs, `firecracker`) layer from the environment
-(`EKVM_KERNEL`, `EKVM_ROOTFS`, …) under explicit `BootConfig` fields.
+(`BSX_KERNEL`, `BSX_ROOTFS`, …) under explicit `BootConfig` fields.
 
 Networking is off by default. `enable_network` gives the guest a tap whose only reachable address is
 the host end of its /30; `egress` additionally hands it a default route and a resolver, which is read
@@ -53,7 +53,7 @@ only when `enable_network` is set and ignored otherwise. Neither builds a path: 
 forwarding, or NAT, so on a netns nothing has furnished the reachable set is unchanged and only what
 the host can *observe* widens. Attaching an uplink is the embedder's, per
 [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster);
-bounding what crosses the tap is the eBPF policy in [`ekvm-probes-loader`](./probes.md).
+bounding what crosses the tap is the eBPF policy in [`bsx-probes-loader`](./probes.md).
 
 ### Exec: synchronous, bounded, faithful
 
@@ -72,7 +72,7 @@ Session state persists for the VM lifetime and is cleared upon `shutdown`.
 
 ### Budgets: resource policy
 
-`Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. The non-zero types make a zero unrepresentable rather than validated at runtime. Network egress is separate from `Limits`: the route is `BootConfig::egress` (a `GuestEgress`), and the packet-level allow-list lives in `ekvm-probes-loader`'s policy types. Cgroup constraints are best-effort when host controllers are unassigned; the KVM boundary and the jailer are not conditional on them.
+`Limits` specifies per-sandbox resource constraints: `vcpus` (`NonZeroU8`), `mem_mib` (`NonZeroU32`), `wall` (execution deadline), and `output_cap`. The non-zero types make a zero unrepresentable rather than validated at runtime. Network egress is separate from `Limits`: the route is `BootConfig::egress` (a `GuestEgress`), and the packet-level allow-list lives in `bsx-probes-loader`'s policy types. Cgroup constraints are best-effort when host controllers are unassigned; the KVM boundary and the jailer are not conditional on them.
 
 ### Errors: three buckets you can branch on
 

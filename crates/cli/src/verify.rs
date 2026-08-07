@@ -1,4 +1,4 @@
-//! `ekvm verify <record>`: check a signed audit record's `ed25519` signature.
+//! `bsx verify <record>`: check a signed audit record's `ed25519` signature.
 //!
 //! Re-reads the canonical record bytes from the envelope and verifies them against a **trusted**
 //! public key: the host's own by default, or one (or more) `--key <hex>` supplied out of band, so a
@@ -17,15 +17,15 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use ekvm_record::{HostKey, MAX_ENVELOPE_BYTES, TrustedKey, verify, verify_chain};
+use bsx_record::{HostKey, MAX_ENVELOPE_BYTES, TrustedKey, verify, verify_chain};
 
 use crate::CliError;
 use crate::config;
 
-/// `ekvm verify` arguments.
+/// `bsx verify` arguments.
 #[derive(clap::Args, Debug)]
 pub struct VerifyArgs {
-    /// The signed record file to check (as written by `ekvm run --record`).
+    /// The signed record file to check (as written by `bsx run --record`).
     #[arg(value_name = "RECORD")]
     record: PathBuf,
     /// A trusted public key as 64 hex chars (a record's `key_id`), repeatable. Default: the host's
@@ -35,7 +35,7 @@ pub struct VerifyArgs {
 }
 
 /// Verify the record file, printing the outcome and returning a non-zero exit on any failure.
-pub fn run(args: VerifyArgs, file: Option<&config::EkvmToml>) -> Result<ExitCode, CliError> {
+pub fn run(args: VerifyArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, CliError> {
     let content = read_bounded(&args.record)?;
     let trusted = trusted_keys(&args, file)?;
 
@@ -96,13 +96,13 @@ fn read_bounded(path: &std::path::Path) -> Result<String, CliError> {
 }
 
 /// The trusted key **set**: the union of explicit `--key` values, the configured trusted keys
-/// (`EKVM_TRUSTED_KEYS` / `.ekvm.toml`, for rotation), and the host's own current signing key.
+/// (`BSX_TRUSTED_KEYS` / `.bsx.toml`, for rotation), and the host's own current signing key.
 /// Trusting a set is what lets a record signed *before* a key rotation still verify:
 /// keep the old public key in the set and it stays valid. Everything reduces to `key_id` hex, so the
 /// sources dedup cleanly.
 fn trusted_keys(
     args: &VerifyArgs,
-    file: Option<&config::EkvmToml>,
+    file: Option<&config::BsxToml>,
 ) -> Result<Vec<TrustedKey>, CliError> {
     let mut hexes: Vec<String> = args.keys.clone();
     hexes.extend(config::trusted_key_hexes(file));
@@ -123,7 +123,7 @@ fn trusted_keys(
     hexes.dedup();
     if hexes.is_empty() {
         return Err(CliError::Cli(format!(
-            "no trusted key: pass --key <hex>, set EKVM_TRUSTED_KEYS, or provide a signing key at {}",
+            "no trusted key: pass --key <hex>, set BSX_TRUSTED_KEYS, or provide a signing key at {}",
             key_path.display()
         )));
     }

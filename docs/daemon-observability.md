@@ -6,13 +6,13 @@ engine.
 ## Structured logs
 
 Operational logs are structured `tracing` events on **stderr**, human-readable text by default,
-or one JSON object per line with `--log-json` (or `EKVM_LOG_FORMAT=json`) for a log shipper. The
+or one JSON object per line with `--log-json` (or `BSX_LOG_FORMAT=json`) for a log shipper. The
 events and their fields (`vmm_pid`, `boot_ms`, `pooled`, …) are identical in both encodings; the flag
-changes only the framing. The filter is `--log` / `EKVM_LOG` (default `info`, the per-session
+changes only the framing. The filter is `--log` / `BSX_LOG` (default `info`, the per-session
 open/close lines are the daemon's operational trace).
 
 ```console
-ekvm serve --socket ./ekvm.sock --log-json --log info 2>> /var/log/ekvm.jsonl
+bsx serve --socket ./bsx.sock --log-json --log info 2>> /var/log/bsx.jsonl
 ```
 
 ## Metrics (Prometheus)
@@ -20,7 +20,7 @@ ekvm serve --socket ./ekvm.sock --log-json --log info 2>> /var/log/ekvm.jsonl
 `--metrics ADDR` serves the Prometheus text-exposition format at `GET /metrics`:
 
 ```console
-ekvm serve --socket ./ekvm.sock --metrics 127.0.0.1:9920
+bsx serve --socket ./bsx.sock --metrics 127.0.0.1:9920
 curl -s http://127.0.0.1:9920/metrics
 ```
 
@@ -32,27 +32,27 @@ convention of base units: **seconds**, never milliseconds.
 
 | Metric | Type | Meaning |
 |---|---|---|
-| `ekvm_build_info{version=…}` | gauge | Build metadata (value always 1). |
-| `ekvm_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
-| `ekvm_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
-| `ekvm_open_refusals_total{reason=…}` | counter | `at_capacity` refusals, by which ceiling refused: `sessions` (`--max-sessions`) vs `resources` (`--max-committed-*`). A flat zero here plus flat opens means saturation, not calm. |
-| `ekvm_sessions_active` | gauge | Sessions currently open (one live microVM each). |
-| `ekvm_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
-| `ekvm_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
-| `ekvm_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
-| `ekvm_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
-| `ekvm_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
-| `ekvm_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
-| `ekvm_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
-| `ekvm_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
-| `ekvm_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions and pre-warmed pool clones: the RAM actually spoken for. |
-| `ekvm_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
+| `bsx_build_info{version=…}` | gauge | Build metadata (value always 1). |
+| `bsx_sessions_opened_total{pooled=…}` | counter | Sessions opened, pre-warmed pool vs cold boot. |
+| `bsx_session_open_failures_total` | counter | `open`s that never produced a sandbox. |
+| `bsx_open_refusals_total{reason=…}` | counter | `at_capacity` refusals, by which ceiling refused: `sessions` (`--max-sessions`) vs `resources` (`--max-committed-*`). A flat zero here plus flat opens means saturation, not calm. |
+| `bsx_sessions_active` | gauge | Sessions currently open (one live microVM each). |
+| `bsx_sentinel_degraded` | gauge | Active sessions whose VM-lifetime sentinel could not be armed (fallback to Drop-only cleanup). |
+| `bsx_sweep_reclaimed_total{resource=…}` | counter | Orphaned VM resources reclaimed by sweeps (`resource="dirs"` or `"netns"`). |
+| `bsx_requests_total{verb=…}` | counter | Requests served after `open`, by wire verb. |
+| `bsx_request_errors_total{kind=…}` | counter | Errored requests: `guest` (session survives) vs `infra` (session-ending). |
+| `bsx_protocol_errors_total` | counter | Wire lines that failed to decode (malformed, oversize, wrong schema). |
+| `bsx_boot_seconds` | histogram | Boot-to-serving latency (warm pops and cold boots alike). |
+| `bsx_guest_command_seconds` | histogram | Host-observed wall time of guest commands. |
+| `bsx_pool_ready` | gauge | Warm clones ready in the pool, **absent** (not zero) without a pool. |
+| `bsx_committed_mem_mib` / `_committed_vcpus` | gauge | Guest memory (MiB) / vCPUs committed across live sessions and pre-warmed pool clones: the RAM actually spoken for. |
+| `bsx_capacity_mem_mib` / `_capacity_vcpus` | gauge | The aggregate ceilings (`--max-committed-mem-mib` / `--max-committed-vcpus`; `0` = unlimited). Scrape committed-vs-capacity to route on real headroom. |
 
 A minimal scrape config:
 
 ```yaml
 scrape_configs:
-  - job_name: ekvm
+  - job_name: bsx
     static_configs:
       - targets: ["127.0.0.1:9920"]
 ```

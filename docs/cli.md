@@ -1,28 +1,28 @@
-# Using the eKVM CLI
+# Using the bsx CLI
 
 In addition to the [embedding API](./embedding.md), which lets you use the engine as a library, the
-project provides an `ekvm` CLI to run untrusted code in a hardware-isolated microVM from the command
+project provides an `bsx` CLI to run untrusted code in a hardware-isolated microVM from the command
 line. It is the engine's **reference embedder**: the whole sandbox lifecycle, open (confined by
 default), exec with inputs, collect artifacts, close, in one command.
 
 In short, you can run a command inside a microVM like so:
 
 ```console
-ekvm run -- python3 -c 'print(2 + 2)'
+bsx run -- python3 -c 'print(2 + 2)'
 ```
 
 Or, to prove the boundary without running anything of your own, boot a microVM to userspace and read
 its console:
 
 ```console
-ekvm run --demo-boot
+bsx run --demo-boot
 ```
 
 The defaults point at the guest rootfs (built by `cargo xtask build-rootfs` or `self-host`), which
 carries `python3`, `node`, and the in-guest exec agent. From a source checkout without installing,
-the same commands are `cargo run -p ekvm -- run …`.
+the same commands are `cargo run -p bsx -- run …`.
 
-`ekvm run` is **jailed by default**: the VMM runs under Firecracker's jailer (chroot, uid/gid drop,
+`bsx run` is **jailed by default**: the VMM runs under Firecracker's jailer (chroot, uid/gid drop,
 its own namespaces, a cgroup), with Firecracker's own built-in seccomp filters left on top because
 the driver never passes `--no-seccomp`. That needs real root and the `jailer` binary. On a dev box
 without them, `--unjailed` is the explicit, greppable opt-out, and the guest still sits behind the KVM
@@ -39,8 +39,8 @@ out of scope.
 
 | Engine capability | CLI surface |
 |-------------------|-------------|
-| Boot + one exec | [`ekvm run -- <cmd>`](./cli-commands.md#ekvm-run) |
-| Stateful session | [`ekvm shell`](./cli-commands.md#ekvm-shell) |
+| Boot + one exec | [`bsx run -- <cmd>`](./cli-commands.md#bsx-run) |
+| Stateful session | [`bsx shell`](./cli-commands.md#bsx-shell) |
 | Confinement (jail) | jailed by default; `--unjailed` opts out |
 | Resource limits (`Limits`) | `--vcpus`, `--mem`, `--wall`, `--output-cap` |
 | Load-bearing limits (`require_limits`) | `--require-limits`: refuse, rather than boot uncapped, when a cgroup cap can't apply |
@@ -50,28 +50,28 @@ out of scope.
 | A route out (`GuestEgress`) | `--gateway`, `--resolver` (the hoster furnishes the uplink; [decision 9](./architecture-decisions.md#9-egress-is-enabled-by-the-engine-constructed-by-the-hoster)) |
 | Egress policy (`EgressPolicy`) | [`--allow IP[/CIDR][:PORT][/PROTO]`](./cli-observe.md#enforcing-egress-with---allow) |
 | Host-observed audit record | [`--trace`, `--record`, `--record-summary`, `--watch`](./cli-observe.md) |
-| Verify a signed record | [`ekvm verify <record>`](./cli-commands.md#ekvm-verify) |
+| Verify a signed record | [`bsx verify <record>`](./cli-commands.md#bsx-verify) |
 | Structured run result | `--json` |
-| Host readiness | [`ekvm doctor`](./cli-commands.md#ekvm-doctor) |
+| Host readiness | [`bsx doctor`](./cli-commands.md#bsx-doctor) |
 | Crashed-run residue (`sweep_orphans`) | no flag: run automatically before every boot subcommand, reclaiming this euid's dead-pid scratch dirs and netns |
-| Config layering | [flags > env (`EKVM_*`) > `.ekvm.toml` > defaults](./cli-config.md) |
+| Config layering | [flags > env (`BSX_*`) > `.bsx.toml` > defaults](./cli-config.md) |
 
 ## Deliberately not in the CLI
 
 Daemon-scoped, embedding-API, or platform, by design. Their absence is intent, not omission.
 "The CLI" here means the one-shot commands (`run`, `shell`, `doctor`, `verify`): a process that
-boots one VM, does its work, and exits. The daemon is the **same `ekvm` binary** started as
-`ekvm serve`, so a daemon-scoped feature is one subcommand away, not a separate install; what
+boots one VM, does its work, and exits. The daemon is the **same `bsx` binary** started as
+`bsx serve`, so a daemon-scoped feature is one subcommand away, not a separate install; what
 differs is the operational shape, a long-lived process with its own flags, policy, and wire API.
 
 - **Snapshots and the pre-warmed pool.** A pre-warmed pool is a long-lived-process concern, so it
-  lives in the [`ekvm serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
+  lives in the [`bsx serve` daemon](./daemon.md) (`--prewarm`), not a one-shot CLI.
 - **The wire API.** The programmatic driver surface is
   [the daemon's](./daemon-protocol.md), not a subcommand.
 - **The shared read-only root** (`BootConfig::read_only_root`, one base image served `O_RDONLY` to
   many VMs with a per-run tmpfs overlay). A one-shot CLI boots one VM, so the sharing has nothing to
   share with; it pays off across concurrent sandboxes, which is an embedder's arrangement. Nothing
-  the CLI or the daemon runs sets it, so each `ekvm run` gets its own read-write copy of the base.
+  the CLI or the daemon runs sets it, so each `bsx run` gets its own read-write copy of the base.
 - **Bulk block-device I/O** (`BootConfig::input_dir`/`output_dir`, whole directories or large files as
   ext4 devices) and **out-of-band control** (`KillHandle`, force-killing a blocked exec from another
   thread) are *embedding-API* capabilities. The CLI's file path is per-frame `--put`/`--get` (small,

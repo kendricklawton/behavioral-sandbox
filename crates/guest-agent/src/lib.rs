@@ -1,4 +1,4 @@
-//! `ekvm-guest-agent`, the in-guest agent that runs a command and reports its result over the channel.
+//! `bsx-guest-agent`, the in-guest agent that runs a command and reports its result over the channel.
 //!
 //! [`serve`] handles **one connection**: it accepts a [`ServerConnection`], reads a single
 //! [`Request::Exec`], runs the command, streams its `stdout`/`stderr` back as they arrive, and ends
@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use ekvm_channel::{ChannelError, Request, Response, ServerConnection};
+use bsx_channel::{ChannelError, Request, Response, ServerConnection};
 
 /// Agent-side ceiling on a command's runtime: a host-requested timeout is clamped to this, so a
 /// buggy host can't ask the agent to wait effectively forever.
@@ -37,9 +37,9 @@ const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(3600); // 1 hour
 
 /// How often the reaper polls for the child's exit while waiting toward the deadline.
 /// Exponential backoff for the child-exit poll: start tight so a fast command returns almost at
-/// once, widen toward a cap so a long one polls cheaply. Mirrors `ekvm`'s `PollBackoff` (the boot
+/// once, widen toward a cap so a long one polls cheaply. Mirrors `bsx`'s `PollBackoff` (the boot
 /// path's proven fix for the same fixed-tick quantization); kept local because this crate is the
-/// static musl guest binary and takes no `ekvm` dependency.
+/// static musl guest binary and takes no `bsx` dependency.
 struct WaitBackoff {
     next: Duration,
 }
@@ -241,7 +241,7 @@ where
             let mut cmd = Command::new("sh");
             cmd.arg("-c")
                 .arg(TRAMPOLINE_SCRIPT)
-                .arg("ekvm-exec-trampoline") // $0
+                .arg("bsx-exec-trampoline") // $0
                 .arg(&cg.path)
                 .arg(program)
                 .args(args);
@@ -474,7 +474,7 @@ impl ExecCgroup {
     /// Create a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a cgroup v2 mount.
     fn create() -> Option<Self> {
         let path = PathBuf::from(CGROUP_ROOT).join(format!(
-            "ekvm-exec-{}-{}",
+            "bsx-exec-{}-{}",
             std::process::id(),
             CGROUP_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -521,7 +521,7 @@ impl RunDir {
     /// A fresh, uniquely-named per-run dir under `/tmp`, removed on drop.
     fn fresh() -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!(
-            "ekvm-run-{}-{}",
+            "bsx-run-{}-{}",
             std::process::id(),
             RUN_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -588,7 +588,7 @@ impl RunDir {
         // `PayloadTooLarge` catch is the precise-boundary/TOCTOU backstop (a file that grows between
         // this stat and the read still can't overflow a frame).
         match std::fs::metadata(&real) {
-            Ok(md) if md.len() > ekvm_channel::MAX_PAYLOAD as u64 => {
+            Ok(md) if md.len() > bsx_channel::MAX_PAYLOAD as u64 => {
                 tracing::warn!(
                     "artifact {rel:?} exceeds the frame cap ({} bytes); skipped",
                     md.len()

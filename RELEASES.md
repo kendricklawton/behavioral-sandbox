@@ -1,41 +1,41 @@
 # Releases
 
-> **Only the release mechanics below are in force.** `v0.0.1` and `v0.0.2` (both 2026-08-02) are
-> checkpoint tags that exercised them: the tag-triggered build, signing, the manifest,
-> draft-then-publish, and `install.sh`'s download path. The API surface, host requirements, support
-> policy, and Rust policy still describe what is *planned* for `v0.1.0`, not commitments that apply
-> today.
+> **Only the release mechanics below are in force.** `v0.0.1` and `v0.0.2` (both 2026-08-02) and
+> `v0.0.3` (2026-08-07) are checkpoint tags that exercised them: the tag-triggered build, signing,
+> the manifest, draft-then-publish, and `install.sh`'s download path. The API surface, host
+> requirements, support policy, and Rust policy still describe what is *planned* for `v0.1.0`, not
+> commitments that apply today.
 
 ## v0.1.0 (Unreleased, planned)
 
-The first supported release of eKVM: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
+The first supported release of bsx: a self-hostable engine that boots a hardware-isolated Firecracker microVM, executes untrusted code, enforces host-side eBPF policy, and emits a host-signed audit record.
 
 ### Added
-- **Hardware Isolation Driver (`ekvm-engine`, `crates/engine`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
-- **Host eBPF Observability (`ekvm-probes` & `ekvm-probes-loader`)**: `aya`-based eBPF probes for out-of-guest syscall tracing, TAP network flow monitoring, and cgroup v2 resource accounting.
-- **Daemon Wire Interface (`ekvm-protocol` & `ekvm`)**: Versioned newline-delimited JSON wire API (`schema: 1`) served by `ekvm serve` over Unix domain sockets.
+- **Hardware Isolation Driver (`bsx-engine`, `crates/engine`)**: `Sandbox` lifecycle API managing Firecracker microVM boot, jailed execution, disk staging, and teardown.
+- **Host eBPF Observability (`bsx-probes` & `bsx-probes-loader`)**: `aya`-based eBPF probes for out-of-guest syscall tracing, TAP network flow monitoring, and cgroup v2 resource accounting.
+- **Daemon Wire Interface (`bsx-protocol` & `bsx`)**: Versioned newline-delimited JSON wire API (`schema: 1`) served by `bsx serve` over Unix domain sockets.
 - **Audit Records**: Host-observed, Ed25519-signed JSON audit logs (`RunRecord`) with a hash-chained `trace`. What a signature establishes is in [docs/security-threat-model.md](docs/security-threat-model.md#record-integrity-beyond-the-guest).
-- **Reference Rust Client (`ekvm-client`, `crates/client`)**: Dependency-light reference client driving `ekvm serve` over Unix sockets.
+- **Reference Rust Client (`bsx-client`, `crates/client`)**: Dependency-light reference client driving `bsx serve` over Unix sockets.
 - **Pre-warmed Sandbox Pool**: Snapshot-restore pool for warm sandbox starts. Latency figures are withdrawn pending a re-measurement on a verified host; see [docs/benchmarks.md](docs/benchmarks.md).
-- **Host Diagnostics (`ekvm doctor`)**: Pre-flight host verification for `/dev/kvm`, the host-kernel floor (a probed `cgroup.kill`, else >= 5.15), cgroup v2, and BTF eBPF support.
-- **Distribution Tooling (`xtask`)**: Release packaging (`cargo xtask dist`) producing release tarballs (`ekvm-0.1.0-x86_64-linux.tar.gz`), a signed `SHA256SUMS` manifest, and single-command installer (`install.sh`).
+- **Host Diagnostics (`bsx doctor`)**: Pre-flight host verification for `/dev/kvm`, the host-kernel floor (a probed `cgroup.kill`, else >= 5.15), cgroup v2, and BTF eBPF support.
+- **Distribution Tooling (`xtask`)**: Release packaging (`cargo xtask dist`) producing release tarballs (`bsx-0.1.0-x86_64-linux.tar.gz`), a signed `SHA256SUMS` manifest, and single-command installer (`install.sh`).
 
 ### Planned pinned API surface (v0.1.0)
 The same surface `AGENTS.md`'s `api`-scope rule and
 [the Semver section](docs/embedding-scope.md#semver--api-stability) name, restated here as what a
 tag would freeze.
-- **Rust Driver API** (`ekvm-engine`): `Sandbox`, `Limits`, `RunResult`, `VmmError` (`kind() -> ErrorKind`).
-- **Host↔guest framing** (`ekvm-channel`): the length-prefixed exec protocol the driver and the
+- **Rust Driver API** (`bsx-engine`): `Sandbox`, `Limits`, `RunResult`, `VmmError` (`kind() -> ErrorKind`).
+- **Host↔guest framing** (`bsx-channel`): the length-prefixed exec protocol the driver and the
   in-guest agent share.
-- **Daemon wire protocol** (`ekvm-protocol`): line-delimited JSON (`schema: 1`).
-- **Signed audit record** (`ekvm-record`): the record's shape, its canonical JSON, and the
+- **Daemon wire protocol** (`bsx-protocol`): line-delimited JSON (`schema: 1`).
+- **Signed audit record** (`bsx-record`): the record's shape, its canonical JSON, and the
   signature envelope (`verify`, `verify_chain`, `record_hash`). The one contract here whose
   breakage reaches backwards, since it invalidates records already written.
 
 ### Planned host requirements (v0.1.0)
 - **Host**: Linux `x86_64` with `/dev/kvm`, cgroup v2, and kernel BTF (`/sys/kernel/btf/vmlinux`);
   a kernel providing `cgroup.kill`, else >= 5.15 where there is no cgroup v2 hierarchy to probe.
-  `ekvm doctor` verifies all of it and prints the fix for whatever is missing.
+  `bsx doctor` verifies all of it and prints the fix for whatever is missing.
 - **Firecracker**: v1.15 through v1.16 supported (upstream's current support window);
   v1.16.1 is the pinned, tested, hash-verified release. One measured difference on v1.15:
   the `clock_realtime` snapshot-load flag is v1.16+, and the engine withholds it from an
@@ -50,6 +50,36 @@ tag would freeze.
 
 ---
 
+## v0.0.3 (2026-08-07, checkpoint)
+
+The rename checkpoint: the crates, the binary, and the configuration surface are `bsx`. Still not a
+supported release; pin a git rev.
+
+### Changed
+- **BREAKING: every package name and the binary.** The `ekvm-*` crates are `bsx-*` and the `ekvm`
+  binary is `bsx`. Nothing moved inside the pinned surface (`bsx-engine`, `bsx-channel`,
+  `bsx-protocol`, `bsx-record`): no type, function, or wire shape changed along with the names. The
+  one type that was renamed, `EkvmToml` to `BsxToml`, is in the CLI's own internals.
+- **BREAKING: the configuration surface.** `EKVM_*` environment variables are `BSX_*`, and the file
+  the CLI walks up from the cwd for is `.bsx.toml`. The secret the tag build reads for release
+  signing is `BSX_RELEASE_SIGNING_KEY`.
+- **BREAKING: the guest data-disk labels.** `INPUT_LABEL` and `OUTPUT_LABEL` are `bsx-input` and
+  `bsx-output`, single-sourced in `bsx-channel` so the driver that stamps a label and the guest that
+  resolves it cannot disagree. `injects_a_large_file_via_block_device` and
+  `collects_outputs_via_block_device` boot a guest that mounts both by label and round-trip a file
+  larger than the channel's frame cap.
+- **The repository is `kendricklawton/behavioral-sandbox`**, and release assets are named
+  `bsx-<version>-x86_64-linux.tar.gz`. The `v0.0.1` and `v0.0.2` assets carry the previous name.
+- **The signed record format is unchanged**: `AUDIT_SCHEMA_VERSION` 1, envelope `schema` 2. A
+  `sandbox_id` carries a `bsx-` prefix, which is a value rather than a schema field, so
+  `crates/record/tests/durability.rs` still holds today's canonicalization to an envelope signed
+  2026-08-03 and that envelope still verifies.
+
+### Removed
+- Documentation of language SDKs and of three companion SDK repositories, none of which exist.
+
+---
+
 ## v0.0.2 (2026-08-02, checkpoint)
 
 A second checkpoint, cut because `v0.0.1` shipped two defects worth correcting before anyone
@@ -57,8 +87,8 @@ installs from a link. Still not a supported release; pin a git rev.
 
 ### Fixed
 - **The reported version.** `v0.0.1` named its tarball from the pushed tag while the workspace was
-  still `0.0.0`, so a binary installed from `ekvm-0.0.1-x86_64-linux.tar.gz` answered
-  `ekvm --version` with `0.0.0`.
+  still `0.0.0`, so a binary installed from `bsx-0.0.1-x86_64-linux.tar.gz` answered
+  `bsx --version` with `0.0.0`.
 - **A truncated `curl … | sh`.** `sh` reading from a pipe executes as it reads, so a connection
   dropping mid-transfer ran a prefix of `install.sh`: the binary landed, the kernel, rootfs and
   probes object did not, and it exited 0. Every filesystem-touching statement now runs from a
@@ -93,7 +123,7 @@ tag (and after any rotation), the operator ceremony is:
    its SPKI PEM.
 2. Pin the public key: commit the PEM as `release-key.pem` (repo root) **and** into the
    `install.sh` heredoc (a dist test asserts the two are byte-identical).
-3. `gh secret set EKVM_RELEASE_SIGNING_KEY < <file>` wires the private key into release CI.
+3. `gh secret set BSX_RELEASE_SIGNING_KEY < <file>` wires the private key into release CI.
 
 Tag builds hard-fail without the secret, and the attach step refuses to publish without
 `SHA256SUMS.sig`: a mis-wired secret cannot ship an unsigned release. `workflow_dispatch` dry
@@ -118,9 +148,9 @@ never enters the repo or `dist/`.
 Firecracker range, floor through pin (v0.1.0 supports v1.15 through v1.16). The line stays
 supported for as long as any Firecracker series in that range is still under upstream
 support; once the last of them ages out (about one Firecracker release cycle, roughly six
-months, after the next eKVM minor ships), every VMM the line can drive is unpatched, and
+months, after the next bsx minor ships), every VMM the line can drive is unpatched, and
 continuing to "support" it would bless untrusted code on an unmaintained isolation
-boundary, the same threat-model reasoning behind `ekvm doctor`'s host kernel floor. The
+boundary, the same threat-model reasoning behind `bsx doctor`'s host kernel floor. The
 weekly `firecracker-pin` workflow watches upstream's support table, so the end of a window
 is observed, not remembered.
 
@@ -129,5 +159,5 @@ is observed, not remembered.
 ## Rust Version Support
 
 - **Policy**: Supported Rust is current stable, pinned exactly in `rust-toolchain.toml` and mirrored in the workspace package `rust-version`.
-- **The eBPF crate (`ekvm-probes`, `crates/probes`)**: Nightly by construction, targeting `bpfel-unknown-none` via `bpf-linker`.
+- **The eBPF crate (`bsx-probes`, `crates/probes`)**: Nightly by construction, targeting `bpfel-unknown-none` via `bpf-linker`.
 - **Bumping Rust**: Update `rust-toolchain.toml` and `Cargo.toml` together, verify `cargo xtask ci` passes, and document in release notes.

@@ -1,4 +1,4 @@
-//! The human-readable audit trail (`ekvm run --trace`): a pretty rendering of the per-run
+//! The human-readable audit trail (`bsx run --trace`): a pretty rendering of the per-run
 //! [`RunRecord`] for people at a terminal. The **machine** surface is the record's deterministic
 //! JSON (`--record`, `RunRecord::to_json`); this rendering makes no stability promise beyond
 //! being deterministic for the same record, parse the JSON, read this.
@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use ekvm_probes_loader::{AxisGap, RunRecord, Syscall};
+use bsx_probes_loader::{AxisGap, RunRecord, Syscall};
 
 /// How many notable host syscalls the trail prints before folding the rest into a count, the
 /// record itself already caps and truncation-flags the full set; this is only about screen space.
@@ -201,18 +201,18 @@ pub(crate) fn syscall_name(kind: Syscall) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ekvm_probes_loader::RecordSubject;
-    use ekvm_probes_loader::{
+    use bsx_probes_loader::RecordSubject;
+    use bsx_probes_loader::{
         FlowCounts, FlowKey, FlowKey6, NetSection, NetStats, ResourceSummary, SyscallEvent,
         SyscallFootprint, Timing,
     };
 
     /// A synthetic event from public fields, as the loader's own unit tests build them.
     fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
-        let mut d = [0u8; ekvm_probes_loader::DETAIL_CAP];
+        let mut d = [0u8; bsx_probes_loader::DETAIL_CAP];
         let n = detail.len().min(d.len());
         d[..n].copy_from_slice(&detail[..n]);
-        let mut c = [0u8; ekvm_probes_loader::COMM_CAP];
+        let mut c = [0u8; bsx_probes_loader::COMM_CAP];
         let m = comm.len().min(c.len());
         c[..m].copy_from_slice(&comm.as_bytes()[..m]);
         SyscallEvent {
@@ -276,7 +276,7 @@ mod tests {
         resources.cgroup.memory_peak = Some(14 * 1024 * 1024);
         resources.cgroup.io_wbytes = Some(512);
         RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             Some(NetSection::from_tap(flows, totals, denials, 0, 0).with_v6(flows6, denials6)),
             resources,
             SyscallFootprint::from_events(
@@ -314,7 +314,7 @@ audit trail (host-observed, from outside the guest)
     #[test]
     fn no_network_names_the_flag_that_enables_it() {
         let record = RunRecord::from_parts(
-            RecordSubject::new("ekvm-4242-0".into(), 1_700_000_000_000_000_000),
+            RecordSubject::new("bsx-4242-0".into(), 1_700_000_000_000_000_000),
             None,
             ResourceSummary::default(),
             SyscallFootprint::default(),

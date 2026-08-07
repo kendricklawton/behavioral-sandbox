@@ -1,7 +1,7 @@
 //! The signed per-run **audit record**: its types, deterministic JSON, summary projection, and
 //! ed25519 signing/verification.
 //!
-//! This crate is the *consumer's* half of the audit story. `ekvm-probes-loader` attaches the eBPF
+//! This crate is the *consumer's* half of the audit story. `bsx-probes-loader` attaches the eBPF
 //! probes and reads their maps; what it assembles is a [`RunRecord`], and everything about that
 //! record (its shape, its byte-stable JSON, the signature envelope, verification and the session
 //! hash-chain) lives here so a record can be parsed and verified **off-host**: an auditor's
@@ -16,7 +16,7 @@
 
 #![forbid(unsafe_code)]
 
-pub use ekvm_probes_common::{
+pub use bsx_probes_common::{
     COMM_CAP, DETAIL_CAP, FlowCounts, FlowKey, FlowKey6, PolicyRule, PolicyRule6, Protocol,
     Syscall, SyscallEvent,
 };

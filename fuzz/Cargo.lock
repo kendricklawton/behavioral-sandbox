@@ -197,6 +197,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "bsx"
+version = "0.0.3"
+dependencies = [
+ "bsx-engine",
+ "bsx-probes-loader",
+ "bsx-protocol",
+ "bsx-record",
+ "clap",
+ "nix 0.31.3",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml 1.1.4+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "bsx-channel"
+version = "0.0.3"
+dependencies = [
+ "zeroize",
+]
+
+[[package]]
+name = "bsx-engine"
+version = "0.0.3"
+dependencies = [
+ "bsx-channel",
+ "nix 0.31.3",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tracing",
+]
+
+[[package]]
+name = "bsx-probes-common"
+version = "0.0.3"
+
+[[package]]
+name = "bsx-probes-loader"
+version = "0.0.3"
+dependencies = [
+ "aya",
+ "bsx-probes-common",
+ "bsx-record",
+ "nix 0.31.3",
+]
+
+[[package]]
+name = "bsx-protocol"
+version = "0.0.3"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "bsx-record"
+version = "0.0.3"
+dependencies = [
+ "bsx-probes-common",
+ "ed25519-dalek",
+ "serde_json",
+ "sha2 0.11.0",
+ "zeroize",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -586,77 +657,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
-name = "ekvm"
-version = "0.0.2"
-dependencies = [
- "clap",
- "ekvm-engine",
- "ekvm-probes-loader",
- "ekvm-protocol",
- "ekvm-record",
- "nix 0.31.3",
- "ratatui",
- "serde",
- "serde_json",
- "signal-hook",
- "toml 1.1.4+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "ekvm-channel"
-version = "0.0.2"
-dependencies = [
- "zeroize",
-]
-
-[[package]]
-name = "ekvm-engine"
-version = "0.0.2"
-dependencies = [
- "ekvm-channel",
- "nix 0.31.3",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tracing",
-]
-
-[[package]]
-name = "ekvm-probes-common"
-version = "0.0.2"
-
-[[package]]
-name = "ekvm-probes-loader"
-version = "0.0.2"
-dependencies = [
- "aya",
- "ekvm-probes-common",
- "ekvm-record",
- "nix 0.31.3",
-]
-
-[[package]]
-name = "ekvm-protocol"
-version = "0.0.2"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "ekvm-record"
-version = "0.0.2"
-dependencies = [
- "ed25519-dalek",
- "ekvm-probes-common",
- "serde_json",
- "sha2 0.11.0",
- "zeroize",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -764,13 +764,13 @@ dependencies = [
 
 [[package]]
 name = "fuzz"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
- "ekvm",
- "ekvm-channel",
- "ekvm-probes-common",
- "ekvm-protocol",
- "ekvm-record",
+ "bsx",
+ "bsx-channel",
+ "bsx-probes-common",
+ "bsx-protocol",
+ "bsx-record",
  "libfuzzer-sys",
  "serde_json",
  "toml 0.8.23",

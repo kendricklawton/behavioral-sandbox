@@ -1,5 +1,5 @@
 # Release packaging: on a pushed v* tag (the user's act; tags are human-cut per RELEASES.md),
-# assemble `cargo xtask dist`, sign SHA256SUMS with the EKVM_RELEASE_SIGNING_KEY secret (a
+# assemble `cargo xtask dist`, sign SHA256SUMS with the BSX_RELEASE_SIGNING_KEY secret (a
 # detached ed25519 signature; a tag build without the secret or the .sig hard-fails, never ships
 # unsigned), and attach tarball + SHA256SUMS + SHA256SUMS.sig to a DRAFT GitHub release, so
 # publishing stays a human step too. Manual dispatch builds the package without a release, a dry
@@ -80,15 +80,15 @@ jobs:
       - name: Stage the release signing key (tags only)
         if: github.ref_type == 'tag'
         env:
-          SIGNING_KEY: ${{ secrets.EKVM_RELEASE_SIGNING_KEY }}
+          SIGNING_KEY: ${{ secrets.BSX_RELEASE_SIGNING_KEY }}
         run: |
           if [ -z "$SIGNING_KEY" ]; then
-            echo "::error::EKVM_RELEASE_SIGNING_KEY secret is not configured; refusing an unsigned release" >&2
+            echo "::error::BSX_RELEASE_SIGNING_KEY secret is not configured; refusing an unsigned release" >&2
             exit 1
           fi
           umask 077
           printf '%s\n' "$SIGNING_KEY" > "$RUNNER_TEMP/release-signing.key"
-          echo "EKVM_RELEASE_SIGNING_KEY=$RUNNER_TEMP/release-signing.key" >> "$GITHUB_ENV"
+          echo "BSX_RELEASE_SIGNING_KEY=$RUNNER_TEMP/release-signing.key" >> "$GITHUB_ENV"
 
       - name: Assemble the package
         run: |
@@ -113,4 +113,4 @@ jobs:
           # is the copy pinned in the repo (and in install.sh), not the asset next to the tarball.
           gh release create "${GITHUB_REF_NAME}" --draft --title "${GITHUB_REF_NAME}" \
             --notes "Pre-release checkpoint. Verify: openssl pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS -sigfile SHA256SUMS.sig (against the repo-pinned release-key.pem), then sha256sum -c SHA256SUMS. Install: see install.sh." \
-            dist/ekvm-*-x86_64-linux.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig release-key.pem
+            dist/bsx-*-x86_64-linux.tar.gz dist/SHA256SUMS dist/SHA256SUMS.sig release-key.pem

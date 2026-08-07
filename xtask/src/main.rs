@@ -51,10 +51,10 @@ enum Cmd {
     /// Check the host can do KVM + eBPF; report what's missing.
     Setup,
     /// Single-command self-host: obtain the pinned kernel + rootfs, build the guest image + eBPF
-    /// object, install the `ekvm` binary, and (on a KVM host) boot one sandbox to prove
-    /// it. Offline when `EKVM_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
+    /// object, install the `bsx` binary, and (on a KVM host) boot one sandbox to prove
+    /// it. Offline when `BSX_VENDOR_DIR` points at a `cargo xtask vendor` mirror.
     SelfHost {
-        /// Where to install the `ekvm` binary (default `~/.local/bin`).
+        /// Where to install the `bsx` binary (default `~/.local/bin`).
         #[arg(long, value_name = "DIR")]
         prefix: Option<PathBuf>,
         /// Build + install only; skip the sandbox boot proof (it just prints the command).
@@ -90,7 +90,7 @@ enum Cmd {
     FetchArtifacts,
     /// Assemble the shippable release package: the release binary + the guest kernel, rootfs, and
     /// eBPF object, staged, sha256-manifested, and tarred into `dist/` with a `SHA256SUMS`.
-    /// Vendor-aware via `EKVM_VENDOR_DIR`; the eBPF toolchain is required (a
+    /// Vendor-aware via `BSX_VENDOR_DIR`; the eBPF toolchain is required (a
     /// package without the audit half is not the product).
     Dist {
         /// The package version (release CI passes the pushed tag). Default: `git describe --tags`
@@ -100,7 +100,7 @@ enum Cmd {
     },
     /// Mint (or show) the release signing key and print the pin-and-secret ceremony: pin the
     /// public key (`release-key.pem` + the `install.sh` heredoc), set the
-    /// `EKVM_RELEASE_SIGNING_KEY` CI secret. The private key lives at `--path`, outside the repo.
+    /// `BSX_RELEASE_SIGNING_KEY` CI secret. The private key lives at `--path`, outside the repo.
     ReleaseKey {
         /// Where the private key file lives (created `0600` on first use; never under `dist/`).
         #[arg(long, value_name = "FILE")]
@@ -299,7 +299,7 @@ const FUZZ_TARGETS: &[&str] = &[
     "syscall_event",
     "egress_rule",
     "audit_record",
-    "ekvm_config",
+    "bsx_config",
 ];
 
 /// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance
@@ -485,7 +485,7 @@ fn ci() -> Result<()> {
     // the same class the drift lint catches for repo paths. The rendered HTML is not the point and
     // is never published (`.github/workflows/docs.yml` builds the mdBook, not rustdoc).
     //
-    // A bin and a lib both named `ekvm` in *different* packages would render to the same path and
+    // A bin and a lib both named `bsx` in *different* packages would render to the same path and
     // collide here. Both live in the CLI package, where cargo resolves them, so `target/doc/` holds
     // one directory per crate and nothing is suppressed.
     cargo_env(
@@ -853,10 +853,10 @@ fn privileged_preflight() -> Result<()> {
     // reading like an engine bug rather than the one-line host fix it is (the engine carries its
     // own boot-time refusal; this is the gate's up-front one). Same loud-up-front discipline as the
     // checks above, reusing the doctor's tested detector against the exact scratch dir the tests
-    // will resolve (`BootConfig::from_env`, so an `EKVM_SCRATCH_DIR` override clears it).
-    let scratch = ekvm_engine::BootConfig::from_env().scratch_dir;
-    let flags = ekvm_engine::doctor::scratch_mount_flags(&scratch);
-    if flags.is_some_and(ekvm_engine::doctor::MountFlags::blocks_jail) {
+    // will resolve (`BootConfig::from_env`, so an `BSX_SCRATCH_DIR` override clears it).
+    let scratch = bsx_engine::BootConfig::from_env().scratch_dir;
+    let flags = bsx_engine::doctor::scratch_mount_flags(&scratch);
+    if flags.is_some_and(bsx_engine::doctor::MountFlags::blocks_jail) {
         let flag = if flags.is_some_and(|f| f.nodev) {
             "nodev"
         } else {
@@ -868,7 +868,7 @@ fn privileged_preflight() -> Result<()> {
              Point it off {flag} (e.g. /var/tmp) — or \
              use ./ci-privileged.sh, which sets all three env concerns:\n    \
              sudo -E env CARGO_TARGET_DIR=\"$PWD/target-privileged\" \
-             EKVM_SCRATCH_DIR=/var/tmp/ekvm cargo xtask ci-privileged",
+             BSX_SCRATCH_DIR=/var/tmp/bsx cargo xtask ci-privileged",
             scratch.display()
         );
     }
@@ -937,24 +937,24 @@ fn privileged_preflight() -> Result<()> {
 fn setup() -> Result<()> {
     println!("agent: host capability check\n");
 
-    // The runtime host checks are the *same* implementation `ekvm doctor` renders: one
+    // The runtime host checks are the *same* implementation `bsx doctor` renders: one
     // source of truth for what "ready" means, so the dev-box check and the operator's can't drift.
     // The artifact paths come from the env-layered config (the workspace `artifacts/` defaults),
     // matching what a dev boot resolves.
-    let config = ekvm_engine::BootConfig::from_env();
-    for c in ekvm_engine::doctor::checks(&config) {
-        let ok = c.status == ekvm_engine::doctor::CheckStatus::Ok;
+    let config = bsx_engine::BootConfig::from_env();
+    for c in bsx_engine::doctor::checks(&config) {
+        let ok = c.status == bsx_engine::doctor::CheckStatus::Ok;
         check(&c.label, ok);
     }
-    // The eBPF-observability capability row (owned by the probe loader, out of `ekvm`).
+    // The eBPF-observability capability row (owned by the probe loader, out of `bsx`).
     check(
         "eBPF observability (CAP_BPF + CAP_PERFMON + kernel BTF)",
-        ekvm_probes_loader::check_support().is_ok(),
+        bsx_probes_loader::check_support().is_ok(),
     );
 
     // Dev-toolchain checks, only `xtask` needs these (building the eBPF object, the guest agent,
     // verifying static links); an operator running the shipped engine does not, so they are not in
-    // the shared `ekvm doctor` set.
+    // the shared `bsx doctor` set.
     println!("\ndev toolchain (for building, not running):");
     // Verified, not just announced: a row that printed the pin while any version satisfied it would
     // be the same hollow-green this gate exists to refuse.
@@ -996,10 +996,10 @@ fn setup() -> Result<()> {
         matches!(rootfs::mke2fs_version(), Some(v) if v >= rootfs::MKE2FS_SOURCE_DATE_EPOCH_MIN),
     );
 
-    // The degradation matrix, the same fails-open-vs-hard split `ekvm doctor` prints, from the one
+    // The degradation matrix, the same fails-open-vs-hard split `bsx doctor` prints, from the one
     // shared source, so a mismatched host explains itself *before* the first boot discovers it.
     println!("\nDegradation matrix: what a missing item above means at runtime:");
-    for line in ekvm_engine::doctor::matrix() {
+    for line in bsx_engine::doctor::matrix() {
         println!("  {line}");
     }
 
@@ -1008,15 +1008,11 @@ fn setup() -> Result<()> {
     // these are the calls only they can make. Surfaced here, in the host-check tool, because
     // that's the one place a self-hoster looks before standing the engine up.
     println!("\nHardening: the hoster's responsibility (the engine can't decide these for you):");
-    println!(
-        "    scratch base: point EKVM_SCRATCH_DIR at a dir only the engine user owns (not the"
-    );
+    println!("    scratch base: point BSX_SCRATCH_DIR at a dir only the engine user owns (not the");
     println!(
         "                  world-writable /tmp default), so no other local user can plant residue"
     );
-    println!(
-        "    run the sweep: schedule ekvm_engine::sweep_orphans() (boot-time + periodic), the"
-    );
+    println!("    run the sweep: schedule bsx_engine::sweep_orphans() (boot-time + periodic), the");
     println!("                  engine exposes it; when/how often it runs is your ops call");
     println!("    one sweep per identity: a sweep reclaims only dirs its own euid owns, so if you");
     println!("                  run drivers as several users, each user must run its own sweep");
@@ -1028,7 +1024,7 @@ fn setup() -> Result<()> {
     println!(
         "             A host without kernel BTF or those caps is named by a typed error, not a"
     );
-    println!("             cryptic verifier reject (ekvm_probes_loader::check_support).");
+    println!("             cryptic verifier reject (bsx_probes_loader::check_support).");
 
     println!("\nMissing items are covered in docs/cli-install.md -> Prerequisites.");
     Ok(())
@@ -1047,12 +1043,8 @@ fn setup() -> Result<()> {
 /// rule, `docs/embedding-scope.md`, and `RELEASES.md` all name.
 /// `pinned_surface_is_named_the_same_in_every_doc` holds those three to this list, so a crate can't
 /// join the surface in one document and be missing from the tag's own release notes.
-const PINNED_SURFACE_CRATES: [&str; 4] = [
-    "ekvm-engine",
-    "ekvm-channel",
-    "ekvm-protocol",
-    "ekvm-record",
-];
+const PINNED_SURFACE_CRATES: [&str; 4] =
+    ["bsx-engine", "bsx-channel", "bsx-protocol", "bsx-record"];
 
 /// `cargo xtask semver-check`: the pinned surface against a baseline rev.
 ///
@@ -1397,11 +1389,11 @@ fn require_kvm(what: &str) -> Result<()> {
     Ok(())
 }
 
-/// The local vendor mirror, if the operator set `EKVM_VENDOR_DIR`: the offline source for every
+/// The local vendor mirror, if the operator set `BSX_VENDOR_DIR`: the offline source for every
 /// sha-pinned upstream input (`cargo xtask vendor`), so a build never reaches the Firecracker S3
 /// bucket or the Alpine CDN. `None` means fetch from pinned upstream (the default).
 fn vendor_dir() -> Option<PathBuf> {
-    std::env::var_os("EKVM_VENDOR_DIR")
+    std::env::var_os("BSX_VENDOR_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
 }
@@ -1764,7 +1756,7 @@ exclude = ["crates/probes", "fuzz"]
     /// The repo-layout table is restated in three places for three audiences: `AGENTS.md` for an
     /// agent, `README.md` for someone who never clones, and `docs/architecture.md` for the book.
     /// Three hand-maintained copies of one list drift, and this one did: `README.md` silently
-    /// omitted `ekvm-test-support` while the other two carried all ten.
+    /// omitted `bsx-test-support` while the other two carried all ten.
     ///
     /// Asserts each table names every workspace package, and that the directory it pairs with is
     /// the real one, so a rename cannot leave a table half-updated. The tables may say anything
@@ -1813,7 +1805,7 @@ exclude = ["crates/probes", "fuzz"]
 
     /// The pinned API surface is stated in three places for three audiences, and **`RELEASES.md`
     /// asserts the three are the same list**. That claim drifted the moment it was written down:
-    /// `ekvm-record` joined the surface in `AGENTS.md` and `docs/embedding-scope.md` and was left
+    /// `bsx-record` joined the surface in `AGENTS.md` and `docs/embedding-scope.md` and was left
     /// out of `RELEASES.md`, which is the copy a tag freezes.
     ///
     /// Asserts every crate in [`PINNED_SURFACE_CRATES`] is named in all three. The prose around the
@@ -1836,7 +1828,7 @@ exclude = ["crates/probes", "fuzz"]
         }
     }
 
-    /// `ekvm-record` exists so a consumer can parse and verify a signed record **off-host**: an
+    /// `bsx-record` exists so a consumer can parse and verify a signed record **off-host**: an
     /// auditor's machine, a CI job, no eBPF, no root. That is only true while its dependency
     /// closure stays free of `aya` (the eBPF loader) and `nix` (the loader's netns join), so this
     /// walks the closure out of `Cargo.lock` and holds the line. The crate docs' "no aya, no nix"
@@ -1896,11 +1888,11 @@ exclude = ["crates/probes", "fuzz"]
             }
         }
         assert!(
-            packages.contains("ekvm-record"),
-            "Cargo.lock has no ekvm-record package (stale lockfile?)"
+            packages.contains("bsx-record"),
+            "Cargo.lock has no bsx-record package (stale lockfile?)"
         );
 
-        let mut queue = vec!["ekvm-record".to_string()];
+        let mut queue = vec!["bsx-record".to_string()];
         let mut closure = BTreeSet::new();
         while let Some(pkg) = queue.pop() {
             if closure.insert(pkg.clone()) {
@@ -1910,7 +1902,7 @@ exclude = ["crates/probes", "fuzz"]
         for forbidden in ["aya", "nix"] {
             assert!(
                 !closure.contains(forbidden),
-                "ekvm-record's dependency closure contains `{forbidden}`; the crate exists so \
+                "bsx-record's dependency closure contains `{forbidden}`; the crate exists so \
                  record verification runs off-host without linking an eBPF loader"
             );
         }

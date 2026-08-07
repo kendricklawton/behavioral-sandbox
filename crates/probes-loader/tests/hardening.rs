@@ -4,14 +4,14 @@
 //!
 //! `#[ignore]`d: each boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches all
 //! three host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
-//! object). Run via `cargo xtask ci-privileged`. Uses `ekvm` as a **dev-dependency only**, so
+//! object). Run via `cargo xtask ci-privileged`. Uses `bsx` as a **dev-dependency only**, so
 //! the loader library stays independent of the driver: the two tracks bridge by plain values.
 //!
 //! These fuse constituents that already pass individually, deny-by-default egress with an
 //! allow-listed exception (`net_enforce.rs`), a fork storm that creates no host threads (hardware
 //! isolation), and the faithful record (`audit_record.rs`), into **one hostile guest**, and add the
 //! part those pieces don't: the record is the evidence. Full VM/jail escape and the cgroup
-//! cpu/mem/pid caps are proven under real root by the `ekvm` confinement suite (a mem-hog /
+//! cpu/mem/pid caps are proven under real root by the `bsx` confinement suite (a mem-hog /
 //! fork-bomb bounded by `memory.max`/`cpu.max`); this suite runs on the probe-capability path and
 //! consolidates the *observed and recorded* dimensions of containment.
 #![allow(clippy::panic)]
@@ -19,12 +19,12 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ekvm_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
-use ekvm_probes_loader::{
+use bsx_engine::{BootConfig, DEFAULT_GUEST_CID, GUEST_READY_MARKER, Vm};
+use bsx_probes_loader::{
     AttachParams, AxisGap, EgressPolicy, Nic, Protocol, RecordSubject, SandboxProbes, SharedMeter,
     SharedTracer, Timing, check_support, object_path,
 };
-use ekvm_test_support::{LimitCgroup, have_real_root, process_threads};
+use bsx_test_support::{LimitCgroup, have_real_root, process_threads};
 
 /// IP protocol number for UDP, for the raw flow/denial-key comparisons the loader doesn't re-export
 /// a const for.
@@ -72,7 +72,7 @@ fn skip_reason() -> Option<String> {
 fn networked_agent_config() -> BootConfig {
     let root = workspace_root();
     let mut cfg = BootConfig::from_env();
-    if std::env::var_os("EKVM_KERNEL").is_none() {
+    if std::env::var_os("BSX_KERNEL").is_none() {
         cfg.kernel = root.join("artifacts/vmlinux");
     }
     cfg.rootfs = root.join("artifacts/rootfs-guest.ext4");

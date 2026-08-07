@@ -4,16 +4,16 @@
 # (`.cargo/config.toml`). The host workspace stays on stable and never compiles this crate; its object
 # is built separately by `cargo xtask build-probes`.
 [package]
-name = "ekvm-probes"
-version = "0.0.2"
+name = "bsx-probes"
+version = "0.0.3"
 edition = "2024"
 
 # Excluded from the workspace (builds for `bpfel-unknown-none`, not the host triple), so its package
 # fields are spelled literally rather than inherited from `[workspace.package]`.
 rust-version = "1.97"
 license = "Apache-2.0"
-authors = ["eKVM Contributors"]
-repository = "https://github.com/ekvm-rs/ekvm"
+authors = ["Kendrick Lawton"]
+repository = "https://github.com/kendricklawton/behavioral-sandbox"
 publish = false
 description = "The eBPF programs (no_std): syscall tracepoints, tc classifiers on the tap, cgroup accounting."
 
@@ -24,13 +24,13 @@ aya-ebpf = "0.2"
 
 # The wire record written into the ring buffer (`SyscallEvent`), shared with the userspace reader so
 # the two sides can't drift. `no_std`, no default features: the BPF side never wants `std`.
-ekvm-probes-common = { path = "../probes-common", default-features = false }
+bsx-probes-common = { path = "../probes-common", default-features = false }
 
 # One object per program set, linked by `bpf-linker` for `bpfel-unknown-none`: the syscall
 # tracepoints, the tc flow/egress programs, and the accounting probe ride together (splitting into
 # more `[[bin]]`s stays an option if attaching them independently ever helps). The bin name stays
-# `probes` while the package is `ekvm-probes`: it is the object's filename on disk, which
-# `ekvm-probes-loader` and `xtask` both name.
+# `probes` while the package is `bsx-probes`: it is the object's filename on disk, which
+# `bsx-probes-loader` and `xtask` both name.
 [[bin]]
 name = "probes"
 path = "src/main.rs"

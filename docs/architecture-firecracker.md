@@ -62,7 +62,7 @@ snapshot, so `Vm::restore` spawns a bare VMM and makes exactly one call, `PUT /s
 |---|---|
 | `/dev/vda` | the root drive; Firecracker adds `root=/dev/vda` to the command line itself |
 | `/dev/vdb` | the bulk input image, opened `O_RDONLY` by Firecracker, which is what makes it immutable |
-| the output drive | mounted **by label** (`ekvm-output`), since a boot may attach input, output, both, or neither, so the letter is not stable |
+| the output drive | mounted **by label** (`bsx-output`), since a boot may attach input, output, both, or neither, so the letter is not stable |
 | `eth0` | one virtio-net backed by a host tap the driver creates first, inside a per-VM netns |
 | vsock | one device on guest CID 3, the exec channel's transport |
 | `ttyS0` | not an API call: `console=ttyS0` on the command line, and Firecracker wires it to its own stdout, which the driver captures |
@@ -145,7 +145,7 @@ Two things the driver does differently once chrooted are worth knowing before re
 Staging happens **after** the API socket answers, since the chroot does not exist until the jailer
 builds it. And the workdir name is deliberately short, because the jailer embeds it **twice** in the
 API socket path, which must fit `sockaddr_un.sun_path` at 108 bytes; `check_sun_path` refuses up
-front and names `EKVM_SCRATCH_DIR` as the fix, because the alternative is a `bind()` failing deep
+front and names `BSX_SCRATCH_DIR` as the fix, because the alternative is a `bind()` failing deep
 inside Firecracker and surfacing as a boot timeout that says nothing.
 
 ## Snapshot and restore

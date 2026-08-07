@@ -4,11 +4,11 @@
 # because this file is a third copy of that pin and the other two once drifted for 21 months).
 # The KVM boundary cannot come from the image: run it with the host's /dev/kvm.
 #   cargo xtask dist
-#   docker build -f Containerfile --build-arg DIST=dist/ekvm-<ver>-x86_64-linux -t ekvm:<ver> .
+#   docker build -f Containerfile --build-arg DIST=dist/bsx-<ver>-x86_64-linux -t bsx:<ver> .
 #   (optional, for the OCI labels: --build-arg VERSION=<ver> --build-arg REVISION=$(git rev-parse HEAD))
-#   docker run --rm ekvm:<ver>                                # doctor: what this host can do
-#   docker run --rm --device /dev/kvm ekvm:<ver> run --unjailed -- echo hi
-#   docker run --rm --device /dev/kvm --cap-add NET_ADMIN ekvm:<ver> run --unjailed --net ...
+#   docker run --rm bsx:<ver>                                # doctor: what this host can do
+#   docker run --rm --device /dev/kvm bsx:<ver> run --unjailed -- echo hi
+#   docker run --rm --device /dev/kvm --cap-add NET_ADMIN bsx:<ver> run --unjailed --net ...
 # The jailed default and eBPF observation need more of the host (real root in the user namespace,
 # CAP_BPF/CAP_PERFMON, cgroup v2 delegation); a hardened deployment runs those on the host or in a
 # privileged container, a hoster call the engine does not make for you.
@@ -31,15 +31,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
     && install -m 0755 "/tmp/release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" /usr/local/bin/firecracker \
     && install -m 0755 "/tmp/release-${FC_VERSION}-x86_64/jailer-${FC_VERSION}-x86_64" /usr/local/bin/jailer
 
-# The ekvm binary is static musl (`cargo xtask dist` verifies it), so the base is not chosen for
+# The bsx binary is static musl (`cargo xtask dist` verifies it), so the base is not chosen for
 # its libc: it supplies the tool userspace the engine shells out to (iproute2, e2fsprogs,
 # util-linux). Which distro provides those inside the image is a pinned, closed detail of this
 # file, not a host assumption; the engine itself probes capabilities, never distro identity.
 FROM ${BASE}
 ARG VERSION=dev
 ARG REVISION=unknown
-LABEL org.opencontainers.image.source="https://github.com/ekvm-rs/ekvm" \
-      org.opencontainers.image.title="ekvm" \
+LABEL org.opencontainers.image.source="https://github.com/kendricklawton/behavioral-sandbox" \
+      org.opencontainers.image.title="bsx" \
       org.opencontainers.image.description="Self-hostable, isolated code-execution sandbox: Firecracker microVMs, host-side eBPF" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${VERSION}" \
@@ -49,18 +49,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends iproute2 e2fspr
     && rm -rf /var/lib/apt/lists/*
 COPY --from=firecracker /usr/local/bin/firecracker /usr/local/bin/jailer /usr/local/bin/
 ARG DIST
-COPY ${DIST}/ /opt/ekvm/
-ENV EKVM_KERNEL=/opt/ekvm/share/ekvm/vmlinux \
-    EKVM_ROOTFS=/opt/ekvm/share/ekvm/rootfs-guest.ext4 \
-    EKVM_PROBES_OBJECT=/opt/ekvm/share/ekvm/probes \
-    PATH=/opt/ekvm/bin:/usr/local/bin:/usr/bin:/bin
+COPY ${DIST}/ /opt/bsx/
+ENV BSX_KERNEL=/opt/bsx/share/bsx/vmlinux \
+    BSX_ROOTFS=/opt/bsx/share/bsx/rootfs-guest.ext4 \
+    BSX_PROBES_OBJECT=/opt/bsx/share/bsx/probes \
+    PATH=/opt/bsx/bin:/usr/local/bin:/usr/bin:/bin
 # The layout the ENV paths promise, checked at build time. The threat is an unset or wrong DIST:
-# an empty ARG expands the COPY above to `COPY / /opt/ekvm/`, which silently bakes the whole build
+# an empty ARG expands the COPY above to `COPY / /opt/bsx/`, which silently bakes the whole build
 # context into a layer; this turns that into a build failure that names the missing piece.
-RUN test -x /opt/ekvm/bin/ekvm \
- && test -f "$EKVM_KERNEL" && test -f "$EKVM_ROOTFS" && test -f "$EKVM_PROBES_OBJECT"
+RUN test -x /opt/bsx/bin/bsx \
+ && test -f "$BSX_KERNEL" && test -f "$BSX_ROOTFS" && test -f "$BSX_PROBES_OBJECT"
 # Deliberately no USER: the engine's supported paths need root in the container's user namespace
 # (the jailer mknod's device nodes, taps need CAP_NET_ADMIN), and a nonroot USER here would only
 # pretend otherwise. The graduated --device/--cap-add tiers in the header are the real knob.
-ENTRYPOINT ["/opt/ekvm/bin/ekvm"]
+ENTRYPOINT ["/opt/bsx/bin/bsx"]
 CMD ["doctor"]

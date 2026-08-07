@@ -1,4 +1,4 @@
-# eKVM: engineering disciplines
+# bsx: engineering disciplines
 
 **A self-hostable, isolated code-execution sandbox.** Untrusted code runs inside a
 **Firecracker** microVM (hardware isolation via KVM); **host-side eBPF** (**aya**) observes and
@@ -41,8 +41,8 @@ a design error rather than a trade-off.
    containing the guest is a design error.
 3. **Deny by default.** A sandbox with no explicit policy is configured with no route out and
    minimal capability, and each allowance is recorded in the audit log.
-4. **Engine, not platform.** A self-hostable runtime and a driver API; tenancy, billing, scheduling,
-   and dashboards are the hoster's. The **AI model is out too**: it is always the *caller* driving
+4. **Engine, not platform.** A self-hostable runtime and a driver API; tenancy, billing, and
+   scheduling are the hoster's. The **AI model is out too**: it is always the *caller* driving
    the engine from outside, never an engine component. A recorded non-goal.
 5. **No panic, hang, or leak on the host path.** A hostile or crashing guest, a failed probe, or a
    broken channel should surface as a typed error. This is the rule the code is written against and
@@ -52,27 +52,27 @@ a design error rather than a trade-off.
 
 ## Repo layout
 
-One workspace. **Directories stay short and packages carry the `ekvm-` prefix**, so a package name is
-its directory plus that prefix, with **exactly one exception**: `crates/cli` builds `ekvm`, because
+One workspace. **Directories stay short and packages carry the `bsx-` prefix**, so a package name is
+its directory plus that prefix, with **exactly one exception**: `crates/cli` builds `bsx`, because
 the bare name goes to the thing a user types. That one row is why `-p` takes the **package**
-(`-p ekvm-engine`) and paths take the **directory** (`crates/engine`). `cargo xtask ci` checks every
+(`-p bsx-engine`) and paths take the **directory** (`crates/engine`). `cargo xtask ci` checks every
 `-p` in every tracked text file against the real package list, so a stale one fails the gate rather
-than a reader's terminal. Before a non-trivial change to `ekvm-engine`, read `docs/architecture.md`
+than a reader's terminal. Before a non-trivial change to `bsx-engine`, read `docs/architecture.md`
 for the types worth knowing, the boot sequence, and the teardown layers.
 
 | Path | Package | What it is |
 |---|---|---|
-| `crates/engine` | `ekvm-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
-| `crates/channel` | `ekvm-channel` | Host↔guest framing. Near dependency-free (`zeroize`, for the secret wipe, is the one dependency), shared verbatim by driver and agent, so a wire change reaches both in one commit. |
-| `crates/guest-agent` | `ekvm-guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. Its binary keeps the bare name `guest-agent`: that is the path the rootfs build bakes in. |
-| `crates/probes` | `ekvm-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. Its binary keeps the bare name `probes`: that is the object filename the loader looks for. |
-| `crates/probes-common` | `ekvm-probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero deps, single-sourced. |
-| `crates/probes-loader` | `ekvm-probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble the record. |
-| `crates/record` | `ekvm-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing/verification. No aya, so a record verifies off-host. |
-| `crates/protocol` | `ekvm-protocol` | The daemon's wire types, versioned. |
-| `crates/client` | `ekvm-client` | Rust reference client for `ekvm serve`. |
-| `crates/cli` | `ekvm` | The `ekvm` binary (`run`/`shell`/`doctor`/`verify`) plus `ekvm serve`. Package, binary, and command are all `ekvm`; its library half is the CLI's own internals, not the engine. |
-| `crates/test-support` | `ekvm-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
+| `crates/engine` | `bsx-engine` | The engine: microVM lifecycle, jail, networking, snapshots, the pool, the `Sandbox` API. `#![forbid(unsafe_code)]`. |
+| `crates/channel` | `bsx-channel` | Host↔guest framing. Near dependency-free (`zeroize`, for the secret wipe, is the one dependency), shared verbatim by driver and agent, so a wire change reaches both in one commit. |
+| `crates/guest-agent` | `bsx-guest-agent` | In-guest exec and IO. Static musl, baked into the rootfs. Not the security boundary. Its binary keeps the bare name `guest-agent`: that is the path the rootfs build bakes in. |
+| `crates/probes` | `bsx-probes` | The eBPF programs (`#![no_std]`, `bpfel-unknown-none` via `bpf-linker`). The only crate allowed `unsafe`. Its binary keeps the bare name `probes`: that is the object filename the loader looks for. |
+| `crates/probes-common` | `bsx-probes-common` | The `#[repr(C)]` records crossing the eBPF boundary. Zero deps, single-sourced. |
+| `crates/probes-loader` | `bsx-probes-loader` | aya userspace: attach to one sandbox, read the maps, assemble the record. |
+| `crates/record` | `bsx-record` | The signed audit record: its types, deterministic JSON, and ed25519 signing/verification. No aya, so a record verifies off-host. |
+| `crates/protocol` | `bsx-protocol` | The daemon's wire types, versioned. |
+| `crates/client` | `bsx-client` | Rust reference client for `bsx serve`. |
+| `crates/cli` | `bsx` | The `bsx` binary (`run`/`shell`/`doctor`/`verify`) plus `bsx serve`. Package, binary, and command are all `bsx`; its library half is the CLI's own internals, not the engine. |
+| `crates/test-support` | `bsx-test-support` | Test fixtures: scratch dirs, small filesystems for disk-full cases, cgroup helpers, the real-root guard. |
 | `xtask` | `xtask` | Dev orchestration: the gates, artifact builds, benchmarks, packaging. Never shipped, never renamed (`cargo xtask` is a `--package xtask` alias). |
 | `docs/` | | mdBook, `SUMMARY.md` is the index. Flat `topic-subtopic.md` names; the hierarchy lives in `SUMMARY.md`, not in directories. |
 
@@ -134,8 +134,8 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   earlier design", "used to", "no longer", "this replaced"), incident anecdotes, and regression
   backstories belong in the commit that fixed them, where git keeps them attached to the diff.
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
-  `ekvm run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`EKVM_*`) >
-  file (`.ekvm.toml`, the nearest one walking up from the cwd) > defaults**.
+  `bsx run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`BSX_*`) >
+  file (`.bsx.toml`, the nearest one walking up from the cwd) > defaults**.
 - **No em-dashes in prose.** Repo docs, code comments, and commit messages use colons, commas, or
   parentheses instead. A genuine separator inside a code block or shown output stays; user-facing
   output *strings* are a separate call.
@@ -150,8 +150,8 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   **what was done** ("fix: bound session reads by a deadline"). A mixed change takes its most
   significant type (`fix` over `refactor` over `test`). **Public-API changes carry the `api` scope**
   (`feat(api):` / `fix(api)!:`), so a downstream pin bump is auditable from the log alone. The
-  surface is `ekvm-engine`'s public API, the `ekvm-channel` wire framing, `ekvm-protocol`'s wire
-  types, and `ekvm-record`'s signed-envelope surface; `docs/embedding-scope.md` names it exactly.
+  surface is `bsx-engine`'s public API, the `bsx-channel` wire framing, `bsx-protocol`'s wire
+  types, and `bsx-record`'s signed-envelope surface; `docs/embedding-scope.md` names it exactly.
 - **Backwards compatibility follows the data's direction.** Structs the caller constructs
   (`Limits`, `BootConfig`) take a builder or `Default`, so a new knob is additive and invariants stay
   checkable. Structs the engine returns (`RunResult`, `Artifact`, `ExecMetrics`) keep public fields,
@@ -160,8 +160,6 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   `cargo xtask semver-check`, which names each crate explicitly: run bare, `cargo-semver-checks`
   drops every `publish = false` package (all of them) and exits `0` having checked nothing. It is
   also inert until `0.1.0`, since cargo treats every `0.0.x` bump as already breaking.
-- **Non-Rust SDKs live in separate repos** (`ekvm-sdk-python`, `ekvm-sdk-js`, `ekvm-sdk-go`); do not pull
-  Python, Node, or Go build tooling into this workspace. The same holds for a **web frontend**: a
-  dashboard is the hoster's layer (design rule 4, and `docs/embedding-scope.md` states it as a
-  non-goal), so its build tooling stays out of this workspace too. Anything that authenticates
-  *users* belongs there, never in `ekvm-protocol`: the wire carries no identity by design.
+- **The wire carries no identity.** Anything that authenticates *users* stays out of
+  `bsx-protocol` by design: the daemon's access control is the socket's permissions, a recorded
+  non-goal stated on `serve`'s own flags.

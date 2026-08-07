@@ -20,7 +20,7 @@ use std::process::Child;
 use std::sync::atomic::AtomicU64;
 use std::time::{Duration, Instant};
 
-use ekvm_channel::ClientConnection;
+use bsx_channel::ClientConnection;
 
 use crate::console::Console;
 use crate::drives::{OutputDevice, collect_output_image};
@@ -58,8 +58,8 @@ const DEFAULT_BOOT_ARGS: &str =
 /// engine builds, what `Sandbox` needs (exec requires the in-guest agent), and what every product
 /// path boots, so the default must match it, a caller pointing at it must not need to also know a
 /// marker. The exception is the pinned Ubuntu CI rootfs (raw boot tests only), whose readiness is
-/// its getty prompt: those callers set `login:` explicitly (or via `EKVM_MARKER`).
-const DEFAULT_USERSPACE_MARKER: &str = ekvm_channel::GUEST_READY_MARKER;
+/// its getty prompt: those callers set `login:` explicitly (or via `BSX_MARKER`).
+const DEFAULT_USERSPACE_MARKER: &str = bsx_channel::GUEST_READY_MARKER;
 
 /// Names the next per-VM scratch dir uniquely within this process (paired with the PID).
 pub(crate) static VM_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -71,10 +71,10 @@ pub(crate) const FC_STDERR: &str = "fc.stderr";
 /// the exec channel; overridable per-VM via [`BootConfig::guest_cid`].
 pub const DEFAULT_GUEST_CID: u32 = 3;
 
-/// The vsock port the in-guest agent listens on for exec connections, defined in `ekvm-channel`
+/// The vsock port the in-guest agent listens on for exec connections, defined in `bsx-channel`
 /// (it's a host↔guest contract value: the rootfs build writes it into the guest's init line, and
 /// the host dials it through Firecracker's vsock unix socket). Re-exported here for callers.
-pub use ekvm_channel::VSOCK_PORT;
+pub use bsx_channel::VSOCK_PORT;
 
 /// The vsock unix socket Firecracker creates in the scratch dir; the host connects here and speaks
 /// the `CONNECT <port>` handshake to reach a guest port.
@@ -102,7 +102,7 @@ pub(crate) const VMM_REAP_GRACE: Duration = Duration::from_secs(2);
 pub(crate) const POWER_OFF_POLL: Duration = Duration::from_millis(50);
 
 /// Everything needed to boot one microVM. [`default`](BootConfig::default) is the pure pinned
-/// baseline, [`from_env`](BootConfig::from_env) layers the `EKVM_*` overrides on top, and
+/// baseline, [`from_env`](BootConfig::from_env) layers the `BSX_*` overrides on top, and
 /// [`with_limits`](BootConfig::with_limits) folds a [`Limits`] budget onto the resource knobs.
 /// `#[non_exhaustive]`: construct via [`from_env`](BootConfig::from_env) /
 /// [`default`](BootConfig::default) and mutate fields, new features add knobs (tap, jailer,
@@ -144,7 +144,7 @@ pub struct BootConfig {
     pub guest_cid: Option<u32>,
     /// Boot the base rootfs **read-only and shared** (no per-VM copy) under a per-run **tmpfs
     /// overlay**, so `/` is writable but the base is never mutated and many VMs share one
-    /// page-cache-deduped base. Requires a rootfs whose [`ekvm_channel::GUEST_OVERLAY_INIT`] builds the
+    /// page-cache-deduped base. Requires a rootfs whose [`bsx_channel::GUEST_OVERLAY_INIT`] builds the
     /// overlay (the agent image from `cargo xtask build-rootfs`); the driver appends
     /// `init=<that path> overlay_size=<mem/2>M` to the kernel command line. `false` (the
     /// default) keeps the copy-then-boot-read-write path. One concept, not two knobs: a read-only
@@ -153,14 +153,14 @@ pub struct BootConfig {
     /// A host directory to inject as **bulk read-only input**: the driver builds an ext4 from
     /// it and attaches it as a second block device (`/dev/vdb`, `O_RDONLY`); the guest rootfs mounts
     /// it at `/input`, so a command reads it as `/input/...`. This is the whole-working-dir /
-    /// large-file path, the vsock channel's [`Request::PutFile`](ekvm_channel::Request::PutFile) carries only small per-frame files.
+    /// large-file path, the vsock channel's [`Request::PutFile`](bsx_channel::Request::PutFile) carries only small per-frame files.
     /// `None` (the default) attaches no input device. Building the image needs `mke2fs` + `truncate`.
     pub input_dir: Option<PathBuf>,
     /// A host directory to receive **bulk output**: the driver attaches a blank, **writable**
-    /// ext4 as a third block device (`/dev/vd?`, labelled `ekvm-output`); the guest rootfs mounts it
+    /// ext4 as a third block device (`/dev/vd?`, labelled `bsx-output`); the guest rootfs mounts it
     /// read-write at `/output`, so a command's files under `/output/...` are pulled back here by
     /// [`RunningVm::collect_outputs`]. This is the whole-working-dir / large-file counterpart to the
-    /// vsock channel's per-frame [`Response::File`](ekvm_channel::Response::File) artifacts. `None` (the default) attaches no output
+    /// vsock channel's per-frame [`Response::File`](bsx_channel::Response::File) artifacts. `None` (the default) attaches no output
     /// device. Readback needs `e2fsck` + `debugfs` (e2fsprogs) on the host; the directory is created
     /// if missing and receives the guest's `/output` tree (host-escaping symlinks are dropped).
     pub output_dir: Option<PathBuf>,
@@ -183,7 +183,7 @@ pub struct BootConfig {
     /// and design decision 9.
     ///
     /// **Read only when [`enable_network`](BootConfig::enable_network) is set**, and ignored
-    /// otherwise rather than refused. A gateway is a *host* fact (`EKVM_GATEWAY`, `.ekvm.toml`),
+    /// otherwise rather than refused. A gateway is a *host* fact (`BSX_GATEWAY`, `.bsx.toml`),
     /// so it is normally set once for every sandbox on a host; refusing the combination would mean
     /// an operator who configures an uplink breaks every run that does not ask for a NIC. Whether a
     /// caller *explicitly* asked for a gateway on a NIC-less run is visible only to the layer that
@@ -213,11 +213,11 @@ pub struct BootConfig {
     /// a run the host can't cap is a typed [`VmmError::LimitsUnavailable`], not a silently-uncapped
     /// one. A host posture, not a per-run quantity (so it lives here, not on [`Limits`]) and not
     /// client-settable over the wire (the daemon fixes it, like the jail). Layered
-    /// `flag > env (EKVM_REQUIRE_LIMITS) > file > default` at the CLI.
+    /// `flag > env (BSX_REQUIRE_LIMITS) > file > default` at the CLI.
     pub require_limits: bool,
-    /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/ekvm-<pid>-<n>`), holding the
+    /// Base directory for per-VM **scratch** dirs (`<scratch_dir>/bsx-<pid>-<n>`), holding the
     /// read-write rootfs copy, the jail chroot, block-device images, and sockets. Defaults to `/tmp`
-    /// (overridable via `EKVM_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
+    /// (overridable via `BSX_SCRATCH_DIR`). **This matters on constrained hardware:** `/tmp` is
     /// often `tmpfs` (host RAM), so a read-write boot's full-rootfs copy is charged to RAM, on a
     /// small box that alone can exhaust memory (or `ENOSPC` a small tmpfs) and fail the boot. Point
     /// this at real disk to bound RAM use, or prefer [`read_only_root`](BootConfig::read_only_root),
@@ -227,8 +227,8 @@ pub struct BootConfig {
 }
 
 impl BootConfig {
-    /// Layer the environment overrides, `EKVM_FIRECRACKER`, `EKVM_KERNEL`, `EKVM_ROOTFS`,
-    /// `EKVM_MARKER`, `EKVM_SCRATCH_DIR`, `EKVM_REQUIRE_LIMITS`, `EKVM_GATEWAY`, `EKVM_RESOLVER`,
+    /// Layer the environment overrides, `BSX_FIRECRACKER`, `BSX_KERNEL`, `BSX_ROOTFS`,
+    /// `BSX_MARKER`, `BSX_SCRATCH_DIR`, `BSX_REQUIRE_LIMITS`, `BSX_GATEWAY`, `BSX_RESOLVER`,
     /// onto [`BootConfig::default`]. The
     /// resource *quantities* (`vcpus`, `mem_mib`, `boot_timeout`) have no env key; they come from
     /// [`Limits`] via [`with_limits`](BootConfig::with_limits). `require_limits` is a host **posture**,
@@ -238,41 +238,40 @@ impl BootConfig {
     }
 
     /// The composable core of [`from_env`](BootConfig::from_env): every override comes through
-    /// `lookup`, keyed by the `EKVM_*` env name. Two uses: precedence is unit-testable without
+    /// `lookup`, keyed by the `BSX_*` env name. Two uses: precedence is unit-testable without
     /// mutating the process environment (which races under the parallel runner and is `unsafe` from
     /// edition 2024); and a caller can **layer another source under the environment** by returning
-    /// the real env var if set, else its own value, e.g. the CLI's `.ekvm.toml` file layer resolves
+    /// the real env var if set, else its own value, e.g. the CLI's `.bsx.toml` file layer resolves
     /// `env > file > defaults` by composing `std::env::var_os(key).or_else(|| file.get(key))`.
     pub fn from_env_with(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
         let mut cfg = Self::default();
-        if let Some(v) = lookup("EKVM_FIRECRACKER") {
+        if let Some(v) = lookup("BSX_FIRECRACKER") {
             cfg.firecracker = PathBuf::from(v);
         }
-        if let Some(v) = lookup("EKVM_KERNEL") {
+        if let Some(v) = lookup("BSX_KERNEL") {
             cfg.kernel = PathBuf::from(v);
         }
-        if let Some(v) = lookup("EKVM_ROOTFS") {
+        if let Some(v) = lookup("BSX_ROOTFS") {
             cfg.rootfs = PathBuf::from(v);
         }
         // Strict UTF-8 like `env::var`: a non-UTF-8 marker can't be searched for anyway.
-        if let Some(v) = lookup("EKVM_MARKER").and_then(|v| v.into_string().ok()) {
+        if let Some(v) = lookup("BSX_MARKER").and_then(|v| v.into_string().ok()) {
             cfg.userspace_marker = v;
         }
-        if let Some(v) = lookup("EKVM_SCRATCH_DIR") {
+        if let Some(v) = lookup("BSX_SCRATCH_DIR") {
             cfg.scratch_dir = PathBuf::from(v);
         }
-        if let Some(v) = lookup("EKVM_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
+        if let Some(v) = lookup("BSX_REQUIRE_LIMITS").and_then(|v| parse_env_bool(&v)) {
             cfg.require_limits = v;
         }
         // A host posture like `require_limits`, not a per-run quantity: which uplink this host has
         // is the operator's fact, the same for every sandbox on it. The resolver is only read when a
         // gateway resolved, so a resolver the guest could not route to is unreachable here too.
-        if let Some(gateway) =
-            lookup("EKVM_GATEWAY").and_then(|v| parse_env_ipv4(&v, "EKVM_GATEWAY"))
+        if let Some(gateway) = lookup("BSX_GATEWAY").and_then(|v| parse_env_ipv4(&v, "BSX_GATEWAY"))
         {
             let mut egress = GuestEgress::via(gateway);
             if let Some(resolver) =
-                lookup("EKVM_RESOLVER").and_then(|v| parse_env_ipv4(&v, "EKVM_RESOLVER"))
+                lookup("BSX_RESOLVER").and_then(|v| parse_env_ipv4(&v, "BSX_RESOLVER"))
             {
                 egress = egress.with_resolver(resolver);
             }
@@ -295,7 +294,7 @@ impl BootConfig {
     }
 }
 
-/// Parse an `EKVM_*` IPv4 env value. An unparseable value is `None` **and a warning**: falling back
+/// Parse an `BSX_*` IPv4 env value. An unparseable value is `None` **and a warning**: falling back
 /// to the sealed default is the safe direction, but a typo'd gateway that silently produces a
 /// sandbox with no route out is the kind of quiet misconfiguration that reads as a broken engine.
 /// `key` rides the warning so the operator is told which value to fix.
@@ -313,9 +312,9 @@ fn parse_env_ipv4(v: &std::ffi::OsStr, key: &str) -> Option<Ipv4Addr> {
     }
 }
 
-/// Parse an `EKVM_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
+/// Parse an `BSX_*` boolean env value, tolerant of the usual spellings and case. An unrecognized
 /// value is `None` (the caller keeps the default) rather than a silent `false`, so a typo'd
-/// `EKVM_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
+/// `BSX_REQUIRE_LIMITS=ture` doesn't quietly disable a hardening opt-in.
 fn parse_env_bool(v: &std::ffi::OsStr) -> Option<bool> {
     match v.to_str()?.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Some(true),
@@ -362,7 +361,7 @@ pub(crate) fn refuse_uncappable_boot(config: &BootConfig) -> Result<(), VmmError
 /// as the typo it is. Checked against the link the tap builder will actually assign, so a change to
 /// the prefix moves both together.
 ///
-/// Only fires when a NIC was asked for: a host-wide `EKVM_GATEWAY` must stay inert on a boot that
+/// Only fires when a NIC was asked for: a host-wide `BSX_GATEWAY` must stay inert on a boot that
 /// wants no networking at all.
 pub(crate) fn refuse_offlink_gateway(config: &BootConfig) -> Result<(), VmmError> {
     let (true, Some(egress)) = (config.enable_network, config.egress) else {
@@ -726,7 +725,7 @@ impl RunningVm {
     }
 
     /// This VM's **name**, unique among live VMs on the host: the leaf of its scratch dir,
-    /// `ekvm-<pid>-<seq>`, where the pid is this driver's and the sequence is per-process.
+    /// `bsx-<pid>-<seq>`, where the pid is this driver's and the sequence is per-process.
     ///
     /// Exposed because it is the handle everything else about the VM is already keyed on: the
     /// scratch dir on disk, the netns (and so `ip netns list`), and the driver's own log lines. An
@@ -1088,7 +1087,7 @@ pub(crate) fn reclaim_scratch_after_tap_failure(workdir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ekvm_test_support::ScratchDir;
+    use bsx_test_support::ScratchDir;
 
     #[test]
     fn reclaim_scratch_removes_the_dir_when_there_is_no_netns() {
@@ -1096,8 +1095,8 @@ mod tests {
         // `abort` now route through this one helper, so a failed boot reclaims exactly as a drop does.
         // (The netns-lingers branch needs CAP_NET_ADMIN to make `netns_exists` meaningful; the
         // privileged suite covers the sweep reclaiming a stranded netns+dir pair.)
-        let base = ScratchDir::created("ekvm-reclaim");
-        let workdir = base.path().join("ekvm-1-0");
+        let base = ScratchDir::created("bsx-reclaim");
+        let workdir = base.path().join("bsx-1-0");
         std::fs::create_dir(&workdir).expect("create workdir");
         reclaim_scratch(&workdir, None);
         assert!(
@@ -1187,13 +1186,13 @@ mod tests {
 
     #[test]
     fn a_host_wide_gateway_does_not_break_a_boot_that_wants_no_nic() {
-        // The regression this guards. A gateway is a host fact: `EKVM_GATEWAY` and `.ekvm.toml`
+        // The regression this guards. A gateway is a host fact: `BSX_GATEWAY` and `.bsx.toml`
         // exist so an operator sets it once for the whole host. If that made a NIC-less boot fail,
-        // configuring an uplink would break `ekvm run` with no `--net`, every `ekvm shell`, and
+        // configuring an uplink would break `bsx run` with no `--net`, every `bsx shell`, and
         // every daemon session from a client that predates the network fields, which is to say
         // nearly everything on a host that followed its own documentation.
         let mut cfg = BootConfig::from_env_with(|key| match key {
-            "EKVM_GATEWAY" => Some(std::ffi::OsString::from("10.200.0.1")),
+            "BSX_GATEWAY" => Some(std::ffi::OsString::from("10.200.0.1")),
             _ => None,
         });
         assert!(cfg.egress.is_some(), "the host layer sets a gateway");
@@ -1304,14 +1303,14 @@ mod tests {
 
     #[test]
     fn require_limits_reads_from_the_environment() {
-        // `from_env_with` layers `EKVM_REQUIRE_LIMITS` (a posture, not a resource quantity) onto the
+        // `from_env_with` layers `BSX_REQUIRE_LIMITS` (a posture, not a resource quantity) onto the
         // default `false`, tolerant of spelling/case; an unrecognized value keeps the default.
-        let on = BootConfig::from_env_with(|k| (k == "EKVM_REQUIRE_LIMITS").then(|| "TRUE".into()));
+        let on = BootConfig::from_env_with(|k| (k == "BSX_REQUIRE_LIMITS").then(|| "TRUE".into()));
         assert!(on.require_limits);
-        let off = BootConfig::from_env_with(|k| (k == "EKVM_REQUIRE_LIMITS").then(|| "0".into()));
+        let off = BootConfig::from_env_with(|k| (k == "BSX_REQUIRE_LIMITS").then(|| "0".into()));
         assert!(!off.require_limits);
         let typo =
-            BootConfig::from_env_with(|k| (k == "EKVM_REQUIRE_LIMITS").then(|| "ture".into()));
+            BootConfig::from_env_with(|k| (k == "BSX_REQUIRE_LIMITS").then(|| "ture".into()));
         assert!(
             !typo.require_limits,
             "an unrecognized value keeps the default"
@@ -1333,8 +1332,8 @@ mod tests {
     fn from_env_layers_overrides_onto_defaults() {
         // Injected lookup, not `set_var`: no process-global mutation, no parallel-test race.
         let cfg = BootConfig::from_env_with(|key| match key {
-            "EKVM_KERNEL" => Some("/elsewhere/vmlinux".into()),
-            "EKVM_MARKER" => Some("guest-ready".into()),
+            "BSX_KERNEL" => Some("/elsewhere/vmlinux".into()),
+            "BSX_MARKER" => Some("guest-ready".into()),
             _ => None,
         });
         assert_eq!(cfg.kernel, PathBuf::from("/elsewhere/vmlinux"));
@@ -1352,7 +1351,7 @@ mod tests {
                 || default_scratch == std::path::Path::new("/var/tmp")
         );
         let cfg = BootConfig::from_env_with(|k| {
-            (k == "EKVM_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
+            (k == "BSX_SCRATCH_DIR").then(|| "/mnt/disk/scratch".into())
         });
         assert_eq!(cfg.scratch_dir, PathBuf::from("/mnt/disk/scratch"));
     }
