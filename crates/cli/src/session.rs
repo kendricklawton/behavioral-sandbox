@@ -846,15 +846,15 @@ fn send(w: &mut UnixStream, resp: &Response) -> bool {
         // flooded-output error the taxonomy already carries rather than dropping the connection and
         // leaving the client to infer why.
         Err(ProtocolError::TooLarge { limit }) => {
+            let (what, kind) = oversize_reply(resp);
             tracing::warn!(
                 limit,
-                "reply exceeds the wire cap; answering flooded output"
+                what,
+                "reply exceeds the wire cap; answering a flooded reply"
             );
             let flooded = nonfatal(
-                format!(
-                    "the run's output exceeds the {limit}-byte reply cap and cannot be carried"
-                ),
-                FaultKind::Guest,
+                format!("{what} exceeds the {limit}-byte reply cap and cannot be carried"),
+                kind,
             );
             match write_response(w, &flooded) {
                 Ok(()) => true,
@@ -868,6 +868,23 @@ fn send(w: &mut UnixStream, resp: &Response) -> bool {
             tracing::debug!(error = %e, "reply failed; the client is gone");
             false
         }
+    }
+}
+
+/// What did not fit, and whose fault that is, for a reply the wire cannot carry. Named per variant
+/// because `send` serves every reply: a `get` of a binary file expands 3x through [`lossy`] and
+/// trips the same bound as a flooding `exec`, and telling that caller its *run's output* was too big
+/// would point at the wrong thing. The record replies are host-built, so they are [`FaultKind::Infra`]
+/// rather than the guest's doing.
+/// `a_flooded_reply_names_what_did_not_fit` pins the pairing.
+fn oversize_reply(resp: &Response) -> (&'static str, FaultKind) {
+    match resp {
+        Response::Result { .. } => ("the run's output", FaultKind::Guest),
+        Response::Got { .. } => ("the file read back", FaultKind::Guest),
+        Response::Trace { .. } | Response::TraceSummary { .. } => {
+            ("the session's audit record", FaultKind::Infra)
+        }
+        _ => ("the reply", FaultKind::Infra),
     }
 }
 
@@ -1050,29 +1067,72 @@ mod tests {
         // cap's worth of ordinary text must encode: bounding a reply below what the engine will
         // capture is what makes a legitimate run's own output undeliverable.
         let cap = Limits::default().output_cap;
-        let reply = Response::result(0, "x".repeat(cap), String::new(), 5);
-        let mut wire = Vec::new();
-        let encoded = write_response(&mut wire, &reply);
+        let encodes = |stdout: String| {
+            let mut wire = Vec::new();
+            write_response(&mut wire, &Response::result(0, stdout, String::new(), 5))
+        };
+
+        // 1x, ordinary text.
+        let encoded = encodes("x".repeat(cap));
         assert!(
             encoded.is_ok(),
             "a result at the default output_cap ({cap} bytes) must fit the wire: {encoded:?}"
+        );
+
+        // 2x, the escape of a quote (a JSON file, a log of quoted strings). Twice the cap is *not*
+        // enough on its own: the envelope pushes this the last 84 bytes over, which is why the bound
+        // carries a MiB of slack rather than being exactly double.
+        let encoded = encodes("\"".repeat(cap));
+        assert!(
+            encoded.is_ok(),
+            "quote-dense output at the cap escapes to 2x and must still fit: {encoded:?}"
         );
 
         // What the number does *not* cover, stated as a test so the limit is measured rather than
         // assumed: a C0 control byte is valid UTF-8 and JSON-escapes to six bytes, so a cap's worth
         // of them exceeds the reply bound and is reported (`send` answers a flooded-output error)
         // rather than carried.
-        let controls = Response::result(0, "\u{1}".repeat(cap), String::new(), 5);
-        let mut wire = Vec::new();
         assert!(
             matches!(
-                write_response(&mut wire, &controls),
+                encodes("\u{1}".repeat(cap)),
                 Err(ProtocolError::TooLarge {
                     limit: MAX_RESPONSE_BYTES
                 })
             ),
             "control-dense output at the cap expands past the reply bound by design"
         );
+    }
+
+    #[test]
+    fn a_flooded_reply_names_what_did_not_fit() {
+        // `send` serves every reply, so one hard-coded "the run's output" is wrong for three of
+        // them. A `get` of a binary file reaches this bound through the 3x lossy expansion, and the
+        // record replies reach it without the guest doing anything at all.
+        for (resp, want, kind) in [
+            (
+                Response::result(0, String::new(), String::new(), 0),
+                "the run's output",
+                FaultKind::Guest,
+            ),
+            (
+                Response::got("f".into(), String::new(), true, false),
+                "the file read back",
+                FaultKind::Guest,
+            ),
+            (
+                Response::trace(serde_json::json!({})),
+                "the session's audit record",
+                FaultKind::Infra,
+            ),
+            (
+                Response::trace_summary(serde_json::json!({})),
+                "the session's audit record",
+                FaultKind::Infra,
+            ),
+            (Response::opened(1, false), "the reply", FaultKind::Infra),
+        ] {
+            assert_eq!(oversize_reply(&resp), (want, kind), "{resp:?}");
+        }
     }
 
     /// An `open` with the given knobs set on an otherwise-default request: the foreign-crate way

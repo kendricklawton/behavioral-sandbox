@@ -87,15 +87,18 @@ pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 /// output under an `output_cap` an operator already controls. Bounding a reply by the client-DoS
 /// number is what makes a legitimate `result` undeliverable.
 ///
-/// Sized at twice the engine's default `output_cap`, which covers the 2x escape of quotes,
-/// backslashes and newlines. It deliberately does **not** cover the worst case: a C0 control byte is
-/// valid UTF-8 and JSON-escapes to `\u00XX`, six bytes, and a byte that is not valid UTF-8 renders
-/// as U+FFFD's three, so output dense in either still exceeds this. That case is *reported*, the
-/// daemon answering a flooded-output error, rather than designed around, since covering it would
-/// mean a bound six times the operator's cap and a peak allocation to match.
-/// `the_wire_can_carry_the_default_output_cap` holds this number against `Limits::default()`, since
-/// this crate is engine-free and cannot read that default itself.
-pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+/// Twice the engine's default `output_cap` (16 MiB), so a cap's worth of quotes, backslashes or
+/// newlines still fits at its 2x escape, **plus a MiB**: twice the cap alone leaves nothing for the
+/// envelope, and the envelope is what puts a quote-dense reply 84 bytes over.
+///
+/// It deliberately does not cover the worst case: a C0 control byte is valid UTF-8 and JSON-escapes
+/// to `\u00XX`, six bytes, and a byte that is not valid UTF-8 renders as U+FFFD's three, so output
+/// dense in either still exceeds this. That case is *reported*, the daemon answering a
+/// flooded-output error, rather than designed around, since covering it would mean a bound six times
+/// the operator's cap and a peak allocation to match.
+/// `the_wire_can_carry_the_default_output_cap` holds this number against `Limits::default()` at both
+/// 1x and 2x, since this crate is engine-free and cannot read that default itself.
+pub const MAX_RESPONSE_BYTES: usize = 33 * 1024 * 1024;
 
 /// The ordering the two bounds exist for, checked at compile time: a reply the daemon produced under
 /// an operator's `output_cap` must not be bounded by the cap on an untrusted client's line. Equal
@@ -1396,7 +1399,7 @@ mod tests {
     }
 
     #[test]
-    fn the_size_cap_names_one_number_on_both_sides_of_the_wire() {
+    fn a_request_at_its_cap_encodes_and_decodes_and_one_byte_more_does_not() {
         // The bound is the line's content, the newline excluded, on the write side exactly as on
         // the read side (`read_line_capped` drops the terminator before counting): a message whose
         // line is exactly [`MAX_REQUEST_BYTES`] encodes and decodes, one more byte is refused by

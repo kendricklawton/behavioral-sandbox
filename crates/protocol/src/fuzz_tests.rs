@@ -166,10 +166,18 @@ fn rand_response(rng: &mut Rng) -> Response {
     }
 }
 
-fn encode<T: serde::Serialize>(msg: &T) -> Vec<u8> {
+/// Encode through the direction's own writer, so a generated message is bounded by exactly the cap
+/// the matching reader will apply to it. Writing everything under the larger cap would let a request
+/// between the two bounds encode and then fail its own round trip.
+fn encode_request(req: &Request) -> Vec<u8> {
     let mut buf = Vec::new();
-    write_message(&mut buf, msg, MAX_RESPONSE_BYTES)
-        .expect("a generated message serializes under the size cap");
+    write_request(&mut buf, req).expect("a generated request serializes under the request cap");
+    buf
+}
+
+fn encode_response(resp: &Response) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_response(&mut buf, resp).expect("a generated response serializes under the response cap");
     buf
 }
 
@@ -204,12 +212,12 @@ fn request_and_response_round_trip() {
     let mut rng = Rng::new(0x1234_5678_9ABC_DEF0);
     for _ in 0..4_000 {
         let req = rand_request(&mut rng);
-        let buf = encode(&req);
+        let buf = encode_request(&req);
         let mut cur = Cursor::new(&buf);
         assert_eq!(read_request(&mut cur).unwrap(), Some(req));
 
         let resp = rand_response(&mut rng);
-        let buf = encode(&resp);
+        let buf = encode_response(&resp);
         let mut cur = Cursor::new(&buf);
         assert_eq!(read_response(&mut cur).unwrap(), Some(resp));
     }
@@ -221,12 +229,12 @@ fn request_and_response_round_trip() {
 fn truncations_of_valid_messages_never_panic() {
     let mut rng = Rng::new(0x0F0F_0F0F_1234_9999);
     for _ in 0..4_000 {
-        let buf = encode(&rand_request(&mut rng));
+        let buf = encode_request(&rand_request(&mut rng));
         let cut = rng.below(buf.len());
         let mut cur = Cursor::new(&buf[..cut]);
         let _ = read_request(&mut cur);
 
-        let buf = encode(&rand_response(&mut rng));
+        let buf = encode_response(&rand_response(&mut rng));
         let cut = rng.below(buf.len());
         let mut cur = Cursor::new(&buf[..cut]);
         let _ = read_response(&mut cur);

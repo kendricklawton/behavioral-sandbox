@@ -113,11 +113,11 @@ The two directions carry **different** bounds, and an SDK implements both.
 | Direction | Bound | What it bounds |
 |---|---|---|
 | Request (client to daemon) | 4 MiB | A line an untrusted peer sent. The daemon refuses a longer one before decoding it, drains to the next newline so the session resyncs, and answers `protocol`. |
-| Reply (daemon to client) | 32 MiB | The daemon's own output, under the session's `output_cap`. One number for both directions is what makes a run's own `stdout` undeliverable, so the reply bound is the larger. |
+| Reply (daemon to client) | 33 MiB | The daemon's own output, under the session's `output_cap`. One number for both directions is what makes a run's own `stdout` undeliverable, so the reply bound is the larger. |
 
 The reply bound is not `output_cap` and cannot be derived from it: JSON escaping expands what the
 guest printed, six bytes for a C0 control byte and three for a byte that is not valid UTF-8, so
-32 MiB carries the default 16 MiB cap's worth of ordinary text but not a cap's worth of either.
+33 MiB carries the default 16 MiB cap's worth of ordinary text but not a cap's worth of either.
 Output that expands past the bound comes back as a `guest` error naming the number, never as a
 silently truncated `result` and never as a dropped connection, so an SDK surfaces it like any other
 flooded-output fault.
