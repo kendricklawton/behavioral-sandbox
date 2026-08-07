@@ -649,7 +649,7 @@ fn refuse_at_capacity(stream: UnixStream, server: &Server) {
     let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(1)));
     let mut stream = stream;
     let refusal = ekvm_protocol::Response::at_capacity(AT_CAPACITY_RETRY_MS);
-    let _ = ekvm_protocol::write_message(&mut stream, &refusal);
+    let _ = ekvm_protocol::write_response(&mut stream, &refusal);
 }
 
 /// This daemon's prewarm snapshot bundle dir (guest-memory-sized), under the engine's scratch knob.
@@ -1297,7 +1297,7 @@ mod tests {
         let started = Instant::now();
         refuse_at_capacity(daemon_end, &server);
         let mut reader = std::io::BufReader::new(client);
-        let reply = ekvm_protocol::read_message::<ekvm_protocol::Response>(&mut reader)
+        let reply = ekvm_protocol::read_response(&mut reader)
             .expect("the refusal parses")
             .expect("the refusal is a message, not EOF");
         assert!(

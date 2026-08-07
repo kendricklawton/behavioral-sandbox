@@ -6,7 +6,7 @@
 //! which only sees a guest already contained inside a VM. A hostile or buggy peer must be
 //! a typed [`ProtocolError`], never a host panic, hang, or leak. These tests assert exactly that: for
 //! **any** input, the reader returns a value or a typed error, never panics, never loops unboundedly,
-//! and never buffers past [`MAX_MESSAGE_BYTES`](crate::MAX_MESSAGE_BYTES).
+//! and never buffers past [`MAX_REQUEST_BYTES`](crate::MAX_REQUEST_BYTES).
 //!
 //! **No `proptest`/`arbitrary`.** This crate is a deliberately-thin leaf (serde only); rather than
 //! pull a fuzzing framework into its tree, the generator is a tiny deterministic PRNG. Fixed seeds
@@ -168,7 +168,8 @@ fn rand_response(rng: &mut Rng) -> Response {
 
 fn encode<T: serde::Serialize>(msg: &T) -> Vec<u8> {
     let mut buf = Vec::new();
-    write_message(&mut buf, msg).expect("a generated message serializes under the size cap");
+    write_message(&mut buf, msg, MAX_RESPONSE_BYTES)
+        .expect("a generated message serializes under the size cap");
     buf
 }
 
@@ -190,9 +191,9 @@ fn reader_never_panics_on_arbitrary_bytes() {
         }
         let mut cur = Cursor::new(&data);
         // Bounded drain: read until EOF or the first error, never looping unboundedly on garbage.
-        while let Ok(Some(_)) = read_message::<Request>(&mut cur) {}
+        while let Ok(Some(_)) = read_request(&mut cur) {}
         let mut cur = Cursor::new(&data);
-        while let Ok(Some(_)) = read_message::<Response>(&mut cur) {}
+        while let Ok(Some(_)) = read_response(&mut cur) {}
     }
 }
 
@@ -205,12 +206,12 @@ fn request_and_response_round_trip() {
         let req = rand_request(&mut rng);
         let buf = encode(&req);
         let mut cur = Cursor::new(&buf);
-        assert_eq!(read_message::<Request>(&mut cur).unwrap(), Some(req));
+        assert_eq!(read_request(&mut cur).unwrap(), Some(req));
 
         let resp = rand_response(&mut rng);
         let buf = encode(&resp);
         let mut cur = Cursor::new(&buf);
-        assert_eq!(read_message::<Response>(&mut cur).unwrap(), Some(resp));
+        assert_eq!(read_response(&mut cur).unwrap(), Some(resp));
     }
 }
 
@@ -223,12 +224,12 @@ fn truncations_of_valid_messages_never_panic() {
         let buf = encode(&rand_request(&mut rng));
         let cut = rng.below(buf.len());
         let mut cur = Cursor::new(&buf[..cut]);
-        let _ = read_message::<Request>(&mut cur);
+        let _ = read_request(&mut cur);
 
         let buf = encode(&rand_response(&mut rng));
         let cut = rng.below(buf.len());
         let mut cur = Cursor::new(&buf[..cut]);
-        let _ = read_message::<Response>(&mut cur);
+        let _ = read_response(&mut cur);
     }
 }
 
@@ -238,14 +239,14 @@ fn truncations_of_valid_messages_never_panic() {
 #[test]
 fn an_overlong_line_is_bounded_not_buffered() {
     // One byte past the cap with no newline: the reader must stop at the cap, not read it all in.
-    let flood = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+    let flood = vec![b'x'; MAX_REQUEST_BYTES + 1];
     let mut cur = Cursor::new(&flood);
     let mut out = Vec::new();
-    let err = read_line_capped(&mut cur, MAX_MESSAGE_BYTES, &mut out).unwrap_err();
-    assert!(matches!(err, ProtocolError::TooLarge));
+    let err = read_line_capped(&mut cur, MAX_REQUEST_BYTES, &mut out).unwrap_err();
+    assert!(matches!(err, ProtocolError::TooLarge { .. }));
     assert!(
-        out.len() <= MAX_MESSAGE_BYTES,
-        "buffered {} bytes, past the {MAX_MESSAGE_BYTES} cap",
+        out.len() <= MAX_REQUEST_BYTES,
+        "buffered {} bytes, past the {MAX_REQUEST_BYTES} cap",
         out.len()
     );
 }

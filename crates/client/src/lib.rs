@@ -32,8 +32,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use ekvm_protocol::{
-    ExecParams, FaultKind, GetParams, ProtocolError, PutParams, Request, Response, read_message,
-    write_message,
+    ExecParams, FaultKind, GetParams, ProtocolError, PutParams, Request, Response, read_response,
+    write_request,
 };
 
 // The session-knobs struct is the protocol's, re-exported so a caller of this client names one
@@ -162,7 +162,7 @@ impl Client {
 
     /// Bound how long a call blocks *writing* a request, so a daemon that stops reading can't hang
     /// the caller forever: without it a large `put`/`exec` fills the socket buffer and blocks in
-    /// `write_message` with no opt-out. `None` blocks indefinitely (the default). Set it generously
+    /// `write_request` with no opt-out. `None` blocks indefinitely (the default). Set it generously
     /// (a big `put` is real bytes over the socket), like the read timeout.
     /// # Errors
     /// The underlying `setsockopt` error.
@@ -334,7 +334,7 @@ impl Client {
 
     /// Send one request line, stamped with the wire schema.
     fn send(&mut self, req: &Request) -> Result<(), ClientError> {
-        write_message(&mut self.writer, req).map_err(ClientError::Protocol)
+        write_request(&mut self.writer, req).map_err(ClientError::Protocol)
     }
 
     /// Read one response line, mapping a clean EOF to [`ClientError::Closed`], a remote
@@ -342,7 +342,7 @@ impl Client {
     /// [`AtCapacity`](Response::AtCapacity) refusal to [`ClientError::AtCapacity`], so callers only
     /// match the replies they expect and see backpressure as its own class.
     fn recv(&mut self) -> Result<Response, ClientError> {
-        match read_message::<Response>(&mut self.reader)? {
+        match read_response(&mut self.reader)? {
             None => Err(ClientError::Closed),
             Some(Response::Error {
                 message,

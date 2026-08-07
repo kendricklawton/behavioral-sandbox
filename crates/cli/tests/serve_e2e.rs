@@ -459,6 +459,51 @@ fn agent_serves_the_full_wire_api_over_a_unix_socket() {
 
 #[test]
 #[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
+fn a_run_whose_output_outgrows_a_request_line_still_reaches_the_client() {
+    if let Some(why) = skip_reason() {
+        eprintln!(
+            "skipping a_run_whose_output_outgrows_a_request_line_still_reaches_the_client: {why}"
+        );
+        return;
+    }
+    let (_daemon, socket) = launch_daemon(None, None);
+    let mut client = Client::connect(&socket).unwrap_or_else(|e| panic!("connect: {e}"));
+    if let Err(e) = client.set_read_timeout(Some(Duration::from_secs(60))) {
+        panic!("set read timeout: {e}");
+    }
+    client
+        .open(OpenParams::default())
+        .unwrap_or_else(|e| panic!("open: {e}"));
+
+    // Six MiB, past `MAX_REQUEST_BYTES` and well inside the default `output_cap`. A reply bounded by
+    // the request cap could not carry this, and the client saw the session close with no reply and
+    // no diagnostic. The assertion is that a run's own output comes back.
+    const OUT: usize = 6 * 1024 * 1024;
+    let flood = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("head -c {OUT} /dev/zero | tr '\\0' 'x'"),
+    ];
+    let run = client.exec(&flood, "").unwrap_or_else(|e| {
+        panic!("a {OUT}-byte run must return its output, not a dead session: {e}")
+    });
+    assert_eq!(run.exit_code, 0, "the command itself succeeds");
+    assert_eq!(
+        run.stdout.len(),
+        OUT,
+        "every byte the engine captured must reach the client"
+    );
+
+    // And the session is still usable, so nothing about the large reply retired the VM.
+    let run = client
+        .exec(&["echo".to_string(), "still-here".to_string()], "")
+        .unwrap_or_else(|e| panic!("the session must survive a large reply: {e}"));
+    assert_eq!(run.stdout, "still-here\n");
+    client.close().unwrap_or_else(|e| panic!("close: {e}"));
+}
+
+#[test]
+#[ignore = "spawns ekvm; needs /dev/kvm + the guest rootfs (run via `cargo xtask ci-privileged`)"]
 fn the_reference_client_drives_a_full_session() {
     if let Some(why) = skip_reason() {
         eprintln!("skipping the_reference_client_drives_a_full_session: {why}");

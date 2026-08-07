@@ -33,7 +33,7 @@ use ekvm_engine::{MAX_VCPUS, vcpus_supported};
 use ekvm_probes_loader::{EgressPolicy, MAX_POLICY_RULES, Timing};
 use ekvm_protocol::{
     ExecParams, FaultKind, GetParams, OpenParams, ProtocolError, PutParams, Request, Response,
-    read_message, write_message,
+    read_request, write_response,
 };
 
 use crate::metrics::{Metrics, Verb};
@@ -75,7 +75,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
 
     // The first message must be `open` (carrying the session's resource envelope). Anything else,
     // EOF, a stray verb, a malformed/wrong-schema line, ends the connection before any VM is booted.
-    let open = match read_message::<Request>(&mut reader) {
+    let open = match read_request(&mut reader) {
         Ok(Some(req)) => req,
         Ok(None) => return, // client hung up before opening; nothing to tear down
         Err(e) => {
@@ -211,7 +211,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
         // Each message gets a fresh full budget: the clock starts here, not at `open`, so a long
         // boot or a long-running previous command never eats into the next request's deadline.
         reader.get_mut().rearm();
-        match read_message::<Request>(&mut reader) {
+        match read_request(&mut reader) {
             Ok(None) => break, // clean EOF, teardown below
             Ok(Some(Request::Close)) => {
                 let _ = send(&mut writer, &Response::Closed);
@@ -250,10 +250,7 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     // line unread. `a_cancel_after_the_idle_deadline_still_gets_its_ack` pins this.
                     server.metrics.request_failed(false);
                     reader.get_mut().rearm();
-                    if matches!(
-                        read_message::<Request>(&mut reader),
-                        Ok(Some(Request::Cancel))
-                    ) {
+                    if matches!(read_request(&mut reader), Ok(Some(Request::Cancel))) {
                         let _ = write_response(&mut writer, &Response::Cancelled);
                     }
                     break;
@@ -843,16 +840,35 @@ fn record_to_value(json: &str) -> serde_json::Value {
 fn send(w: &mut UnixStream, resp: &Response) -> bool {
     match write_response(w, resp) {
         Ok(()) => true,
+        // Not a gone client: the daemon's own reply outgrew what one line carries, which a run can
+        // reach under an `output_cap` larger than the wire's (output dense in C0 controls escapes
+        // to six bytes each, invalid UTF-8 to three). The session is intact, so answer the typed
+        // flooded-output error the taxonomy already carries rather than dropping the connection and
+        // leaving the client to infer why.
+        Err(ProtocolError::TooLarge { limit }) => {
+            tracing::warn!(
+                limit,
+                "reply exceeds the wire cap; answering flooded output"
+            );
+            let flooded = nonfatal(
+                format!(
+                    "the run's output exceeds the {limit}-byte reply cap and cannot be carried"
+                ),
+                FaultKind::Guest,
+            );
+            match write_response(w, &flooded) {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::debug!(error = %e, "reply failed; the client is gone");
+                    false
+                }
+            }
+        }
         Err(e) => {
             tracing::debug!(error = %e, "reply failed; the client is gone");
             false
         }
     }
-}
-
-/// Write one schema-stamped response line (the shared codec).
-fn write_response(w: &mut UnixStream, resp: &Response) -> Result<(), ProtocolError> {
-    write_message(w, resp)
 }
 
 /// UTF-8-lossy rendering of captured bytes, matching `ekvm run --json`.
@@ -1025,6 +1041,39 @@ fn ms(d: Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ekvm_protocol::{MAX_RESPONSE_BYTES, write_request};
+
+    #[test]
+    fn the_wire_can_carry_the_default_output_cap() {
+        // The enforcer for `MAX_RESPONSE_BYTES`, which lives here because `ekvm-protocol` is
+        // engine-free and cannot read `Limits::default()` itself. A `result` carrying the default
+        // cap's worth of ordinary text must encode: bounding a reply below what the engine will
+        // capture is what makes a legitimate run's own output undeliverable.
+        let cap = Limits::default().output_cap;
+        let reply = Response::result(0, "x".repeat(cap), String::new(), 5);
+        let mut wire = Vec::new();
+        let encoded = write_response(&mut wire, &reply);
+        assert!(
+            encoded.is_ok(),
+            "a result at the default output_cap ({cap} bytes) must fit the wire: {encoded:?}"
+        );
+
+        // What the number does *not* cover, stated as a test so the limit is measured rather than
+        // assumed: a C0 control byte is valid UTF-8 and JSON-escapes to six bytes, so a cap's worth
+        // of them exceeds the reply bound and is reported (`send` answers a flooded-output error)
+        // rather than carried.
+        let controls = Response::result(0, "\u{1}".repeat(cap), String::new(), 5);
+        let mut wire = Vec::new();
+        assert!(
+            matches!(
+                write_response(&mut wire, &controls),
+                Err(ProtocolError::TooLarge {
+                    limit: MAX_RESPONSE_BYTES
+                })
+            ),
+            "control-dense output at the cap expands past the reply bound by design"
+        );
+    }
 
     /// An `open` with the given knobs set on an otherwise-default request: the foreign-crate way
     /// to build the `#[non_exhaustive]` params struct, and the shape every future knob keeps.
@@ -1318,7 +1367,7 @@ mod tests {
         });
 
         let started = Instant::now();
-        let result = read_message::<Request>(&mut reader);
+        let result = read_request(&mut reader);
         let elapsed = started.elapsed();
         dripper.join().expect("dripper");
 
@@ -1347,17 +1396,17 @@ mod tests {
 
         let sender = std::thread::spawn(move || {
             let mut client = client;
-            write_message(&mut client, &Request::Trace).expect("first message");
+            write_request(&mut client, &Request::Trace).expect("first message");
             // Idle 150ms: inside the first budget's leftover only if the deadline were cumulative;
             // well inside a *fresh* 200ms budget after rearm.
             std::thread::sleep(Duration::from_millis(150));
-            write_message(&mut client, &Request::Close).expect("second message");
+            write_request(&mut client, &Request::Close).expect("second message");
         });
 
-        let first = read_message::<Request>(&mut reader).expect("first parses");
+        let first = read_request(&mut reader).expect("first parses");
         assert_eq!(first, Some(Request::Trace));
         reader.get_mut().rearm();
-        let second = read_message::<Request>(&mut reader).expect("second parses after rearm");
+        let second = read_request(&mut reader).expect("second parses after rearm");
         assert_eq!(second, Some(Request::Close));
         sender.join().expect("sender");
     }

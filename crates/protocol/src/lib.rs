@@ -34,8 +34,16 @@
 //! posture. The peer is a **local, trusted-ish client** the hoster runs, so hand-debuggability
 //! (`socat`, `nc`) matters more than a compact wire, and any language can drive a line of JSON over a
 //! unix socket with only a JSON library. The one adversarial concern that still applies is the
-//! decoder's contract (no panic/hang/unbounded allocation on any input): every decode is bounded by
-//! [`MAX_MESSAGE_BYTES`] and returns a typed [`ProtocolError`], never a panic.
+//! decoder's contract (no panic/hang/unbounded allocation on any input): every line is bounded
+//! before it is decoded and every failure is a typed [`ProtocolError`], never a panic.
+//!
+//! **The two directions carry different bounds**, [`MAX_REQUEST_BYTES`] and
+//! [`MAX_RESPONSE_BYTES`], because they bound different things: a request is an untrusted peer's
+//! line, a response is the daemon's own output under an `output_cap` an operator already controls.
+//! The read side is the direction-typed [`read_request`]/[`read_response`], the write side
+//! [`write_request`]/[`write_response`], so a call site cannot pick the wrong number. The asymmetry
+//! is a posture: a client trusts the daemon it chose to connect to further than a daemon trusts
+//! whoever reaches its socket.
 //!
 //! **Text, not binary.** `stdin`, `put`/`get` `content`, and the returned `stdout`/`stderr` are
 //! **UTF-8 strings**, lossy on the way out exactly like `ekvm run --json` (so the daemon and the CLI
@@ -66,19 +74,41 @@ use serde::{Deserialize, Serialize};
 /// request/response shape changes in a non-additive way.
 pub const WIRE_SCHEMA: u32 = 1;
 
-/// Upper bound on one protocol line, before decoding, the allocation cap so a peer that
-/// never sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an
-/// unbounded read. Generous: a per-message `stdin`/`content` string plus its JSON envelope fits,
-/// while the exec channel still enforces the real `ekvm_engine::MAX_PAYLOAD` on the bytes that reach
-/// the guest, so this is a DoS bound, not the input-size contract.
-pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+/// Upper bound on one **request** line, before decoding: the allocation cap so a client that never
+/// sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an unbounded
+/// read. This is the bound on *untrusted* input. Generous: a per-message `stdin`/`content` string
+/// plus its JSON envelope fits, while the exec channel still enforces the real
+/// `ekvm_engine::MAX_PAYLOAD` on the bytes that reach the guest, so this is a DoS bound, not the
+/// input-size contract.
+pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Upper bound on one **response** line. Larger than [`MAX_REQUEST_BYTES`] because the two bound
+/// different things: a request is an untrusted peer's line, while a response is the daemon's own
+/// output under an `output_cap` an operator already controls. Bounding a reply by the client-DoS
+/// number is what makes a legitimate `result` undeliverable.
+///
+/// Sized at twice the engine's default `output_cap`, which covers the 2x escape of quotes,
+/// backslashes and newlines. It deliberately does **not** cover the worst case: a C0 control byte is
+/// valid UTF-8 and JSON-escapes to `\u00XX`, six bytes, and a byte that is not valid UTF-8 renders
+/// as U+FFFD's three, so output dense in either still exceeds this. That case is *reported*, the
+/// daemon answering a flooded-output error, rather than designed around, since covering it would
+/// mean a bound six times the operator's cap and a peak allocation to match.
+/// `the_wire_can_carry_the_default_output_cap` holds this number against `Limits::default()`, since
+/// this crate is engine-free and cannot read that default itself.
+pub const MAX_RESPONSE_BYTES: usize = 32 * 1024 * 1024;
+
+/// The ordering the two bounds exist for, checked at compile time: a reply the daemon produced under
+/// an operator's `output_cap` must not be bounded by the cap on an untrusted client's line. Equal
+/// numbers are what made a legitimate `result` undeliverable.
+const _: () = assert!(MAX_RESPONSE_BYTES > MAX_REQUEST_BYTES);
 
 /// A schema-stamped message. Every line on the wire, request or response, is an `Envelope`: the
 /// leading `schema` field plus the flattened [`Request`]/[`Response`] body, so a line reads
 /// `{"schema":1,"op":"exec",...}` and the version is legible before the body.
 ///
 /// Built by [`new`](Self::new), which stamps [`WIRE_SCHEMA`], the only version this crate speaks.
-/// The *gate* is [`read_message`]: deserializing an `Envelope` directly checks nothing, so a
+/// The *gate* is the read side ([`read_request`]/[`read_response`]): deserializing an `Envelope`
+/// directly checks nothing, so a
 /// stamp this crate would refuse is representable here, on purpose, since a test or a probe wants
 /// to read a foreign stamp, but only ever *minted* through `new`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,8 +123,8 @@ pub struct Envelope<T> {
 
 impl<T> Envelope<T> {
     /// Stamp `body` with the one schema this crate speaks. There is no way to mint any other
-    /// number here; a peer's foreign stamp exists only on the decode side, where [`read_message`]
-    /// refuses it.
+    /// number here; a peer's foreign stamp exists only on the decode side, where
+    /// [`read_request`]/[`read_response`] refuse it.
     #[must_use]
     pub fn new(body: T) -> Self {
         Self {
@@ -655,9 +685,14 @@ pub enum ProtocolError {
     Schema(u64),
     /// A line that isn't valid UTF-8 JSON for the expected message.
     Malformed(String),
-    /// A line exceeded [`MAX_MESSAGE_BYTES`] before a newline arrived, rejected before it can grow
-    /// host memory without bound.
-    TooLarge,
+    /// A line exceeded the bound for its direction ([`MAX_REQUEST_BYTES`] or
+    /// [`MAX_RESPONSE_BYTES`]), rejected before it can grow host memory without bound. Carries the
+    /// bound it broke, so a caller reporting this names the number that applied rather than
+    /// guessing which direction it was reading.
+    TooLarge {
+        /// The bound this line exceeded.
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -674,8 +709,8 @@ impl std::fmt::Display for ProtocolError {
                 )
             }
             ProtocolError::Malformed(m) => write!(f, "malformed message: {m}"),
-            ProtocolError::TooLarge => {
-                write!(f, "message line exceeds the {MAX_MESSAGE_BYTES}-byte cap")
+            ProtocolError::TooLarge { limit } => {
+                write!(f, "message line exceeds the {limit}-byte cap")
             }
         }
     }
@@ -690,21 +725,35 @@ impl std::error::Error for ProtocolError {
     }
 }
 
-/// Read one schema-stamped message of type `T` from `reader`, bounded by [`MAX_MESSAGE_BYTES`].
-/// `Ok(None)` on a clean EOF (the peer hung up); blank lines are skipped so a stray newline isn't a
-/// protocol fault. The order of checks is deliberate: over-cap (before decoding) → JSON well-formed
-/// → **schema match** (before the body is trusted) → body decode.
-/// This is the one decode both ends use, the daemon with `T = Request`, a client with
-/// `T = Response`, so the framing, the cap, and the schema gate can't drift between them.
+/// Read one [`Request`] (the daemon's side of the wire), bounded by [`MAX_REQUEST_BYTES`].
 /// # Errors
-/// [`ProtocolError`] on an I/O failure, an over-cap line, a wrong `schema`, or a body that isn't a
-/// valid `T`.
-pub fn read_message<T: DeserializeOwned>(
+/// [`ProtocolError`] on an I/O failure, an over-cap line, a wrong `schema`, or an undecodable body.
+pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, ProtocolError> {
+    read_message(reader, MAX_REQUEST_BYTES)
+}
+
+/// Read one [`Response`] (a client's side of the wire), bounded by [`MAX_RESPONSE_BYTES`].
+/// # Errors
+/// [`ProtocolError`] on an I/O failure, an over-cap line, a wrong `schema`, or an undecodable body.
+pub fn read_response(reader: &mut impl BufRead) -> Result<Option<Response>, ProtocolError> {
+    read_message(reader, MAX_RESPONSE_BYTES)
+}
+
+/// Read one schema-stamped message of type `T` from `reader`, bounded by `cap`. `Ok(None)` on a
+/// clean EOF (the peer hung up); blank lines are skipped so a stray newline isn't a protocol fault.
+/// The order of checks is deliberate: over-cap (before decoding) → JSON well-formed → **schema
+/// match** (before the body is trusted) → body decode.
+///
+/// One decode serves both ends, so the framing and the schema gate can't drift between them, while
+/// `cap` comes from the direction-typed wrappers above: the bound is the one thing that must differ
+/// between a line a hostile client sent and a line the daemon produced.
+fn read_message<T: DeserializeOwned>(
     reader: &mut impl BufRead,
+    cap: usize,
 ) -> Result<Option<T>, ProtocolError> {
     loop {
         let mut buf = Vec::new();
-        let eof = read_line_capped(reader, MAX_MESSAGE_BYTES, &mut buf)?;
+        let eof = read_line_capped(reader, cap, &mut buf)?;
         if eof && buf.is_empty() {
             return Ok(None); // clean EOF, nothing buffered
         }
@@ -770,7 +819,7 @@ fn read_line_capped(
                     // The newline is already in view: consume through it so the next read starts
                     // at the following line, then report the oversize one.
                     reader.consume(i + 1);
-                    return Err(ProtocolError::TooLarge);
+                    return Err(ProtocolError::TooLarge { limit: cap });
                 }
                 out.extend_from_slice(&available[..i]);
                 reader.consume(i + 1); // consume through the newline, which we drop
@@ -783,7 +832,7 @@ fn read_line_capped(
                     // line's `\n` (or EOF) so the stream resyncs, then report the oversize line.
                     reader.consume(used);
                     discard_to_newline(reader)?;
-                    return Err(ProtocolError::TooLarge);
+                    return Err(ProtocolError::TooLarge { limit: cap });
                 }
                 out.extend_from_slice(available);
                 reader.consume(used);
@@ -819,26 +868,42 @@ fn discard_to_newline(reader: &mut impl BufRead) -> Result<(), ProtocolError> {
     }
 }
 
-/// Write one message `body` as a single schema-stamped `\n`-terminated JSON line and flush it. The
-/// daemon writes a [`Response`]; a client writes a [`Request`].
+/// Write one [`Request`] (a client's side of the wire), bounded by [`MAX_REQUEST_BYTES`].
 /// # Errors
-/// [`ProtocolError::Io`] on a write failure (serialization of these fixed types is infallible);
-/// [`ProtocolError::TooLarge`] if the serialized line exceeds [`MAX_MESSAGE_BYTES`], the same
-/// envelope the read side enforces, refused before a byte is written.
-pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), ProtocolError> {
+/// [`ProtocolError::Io`] on a write failure; [`ProtocolError::TooLarge`] if the line would exceed
+/// the bound the daemon reads it under.
+pub fn write_request(w: &mut impl Write, req: &Request) -> Result<(), ProtocolError> {
+    write_message(w, req, MAX_REQUEST_BYTES)
+}
+
+/// Write one [`Response`] (the daemon's side of the wire), bounded by [`MAX_RESPONSE_BYTES`].
+/// # Errors
+/// [`ProtocolError::Io`] on a write failure; [`ProtocolError::TooLarge`] if the line would exceed
+/// the bound a client reads it under, which for a `result` means the run's output outgrew what this
+/// wire carries and the caller owes the client a flooded-output error instead of this reply.
+pub fn write_response(w: &mut impl Write, resp: &Response) -> Result<(), ProtocolError> {
+    write_message(w, resp, MAX_RESPONSE_BYTES)
+}
+
+/// Write one message `body` as a single schema-stamped `\n`-terminated JSON line and flush it,
+/// bounded by `cap` (the direction's bound, from the wrappers above).
+fn write_message<T: Serialize>(
+    w: &mut impl Write,
+    body: &T,
+    cap: usize,
+) -> Result<(), ProtocolError> {
     let envelope = Envelope::new(body);
     // These types always serialize (no maps with non-string keys, no failing custom impls), so a
     // serialize error is a bug, not a runtime state, fold it into `Io` rather than a new variant.
     let mut line = serde_json::to_string(&envelope)
         .map_err(|e| ProtocolError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-    // The encode side honors the same size envelope as the decode side: a line the peer's own
-    // `read_message` would reject as `TooLarge` is refused *here*, typed, before any byte moves.
+    // The encode side honors the same envelope the peer's read side will: a line that peer would
+    // reject as `TooLarge` is refused *here*, typed, before any byte moves, so an undeliverable
+    // reply is a value the daemon can answer rather than a half-written line.
     // Checked before the newline is appended, since the read side's cap is on the line's content
     // (`read_line_capped` excludes the terminator), so the two bounds name one number.
-    // Latent today (every producer is bounded well under the cap: flows ≤ 4096, notable ≤ 64), but
-    // the size contract must not live as an implicit invariant of a different crate's caps.
-    if line.len() > MAX_MESSAGE_BYTES {
-        return Err(ProtocolError::TooLarge);
+    if line.len() > cap {
+        return Err(ProtocolError::TooLarge { limit: cap });
     }
     line.push('\n');
     w.write_all(line.as_bytes()).map_err(ProtocolError::Io)?;
@@ -856,20 +921,20 @@ pub fn write_message<T: Serialize>(w: &mut impl Write, body: &T) -> Result<(), P
 pub mod fuzz {
     use std::io::Cursor;
 
-    use crate::{Request, Response, read_message};
+    use crate::{read_request, read_response};
 
     /// Read a stream of `Request`s from `data` (the daemon's view of a client's bytes), the
     /// highest-value target: `ekvm serve` decodes exactly this off its socket. Drains to EOF so a
     /// lying length, a blank-line flood, or a mid-line truncation are all exercised.
     pub fn read_requests(data: &[u8]) {
         let mut cur = Cursor::new(data);
-        while let Ok(Some(_)) = read_message::<Request>(&mut cur) {}
+        while let Ok(Some(_)) = read_request(&mut cur) {}
     }
 
     /// Read a stream of `Response`s from `data` (a client decoding a hostile/garbled daemon).
     pub fn read_responses(data: &[u8]) {
         let mut cur = Cursor::new(data);
-        while let Ok(Some(_)) = read_message::<Response>(&mut cur) {}
+        while let Ok(Some(_)) = read_response(&mut cur) {}
     }
 }
 
@@ -880,12 +945,12 @@ mod fuzz_tests;
 mod tests {
     use super::*;
 
-    /// Encode a request through [`write_message`] and decode it back through [`read_message`], the
+    /// Encode a request through [`write_request`] and decode it back through [`read_request`], the
     /// exact round trip the daemon and a client make across the socket.
     fn roundtrip_request(req: &Request) -> Request {
         let mut wire = Vec::new();
-        write_message(&mut wire, req).expect("encode");
-        read_message(&mut wire.as_slice())
+        write_request(&mut wire, req).expect("encode");
+        read_request(&mut wire.as_slice())
             .expect("decode ok")
             .expect("a message, not EOF")
     }
@@ -978,8 +1043,8 @@ mod tests {
             },
         ] {
             let mut wire = Vec::new();
-            write_message(&mut wire, &resp).expect("encode");
-            let back: Response = read_message(&mut wire.as_slice())
+            write_response(&mut wire, &resp).expect("encode");
+            let back: Response = read_response(&mut wire.as_slice())
                 .expect("decode")
                 .expect("a message");
             assert_eq!(back, resp);
@@ -992,7 +1057,7 @@ mod tests {
         // crate must read that as `false` (`#[serde(default)]`), not a decode error, so the field
         // lands without a schema bump.
         let line = b"{\"schema\":1,\"reply\":\"got\",\"path\":\"x\",\"content\":\"hi\",\"present\":true}\n";
-        let back: Response = read_message(&mut line.as_slice())
+        let back: Response = read_response(&mut line.as_slice())
             .expect("an old daemon's got decodes")
             .expect("a message");
         assert_eq!(
@@ -1014,9 +1079,11 @@ mod tests {
     /// constructors, variant attributes) exactly as long as this test cannot tell.
     #[test]
     fn the_wire_bytes_of_every_message_shape_are_pinned() {
+        // Generic over both directions because this pins *bytes*, which the direction's bound has
+        // no say in; the larger cap keeps a pinned shape from tripping it.
         fn line<T: serde::Serialize>(msg: &T) -> String {
             let mut wire = Vec::new();
-            write_message(&mut wire, msg).expect("every pinned shape encodes");
+            write_message(&mut wire, msg, MAX_RESPONSE_BYTES).expect("every pinned shape encodes");
             String::from_utf8(wire).expect("the wire is UTF-8")
         }
 
@@ -1215,11 +1282,11 @@ mod tests {
     fn every_message_carries_the_schema() {
         // The stamp is present and legible on both directions of the wire.
         let mut req_wire = Vec::new();
-        write_message(&mut req_wire, &Request::Close).expect("encode");
+        write_request(&mut req_wire, &Request::Close).expect("encode");
         assert_eq!(req_wire, b"{\"schema\":1,\"op\":\"close\"}\n");
 
         let mut resp_wire = Vec::new();
-        write_message(&mut resp_wire, &Response::Closed).expect("encode");
+        write_response(&mut resp_wire, &Response::Closed).expect("encode");
         assert_eq!(resp_wire, b"{\"schema\":1,\"reply\":\"closed\"}\n");
     }
 
@@ -1227,17 +1294,17 @@ mod tests {
     fn a_wrong_schema_is_a_typed_error_before_the_body_is_trusted() {
         // A future/foreign schema is rejected as `Schema`, even when the body is an op we do know...
         assert!(matches!(
-            read_message::<Request>(&mut b"{\"schema\":2,\"op\":\"close\"}\n".as_slice()),
+            read_request(&mut b"{\"schema\":2,\"op\":\"close\"}\n".as_slice()),
             Err(ProtocolError::Schema(2))
         ));
         // ...and even when the body is a shape this version has never seen.
         assert!(matches!(
-            read_message::<Request>(&mut b"{\"schema\":99,\"op\":\"teleport\"}\n".as_slice()),
+            read_request(&mut b"{\"schema\":99,\"op\":\"teleport\"}\n".as_slice()),
             Err(ProtocolError::Schema(99))
         ));
         // A message with no schema at all is malformed, not silently accepted.
         assert!(matches!(
-            read_message::<Request>(&mut b"{\"op\":\"close\"}\n".as_slice()),
+            read_request(&mut b"{\"op\":\"close\"}\n".as_slice()),
             Err(ProtocolError::Malformed(_))
         ));
     }
@@ -1269,7 +1336,7 @@ mod tests {
         // A minimal `open` (no knobs) decodes, so a client can take every default. This is also what
         // makes each new `open` field additive: a client written before `net`/`allow` existed sends
         // exactly these bytes, and they still decode to the conservative posture.
-        let req: Request = read_message(&mut b"{\"schema\":1,\"op\":\"open\"}\n".as_slice())
+        let req: Request = read_request(&mut b"{\"schema\":1,\"op\":\"open\"}\n".as_slice())
             .expect("decode")
             .expect("a message");
         assert_eq!(
@@ -1288,20 +1355,16 @@ mod tests {
     #[test]
     fn blank_lines_are_skipped_and_eof_is_none() {
         // Leading blank lines are tolerated; a stream with only whitespace is a clean EOF.
-        let req: Request = read_message(&mut b"\n\n{\"schema\":1,\"op\":\"close\"}\n".as_slice())
+        let req: Request = read_request(&mut b"\n\n{\"schema\":1,\"op\":\"close\"}\n".as_slice())
             .expect("decode")
             .expect("a message past the blanks");
         assert_eq!(req, Request::Close);
         assert!(
-            read_message::<Request>(&mut b"\n  \n".as_slice())
+            read_request(&mut b"\n  \n".as_slice())
                 .expect("decode")
                 .is_none()
         );
-        assert!(
-            read_message::<Request>(&mut b"".as_slice())
-                .expect("decode")
-                .is_none()
-        );
+        assert!(read_request(&mut b"".as_slice()).expect("decode").is_none());
     }
 
     #[test]
@@ -1316,7 +1379,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    read_message::<Request>(&mut bad.as_bytes()),
+                    read_request(&mut bad.as_bytes()),
                     Err(ProtocolError::Malformed(_))
                 ),
                 "{bad:?} should be a typed Malformed error"
@@ -1328,12 +1391,12 @@ mod tests {
     fn the_size_cap_names_one_number_on_both_sides_of_the_wire() {
         // The bound is the line's content, the newline excluded, on the write side exactly as on
         // the read side (`read_line_capped` drops the terminator before counting): a message whose
-        // line is exactly [`MAX_MESSAGE_BYTES`] encodes and decodes, one more byte is refused by
+        // line is exactly [`MAX_REQUEST_BYTES`] encodes and decodes, one more byte is refused by
         // the writer before any byte moves. Pinned so the writer cannot start counting the
         // newline too and refuse an at-cap line its own peer accepts.
         let overhead = {
             let mut w = Vec::new();
-            write_message(
+            write_request(
                 &mut w,
                 &Request::Put(PutParams {
                     path: "p".into(),
@@ -1345,40 +1408,65 @@ mod tests {
         };
         let at_cap = Request::Put(PutParams {
             path: "p".into(),
-            content: "x".repeat(MAX_MESSAGE_BYTES - overhead),
+            content: "x".repeat(MAX_REQUEST_BYTES - overhead),
         });
         let mut wire = Vec::new();
-        write_message(&mut wire, &at_cap).expect("an at-cap line encodes");
+        write_request(&mut wire, &at_cap).expect("an at-cap line encodes");
         assert_eq!(
             wire.len(),
-            MAX_MESSAGE_BYTES + 1,
+            MAX_REQUEST_BYTES + 1,
             "content at the cap, plus the newline"
         );
-        let back: Request = read_message(&mut wire.as_slice())
+        let back: Request = read_request(&mut wire.as_slice())
             .expect("the peer accepts an at-cap line")
             .expect("a message");
         assert_eq!(back, at_cap);
 
         let over = Request::Put(PutParams {
             path: "p".into(),
-            content: "x".repeat(MAX_MESSAGE_BYTES - overhead + 1),
+            content: "x".repeat(MAX_REQUEST_BYTES - overhead + 1),
         });
         let mut wire = Vec::new();
         assert!(matches!(
-            write_message(&mut wire, &over),
-            Err(ProtocolError::TooLarge)
+            write_request(&mut wire, &over),
+            Err(ProtocolError::TooLarge { .. })
         ));
         assert!(wire.is_empty(), "refused before any byte moved");
+    }
+
+    #[test]
+    fn a_reply_may_carry_what_a_request_may_not() {
+        // The asymmetry as behavior, where the `const` assertion above the constants states it as
+        // an ordering: an exec whose output is larger than a client is allowed to *send* still
+        // reaches that client, because the two directions bound different things.
+        let big = "x".repeat(MAX_REQUEST_BYTES + 1);
+        let reply = Response::result(0, big.clone(), String::new(), 5);
+        let mut wire = Vec::new();
+        write_response(&mut wire, &reply).expect("a reply past the request cap still encodes");
+        let back = read_response(&mut wire.as_slice())
+            .expect("and its reader accepts it")
+            .expect("a message");
+        assert_eq!(back, reply);
+
+        // The same size going the other way is still refused: widening the reply bound must not
+        // have widened what a client may send.
+        let mut wire = Vec::new();
+        assert!(matches!(
+            write_request(&mut wire, &Request::Put(PutParams::new("p".into(), big))),
+            Err(ProtocolError::TooLarge {
+                limit: MAX_REQUEST_BYTES
+            })
+        ));
     }
 
     #[test]
     fn an_overlong_line_is_rejected_before_allocating_unboundedly() {
         // A line that never terminates (no newline, past the cap) is a typed TooLarge, not an
         // unbounded read that grows host memory.
-        let flood = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+        let flood = vec![b'x'; MAX_REQUEST_BYTES + 1];
         assert!(matches!(
-            read_message::<Request>(&mut flood.as_slice()),
-            Err(ProtocolError::TooLarge)
+            read_request(&mut flood.as_slice()),
+            Err(ProtocolError::TooLarge { .. })
         ));
     }
 
@@ -1387,23 +1475,23 @@ mod tests {
         // An over-cap line is drained through its newline, so a session that treats `TooLarge` as
         // per-request never resumes mid-line: exactly one `TooLarge` is reported and the very next
         // line decodes normally.
-        let mut wire = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+        let mut wire = vec![b'x'; MAX_REQUEST_BYTES + 1];
         wire.push(b'\n'); // the oversize line *is* newline-terminated
         wire.extend_from_slice(b"{\"schema\":1,\"op\":\"close\"}\n"); // a valid message right after
         let mut cursor = wire.as_slice();
 
         // First read: the oversize line, one clean `TooLarge`.
         assert!(matches!(
-            read_message::<Request>(&mut cursor),
-            Err(ProtocolError::TooLarge)
+            read_request(&mut cursor),
+            Err(ProtocolError::TooLarge { .. })
         ));
         // Second read: the stream resynced, so the following message parses (no mid-line garbage).
         assert!(matches!(
-            read_message::<Request>(&mut cursor),
+            read_request(&mut cursor),
             Ok(Some(Request::Close))
         ));
         // Third read: clean EOF, nothing stranded.
-        assert!(matches!(read_message::<Request>(&mut cursor), Ok(None)));
+        assert!(matches!(read_request(&mut cursor), Ok(None)));
     }
 
     #[test]
@@ -1411,7 +1499,7 @@ mod tests {
         // The whole point of `Unknown`: a daemon that grows a new kind must not break every SDK
         // built before it. The raw string survives so the fault is still loggable.
         let line = br#"{"schema":1,"reply":"error","message":"x","fatal":true,"kind":"quota"}"#;
-        let resp: Response = read_message(&mut &line[..])
+        let resp: Response = read_response(&mut &line[..])
             .expect("a future kind decodes")
             .expect("one message");
         assert!(
@@ -1424,7 +1512,7 @@ mod tests {
     fn an_error_without_a_kind_decodes_as_unknown() {
         // A peer predating the field at all: absent `kind` must not be a decode failure.
         let line = br#"{"schema":1,"reply":"error","message":"x","fatal":false}"#;
-        let resp: Response = read_message(&mut &line[..])
+        let resp: Response = read_response(&mut &line[..])
             .expect("a kind-less error decodes")
             .expect("one message");
         assert!(
@@ -1519,8 +1607,8 @@ mod tests {
             allow: None,
         });
         let mut wire = Vec::new();
-        write_message(&mut wire, &req).expect("an open serializes");
-        let back: Request = read_message(&mut &wire[..])
+        write_request(&mut wire, &req).expect("an open serializes");
+        let back: Request = read_request(&mut &wire[..])
             .expect("it decodes")
             .expect("one message");
         assert_eq!(back, req, "a >32-bit output_cap must survive the wire");
@@ -1535,7 +1623,7 @@ mod tests {
         // next daemon upgrade.
         let line =
             br#"{"schema":1,"reply":"opened","boot_ms":7,"pooled":true,"cpu_model":"future"}"#;
-        let resp: Response = read_message(&mut &line[..])
+        let resp: Response = read_response(&mut &line[..])
             .expect("an unknown field must not fail the decode")
             .expect("one message");
         assert_eq!(
@@ -1549,7 +1637,7 @@ mod tests {
 
         // The same rule on the request side, which the daemon relies on to accept a newer client.
         let line = br#"{"schema":1,"op":"exec","argv":["echo"],"nice":10}"#;
-        let req: Request = read_message(&mut &line[..])
+        let req: Request = read_request(&mut &line[..])
             .expect("an unknown field must not fail the decode")
             .expect("one message");
         assert_eq!(
@@ -1631,7 +1719,7 @@ mod tests {
         // wrong request. Growing the reply set is a schema bump, and this test is what makes that
         // a promise instead of a preference.
         let line = br#"{"schema":1,"reply":"streamed","chunk":"partial output"}"#;
-        let err = read_message::<Response>(&mut &line[..])
+        let err = read_response(&mut &line[..])
             .map(|_| ())
             .expect_err("an unknown reply must not decode");
         assert!(
