@@ -46,8 +46,9 @@ use zeroize::Zeroizing;
 use crate::RunRecord;
 
 /// The version of the **signed delivery surface**: the `schema` field of the signature envelope. v1
-/// was the bare record; v2 wraps it in `{schema, key_id, signature, record}`. A consumer reads this to
-/// know it is holding a signed envelope; the record inside carries its own
+/// was the bare record; v2 wraps it in `{schema, key_id, signature, record}`. [`verify`] refuses any
+/// other number ([`VerifyError::Schema`]) before it reads a field, so this is what a consumer holds
+/// a *readable* envelope by; the record inside carries its own
 /// [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION).
 pub const SIGNED_RECORD_SCHEMA_VERSION: u32 = 2;
 
@@ -381,6 +382,20 @@ fn verify_entry(
     }
     let v: serde_json::Value =
         serde_json::from_str(envelope).map_err(|e| VerifyError::Malformed(e.to_string()))?;
+    // The delivery surface's own version, before any field is read: a future envelope shape is then
+    // "this build cannot read that" rather than a verdict reached by applying today's rules to it.
+    // `schema` rides *outside* the signed message (only the record bytes, or `prev + "\n" + record`,
+    // are signed), so this gates the shape, it does not attest it: altering `schema` turns a good
+    // record into a rejection, never a forgery into a pass.
+    match v.get("schema").and_then(serde_json::Value::as_u64) {
+        Some(s) if s == u64::from(SIGNED_RECORD_SCHEMA_VERSION) => {}
+        Some(got) => return Err(VerifyError::Schema { got }),
+        None => {
+            return Err(VerifyError::Malformed(
+                "missing or non-integer `schema` field".into(),
+            ));
+        }
+    }
     let field = |name: &str| -> Result<String, VerifyError> {
         v.get(name)
             .and_then(serde_json::Value::as_str)
@@ -542,8 +557,16 @@ impl std::error::Error for KeyError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum VerifyError {
-    /// The envelope isn't well-formed (not JSON, or missing `record`/`key_id`/`signature`).
+    /// The envelope isn't well-formed (not JSON, or missing `schema`/`record`/`key_id`/`signature`).
     Malformed(String),
+    /// The envelope names a delivery-surface version this build does not speak, carrying the number
+    /// it named. v1 was the bare record rather than an envelope, so there is no older shape to
+    /// accept: [`SIGNED_RECORD_SCHEMA_VERSION`] is the only `schema` that verifies, and a newer one
+    /// is refused rather than read under rules that may no longer describe it.
+    Schema {
+        /// The version the envelope claimed.
+        got: u64,
+    },
     /// The record's `key_id` names no key in the trusted set (the given id).
     UntrustedKey(String),
     /// The signature did not verify against the trusted key: the record was altered, or signed by a
@@ -561,6 +584,13 @@ impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(m) => write!(f, "not a signed record envelope: {m}"),
+            // "this build", not a role: the same rendering reaches whichever side is holding the
+            // older code, so naming one would state the mismatch backwards for the other.
+            Self::Schema { got } => write!(
+                f,
+                "unsupported record envelope schema {got} \
+                 (this build speaks {SIGNED_RECORD_SCHEMA_VERSION})"
+            ),
             Self::UntrustedKey(id) => write!(f, "record signed by an untrusted key (key_id {id})"),
             Self::BadSignature => {
                 write!(
@@ -654,6 +684,53 @@ mod tests {
         assert_eq!(
             recovered, canonical,
             "verify returns the exact signed bytes"
+        );
+    }
+
+    /// `schema` names the delivery surface, and until it was checked it was written by the signer
+    /// and read by nobody: an envelope claiming any version at all verified. The hazard is a later
+    /// version that changes *what gets signed*, which today's rules would then read confidently and
+    /// wrongly, so an unrecognized number must be a refusal rather than a verdict.
+    #[test]
+    fn an_envelope_schema_this_build_does_not_speak_is_refused() {
+        let key = test_key();
+        let trusted = [key.verifying_key()];
+        let good = key.sign_canonical(r#"{"schema":1,"timing":{"boot_ns":1}}"#);
+        // The control: without it every assertion below would also pass on a verifier that has
+        // simply stopped accepting anything.
+        assert!(
+            verify(&good, &trusted).is_ok(),
+            "the real envelope verifies"
+        );
+
+        // The envelope's own `schema`, not the record's: the record's is escaped (`\"schema\":1`)
+        // inside the embedded string, so anchoring on the leading brace names the outer one.
+        let future = good.replacen("{\"schema\":2", "{\"schema\":3", 1);
+        assert_ne!(future, good, "the replacement actually changed the version");
+        assert_eq!(
+            verify(&future, &trusted),
+            Err(VerifyError::Schema { got: 3 }),
+            "a version this build does not speak is refused, not read under today's rules"
+        );
+
+        // Ordering: the version is reported before the key is looked up, so someone holding a newer
+        // record is told to upgrade rather than told it was signed by a stranger. Two independent
+        // reasons to fail, and this pins which one is answered.
+        let stranger =
+            HostKey::from_seed([9u8; 32]).sign_canonical(r#"{"schema":1,"timing":{"boot_ns":1}}"#);
+        let future_stranger = stranger.replacen("{\"schema\":2", "{\"schema\":3", 1);
+        assert_eq!(
+            verify(&future_stranger, &trusted),
+            Err(VerifyError::Schema { got: 3 }),
+            "the unreadable version outranks the untrusted key"
+        );
+
+        // No `schema` at all was never a shape this crate produced, and there is no number to
+        // report, so it is malformed rather than a version complaint.
+        let none = good.replacen("{\"schema\":2,", "{", 1);
+        assert!(
+            matches!(verify(&none, &trusted), Err(VerifyError::Malformed(_))),
+            "an envelope with no schema is malformed"
         );
     }
 
