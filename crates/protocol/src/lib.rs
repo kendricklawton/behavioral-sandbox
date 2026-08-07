@@ -665,9 +665,12 @@ impl std::fmt::Display for ProtocolError {
         match self {
             ProtocolError::Io(e) => write!(f, "protocol io: {e}"),
             ProtocolError::Schema(got) => {
+                // "this build", not "this daemon": `read_message` is shared by both ends, so a
+                // client renders this line about a *daemon's* stamp and naming a role states the
+                // mismatch backwards. `a_schema_mismatch_names_the_speaker_not_a_role` pins it.
                 write!(
                     f,
-                    "unsupported wire schema {got} (this daemon speaks {WIRE_SCHEMA})"
+                    "unsupported wire schema {got} (this build speaks {WIRE_SCHEMA})"
                 )
             }
             ProtocolError::Malformed(m) => write!(f, "malformed message: {m}"),
@@ -1237,6 +1240,28 @@ mod tests {
             read_message::<Request>(&mut b"{\"op\":\"close\"}\n".as_slice()),
             Err(ProtocolError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn a_schema_mismatch_names_the_speaker_not_a_role() {
+        // One `read_message` serves both ends, so this error renders on a client decoding a
+        // daemon's reply as readily as on the daemon decoding a client's request. A rendering that
+        // named either role would state the mismatch backwards for the other one: a client meeting
+        // a schema-2 daemon would be told "this daemon speaks 1" by the very line reporting that
+        // the daemon speaks 2.
+        let rendered = ProtocolError::Schema(2).to_string();
+        for role in ["daemon", "client", "server", "peer"] {
+            assert!(
+                !rendered.contains(role),
+                "the rendering names a role ({role}), so it is wrong at one end: {rendered}"
+            );
+        }
+        // Both numbers stay legible: what arrived, and what this build speaks.
+        assert!(rendered.contains('2'), "{rendered}");
+        assert!(
+            rendered.contains(&WIRE_SCHEMA.to_string()),
+            "the local schema should render: {rendered}"
+        );
     }
 
     #[test]
