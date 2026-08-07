@@ -1,7 +1,7 @@
 # Introduction
 
-**BSX** is a self-hostable engine for running untrusted code in hardware isolation, with a
-host-observed record of what the host was able to see it do.
+**Behavioral Sandbox** (**BSX**) is a self-hostable engine for running untrusted code in hardware
+isolation, with a host-observed record of what the host was able to see it do.
 
 Untrusted code runs inside a **Firecracker** microVM, so the isolation boundary is the CPU's,
 enforced by KVM. Everything that watches or restricts that code runs on the *host* side of that
