@@ -124,6 +124,12 @@ chain**: signatures plus each record's commitment to its predecessor's hash, so 
 inserted, or dropped record fails even though every envelope alone carries a valid signature.
 `a_chain_file_verifies_and_a_reordered_or_tampered_one_fails` pins both directions.
 
+A chain is verified **from its anchor**: the first line must be the session's unchained first
+record. That is what makes a dropped *head* detectable, and it is also why a mid-session slice (a
+rotated log, the last N replies kept) cannot be checked as a chain, only envelope by envelope, which
+keeps each record's authenticity and loses the ordering property. Dropping the *tail* stays
+undetectable either way without an external anchor.
+
 ```console
 ekvm verify run.json                      # trusts this host's own signing key
 ekvm verify --key <64-hex> run.json       # trust a public key handed over out of band (repeatable)

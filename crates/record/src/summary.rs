@@ -133,6 +133,11 @@ fn net_summary(out: &mut String, net: &NetSection) {
     // though every packet was dropped. Subtract the denied triples: `reached` must mean the guest
     // actually got bytes out, not merely attempted, or a supervising agent reads a
     // blocked exfil endpoint as reached. Those endpoints still appear in `denied` below.
+    //
+    // Subtracting the whole triple is right only while a denied endpoint cannot *also* have gotten
+    // bytes out, which holds because the policy is armed before the tap goes live rather than
+    // because of anything here. A policy that could change mid-session would make a triple both
+    // reached and denied, and this would then report the reach as zero.
     let denied: BTreeSet<(u32, u16, u8)> = net
         .denials
         .iter()

@@ -243,6 +243,10 @@ impl NetSection {
     /// so every v4-only caller and test is untouched; a section with no v6 traffic just carries empty
     /// v6 vectors. The v6 drop counters share the v4 `dropped_flows`/`dropped_denials` (a lost row is a
     /// lost row, whichever family), so [`truncated`](Self::truncated) already covers both.
+    ///
+    /// **Call once.** The v6 counts fold into [`totals`](Self::totals) while
+    /// [`flows6`](Self::flows6) is *replaced*, so a second call leaves the first call's bytes in the
+    /// rollup with its flows gone.
     #[must_use]
     pub fn with_v6(
         mut self,
@@ -306,7 +310,9 @@ impl NetSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FlowRecord {
+    /// The flow's 5-tuple, as the kernel keyed it.
     pub key: FlowKey,
+    /// Its per-direction byte and packet counters.
     pub counts: FlowCounts,
 }
 
@@ -341,7 +347,9 @@ fn flow_order6(k: &FlowKey6) -> ([u8; 16], u16, u8, [u8; 16], u16) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct FlowRecord6 {
+    /// The flow's v6 5-tuple, as the kernel keyed it.
     pub key: FlowKey6,
+    /// Its per-direction byte and packet counters.
     pub counts: FlowCounts,
 }
 
@@ -405,8 +413,11 @@ impl SyscallFootprint {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct SyscallCounts {
+    /// `execve` events attributed to this sandbox's cgroup.
     pub execve: u64,
+    /// `openat` events.
     pub openat: u64,
+    /// `connect` events.
     pub connect: u64,
     /// Events whose discriminant didn't decode to a known [`Syscall`].
     pub unknown: u64,
@@ -419,9 +430,15 @@ pub struct SyscallCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NotableSyscall {
+    /// Which syscall this entry is about.
     pub kind: Syscall,
+    /// The decoded detail: an opened or exec'd path, or a connect target. A prefix rather than the
+    /// whole value when [`truncated`](Self::truncated) is set.
     pub detail: String,
+    /// The `comm` credited with it, lexicographically smallest when several produced the same
+    /// `(kind, detail)`, so the record does not depend on ring-buffer arrival order.
     pub comm: String,
+    /// How many times this exact `(kind, detail)` occurred.
     pub hits: u64,
     /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix**, not
     /// the path the guest used (see `SyscallEvent::detail_truncated`). Two consequences a reader
@@ -597,7 +614,9 @@ impl SyscallFold {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Timing {
+    /// Boot to userspace, as the caller measured it.
     pub boot: Duration,
+    /// Host-observed wall time of the run's exec.
     pub exec_wall: Duration,
 }
 
@@ -1045,21 +1064,16 @@ mod tests {
         assert!(b.notable.iter().all(|n| n.comm == "b"));
     }
 
+    /// A flow to `dst:dport` from the fixed guest address, over the shared [`crate::testutil::flow`]
+    /// builder rather than a second one: a private copy here is what `testutil` exists to prevent,
+    /// and its counters had already drifted from the shared ones.
     fn flow(dst: [u8; 4], dport: u16) -> (FlowKey, FlowCounts) {
-        (
-            FlowKey::new(
-                u32::from_be_bytes([10, 200, 0, 2]),
-                u32::from_be_bytes(dst),
-                40000,
-                dport,
-                ekvm_probes_common::IPPROTO_TCP,
-            ),
-            FlowCounts {
-                ingress_packets: 1,
-                ingress_bytes: 60,
-                egress_packets: 1,
-                egress_bytes: 60,
-            },
+        crate::testutil::flow(
+            [10, 200, 0, 2],
+            40000,
+            dst,
+            dport,
+            ekvm_probes_common::IPPROTO_TCP,
         )
     }
 

@@ -54,8 +54,13 @@ pub const SIGNED_RECORD_SCHEMA_VERSION: u32 = 2;
 
 /// The most bytes [`verify`] accepts as an envelope. The verifier is where attacker-relayed bytes
 /// enter the host (a record arrives via an untrusted transport by design), so its decode is bounded
-/// like every other untrusted input. A real envelope is kilobytes (every record section is capped),
-/// so the bound is orders-of-magnitude headroom, not a budget.
+/// like every other untrusted input.
+///
+/// The bound is headroom rather than a budget, but what keeps a produced envelope under it is not
+/// in this crate: [`MAX_NOTABLE`](crate::MAX_NOTABLE) caps the syscall sample here, while the flow,
+/// denial and policy vectors are plain `Vec`s bounded only by the sizes of the kernel maps the
+/// loader read them from. So this number is not held against the producer by anything; it exists to
+/// stop an attacker's envelope, and a producer that outgrew it would be a bug found at verify time.
 pub const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 
 /// A host signing key (an `ed25519` keypair). Held host-side; the guest never sees it. Sign a record

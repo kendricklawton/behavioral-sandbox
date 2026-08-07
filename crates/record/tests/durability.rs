@@ -41,7 +41,11 @@ fn fixture_key() -> HostKey {
     HostKey::from_seed([7u8; 32])
 }
 
-/// A synthetic `SyscallEvent` from public fields, the same shape `json.rs`'s golden tests use.
+/// A synthetic `SyscallEvent` from public fields. `src/testutil.rs` holds the same builder for the
+/// unit tests, and this is deliberately a second copy rather than a shared one: an integration test
+/// compiles as a foreign crate, so it cannot see `pub(crate)`, and building the fixture through the
+/// **public** API is what makes this suite evidence that an outside consumer can reconstruct the
+/// signed bytes.
 fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
     let mut d = [0u8; ekvm_record::DETAIL_CAP];
     let n = detail.len().min(d.len());
