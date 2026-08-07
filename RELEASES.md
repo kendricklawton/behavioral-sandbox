@@ -76,9 +76,6 @@ supported release; pin a git rev.
   `crates/record/tests/durability.rs` still holds today's canonicalization to an envelope signed
   2026-08-03 and that envelope still verifies.
 
-### Removed
-- Documentation of language SDKs and of three companion SDK repositories, none of which exist.
-
 ---
 
 ## v0.0.2 (2026-08-02, checkpoint)
