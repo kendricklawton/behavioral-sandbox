@@ -1,10 +1,9 @@
 # Releases
 
-> **Only the release mechanics below are in force.** `v0.0.1` and `v0.0.2` (both 2026-08-02) and
-> `v0.0.3` (2026-08-07) are checkpoint tags that exercised them: the tag-triggered build, signing,
-> the manifest, draft-then-publish, and `install.sh`'s download path. The API surface, host
-> requirements, support policy, and Rust policy still describe what is *planned* for `v0.1.0`, not
-> commitments that apply today.
+> **Only the release mechanics below are in force.** The `v0.0.x` tags are checkpoints that exercise
+> them: the tag-triggered build, signing, the manifest, draft-then-publish, and `install.sh`'s
+> download path. The API surface, host requirements, support policy, and Rust policy still describe
+> what is *planned* for `v0.1.0`, not commitments that apply today.
 
 ## v0.1.0 (Unreleased, planned)
 
@@ -36,16 +35,14 @@ tag would freeze.
 - **Host**: Linux `x86_64` with `/dev/kvm`, cgroup v2, and kernel BTF (`/sys/kernel/btf/vmlinux`);
   a kernel providing `cgroup.kill`, else >= 5.15 where there is no cgroup v2 hierarchy to probe.
   `bsx doctor` verifies all of it and prints the fix for whatever is missing.
-- **Firecracker**: v1.15 through v1.16 supported (upstream's current support window);
-  v1.16.1 is the pinned, tested, hash-verified release. One measured difference on v1.15:
-  the `clock_realtime` snapshot-load flag is v1.16+, and the engine withholds it from an
-  older VMM rather than failing the restore, so a clone restored on v1.15 wakes with its
-  clock still at snapshot time. Everything else in the privileged gate passed against
-  v1.15.1 (2026-08-04, the development host): boot, jailed boot, exec, networking, egress
-  enforcement, probes, and snapshot/restore itself; the one red test was
-  `restored_clones_do_not_share_entropy_or_freeze_the_clock`, failing by exactly the
-  snapshot's age. Warm-pool workflows that need wall time to survive a restore need v1.16.
-  The operator installs the binary (see [docs/cli-install.md](docs/cli-install.md)), so an
+- **Firecracker**: v1.15 through v1.16 supported (upstream's current support window); v1.16.1 is
+  the pinned, tested, hash-verified release. One measured difference on v1.15: the `clock_realtime`
+  snapshot-load flag is v1.16+, and the engine withholds it from an older VMM rather than failing
+  the restore, so a clone restored on v1.15 wakes with its clock still at snapshot time. That is
+  the only red test there (`restored_clones_do_not_share_entropy_or_freeze_the_clock`, failing by
+  exactly the snapshot's age); the rest of the privileged gate passed against v1.15.1 on the
+  development host, 2026-08-04. Warm-pool workflows that need wall time to survive a restore need
+  v1.16. The operator installs the binary ([docs/cli-install.md](docs/cli-install.md)), so an
   upstream security patch never waits on a release of this engine.
 
 ---
@@ -91,8 +88,7 @@ installs from a link. Still not a supported release; pin a git rev.
 
 ### Fixed
 - **The reported version.** `v0.0.1` named its tarball from the pushed tag while the workspace was
-  still `0.0.0`, so a binary installed from `bsx-0.0.1-x86_64-linux.tar.gz` answered
-  `bsx --version` with `0.0.0`.
+  still `0.0.0`, so a binary installed from that tag's tarball answered `--version` with `0.0.0`.
 - **A truncated `curl … | sh`.** `sh` reading from a pipe executes as it reads, so a connection
   dropping mid-transfer ran a prefix of `install.sh`: the binary landed, the kernel, rootfs and
   probes object did not, and it exited 0. Every filesystem-touching statement now runs from a
@@ -148,15 +144,12 @@ never enters the repo or `dist/`.
   (`release-vX.Y`, patch tags `vX.Y.1`, `vX.Y.2`, ...).
 - **Older minors**: unsupported.
 
-**The previous minor's window is computed, not dated.** Each release line supports a
-Firecracker range, floor through pin (v0.1.0 supports v1.15 through v1.16). The line stays
-supported for as long as any Firecracker series in that range is still under upstream
-support; once the last of them ages out (about one Firecracker release cycle, roughly six
-months, after the next BSX minor ships), every VMM the line can drive is unpatched, and
-continuing to "support" it would bless untrusted code on an unmaintained isolation
-boundary, the same threat-model reasoning behind `bsx doctor`'s host kernel floor. The
-weekly `firecracker-pin` workflow watches upstream's support table, so the end of a window
-is observed, not remembered.
+**The previous minor's window is computed, not dated.** Each release line supports a Firecracker
+range, floor through pin (v0.1.0 supports v1.15 through v1.16), and stays supported while any series
+in that range is still under upstream support. Once the last ages out, every VMM the line can drive
+is unpatched, which is the reasoning behind `bsx doctor`'s host kernel floor as well. The weekly
+`firecracker-pin` workflow watches upstream's support table, so the end of a window is observed
+rather than remembered.
 
 ---
 
