@@ -8,7 +8,7 @@
   - [A run, start to finish](./architecture-lifecycle.md)
   - [The eBPF half](./architecture-ebpf.md)
   - [Design decisions](./architecture-decisions.md)
-- [Using the bsx CLI](./cli.md)
+- [Using the `bsx` CLI](./cli.md)
   - [Installation](./cli-install.md)
   - [Commands and options](./cli-commands.md)
   - [Observing a run](./cli-observe.md)

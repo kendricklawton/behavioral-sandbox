@@ -467,7 +467,7 @@ To drive the individual steps instead, or to work on the engine itself, `AGENTS.
 toolchain (the Rust version policy, the probes crate's pinned nightly and `bpf-linker`), the
 artifact commands, and the two test gates.
 
-Once you have a binary, head to [Using the bsx CLI](./cli.md) to run something.
+Once you have a binary, head to [Using the `bsx` CLI](./cli.md) to run something.
 
 ## Vendoring for offline builds
 

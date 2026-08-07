@@ -49,7 +49,7 @@ is a runtime plus a clean driver API you self-host, and the model driving an age
 - **[Architecture and design](./architecture.md)**, the six design rules, how the engine integrates
   with the host, what the crates are for and the order things happen in during a run, and the
   numbered decisions with their rationale.
-- **[Using the bsx CLI](./cli.md)**, how to run the engine: [install the
+- **[Using the `bsx` CLI](./cli.md)**, how to run the engine: [install the
   prerequisites](./cli-install.md) and stand it up with one `cargo xtask self-host`, then run
   untrusted code with `bsx run` and hold interactive sessions with `bsx shell`. Start here.
 - **[Using the engine API](./embedding.md)**, the embedder's contract: the `Sandbox` lifecycle,

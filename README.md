@@ -197,7 +197,7 @@ Run `mdbook serve docs` to read it locally, or read the Markdown in place.
 - **[Architecture and design](docs/architecture.md)**, the six design rules, how the engine
   integrates with the host, what the crates are for, and the numbered decisions with their
   rationale.
-- **[Using the bsx CLI](docs/cli.md)**, including [installation](docs/cli-install.md).
+- **[Using the `bsx` CLI](docs/cli.md)**, including [installation](docs/cli-install.md).
 - **[Using the `bsx serve` daemon](docs/daemon.md)**, the wire API.
 - **[Using the engine API](docs/embedding.md)**, the embedder's contract and the non-goals.
 - **[Host-side observability & enforcement](docs/probes.md)**, the eBPF half: syscall tracing,
