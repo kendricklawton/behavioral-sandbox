@@ -228,9 +228,12 @@ impl HostKey {
         out.push_str(&sig_hex);
         out.push('"');
         if let Some(p) = prev {
-            // `prev` is 64 hex chars (no JSON metacharacters), so it needs no escaping.
+            // Escaped like any other caller-supplied string. `prev` is a [`record_hash`] in every
+            // path this repo has, and 64 hex chars need no escaping, but this is a `pub fn` taking
+            // an arbitrary `&str`: an unescaped `"` here would emit an envelope that is not the
+            // JSON it looks like. The escaper is the same one the record rides through.
             out.push_str(",\"prev\":\"");
-            out.push_str(p);
+            crate::json::json_escape_into(&mut out, p);
             out.push('"');
         }
         out.push_str(",\"record\":\"");
@@ -428,9 +431,15 @@ fn verify_entry(
 /// Note: truncating the **tail** of the chain is not detectable here without an external anchor (the
 /// append-only limitation); it detects any edit *within* the delivered sequence.
 /// # Errors
-/// [`ChainError::Entry`] if an envelope fails to verify; [`ChainError::BrokenLink`] if a `prev` link
-/// doesn't match the previous record's hash.
+/// [`ChainError::Empty`] if there are no envelopes; [`ChainError::Entry`] if an envelope fails to
+/// verify; [`ChainError::BrokenLink`] if a `prev` link doesn't match the previous record's hash.
 pub fn verify_chain(envelopes: &[&str], trusted: &[TrustedKey]) -> Result<Vec<String>, ChainError> {
+    // Nothing verified is not a verified chain. Without this the call answers `Ok(vec![])`, which a
+    // caller reasonably reads as "checked, and it held"; the CLI guards the empty file separately,
+    // in another crate, so an embedder calling this directly got the pass.
+    if envelopes.is_empty() {
+        return Err(ChainError::Empty);
+    }
     let mut records = Vec::with_capacity(envelopes.len());
     let mut expected_prev: Option<String> = None;
     for (index, envelope) in envelopes.iter().enumerate() {
@@ -610,6 +619,10 @@ pub enum ChainError {
         /// The per-record failure.
         source: VerifyError,
     },
+    /// There were no envelopes to verify. A chain of nothing is not a verified chain, so this is a
+    /// rejection rather than an empty `Ok`: the distinction matters to a caller that treats a
+    /// successful return as evidence.
+    Empty,
     /// The `prev` link at `index` doesn't match the previous record's hash: a reordered, inserted, or
     /// deleted record.
     BrokenLink {
@@ -621,6 +634,7 @@ pub enum ChainError {
 impl fmt::Display for ChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Empty => write!(f, "no records to verify: an empty input is not a chain"),
             Self::Entry { index, source } => write!(f, "record {index} in the chain: {source}"),
             Self::BrokenLink { index } => write!(
                 f,
@@ -634,7 +648,7 @@ impl std::error::Error for ChainError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Entry { source, .. } => Some(source),
-            Self::BrokenLink { .. } => None,
+            Self::Empty | Self::BrokenLink { .. } => None,
         }
     }
 }
@@ -862,6 +876,39 @@ mod tests {
             verify_chain(&[e0.as_str(), tampered.as_str()], &trusted),
             Err(ChainError::Entry { index: 1, .. })
         ));
+    }
+
+    #[test]
+    fn a_hostile_prev_cannot_deform_the_envelope() {
+        // `sign_canonical_chained` is public and takes an arbitrary `&str`, so the "64 hex chars,
+        // no metacharacters" invariant is the caller's habit, not something the signature enforces.
+        // An unescaped `"` would emit bytes that are not the JSON they look like.
+        let key = test_key();
+        let hostile = r#"x","record":"forged"#;
+        let envelope = key.sign_canonical_chained(r#"{"schema":1}"#, Some(hostile));
+        let v: serde_json::Value =
+            serde_json::from_str(&envelope).expect("the envelope stays valid JSON");
+        assert_eq!(v["prev"], hostile, "prev round-trips through the escaping");
+        assert_eq!(
+            v["record"], r#"{"schema":1}"#,
+            "and the record field is the real one, not a smuggled second key"
+        );
+        // It still verifies, so escaping did not change what was signed.
+        assert_eq!(
+            verify(&envelope, &[key.verifying_key()]).expect("verifies"),
+            r#"{"schema":1}"#
+        );
+    }
+
+    #[test]
+    fn an_empty_chain_is_refused_rather_than_answered_ok() {
+        // A chain of nothing is not a verified chain. `Ok(vec![])` reads to a caller as "checked,
+        // and it held"; the CLI guards the empty file in another crate, so an embedder calling this
+        // directly got that pass.
+        assert_eq!(
+            verify_chain(&[], &[test_key().verifying_key()]),
+            Err(ChainError::Empty)
+        );
     }
 
     #[test]
