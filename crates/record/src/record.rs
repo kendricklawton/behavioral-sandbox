@@ -385,12 +385,6 @@ pub struct SyscallFootprint {
 }
 
 impl SyscallFootprint {
-    /// Human label for this axis's scope, clarifying that it records the host VMM footprint rather than in-guest execution.
-    #[must_use]
-    pub fn scope_label(&self) -> &'static str {
-        "VMM host footprint, not guest"
-    }
-
     /// Fold a sequence of events into a footprint, keeping only those in `cgroup_id`. The convenience
     /// form of [`SyscallFold`] for callers (and the tests) that already have the events in hand.
     #[must_use]

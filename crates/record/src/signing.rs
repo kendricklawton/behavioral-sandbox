@@ -202,15 +202,6 @@ impl HostKey {
         self.sign_canonical_chained(&record.to_json(), None)
     }
 
-    /// Sign a record as the next link in a session chain: it commits to `prev` (the [`record_hash`] of
-    /// the previous record in the session) so reordering, inserting, or deleting a record in the
-    /// sequence is detectable ([`verify_chain`]). `prev` is `None` for the first record in a session
-    /// (an unchained anchor, byte-identical to [`sign_record`](Self::sign_record)).
-    #[must_use]
-    pub fn sign_record_chained(&self, record: &RunRecord, prev: Option<&str>) -> String {
-        self.sign_canonical_chained(&record.to_json(), prev)
-    }
-
     /// Sign already-canonical record bytes (unchained), returning the envelope. The signed message is
     /// `canonical` verbatim; verification re-reads it from the envelope's `record` string.
     #[must_use]
