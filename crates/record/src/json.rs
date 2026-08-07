@@ -444,9 +444,15 @@ mod tests {
         let mut record = sample(vec![]);
         record.host_syscalls = SyscallFootprint::from_events(0x42, &[ev(1, 0x42, &long, "sh")]);
         let json = record.to_json();
+        // The record carries two `truncated` fields, one on the network section and one per notable
+        // entry, so a bare `contains` would also be satisfied by the wrong one. Name this one.
         assert!(
-            json.contains("\"truncated\":true"),
-            "a cut path must be flagged in the machine-readable record: {json}"
+            json.contains("\"detail\":\"aaa"),
+            "the cut path is the notable entry under test: {json}"
+        );
+        assert!(
+            json.contains("\"hits\":1,\"truncated\":true"),
+            "a cut path must be flagged on its own entry, not merely somewhere in the record: {json}"
         );
     }
 
@@ -499,6 +505,9 @@ mod tests {
         .to_json();
         const REQUIRED_V1_KEYS: &[&str] = &[
             "\"schema\":",
+            "\"subject\":",
+            "\"sandbox_id\":",
+            "\"started_unix_ns\":",
             "\"timing\":",
             "\"boot_ns\":",
             "\"exec_wall_ns\":",
@@ -521,6 +530,7 @@ mod tests {
             "\"dropped_flows\":",
             "\"dropped_denials\":",
             "\"truncated\":",
+            "\"posture\":",
             "\"resources\":",
             "\"cpu_time_ns\":",
             "\"cgroup\":",
@@ -550,6 +560,90 @@ mod tests {
         for key in REQUIRED_V1_KEYS {
             assert!(json.contains(key), "v1 key {key} missing from: {json}");
         }
+
+        // And the other direction, so the list cannot fall behind the writer the way it already
+        // had: every key the record actually emits must be named above. A key that ships without
+        // being frozen here is a key nothing stops a later edit from removing.
+        fn keys(v: &serde_json::Value, into: &mut std::collections::BTreeSet<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    for (k, child) in map {
+                        into.insert(k.clone());
+                        keys(child, into);
+                    }
+                }
+                serde_json::Value::Array(items) => items.iter().for_each(|i| keys(i, into)),
+                _ => {}
+            }
+        }
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json);
+        assert!(parsed.is_ok(), "{parsed:?}");
+        let mut emitted = std::collections::BTreeSet::new();
+        keys(&parsed.expect("checked just above"), &mut emitted);
+        let frozen: std::collections::BTreeSet<String> = REQUIRED_V1_KEYS
+            .iter()
+            .map(|k| k.trim_matches(|c| c == '"' || c == ':').to_string())
+            .collect();
+        let unfrozen: Vec<&String> = emitted.difference(&frozen).collect();
+        assert!(
+            unfrozen.is_empty(),
+            "these keys ship in v1 but are not frozen in REQUIRED_V1_KEYS: {unfrozen:?}"
+        );
+    }
+
+    /// Two renderings that only production reaches, so neither had a test: every gap the suite
+    /// built was `Network` or `Cpu`, and every flow used TCP or UDP. Both strings land inside the
+    /// signed bytes, and both are what an SDK matches on.
+    #[test]
+    fn every_gap_axis_and_an_unnamed_protocol_render() {
+        // All three axes, so a typo in either renderer's arm is caught rather than two of three.
+        let record = RunRecord::from_parts(
+            RecordSubject::new("ekvm-4242-0".into(), 1),
+            None,
+            ResourceSummary::default(),
+            SyscallFootprint::default(),
+            Timing::new(Duration::ZERO, Duration::ZERO),
+            vec![
+                AxisGap::HostSyscalls("tracer".into()),
+                AxisGap::Network("tap".into()),
+                AxisGap::Cpu("meter".into()),
+            ],
+        );
+        let json = record.to_json();
+        for axis in ["host_syscalls", "network", "cpu"] {
+            assert!(json.contains(&format!("{{\"axis\":\"{axis}\"")), "{json}");
+        }
+        assert!(
+            record
+                .to_summary_json()
+                .contains("\"host_syscalls: tracer\""),
+            "the summary flattens the same axis name: {}",
+            record.to_summary_json()
+        );
+
+        // A guest ping is an IPv4 flow whose protocol is neither TCP nor UDP: `parse` keys it with
+        // ports 0 and the real protocol number, so `proto_name`'s fallback is a production
+        // rendering, not a defensive arm.
+        const IPPROTO_ICMP: u8 = 1;
+        let record = sample(vec![flow(
+            [10, 200, 0, 2],
+            0,
+            [1, 1, 1, 1],
+            0,
+            IPPROTO_ICMP,
+        )]);
+        let json = record.to_json();
+        assert!(
+            json.contains("\"proto\":\"proto 1\""),
+            "an unnamed protocol renders as `proto <n>`: {json}"
+        );
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&json);
+        assert!(parsed.is_ok(), "and it stays valid JSON: {parsed:?}");
+        assert!(
+            record.to_summary_json().contains("1.1.1.1:0/proto 1"),
+            "the summary endpoint uses the same rendering: {}",
+            record.to_summary_json()
+        );
     }
 
     #[test]

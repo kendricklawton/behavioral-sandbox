@@ -579,9 +579,11 @@ mod tests {
             record.to_summary_json().matches("/tmp/file-").count() <= SUMMARY_NOTABLE_CAP,
             "notable sample is capped at {SUMMARY_NOTABLE_CAP}"
         );
+        // Two `truncated` fields exist (network and host_syscalls); this test is about the syscall
+        // cap, so anchor on the notable list's closing bracket rather than on either flag alone.
         assert!(
-            record.to_summary_json().contains("\"truncated\":true"),
-            "the cap being hit is flagged"
+            record.to_summary_json().contains("],\"truncated\":true}"),
+            "the syscall cap being hit is flagged on the host_syscalls object"
         );
     }
 }

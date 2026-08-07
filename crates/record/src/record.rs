@@ -709,19 +709,6 @@ mod tests {
     }
 
     #[test]
-    fn ring_buffer_overflow_honest_truncation() {
-        let footprint = SyscallFootprint {
-            total: 100,
-            notable_truncated: true,
-            overflow_events: 36,
-            ..Default::default()
-        };
-        assert!(footprint.notable_truncated);
-        assert_eq!(footprint.overflow_events, 36);
-        assert_eq!(footprint.total, 100);
-    }
-
-    #[test]
     fn footprint_counts_by_kind_including_unknown() {
         let events = [
             ev(Syscall::Execve as u32, CG, b"/bin/sh", "sh"),
