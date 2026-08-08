@@ -934,6 +934,77 @@ fn guest_fork_bomb_is_bounded_by_the_cgroup() {
 }
 
 #[test]
+#[ignore = "needs /dev/kvm + real root (run via `cargo xtask ci-privileged` as root)"]
+fn two_concurrent_sandboxes_run_under_distinct_jail_uids() {
+    // The axis `a_hostile_run_cannot_starve_or_observe_a_co_resident_run` does not cover: it scopes
+    // itself to starvation (cgroup quota) and observation (per-VM netns), leaving the identity the
+    // VMMs run *as*. Processes sharing a uid can signal each other whatever their cgroup or netns,
+    // so two guests that each breached KVM into their own VMM could kill each other's sandbox.
+    // Reading `/proc` proves the separation is in force, not merely configured.
+    if !have_jailer_privileges() {
+        eprintln!(
+            "skipping two_concurrent_sandboxes_run_under_distinct_jail_uids: needs real root"
+        );
+        return;
+    }
+    // `Uid:` is real/effective/saved/fs; the jailer's `setuid` sets all four, so the first answers it.
+    let vmm_uid = |pid: u32| -> u32 {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Uid:"))
+                    .and_then(|v| v.split_whitespace().next())
+                    .and_then(|u| u.parse::<u32>().ok())
+            })
+            .expect("read and parse the VMM's uid")
+    };
+    let span = bsx_engine::JailIds::span(20_000, 4).expect("a valid span");
+    let booted: Vec<bsx_engine::RunningVm> = (0..2)
+        .map(|_| {
+            let mut cfg = guest_rootfs_config();
+            let mut jail = bsx_engine::Jail::default();
+            jail.ids = Some(span.clone());
+            cfg.jail = Some(jail);
+            Vm::boot(cfg).expect("a jailed microVM should boot")
+        })
+        .collect();
+
+    let uids: Vec<u32> = booted.iter().map(|vm| vmm_uid(vm.vmm_pid())).collect();
+    assert_ne!(
+        uids[0], uids[1],
+        "two concurrent sandboxes must not share a jail uid (both were {})",
+        uids[0]
+    );
+    for uid in &uids {
+        assert!(
+            (20_000..20_004).contains(uid),
+            "a leased uid must come from the declared span, got {uid}"
+        );
+        assert_ne!(*uid, 0, "a jailed VMM must never run as root");
+    }
+
+    for vm in booted {
+        vm.shutdown().expect("shutdown should succeed");
+    }
+
+    // Teardown returns the ids, so a long-lived host churns inside its span rather than exhausting
+    // it. `RunningVm`'s drop runs teardown before its fields drop, which is what makes a released id
+    // safe to reuse: the chroot chowned to it is already gone.
+    let mut cfg = guest_rootfs_config();
+    let mut jail = bsx_engine::Jail::default();
+    jail.ids = Some(span);
+    cfg.jail = Some(jail);
+    let reused = Vm::boot(cfg).expect("a released id should be reusable");
+    assert_eq!(
+        vmm_uid(reused.vmm_pid()),
+        20_000,
+        "the lowest released id comes back first"
+    );
+    reused.shutdown().expect("shutdown should succeed");
+}
+
+#[test]
 #[ignore = "needs /dev/kvm + real root + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn a_hostile_run_cannot_starve_or_observe_a_co_resident_run() {
     // The explicitly multi-tenant assertion: a hostile run storming the host's CPU alongside

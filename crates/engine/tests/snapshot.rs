@@ -463,6 +463,65 @@ fn restores_prewarmed_clones_under_the_jailer_and_pools_them() {
 }
 
 #[test]
+#[ignore = "needs /dev/kvm + real root + the jailer (run via `cargo xtask ci-privileged` as root)"]
+fn pooled_clones_do_not_share_a_jail_uid() {
+    // The pool is the path a caller cannot fix from outside: it restores every clone from one stored
+    // `BootConfig`, so before the span existed each clone inherited the same fixed id no matter what
+    // the embedder did. A prewarmed multi-tenant host runs on exactly this path, so the separation
+    // has to hold here and not only for a hand-rolled cold boot.
+    if !have_jailer_privileges() {
+        eprintln!("skipping pooled_clones_do_not_share_a_jail_uid: needs real root (euid 0)");
+        return;
+    }
+    let bundle = TmpDir::new("snap-span");
+    let (snap, _cold) = prewarmed_python_snapshot(&bundle);
+
+    let mut cfg = guest_rootfs_config();
+    let mut jail = Jail::default();
+    jail.ids = Some(bsx_engine::JailIds::span(21_000, 4).expect("a valid span"));
+    cfg.jail = Some(jail);
+
+    let uid_of = |pid: u32| -> u32 {
+        std::fs::read_to_string(format!("/proc/{pid}/status"))
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Uid:"))
+                    .and_then(|v| v.split_whitespace().next())
+                    .and_then(|u| u.parse::<u32>().ok())
+            })
+            .expect("parse a pooled VMM's uid")
+    };
+
+    let mut pool = Pool::new(snap, cfg, 3).expect("a spanned pool should prefill");
+    assert_eq!(pool.ready(), 3);
+    let uids: Vec<u32> = pool.vmm_pids().into_iter().map(uid_of).collect();
+    let mut distinct = uids.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    assert_eq!(
+        distinct.len(),
+        uids.len(),
+        "every pooled clone needs its own jail uid, got {uids:?}"
+    );
+    assert!(
+        uids.iter().all(|u| (21_000..21_004).contains(u)),
+        "pooled uids must come from the declared span, got {uids:?}"
+    );
+
+    // A taken clone keeps the id it was restored under, and gives it back on shutdown.
+    let vm = pool.take().expect("take a spanned clone");
+    let taken_uid = uid_of(vm.vmm_pid());
+    assert!(uids.contains(&taken_uid));
+    let out = vm
+        .exec(&["echo".into(), "spanned".into()], b"")
+        .expect("exec on the pooled clone");
+    assert_eq!(out.stdout, b"spanned\n");
+    vm.shutdown().expect("pooled clone shutdown");
+    pool.shutdown();
+}
+
+#[test]
 #[ignore = "needs /dev/kvm + real root + the jailer + delegated cgroups (run via `cargo xtask ci-privileged` as root)"]
 fn restores_a_private_disk_snapshot_under_the_jailer() {
     // The daemon's `--prewarm` shape, distinct from the shared-base test above: a `Sandbox` pool
