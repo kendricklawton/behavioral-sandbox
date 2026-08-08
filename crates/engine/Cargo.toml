@@ -17,6 +17,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
+# The bulk-output readback. The alternative is shelling out to `e2fsck` + `debugfs rdump`, which
+# parses a wholly guest-authored filesystem in C with the driver's privileges; this parses it in
+# `unsafe`-free Rust in-process, so the readback needs no host tool, no child process, and no
+# privilege drop around one.
+ext4-view = { workspace = true }
 # The host↔guest exec channel: the driver speaks the shared protocol over Firecracker's vsock.
 bsx-channel = { path = "../channel" }
 # A **deadline-bounded** unix-socket connect. `std` offers only a blocking `UnixStream::connect`, so

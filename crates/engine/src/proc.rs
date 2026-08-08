@@ -76,13 +76,8 @@ pub(crate) fn output_bounded(
         .spawn()
         .map_err(|e| crate::drives::tool_spawn_error(label, e))?;
     let deadline = Instant::now() + timeout;
-    let status = crate::drives::wait_bounded(
-        &mut child,
-        deadline,
-        label,
-        Duration::from_millis(5),
-        || None,
-    )?;
+    let status =
+        crate::drives::wait_bounded(&mut child, deadline, label, Duration::from_millis(5))?;
     let mut stderr = String::new();
     if let Some(mut pipe) = child.stderr.take() {
         let _ = pipe.read_to_string(&mut stderr);

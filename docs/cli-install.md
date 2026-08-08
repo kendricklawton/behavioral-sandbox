@@ -412,9 +412,11 @@ commands that install them on a fresh box, see [Preparing the host](#preparing-t
   for CO-RE eBPF, most modern distros ship it.
 - **`firecracker`** + its **jailer** binary (pinned version, `cargo xtask setup` probes it), on
   `PATH` or named via `BSX_FIRECRACKER`.
-- **`e2fsprogs` + `coreutils`** (`mke2fs`, `e2fsck`, `debugfs`, `truncate`): the driver builds the
-  rootfs and the bulk-input/output block devices, and reads outputs back, all **rootless** (no
-  loopback, no `sudo`). A missing tool is a clear typed error. The **reproducible** rootfs build
+- **`e2fsprogs` + `coreutils`** (`mke2fs`, `truncate`): the driver builds the rootfs and the
+  bulk-input/output block devices **rootlessly** (no loopback, no `sudo`). A missing tool is a clear
+  typed error. Reading outputs back needs no host tool at all: the guest-written image is parsed
+  in-process (see [decision 10](./architecture-decisions.md#10-the-guests-output-image-is-parsed-in-process-not-by-e2fsprogs)).
+  The **reproducible** rootfs build
   (`cargo xtask build-rootfs --verify`) additionally needs e2fsprogs **>= 1.47.1**, where `mke2fs`
   starts honouring `SOURCE_DATE_EPOCH` (older versions stamp wall-clock times). `cargo xtask setup`
   probes it, and [Distro differences](#distro-differences-that-bite) names which stock images sit

@@ -299,6 +299,7 @@ const FUZZ_TARGETS: &[&str] = &[
     "egress_rule",
     "audit_record",
     "bsx_config",
+    "output_image",
 ];
 
 /// cargo-fuzz drives libFuzzer under a nightly toolchain, both opt-in installs, so bail with guidance

@@ -167,3 +167,43 @@ its loop bound has to be a compile-time constant; the tap's world-to-guest direc
 unconditionally, so what can reach a guest is whatever the hoster's uplink exposes; and two
 sandboxes sharing a hoster's bridge are separated by that bridge's configuration plus each
 sandbox's own egress policy, not by anything the engine does.
+
+## 10. The guest's output image is parsed in-process, not by e2fsprogs
+
+Bulk output comes back on a writable ext4 block device the guest mounts at `/output`. Reading it
+means interpreting a filesystem whose every byte, superblock through inode tables, was chosen by the
+code the sandbox exists to contain.
+
+**The readback parses that image with [`ext4-view`](https://crates.io/crates/ext4-view), in this
+process.** The alternative, and what the engine did before, is shelling out to `e2fsck -fy` and
+`debugfs -R rdump`: mature C parsers, but C parsers nonetheless, running with whatever privileges
+the driver holds, which on the normal path is root because the jailer needs it. The exposure is not
+the microVM failing. The guest never escapes; the host walks up to the boundary afterwards and reads
+attacker-authored bytes with a tool that was never written for that adversary.
+
+`ext4-view` is read-only by its own stated non-goal and carries `#![forbid(unsafe_code)]`, the same
+attribute as the host path it runs on, so the bulk-output parser sits in the same memory-safety class
+as the rest of the driver. It replays the image's journal on read, which is what preserves the
+property `e2fsck` was there for: a guest killed mid-write leaves a dirty image, and the journal is
+how its completed writes are still legible.
+
+**Three things follow, and they are why this is a decision rather than a swap.**
+
+The readback needs no host tool, no child process, and no privilege drop around one. `e2fsck` and
+`debugfs` leave `bsx doctor`'s preflight; `mke2fs` stays, because the *input* image and the rootfs
+build still use it. Deadline handling, stderr capture, and the exit-code quirks of `rdump` (which
+exits 0 having extracted nothing) all leave with the child process.
+
+The bounds move from watching a subprocess to being written into the walk itself: bytes charged per
+chunk as they are written, a total entry count, a depth limit, and a wall clock. Depth and entries
+exist because a crafted image can point a directory entry at an ancestor and `ext4-view` exposes no
+inode number to deduplicate on. Every bound is a typed error, never a silent truncation, on the same
+reasoning that never let an `rdump` which extracted nothing pass as success.
+
+**Memory safety is not correctness, and the trade is named rather than hidden.** A logic bug in the
+reader or in the walk (a traversal, a cycle, an allocation blow-up) is still reachable, and upstream
+does not fuzz. `cargo xtask fuzz output_image` is this repo's answer to that, loading and fully
+walking a mutated image; it is the first fuzz coverage this parser has had in either form, since
+e2fsprogs was never fuzzed here either. A genuinely corrupt image now fails the readback with a typed
+error instead of being repaired into something, which is the deliberate posture: refusing to read a
+broken guest image is easier to defend than trusting a repair pass over attacker-chosen bytes.

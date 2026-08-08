@@ -1,11 +1,13 @@
 //! The bulk input/output block devices: build their ext4 images rootless
-//! (`mke2fs -d`), and read the output tree back from an untrusted image safely (fsck'd, bounded,
-//! symlink-sanitized) after the guest is dead.
+//! (`mke2fs -d`), and read the output tree back from an untrusted image in-process (`ext4-view`,
+//! bounded, symlink-sanitized) after the guest is dead.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
+
+use ext4_view::{Ext4, FileType, PathBuf as GuestPath};
 
 /// The filesystem labels the driver stamps on the data devices so the guest mounts them by label,
 /// not by enumeration-order `/dev/vdX` (a boot may attach input, output, both, or neither). Defined
@@ -13,7 +15,6 @@ use std::time::{Duration, Instant};
 use bsx_channel::{INPUT_LABEL, OUTPUT_LABEL};
 
 use crate::VmmError;
-use crate::paths::path_str;
 
 /// Size of the blank writable output image. A fixed cap, and the natural bulk-output
 /// bound (the guest can't write more than the filesystem holds), mirroring the channel path's
@@ -22,26 +23,29 @@ use crate::paths::path_str;
 const OUTPUT_IMAGE_MIB: u32 = 256;
 
 /// Hard ceiling on the **real host bytes** [`RunningVm::collect_outputs`] will write while extracting
-/// the output image. `debugfs rdump` materialises filesystem holes as zeros, so a hostile guest could
-/// stage a sparse file with a huge logical size inside the capped image and inflate the readback, a
-/// watcher aborts once the extracted tree's allocated blocks pass this bound. Generous headroom over
-/// [`OUTPUT_IMAGE_MIB`] (a legitimate tree's real bytes can't exceed the image), so only abuse trips.
+/// the output image. A hole in a guest file reads back as zeros, so a hostile guest could stage a
+/// sparse file with a huge logical size inside the capped image and inflate the readback; the walk
+/// charges what it writes against this bound. Generous headroom over [`OUTPUT_IMAGE_MIB`] (a
+/// legitimate tree's real bytes can't exceed the image), so only abuse trips.
 const OUTPUT_EXTRACT_CAP: u64 = 2 * (OUTPUT_IMAGE_MIB as u64) * 1024 * 1024; // 512 MiB
 
-/// Wall-clock bound on the output readback (`e2fsck` + `debugfs rdump`), so a pathological image can
-/// never hang the host teardown. Read-back is off the boot path; generous is fine.
+/// Wall-clock bound on the output readback, so a pathological image can never hang the host
+/// teardown. Read-back is off the boot path; generous is fine.
 const OUTPUT_READBACK_TIMEOUT: Duration = Duration::from_secs(120);
-/// The readback tools' `wait_bounded` tick: off the boot path, so latency is cheap, and rdump's
-/// over-budget callback walks the extracted tree each tick, so faster would cost real CPU.
-const READBACK_POLL: Duration = Duration::from_millis(50);
+/// How deep the readback will descend a guest tree. A crafted image can point a directory entry at
+/// an ancestor, and this is one of the two bounds that holds such a cycle (see [`Walk::dir`]).
+const MAX_OUTPUT_DEPTH: u32 = 64;
+/// How many directory entries the readback will visit. The other half of the cycle bound, and the
+/// one that also holds a wide tree of empty directories, which costs host inodes but no bytes.
+const MAX_OUTPUT_ENTRIES: u64 = 500_000;
+/// Copy buffer for one guest file. An upper bound, not a stride: the reader answers a `read` with at
+/// most one filesystem block, so the buffer is rarely filled. Each read is charged against the byte
+/// cap as it lands, which is what enforces the cap mid-file rather than at file boundaries.
+const READBACK_CHUNK: usize = 64 * 1024;
 /// How long a killed helper is given to be reaped before it is detached (see
 /// [`kill_and_reap_briefly`]). Short: a killable child dies at once, and anything slower is the
 /// D-state case, where waiting longer only lengthens the hang.
 const HELPER_REAP_GRACE: Duration = Duration::from_millis(200);
-/// How much of a readback helper's stderr is kept to name a failure. One screenful: enough for
-/// e2fsprogs' one-line causes ("No space left on device"), small enough that a crafted image can't
-/// make the *diagnostic* the expensive part.
-const STDERR_TAIL_CAP: u64 = 4096;
 /// A booted VM's writable output device: the ext4 image the guest mounts at `/output`, and the host
 /// directory its tree is extracted into on [`RunningVm::collect_outputs`].
 #[derive(Debug, Clone)]
@@ -213,216 +217,281 @@ fn run_host_tool(program: &str, args: &[&OsStr], deadline: Instant) -> Result<()
     Ok(())
 }
 
-/// Map a failure to spawn one of the driver's host helpers (`mke2fs`/`truncate`/`e2fsck`/`debugfs`
-/// for the block devices, `ip` for the tap) to a typed error: a missing binary is a clear
+/// Map a failure to spawn one of the driver's host helpers (`mke2fs`/`truncate` for the block
+/// devices, `ip` for the tap) to a typed error: a missing binary is a clear
 /// [`VmmError::Artifact`] (install hint), anything else a [`VmmError::Vmm`].
 pub(crate) fn tool_spawn_error(program: &str, e: std::io::Error) -> VmmError {
     if e.kind() == std::io::ErrorKind::NotFound {
         VmmError::Artifact(format!(
-            "{program} not found (a host tool the driver shells out to — install e2fsprogs/coreutils/iproute2)"
+            "{program} not found (a host tool the driver shells out to: install e2fsprogs/coreutils/iproute2)"
         ))
     } else {
         VmmError::Vmm(format!("run {program}: {e}"))
     }
 }
 
-/// Read the writable output image back into the host `dest` directory, rootless. Ordered so the tree
-/// is consistent and safe before it's returned: recover the journal (`e2fsck`), extract under a
-/// byte/time cap (`debugfs rdump`), drop `lost+found`, neutralise host-escaping symlinks, then list
-/// what survived. Called only after the VMM has exited (see [`RunningVm::collect_outputs`]).
+/// Read the writable output image back into the host `dest` directory, rootless and in-process.
+/// Ordered so the tree is safe before it's returned: walk the image under a byte/entry/time cap,
+/// neutralise host-escaping symlinks, then list what survived. Called only after the VMM has exited
+/// (see [`RunningVm::collect_outputs`]).
+///
+/// The image is wholly guest-authored, so it is parsed in-process by `ext4-view`, an `unsafe`-free
+/// reader on the `#![forbid(unsafe_code)]` host path. The reader replays the image's journal, which
+/// is what makes a hard-killed guest's dirty image readable.
 pub(crate) fn collect_output_image(image: &Path, dest: &Path) -> Result<Vec<String>, VmmError> {
     std::fs::create_dir_all(dest)
         .map_err(|e| VmmError::Vmm(format!("create output dir {}: {e}", dest.display())))?;
-    // One deadline for the whole readback: fsck and rdump share the bound the constant promises,
-    // rather than each stage getting its own fresh wall.
-    let deadline = Instant::now() + OUTPUT_READBACK_TIMEOUT;
-    fsck_output_image(image, deadline)?;
-    rdump_capped(image, dest, OUTPUT_EXTRACT_CAP, deadline)?;
-    // Guest-controlled tree: drop the ext4 housekeeping dir and any symlink that would redirect a
-    // later host read onto the host filesystem, before the caller (or its tooling) touches the files.
-    let _ = std::fs::remove_dir_all(dest.join("lost+found"));
+    let fs = Ext4::load_from_path(image)
+        .map_err(|e| VmmError::Vmm(format!("read the output image {}: {e}", image.display())))?;
+    Walk::new(dest, OUTPUT_EXTRACT_CAP).run(&fs)?;
+    // Guest-controlled tree: drop any symlink that would redirect a later host read onto the host
+    // filesystem, before the caller (or its tooling) touches the files.
     sanitize_symlinks(dest)?;
     collect_paths(dest)
 }
 
-/// `e2fsck -fy` the image: force a full check and auto-answer, recovering the journal and clearing the
-/// "not cleanly unmounted" state a hard-killed guest leaves, so `debugfs` sees a consistent tree. The
-/// image's contents are wholly guest-chosen, and a crafted filesystem can send e2fsck into a
-/// pathological repair, so it runs under the readback deadline ([`wait_bounded`]), never an
-/// open-ended `.status()`. The exit status is a bitmask, 0 clean, 1 errors corrected, 2 corrected +
-/// reboot advised (moot for an image file); `>= 4` means errors left uncorrected or an operational
-/// failure, which is a real error.
-fn fsck_output_image(image: &Path, deadline: Instant) -> Result<(), VmmError> {
-    let (sink, back) = match stderr_capture() {
-        Some((sink, back)) => (sink, Some(back)),
-        None => (Stdio::null(), None),
-    };
-    let mut child = Command::new("e2fsck")
-        .arg("-fy")
-        .arg(image)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(sink)
-        .spawn()
-        .map_err(|e| tool_spawn_error("e2fsck", e))?;
-    let status = wait_bounded(&mut child, deadline, "e2fsck", READBACK_POLL, || None)?;
-    let stderr = captured_stderr(back);
-    match status.code() {
-        Some(0) => Ok(()),
-        // Errors were found and corrected (1) or corrected + reboot-advised (2): the tree is now
-        // consistent, but a hard-killed guest's in-flight writes may have been rolled back with the
-        // journal. Record it so a recovered output shows up in the audit log, not as pristine.
-        Some(code) if code < 4 => {
-            tracing::warn!(
-                exit = code,
-                "e2fsck corrected the output image before readback; captured artifacts may be missing the guest's last writes"
-            );
-            Ok(())
-        }
-        Some(_) => Err(VmmError::Vmm(format!(
-            "e2fsck could not repair the output image: {}",
-            crate::proc::failure_detail(status, &stderr)
-        ))),
-        None => Err(VmmError::Vmm(format!(
-            "e2fsck terminated by a signal: {}",
-            crate::proc::failure_detail(status, &stderr)
-        ))),
+/// Remove a **symlink** already sitting at `host_path` before the walk creates anything there.
+///
+/// `File::create` and `create_dir_all` both follow a link, so a link planted in `output_dir` ahead of
+/// the readback redirects the create onto whatever it names: the guest's bytes land outside `dest`,
+/// and [`sanitize_symlinks`] then removes the link, so the manifest reports a clean run that wrote
+/// nothing. [`Walk::dir`] calls this for every entry, which is what keeps a create inside `dest`.
+/// A regular file or directory already at the name is left alone; only a link redirects a write.
+fn clear_planted_link(host_path: &Path) -> Result<(), VmmError> {
+    match host_path.symlink_metadata() {
+        Ok(meta) if meta.is_symlink() => std::fs::remove_file(host_path)
+            .map_err(|e| VmmError::Vmm(format!("clear the link at {}: {e}", host_path.display()))),
+        _ => Ok(()),
     }
 }
 
-/// A capture sink for a readback helper's stderr: `(the child's handle, our read-back handle)` onto
-/// one already-unlinked file.
+/// One extraction of a guest image into a host directory, carrying the three bounds a guest-authored
+/// tree is walked under.
 ///
-/// **Not a pipe.** Nothing reads a pipe until the child has exited, so a helper that emits more than
-/// the ~64 KiB pipe buffer blocks on its own write and is only freed by the deadline kill: a
-/// 120-second wedge with no diagnostic.
-/// `debugfs` reports per failed file and the tree is guest-controlled, so that volume is reachable on
-/// purpose, not just in theory. A file has no such limit and the read stays bounded either way.
-///
-/// `None` when the sink can't be made, which degrades to "no stderr" (the exit status becomes the
-/// whole diagnosis) rather than failing a readback over its own diagnostics.
-fn stderr_capture() -> Option<(Stdio, std::fs::File)> {
-    let (sink, back) = crate::proc::scratch_pair("readback").ok()?;
-    Some((Stdio::from(sink), back))
-}
-
-/// The head of a captured stderr, for naming a failure whose cause only the tool knows (a full output
-/// dir, a corrupt image). Bounded: an unbounded read would let a crafted image dictate how much host
-/// memory the *diagnostic* costs.
-fn captured_stderr(back: Option<std::fs::File>) -> String {
-    back.and_then(|f| crate::proc::read_head(f, STDERR_TAIL_CAP).ok())
-        .unwrap_or_default()
-}
-
-/// Extract the image tree into `dest` with `debugfs rdump`, bounded so a hostile guest can't blow up
-/// the host. `debugfs` materialises filesystem holes as real zeros, so a sparse file staged in the
-/// capped image could still inflate the readback, a poll loop aborts the extraction once `dest`'s
-/// **allocated** bytes pass `byte_cap`, or once it outruns `timeout`. rdump prints benign
-/// "changing ownership" warnings when run non-root (it can't chown to the guest's uids) and still
-/// exits 0; those are ignored. Its stderr is captured (see [`stderr_capture`]) for two reasons: a
-/// real failure, most plainly a full `dest`, then names its cause instead of reporting a bare exit
-/// code, **and** rdump exits 0 even when it extracted nothing, so stderr is the only place that
-/// failure is visible at all (see [`rdump_failures`]).
-fn rdump_capped(
-    image: &Path,
-    dest: &Path,
+/// **Every bound is a typed error, never a silent stop.** A truncated tree reported as a clean
+/// readback is the audit-honesty failure of claiming artifacts that were never written.
+struct Walk<'a> {
+    dest: &'a Path,
+    /// Ceiling on written bytes. A field rather than a constant so a test can drive the bound with
+    /// a fixture instead of half a gigabyte of guest output.
     byte_cap: u64,
+    /// Real host bytes written so far, against [`OUTPUT_EXTRACT_CAP`]. A hole in a guest file reads
+    /// back as zeros, so a sparse file staged inside the capped image is counted at the size it
+    /// actually costs the host.
+    bytes: u64,
+    /// Directory entries visited so far, against [`MAX_OUTPUT_ENTRIES`]. Entries only: a file's
+    /// copy chunks check the clock but must not spend this budget, or one large legitimate file
+    /// would report a tree that has too many entries.
+    entries: u64,
     deadline: Instant,
-) -> Result<(), VmmError> {
-    // debugfs parses its `-R` request by whitespace, with no quoting, reject a whitespace dest
-    // rather than silently truncate the path (the dest is operator-set, so this is a clear config
-    // error, not a guest-reachable one).
-    let dest_str = path_str(dest)?;
-    if dest_str.chars().any(char::is_whitespace) {
-        return Err(VmmError::Vmm(format!(
-            "output dir path must not contain whitespace (debugfs -R limitation): {dest_str}"
-        )));
-    }
-    let (sink, back) = match stderr_capture() {
-        Some((sink, back)) => (sink, Some(back)),
-        None => (Stdio::null(), None),
-    };
-    let mut child = Command::new("debugfs")
-        .arg("-R")
-        .arg(format!("rdump / {dest_str}"))
-        .arg(image)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(sink)
-        .spawn()
-        .map_err(|e| tool_spawn_error("debugfs", e))?;
-
-    // The extra bound rdump carries over a plain wait: abort the moment the extracted tree's
-    // allocated blocks pass `byte_cap` (a sparse-file blow-up materialising as real host zeros),
-    // not only when it outruns the deadline.
-    let status = wait_bounded(&mut child, deadline, "debugfs rdump", READBACK_POLL, || {
-        (dir_alloc_bytes(dest) > byte_cap).then_some(VmmError::OutputCap {
-            limit: byte_cap.min(usize::MAX as u64) as usize,
-        })
-    })?;
-    let stderr = captured_stderr(back);
-    // `debugfs` exits **0 even when every file failed to extract**, reporting each on stderr only
-    // (observed: a whole tree of "Permission denied while opening ..." with status 0). Trusting the
-    // exit code alone therefore hands the caller an empty output dir and calls it a successful
-    // readback, which is the audit-honesty failure of claiming artifacts that were never written.
-    // So a real rdump complaint is an error whatever the status says.
-    let complaints = rdump_failures(&stderr);
-    if !complaints.is_empty() {
-        return Err(VmmError::Vmm(format!(
-            "debugfs rdump could not extract the output image: {complaints}"
-        )));
-    }
-    match status.code() {
-        Some(0) => Ok(()),
-        _ => Err(VmmError::Vmm(format!(
-            "debugfs rdump failed: {}",
-            crate::proc::failure_detail(status, &stderr)
-        ))),
-    }
+    /// One copy buffer for the whole walk, heap-allocated: a per-file array would put
+    /// [`READBACK_CHUNK`] on the stack under [`MAX_OUTPUT_DEPTH`] frames of recursion, and a
+    /// per-file `Vec` would allocate once per file in a tree that can hold many.
+    buf: Box<[u8]>,
 }
 
-/// The `rdump:` lines that report a real extraction failure, joined, or empty when there are none.
-///
-/// Run non-root, rdump cannot chown to the guest's uids and says so per file; that is expected and
-/// must not fail a readback, so it is the one prefix filtered out. Everything else it prefixes with
-/// `rdump:` is a file it did not write.
-fn rdump_failures(stderr: &str) -> String {
-    stderr
-        .lines()
-        .map(str::trim)
-        .filter(|l| l.starts_with("rdump:"))
-        .filter(|l| !l.contains("changing ownership"))
-        .collect::<Vec<_>>()
-        .join("; ")
+impl<'a> Walk<'a> {
+    fn new(dest: &'a Path, byte_cap: u64) -> Self {
+        Self {
+            dest,
+            byte_cap,
+            bytes: 0,
+            entries: 0,
+            deadline: Instant::now() + OUTPUT_READBACK_TIMEOUT,
+            buf: vec![0u8; READBACK_CHUNK].into_boxed_slice(),
+        }
+    }
+
+    /// Extract the image's root into `dest`.
+    fn run(&mut self, fs: &Ext4) -> Result<(), VmmError> {
+        let root = GuestPath::try_from("/")
+            .map_err(|e| VmmError::Vmm(format!("build the guest root path: {e}")))?;
+        self.dir(fs, &root, self.dest.to_path_buf(), 0)
+    }
+
+    /// Extract one guest directory into `host_dir`, recursing at `depth`.
+    ///
+    /// A crafted image can name a directory whose entry points back at an ancestor, so the walk is
+    /// bounded by depth and total entries rather than by a visited set: `ext4-view` exposes no inode
+    /// number to deduplicate on, and both bounds hold a cycle whether or not one is expressible.
+    fn dir(
+        &mut self,
+        fs: &Ext4,
+        guest_dir: &GuestPath,
+        host_dir: PathBuf,
+        depth: u32,
+    ) -> Result<(), VmmError> {
+        if depth > MAX_OUTPUT_DEPTH {
+            return Err(VmmError::Vmm(format!(
+                "output tree is deeper than {MAX_OUTPUT_DEPTH} levels at {}",
+                host_dir.display()
+            )));
+        }
+        let entries = fs
+            .read_dir(guest_dir)
+            .map_err(|e| VmmError::Vmm(format!("read guest dir {}: {e}", guest_dir.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| {
+                VmmError::Vmm(format!("read entry in {}: {e}", guest_dir.display()))
+            })?;
+            self.entry()?;
+
+            let name = entry.file_name();
+            // `.` and `..` are real entries in an ext4 directory block and the iterator yields them;
+            // descending either is how a walk of a legitimate tree loops forever.
+            if name == "." || name == ".." {
+                continue;
+            }
+            // `lost+found` is ext4 housekeeping, not the guest's output.
+            if depth == 0 && name == "lost+found" {
+                continue;
+            }
+            // A name with no `str` form names no host file a caller could open. `DirEntryName`
+            // already rejects `/` and NUL, so a name that is valid UTF-8 is a single path component
+            // and cannot climb out of `host_dir`.
+            let Ok(name) = name.as_str() else {
+                tracing::warn!(
+                    dir = %guest_dir.display(),
+                    "output entry has a non-UTF-8 name; skipped"
+                );
+                continue;
+            };
+            let guest_path = entry.path();
+            let host_path = host_dir.join(name);
+            let meta = entry.metadata().map_err(|e| {
+                VmmError::Vmm(format!("stat guest entry {}: {e}", guest_path.display()))
+            })?;
+
+            let file_type = meta.file_type();
+            // Only for the arms below that create something: a node type the walk skips must not
+            // delete whatever is already at that name.
+            if matches!(
+                file_type,
+                FileType::Directory | FileType::Regular | FileType::Symlink
+            ) {
+                clear_planted_link(&host_path)?;
+            }
+            match file_type {
+                FileType::Directory => {
+                    std::fs::create_dir_all(&host_path).map_err(|e| {
+                        VmmError::Vmm(format!("create {}: {e}", host_path.display()))
+                    })?;
+                    self.dir(fs, &guest_path, host_path, depth + 1)?;
+                }
+                FileType::Regular => self.file(fs, &guest_path, &host_path)?,
+                FileType::Symlink => {
+                    let target = fs.read_link(&guest_path).map_err(|e| {
+                        VmmError::Vmm(format!("read guest symlink {}: {e}", guest_path.display()))
+                    })?;
+                    // A target with no `str` form names nothing a host read could follow, so it is
+                    // dropped here rather than recreated as a link the sanitizer cannot resolve.
+                    let Ok(target) = target.to_str() else {
+                        tracing::warn!(
+                            path = %guest_path.display(),
+                            "output symlink has a non-UTF-8 target; skipped"
+                        );
+                        continue;
+                    };
+                    // `symlink` refuses to replace an existing name, where `File::create` and
+                    // `create_dir_all` both tolerate one, so a reused `output_dir` would fail on
+                    // this arm alone. Clear the way to keep the three arms consistent.
+                    if host_path.symlink_metadata().is_ok() {
+                        let _ = std::fs::remove_file(&host_path)
+                            .or_else(|_| std::fs::remove_dir_all(&host_path));
+                    }
+                    // Recreated verbatim, then judged by `sanitize_symlinks` against the real `dest`:
+                    // an escaping target is dropped there, where containment is resolved rather than
+                    // guessed from the link text.
+                    std::os::unix::fs::symlink(target, &host_path).map_err(|e| {
+                        VmmError::Vmm(format!("create symlink {}: {e}", host_path.display()))
+                    })?;
+                }
+                // Block/char devices, fifos and sockets carry guest-chosen major/minor numbers and
+                // no data. They are named in the log and skipped rather than recreated on the host.
+                other => tracing::warn!(
+                    path = %guest_path.display(),
+                    file_type = ?other,
+                    "output entry is not a file, directory or symlink; skipped"
+                ),
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy one guest file to `host_path`, charging its bytes against the cap as they are written.
+    ///
+    fn file(
+        &mut self,
+        fs: &Ext4,
+        guest_path: &GuestPath,
+        host_path: &Path,
+    ) -> Result<(), VmmError> {
+        let mut src = fs
+            .open(guest_path)
+            .map_err(|e| VmmError::Vmm(format!("open guest file {}: {e}", guest_path.display())))?;
+        let mut dst = std::fs::File::create(host_path)
+            .map_err(|e| VmmError::Vmm(format!("create {}: {e}", host_path.display())))?;
+        loop {
+            self.check_clock()?;
+            let n = std::io::Read::read(&mut src, &mut self.buf).map_err(|e| {
+                VmmError::Vmm(format!("read guest file {}: {e}", guest_path.display()))
+            })?;
+            if n == 0 {
+                return Ok(());
+            }
+            // Charged before the write, so the cap bounds what reaches the host rather than
+            // discovering the overrun once it is already on disk.
+            self.bytes = self.bytes.saturating_add(n as u64);
+            if self.bytes > self.byte_cap {
+                return Err(VmmError::OutputCap {
+                    limit: self.byte_cap.min(usize::MAX as u64) as usize,
+                });
+            }
+            std::io::Write::write_all(&mut dst, &self.buf[..n])
+                .map_err(|e| VmmError::Vmm(format!("write {}: {e}", host_path.display())))?;
+        }
+    }
+
+    /// Charge one directory entry against the entry count, and check the clock.
+    fn entry(&mut self) -> Result<(), VmmError> {
+        self.entries += 1;
+        if self.entries > MAX_OUTPUT_ENTRIES {
+            return Err(VmmError::Vmm(format!(
+                "output tree has more than {MAX_OUTPUT_ENTRIES} entries"
+            )));
+        }
+        self.check_clock()
+    }
+
+    /// Check the wall clock alone, for work that is not a new entry.
+    fn check_clock(&self) -> Result<(), VmmError> {
+        if Instant::now() >= self.deadline {
+            return Err(VmmError::Timeout(
+                "the output readback exceeded its deadline".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Poll `child` to exit under `deadline`, killing and reaping it on any exit path so a shelled-out
-/// helper run against guest-controlled or wedge-prone state (`e2fsck`/`debugfs` on a guest image,
-/// the jail's `mount`) can never park the host thread. `over_budget` is checked each tick for an extra abort condition (rdump's byte cap);
-/// returning `Some(err)` kills the child and surfaces that error. A `try_wait` failure, the
-/// deadline, or an over-budget signal all kill and *briefly* reap ([`kill_and_reap_briefly`]:
-/// an unkillable D-state child is detached, never waited on) before returning a typed error;
-/// the `what` label names the tool in the timeout/wait messages.
+/// helper run against wedge-prone state (the jail's `mount`, a version probe) can never park the
+/// host thread. A `try_wait` failure or the deadline kills and *briefly* reaps
+/// ([`kill_and_reap_briefly`]: an unkillable D-state child is detached, never waited on) before
+/// returning a typed error; the `what` label names the tool in the timeout/wait messages.
 ///
-/// `poll` is the tick, and the caller owns the trade: it bounds both the added latency for a
-/// fast helper (the readback tools tolerate 50ms, a boot-path `mount` finishing in ~1ms does
-/// not) and how often `over_budget` runs (rdump's callback walks the extracted tree, so a fast
-/// tick there would make the watchdog itself expensive).
+/// `poll` is the tick, and the caller owns the trade: it bounds the added latency for a fast helper
+/// (a teardown helper tolerates a lazy tick, a boot-path `mount` finishing in ~1ms does not).
 pub(crate) fn wait_bounded(
     child: &mut Child,
     deadline: Instant,
     what: &str,
     poll: Duration,
-    mut over_budget: impl FnMut() -> Option<VmmError>,
 ) -> Result<ExitStatus, VmmError> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
             Ok(None) => {
-                if let Some(err) = over_budget() {
-                    kill_and_reap_briefly(child, what, HELPER_REAP_GRACE);
-                    return Err(err);
-                }
                 if Instant::now() >= deadline {
                     kill_and_reap_briefly(child, what, HELPER_REAP_GRACE);
                     return Err(VmmError::Timeout(format!("{what} exceeded its deadline")));
@@ -475,34 +544,8 @@ fn reap_briefly(
     }
 }
 
-/// Sum of **allocated** bytes (`blocks * 512`, real host disk, not logical size) under `dir`. Walks
-/// with `file_type`/`DirEntry::metadata` (both `lstat`-like), so a guest symlink is counted as the
-/// link itself and never followed, the walk can't be lured onto the host filesystem while sizing.
-fn dir_alloc_bytes(dir: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    let mut total = 0u64;
-    let mut stack = vec![dir.to_path_buf()];
-    while let Some(d) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&d) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            match entry.file_type() {
-                Ok(ft) if ft.is_dir() => stack.push(entry.path()),
-                Ok(_) => {
-                    if let Ok(meta) = entry.metadata() {
-                        total = total.saturating_add(meta.blocks().saturating_mul(512));
-                    }
-                }
-                Err(_) => {}
-            }
-        }
-    }
-    total
-}
-
-/// Remove every symlink under `dest` whose target escapes `dest`. `debugfs rdump` recreates a guest
-/// symlink verbatim as a **host** symlink, so an un-sanitised `link -> /etc/shadow` (or one that
+/// Remove every symlink under `dest` whose target escapes `dest`. The walk recreates a guest symlink
+/// verbatim as a **host** symlink, so an un-sanitised `link -> /etc/shadow` (or one that
 /// climbs out with `..`) would make a later host read of the results read host files, the inverse of
 /// the input side, where `mke2fs -d` resolves links inside the guest image. In-tree links (e.g.
 /// `a -> sub/b`) are kept.
@@ -594,6 +637,7 @@ fn collect_paths(dest: &Path) -> Result<Vec<String>, VmmError> {
 mod tests {
     use super::*;
     use bsx_test_support::ScratchDir;
+    use std::process::Stdio;
 
     #[test]
     fn sanitize_symlinks_drops_escapes_including_chained_intermediate_links() {
@@ -633,7 +677,7 @@ mod tests {
 
     #[test]
     fn wait_bounded_kills_a_child_that_outruns_the_deadline() {
-        // Stands in for e2fsck/debugfs wedged on a pathological guest image: a long sleeper must be
+        // Stands in for a host helper wedged on pathological state: a long sleeper must be
         // killed and reaped at the deadline, returning a typed Timeout, never parking the thread.
         let mut child = Command::new("sleep")
             .arg("30")
@@ -649,7 +693,6 @@ mod tests {
             started + Duration::from_millis(100),
             "sleep",
             Duration::from_millis(10),
-            || None,
         )
         .expect_err("a 30s sleep must not finish before a 100ms deadline");
         assert!(matches!(err, VmmError::Timeout(_)), "got {err:?}");
@@ -770,83 +813,278 @@ mod tests {
             Instant::now() + Duration::from_secs(5),
             "true",
             Duration::from_millis(10),
-            || None,
         )
         .expect("a fast child returns its status");
         assert!(status.success(), "`true` exits 0");
     }
 
-    #[test]
-    fn output_dir_with_whitespace_is_rejected_before_debugfs() {
-        // A whitespace dest would be split by debugfs's `-R` parser; catch it as a typed error rather
-        // than silently truncating the extraction path. (No debugfs is spawned, the guard fires first.)
-        let err = rdump_capped(
-            Path::new("/nonexistent/img.ext4"),
-            Path::new("/tmp/has a space"),
-            OUTPUT_EXTRACT_CAP,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .unwrap_err();
-        assert!(
-            matches!(err, VmmError::Vmm(ref m) if m.contains("whitespace")),
-            "got {err:?}"
-        );
+    /// Build a real ext4 from `tree` with `mke2fs -d`, then read it back through the live
+    /// `collect_output_image`. `None` when the host has no usable `mke2fs`, which is a skip, not a
+    /// failure: the readback under test is in-process, but staging a genuine image is not.
+    fn round_trip(tag: &str, tree: &Path, dir: &Path) -> Option<(PathBuf, Vec<String>)> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let image = build_input_image(tree, dir, deadline).ok().or_else(|| {
+            eprintln!("skipping {tag}: no working mke2fs");
+            None
+        })?;
+        let dest = dir.join("out");
+        let paths = collect_output_image(&image, &dest).expect("read the image back");
+        Some((dest, paths))
     }
 
     #[test]
-    fn an_rdump_that_extracted_nothing_is_a_failure_whatever_its_exit_code_said() {
-        // Measured, not assumed: `debugfs -R "rdump / <unwritable>"` prints one line per file it
-        // could not write and **exits 0**. Reading the status alone therefore reports a successful
-        // readback over an empty output dir, which is the engine claiming artifacts it does not
-        // have. This is the pure half of that check.
-        let failed = "debugfs 1.47.4 (6-Mar-2025)\n\
-                      rdump: Permission denied while making directory /out//lost+found\n\
-                      rdump: Permission denied while opening /out//payload-0\n";
-        let complaints = rdump_failures(failed);
-        assert!(
-            complaints.contains("payload-0") && complaints.contains("lost+found"),
-            "every file rdump dropped must survive into the error: {complaints}"
-        );
+    fn a_guest_tree_round_trips_through_the_in_process_reader() {
+        // A real mke2fs-written ext4 read back in-process, no child process involved. Nested dirs
+        // and an in-tree symlink, because those are the shapes the walk has to descend and recreate
+        // rather than just copy.
+        let dir = bsx_test_support::ScratchDir::created("readback-roundtrip");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("sub/deeper")).expect("seed dirs");
+        std::fs::write(tree.join("top.txt"), b"top level").expect("seed file");
+        std::fs::write(tree.join("sub/nested.bin"), vec![7u8; 100_000]).expect("seed nested");
+        std::fs::write(tree.join("sub/deeper/leaf"), b"leaf").expect("seed leaf");
+        std::os::unix::fs::symlink("sub/nested.bin", tree.join("inside"))
+            .expect("seed in-tree symlink");
 
-        // The one prefix that must *not* fail a readback: run non-root, rdump cannot chown to the
-        // guest's uids and says so per file while extracting them perfectly well.
-        let benign = "debugfs 1.47.4 (6-Mar-2025)\n\
-                      rdump: Operation not permitted while changing ownership of /out//payload-0\n";
+        let Some((dest, paths)) = round_trip(
+            "a_guest_tree_round_trips_through_the_in_process_reader",
+            &tree,
+            dir.path(),
+        ) else {
+            return;
+        };
+
         assert_eq!(
-            rdump_failures(benign),
-            "",
-            "an ownership warning is expected non-root and must not fail the readback"
+            std::fs::read(dest.join("top.txt")).expect("read top"),
+            b"top level"
         );
-        assert_eq!(rdump_failures(""), "", "silence is success");
+        assert_eq!(
+            std::fs::read(dest.join("sub/deeper/leaf")).expect("read leaf"),
+            b"leaf"
+        );
+        // A multi-chunk file, so the copy loop is exercised past one `READBACK_CHUNK`.
+        assert_eq!(
+            std::fs::read(dest.join("sub/nested.bin")).expect("read nested"),
+            vec![7u8; 100_000]
+        );
+        // An in-tree link is kept as a link, not flattened into a copy.
+        let link = dest.join("inside");
+        assert!(
+            link.symlink_metadata().expect("stat link").is_symlink(),
+            "an in-tree symlink must survive as a symlink"
+        );
+        assert_eq!(
+            std::fs::read(&link).expect("read through the link"),
+            vec![7u8; 100_000]
+        );
+
+        // The manifest names every file, and never `lost+found`, which is ext4 housekeeping.
+        for want in ["top.txt", "sub/nested.bin", "sub/deeper/leaf", "inside"] {
+            assert!(
+                paths.iter().any(|p| p == want),
+                "manifest missing {want}: {paths:?}"
+            );
+        }
+        assert!(
+            !paths.iter().any(|p| p.starts_with("lost+found")),
+            "lost+found is not the guest's output: {paths:?}"
+        );
     }
 
     #[test]
-    fn a_readback_that_wrote_nothing_is_never_reported_as_a_successful_one() {
-        // The live counterpart of the pure test above, through the real `collect_output_image`. An
-        // unwritable dest stands in for the full one: both make rdump fail per file and exit 0, and
-        // this one needs no root, so the branch is covered by the everyday gate rather than only by
-        // the privileged run.
-        //
-        // Guarded because it *inverts* under root: root writes through mode 0555, the readback then
-        // genuinely succeeds, and the assertion below would fail on a correct engine. A test whose
-        // meaning flips with privilege has to say so.
+    fn a_link_planted_in_the_destination_cannot_redirect_the_readback() {
+        // `output_dir` is operator-chosen, so it can already hold a symlink when the readback runs:
+        // an operator's own, or one planted by anything else with write access between runs. Both
+        // `File::create` and `create_dir_all` follow a link, so without `clear_planted_link` the
+        // guest's bytes land wherever it points, and `sanitize_symlinks` then removes the link so
+        // the manifest reports a clean run that wrote nothing. Writes must stay inside `dest`.
+        let dir = bsx_test_support::ScratchDir::created("readback-planted");
+        let outside_file = dir.path().join("OUTSIDE");
+        std::fs::write(&outside_file, b"host content").expect("seed outside file");
+        let outside_dir = dir.path().join("OUTSIDE_DIR");
+        std::fs::create_dir_all(&outside_dir).expect("seed outside dir");
+
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("d")).expect("seed guest dir");
+        std::fs::write(tree.join("d/x"), b"guest data").expect("seed nested");
+        std::fs::write(tree.join("f"), b"guest data").expect("seed file");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(image) = build_input_image(&tree, dir.path(), deadline) else {
+            eprintln!("skipping a_link_planted_in_the_destination: no working mke2fs");
+            return;
+        };
+
+        // The names the guest is about to write, already present as links pointing out of `dest`.
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("dest");
+        std::os::unix::fs::symlink(&outside_file, dest.join("f")).expect("plant a file link");
+        std::os::unix::fs::symlink(&outside_dir, dest.join("d")).expect("plant a dir link");
+
+        collect_output_image(&image, &dest).expect("the readback");
+
+        assert_eq!(
+            std::fs::read(&outside_file).expect("read the outside file"),
+            b"host content",
+            "a planted link must not redirect a file write out of the destination"
+        );
+        assert!(
+            !outside_dir.join("x").exists(),
+            "a planted link must not redirect a directory write out of the destination"
+        );
+        // And the guest's data is where it belongs.
+        assert_eq!(
+            std::fs::read(dest.join("f")).expect("read the extracted file"),
+            b"guest data"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("d/x")).expect("read the extracted nested file"),
+            b"guest data"
+        );
+    }
+
+    #[test]
+    fn a_second_collection_into_the_same_dest_replaces_what_is_there() {
+        // An embedder may point two runs at one `output_dir`. Files and directories tolerate that
+        // on their own (`File::create` truncates, `create_dir_all` is idempotent); a symlink is the
+        // one node type whose syscall refuses to replace, so without help the second run fails on
+        // that arm alone.
+        let dir = bsx_test_support::ScratchDir::created("readback-recollect");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(tree.join("d")).expect("seed dir");
+        std::fs::write(tree.join("f"), b"content").expect("seed file");
+        std::os::unix::fs::symlink("f", tree.join("l")).expect("seed link");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(image) = build_input_image(&tree, dir.path(), deadline) else {
+            eprintln!("skipping a_second_collection_into_the_same_dest: no working mke2fs");
+            return;
+        };
+        let dest = dir.path().join("out");
+        collect_output_image(&image, &dest).expect("the first collection");
+        let again = collect_output_image(&image, &dest).expect("a reused dest is not an error");
+
+        assert!(
+            again.iter().any(|p| p == "l"),
+            "the link must be back: {again:?}"
+        );
+        assert_eq!(
+            std::fs::read(dest.join("f")).expect("read the file"),
+            b"content"
+        );
+    }
+
+    #[test]
+    fn a_large_file_does_not_spend_the_entry_budget() {
+        // The entry bound exists to hold a directory cycle. If the copy loop charged its chunks to
+        // the same counter, one legitimate multi-megabyte file would be reported as a tree with too
+        // many entries, and the diagnostic would name the wrong problem.
+        let dir = bsx_test_support::ScratchDir::created("readback-entries");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("seed dir");
+        // Many `READBACK_CHUNK`s, so a chunk-counting walk is unmistakable against a 4-entry root.
+        let chunks = 64;
+        std::fs::write(tree.join("big"), vec![3u8; chunks * READBACK_CHUNK]).expect("seed big");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(image) = build_input_image(&tree, dir.path(), deadline) else {
+            eprintln!("skipping a_large_file_does_not_spend_the_entry_budget: no working mke2fs");
+            return;
+        };
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let fs = Ext4::load_from_path(&image).expect("load the image");
+        let mut walk = Walk::new(&dest, OUTPUT_EXTRACT_CAP);
+        walk.run(&fs).expect("the walk");
+
+        // The root holds `.`, `..`, `lost+found` and `big`; the file's 64 chunks are not entries.
+        assert!(
+            walk.entries < chunks as u64,
+            "a {chunks}-chunk file spent the entry budget: {} entries counted",
+            walk.entries
+        );
+        assert_eq!(
+            std::fs::metadata(dest.join("big")).expect("stat big").len(),
+            (chunks * READBACK_CHUNK) as u64
+        );
+    }
+
+    #[test]
+    fn an_escaping_symlink_does_not_survive_the_readback() {
+        // `mke2fs -d` copies a symlink verbatim into the image, so this is the guest's real escape
+        // attempt: the reader recreates the link and the sanitizer has to be what drops it. The
+        // in-tree link beside it must be untouched, or "sanitized" would just mean "deleted".
+        let dir = bsx_test_support::ScratchDir::created("readback-escape");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("seed dir");
+        std::fs::write(tree.join("real"), b"kept").expect("seed file");
+        std::os::unix::fs::symlink("/etc/shadow", tree.join("escape")).expect("seed escape");
+        std::os::unix::fs::symlink("real", tree.join("inside")).expect("seed in-tree");
+
+        let Some((dest, paths)) = round_trip(
+            "an_escaping_symlink_does_not_survive_the_readback",
+            &tree,
+            dir.path(),
+        ) else {
+            return;
+        };
+
+        assert!(
+            dest.join("escape").symlink_metadata().is_err(),
+            "a link out of the destination must not survive: {paths:?}"
+        );
+        assert!(
+            dest.join("inside").symlink_metadata().is_ok(),
+            "an in-tree link must survive: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn the_byte_cap_stops_a_readback_that_would_outgrow_it() {
+        // The sparse-file blow-up in miniature: the cap is charged per chunk while copying, so a
+        // file larger than the ceiling fails part-way rather than after it has landed on the host.
+        let dir = bsx_test_support::ScratchDir::created("readback-cap");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).expect("seed dir");
+        std::fs::write(tree.join("big"), vec![0u8; 512 * 1024]).expect("seed big file");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let Ok(image) = build_input_image(&tree, dir.path(), deadline) else {
+            eprintln!("skipping the_byte_cap_stops_a_readback_that_would_outgrow_it: no mke2fs");
+            return;
+        };
+        let dest = dir.path().join("out");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let fs = Ext4::load_from_path(&image).expect("load the image");
+
+        let err = Walk::new(&dest, 64 * 1024)
+            .run(&fs)
+            .expect_err("a tree past the cap is not a successful readback");
+        assert!(
+            matches!(err, VmmError::OutputCap { .. }),
+            "the cap must be its own typed error, not a generic one: {err}"
+        );
+    }
+
+    #[test]
+    fn a_readback_into_an_unwritable_dest_names_the_file_it_could_not_write() {
+        // A readback that cannot write must fail loudly and name what it could not write; silently
+        // returning an empty manifest is the audit-honesty failure of claiming a clean run.
         if bsx_test_support::have_real_root() {
             eprintln!(
-                "skipping a_readback_that_wrote_nothing_is_never_reported_as_a_successful_one: \
+                "skipping a_readback_into_an_unwritable_dest_names_the_file_it_could_not_write: \
                  root writes through an unwritable dir, so there is no failure to observe"
             );
             return;
         }
-        let dir = bsx_test_support::ScratchDir::created("rdump-unwritable");
+        let dir = bsx_test_support::ScratchDir::created("readback-unwritable");
         let tree = dir.path().join("tree");
         std::fs::create_dir_all(&tree).expect("seed dir");
         std::fs::write(tree.join("payload"), b"guest output").expect("seed payload");
+
         let deadline = Instant::now() + Duration::from_secs(60);
         let Ok(image) = build_input_image(&tree, dir.path(), deadline) else {
-            eprintln!(
-                "skipping a_readback_that_wrote_nothing_is_never_reported_as_a_successful_one: \
-                 no working mke2fs"
-            );
+            eprintln!("skipping a_readback_into_an_unwritable_dest_names_the_file: no mke2fs");
             return;
         };
 
@@ -914,19 +1152,17 @@ mod tests {
 
     #[test]
     #[ignore = "mounts a tmpfs; needs real root (run via `cargo xtask ci-privileged`)"]
-    fn a_full_output_dir_names_debugfs_as_the_cause() {
-        // `debugfs` and `e2fsck` must not discard their stderr: a readback into a full output dir
-        // would then report `(exit 1)` and nothing else. The image here is legitimate; only the
-        // destination is out of space, which is precisely the failure an exit code cannot
-        // distinguish.
-        let Some(fs) = bsx_test_support::SmallFs::create(8, "rdump-full") else {
-            eprintln!("skipping a_full_output_dir_names_debugfs_as_the_cause: needs real root");
+    fn a_full_output_dir_names_the_file_and_the_cause() {
+        // A readback into a full output dir must report the write that failed and the kernel's own
+        // reason. The image here is legitimate; only the destination is out of space.
+        let Some(fs) = bsx_test_support::SmallFs::create(8, "readback-full") else {
+            eprintln!("skipping a_full_output_dir_names_the_file_and_the_cause: needs real root");
             return;
         };
         // The image is built on the *host* filesystem and seeded with real content: this test is
-        // about the destination being full, and rdump of an empty image would write nothing at all
-        // and succeed on any headroom.
-        let src = bsx_test_support::ScratchDir::created("rdump-src");
+        // about the destination being full, and an empty image would write nothing at all and
+        // succeed on any headroom.
+        let src = bsx_test_support::ScratchDir::created("readback-src");
         let tree = src.path().join("tree");
         std::fs::create_dir_all(&tree).expect("seed dir");
         for i in 0..4 {
@@ -935,13 +1171,13 @@ mod tests {
         }
         let deadline = Instant::now() + Duration::from_secs(60);
         let Ok(image) = build_input_image(&tree, src.path(), deadline) else {
-            eprintln!("skipping a_full_output_dir_names_debugfs_as_the_cause: no working mke2fs");
+            eprintln!("skipping a_full_output_dir_names_the_file_and_the_cause: no working mke2fs");
             return;
         };
 
         let dest = fs.path().join("out");
-        // Leave enough for the `create_dir_all` and e2fsck's own bookkeeping, but far less than the
-        // extracted tree, so the failure lands inside rdump rather than before it.
+        // Leave enough for the `create_dir_all`, but far less than the extracted tree, so the
+        // failure lands inside the copy rather than before it.
         fs.fill_leaving(128 * 1024);
         let started = Instant::now();
         let err =
@@ -949,8 +1185,8 @@ mod tests {
         let msg = err.to_string();
 
         // The trap this test would otherwise fall into: a readback that *wedges* also produces an
-        // error with no bare exit code and no trailing colon, so the weaker assertions below would
-        // pass on a 120-second timeout that captured no stderr at all, proving nothing.
+        // error with no trailing colon, so the weaker assertions below would pass on a 120-second
+        // timeout, proving nothing.
         assert!(
             !matches!(err, VmmError::Timeout(_)),
             "the readback must fail on the full disk, not wedge until its deadline: {msg}"
@@ -964,11 +1200,9 @@ mod tests {
             !msg.trim_end().ends_with(':'),
             "a failed readback must name a cause, not end in a bare colon: {msg}"
         );
-        // `failure_detail` falls back to the exit status only when stderr was empty, so a message
-        // ending in one is exactly the pre-fix behaviour: the tool spoke and nobody listened.
         assert!(
-            !msg.contains("exit status:") && !msg.contains("(exit "),
-            "the detail must be the tool's own stderr, not its exit status: {msg}"
+            msg.contains("payload"),
+            "the error must name the file it could not write: {msg}"
         );
     }
 }

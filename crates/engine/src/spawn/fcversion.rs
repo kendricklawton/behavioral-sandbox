@@ -98,7 +98,6 @@ pub(super) fn probe_fc_version_within(firecracker: &Path, wall: Duration) -> FcP
                 deadline,
                 "firecracker --version",
                 Duration::from_millis(5),
-                || None,
             )
             .is_err()
             {

@@ -412,7 +412,6 @@ fn run_mount(
         deadline,
         what,
         std::time::Duration::from_millis(2),
-        || None,
     )?;
     // Read after exit. This terminates because a bind `mount` execs no filesystem helper and
     // backgrounds nothing, so reaping the child closed the pipe's last write end.
