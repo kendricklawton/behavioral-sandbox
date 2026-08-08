@@ -195,6 +195,14 @@ struct RunArgs {
     /// or `.bsx.toml`.
     #[arg(long, help_heading = "Isolation")]
     require_limits: bool,
+    /// The uid the jailer drops the VMM to [default: 10000].
+    /// An operator setting, not a caller's: sandboxes sharing an id can signal each other's VMMs.
+    /// Also settable via `BSX_JAIL_UID` or `.bsx.toml`.
+    #[arg(long, value_name = "UID", value_parser = parse_jail_id, help_heading = "Isolation")]
+    jail_uid: Option<u32>,
+    /// The gid the jailer drops the VMM to [default: 10000]. See `--jail-uid`.
+    #[arg(long, value_name = "GID", value_parser = parse_jail_id, help_heading = "Isolation")]
+    jail_gid: Option<u32>,
     /// Guest vCPUs, 1 or an even number up to 32 [default: 1].
     /// Zero or over-cap is a typed CLI error, never a silent clamp (Firecracker caps a microVM
     /// at 32).
@@ -312,6 +320,12 @@ struct ShellArgs {
     /// Refuse the boot if the cpu/memory cgroup caps can't be applied (see `run --require-limits`).
     #[arg(long)]
     require_limits: bool,
+    /// The uid the jailer drops the VMM to (see `run --jail-uid`).
+    #[arg(long, value_name = "UID", value_parser = parse_jail_id)]
+    jail_uid: Option<u32>,
+    /// The gid the jailer drops the VMM to (see `run --jail-uid`).
+    #[arg(long, value_name = "GID", value_parser = parse_jail_id)]
+    jail_gid: Option<u32>,
     /// Guest vCPUs (default 1). 1 or an even number up to 32 (see `run --vcpus`).
     #[arg(long, value_name = "N", value_parser = parse_vcpus)]
     vcpus: Option<NonZeroU8>,
@@ -411,6 +425,18 @@ fn base_config(file: Option<&config::BsxToml>) -> BootConfig {
     BootConfig::from_env_with(|key| {
         std::env::var_os(key).or_else(|| file.and_then(|f| f.env_value(key)))
     })
+}
+
+/// Apply the `--jail-uid`/`--jail-gid` flag layer over the env/file ids `base_config` already
+/// folded. Shared by `run`, `shell`, and `serve` so the three cannot drift on which layer wins.
+/// An unjailed boot drops the whole `Jail` later, so setting ids for one is inert rather than wrong.
+fn apply_jail_ids(config: &mut BootConfig, uid: Option<u32>, gid: Option<u32>) {
+    if let Some(uid) = uid {
+        config.jail.get_or_insert_default().uid = uid;
+    }
+    if let Some(gid) = gid {
+        config.jail.get_or_insert_default().gid = gid;
+    }
 }
 
 /// `bsx run`: open (jailed by default) → attach the probes when asked (`--trace`/`--record`/
@@ -519,6 +545,7 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
     if args.require_limits {
         config.require_limits = true;
     }
+    apply_jail_ids(&mut config, args.jail_uid, args.jail_gid);
     // Captured before `config` moves into the boot: the record needs it, and an allowance means
     // something different with a route behind it than without.
     let gateway = config.egress.map(|e| e.gateway());
@@ -721,6 +748,7 @@ fn shell(args: ShellArgs, file: Option<&config::BsxToml>) -> Result<ExitCode, Cl
     if args.require_limits {
         config.require_limits = true;
     }
+    apply_jail_ids(&mut config, args.jail_uid, args.jail_gid);
     let sandbox = open(config, args.unjailed)?;
     let mut err_out = std::io::stderr();
     let _ = writeln!(
@@ -846,6 +874,21 @@ fn shell_policy(args: &ShellArgs, host_policy: &Policy) -> Result<Limits, CliErr
 /// pinned VMM won't boot, an over-32 count or an odd one above 1. Either way it is a **typed CLI
 /// error, never a silent clamp**: the value is refused at parse, not narrowed behind the caller's
 /// back or surfaced as a late boot error.
+/// Parse `--jail-uid`/`--jail-gid`. Zero is refused by name rather than accepted and quietly
+/// undoing the drop: `setuid(0)` leaves the VMM as root, which is the one id the jail exists to
+/// leave. A typed CLI error here, where the env layer can only warn and fall back.
+fn parse_jail_id(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(0) => Err(
+            "0 is root, which is the id the jailer exists to drop; pick a non-zero \
+                      uid/gid that owns nothing else on this host"
+                .to_string(),
+        ),
+        Ok(id) => Ok(id),
+        Err(_) => Err(format!("expected a uid/gid, got {s:?}")),
+    }
+}
+
 fn parse_vcpus(s: &str) -> Result<NonZeroU8, String> {
     let vcpus: NonZeroU8 = s
         .parse()
@@ -1054,8 +1097,9 @@ fn init_tracing(filter: Option<&str>) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, build_egress, parse_allow,
-        parse_env_pair, parse_mem_mib, parse_vcpus, shell_policy, write_artifacts_in,
+        AllowRule, Artifact, Cli, MAX_VCPUS, Policy, ShellArgs, apply_jail_ids, build_egress,
+        parse_allow, parse_env_pair, parse_jail_id, parse_mem_mib, parse_vcpus, shell_policy,
+        write_artifacts_in,
     };
     use bsx_probes_loader::{Ipv4Cidr, MAX_POLICY_RULES, Protocol};
     use bsx_test_support::ScratchDir;
@@ -1151,6 +1195,35 @@ mod tests {
     }
 
     #[test]
+    fn a_jail_id_flag_refuses_root_and_wins_over_the_env_and_file_layer() {
+        assert_eq!(parse_jail_id("20001"), Ok(20001));
+        // Root is the id the jail exists to leave, so a flag naming it is a typed refusal here
+        // rather than a boot that jails into a chroot and drops nothing.
+        let err = parse_jail_id("0").expect_err("0 is root");
+        assert!(err.contains("root"), "the refusal must say why: {err}");
+        assert!(parse_jail_id("-1").is_err());
+        assert!(parse_jail_id("nobody").is_err());
+        assert!(parse_jail_id("").is_err());
+
+        // The flag is the top layer: it overwrites whatever env or file already put on the jail,
+        // and it only touches the field it names.
+        let mut config = bsx_engine::BootConfig::from_env_with(|k| match k {
+            "BSX_JAIL_UID" => Some("30001".into()),
+            "BSX_JAIL_GID" => Some("30002".into()),
+            _ => None,
+        });
+        apply_jail_ids(&mut config, Some(20001), None);
+        let jail = config.jail.expect("the jail survives the flag layer");
+        assert_eq!(jail.uid, 20001, "the flag wins over the env");
+        assert_eq!(jail.gid, 30002, "an absent flag leaves the env value alone");
+
+        // With nothing anywhere, the jail stays unset and the CLI's own default supplies the ids.
+        let mut bare = bsx_engine::BootConfig::from_env_with(|_| None);
+        apply_jail_ids(&mut bare, None, None);
+        assert!(bare.jail.is_none());
+    }
+
+    #[test]
     fn mem_mib_parses_any_nonzero_u32() {
         assert_eq!(
             parse_mem_mib("256"),
@@ -1240,6 +1313,8 @@ mod tests {
         ShellArgs {
             unjailed,
             require_limits: false,
+            jail_uid: None,
+            jail_gid: None,
             vcpus: vcpus.and_then(NonZeroU8::new),
             mem: mem.and_then(NonZeroU32::new),
         }

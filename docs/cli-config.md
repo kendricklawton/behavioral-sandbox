@@ -132,6 +132,28 @@ The `--require-limits` flag sets it per run.
 
 [`require_limits`]: #setting-require_limits
 
+## Setting `jail_uid` and `jail_gid`
+
+- **env**: `BSX_JAIL_UID`, `BSX_JAIL_GID`
+- **type**: integer (a non-zero uid/gid)
+- **default**: `10000` for both
+
+The id the jailer switches to after building the chroot. Pick one that owns nothing else on the
+host: the jailer chowns the chroot to it, so it needs no `/etc/passwd` entry.
+
+**This is the operator's setting and never a caller's.** Every sandbox one engine starts shares it,
+and so does a second `bsx serve` left at the default, so two daemons meant to separate tenants need
+different ids. Processes sharing a uid can signal each other, so a guest that escaped into its own
+VMM would land beside its neighbours' VMMs at the same id (`ptrace` between them is additionally
+gated by Yama, which `bsx doctor` reports). Nothing on the daemon's wire protocol carries an id, by
+design: a client that could name its own could name a neighbour's.
+
+`0` is refused. It is the id the jail exists to leave, and a jailed boot that stayed root would drop
+nothing. The `--jail-uid` / `--jail-gid` flags set it per run on `bsx run`, `bsx shell`, and
+`bsx serve`.
+
+[`jail_uid`]: #setting-jail_uid-and-jail_gid
+
 ## Setting `gateway` and `resolver`
 
 - **env**: `BSX_GATEWAY`, `BSX_RESOLVER`
