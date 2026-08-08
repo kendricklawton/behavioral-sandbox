@@ -4,8 +4,10 @@ Configuration layers **flags > environment (`BSX_*`) > file (`.bsx.toml`) > defa
 layer is the nearest `.bsx.toml` walking up from the current directory (the `.gitignore` convention),
 so a project pins its engine config beside its code.
 
-The file uses the [toml] format. Its keys mirror the environment names 1:1, minus the `BSX_` prefix
-and lowercased, and an **unknown key is a typed error, never a silent no-op**.
+The file uses the [toml] format, and an **unknown key is a typed error, never a silent no-op**. Its
+keys come in two kinds: the artifact and scratch keys mirror the environment names, minus the `BSX_`
+prefix and lowercased, while the [operator policy] keys have no `BSX_*` mirror and sit outside the
+precedence above, because a ceiling its bounded party can override is not a ceiling.
 
 All settings are **optional**. If a setting is not specified, the **default** value is used. *Thus, if
 you don't know what value to use, don't specify it.* The defaults might be tuned in the future.

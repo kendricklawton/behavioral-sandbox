@@ -1,9 +1,8 @@
 //! `cargo xtask <cmd>`, dev orchestration for the agent sandbox engine.
 //!
-//! The command list lives on the `Cmd` enum below and renders as `cargo xtask --help`; this header
-//! keeps no second copy (its old copy outlived four deleted commands before the 2026-08-02 prune).
-//! Each module carries its own `//!` header; the gates and the shared plumbing (paths,
-//! `cargo`/tool runners) live here.
+//! The command list lives on the `Cmd` enum below and renders as `cargo xtask --help`, so this header
+//! keeps no second copy of it. Each module carries its own `//!` header; the gates and the shared
+//! plumbing (paths, `cargo` and tool runners) live here.
 //!
 //! The eBPF crate (`crates/probes`) builds for `bpfel-unknown-none` and is excluded from the host
 //! workspace; `build-probes` builds its object (with BTF) and is folded **into** `ci` (guarded, so
@@ -557,17 +556,14 @@ fn workspace_clippy_denies(root: &Path) -> Result<Vec<String>> {
 
 /// `cargo fmt --check` and `cargo clippy -D warnings` for the detached workspaces.
 ///
-/// Neither had ever been formatted or linted by anything. `crates/probes` is the crate that
-/// matters: it is the only one allowed `unsafe`, its object ships in the release tarball, and it
-/// sat on 18 clippy findings while the contributor docs told readers the gate runs clippy "across
-/// the workspace" and that `main` never carries a warning. Both claims were true only of the
-/// members.
+/// `crates/probes` is the crate that matters here: it is the only one allowed `unsafe` and its object ships
+/// in the release tarball, yet a root-workspace `clippy` walks neither detached workspace.
 ///
 /// Each command runs with the cwd **inside** its workspace, so rustup honours that directory's own
-/// `rust-toolchain.toml`: `crates/probes` pins a nightly, the root pins stable, and linting the
-/// probes with the root's stable would fail on features the crate needs. Clippy on `crates/probes`
-/// skips cleanly when that nightly is absent, the same guard and the same reason as
-/// [`build_probes`]: the everyday gate has to run everywhere.
+/// `rust-toolchain.toml`: `crates/probes` pins a nightly and the root pins stable, and linting the probes
+/// with the root's stable would fail on features the crate needs. Clippy on `crates/probes` skips cleanly
+/// when that nightly is absent, the same guard and reason as [`build_probes`], since the everyday gate has
+/// to run everywhere.
 fn lint_detached_workspaces(root: &Path) -> Result<()> {
     let denies = workspace_clippy_denies(root)?;
     for manifest in detached_manifests(root)? {
@@ -645,23 +641,18 @@ fn run_in(dir: &Path, toolchain: Option<&str>, args: &[&str], shown: &str) -> Re
 
 /// `cargo deny check advisories` for the workspaces the root check cannot see.
 ///
-/// `crates/probes` and `fuzz` carry their own `[workspace]` and lockfile and are excluded from the
-/// root one, so `cargo deny check` walks neither: 281 packages that no advisory scan touched, in a
-/// repo whose daily `audit.yml` looks like it covers everything. `crates/probes` is the crate that
-/// matters, being the only one allowed `unsafe` and the one whose object ships in the tarball.
+/// `crates/probes` and `fuzz` carry their own `[workspace]` and lockfile and are excluded from the root
+/// one, so `cargo deny check` walks neither. `crates/probes` is the crate that matters, being the only one
+/// allowed `unsafe` and the one whose object ships in the tarball.
 ///
-/// Advisories only. Bans, licenses and sources describe the shipped dependency graph, which the root
-/// check already owns; re-running them here would mean a second policy to keep in step for no
-/// coverage.
+/// Advisories only: bans, licenses, and sources describe the shipped dependency graph the root check
+/// already owns, and re-running them here would mean a second policy to keep in step for no coverage.
 ///
-/// **No `--config`, deliberately.** Pointing these at the root `deny.toml` buys exactly one line
-/// over cargo-deny's defaults, `yanked = "deny"` instead of `warn`, and costs the argument being
-/// version-sensitive: `--config` belongs to the `check` subcommand in some releases and is global in
-/// others, which is a command that passes on a dev box and fails CI. Buying that one line meant
-/// pinning cargo-deny's version, and a pinned dev tool is real recurring maintenance for no security
-/// gain. Vulnerabilities are denied by default, which is the whole reason this scan exists; a yanked
-/// crate in the BPF crate or the fuzz harness warns rather than fails, and that is an accepted trade
-/// rather than an oversight.
+/// **No `--config`, deliberately.** Pointing these at the root `deny.toml` buys one line over cargo-deny's
+/// defaults (`yanked = "deny"` instead of `warn`) and costs a version-sensitive argument: `--config`
+/// belongs to the `check` subcommand in some releases and is global in others, which passes on a dev box
+/// and fails CI. Vulnerabilities are denied by default, which is why this scan exists; a yanked crate here
+/// warning rather than failing is an accepted trade.
 fn deny_detached_workspaces(root: &Path) -> Result<()> {
     for manifest in detached_manifests(root)? {
         let shown = manifest.strip_prefix(root).unwrap_or(&manifest);
@@ -682,16 +673,14 @@ fn deny_detached_workspaces(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Assert `fuzz/Cargo.lock` still resolves. That workspace is **detached** (its own `[workspace]`
-/// and lockfile) and it takes the rest of the tree by path, so a dependency edit in the main
-/// workspace ages it. Nothing built it with `--locked`: `cargo xtask fuzz` lets cargo repair the
-/// lockfile in place, which turns drift into a silent rewrite on every run instead of a report.
-/// `crates/probes` is detached the same way but its build *does* pass `--locked`, so only this one
-/// can rot unobserved: a new transitive dependency in the main workspace leaves `fuzz/Cargo.lock`
-/// unresolvable while the nightly job keeps passing.
+/// Asserts `fuzz/Cargo.lock` still resolves. That workspace is **detached**, with its own `[workspace]` and
+/// lockfile, and takes the rest of the tree by path, so a dependency edit in the main workspace ages it.
+/// `cargo xtask fuzz` lets cargo repair the lockfile in place, which turns drift into a silent rewrite
+/// rather than a report. `crates/probes` is detached the same way but its build passes `--locked`, so only
+/// this one can rot unobserved.
 ///
-/// Resolution is the whole check. Building the targets needs nightly plus cargo-fuzz, neither of
-/// which belongs in a host-safe gate that has to run everywhere.
+/// Resolution is the whole check: building the targets needs nightly plus cargo-fuzz, neither of which
+/// belongs in a gate that has to run everywhere.
 fn fuzz_lockfile_resolves(root: &Path) -> Result<()> {
     let out = Command::new("cargo")
         .args(["metadata", "--format-version", "1", "--locked"])
@@ -1030,15 +1019,13 @@ fn setup() -> Result<()> {
     Ok(())
 }
 
-/// Build the eBPF object (`crates/probes`) for `bpfel-unknown-none` via `bpf-linker`. The
-/// crate is **excluded** from the workspace and builds under its own nightly toolchain with
-/// `-Z build-std` (rustup ships no prebuilt `core` for the BPF target), so this drives its build
-/// directly rather than through the workspace `cargo`.
-/// Guarded so `cargo xtask` stays runnable everywhere: on a host missing any of the toolchain
-/// (`bpf-linker`, `rustup`, or the nightly + `rust-src` the `build-std` build needs), it prints a
-/// note and returns `Ok` instead of failing, the everyday host gate must not require the eBPF
-/// toolchain. A dev box installs it (`cargo xtask setup` lists the prereqs); this step is folded
-/// into the `ci` gate, and `ci-privileged` builds it before the probe tests.
+/// Builds the eBPF object for `bpfel-unknown-none` via `bpf-linker`. The crate is **excluded** from the
+/// workspace and builds under its own nightly with `-Z build-std`, since rustup ships no prebuilt `core`
+/// for the BPF target, so this drives its build directly rather than through the workspace `cargo`.
+///
+/// Guarded so `cargo xtask` stays runnable everywhere: on a host missing any of the toolchain it prints a
+/// note and returns `Ok` rather than failing, because the everyday host gate must not require the eBPF
+/// toolchain. This step is folded into `ci`, and `ci-privileged` builds it before the probe tests.
 /// The crates whose public API a `v0.1.0` tag would freeze: the surface `AGENTS.md`'s `api`-scope
 /// rule, `docs/embedding-scope.md`, and `RELEASES.md` all name.
 /// `pinned_surface_is_named_the_same_in_every_doc` holds those three to this list, so a crate can't
@@ -1508,15 +1495,14 @@ fn cargo(args: &[&str]) -> Result<()> {
 /// Run cargo with this host's identity remapped out of whatever it builds. For the binaries a
 /// release ships, never for a build a developer runs and debugs.
 ///
-/// A release build carries no debug info, but `panic!` location strings are baked in regardless,
-/// and for std and every registry dependency those are absolute paths under this host's
-/// `CARGO_HOME` and rustup directory. Two hosts building the same commit therefore emit different
-/// bytes, which is enough on its own to give `rootfs-guest.ext4` a different hash on two hosts
-/// running the same pinned toolchain, the same mke2fs, and the same package closure.
+/// A release build carries no debug info, but `panic!` location strings are baked in regardless, and for
+/// std and every registry dependency those are absolute paths under this host's `CARGO_HOME` and rustup
+/// directory. Two hosts building the same commit therefore emit different bytes, enough on its own to give
+/// `rootfs-guest.ext4` a different hash under the same pinned toolchain and package closure.
 ///
-/// Uses `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS` so a home directory containing a space
-/// cannot split one flag into two. Either form *replaces* configured `rustflags` rather than
-/// appending to them, which is why this stays on the packaging paths and out of the gate.
+/// Uses `CARGO_ENCODED_RUSTFLAGS` rather than `RUSTFLAGS`, so a home directory containing a space cannot
+/// split one flag into two. Either form *replaces* configured `rustflags` rather than appending, which is
+/// why this stays on the packaging paths and out of the gate.
 fn cargo_reproducible(args: &[&str]) -> Result<()> {
     let flags = remap_flags(
         &cargo_home(),

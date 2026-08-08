@@ -1,29 +1,21 @@
-//! Host readiness check: does this machine have what the engine needs to boot and confine a
-//! sandbox? [`checks`] is the **single implementation** behind two entry points, the `bsx doctor`
-//! subcommand an operator runs on a fresh host and `cargo xtask setup` for a dev box, so the two ask
-//! the host the same questions and get the same per-row [`CheckStatus`] back.
+//! Host readiness check: does this machine have what the engine needs to boot and confine a sandbox?
 //!
-//! What each does with those rows is its own, and the shared list does not make them agree on it:
-//! only `bsx doctor` renders the three states apart, calls [`can_boot`], and exits non-zero when a
-//! hard requirement is missing; `setup` prints a flat checklist in which a [`Warn`](CheckStatus::Warn)
-//! is indistinguishable from a [`Fail`](CheckStatus::Fail), and never fails. Each also appends the
-//! eBPF row itself, since that check lives in the probe loader rather than here.
+//! [`checks`] is the **single implementation** behind two entry points, the `bsx doctor` subcommand and
+//! `cargo xtask setup`, so the two ask the host the same questions and get the same per-row
+//! [`CheckStatus`] back. What each does with those rows is its own: only `bsx doctor` renders the three
+//! states apart, calls [`can_boot`], and exits non-zero when a hard requirement is missing. Each also
+//! appends the eBPF row itself, since that check lives in the probe loader rather than here.
 //!
-//! Each [`Check`] is one prerequisite with a [`CheckStatus`]: [`Ok`](CheckStatus::Ok) present,
-//! [`Warn`](CheckStatus::Warn) a *degradation* (the run still works, but something fails open), or [`Fail`](CheckStatus::Fail) a *hard* requirement (a boot can't happen without
-//! it, or the host is off the supported platform). The split mirrors the engine's own error
-//! discipline: the isolation boundary is never a degradation, so `/dev/kvm`, the boot artifacts, and
-//! the **supported-platform floor** (architecture + a security-maintained host-kernel LTS) are hard, while the jailer, resource caps, and networking tools fail open with a named
-//! consequence.
+//! Each [`Check`] is one prerequisite: [`Ok`](CheckStatus::Ok) present, [`Warn`](CheckStatus::Warn) a
+//! *degradation* where the run still works but something fails open, or [`Fail`](CheckStatus::Fail) a
+//! *hard* requirement. The split mirrors the engine's own error discipline, since the isolation boundary
+//! is never a degradation: `/dev/kvm`, the boot artifacts, and the supported-platform floor are hard,
+//! while the jailer, resource caps, and networking tools fail open with a named consequence.
 //!
-//! The host-hardening posture rows reuse [`Warn`](CheckStatus::Warn) for a second kind
-//! of advice: not a capability the engine loses, but a side-channel exposure the layer *beneath*
-//! the engine carries when mutually-distrusting tenants share the hardware. Advisory by design, a
-//! single-tenant dev box tripping them is fine (`docs/security-threat-model.md` is the baseline).
-//!
-//! The eBPF-observability capability check (`CAP_BPF`/`CAP_PERFMON` + kernel BTF) lives in the probe
-//! loader, out of this crate; each entry point appends it. This module is
-//! `unsafe`-free std-only detection, nothing here boots a VM.
+//! The host-hardening rows reuse [`Warn`](CheckStatus::Warn) for a second kind of advice: not a
+//! capability the engine loses, but a side-channel exposure the layer *beneath* the engine carries when
+//! mutually-distrusting tenants share the hardware. Advisory by design, so a single-tenant dev box
+//! tripping them is fine. This module is `unsafe`-free std-only detection; nothing here boots a VM.
 
 use std::ffi::OsString;
 use std::os::unix::ffi::OsStringExt as _;
@@ -610,11 +602,9 @@ impl MountFlags {
     }
 }
 
-/// The jail-relevant mount flags ([`MountFlags`]) of the filesystem holding `dir`. `None` when it
-/// can't be determined (no readable `/proc/self/mountinfo`, or the path doesn't resolve), so the
-/// check reads "unknown" as "assume fine" rather than raising a false alarm.
-/// Public so the guided install (`install.sh`, `cargo xtask self-host`) can pre-empt the failure by
-/// writing a usable `scratch_dir` instead of the operator hitting it (P20.16a): a diagnostic
+/// The jail-relevant mount flags ([`MountFlags`]) of the filesystem holding `dir`, or `None` when they
+/// can't be determined, so the check reads "unknown" as "assume fine" rather than raising a false alarm.
+/// Public so the guided install can pre-empt the failure by writing a usable `scratch_dir`; a diagnostic
 /// helper, not part of the pinned `Sandbox`/`Limits`/`RunResult` surface.
 pub fn scratch_mount_flags(dir: &Path) -> Option<MountFlags> {
     // The scratch dir may not exist yet; its nearest existing ancestor is on the same filesystem the

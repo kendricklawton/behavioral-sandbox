@@ -2,10 +2,9 @@
 //! obtain the pinned guest kernel + rootfs, build the guest image and the eBPF probe object, install
 //! the `bsx` binary, and (on a KVM host) boot one sandbox to prove it works.
 //!
-//! Every step reuses the same tested building blocks the individual `xtask` commands do, so this is
-//! orchestration, not a second code path. **Vendor-aware:** with `BSX_VENDOR_DIR` set, the fetch +
-//! rootfs steps resolve from the local mirror (`cargo xtask vendor`), so the whole build runs offline,
-//! no Firecracker S3 bucket, no Alpine CDN.
+//! Every step reuses the building blocks the individual `xtask` commands do, so this is orchestration
+//! rather than a second code path. **Vendor-aware:** with `BSX_VENDOR_DIR` set the fetch and rootfs steps
+//! resolve from the local mirror, so the whole build runs offline.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -70,18 +69,16 @@ pub(crate) fn self_host(prefix: Option<PathBuf>, no_run: bool) -> Result<()> {
 /// Write `~/.bsx.toml` with **absolute** artifact paths, matching what `install.sh` does for a
 /// packaged install.
 ///
-/// Without it a self-hosted binary only works from inside the source tree: the artifact defaults are
-/// resolved relative to the working directory, so the same binary reports "Ready" in the repo and
-/// fails with a missing kernel/rootfs one directory up. Config discovery walks up from the cwd, so
-/// this file covers any cwd **under `$HOME`**, not literally everywhere; from outside `$HOME` (say
-/// `/tmp`) pass the paths by env or flag. Never overwrites an existing file (your config is yours),
-/// and `BSX_NO_TOML=1` skips it, the same escape hatch `install.sh` offers.
+/// Without it a self-hosted binary only works from inside the source tree, since the artifact defaults
+/// resolve relative to the working directory. Config discovery walks up from the cwd, so this file covers
+/// any cwd **under `$HOME`** rather than everywhere; from outside `$HOME` pass the paths by env or flag.
+/// Never overwrites an existing file, and `BSX_NO_TOML=1` skips it, the same escape hatch `install.sh`
+/// offers.
 ///
-/// On a host whose default scratch base (`/tmp`) is mounted `nodev` (every systemd default) or
-/// `noexec` (hardened baselines), the jailer's chroot there can't open its `/dev/kvm` or exec its
-/// firecracker copy and the jailed default fails `ScratchDirNodev`/`ScratchDirNoexec`; so when the
-/// detector flags it, a `scratch_dir` on an unrestricted path is written too, so the first
-/// `sudo bsx run` works rather than needing a hand-edit (P20.16a).
+/// On a host whose default scratch base is mounted `nodev` or `noexec`, the jailer's chroot there can't
+/// open its `/dev/kvm` or exec its firecracker copy, so the jailed default fails
+/// `ScratchDirNodev`/`ScratchDirNoexec`. When the detector flags it, a `scratch_dir` on an unrestricted
+/// path is written too, so the first `sudo bsx run` works rather than needing a hand-edit.
 fn write_starter_config() -> Result<()> {
     if std::env::var_os("BSX_NO_TOML").is_some() {
         return Ok(());

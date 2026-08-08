@@ -516,12 +516,11 @@ pub(crate) fn bench_density(count: usize) -> Result<()> {
 /// 3. **snapshot restore**, the shared RO base *plus* a shared, copy-on-write memory file, so a
 ///    clone's only private cost is the pages it dirties.
 ///
-/// A per-VM RW copy lives in **tmpfs, outside the VMM's own address space**, so a VMM's `smaps` Pss
-/// can't see it, the honest per-sandbox cost is the whole-host `MemAvailable` drop for a cohort,
-/// divided by the cohort size. This brings up `count` identical sandboxes per strategy, samples the
-/// per-VM VMM Pss (percentiles, not an average) *and* the whole-host drop, then tears the cohort down
-/// before the next strategy. The RW-copy-minus-shared-base gap is the rootfs choice made a number.
-/// Needs KVM + the built guest rootfs.
+/// A per-VM RW copy lives in **tmpfs, outside the VMM's own address space**, so a VMM's `smaps` Pss cannot
+/// see it and the honest per-sandbox cost is the whole-host `MemAvailable` drop for a cohort divided by its
+/// size. This brings up `count` identical sandboxes per strategy, samples both the per-VM Pss as
+/// percentiles and the whole-host drop, then tears the cohort down before the next strategy. Needs KVM and
+/// the built guest rootfs.
 pub(crate) fn bench_footprint(count: usize) -> Result<()> {
     crate::require_kvm("bench-footprint")?;
     if count == 0 {
@@ -707,8 +706,8 @@ fn ns_per_openat(path: &Path, batch: usize) -> u64 {
 /// 3. **watched**, the filter includes us, so every `openat` writes a whole `SyscallEvent` into the
 ///    ring buffer: the cost the *one sandbox you watch* pays.
 ///
-/// The delta of (2)/(3) over (1) is the honest, measured overhead. Needs
-/// `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM), so it runs on any eBPF-capable host.
+/// The delta of (2) and (3) over (1) is the measured overhead. Needs `CAP_BPF`+`CAP_PERFMON` and the built
+/// object rather than KVM, so it runs on any eBPF-capable host.
 pub(crate) fn bench_trace(runs: usize) -> Result<()> {
     if let Err(e) = bsx_probes_loader::check_support() {
         bail!("bench-trace needs eBPF support: {e}");
@@ -850,10 +849,9 @@ fn ns_per_switch(rounds: usize) -> Result<u64> {
 /// 3. **attached, metering us**, our cgroup is a target, so every switch does the lookup **and**
 ///    accumulates our on-CPU time: the cost the *one sandbox you meter* pays.
 ///
-/// The delta of (2)/(3) over (1) is the honest, measured overhead, and the
-/// evidence for the "bounded, sane under many sandboxes" claim: one shared program, a hash lookup per
-/// switch, independent of how many cgroups are metered. Needs `CAP_BPF`+`CAP_PERFMON` and the built
-/// object (not KVM), so it runs on any eBPF-capable host.
+/// The delta of (2) and (3) over (1) is the measured overhead, and the evidence that one shared program
+/// plus a hash lookup per switch is independent of how many cgroups are metered. Needs
+/// `CAP_BPF`+`CAP_PERFMON` and the built object rather than KVM.
 pub(crate) fn bench_meter(runs: usize) -> Result<()> {
     if let Err(e) = bsx_probes_loader::check_support() {
         bail!("bench-meter needs eBPF support: {e}");
@@ -954,16 +952,14 @@ fn nearest_p50(samples: &mut [u64]) -> u64 {
     samples[(50 * n).div_ceil(100).clamp(1, n) - 1]
 }
 
-/// Measure the **eBPF overhead under load**: does the per-event cost of the two shared probes stay
-/// bounded as the number of watched sandboxes grows? `bench-trace`/`bench-meter` measure the cost of
-/// watching *one* sandbox; this sweeps the **watched-target-set size** (1 → 512) and shows the cost is
-/// flat, the design claim ("one shared program, an O(1) map lookup per event, independent of how many
-/// sandboxes are watched") turned into a measured curve rather than an assertion.
-/// For each size the set holds **our own cgroup** (so our events take the expensive watched path) plus
-/// enough never-matching dummy cgroups to reach the size, and the per-event cost is timed on the same
-/// micro-workloads the other benches use: an `openat` burst for the syscall tracer, a ping-pong burst
-/// for the `sched_switch` meter. A rising column would mean the lookup is not O(1); a flat one is the
-/// evidence. Needs `CAP_BPF`+`CAP_PERFMON` and the built object (not KVM).
+/// Measures whether the per-event cost of the two shared probes stays bounded as the number of watched
+/// sandboxes grows, sweeping the **watched-target-set size** from 1 to 512 so the O(1)-lookup claim is a
+/// measured curve rather than an assertion.
+///
+/// For each size the set holds the bench's own cgroup, so its events take the expensive watched path, plus
+/// enough never-matching dummy cgroups to reach the size. The per-event cost is timed on the same
+/// micro-workloads the other benches use. A rising column would mean the lookup is not O(1). Needs
+/// `CAP_BPF`+`CAP_PERFMON` and the built object rather than KVM.
 pub(crate) fn bench_scale(runs: usize) -> Result<()> {
     if let Err(e) = bsx_probes_loader::check_support() {
         bail!("bench-scale needs eBPF support: {e}");

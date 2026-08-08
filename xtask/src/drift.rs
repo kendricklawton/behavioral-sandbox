@@ -1,24 +1,22 @@
-//! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else
-//! compiles or tests, and four kinds are mechanically checkable, so this pass checks them:
+//! The prose-drift lint (part of `cargo xtask ci`): comments and docs make claims nothing else compiles
+//! or tests, and four kinds are mechanically checkable.
 //!
 //! 1. **Repo paths in backticks.** A comment naming `` `crates/engine/src/lib.rs` `` must point at
-//!    something in the tree; a rename otherwise leaves the comment lying about where things live.
-//! 2. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk; `mdbook`
-//!    silently *creates* missing `SUMMARY.md` chapters as empty stubs, so a deleted page would
-//!    otherwise ship as a blank one.
-//! 3. **The `#fragment` on those links.** It must name a heading on the page it points at. A moved
-//!    section leaves the file resolving and the anchor dead, which check 2 cannot see, and
-//!    `RELEASES.md` pointed at a relocated Semver section for months on exactly that blind spot.
-//! 4. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace
-//!    package. A crate's directory is not always its package (`crates/cli` builds `bsx`), so
-//!    this is invisible to check 1: the path resolves while the command it appears in does not run.
-//!    Unlike checks 1 to 3 this one reads **every** tracked text file, not just `.rs` and `.md`:
-//!    a copy-pasteable command is a command wherever it is printed. The scope was widened after
-//!    two dead `-p cli` invocations turned up in a config sample the narrower check had skipped.
+//!    something in the tree, or a rename leaves it lying about where things live.
+//! 2. **Relative links in Markdown.** A `[text](./file.md)` target must exist on disk, since `mdbook`
+//!    silently *creates* a missing `SUMMARY.md` chapter as an empty stub and a deleted page would ship
+//!    as a blank one.
+//! 3. **The `#fragment` on those links.** It must name a heading on the page it points at, since a moved
+//!    section leaves the file resolving and the anchor dead, which check 2 cannot see.
+//! 4. **Cargo package names.** A `cargo … -p <name>` handed to a reader must name a workspace package.
+//!    A crate's directory is not always its package (`crates/cli` builds `bsx`), so this is invisible to
+//!    check 1: the path resolves while the command does not run. Unlike checks 1 to 3 this reads **every**
+//!    tracked text file rather than just `.rs` and `.md`, because a copy-pasteable command is a command
+//!    wherever it is printed.
 //!
-//! This lint checks that pointers point at something, not that the prose around them is still
-//! *true*; the meaning half stays with review, and the standing rule is to promote a checkable
-//! prose promise into a type or test.
+//! This checks that pointers point at something, not that the prose around them is still *true*. The
+//! meaning half stays with review, and the standing rule is to promote a checkable prose promise into a
+//! type or a test.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

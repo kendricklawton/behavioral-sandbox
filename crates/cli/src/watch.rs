@@ -180,12 +180,10 @@ impl Term {
             let _ = disable_raw_mode();
             return Err(VmmError::Vmm(format!("enter alternate screen: {e}")));
         }
-        // Chain a terminal-restoring step ahead of the existing panic hook. Without it, a panic while
-        // the view is up (ratatui/crossterm internals, or the exec worker thread) prints its message
-        // into the alternate screen, which this guard's `Drop` then tears down on unwind, so the
-        // process dies with the terminal correctly restored but the failure *invisible*. Restoring
-        // first means the message lands on the normal screen. `Drop` resets to the default hook (the
-        // CLI installs none before here, so default is the original).
+        // Chain a terminal-restoring step ahead of the existing panic hook: without it a panic while the
+        // view is up prints into the alternate screen, which this guard's `Drop` then tears down on unwind,
+        // so the process dies with the terminal restored and the failure *invisible*. `Drop` resets to the
+        // default hook, which is the original, since the CLI installs none before here.
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let _ = disable_raw_mode();

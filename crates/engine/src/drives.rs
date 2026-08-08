@@ -878,11 +878,11 @@ mod tests {
             eprintln!("skipping a_full_scratch_names_mke2fs_as_the_cause: needs real root");
             return;
         };
-        // Zero headroom, not a comfortable margin. What a 256 MiB ext4 costs on disk is an
-        // e2fsprogs question, not a constant: recent versions punch holes where they used to write
-        // the zeroed inode table and journal, so the image's *allocated* size is metadata only and
-        // has been shrinking. A full filesystem is the one precondition no
-        // version can satisfy, and `truncate` is sparse, so it still gets as far as mke2fs.
+        // Zero headroom rather than a comfortable margin. What a 256 MiB ext4 costs on disk is an
+        // e2fsprogs question rather than a constant, since a version that punches holes instead of writing
+        // the zeroed inode table and journal leaves the image's *allocated* size as metadata only. A full
+        // filesystem is the one precondition no version can satisfy, and `truncate` is sparse, so it still
+        // gets as far as mke2fs.
         fs.fill_leaving(0);
 
         // Report the fixture's real state on failure rather than only "it succeeded": if this ever

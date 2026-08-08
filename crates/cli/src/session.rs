@@ -7,18 +7,16 @@
 //! popped from the pool and a cold boot serve through the exact same code, the only difference the
 //! client sees is the `pooled` flag and the boot latency.
 //!
-//! **The verbs** (the versioned wire API): `open` boots; `exec` runs a command; `put`/`get`
-//! write/read a working-directory file (a no-op exec that only injects/returns it, since injection is
-//! the engine's only file seam); `snapshot` writes a bundle (a typed refusal for a jailed session);
-//! `trace` returns the host-observed audit record (`RunRecord`) so far; `close` ends it.
+//! **The verbs.** `open` boots, `exec` runs a command, `put`/`get` write and read a working-directory
+//! file through a no-op exec (injection is the engine's only file seam), `snapshot` writes a bundle and is
+//! a typed refusal for a jailed session, `trace` returns the host-observed record so far, and `close`
+//! ends it.
 //!
-//! Untrusted input: a hostile or buggy client, bad JSON, a wrong first message, a
-//! wrong wire schema, a command that can't spawn, a mid-session hang-up, is a typed
-//! [`Response::Error`] or a dropped connection, never a daemon panic. The exec-fault taxonomy follows
-//! the CLI's shell: a **guest** fault (a bad command, a timeout, a flooded cap) is per-request and the
-//! session survives it, while an **infra/transport** fault means the VM itself is gone, so the session
-//! ends and its VM drops (tearing the microVM down). Losing the whole daemon process can't leak a VM
-//! either, the lifetime sentinel owns that.
+//! **Untrusted input.** Bad JSON, a wrong first message, a wrong wire schema, a command that can't spawn,
+//! or a mid-session hang-up is a typed [`Response::Error`] or a dropped connection, never a daemon panic.
+//! The exec-fault taxonomy follows the CLI's shell: a **guest** fault is per-request and the session
+//! survives it, while an **infra or transport** fault means the VM is gone, so the session ends and its VM
+//! drops. Losing the whole daemon process can't leak a VM either, since the lifetime sentinel owns that.
 
 use std::io::{BufReader, Read};
 use std::num::{NonZeroU8, NonZeroU32};
@@ -59,15 +57,12 @@ pub fn serve(stream: UnixStream, server: &Server) {
             return;
         }
     };
-    // The idle timeout (if configured) bounds **both** directions, each with the right shape for its
-    // threat. The read half needs an *absolute per-message deadline* ([`DeadlineStream`]), not a bare
-    // `set_read_timeout`: `SO_RCVTIMEO` is re-armed by the OS on every byte, so a client dripping one
-    // byte per interval inside a 4 MiB line would reset a per-read timeout forever, pinning a session
-    // thread + a `--max-sessions` slot (the same slowloris the metrics endpoint's `read_request_head`
-    // closes). The write half stays a plain socket timeout: an `exec` reply can be megabytes against a
-    // ~200 KiB socket buffer, so a client that opens a session and then never reads would otherwise
-    // park the session thread in `write_all` forever. Best-effort on the sockopts: a platform that
-    // refuses them just runs without them.
+    // The idle timeout bounds **both** directions, each with the shape its threat needs. The read half
+    // needs an *absolute per-message deadline*, not a bare `set_read_timeout`: `SO_RCVTIMEO` is re-armed
+    // on every byte, so a client dripping one byte per interval would reset a per-read timeout forever and
+    // pin a session thread plus a `--max-sessions` slot. The write half stays a plain socket timeout,
+    // since an `exec` reply can be megabytes against a small socket buffer and a client that never reads
+    // would park the thread in `write_all`. Best-effort on the sockopts.
     let mut reader = BufReader::new(DeadlineStream::new(stream, server.idle_timeout));
     if let Some(idle) = server.idle_timeout {
         let _ = writer.set_write_timeout(Some(idle));
@@ -146,13 +141,10 @@ pub fn serve(stream: UnixStream, server: &Server) {
     let boot = vm.boot_latency();
     let boot_ms = ms(boot);
 
-    // Attach the host-side probes so `trace` has something to report. Observation is fail-open (a
-    // host without the eBPF caps yields a coverage-gapped record, never a refused session), but
-    // **enforcement is not**: when the session asked for an egress policy, an attach that could not
-    // police the tap is a fatal refusal below, never a session running unenforced.
-    //
-    // The gateway comes from the daemon's own `BootConfig`, not from the wire: whether a route out
-    // exists is the operator's posture, like the jail.
+    // Observation is fail-open, so a host without the eBPF caps yields a coverage-gapped record rather
+    // than a refused session, but **enforcement is not**: a session that asked for an egress policy and
+    // could not police the tap is a fatal refusal below. The gateway comes from the daemon's own
+    // `BootConfig` rather than the wire, since whether a route out exists is the operator's posture.
     let gateway = server.base.egress.map(|e| e.gateway());
     let enforcing = net.egress.is_some();
     let mut attach_params = bsx_probes_loader::AttachParams::new(vm.vmm_pid());
@@ -241,13 +233,12 @@ pub fn serve(stream: UnixStream, server: &Server) {
                     &writer,
                 );
                 if interrupted {
-                    // The sandbox is gone, so the exec's own error is noise; acknowledge only if
-                    // the client actually sent `cancel` (an outright hang-up gets no reply, there
-                    // is nobody to read it). This read awaits a *new* message, so it gets a fresh
-                    // deadline: the in-flight one was armed when the exec request arrived, and an
-                    // exec longer than the idle budget (the case cancel exists for) has already
-                    // spent it, which would turn the ack into a connection reset with the cancel
-                    // line unread. `a_cancel_after_the_idle_deadline_still_gets_its_ack` pins this.
+                    // The sandbox is gone, so the exec's own error is noise. Acknowledge only a real
+                    // `cancel`, since a hang-up has nobody to read the reply. This read awaits a *new*
+                    // message, so it gets a fresh deadline: the in-flight one was armed when the exec
+                    // request arrived, and an exec longer than the idle budget has already spent it, which
+                    // would turn the ack into a reset with the cancel line unread
+                    // (`a_cancel_after_the_idle_deadline_still_gets_its_ack` pins this).
                     server.metrics.request_failed(false);
                     reader.get_mut().rearm();
                     if matches!(read_request(&mut reader), Ok(Some(Request::Cancel))) {
@@ -907,11 +898,10 @@ const CANCEL_POLL: Duration = Duration::from_millis(50);
 /// and `exec` returns a typed error instead of running out its wall budget with a client that is no
 /// longer listening.
 ///
-/// **Thread discipline.** The worker is scoped, so it is *always* joined: `thread::scope` cannot
-/// return until it finishes. That is safe here only because `exec` is bounded on both sides, by the
-/// session's wall budget and, once the kill lands, by the dead guest. A scoped thread wrapping an
-/// unbounded call would be a host hang, which is why the `peek` (not a second blocking read) does
-/// the watching: a reader parked on a silent client would have no such bound.
+/// **Thread discipline.** The worker is scoped, so `thread::scope` cannot return until it finishes. That
+/// holds only because `exec` is bounded on both sides, by the session's wall budget and, once the kill
+/// lands, by the dead guest. A scoped thread wrapping an unbounded call would be a host hang, which is why
+/// the `peek` rather than a second blocking read does the watching.
 fn exec_watching_for_cancel(
     vm: &RunningVm,
     argv: &[String],

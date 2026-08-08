@@ -123,16 +123,24 @@ cargo xtask build-probes     # build the eBPF object (target: bpfel-unknown-none
   Host variance lives in `doctor.rs` preflight, never in the boot path: a conditional in
   `spawn.rs`/`jail.rs` creates N boot paths and leaves N-1 untested. Full rationale:
   `docs/architecture-decisions.md`, decision 8.
-- **A comment earns its lines.** A comment states a constraint, threat, or intent the code can't
-  show, in the fewest sentences that carry it; it never restates what the next lines visibly do.
-  A prose *promise* ("can't drift", "never logged") belongs in a type or a test, with the comment
-  pointing at it. A drift claim that *enumerates* what it covers ("shared by A, B and C") has made
-  one more copy, the list, and it drifts like every copy: name the mechanism a reader can grep
-  instead and let the set be whatever that admits. State the threat-model framing once per module
-  (rustdoc on the item that owns it), not at every call site. A comment states its constraint in the
-  **present tense**, never the story of how it was found: past-tense narration of prior code ("the
-  earlier design", "used to", "no longer", "this replaced"), incident anecdotes, and regression
-  backstories belong in the commit that fixed them, where git keeps them attached to the diff.
+- **A comment earns its lines. `crates/channel` and `crates/client` are the reference**, the two
+  crates to read before commenting a third. An item's rustdoc opens with **one line**, third-person
+  indicative ("Writes a single length-prefixed protocol frame.", "Returns `true` if the failure was
+  caused by clean EOF/disconnect."), and any constraint it carries rides in that line or a trailing
+  clause ("...to prevent unbounded allocations.", "Must fit within ext4's 16-byte limit."). Keep the
+  constraint, cut the essay: a standalone rationale paragraph on an item is the shape to avoid, since
+  the sentence naming the threat is the part a reader needs and the argument for it is the part git
+  already holds. A **body** comment appears only where it states something the code can't show (an
+  ordering, a kernel constraint, why the obvious form is wrong); one narrating what the next lines
+  visibly do comes out. State the threat-model framing once per module (the `//!` header, as a short
+  bolded-label bullet list), not at every call site. A prose *promise* ("can't drift", "never
+  logged") belongs in a type or a test rather than in prose asserting it. A drift claim that
+  *enumerates* what it covers ("shared by A, B and C") has made one more copy, the list, and it
+  drifts like every copy: name the mechanism a reader can grep instead and let the set be whatever
+  that admits. A comment states its constraint in the **present tense**, never the story of how it
+  was found: past-tense narration of prior code ("the earlier design", "used to", "no longer", "this
+  replaced"), incident anecdotes, and regression backstories belong in the commit that fixed them,
+  where git keeps them attached to the diff.
 - `tracing` logs to stderr; a run's structured result/audit-log to stdout, so
   `bsx run … 2>/dev/null` stays pipe-clean. Config is layered **flags > env (`BSX_*`) >
   file (`.bsx.toml`, the nearest one walking up from the cwd) > defaults**.

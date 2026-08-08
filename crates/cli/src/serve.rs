@@ -1,47 +1,33 @@
-//! `bsx`, the long-lived driver **daemon**: it exposes the sandbox lifecycle and the full
-//! [wire API](bsx_protocol) (`open`/`exec`/`put`/`get`/`snapshot`/`trace`/`close`) over a **unix
-//! socket**, so a local client drives microVMs without linking the `bsx-engine` library. This
-//! is the engine's programmatic interface: a thin host of the same public API the CLI and embedders
-//! use: no tenancy, no auth, no billing, no scheduler (those are the
-//! hoster's, above this).
+//! `bsx serve`, the long-lived driver **daemon**: exposes the sandbox lifecycle and the full
+//! [wire API](bsx_protocol) over a **unix socket**, so a local client drives microVMs without linking
+//! `bsx-engine`.
 //!
-//! **Shape.** One connection is one sandbox **session** (the VM *is* the session),
-//! served on its own thread, synchronous, no async runtime, matching the driver's posture. The wire
-//! is the versioned newline-JSON contract in the shared [`bsx_protocol`] crate;
-//! the confinement posture (jailed by default) is the daemon's launch choice, never a client's.
-//! `tracing` goes to **stderr** (operational logs); the socket carries only the protocol.
+//! The engine's programmatic interface, a thin host of the same public API the CLI and embedders use.
+//! No tenancy, no auth, no billing, no scheduler; those are the hoster's, above this.
 //!
-//! **Fast `open`.** With `--prewarm N` the daemon keeps a [`Pool`] of pre-warmed
-//! clones and serves a bare-default `open` from it in milliseconds; a custom resource profile (or no
-//! pool) cold-boots. Building the pool needs KVM (and root, for jailed clones); it is **fail-open**,
-//! a host that can't build it logs one warning and every session cold-boots.
-//!
-//! **Observable by the hoster.** Logs are structured `tracing` lines on stderr (human text by
-//! default, JSON with `--log-json` for a log shipper), and `--metrics ADDR` serves a Prometheus
-//! text-exposition endpoint ([`crate::metrics`]) the hoster scrapes, sessions, verbs, faults, boot and
-//! exec latency histograms, pool stock. The daemon exposes its numbers; dashboards and alerting are
-//! the hoster's.
-//!
-//! **Access control is the hoster's.** The daemon does no authentication (a recorded non-goal): who
-//! may connect is governed by the filesystem permissions on the socket and its directory, which the
-//! deploying hoster sets. Place the socket where only trusted local clients can reach it. The same
-//! goes for the metrics endpoint: it serves plain HTTP with no auth, so bind it to loopback (or a
-//! private scrape network), never a public interface.
-//!
-//! **Bounded concurrency.** Every session is a full microVM (guest RAM, a tap, a cgroup), so the
-//! daemon bounds its own core resource: at the `--max-sessions` ceiling (or an aggregate
-//! `--max-committed-mem-mib`/`--max-committed-vcpus` ceiling) a new connection gets the
-//! distinct `at_capacity` reply *before* any VM is booted, instead of walking the host into
-//! OOM/KVM/fd exhaustion, a backpressure signal a fleet dispatcher fails over on. The ceilings are the
-//! hoster's knobs (`0` = unlimited); admission control is engine self-protection, not tenancy (still
-//! no auth, no scheduling, no queueing).
-//!
-//! **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
-//! ends, tearing the microVM down; and losing the whole daemon process (SIGKILL, OOM) can't leak a
-//! VM either, the lifetime sentinel reaps it, and the next start clears a stale
-//! socket file. A supervisor's SIGTERM/SIGINT is handled: the daemon logs, unlinks its socket, and
-//! exits cleanly (in-flight sessions end crash-consistently, their VMs reaped by the sentinel); a
-//! graceful *drain* of in-flight sessions remains a later ops concern.
+//! - **Shape.** One connection is one sandbox **session**, served on its own thread, synchronous, with
+//!   no async runtime. The wire is the versioned newline-JSON contract in [`bsx_protocol`], and the
+//!   confinement posture is the daemon's launch choice rather than a client's. `tracing` goes to
+//!   stderr; the socket carries only the protocol.
+//! - **Fast `open`.** With `--prewarm N` the daemon keeps a [`Pool`] of pre-warmed clones and serves a
+//!   bare-default `open` from it; a custom resource profile cold-boots. Building the pool needs KVM,
+//!   and it is **fail-open**: a host that can't build it logs one warning and every session
+//!   cold-boots.
+//! - **Observable by the hoster.** Structured `tracing` lines on stderr, JSON with `--log-json`, and
+//!   `--metrics ADDR` serves a Prometheus endpoint ([`crate::metrics`]). The daemon exposes its
+//!   numbers; dashboards and alerting are the hoster's.
+//! - **Access control is the hoster's.** No authentication, a recorded non-goal: who may connect is
+//!   governed by the filesystem permissions on the socket and its directory. The metrics endpoint is
+//!   plain HTTP with no auth, so bind it to loopback or a private scrape network.
+//! - **Bounded concurrency.** Every session is a full microVM, so at the `--max-sessions` ceiling (or
+//!   an aggregate `--max-committed-*` one) a new connection gets the distinct `at_capacity` reply
+//!   *before* any VM boots, rather than walking the host into OOM or fd exhaustion. Admission control
+//!   is engine self-protection, not tenancy.
+//! - **Teardown is crash-safe, shutdown is prompt.** A live session's VM drops when its connection
+//!   ends, and losing the whole daemon process can't leak a VM either, since the lifetime sentinel
+//!   reaps it and the next start clears a stale socket file. SIGTERM/SIGINT logs, unlinks the socket,
+//!   and exits cleanly, with in-flight sessions ending crash-consistently. A graceful *drain* is not
+//!   implemented.
 
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -402,13 +388,11 @@ pub fn serve(args: ServeArgs, log: Option<String>) -> ExitCode {
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => spawn_session(stream, Arc::clone(&server)),
-            // An accept error must not end the daemon, log and keep serving. Resource exhaustion
-            // is paced, though: `EMFILE`/`ENFILE` persist and fail instantly, and the daemon's own
-            // sessions drive the fd count, so an unpaced retry would pin a core and flood the log
-            // at exactly the moment the host is already overloaded. A transient error
-            // (`ECONNABORTED`, a peer that hung up between connect and accept) is *not* paced:
-            // it is routine, and sleeping on it would let any local peer throttle the daemon by
-            // dialing and dropping in a loop.
+            // An accept error must not end the daemon. Resource exhaustion is paced, since
+            // `EMFILE`/`ENFILE` persist and fail instantly and an unpaced retry would pin a core and flood
+            // the log while the host is already overloaded. A transient error is *not* paced: it is
+            // routine, and sleeping on it would let any local peer throttle the daemon by dialing and
+            // dropping in a loop.
             Err(e) => {
                 tracing::warn!(error = %e, "accept failed");
                 if accept_error_is_exhaustion(&e) {
@@ -432,10 +416,9 @@ fn spawn_metrics(listener: TcpListener, server: &Arc<Server>) {
             crate::metrics::serve(listener, registry, move || {
                 // `try_lock`, never a blocking acquire: the scrape must not stall behind a
                 // session's pool refill/restore. On contention (or poison) the sample is omitted for
-                // this scrape, `bsx_pool_ready` is momentarily absent, the same absent-not-zero
-                // shape the endpoint already uses for a daemon with no pool, rather than the
-                // visibility surface freezing under the load it exists to report on. The committed
-                // gauges read the live admission atomics, always available.
+                // this scrape, so `bsx_pool_ready` is momentarily absent, the same absent-rather-than-zero
+                // shape a daemon with no pool gives, instead of the visibility surface freezing under the
+                // load it exists to report on. The committed gauges read the live admission atomics.
                 crate::metrics::CapacitySample {
                     pool_ready: sampled
                         .pool
@@ -670,12 +653,10 @@ fn own_euid() -> Option<u32> {
     uid.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// Reclaim this-user `bsx-prewarm-<pid>` / `bsx-snapshots-<pid>` bundle dirs left by **dead**
-/// prior daemons: their guest-memory-sized files are pure leak once the daemon that owned them is
-/// gone (SIGKILL/OOM skips the signal-handler cleanup). Best-effort, per-entry: a dir we can't stat
-/// or remove is logged and skipped. Skips our own pid and any live pid (a concurrently-running
-/// daemon of the same user). A dead daemon's pid is genuinely absent from `/proc` (it's not our
-/// unreaped child, so no zombie fools this), so existence is a sound liveness check here.
+/// Reclaims this-user `bsx-prewarm-<pid>` and `bsx-snapshots-<pid>` bundle dirs left by **dead** prior
+/// daemons, whose guest-memory-sized files are pure leak once their owner is gone. Best-effort per entry,
+/// skipping this pid and any live one. A dead daemon's pid is genuinely absent from `/proc`, since it is
+/// not this process's unreaped child, so existence is a sound liveness check.
 /// Reclaim the per-VM scratch dirs and network namespaces a crashed driver (SIGKILL/OOM) left behind
 /// ([`bsx_engine::sweep_orphans`]), logging what it reclaimed. The complement of
 /// [`sweep_stale_agent_bundles`], which handles only this daemon's own bundle dirs. Best-effort: a
@@ -903,13 +884,11 @@ fn bind(socket: &Path) -> Result<UnixListener, String> {
             .map_err(|e| format!("remove stale socket {}: {e}", socket.display()))?;
         tracing::warn!(socket = %socket.display(), "removed a stale socket from a dead daemon");
     }
-    // Bind at a temp path in the **same directory**, narrow its mode, then atomically rename it into
-    // place, so the socket never exists at its canonical (client-known) path with the ambient umask's
-    // mode. Binding directly and chmod-ing after leaves a window where a permissive umask lets another
-    // local user connect before the 0660 narrowing lands; the temp path is not the path clients dial,
-    // so no such window exists. Defense-in-depth on the file's own mode: the parent directory's
-    // permissions are the designed access control (the module doc), and a hoster wanting wider access
-    // grants it on the directory (or re-chmods) as a deliberate choice, not an inherited umask accident.
+    // Bind at a temp path in the **same directory**, narrow the mode, then rename atomically into place,
+    // so the socket never exists at its client-known path with the ambient umask's mode. Binding directly
+    // and chmod-ing after leaves a window where a permissive umask lets another local user connect first,
+    // and the temp path is not one clients dial. Defense-in-depth: the parent directory's permissions are
+    // the designed access control, so wider access is a deliberate grant rather than a umask accident.
     let listener = {
         use std::os::unix::fs::PermissionsExt as _;
         let mut tmp = socket.as_os_str().to_os_string();

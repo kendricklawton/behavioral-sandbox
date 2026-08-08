@@ -28,8 +28,8 @@ pub struct NetStats {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ResourceSummary {
-    /// On-CPU time the VMM's cgroup accumulated while metered, the host CPU the sandbox burned running
-    /// its guest, from the scheduler tracepoint (`ResourceMeter`). [`Duration::ZERO`] if the cgroup was
+    /// On-CPU time the VMM's cgroup accumulated while metered, the host CPU the sandbox burned running its
+    /// guest, from the scheduler tracepoint. [`Duration::ZERO`] if the cgroup was
     /// never a metered target.
     pub cpu_time: Duration,
     /// The cgroup's native cgroup v2 counters (memory peak/current, IO bytes, and `cpu.stat`'s
@@ -64,7 +64,7 @@ pub struct CgroupStats {
 }
 
 impl CgroupStats {
-    /// Read the cgroup v2 counters from `cgroup_dir` (e.g. `/sys/fs/cgroup/<path>`), best-effort: each
+    /// Reads the cgroup v2 counters from `cgroup_dir`, best-effort: each
     /// missing or unreadable file leaves its field [`None`] rather than failing, so a partial cgroup
     /// (no `io` controller delegated, an older kernel without `memory.peak`) still yields what it has.
     #[must_use]
@@ -114,8 +114,8 @@ fn parse_keyed_u64(text: &str, key: &str) -> Option<u64> {
 }
 
 /// Sum `rbytes=` and `wbytes=` across every device line of a cgroup `io.stat` file, returning
-/// `(read_bytes, write_bytes)`. Each line is `<maj>:<min> rbytes=<n> wbytes=<n> rios=<n> …`; a device
-/// missing a field contributes 0 for it. Pure, so it is host-unit-testable. Saturating so a pathological
+/// `(read_bytes, write_bytes)`. A device missing a field contributes 0 for it. Pure, so it is
+/// host-unit-testable, and saturating so a pathological
 /// file can't overflow the rollup.
 fn parse_io_bytes(text: &str) -> (u64, u64) {
     let (mut r, mut w) = (0u64, 0u64);
@@ -158,7 +158,7 @@ mod tests {
     fn memory_files_parse_a_single_integer_body() {
         assert_eq!(parse_single_u64("83886080\n"), Some(83_886_080));
         assert_eq!(parse_single_u64("0"), Some(0));
-        // `memory.max` and friends can read "max"; that's not a byte count, so None (field stays absent).
+        // `memory.max` and friends can read "max", which is not a byte count, so the field stays absent.
         assert_eq!(parse_single_u64("max\n"), None);
         assert_eq!(parse_single_u64(""), None);
     }
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn cgroup_stats_read_of_a_synthetic_dir_collects_present_files_and_tolerates_absent() {
-        // Point `read` at a temp dir standing in for a cgroup dir: it collects the files that exist and
+        // A temp dir stands in for a cgroup dir: `read` collects the files that exist and
         // leaves the rest None (best-effort), never failing. No eBPF, no real cgroup, host-safe.
         let dir = std::env::temp_dir().join(format!(
             "bsx-cgstats-{}-{}",

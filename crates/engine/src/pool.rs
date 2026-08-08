@@ -26,20 +26,16 @@ const POOL_FD_HEADROOM: usize = 64;
 /// caller (the retry semantics that variant exists for). An empty pool falls back to an inline
 /// restore, so `take` fails only when a *fresh* restore fails too.
 ///
-/// Dropping the pool tears down every pooled clone (each [`RunningVm`]'s own `Drop`);
-/// [`shutdown`](Pool::shutdown) is the graceful form. **Networked snapshots** pool without a
-/// concurrency limit: each clone recreates the baked-in tap in its own network namespace.
-/// **Confined pool**: set [`jail`](crate::BootConfig::jail) on `config` and
-/// every pooled clone restores under the jailer, chroot, dropped uid, seccomp, its own netns,
-/// so prewarmed starts and confinement compose (needs real root, like any jailed boot).
+/// Dropping the pool tears down every pooled clone; [`shutdown`](Pool::shutdown) is the graceful form.
+/// Networked snapshots pool without a concurrency limit, since each clone recreates the baked-in tap in
+/// its own netns, and setting [`jail`](crate::BootConfig::jail) makes every pooled clone restore under
+/// the jailer, so prewarmed starts and confinement compose.
 ///
 /// **Sizing:** each pooled clone holds up to [`FDS_PER_VM`](crate::FDS_PER_VM) driver-side fds, so
-/// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n`, state
-/// the bound, don't discover it via `EMFILE` mid-restore. [`new`](Pool::new) enforces the
-/// *stating*: an over-budget target logs one `tracing::warn!` naming the numbers and the fix
-/// (raise `ulimit -n`, or shrink the target) before the prefill runs. A warning, not a refusal,
-/// like the cgroup caps, sizing is fairness hygiene, not the isolation boundary,
-/// and the soft limit may be raised by the embedder after this process was probed.
+/// `target × FDS_PER_VM + POOL_FD_HEADROOM` must stay under the process's soft `ulimit -n`.
+/// [`new`](Pool::new) logs one warning naming the numbers and the fix when a target is over budget,
+/// rather than refusing: sizing is fairness hygiene rather than the isolation boundary, and the soft
+/// limit may be raised after this process was probed.
 #[derive(Debug)]
 #[must_use = "dropping a Pool kills its pooled microVMs"]
 pub struct Pool {

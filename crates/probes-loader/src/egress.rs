@@ -1,10 +1,9 @@
 //! The egress policy and its address types.
 //!
-//! Deliberately **no eBPF here**: these are the plain data types an `--allow` string parses into,
-//! which `tap` then writes into the policy maps. They carry their own fuzz target (`egress_rule`),
-//! and keeping them out of the loader is what lets that stay true. The import list below is what
-//! makes that first sentence checkable: `std::net` and the `#[repr(C)]` records, no `aya` and no
-//! loader item, so a change that reaches for either has to add the import here to compile.
+//! Deliberately **no eBPF here**: these are the plain data types an `--allow` string parses into, which
+//! `tap` then writes into the policy maps, so they carry their own fuzz target. The import list below is
+//! what keeps that checkable, since a change reaching for `aya` or a loader item has to add an import
+//! here to compile.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -68,8 +67,8 @@ pub struct EgressPolicy {
 }
 
 /// A validated IPv4 **CIDR**, a network address and a prefix length that is guaranteed `0..=32` by
-/// construction. Parse, don't validate: an out-of-range prefix can't exist as an `Ipv4Cidr`, so it can
-/// never reach the kernel policy map. Build one with [`new`](Self::new) (fallible) or [`host`](Self::host)
+/// construction. Parse rather than validate: an out-of-range prefix can't exist as an `Ipv4Cidr`, so it
+/// never reaches the kernel policy map. Build one with [`new`](Self::new) or [`host`](Self::host)
 /// (an infallible `/32`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv4Cidr {
@@ -79,7 +78,7 @@ pub struct Ipv4Cidr {
 
 impl Ipv4Cidr {
     /// A CIDR `network/prefix_len`, or [`PolicyError::PrefixTooLong`] if `prefix_len > 32`. The network is
-    /// taken as given (the kernel matcher masks it to `prefix_len`, so unmasked host bits don't matter).
+    /// taken as given, since the kernel matcher masks it to `prefix_len`.
     ///
     /// # Errors
     /// [`PolicyError::PrefixTooLong`] when `prefix_len` exceeds 32.
@@ -214,7 +213,7 @@ impl EgressPolicy {
         Self::default()
     }
 
-    /// Allow a destination [`Ipv4Cidr`] on an optional `port` and `proto` ([`None`] = any), consuming and
+    /// Allows a destination [`Ipv4Cidr`] on an optional `port` and `proto`, consuming and
     /// returning `self` for chaining. `None` reads as a wildcard (the kernel's `0`), so
     /// `allow(cidr, None, None)` admits the whole CIDR on any port and protocol. `Some(0)` lowers
     /// to that same `0`, so it also means any port, never literal port 0 (which is not an
@@ -232,7 +231,7 @@ impl EgressPolicy {
         self
     }
 
-    /// Allow a single destination **host** (`/32`) on an optional `port`/`proto`, the common case, sugar
+    /// Allows a single destination **host** (`/32`) on an optional `port` and `proto`, the common case and sugar
     /// over [`allow`](Self::allow) with [`Ipv4Cidr::host`].
     #[must_use]
     pub fn allow_host(self, host: Ipv4Addr, port: Option<u16>, proto: Option<Protocol>) -> Self {
@@ -319,7 +318,7 @@ mod tests {
 
     #[test]
     fn ipv4_cidr_rejects_an_out_of_range_prefix() {
-        // parse-don't-validate: an over-/32 prefix can't be constructed, so it never reaches the map.
+        // An over-`/32` prefix can't be constructed, so it never reaches the map.
         let err = Ipv4Cidr::new(Ipv4Addr::new(10, 0, 0, 0), 40).expect_err("40 is over /32");
         assert_eq!(err, PolicyError::PrefixTooLong { got: 40, max: 32 });
         // The error names the family maximum it exceeded, not a both-families hedge.

@@ -111,7 +111,7 @@ pub(crate) fn per_cpu_sum(ebpf: &Ebpf, name: &str) -> Result<u64, ProbeError> {
     // Saturate, don't `.sum()`: these are adversarial kernel-written counters, and the crate's bar
     // is that a hostile guest can never wrap a large drop/event count down to a small one (the same
     // discipline `totals()`/denials use). A plain `.sum()` would also panic on overflow in a debug
-    // build, which the host path forbids. Unreachable in practice (per-CPU drop slots can't sum past
+    // build, which the host path forbids. Unreachable in practice, since per-CPU drop slots can't sum past
     // `u64::MAX`), but kept consistent with the stated invariant rather than relying on that.
     Ok(per_cpu.iter().copied().fold(0u64, u64::saturating_add))
 }
@@ -142,8 +142,8 @@ const FILTER_MODE_SLOT: u32 = 0;
 const EVENT_DROPS_MAP: &str = "EVENT_DROPS";
 
 /// A loaded, attached syscall tracer: the `sys_enter_{execve,openat,connect}` tracepoints
-/// stream per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the
-/// aya [`Ebpf`] (programs, maps, live attachments); dropping it detaches everything and pins nothing,
+/// stream per-event [`SyscallEvent`]s into a ring buffer that [`drain`](Self::drain) reads. Owns the aya
+/// [`Ebpf`], so dropping it detaches everything and pins nothing,
 /// like [`ExecveCounter`]. Narrow the stream to one sandbox with [`watch_pid`](Self::watch_pid) /
 /// [`watch_cgroup`](Self::watch_cgroup); the default (nothing set) observes the whole host.
 #[must_use = "dropping a SyscallTracer detaches the probes"]
@@ -164,7 +164,7 @@ pub struct SyscallTracer {
 }
 
 impl SyscallTracer {
-    /// Load the compiled object and load + attach all three `sys_enter_*` tracepoints. From here every
+    /// Loads the compiled object and attaches all three `sys_enter_*` tracepoints. From here every
     /// matching host syscall that passes the filter is streamed into the ring buffer until this is
     /// dropped. Attaches unfiltered; call a `watch_*` before or after to narrow it.
     ///
@@ -212,9 +212,9 @@ impl SyscallTracer {
 
     /// Watch only the process tree with this **tgid** (the userspace pid): the programs drop events
     /// from any other tgid. Pass `0` to stop filtering on tgid. Composes with
-    /// [`watch_cgroup`](Self::watch_cgroup) (both configured axes must match). **Selects single-filter
-    /// mode**: like every `watch_*`, this switches the tracer off the [`add_target`](Self::add_target)
-    /// set if it was on, so the two filter models can't half-apply (the mode always matches the last
+    /// [`watch_cgroup`](Self::watch_cgroup), since both configured axes must match. **Selects
+    /// single-filter mode**, switching the tracer off the [`add_target`](Self::add_target) set if it was
+    /// on, so the two filter models can't half-apply and the mode always matches the last
     /// setter used).
     ///
     /// # Errors
@@ -260,8 +260,8 @@ impl SyscallTracer {
     }
 
     /// Events the kernel **dropped** because the ring buffer was full, summed across CPUs, the
-    /// best-effort loss made visible. A monotonic counter since [`load`](Self::load); callers snapshot
-    /// it around a window and report a nonzero delta (the audit bundle turns one into a coverage gap).
+    /// best-effort loss made visible. Monotonic since [`load`](Self::load), so a caller snapshots it around
+    /// a window and reports a nonzero delta, which the audit bundle turns into a coverage gap.
     ///
     /// # Errors
     /// [`ProbeError::Map`] if the drop-counter map is missing or unreadable.
@@ -280,7 +280,7 @@ impl SyscallTracer {
         self.undecodable
     }
 
-    /// Register `cgroup_id` in the trace target *set* and switch to set mode if not already, so from
+    /// Registers `cgroup_id` in the trace target *set*, switching to set mode if needed, so from
     /// here the tracepoints emit that sandbox's host syscalls. The multi-sandbox path: one shared
     /// tracer, every sandbox's cgroup registered, the per-syscall cost a single hash lookup. Idempotent.
     ///
@@ -293,7 +293,7 @@ impl SyscallTracer {
             .map_err(|e| ProbeError::Map(format!("register cgroup {cgroup_id} for tracing: {e}")))
     }
 
-    /// Unregister `cgroup_id`: the tracepoints stop emitting its events. Removing a cgroup that was never
+    /// Unregisters `cgroup_id`, so the tracepoints stop emitting its events. Removing a cgroup that was never
     /// a target is a no-op, not an error (idempotent teardown, like the meter's).
     ///
     /// # Errors
@@ -380,17 +380,15 @@ impl SyscallTracer {
     }
 
     /// Stream a **live trace**: loop, calling `on_event` for each event as it arrives, until
-    /// `keep_going` returns `false`; return the total delivered. When the buffer is momentarily empty
+    /// `keep_going` returns `false`, returning the total delivered. When the buffer is momentarily empty
     /// it sleeps `idle` before polling again (so an idle tracer doesn't spin), but drains greedily
     /// while events are flowing, so latency is bounded by `idle`. Decode + print with
     /// [`SyscallEvent::describe`].
     ///
-    /// Kept a poll-with-sleep loop deliberately. A zero-idle-latency `poll`/`epoll` wait on the ring
-    /// buffer's fd is possible in principle, but aya's `RingBuf` exposes only `AsRawFd`, not `AsFd`, so
-    /// handing its fd to a poller needs `BorrowedFd::borrow_raw`, which is `unsafe` and this crate is
-    /// `#![forbid(unsafe_code)]` (the loader stays unsafe-free by policy). The only caller that matters
-    /// is a live-trace viewer, never the audit record (that uses [`drain`](Self::drain)/`collect`), so
-    /// the idle sleep is immaterial. `keep_going` is where a caller wires a deadline or a Ctrl-C flag.
+    /// A poll-with-sleep loop rather than a zero-idle-latency `poll`/`epoll` wait: aya's `RingBuf` exposes
+    /// only `AsRawFd`, so handing its fd to a poller needs `BorrowedFd::borrow_raw`, which is `unsafe` and
+    /// this crate is `#![forbid(unsafe_code)]`. The only caller is a live-trace viewer, never the audit
+    /// record, so the idle sleep is immaterial. `keep_going` is where a caller wires a deadline.
     ///
     /// # Errors
     /// Propagates a [`drain`](Self::drain) error (currently none in practice).

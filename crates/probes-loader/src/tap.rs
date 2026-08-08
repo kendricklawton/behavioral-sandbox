@@ -73,26 +73,26 @@ pub struct TapMonitor {
 impl TapMonitor {
     /// Attach both classifiers to `interface` **in the current network namespace**, adding a clsact
     /// qdisc first (which gives the device its `tc` ingress and egress hooks). From here every IPv4
-    /// frame crossing that interface is counted against its flow until this is dropped. Use this for an
-    /// interface in your own netns (a test veth, a host device); for a sandbox's tap, which lives in the
+    /// frame crossing that interface is counted against its flow until this is dropped. For an interface in
+    /// the caller's own netns; for a sandbox's tap, which lives in the
     /// sandbox's netns, use [`attach_in_netns`](Self::attach_in_netns).
     ///
     /// # Errors
-    /// [`ProbeError::Unsupported`] if the host can't load eBPF (BTF/caps); [`ProbeError::Object`] if the
-    /// object can't be read (build it: `cargo xtask build-probes`); [`ProbeError::Load`] if the kernel
-    /// rejects the object/a program; [`ProbeError::Attach`] if adding the qdisc or a classifier attach
+    /// [`ProbeError::Unsupported`] if the host can't load eBPF, [`ProbeError::Object`] if the object can't
+    /// be read, [`ProbeError::Load`] if the kernel rejects it, or [`ProbeError::Attach`] if adding the qdisc
+    /// or a classifier attach
     /// fails (the clsact qdisc needs `CAP_NET_ADMIN`, and `interface` must exist).
     pub fn attach(interface: &str) -> Result<Self, ProbeError> {
         check_support()?;
         let mut ebpf = load_classifiers()?;
-        // Current netns (persists): keep the links so aya's drop detaches them here, the correct netns.
+        // The current netns persists, so keep the links and let aya's drop detach them here.
         attach_classifiers(&mut ebpf, interface, false)?;
         Ok(Self { ebpf })
     }
 
     /// Bind the monitor to the **specific tap the driver named for one sandbox**: that tap lives
     /// inside the sandbox's own network namespace, so this enters that netns by name (via
-    /// its `/run/netns/<netns>` handle), attaches both classifiers to `interface` there, and returns the
+    /// its `/run/netns/<netns>` handle, attaches both classifiers to `interface` there, and returns the
     /// calling thread to the caller's netns. Hand it a sandbox's netns name and tap name (typically
     /// `"fc0"`) and the trace is scoped to exactly that sandbox's traffic. The map is read afterward from
     /// the caller's netns as usual (map fds are not namespace-scoped).
@@ -102,18 +102,20 @@ impl TapMonitor {
     /// entered (the netns must exist and `setns` needs `CAP_SYS_ADMIN`/root).
     pub fn attach_in_netns(netns: &str, interface: &str) -> Result<Self, ProbeError> {
         check_support()?;
-        // Load + verify the programs in the caller's netns (creating maps and loading programs is not
+        // Load and verify the programs in the caller's netns, since creating maps and loading programs is
+        // not
         // namespace-scoped); only the `tc` attach must run inside the sandbox's netns.
         let mut ebpf = load_classifiers()?;
         let handle = Path::new(NETNS_DIR).join(netns);
-        // Netns-attached: forget the links so aya's drop can't fire a wrong-netns filter-delete; the
+        // Netns-attached, so forget the links: aya's drop would otherwise fire a wrong-netns
+        // filter-delete, and the
         // sandbox's netns teardown reclaims the in-kernel filter.
         with_netns(&handle, || attach_classifiers(&mut ebpf, interface, true))?;
         Ok(Self { ebpf })
     }
 
-    /// The current per-flow counters as `(FlowKey, FlowCounts)` pairs, read from the `FLOWS` map. Order
-    /// is unspecified (hash-map iteration). The map is read as raw key/value byte arrays and decoded
+    /// The current per-flow counters as `(FlowKey, FlowCounts)` pairs, read from the `FLOWS` map in
+    /// unspecified hash-map order. The map is read as raw key/value byte arrays and decoded
     /// with the shared `FlowKey::from_bytes` / `FlowCounts::from_bytes`, so the loader needs no `unsafe`
     /// map-type binding and the record stays single-sourced with the kernel writer.
     ///

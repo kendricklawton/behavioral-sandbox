@@ -1,15 +1,19 @@
-//! Plain-old-data shared across the eBPF boundary. The kernel programs in `crates/probes` write a
-//! [`SyscallEvent`] into a ring buffer; the userspace loader in `crates/probes-loader` reads the raw
-//! bytes back and reconstructs it with [`SyscallEvent::from_bytes`]. Defining the record **once**,
-//! here, is what keeps the writer and the reader from drifting: a field reordered or resized on one
-//! side but not the other would otherwise be a silent garbage read, the classic FFI-struct bug.
+//! Plain-old-data shared across the eBPF boundary: the records `crates/probes` writes into its maps
+//! and `crates/probes-loader` reads back.
 //!
-//! The type is `#[repr(C)]` with fields ordered large-to-small so the layout is padding-free and
-//! stable, and both sides run on the same host (one kernel, one userspace) so native byte order is
-//! shared, [`from_bytes`](SyscallEvent::from_bytes) reads each field with `from_ne_bytes`, no
-//! `unsafe`, no transmute. `#![no_std]` with zero dependencies so it compiles for the BPF target
-//! unchanged; the `std` feature (enabled by the userspace loader, and by the crate's own tests) opts
-//! back into `std` for the ergonomic [`SyscallEvent::comm_lossy`] helper.
+//! Defining each record **once** is what keeps the writer and the reader from drifting, since a field
+//! reordered or resized on one side only would be a silent garbage read.
+//!
+//! - **Layout:** every shared type is `#[repr(C)]` and padding-free, with explicit zeroed `_pad`
+//!   where a type is a BPF hash-map key (an uninitialized pad byte would make two identical keys
+//!   hash to different slots).
+//! - **Decoding:** both sides run on the same host, so native byte order is shared and each
+//!   `from_bytes` reads field by field with `from_ne_bytes`, no `unsafe` and no transmute.
+//! - **Address math is byte-wise.** The eBPF target has no native `u128` (`bpf-linker` would emit
+//!   compiler-rt calls that don't exist there), so the v6 matchers loop bytes and run identically in
+//!   the kernel and in these host tests.
+//! - **`#![no_std]`, zero dependencies**, so it compiles for the BPF target unchanged. The `std`
+//!   feature opts back into `std` for the ergonomic display helpers.
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 #![forbid(unsafe_code)]
 
@@ -22,29 +26,23 @@ pub const COMM_CAP: usize = 16;
 pub const DETAIL_CAP: usize = 128;
 
 /// The **maximum** leading bytes of a `connect` sockaddr the probe copies into
-/// [`SyscallEvent::detail`]. 28 is `sizeof(struct sockaddr_in6)` (family + port + flowinfo + the
-/// 16-byte address + scope), so a full **IPv6** address is captured, not just its first 8 bytes
-/// (dual-stack). The probe picks between this and [`SOCKADDR_SNAP_V4`] by the caller's own
-/// `addrlen`, so a 16-byte `sockaddr_in` is not over-read; a caller that *declares* a longer
-/// `addrlen` than it uses still gets the longer snapshot, since the declared length is all the
-/// probe has at `sys_enter`.
+/// [`SyscallEvent::detail`]: `sizeof(struct sockaddr_in6)`, so a full IPv6 address is captured. The
+/// probe picks between this and [`SOCKADDR_SNAP_V4`] by the caller's own `addrlen`, so a 16-byte
+/// `sockaddr_in` is not over-read.
 pub const SOCKADDR_SNAP: usize = 28;
 
-/// The IPv4 `sockaddr_in` size (family + port + 4-byte address): the copy length the probe uses
-/// for any `addrlen` below [`SOCKADDR_SNAP`]. For a family shorter still (`sockaddr_nl` is 12, an
-/// `AF_UNIX` short path less), `detail_len` reports the caller's `addrlen` rather than this, so the
-/// record shows the family instead of claiming bytes that were never the address.
+/// The IPv4 `sockaddr_in` size, the copy length the probe uses for any `addrlen` below
+/// [`SOCKADDR_SNAP`]. For a shorter family (`sockaddr_nl` is 12), `detail_len` reports the caller's
+/// `addrlen` instead, so the record shows the family rather than claiming bytes that were never the
+/// address.
 pub const SOCKADDR_SNAP_V4: usize = 16;
 
 /// Which syscall a [`SyscallEvent`] records. The wire field is a raw [`u32`]
-/// ([`SyscallEvent::syscall`]) rather than this enum, so reconstructing an event from arbitrary bytes
-/// can never form an invalid discriminant; [`SyscallEvent::kind`] maps it back, returning `None` for
-/// an unknown value.
-/// `Ord` compares the **explicit discriminants below**, not source order, so a `BTreeMap` keyed on
-/// this iterates exactly as one keyed on the raw `u32` wire value does, and reordering these arms
-/// moves nothing. The audit record's `notable` ordering rests on that, which ties it to the wire
-/// numbering the probe writes rather than to how this file is laid out
-/// (`notable_kinds_are_ordered_by_the_syscall_discriminants` in `bsx-record` holds it).
+/// ([`SyscallEvent::syscall`]), not this enum, so reconstructing an event from arbitrary bytes can
+/// never form an invalid discriminant. `Ord` compares the **explicit discriminants below**, not
+/// source order, so reordering these arms moves nothing and the audit record's `notable` ordering is
+/// tied to the wire numbering (`notable_kinds_are_ordered_by_the_syscall_discriminants` in
+/// `bsx-record` holds it).
 #[repr(u32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Syscall {
@@ -56,11 +54,9 @@ pub enum Syscall {
     Connect = 2,
 }
 
-/// One host syscall observed by the probes, as written into the ring buffer. `#[repr(C)]` and
-/// padding-free (fields large-to-small: the `u64` first, then the `u32`s, then the byte arrays), so
-/// [`from_bytes`](Self::from_bytes) can read it field by field at fixed offsets. This is the **host's**
-/// footprint (a microVM services its own syscalls in-guest and they never trap here, see the crate
-/// docs).
+/// One host syscall observed by the probes, as written into the ring buffer. Fields run
+/// large-to-small so the `#[repr(C)]` layout is padding-free. This is the **host's** footprint: a
+/// microVM services its own syscalls in-guest and they never trap here.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct SyscallEvent {
@@ -87,12 +83,10 @@ pub struct SyscallEvent {
 pub const EVENT_SIZE: usize = core::mem::size_of::<SyscallEvent>();
 
 impl SyscallEvent {
-    /// Reconstruct an event from a ring-buffer record's raw bytes, or `None` if the slice is too
-    /// short. Reads each field at its `#[repr(C)]` offset with `from_ne_bytes`, safe, no
-    /// transmute. The offsets are **derived from the struct itself** (`core::mem::offset_of!`),
-    /// not hand-coded, so even a same-size field reorder cannot make the reader and the kernel
-    /// writer disagree (a resize is caught by the [`EVENT_SIZE`] check; the offsets close the
-    /// remaining drift hole).
+    /// Reconstructs an event from a ring-buffer record's raw bytes, or `None` if the slice is too
+    /// short. The offsets are **derived from the struct itself** (`core::mem::offset_of!`) rather
+    /// than hand-coded, so even a same-size field reorder cannot make the reader and the kernel
+    /// writer disagree; a resize is caught by the [`EVENT_SIZE`] check.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < EVENT_SIZE {
@@ -144,18 +138,12 @@ impl SyscallEvent {
     }
 
     /// Whether this event's **path** ran past [`DETAIL_CAP`] and was cut, so a consumer never shows
-    /// a prefix as though it were the whole path. Without this the record states a path the guest
-    /// never opened, in exactly the same shape as one it did.
+    /// a prefix as though it were the whole path.
     ///
-    /// The probe copies with `bpf_probe_read_user_str`, which NUL-terminates within the buffer: a
-    /// path that fits reports its own length, one that doesn't reports `DETAIL_CAP - 1` (the fill,
-    /// minus the NUL). So a full buffer is the signal, and the one ambiguous case is a path of
-    /// *exactly* `DETAIL_CAP - 1` bytes, which is reported as truncated. That bias is deliberate:
-    /// over-stating doubt about an audit record is safe, understating it is the bug this exists to
-    /// prevent.
-    ///
-    /// Path-like syscalls only. A `connect` sets `detail_len` from the sockaddr snapshot (28 bytes
-    /// at most), so it can never reach the cap, and its detail is not a string to begin with.
+    /// A full buffer is the signal, since `bpf_probe_read_user_str` NUL-terminates within it. The one
+    /// ambiguous case, a path of *exactly* `DETAIL_CAP - 1` bytes, is reported as truncated:
+    /// over-stating doubt about an audit record is safe, understating it is not. Path-like syscalls
+    /// only, since a `connect`'s sockaddr snapshot can never reach the cap.
     #[must_use]
     pub fn detail_truncated(&self) -> bool {
         matches!(self.kind(), Some(Syscall::Execve | Syscall::Openat))
@@ -184,13 +172,10 @@ impl SyscallEvent {
     }
 
     /// The event's detail blob decoded for display: the path (`execve`/`openat`, lossy UTF-8) or the
-    /// `connect` address (`AF_INET` as `a.b.c.d:port`, other families by number). Centralized here so
-    /// every consumer decodes the same way (`std`-only).
-    /// Returns a [`Cow`](std::borrow::Cow): **borrowed** for the common case (a valid-UTF-8 path,
-    /// no allocation), owned only when rendering must build a string (a `connect` sockaddr, or
-    /// lossy replacement characters). A per-event fold probes its dedup map with this without
-    /// paying an allocation per repeat; take [`detail_display`](Self::detail_display) when an owned
-    /// `String` is wanted anyway.
+    /// `connect` address (`std`-only). Centralized so every consumer decodes the same way.
+    ///
+    /// Borrowed for the common case (a valid-UTF-8 path), owned only when rendering must build a
+    /// string, so a per-event fold can probe its dedup map without an allocation per repeat.
     #[cfg(any(feature = "std", test))]
     #[must_use]
     pub fn detail_display_cow(&self) -> std::borrow::Cow<'_, str> {
@@ -253,19 +238,15 @@ fn describe_sockaddr(bytes: &[u8]) -> String {
 // Network flows: the per-flow record the tc program on a VM's tap writes.
 // ---------------------------------------------------------------------------
 
-/// Ethernet header length (dst MAC + src MAC + EtherType), the offset the IPv4 header starts at.
-/// Shared by the tc program (`crates/probes`, which reads with `ctx.load`) and the host-side
-/// [`parse_ipv4_5tuple`], so the two can't disagree on where a field lives (the single-sourcing that
-/// keeps [`SyscallEvent`] honest, applied to packet offsets).
+/// Ethernet header length, the offset the IP header starts at. Shared by the tc program (which reads
+/// with `ctx.load` at absolute offsets) and the host-side parsers (which read through a slice), so
+/// the two can't disagree on where a field lives.
 pub const ETH_HLEN: usize = 14;
 /// Byte offset of the EtherType in an Ethernet frame.
 pub const ETHERTYPE_OFFSET: usize = 12;
 
-/// Field offsets **within** the IPv4 header (which starts at [`ETH_HLEN`]), and the smallest
-/// header the parsers accept. Here for the same reason [`ETH_HLEN`] is: the tc program reads them
-/// with `ctx.load` at absolute offsets and [`parse_ipv4_5tuple`] reads them through a slice, so
-/// naming them once is what makes "the same shared offsets" a fact about the code rather than
-/// something a reader has to check by eye across two crates.
+/// Offset of the flags/fragment-offset field within the IPv4 header (which starts at [`ETH_HLEN`]).
+/// Named here for the same single-sourcing reason as [`ETH_HLEN`].
 pub const IPV4_FRAG_OFFSET: usize = 6;
 /// Offset of the protocol byte in an IPv4 header. See [`IPV4_FRAG_OFFSET`].
 pub const IPV4_PROTO_OFFSET: usize = 9;
@@ -277,7 +258,7 @@ pub const IPV4_DST_OFFSET: usize = 16;
 /// parsers refuse it rather than reading an L4 header that would fall inside the IP header.
 pub const IPV4_MIN_IHL: usize = 20;
 
-/// Field offsets within the fixed IPv6 header, and its length. IPv6 has no `ihl`: the header is
+/// Offset of the next-header byte within the fixed IPv6 header. IPv6 has no `ihl`: the header is
 /// always [`IPV6_HLEN`] bytes and extension headers chain after it (neither parser walks them).
 pub const IPV6_NEXT_HEADER_OFFSET: usize = 6;
 /// Offset of the source address in an IPv6 header. See [`IPV6_NEXT_HEADER_OFFSET`].
@@ -289,20 +270,20 @@ pub const IPV6_HLEN: usize = 40;
 /// EtherType for IPv4.
 pub const ETH_P_IP: u16 = 0x0800;
 /// EtherType for ARP. Egress enforcement lets ARP through even under deny-by-default: the guest must
-/// resolve its on-link gateway (`10.200.0.1`) before it can reach *any* allowed endpoint.
+/// resolve its on-link gateway before it can reach *any* allowed endpoint.
 pub const ETH_P_ARP: u16 = 0x0806;
-/// EtherType for IPv6, and for an 802.1Q VLAN tag. The tap parser handles only IPv4, so a frame with
-/// either of these is *unrepresentable* as a flow: the kernel counts it (as an honest coverage
-/// signal) rather than dropping it from the record silently. Neither is expected on a sandbox's
-/// IPv4-only tap, unlike ARP, which is why ARP is not counted here.
+/// EtherType for IPv6, parsed into its own flow key by [`parse_ipv6_5tuple`]. A *truncated* v6 frame
+/// is counted as unparsed rather than dropped from the record silently.
 pub const ETH_P_IPV6: u16 = 0x86dd;
-/// See [`ETH_P_IPV6`].
+/// EtherType for an 802.1Q VLAN tag, which neither parser handles, so such a frame is
+/// unrepresentable as a flow and counted as unparsed. Not expected on a sandbox's tap, unlike ARP,
+/// which is why ARP is not counted.
 pub const ETH_P_8021Q: u16 = 0x8100;
 /// An L4 protocol an egress rule (or a flow) is matched on, the typed face of the raw IP protocol
-/// number the wire carries. A caller writes `Protocol::Udp`, never `17`. Only the two protocols the
-/// parser reads ports for; "any protocol" is [`None`], not a variant (see [`PolicyRule`]). `#[repr(u8)]`
-/// with the on-wire IP protocol number as the discriminant, so [`as_u8`](Self::as_u8) is the value the
-/// kernel and the map already use.
+/// number the wire carries, so a caller writes `Protocol::Udp` and never `17`. Only the two protocols
+/// the parser reads ports for; "any protocol" is [`None`], not a variant. The discriminant *is* the
+/// on-wire protocol number, so [`as_u8`](Self::as_u8) is the value the kernel and the map already
+/// use.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
@@ -337,19 +318,15 @@ pub const IPPROTO_TCP: u8 = Protocol::Tcp as u8;
 /// IP protocol number for UDP (same leading source/destination port layout as TCP).
 pub const IPPROTO_UDP: u8 = Protocol::Udp as u8;
 
-/// IP protocol number for **ICMPv6** (next-header 58). Unlike ARP (its own v4 ethertype, cleanly
-/// separable from routable IP), ICMPv6 rides the IPv6 ethertype and can carry a routable Echo, so
-/// egress enforcement spares it only to **on-link** destinations ([`icmp6_dst_on_link`]): the
-/// neighbor-discovery (NS/NA/RS/RA), MLD, and NUD traffic the guest needs to resolve and keep its
-/// on-link host end. ICMPv6 to a routable (global-unicast) destination is policed like any other v6
-/// flow (deny-by-default), so a spared Echo can't become an egress channel.
+/// IP protocol number for **ICMPv6**. Unlike ARP (its own v4 ethertype, cleanly separable from
+/// routable IP), ICMPv6 rides the IPv6 ethertype and can carry a routable Echo, so egress enforcement
+/// spares it only to **on-link** destinations ([`icmp6_dst_on_link`]) and polices the rest like any
+/// other v6 flow.
 pub const IPPROTO_ICMPV6: u8 = 58;
 
-/// One **directional** network flow's identity: the IPv4 5-tuple, in host byte order (so a consumer
-/// formats `src_addr` straight to dotted-quad). `#[repr(C)]` and padding-free, the trailing `_pad` is
-/// explicit and always zero because this is a BPF **hash-map key**: an uninitialized pad byte would
-/// make two identical flows hash to different slots. 16 bytes; build it with [`FlowKey::new`], which
-/// zeroes the pad.
+/// One **directional** network flow's identity: the IPv4 5-tuple, in host byte order so a consumer
+/// formats `src_addr` straight to dotted-quad. A 16-byte BPF hash-map key; build it with
+/// [`FlowKey::new`], which zeroes the pad.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct FlowKey {
@@ -371,7 +348,7 @@ pub struct FlowKey {
 pub const FLOW_KEY_SIZE: usize = core::mem::size_of::<FlowKey>();
 
 impl FlowKey {
-    /// Build a key from the 5-tuple, zeroing the padding so it hashes deterministically.
+    /// Builds a key from the 5-tuple, zeroing the padding so it hashes deterministically.
     #[must_use]
     pub fn new(src_addr: u32, dst_addr: u32, src_port: u16, dst_port: u16, proto: u8) -> Self {
         Self {
@@ -384,10 +361,8 @@ impl FlowKey {
         }
     }
 
-    /// Reconstruct a key from a map key's raw bytes (as the loader reads them), or `None` if the slice
-    /// is too short. Reads each field at its fixed `#[repr(C)]` offset with `from_ne_bytes` (same host,
-    /// shared byte order), no `unsafe`, no transmute, defined next to the fields so it can't drift from
-    /// the kernel writer.
+    /// Reconstructs a key from a map key's raw bytes, or `None` if the slice is too short. Defined
+    /// next to the fields so it can't drift from the kernel writer.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_KEY_SIZE {
@@ -422,8 +397,7 @@ impl core::fmt::Display for FlowKey {
 }
 
 /// Per-direction packet/byte counters for one [`FlowKey`], from the tap's perspective: **ingress** is a
-/// frame the guest sent (arriving at the tap), **egress** a frame delivered to the guest. `#[repr(C)]`,
-/// 32 bytes, padding-free (four `u64`s).
+/// frame the guest sent, **egress** one delivered to the guest.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct FlowCounts {
@@ -441,7 +415,7 @@ pub struct FlowCounts {
 pub const FLOW_COUNTS_SIZE: usize = core::mem::size_of::<FlowCounts>();
 
 impl FlowCounts {
-    /// Reconstruct counters from a map value's raw bytes, or `None` if the slice is too short.
+    /// Reconstructs counters from a map value's raw bytes, or `None` if the slice is too short.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_COUNTS_SIZE {
@@ -456,13 +430,13 @@ impl FlowCounts {
     }
 }
 
-/// Parse the IPv4 5-tuple out of an Ethernet `frame` (addresses and ports in host order), or `None` if
-/// it is not IPv4-over-Ethernet or is truncated. TCP/UDP carry their ports; any other protocol reports
-/// ports 0. The tc program in `crates/probes` mirrors this with `ctx.load` at the same offsets, which
-/// are `const`s both halves read, so only the logic around them is mirrored by hand. The in-kernel
-/// reads need a live packet and the verifier, so this pure, slice-based form is the one the host gate
-/// unit-tests, and `crates/probes-loader/tests/differential.rs` runs it as the oracle the loaded
-/// program's own parse is compared against.
+/// Parses the IPv4 5-tuple out of an Ethernet `frame` (addresses and ports in host order), or `None`
+/// if it is not IPv4-over-Ethernet or is truncated. TCP/UDP carry their ports; any other protocol
+/// reports ports 0.
+///
+/// The tc program reads the same offset `const`s, so only the logic around them is mirrored by hand.
+/// The in-kernel reads need a live packet and the verifier, so this pure form is what the host gate
+/// unit-tests and what `crates/probes-loader/tests/differential.rs` runs as the oracle.
 #[must_use]
 pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     let ethertype = u16::from_be_bytes([
@@ -480,9 +454,9 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
     let proto = *ip.get(IPV4_PROTO_OFFSET)?;
     let src = u32::from_be_bytes(ip.get(IPV4_SRC_OFFSET..IPV4_DST_OFFSET)?.try_into().ok()?);
     let dst = u32::from_be_bytes(ip.get(IPV4_DST_OFFSET..IPV4_MIN_IHL)?.try_into().ok()?);
-    // The low 13 bits of the flags/fragment-offset field (bytes 6..8) are the fragment offset. A
-    // non-first fragment (offset != 0) carries no L4 header, so reading "ports" there would just
-    // interpret payload bytes, letting a guest mint bogus 5-tuples. Leave the ports zero for it.
+    // The low 13 bits of the flags/fragment-offset field are the fragment offset. A non-first
+    // fragment carries no L4 header, so reading "ports" there would interpret payload bytes and let a
+    // guest mint bogus 5-tuples.
     let frag_off =
         u16::from_be_bytes([*ip.get(IPV4_FRAG_OFFSET)?, *ip.get(IPV4_FRAG_OFFSET + 1)?]) & 0x1fff;
     let (mut src_port, mut dst_port) = (0u16, 0u16);
@@ -499,16 +473,13 @@ pub fn parse_ipv4_5tuple(frame: &[u8]) -> Option<FlowKey> {
 // a guest-sent packet. Single-sourced here so the in-kernel matcher and the host-tested one can't drift.
 // ---------------------------------------------------------------------------
 
-/// How many egress allow-rules a sandbox's policy holds, a fixed bound, because the tc program scans
-/// the whole array in a **bounded loop** (the verifier needs a compile-time cap) and BPF maps are sized
-/// at load. Comfortably covers a per-sandbox allow-list of a handful of endpoints.
+/// How many egress allow-rules a sandbox's policy holds, fixed because the tc program scans the whole
+/// array in a bounded loop (the verifier needs a compile-time cap) and BPF maps are sized at load.
 pub const MAX_POLICY_RULES: usize = 16;
 
-/// One entry in a sandbox's egress allow-list: a destination **CIDR** plus optional port and
-/// protocol. A guest-sent IPv4 packet is allowed if its destination matches **any** `active` rule (see
-/// [`rule_matches`] / [`egress_allowed`]); with no rule matching, deny-by-default drops it. `#[repr(C)]`
-/// and padding-free (an explicit zeroed `_pad`) so it is a stable 12-byte map value the loader writes
-/// and the kernel reads without either side guessing the layout.
+/// One entry in a sandbox's egress allow-list: a destination **CIDR** plus optional port and protocol.
+/// A guest-sent IPv4 packet is allowed if its destination matches **any** `active` rule, and
+/// deny-by-default drops it otherwise. A stable 12-byte map value.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct PolicyRule {
@@ -531,8 +502,8 @@ pub struct PolicyRule {
 pub const POLICY_RULE_SIZE: usize = core::mem::size_of::<PolicyRule>();
 
 impl PolicyRule {
-    /// Build an **active** allow-rule for `addr/prefix_len`, optional `port` (`0` = any) and `proto`
-    /// (`0` = any), zeroing the padding so it is a byte-stable map value.
+    /// Builds an **active** allow-rule for `addr/prefix_len`, optional `port` and `proto` (`0` = any),
+    /// zeroing the padding so it is a byte-stable map value.
     #[must_use]
     pub fn allow(addr: u32, prefix_len: u8, port: u16, proto: u8) -> Self {
         Self {
@@ -545,8 +516,8 @@ impl PolicyRule {
         }
     }
 
-    /// Serialize to the map value's raw native bytes, so the loader can write the policy without an
-    /// `unsafe` [`aya::Pod`](https://docs.rs/aya) binding (the write-side twin of [`FlowKey::from_bytes`]).
+    /// Serializes to the map value's raw native bytes, so the loader can write the policy without an
+    /// `unsafe` [`aya::Pod`](https://docs.rs/aya) binding.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; POLICY_RULE_SIZE] {
         let mut b = [0u8; POLICY_RULE_SIZE];
@@ -558,8 +529,8 @@ impl PolicyRule {
         b
     }
 
-    /// Reconstruct a rule from a map value's raw bytes, or `None` if the slice is too short, the
-    /// read-side twin of [`to_bytes`](Self::to_bytes), defined next to the fields so it can't drift.
+    /// Reconstructs a rule from a map value's raw bytes, or `None` if the slice is too short. The
+    /// read-side twin of [`to_bytes`](Self::to_bytes), defined beside it so the two can't drift.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < POLICY_RULE_SIZE {
@@ -577,12 +548,12 @@ impl PolicyRule {
 }
 
 /// Whether one [`PolicyRule`] admits the destination `(dst_addr, dst_port, proto)` (all host byte
-/// order). A rule matches when it is `active`, its CIDR contains `dst_addr`, and its port and protocol
-/// match (a `0` port or proto is a wildcard). Single-sourced: the tc program in `crates/probes` calls
-/// this per rule, and [`egress_allowed`] loops it, so kernel and host can't disagree on the verdict.
-/// The mask is built so the shift operand is always `< 32` (an out-of-range shift is UB in the kernel
-/// and rejected by the verifier): `prefix_len == 0` yields an all-zero mask (match any), `32` an
-/// all-ones mask, and an out-of-range `prefix_len` is treated as no match.
+/// order): `active`, its CIDR contains `dst_addr`, and its port and protocol match (a `0` port or
+/// proto is a wildcard). Called per rule by the tc program and looped by [`egress_allowed`], so kernel
+/// and host can't disagree on the verdict.
+///
+/// The mask is built so the shift operand is always `< 32`, since an out-of-range shift is UB in the
+/// kernel and rejected by the verifier. An out-of-range `prefix_len` is treated as no match.
 #[must_use]
 pub fn rule_matches(rule: &PolicyRule, dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     if rule.active == 0 || rule.prefix_len > 32 {
@@ -595,11 +566,10 @@ pub fn rule_matches(rule: &PolicyRule, dst_addr: u32, dst_port: u16, proto: u8) 
         && (rule.proto == 0 || rule.proto == proto)
 }
 
-/// Whether a sandbox's egress allow-list `rules` admits the destination `(dst_addr, dst_port, proto)`:
-/// **any** active rule matching means allow, none matching means deny (deny-by-default). The scan over
-/// [`rule_matches`]; the tc program applies the same any-match logic reading its policy map, and
-/// `crates/probes-loader/tests/differential.rs` runs this as the oracle that classifier's verdict is
-/// compared against. An empty allow-list allows nothing.
+/// Whether a sandbox's egress allow-list admits the destination `(dst_addr, dst_port, proto)`: any
+/// active rule matching means allow, none means deny. An empty allow-list allows nothing. The tc
+/// program applies the same any-match logic over its policy map, and
+/// `crates/probes-loader/tests/differential.rs` runs this as the oracle for that verdict.
 #[must_use]
 pub fn egress_allowed(rules: &[PolicyRule], dst_addr: u32, dst_port: u16, proto: u8) -> bool {
     rules
@@ -610,16 +580,12 @@ pub fn egress_allowed(rules: &[PolicyRule], dst_addr: u32, dst_port: u16, proto:
 // ---------------------------------------------------------------------------
 // IPv6: the v6 twins of the flow key, parser, and egress policy above. Deliberately **parallel**
 // types and maps rather than widening the v4 ones, so the proven v4 datapath stays byte-for-byte
-// unchanged (dual-stack). Addresses are `[u8; 16]` in **network byte order** and all address
-// math is **byte-wise**: the eBPF target has no native `u128` (`bpf-linker` would emit compiler-rt
-// calls that don't exist there), so a shared `u128` matcher couldn't run in the kernel. The byte-wise
-// form runs identically in the kernel and in these host tests, single-sourced so they can't drift.
+// unchanged. Addresses are `[u8; 16]` in network byte order, matched byte-wise (see the crate docs).
 // ---------------------------------------------------------------------------
 
 /// One **directional** IPv6 network flow's identity: the v6 5-tuple, addresses in network byte order.
-/// `#[repr(C)]` and padding-free (an explicit zeroed `_pad`), a stable 40-byte BPF **hash-map key**
-/// exactly like [`FlowKey`]: an uninitialized pad byte would make two identical flows hash to
-/// different slots. Build it with [`FlowKey6::new`], which zeroes the pad.
+/// A stable 40-byte BPF hash-map key like [`FlowKey`]; build it with [`FlowKey6::new`], which zeroes
+/// the pad.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct FlowKey6 {
@@ -642,7 +608,7 @@ pub struct FlowKey6 {
 pub const FLOW_KEY6_SIZE: usize = core::mem::size_of::<FlowKey6>();
 
 impl FlowKey6 {
-    /// Build a v6 key from the 5-tuple, zeroing the padding so it hashes deterministically.
+    /// Builds a v6 key from the 5-tuple, zeroing the padding so it hashes deterministically.
     #[must_use]
     pub fn new(
         src_addr: [u8; 16],
@@ -661,9 +627,8 @@ impl FlowKey6 {
         }
     }
 
-    /// Reconstruct a key from a map key's raw bytes (as the loader reads them), or `None` if the slice
-    /// is too short. Reads each field at its fixed `#[repr(C)]` offset, the v6 twin of
-    /// [`FlowKey::from_bytes`], defined next to the fields so it can't drift from the kernel writer.
+    /// Reconstructs a key from a map key's raw bytes, or `None` if the slice is too short. The v6 twin
+    /// of [`FlowKey::from_bytes`], defined next to the fields so it can't drift from the kernel writer.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < FLOW_KEY6_SIZE {
@@ -697,13 +662,13 @@ impl core::fmt::Display for FlowKey6 {
     }
 }
 
-/// Parse the IPv6 5-tuple out of an Ethernet `frame` (addresses network order, ports host order), or
-/// `None` if it is not IPv6-over-Ethernet or is truncated. TCP/UDP directly after the fixed 40-byte
-/// header carry their ports; **extension headers are not walked** (a first cut), so a frame whose
-/// next-header is an extension (or a fragment) reports ports 0 and `proto` = that next-header value,
-/// still a recorded flow, never silently dropped, mirroring how the v4 parser leaves fragment ports 0.
-/// The tc program in `crates/probes` mirrors this at the same offsets (single-sourced), this pure form
-/// is what the host gate unit-tests.
+/// Parses the IPv6 5-tuple out of an Ethernet `frame` (addresses network order, ports host order), or
+/// `None` if it is not IPv6-over-Ethernet or is truncated.
+///
+/// **Extension headers are not walked**, so a frame whose next-header is an extension reports ports 0
+/// and `proto` = that next-header value: still a recorded flow rather than a silent drop, mirroring how
+/// the v4 parser leaves fragment ports 0. The tc program reads the same offsets; this pure form is what
+/// the host gate unit-tests.
 #[must_use]
 pub fn parse_ipv6_5tuple(frame: &[u8]) -> Option<FlowKey6> {
     let ethertype = u16::from_be_bytes([
@@ -714,7 +679,6 @@ pub fn parse_ipv6_5tuple(frame: &[u8]) -> Option<FlowKey6> {
         return None;
     }
     let ip = frame.get(ETH_HLEN..)?;
-    // The fixed IPv6 header is 40 bytes: next-header at offset 6, src at 8..24, dst at 24..40.
     let next_header = *ip.get(IPV6_NEXT_HEADER_OFFSET)?;
     let mut src = [0u8; 16];
     let mut dst = [0u8; 16];
@@ -730,9 +694,8 @@ pub fn parse_ipv6_5tuple(frame: &[u8]) -> Option<FlowKey6> {
 }
 
 /// One entry in a sandbox's **IPv6** egress allow-list: a destination v6 CIDR plus optional port and
-/// protocol, the v6 twin of [`PolicyRule`]. `#[repr(C)]` and padding-free (explicit zeroed `_pad`), a
-/// stable 24-byte map value. `addr` is network byte order and matched byte-wise to `prefix_len` (no
-/// `u128`, see the module note above).
+/// protocol, the v6 twin of [`PolicyRule`]. A stable 24-byte map value, with `addr` in network byte
+/// order and matched byte-wise to `prefix_len`.
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct PolicyRule6 {
@@ -754,7 +717,7 @@ pub struct PolicyRule6 {
 pub const POLICY_RULE6_SIZE: usize = core::mem::size_of::<PolicyRule6>();
 
 impl PolicyRule6 {
-    /// Build an **active** v6 allow-rule for `addr/prefix_len`, optional `port`/`proto` (`0` = any),
+    /// Builds an **active** v6 allow-rule for `addr/prefix_len`, optional `port`/`proto` (`0` = any),
     /// zeroing the padding so it is a byte-stable map value.
     #[must_use]
     pub fn allow(addr: [u8; 16], prefix_len: u8, port: u16, proto: u8) -> Self {
@@ -768,8 +731,8 @@ impl PolicyRule6 {
         }
     }
 
-    /// Serialize to the map value's raw native bytes (the write-side twin of [`FlowKey6::from_bytes`]),
-    /// so the loader writes the policy without an `unsafe` `aya::Pod` binding.
+    /// Serializes to the map value's raw native bytes, so the loader writes the policy without an
+    /// `unsafe` `aya::Pod` binding.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; POLICY_RULE6_SIZE] {
         let mut b = [0u8; POLICY_RULE6_SIZE];
@@ -781,9 +744,9 @@ impl PolicyRule6 {
         b
     }
 
-    /// Reconstruct from a map value's raw native bytes, the read-side twin of
-    /// [`to_bytes`](Self::to_bytes), defined next to the fields so the two can't drift. `None` for a
-    /// short slice, so a map whose value size no longer matches the record fails loudly.
+    /// Reconstructs from a map value's raw native bytes, the read-side twin of
+    /// [`to_bytes`](Self::to_bytes). `None` for a short slice, so a map whose value size no longer
+    /// matches the record fails loudly.
     #[must_use]
     pub fn from_bytes(b: &[u8]) -> Option<Self> {
         if b.len() < POLICY_RULE6_SIZE {
@@ -802,9 +765,9 @@ impl PolicyRule6 {
     }
 }
 
-/// Whether IPv6 address `addr` lies in `net/prefix_len`, compared **byte-wise** (no `u128`, so this
-/// runs in the eBPF kernel too). Loops a **compile-time-bounded** 16 bytes for the verifier; a
-/// `prefix_len > 128` is treated as no match by the caller.
+/// Whether IPv6 address `addr` lies in `net/prefix_len`, compared byte-wise so it runs in the eBPF
+/// kernel too. Loops a compile-time-bounded 16 bytes for the verifier; a `prefix_len > 128` is treated
+/// as no match by the caller.
 #[must_use]
 pub fn addr6_in_prefix(addr: [u8; 16], net: [u8; 16], prefix_len: u8) -> bool {
     let full = (prefix_len / 8) as usize; // whole bytes that must match exactly
@@ -827,8 +790,7 @@ pub fn addr6_in_prefix(addr: [u8; 16], net: [u8; 16], prefix_len: u8) -> bool {
 }
 
 /// Whether one [`PolicyRule6`] admits `(dst_addr, dst_port, proto)` (address network order), the v6
-/// twin of [`rule_matches`]: `active`, its CIDR contains the address (byte-wise), and its port/proto
-/// match (a `0` port or proto is a wildcard). Single-sourced so the tc program and this agree.
+/// twin of [`rule_matches`]. Single-sourced, so the tc program and this agree.
 #[must_use]
 pub fn rule_matches6(rule: &PolicyRule6, dst_addr: [u8; 16], dst_port: u16, proto: u8) -> bool {
     if rule.active == 0 || rule.prefix_len > 128 {
@@ -839,8 +801,8 @@ pub fn rule_matches6(rule: &PolicyRule6, dst_addr: [u8; 16], dst_port: u16, prot
         && (rule.proto == 0 || rule.proto == proto)
 }
 
-/// Whether a sandbox's IPv6 allow-list `rules` admits `(dst_addr, dst_port, proto)`: any active rule
-/// matching means allow, none means deny (deny-by-default). The v6 twin of [`egress_allowed`].
+/// Whether a sandbox's IPv6 allow-list admits `(dst_addr, dst_port, proto)`, the v6 twin of
+/// [`egress_allowed`].
 #[must_use]
 pub fn egress_allowed6(
     rules: &[PolicyRule6],
@@ -853,34 +815,23 @@ pub fn egress_allowed6(
         .any(|r| rule_matches6(r, dst_addr, dst_port, proto))
 }
 
-/// The per-VM IPv6 link every sandbox reuses, as a `(network, prefix_len)` pair: the prefix the
-/// engine assigns the tap's host end and the guest's `eth0` (`fd00:200::1` and `fd00:200::2`, a
-/// `/64`). Fixed rather than per-sandbox because the per-VM netns supplies uniqueness, which is
-/// what lets a `#![no_std]` in-kernel program know the link without a map lookup.
-///
-/// The engine owns the addresses themselves (`bsx-engine`'s `net.rs`); this pair is the *shape*
-/// the eBPF policy needs, and `the_guest_v6_link_is_the_same_in_the_engine_and_the_probes` in
-/// `xtask` reads both files and fails if the two ever disagree.
+/// The per-VM IPv6 link every sandbox reuses, as a `(network, prefix_len)` pair. Fixed rather than
+/// per-sandbox because the per-VM netns supplies uniqueness, which is what lets a `#![no_std]`
+/// in-kernel program know the link without a map lookup. The engine owns the addresses themselves, and
+/// `the_guest_v6_link_is_the_same_in_the_engine_and_the_probes` in `xtask` fails if the two disagree.
 pub const GUEST_LINK6: ([u8; 16], u8) = (
     [0xfd, 0x00, 0x02, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     64,
 );
 
 /// Whether `dst` is an **on-link** IPv6 scope that guest-originated ICMPv6 must reach for neighbor
-/// discovery / MLD / NUD to work, and only those scopes: link-local unicast (`fe80::/10`),
-/// link-scoped multicast (`ff02::/16`, every NDP/MLD group the guest sends to), or the guest's own
-/// link ([`GUEST_LINK6`]), so steady-state NUD to the host end stays reachable. None of these route
-/// off the connected link.
+/// discovery / MLD / NUD, and only those: link-local unicast (`fe80::/10`), link-scoped multicast
+/// (`ff02::/16`), or the guest's own link ([`GUEST_LINK6`]). None of these route off the connected
+/// link.
 ///
-/// **Deliberately the one `/64`, not `fc00::/7`.** A ULA is not off-link by virtue of being a ULA:
-/// RFC 4193 addresses are routable *within a site*, so sparing the whole range would hand a guest an
-/// unpoliced ICMPv6 channel (Echo carries payload) to every internal endpoint an operator's furnished
-/// uplink can reach, with [`egress_allowed6`] never consulted. Any ICMPv6 destination outside this
-/// set, ULA or global unicast alike, is a routable target the egress valve polices like any other v6
-/// flow.
-///
-/// Built on [`addr6_in_prefix`] so it holds in the eBPF `#![no_std]` program (byte-wise, no `u128`) and
-/// is single-sourced with the host-tested matcher the tc program calls.
+/// **Deliberately the one `/64`, not `fc00::/7`.** RFC 4193 addresses are routable *within a site*, so
+/// sparing the whole ULA range would hand a guest an unpoliced ICMPv6 channel (Echo carries payload) to
+/// every internal endpoint a furnished uplink can reach, with [`egress_allowed6`] never consulted.
 #[must_use]
 pub fn icmp6_dst_on_link(dst: [u8; 16]) -> bool {
     const LINK_LOCAL: [u8; 16] = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; // fe80::/10
@@ -938,20 +889,18 @@ mod flow_tests {
     fn parses_udp_and_skips_non_ip_or_truncated() {
         let u = frame(IPPROTO_UDP, [10, 200, 0, 2], [1, 1, 1, 1], 5353, 53);
         assert_eq!(parse_ipv4_5tuple(&u).expect("udp parses").dst_port, 53);
-        // A non-IPv4 EtherType (ARP, 0x0806) is skipped.
         let mut arp = u.clone();
         arp[ETHERTYPE_OFFSET + 1] = 0x06;
         assert!(parse_ipv4_5tuple(&arp).is_none());
-        // Truncated below a full IPv4 header (and the empty slice) are skipped, never a panic.
+        // A truncated frame is skipped, never a panic.
         assert!(parse_ipv4_5tuple(&u[..ETH_HLEN + 10]).is_none());
         assert!(parse_ipv4_5tuple(&[]).is_none());
     }
 
     #[test]
     fn non_first_fragment_has_no_ports() {
-        // A non-first IP fragment (fragment-offset != 0) carries no L4 header, so what sits at the
-        // port offsets is payload; the parser must zero the ports, else a guest mints bogus 5-tuples.
-        // The flags/fragment-offset field is IP-header bytes 6..8 (absolute `ETH_HLEN + 6`).
+        // A non-first fragment carries no L4 header, so what sits at the port offsets is payload: the
+        // parser must zero the ports, else a guest mints bogus 5-tuples.
         let mut frag = frame(IPPROTO_TCP, [10, 200, 0, 2], [9, 9, 9, 9], 51000, 443);
         frag[ETH_HLEN + 6] = 0x00;
         frag[ETH_HLEN + 7] = 0xb9; // fragment offset 185 (nonzero)
@@ -960,7 +909,7 @@ mod flow_tests {
         assert_eq!(key.proto, IPPROTO_TCP);
         assert_eq!(key.src_port, 0, "non-first fragment ports must be zero");
         assert_eq!(key.dst_port, 0, "non-first fragment ports must be zero");
-        // A *first* fragment (offset 0, More-Fragments bit set) still has its L4 header, keep ports.
+        // A *first* fragment still has its L4 header, so its ports are real.
         let mut first = frame(IPPROTO_TCP, [10, 200, 0, 2], [9, 9, 9, 9], 51000, 443);
         first[ETH_HLEN + 6] = 0x20; // MF flag, offset 0
         first[ETH_HLEN + 7] = 0x00;
@@ -1022,8 +971,8 @@ mod policy_tests {
     #[test]
     fn rule_layout_is_padding_free_and_known_size() {
         assert_eq!(POLICY_RULE_SIZE, 12);
-        // An empty (all-zero) slot must NOT admit anything: `active == 0` short-circuits, so a fixed
-        // array of zeroed rules is deny-all, never an accidental `0.0.0.0/0` allow-all.
+        // An all-zero slot must not admit anything, so a fixed array of zeroed rules is deny-all rather
+        // than an accidental `0.0.0.0/0`.
         let empty = PolicyRule::default();
         assert_eq!(empty.active, 0);
         assert!(!rule_matches(&empty, ip(8, 8, 8, 8), 53, IPPROTO_UDP));
@@ -1031,7 +980,6 @@ mod policy_tests {
 
     #[test]
     fn host_only_prefix_matches_exactly_one_address() {
-        // Allow only 10.200.0.1:9999/udp (the netns host end), /32.
         let rule = PolicyRule::allow(ip(10, 200, 0, 1), 32, 9999, IPPROTO_UDP);
         assert!(rule_matches(&rule, ip(10, 200, 0, 1), 9999, IPPROTO_UDP));
         assert!(!rule_matches(&rule, ip(10, 200, 0, 2), 9999, IPPROTO_UDP)); // other host
@@ -1041,7 +989,6 @@ mod policy_tests {
 
     #[test]
     fn cidr_and_wildcards_match_ranges() {
-        // A /24 with wildcard port and proto (0 = any) admits the whole subnet on any port/proto.
         let subnet = PolicyRule::allow(ip(93, 184, 216, 0), 24, 0, 0);
         assert!(rule_matches(
             &subnet,
@@ -1056,7 +1003,7 @@ mod policy_tests {
             443,
             IPPROTO_TCP
         )); // outside /24
-        // prefix_len 0 is an explicit allow-all address (still gated by port/proto if set).
+        // A `prefix_len` of 0 is allow-all on the address, still gated by port and proto.
         let any = PolicyRule::allow(0, 0, 443, IPPROTO_TCP);
         assert!(rule_matches(&any, ip(1, 2, 3, 4), 443, IPPROTO_TCP));
         assert!(!rule_matches(&any, ip(1, 2, 3, 4), 80, IPPROTO_TCP));
@@ -1064,8 +1011,7 @@ mod policy_tests {
 
     #[test]
     fn out_of_range_prefix_never_matches() {
-        // A malformed rule (prefix_len > 32, e.g. a garbled map write) is treated as no match, never a
-        // shift-overflow or an accidental allow.
+        // A garbled map write must be no match, never a shift-overflow or an accidental allow.
         let bad = PolicyRule {
             prefix_len: 40,
             ..PolicyRule::allow(ip(10, 0, 0, 0), 8, 0, 0)
@@ -1152,17 +1098,16 @@ mod v6_tests {
 
     #[test]
     fn skips_non_v6_truncated_and_leaves_ext_header_ports_zero() {
-        // An IPv4 EtherType is not our v6 frame.
         let mut v4 = frame6(IPPROTO_UDP, ula(2), ula(1), 53, 53);
         v4[ETHERTYPE_OFFSET] = 0x08;
         v4[ETHERTYPE_OFFSET + 1] = 0x00;
         assert!(parse_ipv6_5tuple(&v4).is_none());
-        // Truncated below a full 40-byte header (and the empty slice) are skipped, never a panic.
+        // A truncated frame is skipped, never a panic.
         let ok = frame6(IPPROTO_UDP, ula(2), ula(1), 53, 53);
         assert!(parse_ipv6_5tuple(&ok[..ETH_HLEN + 30]).is_none());
         assert!(parse_ipv6_5tuple(&[]).is_none());
-        // A next-header that is an extension header (0 = hop-by-hop) is not walked: addresses parse,
-        // proto is the next-header value, and ports stay 0 (honest, never a bogus port from options).
+        // An extension next-header is not walked, so the ports stay 0 rather than reading options as
+        // ports.
         let hbh = frame6(0, ula(2), ula(1), 51000, 443);
         let key = parse_ipv6_5tuple(&hbh).expect("addresses still parse");
         assert_eq!(key.proto, 0);
@@ -1173,18 +1118,14 @@ mod v6_tests {
     #[test]
     fn addr6_prefix_covers_full_partial_and_wildcard() {
         let host = ula(1);
-        // /128 matches exactly one address.
         assert!(addr6_in_prefix(host, ula(1), 128));
         assert!(!addr6_in_prefix(host, ula(2), 128));
-        // /0 matches anything.
         assert!(addr6_in_prefix(host, [0u8; 16], 0));
-        // /64 matches the whole link (host bits differ, network bits equal).
         assert!(addr6_in_prefix(ula(2), ula(1), 64));
-        // A partial byte: /125 keeps the low 3 bits free, so ::1..=::7 match ::0/125 but ::8 does not.
+        // The partial-byte path: /125 leaves the low 3 bits free.
         let net = ula(0);
         assert!(addr6_in_prefix(ula(7), net, 125));
         assert!(!addr6_in_prefix(ula(8), net, 125));
-        // A different high byte fails even a short prefix.
         let mut other = ula(1);
         other[0] = 0xfe;
         assert!(!addr6_in_prefix(other, ula(1), 16));
@@ -1192,19 +1133,17 @@ mod v6_tests {
 
     #[test]
     fn rule_matches6_and_deny_by_default() {
-        // Allow only the host end on udp/9999, /128.
         let rule = PolicyRule6::allow(ula(1), 128, 9999, IPPROTO_UDP);
         assert!(rule_matches6(&rule, ula(1), 9999, IPPROTO_UDP));
         assert!(!rule_matches6(&rule, ula(2), 9999, IPPROTO_UDP)); // other host
         assert!(!rule_matches6(&rule, ula(1), 9998, IPPROTO_UDP)); // other port
         assert!(!rule_matches6(&rule, ula(1), 9999, IPPROTO_TCP)); // other proto
-        // An out-of-range prefix (a garbled write) never matches, no panic.
+        // A garbled write must be no match, never a panic.
         let bad = PolicyRule6 {
             prefix_len: 200,
             ..PolicyRule6::allow(ula(0), 64, 0, 0)
         };
         assert!(!rule_matches6(&bad, ula(1), 443, IPPROTO_TCP));
-        // any-match + deny-by-default over a list, and an empty list denies all.
         let rules = [PolicyRule6::allow(ula(0), 64, 0, 0)];
         assert!(egress_allowed6(&rules, ula(9), 80, IPPROTO_TCP));
         assert!(!egress_allowed6(&[], ula(1), 9999, IPPROTO_UDP));
@@ -1213,8 +1152,7 @@ mod v6_tests {
     #[test]
     fn icmp6_on_link_scopes_spared_routable_policed() {
         let a = |s: &str| s.parse::<core::net::Ipv6Addr>().unwrap().octets();
-        // On-link: link-local (fe80::/10, incl. its febf:: upper edge), link-scoped multicast
-        // (all NDP/MLD groups), and the ULA the host end + guest subnet live in. All spared.
+        // Spared: link-local, link-scoped multicast, and the guest's own /64.
         assert!(icmp6_dst_on_link(a("fe80::1"))); // NDP link-local unicast
         assert!(icmp6_dst_on_link(a("febf::1"))); // fe80::/10 upper edge
         assert!(icmp6_dst_on_link(a("ff02::1"))); // all-nodes
@@ -1224,8 +1162,7 @@ mod v6_tests {
         assert!(icmp6_dst_on_link(ula(1))); // this engine's on-link host end (fd00:200::1)
         assert!(icmp6_dst_on_link(ula(2))); // the guest's own end, same /64
 
-        // Routable / off-link: policed, not spared. Global unicast, and wider-scope multicast that a
-        // multicast router could carry off the link (only link-local ff02:: is a neighbor group).
+        // Policed: global unicast, and wider-scope multicast a multicast router could carry off-link.
         assert!(!icmp6_dst_on_link(a("2606:4700:4700::1111"))); // global unicast (the exfil case)
         assert!(!icmp6_dst_on_link(a("2001:4860:4860::8888"))); // global unicast
         assert!(!icmp6_dst_on_link(a("fec0::1"))); // fec0::/10, outside fe80::/10
@@ -1236,12 +1173,9 @@ mod v6_tests {
 
     #[test]
     fn a_ula_outside_the_guests_own_link_is_policed_not_spared() {
-        // The spare exists so steady-state NUD to the on-link host end keeps working, and that is
-        // one `/64`. Sparing all of `fc00::/7` hands a guest an unpoliced ICMPv6 channel to every
-        // ULA there is: RFC 4193 addresses are *routable within a site*, so on a host whose netns
-        // an operator furnished with an uplink (design decision 9), an Echo carries payload to
-        // internal infrastructure without `POLICY6` ever being consulted. Deny-by-default has to
-        // reach these exactly as it reaches global unicast.
+        // The spare covers one `/64`, not `fc00::/7`: a ULA is routable within a site, so sparing the
+        // whole range would carry an Echo's payload to internal infrastructure without `POLICY6` ever
+        // being consulted.
         let a = |s: &str| s.parse::<core::net::Ipv6Addr>().unwrap().octets();
         assert!(
             !icmp6_dst_on_link(a("fc00::1")),
@@ -1263,7 +1197,7 @@ mod v6_tests {
     #[test]
     fn v6_bytes_round_trip_and_display() {
         let key = FlowKey6::new(ula(2), ula(1), 1234, 53, IPPROTO_UDP);
-        // The loader reads a v6 map key as raw native bytes; `from_bytes` must reconstruct it.
+        // Mirror the kernel writer: the loader reads a map key as raw native bytes.
         let mut bytes = [0u8; FLOW_KEY6_SIZE];
         bytes[0..16].copy_from_slice(&key.src_addr);
         bytes[16..32].copy_from_slice(&key.dst_addr);
@@ -1276,7 +1210,6 @@ mod v6_tests {
             key.to_string(),
             "[fd00:200::2]:1234 -> [fd00:200::1]:53 udp"
         );
-        // The policy value round-trips through its native bytes too.
         let rule = PolicyRule6::allow(ula(0), 64, 443, IPPROTO_TCP);
         assert_eq!(&rule.to_bytes()[0..16], &ula(0));
         assert_eq!(rule.to_bytes()[18], 64);
@@ -1289,18 +1222,16 @@ mod tests {
 
     #[test]
     fn layout_is_padding_free_and_known_size() {
-        // Catch a field resize here; the per-field offsets below catch a same-size reorder.
+        // Catches a field resize; the per-field offsets below catch a same-size reorder.
         assert_eq!(EVENT_SIZE, 168);
         assert_eq!(core::mem::align_of::<SyscallEvent>(), 8);
     }
 
     #[test]
     fn layout_offsets_are_the_wire_contract() {
-        // The eBPF object is built separately from the loader (its own toolchain, its own time), so
-        // the struct layout *is* the wire format between two independently-built artifacts. Pin every
-        // field offset: `from_bytes` derives its reads from `offset_of!` (it cannot drift from this
-        // struct), but an accidental layout change would silently change the wire, and a stale probe
-        // object on disk would then read as garbage. This test makes that change loud instead.
+        // The eBPF object is built separately from the loader, so this layout *is* the wire format
+        // between two independently-built artifacts: a layout change would silently make a stale
+        // probe object on disk read as garbage.
         assert_eq!(core::mem::offset_of!(SyscallEvent, cgroup_id), 0);
         assert_eq!(core::mem::offset_of!(SyscallEvent, pid), 8);
         assert_eq!(core::mem::offset_of!(SyscallEvent, tid), 12);
@@ -1343,14 +1274,11 @@ mod tests {
     }
 
     /// The in-gate half of this crate's fuzzing (the deep `cargo fuzz` half is the `syscall_event`
-    /// target in `fuzz/`). The kernel writes the [`SyscallEvent`] record, so its bytes are trusted,
-    /// but `parse_ipv4_5tuple` reads a **guest-crafted** Ethernet frame off the tap: attacker bytes.
-    /// Either must be a value-or-`None`, never a panic, on any input. This sprays
-    /// arbitrary-length buffers at both parsers (and the formatting helpers that build strings from
-    /// the parsed bytes) with a tiny deterministic PRNG, no dependency, fixed seed so it never flakes.
+    /// target in `fuzz/`). `parse_ipv4_5tuple` reads a **guest-crafted** Ethernet frame off the tap,
+    /// so every parser here must return a value or `None` on any input, never panic.
     #[test]
     fn parsers_never_panic_on_arbitrary_bytes() {
-        // xorshift64*: deterministic, zero-dependency (this crate is `#![no_std]`, zero deps).
+        // xorshift64*: deterministic and dependency-free, with a fixed seed so it never flakes.
         let mut state: u64 = 0x2545_F491_4F6C_DD1D;
         let mut next = || {
             state ^= state >> 12;

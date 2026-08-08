@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use bsx_channel::{ClientConnection, Request, Response};
 
-/// Play the host side against `serve`: connect (handshake), send one exec request, then read
-/// responses until a terminal frame. Returns collected stdout, stderr, and the final code or error.
+/// Plays the host side against `serve`: connects, sends one exec request, then reads responses until a
+/// terminal frame. Returns the collected stdout, stderr, and the final code or error.
 fn run(argv: &[&str]) -> (Vec<u8>, Vec<u8>, Result<i32, String>) {
     let (host, guest) = UnixStream::pair().expect("socketpair");
     let argv: Vec<String> = argv.iter().map(|s| (*s).to_string()).collect();
@@ -77,8 +77,8 @@ fn empty_command_is_rejected() {
 
 #[test]
 fn large_output_streams_without_deadlock() {
-    // ~600 KiB of output, far past a pipe buffer: proves the two pumps drain concurrently so the
-    // child never blocks. A single-threaded read-then-forward would hang here.
+    // Far past a pipe buffer, so the two pumps must drain concurrently: a single-threaded
+    // read-then-forward hangs here.
     let (out, _, result) = run(&["sh", "-c", "seq 1 100000"]);
     assert_eq!(result, Ok(0));
     assert!(out.len() > 500_000, "got {} bytes", out.len());
@@ -95,8 +95,7 @@ fn signal_death_maps_to_128_plus_signal() {
 
 #[test]
 fn stdin_is_fed_to_the_command() {
-    // `cat` echoes its stdin to stdout: proves the request's stdin buffer reaches the child and is
-    // closed (EOF), so `cat` exits.
+    // `cat` only exits once its stdin is closed, so this pins both the delivery and the EOF.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
     let mut client = ClientConnection::connect(host).expect("client handshake");
@@ -125,9 +124,9 @@ fn stdin_is_fed_to_the_command() {
 
 #[test]
 fn env_reaches_the_command_but_never_the_agents_own_process() {
-    // The two halves of the env contract in one run: the injected variable is visible to the
-    // spawned command, and it is set via `Command::env` only, `serve` runs in *this* process here,
-    // so if the agent ever `set_var`'d it, the assertion on our own environment would catch it.
+    // Both halves of the env contract: the injected variable reaches the spawned command, and it is set
+    // via `Command::env` only. `serve` runs in *this* process, so a `set_var` would be caught by the
+    // assertion on our own environment.
     let key = "BSX_TEST_ENV_SCOPE";
     assert!(
         std::env::var_os(key).is_none(),
@@ -212,10 +211,8 @@ fn injected_file_is_read_by_the_command_and_artifact_returned() {
 
 #[test]
 fn session_state_persists_across_connections() {
-    // The stateful-session contract at the agent layer: two connections served with the same
-    // session dir see one working directory, a file injected before the first exec, and a file
-    // that exec writes, are both still there for the second. (One-shot `serve` keeps its
-    // fresh-and-removed semantics; this is the `serve_session` path the in-VM binary runs.)
+    // The stateful-session contract: two connections served with the same session dir see one working
+    // directory, so both an injected file and one the first exec writes survive into the second.
     let dir = std::env::temp_dir().join(format!("bsx-session-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -281,10 +278,9 @@ fn session_state_persists_across_connections() {
 
 #[test]
 fn a_relative_program_built_in_the_session_runs_by_its_path() {
-    // Regression: the pre-flight program check must resolve a `/`-bearing relative program against
-    // the run's working dir (where the command runs), not the agent's own cwd. Exec 1 builds an
-    // executable `./tool` in the session dir; exec 2 runs it by that relative path and must not be
-    // falsely rejected as "no such binary".
+    // The pre-flight program check must resolve a `/`-bearing relative program against the run's working
+    // dir, not the agent's own cwd, or a `./tool` an earlier exec built is falsely rejected as "no such
+    // binary".
     let dir = std::env::temp_dir().join(format!("bsx-relprog-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
 
@@ -412,9 +408,8 @@ fn put_file_rejects_path_traversal() {
     }
     let result = agent.join().expect("agent thread");
     assert!(result.is_err(), "a traversing path must fail the request");
-    // Rejected must mean *not written*: a reject-after-write bug would pass the error asserts
-    // alone. The agent resolves relative paths against its cwd, so the escape would land one
-    // level up from the test's cwd.
+    // Rejected must mean *not written*, since a reject-after-write bug would pass the error asserts
+    // alone.
     assert!(
         !std::path::Path::new("../escape.txt").exists(),
         "the traversing path must be rejected before any write"
@@ -423,8 +418,8 @@ fn put_file_rejects_path_traversal() {
 
 #[test]
 fn bad_handshake_is_rejected_not_hung() {
-    // A peer that opens the connection and sends garbage (≥6 bytes, wrong magic) must make `serve`
-    // fail promptly, not block. No deadline needed: read_exact gets its 6 bytes and the magic fails.
+    // Garbage with a wrong magic must make `serve` fail promptly rather than block. No deadline needed:
+    // `read_exact` gets its 6 bytes and the magic check fails.
     let (mut host, guest) = UnixStream::pair().expect("socketpair");
     let agent = std::thread::spawn(move || bsx_guest_agent::serve(guest));
     host.write_all(b"XXXXXX not a handshake")
@@ -435,10 +430,9 @@ fn bad_handshake_is_rejected_not_hung() {
 
 #[test]
 fn stalled_host_does_not_wedge_the_guest() {
-    // A host that handshakes and requests, then STOPS reading, against a command that floods
-    // output. With a write deadline on the guest
-    // stream, `serve` must return an Err in bounded time (the pump's forward times out → drain-and-
-    // discard → child exits) rather than hang forever.
+    // A host that handshakes and requests, then stops reading, against a command that floods output.
+    // With a write deadline on the guest stream, `serve` must return an `Err` in bounded time rather
+    // than hang: the pump's forward times out, drains and discards, and the child exits.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     guest
         .set_write_timeout(Some(Duration::from_millis(200)))
@@ -478,13 +472,10 @@ fn stalled_host_does_not_wedge_the_guest() {
 
 #[test]
 fn a_host_that_stalls_mid_frame_is_a_bounded_typed_error() {
-    // The read-side twin of `stalled_host_does_not_wedge_the_guest`, pinning the caller's half of
-    // the crate's contract (deadlines are the transport owner's job, the crate arms none itself):
-    // with a read deadline armed on the guest stream, a host that goes silent mid-frame (handshake,
-    // then a partial request header, then nothing, the socket held open) is a typed error within
-    // the deadline, never a wedged agent. A trusted-but-dead host is the realistic failure here; a
-    // *hostile* host is out of the guest's threat model, so the per-read deadline is the right
-    // strength for this side.
+    // The read-side twin of `stalled_host_does_not_wedge_the_guest`, pinning the caller's half of the
+    // contract: deadlines are the transport owner's job, and the crate arms none itself. With a read
+    // deadline armed, a host that goes silent mid-frame is a typed error within the deadline. A
+    // trusted-but-dead host is the realistic failure; a hostile one is outside the guest's threat model.
     let (host, guest) = UnixStream::pair().expect("socketpair");
     guest
         .set_read_timeout(Some(Duration::from_millis(200)))

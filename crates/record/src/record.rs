@@ -1,16 +1,10 @@
 //! The fused per-run **audit record** and its pure builders.
 //!
-//! It defines the shape of "what a run did" as observed from *outside* the guest, and the
-//! aggregation that folds the three probes' raw output into it. The attach machinery that produces
-//! those inputs lives in `bsx-probes-loader`'s `observer`; keeping the record pure means its whole
-//! aggregation is unit-tested on the host gate with synthetic inputs, no KVM or caps.
-//!
-//! The record's **core is network + resources + denials**, the signals host-side eBPF observes
-//! strongly across the hardware boundary. [`host_syscalls`](RunRecord::host_syscalls) is the **VMM's
-//! host footprint**, explicitly *not* the guest's syscalls (a microVM services those in-guest).
-//! Every collection is deterministically sorted, so a record built from the same
-//! observations is byte-stable regardless of map-iteration order, the property the JSON
-//! output will rely on.
+//! Defines the shape of "what a run did" as observed from *outside* the guest, plus the aggregation
+//! that folds the probes' raw output into it. The attach machinery producing those inputs lives in
+//! `bsx-probes-loader`, so keeping this half pure is what lets the whole aggregation be unit-tested on
+//! the host gate with synthetic inputs, no KVM or caps. Every collection is deterministically sorted,
+//! so a record built from the same observations is byte-stable regardless of map-iteration order.
 
 use std::borrow::Cow;
 use std::collections::btree_map::BTreeMap;
@@ -23,41 +17,32 @@ use bsx_probes_common::{
 
 use crate::{NetStats, ResourceSummary};
 
-/// The cap on **distinct** notable syscalls kept in a footprint. Repetition is already collapsed into
-/// a hit count, so this bounds cardinality: a run that touches thousands of *different* paths keeps
-/// the first `MAX_NOTABLE` distinct ones **by arrival order** (the fold caps as events stream in;
-/// sorting happens at `finish`, after membership is settled) and counts the rest, never growing the
-/// record without bound.
+/// The cap on **distinct** notable syscalls kept in a footprint. Repetition is already collapsed into a
+/// hit count, so this bounds cardinality: a run touching thousands of different paths keeps the first
+/// `MAX_NOTABLE` by arrival order and counts the rest, never growing the record without bound.
 pub const MAX_NOTABLE: usize = 64;
 
-/// **What** a record is about and **when** it happened: the two questions a signature cannot answer.
+/// **What** a record is about and **when** it happened, both part of the signed bytes: a signature
+/// proves authenticity, not attribution, and a record that cannot be attributed cannot settle a dispute.
 ///
-/// A signature proves a record is authentic. It does not say which sandbox produced it, or when, so
-/// an operator holding two records could not tell them apart, and a record that cannot be attributed
-/// cannot settle a dispute. Both fields are therefore part of the signed bytes.
-///
-/// Deliberately **not** a tenant. The engine has no notion of one (that is the hoster's layer, a
-/// recorded non-goal); it reports the identity it actually minted, and the hoster maps that to
-/// whatever identity its own layer tracks.
+/// Deliberately **not** a tenant, which is the hoster's layer and a recorded non-goal. The engine reports
+/// the identity it minted and the hoster maps that onto whatever its own layer tracks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RecordSubject {
-    /// The sandbox's name, `RunningVm::name` (`bsx-<pid>-<seq>`). The same handle as its scratch
-    /// dir and its netns, so a record can be correlated with on-disk residue and with the host's
-    /// own view. Unique among live VMs; pair it with [`started_unix_ns`](Self::started_unix_ns)
-    /// for a durable identity, since pids are reused after a driver exits.
+    /// The sandbox's name (`bsx-<pid>-<seq>`), the same handle as its scratch dir and netns, so a record
+    /// correlates with on-disk residue. Unique among live VMs; pair it with
+    /// [`started_unix_ns`](Self::started_unix_ns) for a durable identity, since pids are reused.
     pub sandbox_id: String,
-    /// Wall-clock start of the run, nanoseconds since the Unix epoch. Distinct from
-    /// [`Timing`], which says how *long* the run took and never *when*: a record without this
-    /// cannot be placed on a timeline or correlated with anything else the host logged. `0` when
-    /// the host clock could not be read, the same fail-open honesty as [`RunRecord::coverage`].
+    /// Wall-clock start of the run, nanoseconds since the Unix epoch. Distinct from [`Timing`], which
+    /// says how *long* a run took and never *when*, so without this a record cannot be placed on a
+    /// timeline. `0` when the host clock could not be read.
     pub started_unix_ns: u64,
 }
 
 impl RecordSubject {
-    /// Name a record's subject. `started_unix_ns` is wall-clock nanoseconds since the Unix epoch;
-    /// pass `0` when the host clock could not be read, which reads as "unstamped" rather than as
-    /// the epoch.
+    /// Names a record's subject. Pass `0` for `started_unix_ns` when the host clock could not be read,
+    /// which reads as "unstamped" rather than as the epoch.
     #[must_use]
     pub fn new(sandbox_id: String, started_unix_ns: u64) -> Self {
         Self {
@@ -76,21 +61,19 @@ pub struct RunRecord {
     /// The guest's own network traffic on its tap, plus the blocked-egress trail. `None` when the
     /// sandbox had no NIC (nothing to observe), distinct from "observed, and it was empty".
     pub network: Option<NetSection>,
-    /// Host CPU (eBPF) + the cgroup's native memory/IO counters (reused verbatim from the resource meter).
+    /// Host CPU from eBPF, plus the cgroup's native memory and IO counters.
     pub resources: ResourceSummary,
     /// The VMM's **host** syscall footprint, not in-guest syscalls. Bounded.
     pub host_syscalls: SyscallFootprint,
-    /// Boot + exec wall time, supplied by the caller as plain [`Duration`]s (the record never depends
-    /// on `bsx` to learn them).
+    /// Boot and exec wall time, supplied by the caller as plain [`Duration`]s, so the record never
+    /// depends on `bsx` to learn them.
     pub timing: Timing,
-    /// Which axes were unavailable, and why, fail-open honesty, so a partial record is legible rather
-    /// than silently thin.
+    /// Which axes were unavailable, and why, so a partial record is legible rather than silently thin.
     pub coverage: Vec<AxisGap>,
 }
 
 impl RunRecord {
-    /// Assemble a record from already-collected parts. Pure, no eBPF. This is what the loader's
-    /// `SandboxProbes::collect` calls after reading the probes, and what the unit tests exercise
+    /// Assembles a record from already-collected parts. Pure, no eBPF, so the unit tests exercise it
     /// directly.
     #[must_use]
     pub fn from_parts(
@@ -112,8 +95,8 @@ impl RunRecord {
     }
 }
 
-/// The network axis: per-VM totals, the per-flow breakdown, and the denied-egress trail, all read
-/// from the one per-VM tap monitor, so they belong together.
+/// The network axis: per-VM totals, the per-flow breakdown, and the denied-egress trail, all read from
+/// the one per-VM tap monitor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NetSection {
@@ -121,53 +104,49 @@ pub struct NetSection {
     pub totals: NetStats,
     /// Per-flow byte/packet counters, sorted deterministically by destination then source.
     pub flows: Vec<FlowRecord>,
-    /// The IPv6 per-flow breakdown (dual-stack), sorted the same way. Separate from
-    /// [`flows`](Self::flows) so a v4-only consumer is unaffected; [`totals`](Self::totals) sums both.
+    /// The IPv6 per-flow breakdown, sorted the same way. Separate from [`flows`](Self::flows) so a
+    /// v4-only consumer is unaffected; [`totals`](Self::totals) sums both.
     pub flows6: Vec<FlowRecord6>,
-    /// Destinations the egress policy blocked, with the dropped-packet count, the enforcement
-    /// audit trail folded in here. **Aggregated by destination** (one row per blocked endpoint,
-    /// summed across guest source ports) and sorted by that destination triple.
+    /// Destinations the egress policy blocked, with the dropped-packet count. **Aggregated by
+    /// destination**, one row per blocked endpoint summed across guest source ports.
     pub denials: Vec<DenialRecord>,
     /// The IPv6 blocked-destination trail, aggregated and sorted like [`denials`](Self::denials).
     pub denials6: Vec<DenialRecord6>,
-    /// New flows the kernel could not admit because the flow table was full: their traffic is
-    /// **absent** from [`flows`](Self::flows) and undercounted in [`totals`](Self::totals). Nonzero
-    /// means the section is [`truncated`](Self::truncated), a guest churning source ports must not
-    /// be able to evict its real traffic from its own record *silently*.
+    /// New flows a full flow table could not admit, so their traffic is **absent** from
+    /// [`flows`](Self::flows) and undercounted in [`totals`](Self::totals). Nonzero means the section is
+    /// [`truncated`](Self::truncated), since a guest churning source ports must not be able to evict its
+    /// real traffic from its own record silently.
     pub dropped_flows: u64,
-    /// The [`dropped_flows`](Self::dropped_flows) twin for the denial trail: denied packets whose
-    /// destination row a full map could not record (the packets were still dropped at the tap;
-    /// only the audit row is missing).
+    /// The [`dropped_flows`](Self::dropped_flows) twin for the denial trail. The packets were still
+    /// dropped at the tap; only the audit row is missing.
     pub dropped_denials: u64,
-    /// The egress policy in force, read back from the kernel, and the route the guest was given.
-    /// `None` when the posture was not read, which is what a section built without
-    /// [`with_posture`](Self::with_posture) reports.
+    /// The egress policy in force, read back from the kernel, and the route the guest was given. `None`
+    /// when the posture was not read.
     ///
-    /// Without this a record cannot distinguish an unpoliced run from a policed one: zero flows and
-    /// zero denials is the same shape whether every destination was allowed or none was. The denial
-    /// trail says what was refused, never what was permitted.
+    /// Without this a record cannot distinguish an unpoliced run from a policed one: zero flows and zero
+    /// denials is the same shape whether every destination was allowed or none was, because the denial
+    /// trail says what was refused and never what was permitted.
     pub posture: Option<EgressPosture>,
 }
 
 /// What the tap was actually enforcing, and whether the guest had a route to test it with.
 ///
-/// Read back from the kernel maps after attach rather than restated from the caller's request, so
-/// it reports the rules the classifier will consult. The distinction is the point: a policy that
-/// never reached the map reads as absent here instead of as applied.
+/// Read back from the kernel maps after attach rather than restated from the caller's request, so a
+/// policy that never reached the map reads as absent here instead of as applied.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct EgressPosture {
-    /// Whether the classifier is armed. `false` is observe-only, in which case every packet passes
-    /// no matter what [`allowed`](Self::allowed) holds, which is why this rides alongside the rules
-    /// rather than being inferred from a non-empty list.
+    /// Whether the classifier is armed. `false` is observe-only, where every packet passes no matter
+    /// what [`allowed`](Self::allowed) holds, which is why this rides alongside the rules rather than
+    /// being inferred from a non-empty list.
     pub enforcing: bool,
     /// The live IPv4 rules the kernel holds, in slot order.
     pub allowed: Vec<PolicyRule>,
     /// The live IPv6 rules, in slot order.
     pub allowed6: Vec<PolicyRule6>,
-    /// The default route the driver configured for the guest, when it configured one. `None` is the
-    /// sealed posture: the guest can address nothing beyond the host end of its link, so an
-    /// allowance naming anything further has nothing to act on.
+    /// The default route the driver configured for the guest, if any. `None` is the sealed posture,
+    /// where the guest can address nothing beyond the host end of its link, so an allowance naming
+    /// anything further has nothing to act on.
     pub gateway: Option<Ipv4Addr>,
 }
 
@@ -179,9 +158,8 @@ impl NetSection {
     /// meaningful (one row per blocked endpoint) and totally ordered. Total orders on both
     /// collections are what make the record byte-stable across map-iteration order.
     ///
-    /// `dropped_flows`/`dropped_denials` are the kernel's full-map drop counters: how many new
-    /// flows / denial rows could **not** be recorded. They ride the section (and mark it
-    /// [`truncated`](Self::truncated)) so a saturated table reads as truncated, never as complete.
+    /// `dropped_flows`/`dropped_denials` are the kernel's full-map drop counters, and they mark the
+    /// section [`truncated`](Self::truncated) so a saturated table never reads as complete.
     #[must_use]
     pub fn from_tap(
         flows: Vec<(FlowKey, FlowCounts)>,
@@ -195,16 +173,15 @@ impl NetSection {
             .map(|(key, counts)| FlowRecord { key, counts })
             .collect();
         flows.sort_by_key(|f| flow_order(&f.key));
-        // Aggregate denials by destination triple. A BTreeMap keyed on the triple both sums the
-        // per-source entries and yields them already in the total (dst, port, proto) order.
+        // A BTreeMap keyed on the destination triple both sums the per-source entries and yields them
+        // already in the total order.
         let mut by_dst: BTreeMap<(u32, u16, u8), u64> = BTreeMap::new();
         for (key, count) in denials {
             let slot = by_dst
                 .entry((key.dst_addr, key.dst_port, key.proto))
                 .or_insert(0);
-            // Saturate like the sibling totals/IO rollups: kernel-supplied counters are adversarial
-            // by the crate's bar, so a wraparound (debug panic / release wrap) must not corrupt the
-            // audit record.
+            // Kernel-supplied counters are adversarial by this crate's bar, so a wraparound must not
+            // corrupt the audit record.
             *slot = slot.saturating_add(count);
         }
         let denials = by_dst
@@ -228,25 +205,21 @@ impl NetSection {
         }
     }
 
-    /// Attach the egress posture read back from the kernel maps. A builder for the reason
-    /// [`with_v6`](Self::with_v6) is one: every caller that does not read the posture is untouched
-    /// and reports `None`, which says "not read" rather than implying an unpoliced run.
+    /// Attaches the egress posture read back from the kernel maps. A builder, so a caller that does not
+    /// read the posture reports `None`, which says "not read" rather than implying an unpoliced run.
     #[must_use]
     pub fn with_posture(mut self, posture: EgressPosture) -> Self {
         self.posture = Some(posture);
         self
     }
 
-    /// Fold the IPv6 half of the tap reads into a section built by [`from_tap`](Self::from_tap): the v6
-    /// flows and denials, sorted/aggregated exactly as the v4 ones, and their byte/packet counts summed
-    /// into [`totals`](Self::totals) so the rollup is dual-stack. A builder (not a `from_tap` parameter)
-    /// so every v4-only caller and test is untouched; a section with no v6 traffic just carries empty
-    /// v6 vectors. The v6 drop counters share the v4 `dropped_flows`/`dropped_denials` (a lost row is a
-    /// lost row, whichever family), so [`truncated`](Self::truncated) already covers both.
+    /// Folds the IPv6 half of the tap reads into a section built by [`from_tap`](Self::from_tap), sorted
+    /// and aggregated exactly as the v4 ones and summed into [`totals`](Self::totals) so the rollup is
+    /// dual-stack. A builder rather than a `from_tap` parameter, so a v4-only caller is untouched. The v6
+    /// drop counters share the v4 ones, so [`truncated`](Self::truncated) already covers both.
     ///
-    /// **Call once.** The v6 counts fold into [`totals`](Self::totals) while
-    /// [`flows6`](Self::flows6) is *replaced*, so a second call leaves the first call's bytes in the
-    /// rollup with its flows gone.
+    /// **Call once.** The v6 counts fold into [`totals`](Self::totals) while [`flows6`](Self::flows6) is
+    /// *replaced*, so a second call leaves the first call's bytes in the rollup with its flows gone.
     #[must_use]
     pub fn with_v6(
         mut self,
@@ -275,7 +248,7 @@ impl NetSection {
             .collect();
         recs.sort_by_key(|r| flow_order6(&r.key));
         self.flows6 = recs;
-        // Aggregate v6 denials by destination triple, like the v4 path.
+        // Aggregated by destination triple, like the v4 path.
         let mut by_dst: BTreeMap<([u8; 16], u16, u8), u64> = BTreeMap::new();
         for (key, count) in denials6 {
             let slot = by_dst
@@ -295,10 +268,8 @@ impl NetSection {
         self
     }
 
-    /// Whether the section is **incomplete**: the kernel dropped at least one flow or denial row
-    /// because its table was full, so [`flows`](Self::flows)/[`totals`](Self::totals)/
-    /// [`denials`](Self::denials) undercount what actually crossed the tap. A truncated section
-    /// also carries a coverage gap on the record, this is the per-section flag a consumer checks
+    /// Whether the section is **incomplete**, meaning a full kernel table dropped at least one flow or
+    /// denial row and the counts undercount what crossed the tap. The per-section flag a consumer checks
     /// before trusting the flow list as exhaustive.
     #[must_use]
     pub fn truncated(&self) -> bool {
@@ -317,7 +288,7 @@ pub struct FlowRecord {
 }
 
 /// One blocked **destination** and how many packets to it were dropped, summed across guest source
-/// ports (the source of a dropped probe is noise; the endpoint is the audit signal).
+/// ports, since the endpoint is the audit signal and the source of a dropped probe is noise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DenialRecord {
@@ -331,14 +302,14 @@ pub struct DenialRecord {
     pub count: u64,
 }
 
-/// Sort a flow by destination first (the meaningful axis), then source, the full 5-tuple, so the
-/// order is total and the record byte-stable.
+/// Sorts a flow by destination first, then source, over the full 5-tuple, so the order is total and the
+/// record byte-stable.
 fn flow_order(k: &FlowKey) -> (u32, u16, u8, u32, u16) {
     (k.dst_addr, k.dst_port, k.proto, k.src_addr, k.src_port)
 }
 
-/// The IPv6 twin of [`flow_order`]: destination-first total order over the v6 5-tuple (addresses
-/// compared as their network-order bytes, which orders them numerically since they're big-endian).
+/// The IPv6 twin of [`flow_order`]. Addresses compare as their network-order bytes, which orders them
+/// numerically since they are big-endian.
 fn flow_order6(k: &FlowKey6) -> ([u8; 16], u16, u8, [u8; 16], u16) {
     (k.dst_addr, k.dst_port, k.proto, k.src_addr, k.src_port)
 }
@@ -369,8 +340,8 @@ pub struct DenialRecord6 {
 }
 
 /// The VMM's host syscall footprint: exact counts plus a bounded, de-duplicated sample of notable
-/// events. Both dimensions of unboundedness are closed, repetition collapses into a hit count, and
-/// the distinct set is capped at [`MAX_NOTABLE`].
+/// events. Repetition collapses into a hit count and the distinct set is capped at [`MAX_NOTABLE`], so
+/// neither dimension grows without bound.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct SyscallFootprint {
@@ -378,23 +349,21 @@ pub struct SyscallFootprint {
     pub total: u64,
     /// Counts by syscall kind (an unrecognized discriminant lands in `unknown`).
     pub by_kind: SyscallCounts,
-    /// Distinct `(kind, detail)` events with a hit count, sorted deterministically, capped at
-    /// [`MAX_NOTABLE`] (kept by arrival order; see the const doc).
+    /// Distinct `(kind, detail)` events with a hit count, sorted deterministically and capped at
+    /// [`MAX_NOTABLE`].
     pub notable: Vec<NotableSyscall>,
     /// `true` if the cap was hit and events overflowed it.
     pub notable_truncated: bool,
-    /// **Events** (not distinct keys) that overflowed the notable cap: they arrived after it was full
-    /// and matched no stored entry, so every occurrence counts (one new path opened 1000 times past the
-    /// cap adds 1000). These are still tallied in [`by_kind`](Self::by_kind), whose per-kind totals sum
-    /// to [`total`](Self::total) exactly, always, and absent only from the detailed [`notable`](Self::notable)
-    /// sample. So the count is what the sample omits, making the truncation honest rather than silent.
-    /// 0 when not truncated.
+    /// **Events**, not distinct keys, that overflowed the notable cap: every occurrence counts, so one
+    /// new path opened 1000 times past the cap adds 1000. They are still tallied in
+    /// [`by_kind`](Self::by_kind), whose totals always sum to [`total`](Self::total) exactly, and absent
+    /// only from the [`notable`](Self::notable) sample, so this is exactly what the sample omits.
     pub overflow_events: u64,
 }
 
 impl SyscallFootprint {
-    /// Fold a sequence of events into a footprint, keeping only those in `cgroup_id`. The convenience
-    /// form of [`SyscallFold`] for callers (and the tests) that already have the events in hand.
+    /// Folds a sequence of events into a footprint, keeping only those in `cgroup_id`. The convenience
+    /// form of [`SyscallFold`] for callers that already have the events in hand.
     #[must_use]
     pub fn from_events<'a>(
         cgroup_id: u64,
@@ -408,8 +377,8 @@ impl SyscallFootprint {
     }
 }
 
-/// Counts of the host syscalls the probes trace, by kind. Fixed fields, so it's deterministic by
-/// construction (no ordering to stabilize).
+/// Counts of the host syscalls the probes trace, by kind. Fixed fields, so it is deterministic by
+/// construction with no ordering to stabilize.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct SyscallCounts {
@@ -423,10 +392,10 @@ pub struct SyscallCounts {
     pub unknown: u64,
 }
 
-/// A notable host syscall: its kind, the decoded detail (an opened/exec'd path, or a connect target),
-/// the `comm` that made it, and how many times this exact `(kind, detail)` occurred. When more than
-/// one `comm` produced the same `(kind, detail)`, the **lexicographically smallest** is kept, an
-/// order-independent choice, so the record stays byte-stable regardless of ring-buffer arrival order.
+/// A notable host syscall: its kind, the decoded detail, the `comm` that made it, and how many times this
+/// exact `(kind, detail)` occurred. Where several `comm`s produced the same pair the **lexicographically
+/// smallest** is kept, an order-independent choice, so the record stays byte-stable regardless of
+/// ring-buffer arrival order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct NotableSyscall {
@@ -440,48 +409,45 @@ pub struct NotableSyscall {
     pub comm: String,
     /// How many times this exact `(kind, detail)` occurred.
     pub hits: u64,
-    /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix**, not
-    /// the path the guest used (see `SyscallEvent::detail_truncated`). Two consequences a reader
-    /// has to know about: the row names something that was never opened under that name, and rows
-    /// alias, since distinct paths sharing a prefix fold into one entry, making [`hits`](Self::hits)
-    /// a count of events rather than of one path's opens.
+    /// The path outran the probe's capture buffer, so [`detail`](Self::detail) is a **prefix** rather
+    /// than the path the guest used. Two consequences: the row names something never opened under that
+    /// name, and distinct paths sharing a prefix alias into one entry, making [`hits`](Self::hits) a count
+    /// of events rather than of one path's opens.
     pub truncated: bool,
 }
 
-/// A streaming accumulator for [`SyscallFootprint`]: [`record`](Self::record) it per event (e.g. from
-/// `SyscallTracer::drain`'s callback), then [`finish`](Self::finish). Bounds memory *during* the fold,
-/// once [`MAX_NOTABLE`] distinct events are held, further distinct events are counted, not stored.
+/// A streaming accumulator for [`SyscallFootprint`]: [`record`](Self::record) per event, then
+/// [`finish`](Self::finish). Bounds memory *during* the fold, since past [`MAX_NOTABLE`] distinct events
+/// further ones are counted rather than stored.
 #[derive(Debug, Clone)]
 pub struct SyscallFold {
     cgroup_id: u64,
     total: u64,
     by_kind: SyscallCounts,
-    /// Keyed `kind → detail → accumulator` (the same `(kind, detail)` dedup as a flat pair key,
-    /// nested so [`record`](Self::record) can probe the inner map with a **borrowed** `&str`: the
-    /// common repeat path allocates nothing, the owned `String` is built only on a vacant under-cap
-    /// insert). Both `BTreeMap` levels keep the total `(kind, detail)` order, so
+    /// Keyed `kind → detail → accumulator`, nested rather than a flat pair key so
+    /// [`record`](Self::record) can probe the inner map with a **borrowed** `&str` and the common repeat
+    /// path allocates nothing. Both `BTreeMap` levels keep the total order, so
     /// [`finish`](Self::finish) flattens already-sorted.
     notable: BTreeMap<Syscall, BTreeMap<String, NotableAccum>>,
-    /// Total distinct `(kind, detail)` entries held across the nested map, the [`MAX_NOTABLE`] cap
-    /// check (the outer map's `len()` counts kinds, not entries).
+    /// Total distinct `(kind, detail)` entries across the nested map, for the [`MAX_NOTABLE`] check,
+    /// since the outer map's `len()` counts kinds rather than entries.
     distinct: usize,
     overflow_events: u64,
 }
 
-/// The per-`(kind, detail)` accumulator. It carries no `kind`: the map's outer key is that fact,
-/// and a copy here would be a second place for it to be wrong.
+/// The per-`(kind, detail)` accumulator. It carries no `kind`, since the map's outer key is that fact and
+/// a copy here would be a second place for it to be wrong.
 #[derive(Debug, Clone)]
 struct NotableAccum {
     comm: String,
     hits: u64,
-    /// Sticky: set by *any* event folded into this entry. A truncated capture and a complete one
-    /// can share a key (a path of exactly the cap length renders identically to a longer path's
-    /// prefix), and the honest merge of "certain" with "cut" is "cut".
+    /// Sticky, set by *any* event folded into this entry: a truncated capture and a complete one can share
+    /// a key, and the honest merge of "certain" with "cut" is "cut".
     truncated: bool,
 }
 
 impl SyscallFold {
-    /// Start a fold scoped to one sandbox's cgroup. Events from any other cgroup are ignored.
+    /// Starts a fold scoped to one sandbox's cgroup. Events from any other cgroup are ignored.
     #[must_use]
     pub fn new(cgroup_id: u64) -> Self {
         Self {
@@ -494,7 +460,7 @@ impl SyscallFold {
         }
     }
 
-    /// Fold one event in (a no-op if it belongs to a different cgroup).
+    /// Folds one event in, a no-op if it belongs to a different cgroup.
     pub fn record(&mut self, ev: &SyscallEvent) {
         if ev.cgroup_id != self.cgroup_id {
             return;
@@ -503,7 +469,7 @@ impl SyscallFold {
         let kind = match ev.kind() {
             Some(k) => k,
             None => {
-                // Unknown discriminant: counted, but no typed notable entry (its detail is unreliable).
+                // Counted, but no notable entry: an unknown discriminant's detail is unreliable.
                 self.by_kind.unknown += 1;
                 return;
             }
@@ -513,21 +479,17 @@ impl SyscallFold {
             Syscall::Openat => self.by_kind.openat += 1,
             Syscall::Connect => self.by_kind.connect += 1,
         }
-        // Probe with the borrowed render (`Cow`): the common repeat path (`get_mut` by `&str`)
-        // allocates nothing per event; the owned `String` key (and the comm) are built only on a
-        // vacant, under-cap insert. This fold runs once per streamed ring-buffer event, so a
-        // per-repeat allocation would be the record path's one avoidable hot-loop cost.
+        // Probe with the borrowed render, so the common repeat path allocates nothing and the owned key is
+        // built only on a vacant under-cap insert. This runs once per streamed ring-buffer event.
         let detail = ev.detail_display_cow();
         let inner = self.notable.entry(kind).or_default();
         if let Some(acc) = inner.get_mut(detail.as_ref()) {
             acc.hits += 1;
             acc.truncated |= ev.detail_truncated();
-            // Attribute the lexicographically smallest `comm`, not the first to arrive. The same
-            // `(kind, detail)` is commonly produced by more than one process (e.g. many binaries
-            // `openat` `/etc/ld.so.cache`), so a first-arrival `comm` would make the record depend on
-            // ring-buffer stream order, breaking the "same observations -> byte-stable record"
-            // property signing relies on. The compare borrows `comm` (no alloc for a valid-UTF-8
-            // comm, the common case); the owned copy is taken only on the rare replace.
+            // The smallest `comm` rather than the first to arrive: several processes commonly produce the
+            // same `(kind, detail)`, so a first-arrival choice would make the record depend on
+            // ring-buffer stream order and break the byte-stability signing rests on. The compare borrows
+            // `comm`; the owned copy is taken only on the rare replace.
             let comm = ev.comm_lossy();
             if comm.as_ref() < acc.comm.as_str() {
                 acc.comm = comm.into_owned();
@@ -547,10 +509,8 @@ impl SyscallFold {
         }
     }
 
-    /// Finalize into a sorted, capped [`SyscallFootprint`]. Flattening the nested `BTreeMap`s
-    /// yields `(kind, detail)` in total order already (both levels are ordered, and an entry per
-    /// `(kind, detail)` is unique, so no further sort key is needed), the same deterministic order
-    /// the flat pair key produced.
+    /// Finalizes into a sorted, capped [`SyscallFootprint`]. Flattening the nested `BTreeMap`s yields
+    /// `(kind, detail)` in total order already, so no further sort key is needed.
     #[must_use]
     pub fn finish(self) -> SyscallFootprint {
         let notable: Vec<NotableSyscall> = self
@@ -577,8 +537,8 @@ impl SyscallFold {
         }
     }
 
-    /// Produce a live non-destructive [`SyscallFootprint`] snapshot from references without cloning
-    /// the outer or inner `BTreeMap` nodes.
+    /// Produces a live non-destructive [`SyscallFootprint`] snapshot from references, without cloning the
+    /// `BTreeMap` nodes.
     #[must_use]
     pub fn snapshot(&self) -> SyscallFootprint {
         let notable: Vec<NotableSyscall> = self
@@ -604,13 +564,11 @@ impl SyscallFold {
     }
 }
 
-/// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from
-/// `Sandbox::boot_latency` and `RunResult::metrics.wall`, so the record never depends on `bsx`.
+/// Host-measured timing for one run, as plain [`Duration`]s the caller lifts from its own measurements,
+/// so the record never depends on `bsx`.
 ///
-/// A further measurement lands as a new field plus a `with_*` method, never as a wider
-/// [`new`](Self::new): the two-argument constructor is the pair every run has, and
-/// [`Default`] (all-zero, "unmeasured", the [`RecordSubject::started_unix_ns`] posture) is the
-/// starting point for a caller that has only some of them.
+/// A further measurement lands as a new field plus a `with_*` method, never a wider [`new`](Self::new):
+/// the two-argument constructor is the pair every run has, and [`Default`] is all-zero "unmeasured".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct Timing {
@@ -621,15 +579,15 @@ pub struct Timing {
 }
 
 impl Timing {
-    /// The boot latency and the exec wall time, the two every run measures.
+    /// The boot latency and the exec wall time, the two measurements every run has.
     #[must_use]
     pub fn new(boot: Duration, exec_wall: Duration) -> Self {
         Self { boot, exec_wall }
     }
 }
 
-/// One observation axis that was unavailable, and why, carried in [`RunRecord::coverage`] so a
-/// fail-open partial record explains its own gaps instead of looking complete.
+/// One observation axis that was unavailable, and why, carried in [`RunRecord::coverage`] so a partial
+/// record explains its own gaps instead of looking complete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum AxisGap {
@@ -660,10 +618,8 @@ mod tests {
 
     #[test]
     fn a_path_cut_at_the_cap_is_marked_not_passed_off_as_whole() {
-        // The attack this closes: without the flag a path longer than the probe's buffer records
-        // as its own prefix, in exactly the shape of a path that fit, so the record would assert
-        // an open that never happened. Simulate what the probe produces for an over-long path (a full buffer,
-        // NUL-terminated inside it, so `detail_len` is the cap minus the NUL).
+        // Without the flag, a path longer than the probe's buffer records as its own prefix in exactly the
+        // shape of a path that fit, so the record would assert an open that never happened.
         let long = vec![b'a'; bsx_probes_common::DETAIL_CAP - 1];
         let mut fold = SyscallFold::new(CG);
         fold.record(&ev(Syscall::Openat as u32, CG, &long, "sh"));
@@ -696,9 +652,9 @@ mod tests {
 
     #[test]
     fn a_truncated_row_stays_truncated_when_a_complete_capture_joins_it() {
-        // Distinct paths sharing a prefix fold into one row, so a row can mix a cut capture with an
-        // exactly-fitting one. "Certain" merged with "cut" is "cut": the alternative lets one
-        // complete capture clear the doubt on a row that also stands for something longer.
+        // Distinct paths sharing a prefix fold into one row, so "certain" merged with "cut" must be
+        // "cut": the alternative lets one complete capture clear the doubt on a row that also stands for
+        // something longer.
         let at_cap = vec![b'a'; bsx_probes_common::DETAIL_CAP - 1];
         let mut fold = SyscallFold::new(CG);
         fold.record(&ev(Syscall::Openat as u32, CG, &at_cap, "sh"));
@@ -710,8 +666,8 @@ mod tests {
 
     #[test]
     fn a_connect_is_never_reported_as_a_truncated_path() {
-        // `connect` fills `detail_len` from the sockaddr snapshot, not a string read, so the
-        // cap-length test must not apply to it at all.
+        // `connect` fills `detail_len` from the sockaddr snapshot rather than a string read, so the
+        // cap-length test must not apply to it.
         let sockaddr = [2u8, 0, 0, 80, 127, 0, 0, 1];
         let entry = {
             let mut fold = SyscallFold::new(CG);
@@ -741,8 +697,7 @@ mod tests {
         assert_eq!(f.by_kind.openat, 2);
         assert_eq!(f.by_kind.connect, 1);
         assert_eq!(f.by_kind.unknown, 1);
-        // The unknown event produces no notable entry (its detail is unreliable): exactly the four
-        // known-kind events survive as notables.
+        // The unknown event produces no notable entry, so exactly the four known kinds survive.
         assert_eq!(
             f.notable.len(),
             4,
@@ -751,14 +706,13 @@ mod tests {
         );
     }
 
-    /// `notable` is ordered by `(kind, detail)`, and the *kind* half is now [`Syscall`]'s own
-    /// `Ord` rather than a hand-rolled discriminant key. That ordering sits inside the signed
-    /// bytes, so pin it against what actually decides it: the enum's **explicit discriminants**,
-    /// which are the wire values the probe writes. Source order is not what is being asserted, and
-    /// reordering the arms alone is correctly a no-op; changing a discriminant is what must fail.
+    /// `notable`'s order sits inside the signed bytes, and its *kind* half is [`Syscall`]'s own `Ord`, so
+    /// this pins it against what decides it: the enum's **explicit discriminants**, which are the wire
+    /// values the probe writes. Reordering the arms is correctly a no-op; changing a discriminant must
+    /// fail.
     #[test]
     fn notable_kinds_are_ordered_by_the_syscall_discriminants() {
-        // Fed in descending discriminant order, so arrival order cannot be what produces the result.
+        // Fed in descending discriminant order, so arrival order cannot produce the result.
         let events = [
             ev(
                 Syscall::Connect as u32,
@@ -801,9 +755,8 @@ mod tests {
         for _ in 0..1000 {
             fold.record(&ev(Syscall::Openat as u32, CG, b"/etc/hostname", "sh"));
         }
-        // MAX_NOTABLE + 10 more *distinct* paths: the cap holds, the overflow is counted, not stored.
-        // `/etc/hostname` already took one slot, so of the (1 + MAX_NOTABLE + 10) distinct events
-        // offered, MAX_NOTABLE are kept and 11 events overflow (each offered exactly once here).
+        // `/etc/hostname` already took a slot, so of the `1 + MAX_NOTABLE + 10` distinct events offered,
+        // `MAX_NOTABLE` are kept and 11 overflow.
         for i in 0..(MAX_NOTABLE + 10) {
             let path = format!("/f/{i}");
             fold.record(&ev(Syscall::Openat as u32, CG, path.as_bytes(), "sh"));
@@ -825,10 +778,9 @@ mod tests {
 
     #[test]
     fn notable_comm_is_independent_of_arrival_order() {
-        // The same (kind, detail) is commonly produced by more than one process. The recorded `comm`
-        // must not depend on which event the ring buffer delivered first, or the signed record would
-        // vary by stream order, breaking the "same observations -> byte-stable record" property.
-        // Two comms, both orders: the footprints must be byte-identical, and the smaller comm wins.
+        // The recorded `comm` must not depend on which event the ring buffer delivered first, or the signed
+        // record would vary by stream order. Two comms in both orders must give byte-identical footprints,
+        // with the smaller comm winning.
         let a = SyscallFootprint::from_events(
             CG,
             &[
@@ -852,11 +804,10 @@ mod tests {
         );
     }
 
-    /// [`SyscallFold::snapshot`] is the live-trace read (the daemon's `trace` verb, the watch
-    /// TUI) and [`SyscallFold::finish`] is the record's; they are two renderings of one fold and
-    /// must say the same thing. `finish` is pinned by the goldens, so pin `snapshot` to `finish`:
-    /// a fold mid-stream, with a repeat, a truncation, an overflow, and an unknown discriminant in
-    /// play, must snapshot to exactly the footprint finishing it would produce.
+    /// [`SyscallFold::snapshot`] is the live-trace read and [`SyscallFold::finish`] the record's, two
+    /// renderings of one fold that must say the same thing. `finish` is pinned by the goldens, so this pins
+    /// `snapshot` to `finish` with a repeat, a truncation, an overflow, and an unknown discriminant in
+    /// play.
     #[test]
     fn a_snapshot_reads_what_finish_would_write() {
         let mut fold = SyscallFold::new(CG);
@@ -892,15 +843,15 @@ mod tests {
             let path = format!("/cap/{i}");
             fold.record(&ev(Syscall::Openat as u32, CG, path.as_bytes(), "sh"));
         }
-        // One *new* path, opened 3 times past the cap: every occurrence overflows (the field counts
-        // events, not distinct keys, that is its documented meaning).
+        // Every occurrence of a new path past the cap overflows, since the field counts events rather than
+        // distinct keys.
         for _ in 0..3 {
             fold.record(&ev(Syscall::Openat as u32, CG, b"/late/arrival", "sh"));
         }
-        // A repeat of a *stored* path still lands on its entry, not in the overflow.
+        // A repeat of a *stored* path lands on its entry rather than the overflow.
         fold.record(&ev(Syscall::Openat as u32, CG, b"/cap/0", "sh"));
-        // An unknown-discriminant event: tallied in `by_kind.unknown` + `total`, but never notable and
-        // never overflow (it has no notable key at all), so `by_kind` stays exact while `notable` doesn't.
+        // An unknown discriminant is tallied in `by_kind.unknown` and `total` but has no notable key at
+        // all, so it is neither notable nor overflow.
         fold.record(&ev(999, CG, b"", "sh"));
         let f = fold.finish();
         assert_eq!(f.notable.len(), MAX_NOTABLE);
@@ -910,17 +861,17 @@ mod tests {
         // `by_kind` is always exact and complete, its per-kind totals sum to `total`, cap or not.
         let by_kind = f.by_kind.execve + f.by_kind.openat + f.by_kind.connect + f.by_kind.unknown;
         assert_eq!(by_kind, f.total);
-        // `notable`'s hits are the *known* events the sample kept: total minus the overflow it omitted
-        // and minus the unknowns it never had a key for.
+        // `notable`'s hits are the known events the sample kept: total minus the overflow it omitted and the
+        // unknowns it never had a key for.
         let attributed: u64 = f.notable.iter().map(|n| n.hits).sum();
         assert_eq!(attributed, f.total - f.overflow_events - f.by_kind.unknown);
     }
 
     #[test]
     fn denials_aggregate_by_destination_and_stay_byte_stable() {
-        // The kernel keys DENIALS by the full 5-tuple, so retries from different guest source ports
-        // arrive as separate entries. The record aggregates them: one row per blocked endpoint,
-        // stable across input (map-iteration) order.
+        // The kernel keys denials by the full 5-tuple, so retries from different source ports arrive
+        // separately and the record must aggregate them into one row per endpoint, stable across
+        // map-iteration order.
         let dst = u32::from_be_bytes([9, 9, 9, 9]);
         let d = |sport: u16, count: u64| {
             (
@@ -946,9 +897,8 @@ mod tests {
 
     #[test]
     fn adversarial_denial_counts_saturate_instead_of_wrapping() {
-        // Kernel-supplied counters are adversarial by this crate's bar: two near-max per-source
-        // counts summing over `u64::MAX` must clamp at the ceiling, never wrap to a small number
-        // that would make a flood read as a trickle in the audit record.
+        // Kernel-supplied counters are adversarial by this crate's bar, so two near-max counts must clamp
+        // at the ceiling rather than wrap to a small number that reads a flood as a trickle.
         let dst = u32::from_be_bytes([9, 9, 9, 9]);
         let d = |sport: u16, count: u64| {
             (
@@ -1021,9 +971,8 @@ mod tests {
 
     #[test]
     fn concurrent_folds_stay_independent() {
-        // The shared tracer drains one interleaved stream and routes each event to its cgroup's
-        // fold. Mirror that routing here to prove two concurrent sandboxes never contaminate each other:
-        // each fold sees only its own cgroup, and one collecting doesn't disturb the other.
+        // The shared tracer drains one interleaved stream and routes each event to its cgroup's fold, so
+        // mirror that routing: each fold must see only its own cgroup.
         const A: u64 = 0xA;
         const B: u64 = 0xB;
         let mut fa = SyscallFold::new(A);
@@ -1044,7 +993,7 @@ mod tests {
         }
         let a = fa.finish();
         let b = fb.finish();
-        // A saw only its three opens (two distinct, one repeated); nothing of B's leaked in.
+        // A saw only its own three opens, two distinct and one repeated.
         assert_eq!(a.total, 3);
         assert_eq!(a.by_kind.openat, 3);
         assert_eq!(a.by_kind.execve, 0);
@@ -1065,8 +1014,7 @@ mod tests {
     }
 
     /// A flow to `dst:dport` from the fixed guest address, over the shared [`crate::testutil::flow`]
-    /// builder rather than a second one: a private copy here is what `testutil` exists to prevent,
-    /// and its counters had already drifted from the shared ones.
+    /// builder rather than a second one, since a private copy here is what `testutil` exists to prevent.
     fn flow(dst: [u8; 4], dport: u16) -> (FlowKey, FlowCounts) {
         crate::testutil::flow(
             [10, 200, 0, 2],
@@ -1101,9 +1049,8 @@ mod tests {
         );
         assert_eq!(a, b); // same flows, different input order → identical section
         assert_eq!(a.flows[0].key.dst_addr, u32::from_be_bytes([1, 1, 1, 1]));
-        // A full kernel table marks the section truncated: either counter alone is enough, and the
-        // healthy shape (0/0) reads complete. This is the honest-loss contract of the denial
-        // trail: a guest churning source ports can fill the table but not silence the loss.
+        // Either drop counter alone marks the section truncated, and the healthy `0/0` shape reads
+        // complete, so a guest churning source ports can fill the table but not silence the loss.
         assert!(!a.truncated());
         assert!(NetSection::from_tap(vec![], totals, vec![], 1, 0).truncated());
         assert!(NetSection::from_tap(vec![], totals, vec![], 0, 1).truncated());
@@ -1174,9 +1121,9 @@ mod tests {
         assert_eq!(record.timing, timing);
     }
 
-    /// `Timing` is caller-constructed and `#[non_exhaustive]`, so a caller outside this crate
-    /// reaches it only through these two doors. Pin what each one puts where: `new` is positional,
-    /// and swapping its arguments is the silent failure the assertion below exists to catch.
+    /// `Timing` is caller-constructed and `#[non_exhaustive]`, so a caller outside this crate reaches it
+    /// only through these two doors. `new` is positional, and swapping its arguments is the silent failure
+    /// this catches.
     #[test]
     fn timing_is_reachable_by_constructor_and_default_only() {
         let t = Timing::new(Duration::from_millis(88), Duration::from_millis(9));
@@ -1190,8 +1137,7 @@ mod tests {
             Duration::from_millis(9),
             "exec_wall is the second argument"
         );
-        // All-zero reads as "unmeasured", the starting point for a caller that has only some of
-        // the measurements; a future field joins it without touching this assertion.
+        // All-zero reads as "unmeasured", the starting point for a caller with only some measurements.
         assert_eq!(
             Timing::default(),
             Timing::new(Duration::ZERO, Duration::ZERO)

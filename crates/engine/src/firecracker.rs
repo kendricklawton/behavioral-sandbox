@@ -637,13 +637,10 @@ mod tests {
 
     #[test]
     fn a_drip_feeding_peer_trips_the_whole_response_deadline() {
-        // The finding: a per-read `SO_RCVTIMEO` is reset by every byte, so a peer dripping bytes
-        // faster than the timeout but never completing the response would never trip it and would
-        // hold `request` open indefinitely. `DeadlineReader` bounds the *sum* of reads by one
-        // deadline, so a drip that never finishes still fails, at the deadline, regardless of the
-        // per-byte interval. Prove it: a peer sends a byte every 20 ms forever (never a full
-        // response), against a 200 ms deadline. A per-read scheme would never fire (each byte lands
-        // well inside any per-read window); the deadline scheme must.
+        // A per-read `SO_RCVTIMEO` is reset by every byte, so a peer dripping faster than the timeout but
+        // never completing the response holds `request` open indefinitely. `DeadlineReader` bounds the
+        // *sum* of reads by one deadline, so a drip that never finishes still fails at the deadline. Here
+        // a peer sends a byte every 20 ms against a 200 ms deadline: a per-read scheme would never fire.
         use std::io::Write;
         use std::os::unix::net::UnixStream;
         let (client, mut server) = UnixStream::pair().expect("socketpair");

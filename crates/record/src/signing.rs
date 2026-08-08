@@ -1,31 +1,22 @@
 //! Record integrity: an `ed25519` **detached** signature over the canonical audit-record bytes, so a
-//! consumer can detect **post-hoc alteration** of a stored or transmitted record without trusting the
-//! host, operator, or transport that relayed it. The signing key is **host-side**: the
-//! guest never sees it, exactly like the eBPF probes it complements.
+//! consumer can detect post-hoc alteration without trusting the host, operator, or transport that
+//! relayed it. The signing key is host-side; the guest never sees it.
 //!
-//! **What is signed.** The exact bytes of [`RunRecord::to_json`](crate::RunRecord) (the deterministic
-//! JSON). Because those bytes are byte-stable, a verifier reconstructs the signed
-//! message exactly, so a single flipped byte fails the check.
-//!
-//! **The envelope.** Signing wraps the record in a schema-2 delivery surface:
-//! `{"schema":2,"key_id":"<hex>","signature":"<hex>","record":"<canonical record JSON>"}`. The record
-//! rides as an **embedded string**, not a nested object, on purpose: a string value survives a
-//! `serde` round-trip byte-for-byte (the wire `trace` reply re-serializes the envelope), where a
-//! re-parsed nested object would not, and the signed bytes must not change in flight. `schema` here is
-//! the *delivery* surface (v1 was the bare record; v2 is this envelope); the record keeps its own
-//! `schema` inside the string ([`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION)).
-//!
-//! **The session hash-chain.** A record can also commit to the previous one: a chained envelope adds
-//! a `prev` field (the [`record_hash`] of the prior record) and signs `prev + "\n" + canonical`, so a
-//! *sequence* is tamper-evident as a whole, [`verify_chain`] rejects a reordered, inserted, or
-//! deleted record, not just a single-record edit. Off for a one-shot run (no `prev`, identical to the
-//! single-record envelope); on for a session, which threads the chain across its records. (Truncating
-//! the *tail* of a chain is undetectable without an external anchor, the append-only limitation.)
-//!
-//! **The boundary.** The trust root is the host signing key. This detects alteration
-//! *after* the producing host; it does **not** protect against a fully-compromised host, which can
-//! sign a consistent lie. Key custody and rotation are the hoster's; this module only signs with a
-//! given key and verifies against a trusted set, keyed by `key_id`.
+//! - **What is signed:** the exact bytes of [`RunRecord::to_json`](crate::RunRecord). Those bytes are
+//!   byte-stable, so a verifier reconstructs the signed message exactly and one flipped byte fails.
+//! - **The envelope:**
+//!   `{"schema":2,"key_id":"<hex>","signature":"<hex>","record":"<canonical record JSON>"}`. The record
+//!   rides as an **embedded string** rather than a nested object, because a string value survives a
+//!   `serde` round-trip byte-for-byte where a re-parsed object would not, and the signed bytes must not
+//!   change in flight. This `schema` is the *delivery* surface; the record keeps its own inside the
+//!   string.
+//! - **The session hash-chain.** A chained envelope adds a `prev` field (the [`record_hash`] of the
+//!   prior record) and signs `prev + "\n" + canonical`, so [`verify_chain`] rejects a reordered,
+//!   inserted, or deleted record and not just a single-record edit. Off for a one-shot run, on for a
+//!   session. Truncating the *tail* of a chain is undetectable without an external anchor.
+//! - **The boundary.** The trust root is the host signing key, so this detects alteration *after* the
+//!   producing host and not a fully-compromised host, which can sign a consistent lie. Key custody and
+//!   rotation are the hoster's.
 
 use std::fmt;
 use std::fmt::Write as _;
@@ -45,32 +36,29 @@ use zeroize::Zeroizing;
 
 use crate::RunRecord;
 
-/// The version of the **signed delivery surface**: the `schema` field of the signature envelope. v1
-/// was the bare record; v2 wraps it in `{schema, key_id, signature, record}`. [`verify`] refuses any
-/// other number ([`VerifyError::Schema`]) before it reads a field, so this is what a consumer holds
-/// a *readable* envelope by; the record inside carries its own
-/// [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION).
+/// The version of the **signed delivery surface**, the envelope's own `schema` field. [`verify`] refuses
+/// any other number before it reads a field, so this is what holds an envelope *readable*; the record
+/// inside carries its own [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION).
 pub const SIGNED_RECORD_SCHEMA_VERSION: u32 = 2;
 
-/// The most bytes [`verify`] accepts as an envelope. The verifier is where attacker-relayed bytes
-/// enter the host (a record arrives via an untrusted transport by design), so its decode is bounded
-/// like every other untrusted input.
+/// The most bytes [`verify`] accepts as an envelope. The verifier is where attacker-relayed bytes enter
+/// the host, since a record arrives over an untrusted transport by design, so its decode is bounded like
+/// every other untrusted input.
 ///
-/// The bound is headroom rather than a budget, but what keeps a produced envelope under it is not
-/// in this crate: [`MAX_NOTABLE`](crate::MAX_NOTABLE) caps the syscall sample here, while the flow,
-/// denial and policy vectors are plain `Vec`s bounded only by the sizes of the kernel maps the
-/// loader read them from. So this number is not held against the producer by anything; it exists to
-/// stop an attacker's envelope, and a producer that outgrew it would be a bug found at verify time.
+/// Headroom rather than a budget: [`MAX_NOTABLE`](crate::MAX_NOTABLE) caps the syscall sample, but the
+/// flow, denial, and policy vectors are bounded only by the kernel maps the loader read them from. So
+/// nothing holds a *producer* to this number, and one that outgrew it would be a bug found at verify
+/// time.
 pub const MAX_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 
-/// A host signing key (an `ed25519` keypair). Held host-side; the guest never sees it. Sign a record
-/// to produce the envelope; hand [`verifying_key`](Self::verifying_key) to [`verify`] as a trusted key.
+/// A host signing key (an `ed25519` keypair), held host-side where the guest never sees it. Hand
+/// [`verifying_key`](Self::verifying_key) to [`verify`] as a trusted key.
 pub struct HostKey {
     signing: SigningKey,
 }
 
 impl fmt::Debug for HostKey {
-    /// Never print the secret; the `key_id` (public) identifies the key in logs.
+    /// Never prints the secret; the public `key_id` identifies the key in logs.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HostKey")
             .field("key_id", &self.key_id())
@@ -79,9 +67,8 @@ impl fmt::Debug for HostKey {
 }
 
 impl HostKey {
-    /// Build a key from a 32-byte `ed25519` seed (the secret scalar's seed). The key's internal
-    /// copy is zeroized on drop (the `zeroize` feature); the caller's `seed` copy is the caller's
-    /// to scrub.
+    /// Builds a key from a 32-byte `ed25519` seed. The key's internal copy is zeroized on drop; the
+    /// caller's `seed` copy is the caller's to scrub.
     #[must_use]
     pub fn from_seed(seed: [u8; 32]) -> Self {
         Self {
@@ -89,14 +76,15 @@ impl HostKey {
         }
     }
 
-    /// Load the host key from `path`, or **generate and persist** one there on first use (seed from
-    /// `/dev/urandom`, written `0600`, parent dirs created). The generate-on-first-run path is why a
-    /// hoster needs no key ceremony to get a signed record; custody of the file is theirs.
-    /// Concurrent first runs converge on **one** key: the publish is atomic, and a process that
-    /// loses the race discards its candidate and reloads the winner's file, so no signed record is
-    /// ever orphaned by an overwritten key.
+    /// Loads the host key from `path`, or **generates and persists** one there on first use, so a hoster
+    /// needs no key ceremony to get a signed record. Custody of the file is theirs.
+    ///
+    /// Concurrent first runs converge on one key: the publish is atomic, and a process that loses the race
+    /// discards its candidate and reloads the winner's file, so no signed record is orphaned by an
+    /// overwritten key.
+    ///
     /// # Errors
-    /// [`KeyError`] if the file exists but is unreadable or malformed, or if generation/persist fails.
+    /// [`KeyError`] if the file exists but is unreadable or malformed, or if generation fails.
     pub fn load_or_generate(path: &Path) -> Result<Self, KeyError> {
         if path.exists() {
             return Self::load(path);
@@ -112,20 +100,19 @@ impl HostKey {
         }
     }
 
-    /// Load an **existing** host key from `path`, without generating one (unlike
-    /// [`load_or_generate`](Self::load_or_generate)). For verification, which trusts a key that must
-    /// already exist rather than minting a fresh, useless one.
+    /// Loads an **existing** host key from `path` without generating one, for verification, which trusts a
+    /// key that must already exist rather than minting a fresh useless one.
+    ///
     /// # Errors
     /// [`KeyError`] if the file is missing, unreadable, or malformed.
     pub fn open(path: &Path) -> Result<Self, KeyError> {
         Self::load(path)
     }
 
-    /// Load a key from a hex-seed file. Refuses a group- or world-accessible file: the record's
-    /// "host-signed" claim rests on this seed being unreadable to other local users, and silently
-    /// using a lax-mode key (copied, restored from a backup) would make every signature forgeable
-    /// without a word said. First-run generation writes `0600`, so this only fires on a file the
-    /// operator supplied or widened.
+    /// Loads a key from a hex-seed file, refusing a group- or world-accessible one: the record's
+    /// "host-signed" claim rests on this seed being unreadable to other local users, and silently using a
+    /// lax-mode key would make every signature forgeable without a word said. First-run generation writes
+    /// `0600`, so this only fires on a file the operator supplied or widened.
     fn load(path: &Path) -> Result<Self, KeyError> {
         use std::os::unix::fs::PermissionsExt as _;
         let mode = std::fs::metadata(path)
@@ -150,10 +137,10 @@ impl HostKey {
         })
     }
 
-    /// Persist the secret seed as hex, `0600`, creating parent dirs. Publishes **atomically**
-    /// (write a sibling temp file, link it into place): a concurrent generator either wins the
-    /// link or sees the winner's file, and a reader can never observe a partial write. Returns
-    /// `false` when another process published first (the caller reloads that key). Only called on
+    /// Persists the secret seed as hex at `0600`, creating parent dirs. Publishes **atomically** by
+    /// linking a sibling temp file into place, so a concurrent generator either wins the link or sees the
+    /// winner's file and a reader never observes a partial write. Returns `false` when another process
+    /// published first, in which case the caller reloads that key. Only called on
     /// first-run generation, so it never widens an existing file's permissions.
     fn persist(&self, path: &Path) -> Result<bool, KeyError> {
         if let Some(parent) = path.parent() {
@@ -161,9 +148,8 @@ impl HostKey {
         }
         // The staging file is unlinked by `tmp`'s `Drop` on *every* exit from here on, the write
         // error, the hard-link outcome, and an unwinding panic in between, so no `<key>.tmp.<n>`
-        // orphan is left in the key directory (a failure path leaks nothing). The
-        // published key is the hard-linked `path`, a separate name, so removing the staging copy
-        // unconditionally is correct.
+        // orphan is left in the key directory. The published key is the hard-linked `path`, a separate
+        // name, so removing the staging copy unconditionally is correct.
         let tmp = StagingFile(temp_sibling(path));
         let mut f = std::fs::OpenOptions::new()
             .write(true)
@@ -171,10 +157,9 @@ impl HostKey {
             .mode(0o600)
             .open(tmp.path())
             .map_err(KeyError::Io)?;
-        // The seed's transient copies stay under `Zeroizing`, and the newline is a second write
-        // rather than a `push` into the exactly-sized hex string: a push would force a
-        // reallocation, freeing the old buffer with the full hex seed in it un-zeroized
-        // (`Zeroizing` scrubs only the final buffer it drops).
+        // The newline is a second write rather than a `push` into the exactly-sized hex string: a push
+        // would reallocate, freeing the old buffer with the full hex seed in it un-zeroized, since
+        // `Zeroizing` scrubs only the final buffer it drops.
         let seed = Zeroizing::new(self.signing.to_bytes());
         let hex = Zeroizing::new(hex_encode(&*seed));
         f.write_all(hex.as_bytes()).map_err(KeyError::Io)?;
@@ -187,36 +172,35 @@ impl HostKey {
         }
     }
 
-    /// The public verifying key: hand this to [`verify`] as a trusted key.
+    /// The public verifying key, to hand [`verify`] as a trusted key.
     #[must_use]
     pub fn verifying_key(&self) -> TrustedKey {
         TrustedKey(self.signing.verifying_key())
     }
 
-    /// The key's identifier: the hex of its public key. Records name it so a verifier can select the
-    /// right trusted key, and so a rotated key (a new `key_id`) doesn't invalidate older records.
+    /// The key's identifier, the hex of its public key. Records name it so a verifier can select the right
+    /// trusted key, and so a rotated key doesn't invalidate older records.
     #[must_use]
     pub fn key_id(&self) -> String {
         self.verifying_key().key_id()
     }
 
-    /// Sign a finalized record (unchained): canonicalize it ([`RunRecord::to_json`]) and wrap it in
-    /// the signature envelope. The returned string is the schema-2 delivery surface.
+    /// Signs a finalized record, unchained: canonicalizes it and wraps it in the signature envelope.
     #[must_use]
     pub fn sign_record(&self, record: &RunRecord) -> String {
         self.sign_canonical_chained(&record.to_json(), None)
     }
 
-    /// Sign already-canonical record bytes (unchained), returning the envelope. The signed message is
-    /// `canonical` verbatim; verification re-reads it from the envelope's `record` string.
+    /// Signs already-canonical record bytes, unchained. The signed message is `canonical` verbatim, which
+    /// verification re-reads from the envelope's `record` string.
     #[must_use]
     pub fn sign_canonical(&self, canonical: &str) -> String {
         self.sign_canonical_chained(canonical, None)
     }
 
-    /// Sign already-canonical record bytes, optionally chained to `prev`. With `prev`, the signed
-    /// message is `prev + "\n" + canonical` and the envelope carries a `prev` field; without it, the
-    /// message is `canonical` and no `prev` appears (so unchained envelopes stay byte-identical).
+    /// Signs already-canonical record bytes, optionally chained to `prev`. With `prev` the signed message
+    /// is `prev + "\n" + canonical` and the envelope carries a `prev` field; without it neither appears, so
+    /// unchained envelopes stay byte-identical.
     #[must_use]
     pub fn sign_canonical_chained(&self, canonical: &str, prev: Option<&str>) -> String {
         let signature: Signature = match prev {
@@ -233,10 +217,9 @@ impl HostKey {
         out.push_str(&sig_hex);
         out.push('"');
         if let Some(p) = prev {
-            // Escaped like any other caller-supplied string. `prev` is a [`record_hash`] in every
-            // path this repo has, and 64 hex chars need no escaping, but this is a `pub fn` taking
-            // an arbitrary `&str`: an unescaped `"` here would emit an envelope that is not the
-            // JSON it looks like. The escaper is the same one the record rides through.
+            // Escaped like any other caller-supplied string: 64 hex chars need none, but this is a `pub fn`
+            // taking an arbitrary `&str`, and an unescaped `"` would emit an envelope that is not the JSON it
+            // looks like.
             out.push_str(",\"prev\":\"");
             crate::json::json_escape_into(&mut out, p);
             out.push('"');
@@ -247,24 +230,24 @@ impl HostKey {
         out
     }
 
-    /// Sign arbitrary bytes as a **raw detached** `ed25519` signature (64 bytes, no envelope).
-    /// The release-manifest scheme uses this so a stock `openssl pkeyutl -verify -rawin` can check
-    /// the signature without any bsx binary in the loop; audit records keep the envelope.
+    /// Signs arbitrary bytes as a **raw detached** `ed25519` signature, no envelope. The release-manifest
+    /// scheme uses this so a stock `openssl pkeyutl -verify -rawin` can check it with no bsx binary in the
+    /// loop; audit records keep the envelope.
     #[must_use]
     pub fn sign_detached(&self, msg: &[u8]) -> [u8; 64] {
         self.signing.sign(msg).to_bytes()
     }
 }
 
-/// The chain hash of a record's canonical bytes: SHA-256, hex. A chained record's `prev` field is the
-/// chain hash of the previous record, so a sequence's order and membership are committed.
+/// The chain hash of a record's canonical bytes, SHA-256 as hex. A chained record's `prev` is the previous
+/// record's chain hash, so a sequence's order and membership are committed.
 #[must_use]
 pub fn record_hash(canonical: &str) -> String {
     hex_encode(&Sha256::digest(canonical.as_bytes()))
 }
 
 /// The signed message for a chained record: `prev + "\n" + canonical`. `prev` is 64 hex chars and
-/// `canonical` is compact JSON with no leading newline, so the single `\n` is an unambiguous frame.
+/// `canonical` is compact JSON with no leading newline, so the single `\n` frames them unambiguously.
 fn link_message(prev: &str, canonical: &str) -> String {
     let mut m = String::with_capacity(prev.len() + 1 + canonical.len());
     m.push_str(prev);
@@ -273,14 +256,14 @@ fn link_message(prev: &str, canonical: &str) -> String {
     m
 }
 
-/// A trusted **public** key to verify a record against: the host's own (from
-/// [`HostKey::verifying_key`]) or one supplied out of band ([`TrustedKey::from_hex`]). Opaque, so the
-/// crypto library type stays out of the public API.
+/// A trusted **public** key to verify a record against, the host's own or one supplied out of band.
+/// Opaque, so the crypto library's type stays out of the public API.
 #[derive(Debug, Clone)]
 pub struct TrustedKey(VerifyingKey);
 
 impl TrustedKey {
-    /// Parse a trusted public key from its `key_id` form (64 hex chars = 32 bytes).
+    /// Parses a trusted public key from its `key_id` form, 64 hex chars.
+    ///
     /// # Errors
     /// [`KeyError::Malformed`] if the hex is the wrong length or not a valid `ed25519` public key.
     pub fn from_hex(hex: &str) -> Result<Self, KeyError> {
@@ -292,17 +275,18 @@ impl TrustedKey {
             .map_err(|e| KeyError::Malformed(format!("not a valid ed25519 public key: {e}")))
     }
 
-    /// This key's identifier: the hex of its 32 public-key bytes (what a record's `key_id` names).
+    /// This key's identifier, the hex of its 32 public-key bytes, which is what a record's `key_id` names.
     #[must_use]
     pub fn key_id(&self) -> String {
         hex_encode(&self.0.to_bytes())
     }
 
-    /// This key as an SPKI **PEM** block, the encoding stock `openssl` consumes (`-pubin -inkey`),
-    /// so a release signature is verifiable with no bsx binary in the loop.
+    /// This key as an SPKI **PEM** block, the encoding stock `openssl` consumes, so a release signature is
+    /// verifiable with no bsx binary in the loop.
+    ///
     /// # Errors
-    /// [`KeyError::Malformed`] if the DER/PEM encoding fails (a library-internal failure; an
-    /// `ed25519` public key always has a valid SPKI form).
+    /// [`KeyError::Malformed`] if the encoding fails, which is library-internal: an `ed25519` public key
+    /// always has a valid SPKI form.
     pub fn to_spki_pem(&self) -> Result<String, KeyError> {
         use ed25519_dalek::pkcs8::EncodePublicKey as _;
         use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
@@ -311,8 +295,9 @@ impl TrustedKey {
             .map_err(|e| KeyError::Malformed(format!("SPKI PEM encoding failed: {e}")))
     }
 
-    /// Parse a trusted public key from an SPKI **PEM** block (the [`to_spki_pem`](Self::to_spki_pem)
-    /// form, and what `openssl pkey -pubout` emits).
+    /// Parses a trusted public key from an SPKI **PEM** block, the [`to_spki_pem`](Self::to_spki_pem) form
+    /// and what `openssl pkey -pubout` emits.
+    ///
     /// # Errors
     /// [`KeyError::Malformed`] if the PEM is not a valid `ed25519` SPKI public key.
     pub fn from_spki_pem(pem: &str) -> Result<Self, KeyError> {
@@ -322,8 +307,9 @@ impl TrustedKey {
             .map_err(|e| KeyError::Malformed(format!("not a valid ed25519 SPKI PEM: {e}")))
     }
 
-    /// Verify a raw detached signature ([`HostKey::sign_detached`]) over `msg`. Uses
-    /// `verify_strict`, the same malleability posture as the envelope path.
+    /// Verifies a raw detached signature over `msg`, with the same `verify_strict` malleability posture as
+    /// the envelope path.
+    ///
     /// # Errors
     /// [`VerifyError::BadSignature`] if the signature does not check.
     pub fn verify_detached(&self, msg: &[u8], sig: &[u8; 64]) -> Result<(), VerifyError> {
@@ -333,9 +319,9 @@ impl TrustedKey {
     }
 }
 
-/// The engine's per-host data directory: `$XDG_DATA_HOME/bsx` (falling back to
-/// `$HOME/.local/share/bsx`, then `/var/lib/bsx`). This is where an installed deployment keeps
-/// host **state** and runtime artifacts, and is the directory `install.sh` writes into.
+/// The engine's per-host data directory: `$XDG_DATA_HOME/bsx`, falling back to `$HOME/.local/share/bsx`
+/// then `/var/lib/bsx`. Where an installed deployment keeps host **state** and runtime artifacts, and
+/// what `install.sh` writes into.
 #[must_use]
 pub fn data_dir() -> PathBuf {
     let base = std::env::var_os("XDG_DATA_HOME")
@@ -347,29 +333,29 @@ pub fn data_dir() -> PathBuf {
 }
 
 /// The default host-key path when neither a flag, `BSX_SIGNING_KEY`, nor a config file sets one:
-/// `record-signing.ed25519` under the engine's per-host data directory (`$XDG_DATA_HOME/bsx`, else
-/// `$HOME/.local/share/bsx`, else `/var/lib/bsx`). A signing key is host **state**, so it lives
-/// under a data dir, not a config dir.
+/// `record-signing.ed25519` under [`data_dir`]. A signing key is host **state**, so it lives under a data
+/// dir rather than a config dir.
 #[must_use]
 pub fn default_key_path() -> PathBuf {
     data_dir().join("record-signing.ed25519")
 }
 
-/// Verify a signed record envelope against a set of **trusted** verifying keys, returning the exact
-/// canonical record bytes on success. Fails closed: an unknown `key_id`, a malformed envelope, or a
-/// signature that doesn't check is an [`Err`], never a silent pass.
-/// The record's `key_id` must name a key in `trusted`; a record re-signed with an attacker's key
-/// therefore fails with [`VerifyError::UntrustedKey`] rather than verifying against its own embedded
-/// key. Uses `verify_strict` (rejects the known `ed25519` malleability corner).
+/// Verifies a signed record envelope against a set of **trusted** verifying keys, returning the exact
+/// canonical record bytes on success.
+///
+/// Fails closed: an unknown `key_id`, a malformed envelope, or a signature that doesn't check is an
+/// [`Err`], never a silent pass. The record's `key_id` must name a key in `trusted`, so a record re-signed
+/// with an attacker's key fails rather than verifying against its own embedded key. `verify_strict`
+/// rejects the known `ed25519` malleability corner.
+///
 /// # Errors
 /// [`VerifyError`] on a malformed envelope, an untrusted `key_id`, or a bad signature.
 pub fn verify(envelope: &str, trusted: &[TrustedKey]) -> Result<String, VerifyError> {
     verify_entry(envelope, trusted).map(|(record, _prev)| record)
 }
 
-/// Verify one envelope and return `(canonical record, prev)`, where `prev` is the chain link if the
-/// record was signed chained (`None` if unchained). The signed message is `prev + "\n" + record` when
-/// chained, else `record`, so the `prev` link is covered by the signature and can't be rewritten.
+/// Verifies one envelope and returns `(canonical record, prev)`, where `prev` is the chain link or `None`
+/// if unchained. The signed message covers `prev`, so the link can't be rewritten.
 fn verify_entry(
     envelope: &str,
     trusted: &[TrustedKey],
@@ -381,11 +367,10 @@ fn verify_entry(
     }
     let v: serde_json::Value =
         serde_json::from_str(envelope).map_err(|e| VerifyError::Malformed(e.to_string()))?;
-    // The delivery surface's own version, before any field is read: a future envelope shape is then
-    // "this build cannot read that" rather than a verdict reached by applying today's rules to it.
-    // `schema` rides *outside* the signed message (only the record bytes, or `prev + "\n" + record`,
-    // are signed), so this gates the shape, it does not attest it: altering `schema` turns a good
-    // record into a rejection, never a forgery into a pass.
+    // Checked before any field is read, so a future envelope shape is "this build cannot read that" rather
+    // than a verdict reached by applying today's rules. `schema` rides *outside* the signed message, so this
+    // gates the shape without attesting it: altering it turns a good record into a rejection, never a
+    // forgery into a pass.
     match v.get("schema").and_then(serde_json::Value::as_u64) {
         Some(s) if s == u64::from(SIGNED_RECORD_SCHEMA_VERSION) => {}
         Some(got) => return Err(VerifyError::Schema { got }),
@@ -429,19 +414,20 @@ fn verify_entry(
     Ok((record, prev))
 }
 
-/// Verify a **sequence** of signed record envelopes as a hash chain, returning the
-/// canonical records in order. Each entry's signature must check (against `trusted`) **and** its
-/// `prev` must equal the [`record_hash`] of the previous entry's record (the first entry must be
-/// unchained). A reordered, inserted, or middle-deleted record breaks a link and is rejected.
-/// Note: truncating the **tail** of the chain is not detectable here without an external anchor (the
-/// append-only limitation); it detects any edit *within* the delivered sequence.
+/// Verifies a **sequence** of signed record envelopes as a hash chain, returning the canonical records in
+/// order. Each entry's signature must check and its `prev` must equal the [`record_hash`] of the previous
+/// entry's record, with the first entry unchained, so a reordered, inserted, or middle-deleted record
+/// breaks a link.
+///
+/// Truncating the **tail** is not detectable without an external anchor; this detects any edit *within*
+/// the delivered sequence.
+///
 /// # Errors
-/// [`ChainError::Empty`] if there are no envelopes; [`ChainError::Entry`] if an envelope fails to
-/// verify; [`ChainError::BrokenLink`] if a `prev` link doesn't match the previous record's hash.
+/// [`ChainError::Empty`] if there are no envelopes, [`ChainError::Entry`] if one fails to verify, or
+/// [`ChainError::BrokenLink`] if a `prev` link doesn't match the previous record's hash.
 pub fn verify_chain(envelopes: &[&str], trusted: &[TrustedKey]) -> Result<Vec<String>, ChainError> {
-    // Nothing verified is not a verified chain. Without this the call answers `Ok(vec![])`, which a
-    // caller reasonably reads as "checked, and it held"; the CLI guards the empty file separately,
-    // in another crate, so an embedder calling this directly got the pass.
+    // Nothing verified is not a verified chain: `Ok(vec![])` reads as "checked, and it held". The CLI
+    // guards the empty file in another crate, so an embedder calling this directly needs the check here.
     if envelopes.is_empty() {
         return Err(ChainError::Empty);
     }
@@ -459,8 +445,8 @@ pub fn verify_chain(envelopes: &[&str], trusted: &[TrustedKey]) -> Result<Vec<St
     Ok(records)
 }
 
-/// Read 32 random bytes from `/dev/urandom` (the OS CSPRNG on the Linux-only engine), so key
-/// generation needs no `rand` dependency. Zeroized on drop: it is the secret.
+/// Reads 32 random bytes from `/dev/urandom`, so key generation needs no `rand` dependency. Zeroized on
+/// drop, since it is the secret.
 fn random_seed() -> Result<Zeroizing<[u8; 32]>, KeyError> {
     let mut seed = Zeroizing::new([0u8; 32]);
     let mut f = std::fs::File::open("/dev/urandom").map_err(KeyError::Io)?;
@@ -468,8 +454,8 @@ fn random_seed() -> Result<Zeroizing<[u8; 32]>, KeyError> {
     Ok(seed)
 }
 
-/// A per-attempt-unique temp sibling of `path` for the atomic key publish (pid plus a process-wide
-/// counter, so concurrent threads of one process don't collide either).
+/// A per-attempt-unique temp sibling of `path` for the atomic key publish: pid plus a process-wide
+/// counter, so concurrent threads of one process don't collide either.
 fn temp_sibling(path: &Path) -> PathBuf {
     static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -478,12 +464,10 @@ fn temp_sibling(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// An RAII guard for the pre-publish staging file in [`HostKey::persist`]. Its `Drop` unlinks the
-/// file on every scope exit, an error return *or* an unwinding panic, so a failure between creating
-/// the staging copy and hard-linking it into place leaves no orphan behind. A `SIGKILL`
-/// in that window still leaks, `Drop` cannot run then and no in-process guard can close that, but the
-/// name is process-and-sequence unique (see [`temp_sibling`]), so a leaked file never collides with a
-/// later run and is never read.
+/// An RAII guard for the pre-publish staging file in [`HostKey::persist`], unlinking it on every scope
+/// exit, an error return *or* an unwinding panic, so a failure between staging and the hard link leaves no
+/// orphan. A `SIGKILL` in that window still leaks, since no in-process guard can close it, but the name is
+/// process-and-sequence unique, so a leaked file never collides with a later run and is never read.
 struct StagingFile(PathBuf);
 
 impl StagingFile {
@@ -509,7 +493,7 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
-/// Decode hex into a fixed-size buffer; `Err(())` if the length is wrong or a digit is not hex.
+/// Decodes hex into a fixed-size buffer. `Err(())` if the length is wrong or a digit is not hex.
 fn hex_decode(s: &str, out: &mut [u8]) -> Result<(), ()> {
     let b = s.as_bytes();
     if b.len() != out.len() * 2 {
@@ -564,21 +548,19 @@ impl std::error::Error for KeyError {
 pub enum VerifyError {
     /// The envelope isn't well-formed (not JSON, or missing `schema`/`record`/`key_id`/`signature`).
     Malformed(String),
-    /// The envelope names a delivery-surface version this build does not speak, carrying the number
-    /// it named. v1 was the bare record rather than an envelope, so there is no older shape to
-    /// accept: [`SIGNED_RECORD_SCHEMA_VERSION`] is the only `schema` that verifies, and a newer one
-    /// is refused rather than read under rules that may no longer describe it.
+    /// The envelope names a delivery-surface version this build does not speak, carrying the number it
+    /// named. [`SIGNED_RECORD_SCHEMA_VERSION`] is the only `schema` that verifies, and a newer one is
+    /// refused rather than read under rules that may no longer describe it.
     Schema {
         /// The version the envelope claimed.
         got: u64,
     },
     /// The record's `key_id` names no key in the trusted set (the given id).
     UntrustedKey(String),
-    /// The signature did not verify against the trusted key: the record was altered, or signed by a
+    /// The signature did not verify against the trusted key, so the record was altered or signed by a
     /// different key than its `key_id` claims.
     BadSignature,
-    /// The envelope exceeds [`MAX_ENVELOPE_BYTES`], rejected before any parsing: no record this
-    /// engine produces comes close to the bound.
+    /// The envelope exceeds [`MAX_ENVELOPE_BYTES`], rejected before any parsing.
     TooLarge {
         /// The offered envelope's byte length.
         len: usize,
@@ -589,8 +571,8 @@ impl fmt::Display for VerifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Malformed(m) => write!(f, "not a signed record envelope: {m}"),
-            // "this build", not a role: the same rendering reaches whichever side is holding the
-            // older code, so naming one would state the mismatch backwards for the other.
+            // "this build", not a role: the same rendering reaches whichever side holds the older code, so
+            // naming one would state the mismatch backwards for the other.
             Self::Schema { got } => write!(
                 f,
                 "unsupported record envelope schema {got} \
@@ -624,12 +606,11 @@ pub enum ChainError {
         /// The per-record failure.
         source: VerifyError,
     },
-    /// There were no envelopes to verify. A chain of nothing is not a verified chain, so this is a
-    /// rejection rather than an empty `Ok`: the distinction matters to a caller that treats a
-    /// successful return as evidence.
+    /// There were no envelopes to verify. A chain of nothing is not a verified chain, so this rejects
+    /// rather than returning an empty `Ok`, which a caller would read as evidence.
     Empty,
-    /// The `prev` link at `index` doesn't match the previous record's hash: a reordered, inserted, or
-    /// deleted record.
+    /// The `prev` link at `index` doesn't match the previous record's hash, so a record was reordered,
+    /// inserted, or deleted.
     BrokenLink {
         /// The zero-based position whose link is broken.
         index: usize,
@@ -662,15 +643,14 @@ impl std::error::Error for ChainError {
 mod tests {
     use super::*;
 
-    /// A fixed seed so signatures are deterministic in tests (ed25519 signing is deterministic).
+    /// A fixed seed, so signatures are deterministic in tests.
     fn test_key() -> HostKey {
         HostKey::from_seed([7u8; 32])
     }
 
-    /// The envelope embeds the record as a JSON string, so the bytes it escapes are the bytes that
-    /// get signed. Two escapers would be two chances to be wrong about them; assert there is one.
-    /// The control characters below are where two escapers most easily diverge: a dedicated
-    /// `\b`/`\f` arm against a fall-through to the `\u00XX` form.
+    /// The envelope embeds the record as a JSON string, so the bytes it escapes are the bytes that get
+    /// signed, and two escapers would be two chances to be wrong about them. The control characters below
+    /// are where two escapers most easily diverge.
     #[test]
     fn the_envelope_escapes_a_string_exactly_as_the_record_does() {
         let hostile = "tab\tnl\nquote\"backslash\\bs\u{08}ff\u{0C}nul\u{00}";
@@ -697,17 +677,16 @@ mod tests {
         );
     }
 
-    /// `schema` names the delivery surface, and until it was checked it was written by the signer
-    /// and read by nobody: an envelope claiming any version at all verified. The hazard is a later
-    /// version that changes *what gets signed*, which today's rules would then read confidently and
-    /// wrongly, so an unrecognized number must be a refusal rather than a verdict.
+    /// `schema` names the delivery surface, and an unchecked one lets an envelope claiming any version
+    /// verify. The hazard is a later version that changes *what gets signed*, which today's rules would
+    /// read confidently and wrongly, so an unrecognized number must be a refusal rather than a verdict.
     #[test]
     fn an_envelope_schema_this_build_does_not_speak_is_refused() {
         let key = test_key();
         let trusted = [key.verifying_key()];
         let good = key.sign_canonical(r#"{"schema":1,"timing":{"boot_ns":1}}"#);
-        // The control: without it every assertion below would also pass on a verifier that has
-        // simply stopped accepting anything.
+        // The control: without it every assertion below would also pass on a verifier that accepts
+        // nothing at all.
         assert!(
             verify(&good, &trusted).is_ok(),
             "the real envelope verifies"

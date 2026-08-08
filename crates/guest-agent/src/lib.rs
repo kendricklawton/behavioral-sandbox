@@ -1,24 +1,21 @@
 //! `bsx-guest-agent`, the in-guest agent that runs a command and reports its result over the channel.
 //!
-//! [`serve`] handles **one connection**: it accepts a [`ServerConnection`], reads a single
-//! [`Request::Exec`], runs the command, streams its `stdout`/`stderr` back as they arrive, and ends
-//! with the exit code. It is generic over the byte stream, so the same logic runs over **vsock** in
-//! a real guest and over a **unix socket** in tests and the `main` harness here, the driver
-//! is unit-testable without a VM. [`serve_session`] is the same one-command-per-connection loop
-//! body with a **stable working directory**, which is what turns a sequence of execs against one
-//! agent into a stateful session (the in-VM binary uses it; the VM is the session).
+//! The agent carries exec and IO only. It is a convenience inside the isolation boundary, never part
+//! of the trust boundary: containment is the microVM, not this code.
 //!
-//! **The load-bearing subtlety** (the pipe-deadlock hazard, again): the child's `stdout`
-//! and `stderr` are drained by two threads that keep reading **even after forwarding to the host
-//! fails**, on the first forward error they switch to read-and-discard, so the child's ~64 KiB
-//! pipe can never fill and block `wait()`. This is what stops a *dead* host from wedging a live
-//! guest. A merely *stalled* (open but not-reading) host only becomes a forward error if the
-//! connection has a **write deadline**, without one, `write` blocks indefinitely and the drain
-//! stalls. So the guarantee is: **given a stream with read/write deadlines set** (the caller's job,
-//! see [`ServerConnection`]), any dead-or-stalled host is a bounded, typed error, never a hang.
-//!
-//! The agent carries exec/IO only, it is a convenience inside the isolation boundary, never part of
-//! the trust boundary (core property 2). Containment is the microVM, not this code.
+//! - **One connection, one command.** [`serve`] accepts a [`ServerConnection`], reads a single
+//!   [`Request::Exec`], runs it, streams `stdout`/`stderr` back as they arrive, and ends with the exit
+//!   code. [`serve_session`] is the same body with a **stable working directory**, which is what turns
+//!   a sequence of execs against one agent into a stateful session.
+//! - **Generic over the byte stream**, so the same logic runs over vsock in a real guest and over a
+//!   unix socket in tests, and the driver is unit-testable without a VM.
+//! - **The pipe-deadlock hazard.** The child's `stdout` and `stderr` are drained by two threads that
+//!   keep reading even after forwarding to the host fails, switching to read-and-discard, so the
+//!   child's pipe can never fill and block `wait()`. A merely *stalled* host only becomes a forward
+//!   error if the connection carries a **write deadline**, so the bound holds only for a stream with
+//!   read/write deadlines set (the caller's job).
+//! - **Tree reaping.** Every command runs in a per-exec cgroup, so a double-forked grandchild or
+//!   `setsid` daemon holding the output pipes open is killed with the rest.
 #![forbid(unsafe_code)]
 
 use std::io::{Read, Write};
@@ -35,11 +32,10 @@ use bsx_channel::{ChannelError, Request, Response, ServerConnection};
 /// buggy host can't ask the agent to wait effectively forever.
 const MAX_EXEC_TIMEOUT: Duration = Duration::from_secs(3600); // 1 hour
 
-/// How often the reaper polls for the child's exit while waiting toward the deadline.
-/// Exponential backoff for the child-exit poll: start tight so a fast command returns almost at
-/// once, widen toward a cap so a long one polls cheaply. Mirrors `bsx`'s `PollBackoff` (the boot
-/// path's proven fix for the same fixed-tick quantization); kept local because this crate is the
-/// static musl guest binary and takes no `bsx` dependency.
+/// Exponential backoff for the child-exit poll: starts tight so a fast command returns almost at
+/// once, widening toward a cap so a long one polls cheaply. Kept local rather than shared with
+/// `bsx`'s `PollBackoff`, because this crate is the static musl guest binary and takes no `bsx`
+/// dependency.
 struct WaitBackoff {
     next: Duration,
 }
@@ -54,7 +50,7 @@ impl WaitBackoff {
         }
     }
 
-    /// Sleep the current interval, then double it toward the cap.
+    /// Sleeps the current interval, then doubles it toward the cap.
     fn sleep(&mut self) {
         let current = self.next;
         self.next = (self.next * 2).min(Self::CAP);
@@ -114,22 +110,16 @@ impl From<ChannelError> for AgentError {
     }
 }
 
-/// Serve one exec request over `stream` and return the command's exit code. The run gets a
-/// **fresh working directory**, removed afterwards, the stateless one-shot form; a stateful
-/// session server uses [`serve_session`].
+/// Serves one exec request over `stream` and returns the command's exit code, in a **fresh working
+/// directory** removed afterwards. A stateful session server uses [`serve_session`].
 ///
-/// The handshake is done by [`ServerConnection::accept`]; on a spawn failure the agent sends a
-/// terminal [`Response::Error`] to the host *and* returns [`AgentError::Spawn`], so both sides learn
-/// the command never ran. Emits a `tracing` span (`exec`) carrying the argv, exit code, and elapsed
-/// time, so a guest-side failure is diagnosable from the log.
-///
-/// The no-hang guarantee holds **only if `stream` carries read/write deadlines** (see the module
-/// note). A hung *command* is bounded separately by its `timeout_ms` wall-clock budget: past the
-/// deadline the agent SIGKILLs it and replies [`Response::TimedOut`].
+/// On a spawn failure the agent sends a terminal [`Response::Error`] *and* returns
+/// [`AgentError::Spawn`], so both sides learn the command never ran. A hung command is bounded by its
+/// `timeout_ms` budget: past the deadline the agent SIGKILLs it and replies [`Response::TimedOut`].
 ///
 /// # Errors
-/// [`AgentError`] on any channel, spawn, or wait failure. Note a command that runs and exits
-/// non-zero is **not** an error here, that's a normal [`Response::Exit`] with a non-zero code.
+/// [`AgentError`] on any channel, spawn, or wait failure. A command that runs and exits non-zero is
+/// **not** an error here, just a [`Response::Exit`] with a non-zero code.
 pub fn serve<S>(stream: S) -> Result<i32, AgentError>
 where
     S: Read + Write + Send,
@@ -137,12 +127,9 @@ where
     serve_with(stream, RunDir::fresh())
 }
 
-/// [`serve`], but with the run's working directory at `dir`, **created if missing, kept
-/// afterwards**. This is the building block for **stateful sessions**: a server that passes the
-/// same `dir` to every connection gives a sequence of execs one shared, persistent working
-/// directory, so a file injected or written by one command is visible to the next. The in-VM
-/// binary does exactly that with a single per-process dir, the VM *is* the session, and its
-/// lifetime (or its overlay's) bounds the state.
+/// [`serve`], but with the run's working directory at `dir`, **created if missing and kept
+/// afterwards**, so a server passing the same `dir` to every connection gives a sequence of execs one
+/// shared working directory. The VM's lifetime (or its overlay's) bounds that state.
 ///
 /// # Errors
 /// As [`serve`].
@@ -154,9 +141,9 @@ where
 }
 
 /// The shared body of [`serve`]/[`serve_session`]: `workdir` is where injected files land, the
-/// command's cwd, and where artifacts are read back from, the two entry points differ only in how
-/// it was made (fresh-and-removed vs. stable-and-kept). Taken as a `Result` so a creation failure
-/// is still reported to the host over the accepted connection.
+/// command's cwd, and where artifacts are read back from, and the two entry points differ only in how
+/// it was made. Taken as a `Result` so a creation failure is still reported to the host over the
+/// accepted connection.
 fn serve_with<S>(stream: S, workdir: std::io::Result<RunDir>) -> Result<i32, AgentError>
 where
     S: Read + Write + Send,
@@ -187,7 +174,7 @@ where
                 artifacts,
                 timeout_ms,
             } => break (argv, stdin, env, artifacts, timeout_ms),
-            // A newer host's request type we don't implement, reply gracefully, don't drop the link.
+            // A newer host's request type: reply gracefully rather than dropping the link.
             Request::Unknown { tag } => {
                 conn.send_response(&Response::Error(format!("unsupported request (tag {tag})")))?;
                 return Err(AgentError::UnsupportedRequest);
@@ -199,9 +186,8 @@ where
         }
     };
 
-    // The span carries argv and the env *count*, never an env value or key list, env values are
-    // secrets by presumption (the host's secret-hygiene contract), and this log reaches the serial
-    // console, which the host exposes verbatim.
+    // The span carries argv and the env *count*, never a value or key list: env values are secrets by
+    // presumption, and this log reaches the serial console, which the host exposes verbatim.
     let span = tracing::info_span!("exec", argv = ?argv, env_vars = env.len());
     let _enter = span.enter();
 
@@ -213,29 +199,25 @@ where
     let budget = budget_from(timeout_ms);
     let started = Instant::now();
     let deadline = started + budget;
-    // Run the command in its own cgroup so its whole process tree can be reaped at once.
-    // Created before spawn; the child *enrolls itself* via the trampoline below, so every process
-    // the command ever forks inherits membership. Best-effort: `None` on a guest without cgroup v2,
-    // and the agent falls back to the direct-child kill (the pre-tree-reaping behaviour).
+    // Created before spawn, so the child can enroll itself via the trampoline and every process the
+    // command forks inherits membership. Best-effort: `None` on a guest without cgroup v2, where the
+    // agent falls back to the direct-child kill.
     let cgroup = ExecCgroup::create();
 
-    // Resolve the program up front so "no such binary" stays the typed spawn error the host knows
-    // (`Response::Error` → `VmmError::GuestExec`): with the trampoline, the real `execvp` happens
-    // inside the child, where a failure can only surface as a shell-style 127 on stderr. Resolved
-    // against the run's working dir (the child's cwd), so an injected/`built-in-session` `./tool`
-    // is judged where it will actually run, not against the agent's own cwd.
+    // Resolve the program up front so "no such binary" stays the typed spawn error the host knows:
+    // with the trampoline, the real `execvp` happens inside the child, where a failure can only
+    // surface as a shell-style 127 on stderr.
     if let Err(e) = resolve_program(program, workdir.path()) {
         let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
         return Err(AgentError::Spawn(e));
     }
 
-    // Spawn through the cgroup **trampoline**: a tiny `sh` leg that enrolls *itself* in the
-    // per-exec cgroup and then `exec`s the real command (same pid, so wait/kill are untouched).
-    // Self-placement, not a parent-side `cgroup.procs` write after `spawn`: that write raced the
-    // already-running child, and anything it forked before the write landed, a daemon, a fork
-    // storm; on one vCPU the child usually runs first, escaped the cgroup, survived `cgroup.kill`,
-    // and wedged the connection by holding the output pipes open. In the child, enrollment strictly
-    // precedes the `exec`, so the race cannot exist.
+    // Spawn through the cgroup **trampoline**: a tiny `sh` leg that enrolls *itself* in the per-exec
+    // cgroup and then `exec`s the real command (same pid, so wait/kill are untouched). Self-placement
+    // rather than a parent-side `cgroup.procs` write after `spawn`, because that write races the
+    // already-running child and anything it forks first, which would escape the cgroup, survive
+    // `cgroup.kill`, and wedge the connection holding the output pipes open. Enrollment in the child
+    // strictly precedes its `exec`, so the ordering admits no race.
     let mut cmd = match cgroup.as_ref() {
         Some(cg) => {
             let mut cmd = Command::new("sh");
@@ -253,9 +235,9 @@ where
             cmd
         }
     };
-    // Injected environment lands on the **spawned command only** (`Command::env`, inherited across
-    // the trampoline's `exec`), never `std::env::set_var`: the agent's own process outlives this
-    // run and serves the next connection, so mutating it would leak one run's secrets into another.
+    // Injected environment lands on the **spawned command only**, never `std::env::set_var`: the
+    // agent's own process outlives this run and serves the next connection, so mutating it would leak
+    // one run's secrets into another.
     for (key, value) in &env {
         cmd.env(key, value);
     }
@@ -268,8 +250,7 @@ where
     {
         Ok(child) => child,
         Err(e) => {
-            // Report to the host if we can; the local `Spawn` error is the salient one either way,
-            // so a failed report (a broken socket) is intentionally dropped.
+            // The local `Spawn` error is the salient one either way, so a failed report is dropped.
             let _ = conn.send_response(&Response::Error(format!("could not run {program}: {e}")));
             return Err(AgentError::Spawn(e));
         }
@@ -279,14 +260,13 @@ where
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // The connection is now write-only (streaming stdin is future work); share it across the pump
-    // threads. `first_err` records the first forward failure without stopping the drain.
+    // `first_err` records the first forward failure without stopping the drain.
     let conn = Mutex::new(conn);
     let first_err: Mutex<Option<ChannelError>> = Mutex::new(None);
 
     let waited = std::thread::scope(|scope| {
-        // Feed stdin on its own thread and close it (EOF), concurrently with the output pumps, so
-        // a command that writes before draining its stdin can't deadlock against us.
+        // Feed stdin on its own thread, concurrently with the output pumps, so a command that writes
+        // before draining its stdin can't deadlock against us.
         if let Some(mut sink) = child_stdin {
             scope.spawn(move || {
                 let _ = sink.write_all(&stdin);
@@ -299,15 +279,13 @@ where
         if let Some(err) = stderr {
             scope.spawn(|| pump(err, Kind::Stderr, &conn, &first_err));
         }
-        // Reap in the scope's own thread while the pumps drain in parallel, this is what keeps the
-        // child from blocking on a full pipe. Bounded by the deadline: past it we SIGKILL the child
-        // (which unblocks the pumps at EOF) and report a timeout instead of an exit.
+        // Reap in the scope's own thread while the pumps drain in parallel, which is what keeps the
+        // child from blocking on a full pipe.
         let result = wait_bounded(&mut child, deadline);
-        // Then reap the *whole tree*: a double-forked grandchild or a `setsid` daemon that
-        // inherited the stdout/stderr pipe would otherwise keep its write end open, so the pumps
-        // never see EOF and this scope could not join them, wedging the agent on both the exit and
-        // timeout paths. `cgroup.kill` SIGKILLs every process in the cgroup at once, which the
-        // direct-child kill in `wait_bounded` (and even a `killpg`) cannot reach.
+        // Then reap the *whole tree*: a double-forked grandchild or `setsid` daemon that inherited the
+        // output pipes keeps its write end open, so the pumps never see EOF and this scope cannot join
+        // them. `cgroup.kill` reaches every process at once, which a direct-child kill (or a `killpg`)
+        // cannot.
         if let Some(cg) = cgroup.as_ref() {
             cg.kill_all();
         }
@@ -337,9 +315,8 @@ where
     };
     let code = exit_code(&status);
 
-    // Return the requested artifacts before the terminal Exit. A missing one is omitted; an
-    // unreadable or over-the-frame-cap one is logged and skipped, never fail a successful run over
-    // an artifact, so the host always gets the exit code.
+    // A missing artifact is omitted and an unreadable or oversized one is skipped, so a successful run
+    // never fails over an artifact and the host always gets the exit code.
     for path in &artifacts {
         match workdir.get(path) {
             Ok(Some(data)) => {
@@ -375,24 +352,22 @@ enum Waited {
     TimedOut,
 }
 
-/// The command's wall-clock budget from the host's `timeout_ms`, clamped to [`MAX_EXEC_TIMEOUT`] so
-/// a buggy host can't ask the agent to wait effectively forever. [`None`] is the host asking for
-/// that ceiling rather than naming a limit; the wire spells it `0`, and the channel's
-/// [`NonZeroU32`] keeps it from colliding with a real budget.
+/// The command's wall-clock budget from the host's `timeout_ms`, clamped to [`MAX_EXEC_TIMEOUT`] so a
+/// buggy host can't ask the agent to wait effectively forever. [`None`] asks for that ceiling rather
+/// than naming a limit; the wire spells it `0`, and [`NonZeroU32`] keeps it from colliding with a real
+/// budget.
 fn budget_from(timeout_ms: Option<NonZeroU32>) -> Duration {
     timeout_ms.map_or(MAX_EXEC_TIMEOUT, |ms| {
         Duration::from_millis(u64::from(ms.get())).min(MAX_EXEC_TIMEOUT)
     })
 }
 
-/// Wait for the child, but no longer than `deadline`. Polls `try_wait` (so the output pumps keep
-/// draining in parallel, a full pipe never wedges us), and past the deadline SIGKILLs the direct
-/// child and reaps it, so a hung command is bounded and leaves no zombie.
+/// Waits for the child, but no longer than `deadline`, polling `try_wait` so the output pumps keep
+/// draining in parallel and a full pipe never wedges us. Past the deadline it SIGKILLs the direct child
+/// and reaps it, so a hung command leaves no zombie.
 ///
-/// This kills only the *direct* child; the command's wider process tree (double-forked grandchildren,
-/// `setsid` daemons that would otherwise keep the output pipes open) is reaped by [`serve`] through
-/// the per-exec [`ExecCgroup`] after this returns, on both the exit and timeout paths. So a
-/// hung or double-forking command cannot wedge the agent's connection.
+/// Only the *direct* child: the wider process tree is reaped by [`serve`] through the per-exec
+/// [`ExecCgroup`] after this returns, on both the exit and timeout paths.
 fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited> {
     let mut backoff = WaitBackoff::new();
     loop {
@@ -411,23 +386,19 @@ fn wait_bounded(child: &mut Child, deadline: Instant) -> std::io::Result<Waited>
 /// The cgroup v2 unified-hierarchy mount inside the guest (mounted by the rootfs `inittab`).
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
-/// The trampoline `sh` leg that spawns a command *inside* its per-exec cgroup: enroll self
-/// (`$$`, the shell's own pid, into `$1/cgroup.procs`), drop the cgroup arg, then `exec` the
-/// real command, which keeps the same pid, so the agent's wait/kill handles are untouched. The
-/// command and its arguments arrive as real argv entries (`"$@"`), never interpolated into the
-/// script, so they can't inject into it. The enrollment is best-effort (`2>/dev/null`, matching
-/// the rest of the cgroup machinery) and, crucially, **sequenced before the `exec` in the child
-/// itself**, the property a parent-side `cgroup.procs` write can never have.
+/// The trampoline `sh` leg that spawns a command *inside* its per-exec cgroup: enroll self, drop the
+/// cgroup arg, then `exec` the real command, which keeps the same pid so the agent's wait/kill handles
+/// are untouched. The command and its arguments arrive as real argv entries (`"$@"`), never
+/// interpolated into the script, so they can't inject into it. Enrollment is best-effort and
+/// **sequenced before the `exec` in the child itself**, which a parent-side write cannot be.
 const TRAMPOLINE_SCRIPT: &str = r#"{ echo $$ > "$1/cgroup.procs"; } 2>/dev/null; shift; exec "$@""#;
 
-/// Mirror `execvp`'s lookup (a path with a `/` as-is, else a `PATH` search) just enough to report a
-/// missing or non-executable program as the typed spawn error before the trampoline runs.
-/// TOCTOU-tolerant: a program that vanishes between this check and the child's `exec` surfaces as
-/// the trampoline's shell-style 127 instead.
+/// Mirrors `execvp`'s lookup just enough to report a missing or non-executable program as the typed
+/// spawn error before the trampoline runs. TOCTOU-tolerant: a program vanishing between this check and
+/// the child's `exec` surfaces as the trampoline's shell-style 127 instead.
 ///
 /// A `/`-bearing relative program is resolved against `workdir` (the child's cwd), so it is judged
-/// exactly where the trampoline's `exec` will resolve it, an absolute path is used as-is, and a bare
-/// name is `PATH`-searched. Resolving a relative `./tool` against the agent's own cwd instead would
+/// where the trampoline's `exec` will resolve it. Resolving against the agent's own cwd instead would
 /// falsely reject a program injected via `--put` or built by an earlier exec in the session.
 fn resolve_program(program: &str, workdir: &Path) -> Result<(), std::io::Error> {
     use std::os::unix::fs::PermissionsExt as _;
@@ -457,21 +428,21 @@ fn resolve_program(program: &str, workdir: &Path) -> Result<(), std::io::Error> 
 /// Names the next per-exec cgroup uniquely within this agent process.
 static CGROUP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns.
-/// cgroup v2 membership is inherited by every child the command forks and cannot be escaped by
-/// `setsid`, so writing `cgroup.kill` SIGKILLs the entire tree at once, the definitive fix for the
-/// double-fork / daemon wedge that a direct-child `kill` (and even a `killpg`) miss.
+/// A per-exec cgroup whose only job is to **kill the whole process tree** a command spawns. cgroup v2
+/// membership is inherited by every child the command forks and cannot be escaped by `setsid`, so
+/// writing `cgroup.kill` reaches the double-fork and daemon cases a direct-child `kill` (or a `killpg`)
+/// misses.
 ///
-/// Best-effort throughout: if the guest has no cgroup v2, [`create`](Self::create) returns `None` and
-/// the agent falls back to the direct-child kill (no worse than before). No controllers are enabled,
-/// so it works even though the guest's root cgroup holds processes (the no-internal-process rule only
-/// bites when enabling controllers in `subtree_control`), and it needs no host-side delegation.
+/// Best-effort: [`create`](Self::create) returns `None` on a guest without cgroup v2, and the agent
+/// falls back to the direct-child kill. No controllers are enabled, so it works even though the guest's
+/// root cgroup holds processes (the no-internal-process rule only bites when enabling controllers in
+/// `subtree_control`), and it needs no host-side delegation.
 struct ExecCgroup {
     path: PathBuf,
 }
 
 impl ExecCgroup {
-    /// Create a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a cgroup v2 mount.
+    /// Creates a fresh per-exec cgroup, or `None` if `/sys/fs/cgroup` isn't a cgroup v2 mount.
     fn create() -> Option<Self> {
         let path = PathBuf::from(CGROUP_ROOT).join(format!(
             "bsx-exec-{}-{}",
@@ -482,7 +453,7 @@ impl ExecCgroup {
         Some(Self { path })
     }
 
-    /// SIGKILL every process in the cgroup and its descendants, atomically (guest kernel >= 5.14).
+    /// SIGKILLs every process in the cgroup and its descendants, atomically (guest kernel >= 5.14).
     fn kill_all(&self) {
         let _ = std::fs::write(self.path.join("cgroup.kill"), "1");
     }
@@ -490,9 +461,8 @@ impl ExecCgroup {
 
 impl Drop for ExecCgroup {
     fn drop(&mut self) {
-        // Ensure the tree is dead (idempotent with `serve`'s explicit kill), then remove the now-empty
-        // cgroup. `remove_dir` needs it empty, and SIGKILL'd processes are reaped by init
-        // asynchronously, so retry briefly rather than leak a dir on a long-lived guest (the prewarmed pool).
+        // `remove_dir` needs the cgroup empty and SIGKILL'd processes are reaped by init
+        // asynchronously, so retry briefly rather than leak a dir on a long-lived guest.
         self.kill_all();
         for _ in 0..50 {
             if std::fs::remove_dir(&self.path).is_ok() {
@@ -507,10 +477,9 @@ impl Drop for ExecCgroup {
 static RUN_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// The run's working directory. Injected files are written in and artifacts read out through
-/// path-checked helpers so a host path can't escape the directory. Two shapes: a
-/// [`fresh`](RunDir::fresh) one is private to its run and removed on drop; an [`at`](RunDir::at)
-/// one is the caller's stable **session** dir, created if missing and deliberately kept, session
-/// state belongs to the session, not to any one exec.
+/// path-checked helpers so a host path can't escape the directory. A [`fresh`](RunDir::fresh) one is
+/// private to its run and removed on drop; an [`at`](RunDir::at) one is the caller's stable **session**
+/// dir, created if missing and kept, since session state belongs to the session and not to one exec.
 struct RunDir {
     path: PathBuf,
     /// `false` for a fresh per-run dir (removed on drop); `true` for a session dir (kept).
@@ -542,8 +511,8 @@ impl RunDir {
         &self.path
     }
 
-    /// Resolve a host-supplied relative path safely under the working dir, rejecting absolute paths
-    /// and any `..` that would climb out.
+    /// Resolves a host-supplied relative path under the working dir, rejecting absolute paths and any
+    /// `..` that would climb out.
     fn resolve(&self, rel: &str) -> Result<PathBuf, AgentError> {
         let rel = Path::new(rel);
         for comp in rel.components() {
@@ -555,7 +524,7 @@ impl RunDir {
         Ok(self.path.join(rel))
     }
 
-    /// Write an injected file (creating parent dirs).
+    /// Writes an injected file, creating parent dirs.
     fn put(&self, rel: &str, data: &[u8]) -> Result<(), AgentError> {
         let dest = self.resolve(rel)?;
         if let Some(parent) = dest.parent() {
@@ -564,29 +533,23 @@ impl RunDir {
         std::fs::write(&dest, data).map_err(AgentError::WorkDir)
     }
 
-    /// Read an artifact back: `Ok(None)` if it doesn't exist, `Err` on a bad path or read failure.
+    /// Reads an artifact back: `Ok(None)` if it doesn't exist, `Err` on a bad path or read failure.
     ///
-    /// The command ran *before* this read and may have planted a symlink inside the run dir pointing
-    /// outside it (`ln -s /etc/passwd out`); a bare `fs::read` would follow it and hand the host an
-    /// out-of-tree file. So require the link-resolved real path to stay within the run dir, treating
-    /// an escape as "no such artifact" (omitted, not fatal). Defense-in-depth (the microVM stays
-    /// the boundary): this keeps the agent from leaking files a de-privileged command couldn't
-    /// otherwise reach.
+    /// The command ran *before* this read and may have planted a symlink pointing outside the run dir,
+    /// which a bare `fs::read` would follow, so the link-resolved real path must stay within the run
+    /// dir and an escape reads as "no such artifact". Defense-in-depth; the microVM stays the boundary.
     fn get(&self, rel: &str) -> Result<Option<Vec<u8>>, AgentError> {
         let src = self.resolve(rel)?;
         let (real, root) = match (src.canonicalize(), self.path.canonicalize()) {
             (Ok(real), Ok(root)) => (real, root),
-            // Doesn't resolve (absent or dangling) → simply "no such artifact".
-            _ => return Ok(None),
+            _ => return Ok(None), // absent or dangling: no such artifact
         };
         if !real.starts_with(&root) {
             return Ok(None);
         }
-        // Skip an over-cap artifact *before* reading it. `fs::read` would otherwise slurp a
-        // multi-GiB (even sparse) file whole and OOM-kill the agent, taking the whole session down,
-        // instead of the intended graceful skip. This is only the coarse pre-check: the send side's
-        // `PayloadTooLarge` catch is the precise-boundary/TOCTOU backstop (a file that grows between
-        // this stat and the read still can't overflow a frame).
+        // Skip an over-cap artifact *before* reading it: `fs::read` would slurp a multi-GiB (even
+        // sparse) file whole and OOM-kill the agent, taking the session down instead of skipping. The
+        // send side's `PayloadTooLarge` catch is the precise-boundary and TOCTOU backstop.
         match std::fs::metadata(&real) {
             Ok(md) if md.len() > bsx_channel::MAX_PAYLOAD as u64 => {
                 tracing::warn!(
@@ -622,9 +585,9 @@ enum Kind {
     Stderr,
 }
 
-/// Drain one child pipe to the host, in chunks well under `MAX_PAYLOAD`. Reads to EOF
-/// **unconditionally** (see the module note): once a forward fails, the first error is recorded and
-/// later chunks are dropped, but the pipe is still drained so the child can exit.
+/// Drains one child pipe to the host, in chunks well under `MAX_PAYLOAD`. Reads to EOF
+/// **unconditionally**: once a forward fails the first error is recorded and later chunks are dropped,
+/// but the pipe is still drained so the child can exit.
 fn pump<R, S>(
     mut src: R,
     kind: Kind,
@@ -639,10 +602,9 @@ fn pump<R, S>(
         match src.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                // Best-effort skip once a forward has failed, keep looping to drain regardless.
-                // NOTE: this lock is a *temporary* whose guard drops at the end of the `if`
-                // condition; it must NOT be bound to a local, or it would still be held when
-                // `conn.lock()` is taken below and the two pump threads could deadlock.
+                // This lock is a *temporary* whose guard drops at the end of the `if` condition; bound
+                // to a local it would still be held when `conn.lock()` is taken below, and the two
+                // pump threads could deadlock.
                 if first_err
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
@@ -671,7 +633,7 @@ fn pump<R, S>(
 }
 
 /// A command's exit code, mapping signal death to the shell convention `128 + signal` so the host
-/// always gets a meaningful number.
+/// always gets a number.
 fn exit_code(status: &std::process::ExitStatus) -> i32 {
     use std::os::unix::process::ExitStatusExt;
     status

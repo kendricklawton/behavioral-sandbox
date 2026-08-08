@@ -1,12 +1,11 @@
-//! `cargo xtask dist`: assemble the shippable release package: the release binary
-//! plus the xtask-built guest kernel, rootfs, and eBPF object, staged into one directory,
-//! checksummed, and tarred. The artifacts are built here at package time, never carried in the
-//! source tree; the sha256 manifest is the integrity contract, the same discipline as the pinned
-//! boot artifacts. `install.sh` (repo root, also packed into the tarball) consumes the result.
+//! `cargo xtask dist`: assembles the shippable release package, the release binary plus the xtask-built
+//! guest kernel, rootfs, and eBPF object, staged into one directory, checksummed, and tarred.
 //!
-//! Every step reuses the tested building blocks the individual `xtask` commands use, so this is
-//! orchestration, not a second build path. Vendor-aware like `self-host`: with `BSX_VENDOR_DIR`
-//! set the whole assembly runs offline.
+//! The artifacts are built here at package time rather than carried in the source tree, and the sha256
+//! manifest is the integrity contract. `install.sh`, also packed into the tarball, consumes the result.
+//! Every step reuses the building blocks the individual `xtask` commands use, so this is orchestration
+//! rather than a second build path, and it is vendor-aware, so with `BSX_VENDOR_DIR` set the whole
+//! assembly runs offline.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,14 +22,11 @@ const PROBES_NAME: &str = "probes";
 /// The target the **shipped** binary is built for: static musl, so the package carries no libc
 /// dependency at all.
 ///
-/// A glibc build binds to the build host's symbol versions, and glibc is backward but **not
-/// forward** compatible: a binary built on Ubuntu 24.04 (glibc 2.39) will not start on RHEL 9
-/// (2.34) or Ubuntu 22.04 (2.35), failing before `main()` with a loader error that says nothing
-/// about this engine. Building on the oldest supported glibc would fix it by making the CI runner
-/// the compatibility floor; linking musl statically removes the floor instead, which is the same
-/// move `guest-agent` already makes for the same reason (nothing to link against at the far end).
-///
-/// Dev builds stay native: this is the package's target, not the workspace's.
+/// A glibc build binds to the build host's symbol versions, and glibc is backward but **not forward**
+/// compatible, so a binary built on a newer runner fails before `main()` with a loader error that says
+/// nothing about this engine. Building on the oldest supported glibc would make the CI runner the
+/// compatibility floor; linking musl statically removes the floor instead, the same move `guest-agent`
+/// makes. Dev builds stay native, since this is the package's target rather than the workspace's.
 const DIST_TARGET: &str = "x86_64-unknown-linux-musl";
 
 /// `cargo xtask dist [--version V]`: build binary + artifacts, stage, checksum, tar.
@@ -292,11 +288,9 @@ fn deterministic_tar_flags() -> Vec<String> {
 /// Tar the staged directory deterministically: sorted names, numeric zero owners, and `--mtime`
 /// pinned to the **same fixed epoch the rootfs image uses**, so two builds of one tree agree.
 ///
-/// The epoch is taken from the constant, never from the ambient `SOURCE_DATE_EPOCH`. Honouring the
-/// environment was the bug: nothing in `dist` set it, so mtimes fell back to wall clock and two
-/// builds of the identical tree produced different tarballs and different `SHA256SUMS`. An
-/// environment-dependent value cannot give the property this function claims, since a verifier's
-/// shell is not the release runner's.
+/// The epoch comes from the constant, never from the ambient `SOURCE_DATE_EPOCH`: an
+/// environment-dependent value cannot give the property this function claims, because a verifier's shell
+/// is not the release runner's, and an unset variable falls back to wall clock.
 fn tar_stage(dist_dir: &Path, name: &str, tarball: &Path) -> Result<()> {
     let mut cmd = Command::new("tar");
     cmd.args(deterministic_tar_flags());
@@ -974,12 +968,10 @@ mod tests {
         );
     }
 
-    /// Workflows name repo files as bare shell text: a parser's target (`grep … crates/…`), an
-    /// error message telling a human which file to edit. Nothing checked those paths. The
-    /// prose-drift lint reads `.rs` and `.md` only, and even there it wants a backticked span,
-    /// so a rename lands green and the weekly job fails days later on a path that no longer
-    /// exists: splitting `spawn.rs` into `spawn/fcversion.rs` broke `firecracker-pin.yml`'s floor
-    /// parser exactly that way, and only its own non-vacuity guard would have reported it.
+    /// Workflows name repo files as bare shell text: a parser's target, or an error message telling a
+    /// human which file to edit. The prose-drift lint reads `.rs` and `.md` only, and even there it wants
+    /// a backticked span, so without this a rename lands green and the weekly job fails days later on a
+    /// path that no longer exists.
     ///
     /// Scoped to the `crates/` and `xtask/` prefixes, which are ours. A workflow also fetches a
     /// path out of upstream Firecracker's repo by URL, and `dist/` is build output; neither is a

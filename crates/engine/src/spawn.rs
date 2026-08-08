@@ -933,22 +933,19 @@ fn overlay_boot_args(config: &BootConfig) -> String {
 /// The mask comes from the link's own prefix ([`GuestLink::netmask`]) rather than being written
 /// out, so the guest's mask and the host tap's prefix cannot disagree.
 ///
-/// **The gateway and DNS fields are empty unless `egress` names them.** Empty is the shipped
-/// default: the guest installs the connected route (guest to host over the tap) and no default
-/// route, so an off-link destination fails with `ENETUNREACH` inside the guest. A
-/// [`GuestEgress`] fills them, which lets the guest *emit* those packets so the tap's classifier can
-/// see and police them; it does not make them arrive, since nothing here builds a path (decision 9).
-/// A resolver is unrepresentable without a gateway, so the DNS field can never name a host the
-/// guest has no route to.
+/// **The gateway and DNS fields are empty unless `egress` names them**, the shipped default: the guest
+/// installs the connected route and no default route, so an off-link destination fails with
+/// `ENETUNREACH` inside the guest. A [`GuestEgress`] fills them, which lets the guest *emit* those
+/// packets so the tap's classifier can police them, without making them arrive, since nothing here
+/// builds a path. A resolver is unrepresentable without a gateway, so the DNS field can never name a host
+/// the guest has no route to.
 ///
-/// IPv6 rides alongside as the `guest_ip6=<addr>/<plen>` token, since `ip=` has no v6 form: the
-/// guest's `/sbin/net-up` sysinit reads it and applies it to `eth0`. It is emitted only when the v6
-/// link is live (host assignment is best-effort), so an IPv6-disabled host leaves no dangling guest
-/// address. v6 gets a connected `/64` and no default route in every case: `--allow` parses v4 only,
-/// so a v6 route would be one no CLI-authored policy could bound.
+/// IPv6 rides alongside as a `guest_ip6=<addr>/<plen>` token, since `ip=` has no v6 form, and is emitted
+/// only when the v6 link is live, so an IPv6-disabled host leaves no dangling guest address. v6 gets a
+/// connected `/64` and no default route in every case, since `--allow` parses v4 only and a v6 route
+/// would be one no CLI-authored policy could bound.
 ///
-/// Split out of the boot sequence for the reason [`overlay_boot_args`] was: the rendering is then
-/// exercised without a VM.
+/// Split out of the boot sequence so the rendering is exercised without a VM.
 fn network_boot_args(
     v4: &GuestLink<Ipv4Addr>,
     v6: Option<GuestLink<Ipv6Addr>>,
@@ -1260,12 +1257,11 @@ mod tests {
 
     #[test]
     fn a_vmm_that_dies_mid_boot_is_reported_and_reclaimed() {
-        // Distinct from `dead_vmm_fails_fast_with_its_stderr_tail`, which covers a VMM that never
-        // starts: here one comes up, is polled for a while, and *then* dies, which is the shape of
-        // an OOM kill or an operator's `kill -9` landing during boot. What has never been exercised
-        // is the cleanup: this error is the one path that reaches `abort` with a child that died on
-        // its own, and a scratch dir left behind per failed boot is a slow leak nothing sweeps until
-        // the next `sweep_orphans`.
+        // Distinct from `dead_vmm_fails_fast_with_its_stderr_tail`, which covers a VMM that never starts:
+        // here one comes up, is polled for a while, and *then* dies, the shape of an OOM kill landing
+        // during boot. This is the one path that reaches `abort` with a child that died on its own, so it
+        // is the cleanup that matters: a scratch dir left behind per failed boot is a slow leak nothing
+        // reclaims until the next `sweep_orphans`.
         let dir = ScratchDir::created("bsx-dying-fc");
         let kernel = dir.path().join("vmlinux");
         let rootfs = dir.path().join("rootfs.ext4");

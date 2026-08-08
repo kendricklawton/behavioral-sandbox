@@ -172,13 +172,11 @@ pub fn report(config: &BootConfig, args: &DoctorArgs) -> ExitCode {
             "\n{}",
             paint.wrap("1;32", "Ready: this host can boot a sandbox.")
         );
-        // Name a first command that works *here*: the jailed default needs real root plus the
-        // jailer, so suggesting it unconditionally would hand a fresh operator a failing command.
-        // The unjailed form is listed first for the same reason: it works in the very shell
-        // reading this, while the sudo form needs rights a fresh operator account may lack.
-        // That sudo form re-injects the caller's PATH via `env`: sudoers `secure_path` (on by
-        // default on the common distros) overrides PATH even under `-E`, which hides both a
-        // user-local `bsx` and the firecracker/jailer binaries the engine itself resolves.
+        // Name a first command that works *here*: the jailed default needs real root plus the jailer, so
+        // suggesting it unconditionally would hand a fresh operator a failing command, and the unjailed
+        // form works in the very shell reading this. The sudo form re-injects the caller's PATH via `env`,
+        // because sudoers `secure_path` overrides PATH even under `-E` and would hide both a user-local
+        // `bsx` and the binaries the engine resolves.
         if doctor::jailed_run_available() {
             let _ = writeln!(out, "\nTry it:\n  bsx run -- echo hello");
         } else {

@@ -1,15 +1,15 @@
 //! End-to-end test: a workload that touches the network + a file yields a per-run audit record
 //! that shows exactly what the host could observe of it.
 //!
-//! `#[ignore]`d: it boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches all three
-//! host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built object). Run
-//! via `cargo xtask ci-privileged`. Uses `bsx` as a **dev-dependency only**, so the loader library
-//! stays independent of the driver: the two tracks bridge by plain values (a VMM pid, a netns, a tap).
+//! `#[ignore]`d: it boots a real microVM and attaches all three host-side probes, so it needs `/dev/kvm`,
+//! the guest rootfs, `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN`, kernel BTF, and the built object. Run via
+//! `cargo xtask ci-privileged`. Uses `bsx` as a **dev-dependency only**, so the loader library stays
+//! independent of the driver and the two tracks bridge by plain values.
 //!
-//! This is the convergence proof, the microVM and the eBPF observability as **one system**. It drives
-//! the exact launch sequence a caller (the CLI/daemon, later) will: load the shared tracer + meter once,
-//! boot the sandbox, `attach` the bundle to it by plain values, run the guest workload, then `collect`
-//! the fused [`RunRecord`] while the sandbox is still alive and serialize it to deterministic JSON.
+//! The convergence proof, the microVM and the eBPF observability as **one system**. It drives the launch
+//! sequence a caller drives: load the shared tracer and meter once, boot the sandbox, `attach` the bundle
+//! by plain values, run the guest workload, then `collect` the fused [`RunRecord`] while the sandbox is
+//! still alive and serialize it to deterministic JSON.
 //!
 //! **What the host can and can't see, by design.** The guest's outbound packets cross the tap on the
 //! host, so the **network** touch shows up *exactly* in the record's flows, the strong cross-boundary

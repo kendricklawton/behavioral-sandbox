@@ -2,10 +2,10 @@
 //! run, contained on every axis, and the containment **shown in the host-observed audit record**,
 //! plus the proof that the guest can neither see nor disable the probes doing the observing.
 //!
-//! `#[ignore]`d: each boots a real microVM (needs `/dev/kvm` + the guest rootfs) and attaches all
-//! three host-side probes (needs `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN` + kernel BTF + the built
-//! object). Run via `cargo xtask ci-privileged`. Uses `bsx` as a **dev-dependency only**, so
-//! the loader library stays independent of the driver: the two tracks bridge by plain values.
+//! `#[ignore]`d: each boots a real microVM and attaches all three host-side probes, so it needs
+//! `/dev/kvm`, the guest rootfs, `CAP_BPF`+`CAP_PERFMON`+`CAP_NET_ADMIN`, kernel BTF, and the built
+//! object. Run via `cargo xtask ci-privileged`. Uses `bsx` as a **dev-dependency only**, so the loader
+//! library stays independent of the driver.
 //!
 //! These fuse constituents that already pass individually, deny-by-default egress with an
 //! allow-listed exception (`net_enforce.rs`), a fork storm that creates no host threads (hardware

@@ -20,10 +20,9 @@ use bsx_record::{
 
 /// The frozen envelope. Regenerate only on a deliberate schema bump (`regenerate_fixture`).
 const ENVELOPE: &str = include_str!("fixtures/run-record.envelope.json");
-/// The frozen **chain**: two envelopes, one per line, the shape a daemon session writes (every
-/// `trace` reply after the first is signed chained). Frozen separately from [`ENVELOPE`] because a
-/// chained record signs `prev + "\n" + canonical`, and that framing is a distinct part of the signed
-/// surface: nothing about the single-record fixture covers it, so a change to it would reach
+/// The frozen **chain**: two envelopes, one per line, the shape a daemon session writes. Frozen
+/// separately from [`ENVELOPE`] because a chained record signs `prev + "\n" + canonical`, and nothing
+/// about the single-record fixture covers that framing, so a change to it would reach
 /// backwards through every session record on disk with the single-record pin still green.
 const CHAIN: &str = include_str!("fixtures/run-record.chain.jsonl");
 /// The public half of the throwaway fixture key ([`fixture_key`]); not a secret, the seed is in
@@ -41,10 +40,10 @@ fn fixture_key() -> HostKey {
     HostKey::from_seed([7u8; 32])
 }
 
-/// A synthetic `SyscallEvent` from public fields. `src/testutil.rs` holds the same builder for the
-/// unit tests, and this is deliberately a second copy rather than a shared one: an integration test
-/// compiles as a foreign crate, so it cannot see `pub(crate)`, and building the fixture through the
-/// **public** API is what makes this suite evidence that an outside consumer can reconstruct the
+/// A synthetic `SyscallEvent` from public fields, deliberately a second copy of `src/testutil.rs`'s
+/// builder: an integration test compiles as a foreign crate and cannot see `pub(crate)`, and building the
+/// fixture through the **public** API is what makes this suite evidence that an outside consumer can
+/// reconstruct the
 /// signed bytes.
 fn ev(syscall: u32, cgroup: u64, detail: &[u8], comm: &str) -> SyscallEvent {
     let mut d = [0u8; bsx_record::DETAIL_CAP];

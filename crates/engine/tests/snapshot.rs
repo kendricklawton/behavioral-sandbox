@@ -658,22 +658,17 @@ fn restored_clones_do_not_share_entropy_or_freeze_the_clock() {
         "two clones' first urandom draws must differ (VMGenID must reseed the CRNG on restore)"
     );
 
-    // Clock posture, split by what the resolved VMM can be asked for. On v1.16+, `Vm::restore`
-    // sends `clock_realtime` on `PUT /snapshot/load`, which asks Firecracker to advance the
-    // guest's kvmclock by the wall time elapsed since the snapshot was taken instead of resuming
-    // it frozen; that is a promise the docs make, so it is asserted rather than merely printed.
-    // The flag arrived in v1.16 (`FC_CLOCK_REALTIME_SINCE`), so on v1.15 the engine withholds it
-    // rather than failing the restore, and the *documented* behavior (the RELEASES.md carve-out,
-    // measured 2026-08-04) is a clone waking at snapshot time. Both postures are asserted, so a
-    // v1.15 gate run stays green on the difference it documents and still turns red if either
-    // side stops behaving as written (a v1.15 restore that advances, or a v1.16 one that freezes).
-    // Clone B restores later than A (the sleep plus A's whole draw), so each posture is checked
-    // across two different ages, not the same one twice.
+    // Clock posture, split by what the resolved VMM can be asked for. On v1.16+ `Vm::restore` sends
+    // `clock_realtime`, asking Firecracker to advance the guest's kvmclock by the wall time elapsed since
+    // the snapshot instead of resuming it frozen. On v1.15 the engine withholds the flag rather than
+    // failing the restore, and the documented behavior is a clone waking at snapshot time. Both postures
+    // are asserted, so a v1.15 gate run stays green on the difference it documents and still turns red if
+    // either side stops behaving as written. Clone B restores later than A, so each posture is checked
+    // across two ages rather than one twice.
     //
-    // The tolerance is deliberately loose. It is not a claim about time-sync accuracy (the advance
-    // is only as good as the host's own clock, and the guest never runs NTP); it only has to be
-    // tight enough to tell "advanced" from "frozen" across `SNAPSHOT_AGE`, which is why it sits
-    // below it.
+    // The tolerance is deliberately loose: it is no claim about time-sync accuracy, since the advance is
+    // only as good as the host's own clock, and only has to tell "advanced" from "frozen" across
+    // `SNAPSHOT_AGE`.
     let tolerance = (SNAPSHOT_AGE.as_secs() as i64) - 2;
     let clock_advances = vmm_version().is_none_or(|v| v >= (1, 16));
     for (label, skew) in [("A", skew_a), ("B", skew_b)] {

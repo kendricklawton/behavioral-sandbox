@@ -1,17 +1,14 @@
-//! The `guest-agent` binary: listen for connections and [`serve`](bsx_guest_agent::serve) one command
-//! each.
+//! The `guest-agent` binary: listens for connections and serves one command each.
 //!
-//! **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`), the in-VM
-//! channel the host reaches through Firecracker's vsock socket. For host-side development and tests
-//! it can also listen on a **unix socket** (`unix:<path>`), which makes the whole exec path runnable
-//! with no VM. `serve` is transport-agnostic (any `Read`+`Write`); only the listener differs.
-//!
-//! `tracing` goes to stderr. The agent writes exactly one line to **stdout**, the readiness
-//! sentinel ([`GUEST_READY_MARKER`](bsx_channel::GUEST_READY_MARKER)) emitted once its vsock
-//! listener is bound, because the guest's stdout is the serial console the host scans to learn the
-//! agent is up. One connection = one command, so the loop just accepts, serves, logs, and continues;
-//! every connection serves from the same working directory ([`session_dir`]), so repeated execs
-//! against one VM compose into a **stateful session**.
+//! - **Two transports.** In a real guest the agent listens on **vsock** (`vsock:<port>`), the channel
+//!   the host reaches through Firecracker's vsock socket. For host-side development it also listens on
+//!   a **unix socket** (`unix:<path>`), which makes the whole exec path runnable with no VM. Only the
+//!   listener differs, since `serve` takes any `Read`+`Write`.
+//! - **Streams.** `tracing` goes to stderr. Exactly one line goes to **stdout**, the readiness
+//!   sentinel ([`GUEST_READY_MARKER`](bsx_channel::GUEST_READY_MARKER)) emitted once the vsock
+//!   listener is bound, because the guest's stdout is the serial console the host scans.
+//! - **One session per process.** Every connection serves from the same working directory
+//!   ([`session_dir`]), so repeated execs against one VM compose into a **stateful session**.
 #![forbid(unsafe_code)]
 
 use std::io::Write as _;
@@ -24,9 +21,9 @@ use vsock::{VMADDR_CID_ANY, VsockListener};
 
 use bsx_guest_agent::serve_session;
 
-/// Read/write deadline on each served connection. Liveness is the transport's job: with a deadline
-/// set, a dead-or-stalled host surfaces as a typed timeout in `serve` instead of hanging the agent.
-/// Generous, because a real host reads continuously, anything this slow is a broken peer.
+/// Read/write deadline on each served connection. Liveness is the transport's job: with a deadline set,
+/// a dead-or-stalled host surfaces as a typed timeout in `serve` instead of hanging the agent.
+/// Generous, because a real host reads continuously and anything this slow is a broken peer.
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Exit code for an operational failure (bad usage, a bind/serve error): conventional "2", named so
@@ -34,10 +31,9 @@ const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const EXIT_OPERATIONAL: u8 = 2;
 
 /// The listen-spec scheme tokens, shared by the parser and the readiness announcement so the
-/// `vsock:<port>` the host scans for is one definition, not a spelling on each side. The vsock one
-/// comes from [`bsx_channel`] because the *rootfs build* writes it into the guest's init line too,
-/// which is a third side this crate cannot reach; `unix:` is host-side dev transport only, so it
-/// stays local.
+/// `vsock:<port>` the host scans for is one definition. The vsock one comes from [`bsx_channel`]
+/// because the rootfs build writes it into the guest's init line too, a third side this crate cannot
+/// reach; `unix:` is host-side dev transport only, so it stays local.
 use bsx_channel::VSOCK_SCHEME;
 const UNIX_SCHEME: &str = "unix";
 
@@ -68,7 +64,7 @@ enum Listen<'a> {
     Unix(&'a str),
 }
 
-/// Bind the listener named by `spec` and serve connections until killed.
+/// Binds the listener named by `spec` and serves connections until killed.
 fn run(spec: &str) -> Result<(), String> {
     match parse_listen(spec)? {
         Listen::Vsock(port) => run_vsock(port),
@@ -76,8 +72,8 @@ fn run(spec: &str) -> Result<(), String> {
     }
 }
 
-/// Serve connections from a bound `AF_VSOCK` listener, the in-VM transport. Announces readiness on
-/// the console *after* the bind, so the host never dials before we're accepting.
+/// Serves connections from a bound `AF_VSOCK` listener, the in-VM transport. Announces readiness on the
+/// console *after* the bind, so the host never dials before we're accepting.
 fn run_vsock(port: u32) -> Result<(), String> {
     let listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, port)
         .map_err(|e| format!("bind vsock port {port}: {e}"))?;
@@ -86,8 +82,8 @@ fn run_vsock(port: u32) -> Result<(), String> {
 
     for conn in listener.incoming() {
         match conn {
-            // Refuse a connection we can't bound, the no-hang guarantee depends on the deadline
-            // (see `bsx_guest_agent::serve`). `VsockStream`'s setters return `nix::Error`.
+            // Refuse a connection that can't be bounded: `serve`'s no-hang property rests on the
+            // deadline being set.
             Ok(stream) => match stream
                 .set_read_timeout(Some(IO_TIMEOUT))
                 .and_then(|()| stream.set_write_timeout(Some(IO_TIMEOUT)))
@@ -101,10 +97,9 @@ fn run_vsock(port: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// Serve connections from a unix socket, the host-side dev/test transport (no VM).
+/// Serves connections from a unix socket, the host-side dev and test transport.
 fn run_unix(path: &str) -> Result<(), String> {
-    // A stale socket file (from a previous run) would make `bind` fail with EADDRINUSE; the path is
-    // ours, so clear it first, the same "own your scratch path" discipline as the VMM driver.
+    // A stale socket file makes `bind` fail with EADDRINUSE, and the path is ours to own.
     if Path::new(path).exists() {
         let _ = std::fs::remove_file(path);
     }
@@ -124,27 +119,24 @@ fn run_unix(path: &str) -> Result<(), String> {
 }
 
 /// The one working directory every connection this process serves runs in, which is what makes a
-/// sequence of execs against one agent a **stateful session**: a file injected or written by one
-/// command is visible to the next, and the state's lifetime is the VM's (its overlay discards
-/// everything at teardown). One agent process per VM, so the VM *is* the session; snapshot clones
-/// each get their own copy-on-write view of whatever state the source had accumulated. The pid in
-/// the name is for the host-side `unix:` dev transport, where several agent processes may share
-/// one `/tmp`, in a guest it changes nothing (and a snapshot clone keeps its pid, so the path is
-/// stable across restore).
+/// sequence of execs against one agent a **stateful session**. One agent process per VM, so the VM *is*
+/// the session, and the state's lifetime is the VM's.
+///
+/// The pid in the name is for the host-side `unix:` dev transport, where several agent processes may
+/// share one `/tmp`. In a guest it changes nothing, and a snapshot clone keeps its pid, so the path is
+/// stable across restore.
 fn session_dir() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("bsx-session-{}", std::process::id()))
 }
 
-/// Serve one connection, logging (not propagating) a failure so one bad peer never ends the loop.
-/// `serve_session` emits its own `exec` span with the command + exit; only failures need a line
-/// here.
+/// Serves one connection, logging rather than propagating a failure so one bad peer never ends the
+/// loop. `serve_session` emits its own `exec` span, so only failures need a line here.
 fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
-    // One thread per connection, so a wedged session cannot take the listener down with it. The
-    // whole-tree reap that ends an exec is best-effort (it needs cgroup v2 in the guest), so on an
-    // off-spec guest a command that double-forks a daemon holds the output pipes open and its
-    // `pump` never sees EOF; served inline, that one stuck exec would block `accept` and wedge
-    // every later exec too, not just its own. The session dir stays shared on purpose: it is the
-    // session's state, not any one exec's.
+    // One thread per connection, so a wedged session cannot take the listener down with it: the
+    // whole-tree reap needs cgroup v2 in the guest, so on an off-spec guest a command that
+    // double-forks a daemon holds the output pipes open and its `pump` never sees EOF. Served inline,
+    // that one stuck exec would block `accept` and wedge every later exec too. The session dir stays
+    // shared, since it is the session's state rather than any one exec's.
     let spawned = std::thread::Builder::new()
         .name("bsx-session".to_string())
         .spawn(move || {
@@ -153,15 +145,15 @@ fn serve_one<S: std::io::Read + std::io::Write + Send + 'static>(stream: S) {
             }
         });
     if let Err(e) = spawned {
-        // The spawn took the stream with it, so this connection just closes: the host sees a
-        // failed dial and surfaces its typed error, which beats blocking the accept loop.
+        // The spawn took the stream with it, so this connection closes and the host surfaces its typed
+        // dial error, which beats blocking the accept loop.
         tracing::warn!("cannot spawn a session thread ({e}); dropping the connection");
     }
 }
 
-/// Print the readiness sentinel to stdout (the serial console) and flush, so the host's console scan
-/// fires exactly once the vsock listener is accepting. See [`bsx_channel::GUEST_READY_MARKER`].
-/// `writeln!` (not `println!`) so a closed console is ignored, never a panic.
+/// Prints the readiness sentinel to stdout (the serial console) and flushes, so the host's console scan
+/// fires once the vsock listener is accepting. `writeln!` rather than `println!`, so a closed console is
+/// ignored rather than a panic.
 fn announce_ready(port: u32) {
     let mut out = std::io::stdout();
     let _ = writeln!(
@@ -172,15 +164,15 @@ fn announce_ready(port: u32) {
     let _ = out.flush();
 }
 
-/// Set the read/write deadline on a freshly accepted unix connection.
+/// Sets the read/write deadline on a freshly accepted unix connection.
 fn set_unix_deadlines(stream: &UnixStream) -> std::io::Result<()> {
     stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     Ok(())
 }
 
-/// Parse a `vsock:<port>` or `unix:<path>` listen spec (or a clear error). Pure, so it's unit-
-/// testable without binding anything.
+/// Parses a `vsock:<port>` or `unix:<path>` listen spec. Pure, so it is unit-testable without binding
+/// anything.
 fn parse_listen(spec: &str) -> Result<Listen<'_>, String> {
     match spec.split_once(':') {
         Some((VSOCK_SCHEME, port)) => port
@@ -195,9 +187,9 @@ fn parse_listen(spec: &str) -> Result<Listen<'_>, String> {
     }
 }
 
-/// stderr logging, filter from `BSX_LOG` else `info`. `info` (not the CLI's `warn`) is deliberate:
-/// the agent's per-command `exec` span is the guest's operational trace, captured off the serial
-/// console. `try_init` + an explicit fallback so a bad filter or a double-init never panics the run.
+/// stderr logging, filter from `BSX_LOG` else `info`. `info` rather than the CLI's `warn`, because the
+/// agent's per-command `exec` span is the guest's operational trace, captured off the serial console.
+/// `try_init` plus an explicit fallback, so a bad filter or a double-init never panics the run.
 fn init_tracing() {
     let filter = std::env::var("BSX_LOG").unwrap_or_else(|_| "info".to_string());
     let env_filter = tracing_subscriber::EnvFilter::try_new(&filter)
@@ -226,7 +218,7 @@ mod tests {
             parse_listen("unix:/tmp/a.sock"),
             Ok(Listen::Unix("/tmp/a.sock"))
         );
-        // A path may itself contain a colon; only the first `:` is the scheme separator.
+        // Only the first `:` is the scheme separator, so a path may contain one.
         assert_eq!(parse_listen("unix:/tmp/a:b"), Ok(Listen::Unix("/tmp/a:b")));
     }
 

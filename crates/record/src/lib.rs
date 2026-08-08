@@ -1,18 +1,17 @@
 //! The signed per-run **audit record**: its types, deterministic JSON, summary projection, and
-//! ed25519 signing/verification.
+//! ed25519 signing and verification.
 //!
-//! This crate is the *consumer's* half of the audit story. `bsx-probes-loader` attaches the eBPF
-//! probes and reads their maps; what it assembles is a [`RunRecord`], and everything about that
-//! record (its shape, its byte-stable JSON, the signature envelope, verification and the session
-//! hash-chain) lives here so a record can be parsed and verified **off-host**: an auditor's
-//! machine, a CI job, any consumer with no eBPF, no KVM, and no root. No aya, no nix, enforced by
-//! `record_crate_is_aya_free` in the gate.
+//! The *consumer's* half of the audit story: `bsx-probes-loader` attaches the probes and reads their
+//! maps, and what it assembles is a [`RunRecord`].
 //!
-//! The record's **core is network + resources + denials**, the signals host-side eBPF observes
-//! strongly across the hardware boundary. [`RunRecord::host_syscalls`] is the **VMM's host
-//! footprint**, explicitly *not* the guest's syscalls (a microVM services those in-guest). Every
-//! collection is deterministically sorted, so a record built from the same observations is
-//! byte-stable regardless of map-iteration order, the property the JSON output relies on.
+//! - **Verifiable off-host.** Everything about the record lives here, with no aya and no nix, so an
+//!   auditor's machine or a CI job with no eBPF, KVM, or root can parse and verify one.
+//!   `record_crate_is_aya_free` holds that in the gate.
+//! - **Network + resources + denials are the core**, the signals host-side eBPF observes strongly
+//!   across the hardware boundary. [`RunRecord::host_syscalls`] is the **VMM's host footprint**,
+//!   explicitly not the guest's syscalls, which a microVM services in-guest.
+//! - **Deterministic.** Every collection is sorted, so a record built from the same observations is
+//!   byte-stable regardless of map-iteration order, which is what the JSON output rests on.
 
 #![forbid(unsafe_code)]
 
@@ -22,21 +21,21 @@ pub use bsx_probes_common::{
 };
 
 /// Deterministic JSON of the record: the machine-readable audit surface, byte-stable and
-/// dependency-free (`RunRecord::to_json`). Pure, unit-tested host-safe against a golden.
+/// dependency-free. Pure, so it is golden-tested host-safe.
 mod json;
-/// The per-run audit record: the fused, deterministically-ordered view of what one run did,
-/// aggregated from the three probes. Pure, so its whole aggregation is unit-tested host-safe.
+/// The per-run audit record: the fused, deterministically-ordered view of what one run did. Pure, so
+/// its whole aggregation is unit-tested host-safe.
 mod record;
 /// Record integrity: an `ed25519` detached signature over the canonical record bytes, so alteration
-/// after the producing host is detectable. Host-side key; the guest never sees it.
+/// after the producing host is detectable. The key is host-side; the guest never sees it.
 mod signing;
 /// The plain measurement values the record embeds: network totals and the resource summary.
 mod stats;
-/// The model-legible projection of the record (`RunRecord::to_summary_json`): the compact, third face
-/// for an agent's observe→act loop. A pure view of the record, golden-tested host-safe.
+/// The model-legible projection of the record, the compact third face for an agent's observe-then-act
+/// loop. A pure view, golden-tested host-safe.
 mod summary;
-/// Synthetic wire-struct inputs shared by the three modules' unit tests, so a field added to one of
-/// those structs is answered once rather than in three copies that drift.
+/// Synthetic wire-struct inputs shared by the modules' unit tests, so a field added to one of those
+/// structs is answered once rather than in copies that drift.
 #[cfg(test)]
 mod testutil;
 

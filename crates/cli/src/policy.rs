@@ -1,20 +1,16 @@
 //! Operator policy: the host's per-run defaults, its ceilings, and the postures a caller may tighten
 //! but never loosen.
 //!
-//! **Where this binds, and where it is only a guardrail.** A caller of the CLI is *trusted* (see
-//! `docs/security.md`, "the caller harming the caller" is not a security bug): they own the config
-//! file and the environment, so policy there is a house default that keeps honest runs consistent,
-//! not a boundary. The boundary is `bsx serve`: its clients arrive over a socket
-//! and control neither the daemon's environment nor its `.bsx.toml`, so the same policy applied to
-//! a client's `open` is real enforcement. That asymmetry is deliberate, and it is why the resolution
-//! below lives in one shared place instead of in flag parsing.
+//! **Where this binds, and where it is only a guardrail.** A caller of the CLI is *trusted*: they own
+//! the config file and the environment, so policy there is a house default rather than a boundary. The
+//! boundary is `bsx serve`, whose clients arrive over a socket and control neither the daemon's
+//! environment nor its `.bsx.toml`, so the same policy applied to a client's `open` is real enforcement.
+//! That asymmetry is why the resolution below lives in one shared place rather than in flag parsing.
 //!
-//! **Why a ceiling is not just another config value.** The layering is flags > env > file,
-//! so a plain config value is a *default a caller overrides*. That is right for
-//! defaults and wrong for ceilings, which exist precisely to bound what a caller may ask for. So
-//! ceilings do not participate in that precedence: they bound the resolved value, and exceeding one
-//! is a **typed refusal**, never a silent clamp: quietly handing back 4 vCPUs to a caller who
-//! asked for 32 is the silent degradation a refusal exists to forbid.
+//! **A ceiling is not just another config value.** The layering is flags > env > file, so a plain config
+//! value is a *default a caller overrides*, which is right for defaults and wrong for ceilings. Ceilings
+//! therefore do not participate in that precedence: they bound the resolved value, and exceeding one is a
+//! **typed refusal** rather than a silent clamp back to the maximum.
 
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -220,16 +216,16 @@ impl PolicyError {
 }
 
 impl Policy {
-    /// Resolve a caller's request against this policy into concrete [`Limits`].
-    /// Two different things happen to an over-large value, and the difference is whether a caller
-    /// actually asked for it:
-    /// - **An explicit request above a ceiling is refused.** The caller asked for something this host
-    ///   does not permit; silently serving them less is the degradation a refusal exists to forbid.
-    /// - **A *default* above a ceiling is clamped to the ceiling.** Nobody asked for it, so there is
-    ///   no caller intent to contradict, and refusing would be absurd: setting only `max_wall_secs`
-    ///   would otherwise refuse every bare run, because the engine's own 30s default exceeds it. This
-    ///   also means a self-inconsistent policy (a default above its own ceiling) resolves to the
-    ///   ceiling, the operator's stronger statement, rather than failing every run.
+    /// Resolves a caller's request against this policy into concrete [`Limits`]. What happens to an
+    /// over-large value turns on whether a caller actually asked for it:
+    ///
+    /// - **An explicit request above a ceiling is refused**, since silently serving less is the
+    ///   degradation a refusal exists to forbid.
+    /// - **A *default* above a ceiling is clamped to it.** Nobody asked for it, so there is no caller
+    ///   intent to contradict, and refusing would mean setting only `max_wall_secs` refuses every bare
+    ///   run. A self-inconsistent policy therefore resolves to the ceiling, the operator's stronger
+    ///   statement.
+    ///
     /// # Errors
     /// [`PolicyError::Ceiling`] when a value the **caller explicitly requested** exceeds its ceiling.
     pub fn resolve(&self, req: &Requested) -> Result<Limits, PolicyError> {

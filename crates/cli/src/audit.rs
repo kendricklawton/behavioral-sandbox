@@ -2,15 +2,14 @@
 //! (`bsx-engine`), then bind the host-side probes to it by the **plain values** `Sandbox` exposes
 //! (`vmm_pid`/`netns`/`tap_name`) and fuse their output into the per-run [`RunRecord`].
 //!
-//! This is the caller-side launch sequence the loader specifies:
-//! the driver and the eBPF loader stay independent crates; the CLI is where they meet.
+//! The caller-side launch sequence the loader specifies: the driver and the eBPF loader stay
+//! independent crates, and the CLI is where they meet.
 //!
-//! **Observation fails open; enforcement does not.** A host that can't load the shared probes (no
-//! `CAP_BPF`/`CAP_PERFMON`, no BTF, the object not built) still runs the sandbox; the record it
-//! yields is thinner and says exactly why in its coverage section. `--trace` on an unprivileged dev
-//! box is a working command with an honest, mostly-gap record, never a refused run. An egress
-//! *policy* (`--allow`) is the exception: it is a security control, so a run that asked to enforce
-//! one and couldn't arm the tap is a typed refusal, never a silent unenforced run.
+//! **Observation fails open; enforcement does not.** A host that can't load the shared probes still runs
+//! the sandbox, and the record it yields is thinner and says why in its coverage section, so `--trace` on
+//! an unprivileged box is a working command rather than a refused run. An egress *policy* is the
+//! exception: it is a security control, so a run that asked to enforce one and couldn't arm the tap is a
+//! typed refusal, never a silent unenforced run.
 
 use bsx_engine::VmmError;
 use bsx_probes_loader::{
@@ -56,17 +55,13 @@ impl Observability {
         }
     }
 
-    /// Bind the probes to one booted sandbox (post-boot, by the plain values in `params`). With
-    /// both shared probes live this is [`SandboxProbes::attach`], passing `params.egress` through:
-    /// `Some(policy)` arms enforcement on the tap (armed before it goes live), `None` is
-    /// observe-only.
+    /// Binds the probes to one booted sandbox by the plain values in `params`, passing `params.egress`
+    /// through: `Some(policy)` arms enforcement on the tap before it goes live, `None` is observe-only.
     ///
-    /// **Observation fails open; enforcement does not.** Without the shared probes the bundle
-    /// simply doesn't attach and the record's coverage explains every unbound axis (a thinner but
-    /// working `--trace`). But `egress` is a *security control*, not an observation: if a policy was
-    /// asked for and the tap couldn't be policed (no probes, or the network axis gapped on
-    /// caps/BTF/attach), this is a **typed refusal**, never a run with the operator's allow-list
-    /// silently unapplied.
+    /// **Observation fails open; enforcement does not.** Without the shared probes the bundle doesn't
+    /// attach and the record's coverage explains every unbound axis. But `egress` is a *security control*
+    /// rather than an observation, so a policy that was asked for and could not be armed is a **typed
+    /// refusal**, never a run with the operator's allow-list silently unapplied.
     ///
     /// # Errors
     /// [`VmmError::Vmm`] when `params.egress` is `Some` but enforcement could not be armed.

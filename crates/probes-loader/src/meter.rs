@@ -23,25 +23,25 @@ const METER_TARGETS_MAP: &str = "METER_TARGETS";
 /// The meter-everything toggle (`#[map] static METER_ALL`), slot 0: `0` meters only the target set,
 /// `1` meters every cgroup, the whole-host escape hatch, not the default.
 const METER_ALL_MAP: &str = "METER_ALL";
-/// The membership value stored for a registered target cgroup in `METER_TARGETS` (the set is a map, so
+/// The membership value stored for a registered target cgroup in `METER_TARGETS`. The set is a map, so
 /// the value is a present/absent marker the kernel only tests for existence).
 pub(crate) const TARGET_PRESENT: u8 = 1;
 
 /// A loaded, attached **resource meter**: the `sched/sched_switch` tracepoint accumulates each
-/// registered cgroup's on-CPU time into a map, which [`cpu_time`](Self::cpu_time) reads back per cgroup
-/// id. This is the host CPU a sandbox's VMM burns running the guest vCPUs, attributed to the sandbox's
-/// own cgroup, the metering primitive (the engine measures; the hoster bills). Owns the aya [`Ebpf`]
-/// (the program, its maps, the live attachment) and pins nothing, so dropping it detaches cleanly like
+/// registered cgroup's on-CPU time into a map, which [`cpu_time`](Self::cpu_time) reads back per cgroup id.
+/// This is the host CPU a sandbox's VMM burns running the guest vCPUs, attributed to the sandbox's own
+/// cgroup: the engine measures, the hoster bills. Owns the aya [`Ebpf`] and pins nothing, so dropping it
+/// detaches cleanly like
 /// the other loaders.
 ///
-/// **One meter, many sandboxes.** `sched_switch` is a *global* tracepoint, so this attaches **once** and
+/// **One meter, many sandboxes.** `sched_switch` is a global tracepoint, so this attaches **once** and
 /// meters a *set* of cgroups: [`add_target`](Self::add_target) registers a sandbox's cgroup,
 /// [`remove_target`](Self::remove_target) unregisters it, and the hot path stays a single hash lookup no
-/// matter how many sandboxes are metered (a program-per-sandbox would run every attached program on every
+/// matter how many are metered, where a program-per-sandbox would run every attached program on every
 /// switch). Hold one `ResourceMeter` for the process and register each sandbox's cgroup id (what
 /// [`crate::cgroup_id_of_pid`] resolves from its VMM pid).
 ///
-/// **CPU here, memory/IO from cgroup v2.** CPU is where per-event timing earns its keep, so it rides
+/// **CPU here, memory and IO from cgroup v2.** CPU is where per-event timing earns its keep, so it rides
 /// eBPF; a cgroup's memory high-water mark and IO bytes are already maintained by the kernel's native
 /// cgroup v2 counters, read by [`CgroupStats::read`], the "or cgroup" half of the primitive.
 /// [`summary_for_pid`](Self::summary_for_pid) rolls both into a [`ResourceSummary`] for one sandbox
@@ -52,10 +52,10 @@ pub struct ResourceMeter {
 }
 
 impl ResourceMeter {
-    /// Load the compiled object and load + attach the `account_sched_switch` tracepoint. From here every
-    /// context switch charges the outgoing task's on-CPU time to its cgroup, **but only for registered
-    /// cgroups**, so nothing accumulates until you [`add_target`](Self::add_target) a sandbox (or turn on
-    /// [`meter_all`](Self::meter_all)). Attaching once and metering a set is what keeps this bounded under
+    /// Loads the compiled object and attaches the `account_sched_switch` tracepoint. From here every context
+    /// switch charges the outgoing task's on-CPU time to its cgroup, **but only for registered cgroups**, so
+    /// nothing accumulates until [`add_target`](Self::add_target) or [`meter_all`](Self::meter_all).
+    /// Attaching once and metering a set is what keeps this bounded under
     /// many concurrent sandboxes.
     ///
     /// # Errors
@@ -104,7 +104,7 @@ impl ResourceMeter {
             .map_err(|e| ProbeError::Map(format!("register cgroup {cgroup_id} for metering: {e}")))
     }
 
-    /// Unregister `cgroup_id`: the tracepoint stops charging its time (the accumulated `CPU_NS` total
+    /// Unregisters `cgroup_id`, so the tracepoint stops charging its time. The accumulated `CPU_NS` total
     /// stays readable for a final snapshot until [`reset`](Self::reset) or the meter is dropped).
     /// Removing a cgroup that was never a target is a no-op, not an error.
     ///
@@ -114,7 +114,7 @@ impl ResourceMeter {
     pub fn remove_target(&mut self, cgroup_id: u64) -> Result<(), ProbeError> {
         match self.targets()?.remove(&cgroup_id) {
             Ok(()) => Ok(()),
-            // Absent key (`bpf_map_delete_elem` → ENOENT): nothing to remove, so a no-op is the intended
+            // An absent key means nothing to remove, so a no-op is the intended
             // outcome, don't turn "already gone" into a failure. Any *other* syscall error (a
             // permission/fd fault) still surfaces, so this only swallows the idempotent case.
             Err(aya::maps::MapError::SyscallError(e))
@@ -180,8 +180,8 @@ impl ResourceMeter {
     }
 
     /// Turn the **meter-everything** toggle on or off. Off (the default) meters only the registered
-    /// [`add_target`](Self::add_target) set, the multi-sandbox path. On meters every cgroup on the host
-    /// (so `CPU_NS` grows toward one entry per live cgroup); the whole-host escape hatch for a snapshot or
+    /// [`add_target`](Self::add_target) set, the multi-sandbox path. On meters every cgroup on the host, so
+    /// `CPU_NS` grows toward one entry per live cgroup: the whole-host escape hatch for a snapshot or
     /// a test, not the per-sandbox path.
     ///
     /// # Errors
@@ -209,8 +209,8 @@ impl ResourceMeter {
             .map_err(|e| ProbeError::Map(format!("open `{METER_TARGETS_MAP}` as a hash map: {e}")))
     }
 
-    /// The accumulated on-CPU time charged to `cgroup_id` since [`load`](Self::load), as a [`Duration`].
-    /// `Duration::ZERO` if the cgroup has no entry yet (never scheduled, or not the metered target). The
+    /// The accumulated on-CPU time charged to `cgroup_id` since [`load`](Self::load). `Duration::ZERO` if
+    /// the cgroup has no entry yet, whether never scheduled or not a metered target. The
     /// nanosecond total the map holds, wrapped for the caller.
     ///
     /// **Charges post at switch-out.** A slice is charged when the task *leaves* its CPU (that is when

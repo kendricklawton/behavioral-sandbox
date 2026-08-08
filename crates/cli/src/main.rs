@@ -2,13 +2,10 @@
 //! or hold it open as an interactive stateful session (`shell`), with the run's host-observed
 //! **audit surface** on flags (`--trace`/`--record`/`--record-summary`/`--watch`, see [`audit`]).
 //!
-//! `tracing` logs to **stderr**; **stdout** is reserved for a run's result (the guest's raw output,
-//! or the `--json` structured result / audit log), so `bsx run … 2>/dev/null` stays
-//! pipe-clean (the `--watch` live view also draws on stderr, same reason). Log filter resolves
-//! flags > env (`BSX_LOG`) > file > default. Both subcommands run
-//! **jailed by default** with `--unjailed` as the explicit opt-out, and both point
-//! at the env-layered artifacts (`BSX_ROOTFS`/`BSX_KERNEL`/`BSX_MARKER`, exec needs the
-//! guest rootfs from `cargo xtask build-rootfs`).
+//! `tracing` logs to **stderr** and **stdout** is reserved for a run's result, so `bsx run … 2>/dev/null`
+//! stays pipe-clean; the `--watch` live view draws on stderr for the same reason. The log filter resolves
+//! flags > env (`BSX_LOG`) > file > default. Both subcommands run **jailed by default** with `--unjailed`
+//! as the explicit opt-out, and both point at the env-layered artifacts.
 #![forbid(unsafe_code)]
 
 mod audit;
@@ -493,12 +490,10 @@ fn run_command(args: RunArgs, file: Option<&config::BsxToml>) -> Result<ExitCode
     // failure, so validate it up front rather than paying a full boot + teardown only to fail on it.
     let files_in = read_put_files(&args.put)?;
 
-    // If this run will sign a record, resolve the key **now**, before booting. The signing path
-    // rejects a group/world-readable key file (its secrecy is what the "host-signed" claim rests
-    // on), and finding that out after the guest has already run would throw the record away with
-    // the work already done. Last of the pre-flight checks, because it is the only one that
-    // *creates* something (a first-run key), which a run rejected by a cheaper check above should
-    // not do. Loading is idempotent: the write path reloads the same key.
+    // Resolve the signing key **before** booting: the signing path rejects a group- or world-readable key
+    // file, and learning that after the guest ran would throw the record away with the work already done.
+    // Last of the pre-flight checks, because it is the only one that *creates* something, which a run a
+    // cheaper check rejects should not do. Loading is idempotent.
     if record_path.is_some() {
         let key_path = config::signing_key_path(file);
         bsx_probes_loader::HostKey::load_or_generate(&key_path).map_err(|e| {
@@ -1029,16 +1024,15 @@ fn piped_stdin() -> Result<Vec<u8>, CliError> {
     Ok(buf)
 }
 
-/// Initialize stderr logging from the filter [`config::resolve_log`] already resolved
-/// (`flag > BSX_LOG > file`), falling back to `warn` when nothing set it. Does not re-read the
-/// environment: the precedence is single-sourced in `resolve_log`, this only applies the result.
+/// Initializes stderr logging from the filter [`config::resolve_log`] already resolved, falling back to
+/// `warn` when nothing set it. Does not re-read the environment, since the precedence is single-sourced
+/// there and this only applies the result.
 ///
-/// A filter `tracing` cannot parse is a **typed refusal**, the same loudness the file layer gives
-/// a mistyped *key* (`deny_unknown_fields`): silently running with logging the operator did not
-/// choose is the no-op that posture forbids. What this cannot police is EnvFilter's own grammar:
-/// a bare unknown ident (`debgu`) parses as a *target* name, so only what the parser itself
-/// rejects is refused. `an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` pins both
-/// entry points.
+/// A filter `tracing` cannot parse is a **typed refusal**, the same loudness the file layer gives a
+/// mistyped key. What this cannot police is `EnvFilter`'s own grammar, where a bare unknown ident parses as
+/// a *target* name, so only what the parser itself rejects is refused
+/// (`an_invalid_log_filter_is_a_loud_refusal_not_a_silent_warn` pins both entry points).
+///
 /// # Errors
 /// [`CliError::Cli`] naming the unparseable filter.
 fn init_tracing(filter: Option<&str>) -> Result<(), CliError> {

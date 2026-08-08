@@ -1,29 +1,21 @@
 //! The **model-legible projection** of the per-run [`RunRecord`]: a compact, semantically-labelled
-//! summary shaped to feed straight back into an agent's observe→act loop.
+//! summary shaped to feed back into an agent's observe-then-act loop.
 //!
-//! This is the *third face* of the one record, alongside the human trail (`--trace`) and the full
-//! machine JSON (`--record`, [`RunRecord::to_json`](crate::RunRecord::to_json)). It is a **pure view**
-//! of the existing record, no new observation, no new machinery (the AI-native surface
-//! adds a *reader* of the host-observed record, never a new *authority*). It answers the questions a
-//! supervising agent asks between turns: *what did my sandboxed code reach, what was blocked, what did
-//! it cost, and what couldn't the host see?*
+//! The *third face* of the one record, alongside the human trail and the full machine JSON. A **pure
+//! view** with no new observation and no new machinery, so it adds a *reader* of the host-observed
+//! record and never a new *authority*.
 //!
-//! **How it is compact.** It drops the record's *forensic* detail, per-flow byte/packet counters,
-//! per-syscall `comm`/`hits`, the transient `memory.current` and the `cpu.stat` cross-check, and
-//! keeps the *decision-relevant* signal: the distinct destinations reached (flows collapsed to their
-//! destinations, the ephemeral source dropped), the destinations **denied**, the resource envelope, a
-//! bounded host-syscall sample, and any coverage gap. "Compact" is a **measured number**, not a claim:
-//! a size test pins the projection well under the full record (invariant 4).
-//!
-//! **Vocabulary is guest-centric.** The record names traffic from the *tap's* view (ingress = what the
-//! guest sent); the summary relabels to the *guest's* view (`sent`/`recv`) because that is how an agent
-//! reasons about its own code. The host-syscall counts stay labelled `host_syscalls`, they are the
-//! **VMM's** host-boundary footprint, not the guest's in-guest file I/O (which a microVM services
-//! itself, out of host view), and the projection does not pretend otherwise.
-//!
-//! Byte-stable and deterministic for the same reasons as [`RunRecord::to_json`]: a fixed key order,
-//! integer nanoseconds/bytes (no float wobble), and every array derived from a builder-sorted
-//! collection (or freshly sorted here). A golden test pins the exact bytes.
+//! - **How it is compact.** It drops the forensic detail (per-flow counters, per-syscall `comm`/`hits`,
+//!   the transient `memory.current`, the `cpu.stat` cross-check) and keeps the decision-relevant signal:
+//!   distinct destinations reached, destinations denied, the resource envelope, a bounded syscall sample,
+//!   and any coverage gap. "Compact" is a **measured number**, not a claim: a size test pins the
+//!   projection well under the full record.
+//! - **Vocabulary is guest-centric.** The record names traffic from the *tap's* view, so the summary
+//!   relabels to the guest's (`sent`/`recv`), because that is how an agent reasons about its own code.
+//!   The syscall counts stay labelled `host_syscalls`, since they are the **VMM's** host-boundary
+//!   footprint and not the guest's in-guest file IO.
+//! - **Byte-stable**, for the same reasons as [`RunRecord::to_json`]: a fixed key order, integer
+//!   nanoseconds and bytes, and every array either builder-sorted or freshly sorted here.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -31,24 +23,20 @@ use std::fmt::Write as _;
 use crate::json::{clamped_ns, field, field_opt_u64, json_str, proto_name, syscall_name};
 use crate::record::{AxisGap, NetSection, RunRecord};
 
-/// The version of the record-summary JSON schema, emitted as the leading `schema` field of
-/// [`RunRecord::to_summary_json`]. Versioned independently of the full record's
-/// [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION) and the CLI run-result schema: this is a
-/// *fourth* surface with its own compatibility clock. Within a version, changes are additive only; a
-/// rename/removal or a changed meaning bumps this integer.
+/// The version of the record-summary JSON schema. Versioned independently of the full record's
+/// [`AUDIT_SCHEMA_VERSION`](crate::AUDIT_SCHEMA_VERSION) and the CLI run-result schema, since this is a
+/// fourth surface with its own compatibility clock. Additive within a version.
 pub const SUMMARY_SCHEMA_VERSION: u32 = 1;
 
 /// The projection's own cap on notable host syscalls, tighter than the record's
-/// [`MAX_NOTABLE`](crate::MAX_NOTABLE) (64), because the summary is a context-window artifact, not a
-/// forensic one. Beyond it the projection sets `truncated`, so "there was more" is never silent.
+/// [`MAX_NOTABLE`](crate::MAX_NOTABLE), because the summary is a context-window artifact rather than a
+/// forensic one. Past it the projection sets `truncated`, so "there was more" is never silent.
 const SUMMARY_NOTABLE_CAP: usize = 16;
 
 impl RunRecord {
-    /// Render this record as the compact, model-legible **summary**, one line of deterministic JSON,
-    /// a pure projection of the record for an agent's observe→act loop (what it reached, what egress
-    /// was denied, its resource envelope, any coverage gap; the forensic detail dropped). A *view* of
-    /// the record, not new machinery. The leading `schema` field is
-    /// [`SUMMARY_SCHEMA_VERSION`].
+    /// Renders this record as the compact, model-legible **summary**: one line of deterministic JSON
+    /// carrying what the run reached, what egress was denied, its resource envelope, and any coverage gap.
+    /// The leading `schema` field is [`SUMMARY_SCHEMA_VERSION`].
     #[must_use]
     pub fn to_summary_json(&self) -> String {
         let mut out = String::with_capacity(256);
@@ -68,8 +56,8 @@ impl RunRecord {
         );
         out.push('}');
 
-        // network, reached vs denied (the core "what it did / what was blocked"), plus the guest-view
-        // byte rollup. null when the sandbox had no NIC, same distinction the full record draws.
+        // network, reached against denied, plus the guest-view
+        // byte rollup. `null` when the sandbox had no NIC, the distinction the full record draws.
         out.push_str(",\"network\":");
         match &self.network {
             Some(net) => net_summary(&mut out, net),
@@ -80,7 +68,7 @@ impl RunRecord {
         out.push_str(",\"host_syscalls\":");
         syscalls_summary(&mut out, self);
 
-        // resources, the envelope: eBPF CPU, peak memory, IO bytes. The transient/ cross-check fields
+        // resources: eBPF CPU, peak memory, IO bytes. The transient and cross-check fields
         // are dropped.
         out.push_str(",\"resources\":{");
         field(
@@ -109,7 +97,7 @@ impl RunRecord {
         );
         out.push('}');
 
-        // gaps, coverage flattened to "axis: reason" strings, in the record's own (deterministic) order.
+        // gaps, flattened to "axis: reason" strings in the record's own deterministic order.
         out.push_str(",\"gaps\":[");
         for (i, gap) in self.coverage.iter().enumerate() {
             if i > 0 {
@@ -203,7 +191,7 @@ fn net_summary(out: &mut String, net: &NetSection) {
     // exhaustive (the kernel's flow/denial tables saturated); the counts ride the full record.
     out.push_str(",\"truncated\":");
     out.push_str(if net.truncated() { "true" } else { "false" });
-    // What the sandbox *may* reach, next to what it did. `reached`/`denied` are both backward-looking,
+    // What the sandbox *may* reach, beside what it did. `reached` and `denied` are both backward-looking,
     // so an agent planning its next turn cannot tell "this endpoint failed, retrying is pointless"
     // from "I never tried it". `allowed` + `routed` answer that before it spends a turn finding out.
     // All three are `null` when the posture could not be read, which is not the same claim as an
@@ -266,7 +254,7 @@ fn rule_port_proto(out: &mut String, port: u16, proto: u8) {
 }
 
 /// The host-syscall summary: the by-kind counts, a bounded `notable` sample as `"kind detail"` strings
-/// (the forensic `comm`/`hits` dropped), and one honest `truncated` flag that is true if *either* the
+/// with the forensic `comm`/`hits` dropped, and one `truncated` flag that is true if *either* the
 /// record's own cap overflowed *or* this projection's tighter cap dropped entries.
 fn syscalls_summary(out: &mut String, record: &RunRecord) {
     let s = &record.host_syscalls;

@@ -1,20 +1,16 @@
-//! Deterministic JSON of the per-run [`RunRecord`]: "what this run did," serialized from
-//! *outside* the guest.
+//! Deterministic JSON of the per-run [`RunRecord`]: "what this run did", serialized from *outside* the
+//! guest.
 //!
-//! Hand-rolled, dependency-free, and **compact** (no incidental whitespace), for the same reasons the
-//! host↔guest wire is hand-framed: the audit-log format is a contract downstream clients
-//! parse, so pinning the exact bytes here, rather than trusting a derive's field order, is the
-//! point. The output is **byte-stable**: object keys are written in a fixed order and every array the
-//! record carries is already sorted by its builder ([`NetSection::from_tap`](crate::NetSection),
-//! [`SyscallFold::finish`](crate::SyscallFold)), so the same observations always render the same bytes.
-//! A golden test pins them.
-//!
-//! No floats (durations are integer nanoseconds, byte counts are integers), so there is no
-//! locale/precision wobble; IPv4 addresses render as dotted quads and protocols/syscalls as their
-//! names, so the record reads without a decoder ring. Durations are clamped to **u64 nanoseconds**
-//! (a ~584-year ceiling, the numeric bound consumers can rely on; parse these with 64-bit integers,
-//! not doubles). The human-facing view (a TUI, a pretty-printer) is the live view's job; this is the
-//! machine surface it and any client build on.
+//! - **Hand-rolled and compact**, for the same reason the host-guest wire is hand-framed: the audit-log
+//!   format is a contract downstream clients parse, so pinning the exact bytes beats trusting a derive's
+//!   field order.
+//! - **Byte-stable.** Object keys are written in a fixed order and every array is already sorted by its
+//!   builder, so the same observations always render the same bytes. A golden test pins them.
+//! - **No floats.** Durations are integer nanoseconds clamped to `u64` (a ~584-year ceiling; parse with
+//!   64-bit integers, not doubles) and byte counts are integers, so there is no locale or precision
+//!   wobble. Addresses render as dotted quads and protocols and syscalls as their names, so the record
+//!   reads without a decoder ring.
+//! - **The machine surface.** Pretty-printing for people is the live view's job.
 
 use std::fmt::Display;
 use std::fmt::Write as _;
@@ -26,17 +22,13 @@ use crate::record::{AxisGap, EgressPosture, NetSection, RunRecord, SyscallFootpr
 use crate::{CgroupStats, FlowCounts, NetStats, ResourceSummary};
 
 /// The version of the audit-record JSON schema, emitted as the leading `schema` field of
-/// [`RunRecord::to_json`]. **Compatibility policy:** within a version, changes are *additive only*
-/// (a new field a consumer may ignore); renaming or removing a field, or changing a value's meaning,
-/// bumps this integer. A parser keys on this to know which shape it is reading, and it is versioned
-/// *before* anything external parses it.
+/// [`RunRecord::to_json`]. Within a version changes are **additive only**; a rename, a removal, or a
+/// changed meaning bumps this integer, so a parser keys on it to know which shape it is reading.
 pub const AUDIT_SCHEMA_VERSION: u32 = 1;
 
 impl RunRecord {
-    /// Render this record as one line of deterministic, compact JSON, the structured output. The
-    /// schema is stable and byte-for-byte reproducible across map-iteration order (see the module doc);
-    /// The live view pretty-prints it for people, and a client parses it as the audit-log format.
-    /// The leading `schema` field ([`AUDIT_SCHEMA_VERSION`]) versions the format.
+    /// Renders this record as one line of deterministic, compact JSON, byte-for-byte reproducible across
+    /// map-iteration order. The leading `schema` field versions the format.
     #[must_use]
     pub fn to_json(&self) -> String {
         let mut out = String::with_capacity(512);
@@ -45,8 +37,8 @@ impl RunRecord {
         // schema version, first, so a consumer reads it before anything else.
         field(&mut out, "schema", AUDIT_SCHEMA_VERSION, true);
 
-        // Subject next: what this record is about and when. A consumer filing or correlating
-        // records needs both before it cares what the sandbox did.
+        // Subject next: a consumer filing or correlating records needs both before it cares what the
+        // sandbox did.
         out.push_str(",\"subject\":{\"sandbox_id\":");
         json_str(&mut out, &self.subject.sandbox_id);
         field(
@@ -114,8 +106,7 @@ fn net_to_json(out: &mut String, net: &NetSection) {
             out.push(',');
         }
         out.push('{');
-        // A denial is per-destination (already aggregated across guest source ports by the builder):
-        // the blocked endpoint + proto, and the dropped-packet count.
+        // A denial is per-destination, already aggregated across guest source ports by the builder.
         let d = denial.dst_addr.to_be_bytes();
         let _ = write!(out, "\"dst\":\"{}.{}.{}.{}\"", d[0], d[1], d[2], d[3]);
         field(out, "dst_port", denial.dst_port, false);
@@ -125,7 +116,7 @@ fn net_to_json(out: &mut String, net: &NetSection) {
         field(out, "packets", denial.count, false);
         out.push('}');
     }
-    // The IPv6 flows and denials (dual-stack), additive `flows6`/`denials6` arrays so a v4-only
+    // Additive `flows6`/`denials6` arrays, so a v4-only
     // consumer is unaffected and the schema stays 1. Addresses render as v6 strings.
     out.push_str("],\"flows6\":[");
     for (i, flow) in net.flows6.iter().enumerate() {
@@ -156,14 +147,14 @@ fn net_to_json(out: &mut String, net: &NetSection) {
         out.push('}');
     }
     out.push(']');
-    // The kernel's full-map drop counters + the one flag a consumer checks before trusting the
-    // flow list as exhaustive. Additive keys (schema stays 1); 0/false is the healthy shape.
+    // The kernel's drop counters plus the flag a consumer checks before trusting the flow list as
+    // exhaustive. Additive keys, and `0`/`false` is the healthy shape.
     field(out, "dropped_flows", net.dropped_flows, false);
     field(out, "dropped_denials", net.dropped_denials, false);
     out.push_str(",\"truncated\":");
     out.push_str(if net.truncated() { "true" } else { "false" });
-    // What was being enforced, and whether the guest had a route to test it with. Additive key
-    // (schema stays 1). `null` says the posture was not read, which is not the same claim as an
+    // What was being enforced, and whether the guest had a route to test it with. `null` says the posture
+    // was not read, which is not the same claim as an
     // empty rule list, so the two render differently on purpose.
     out.push_str(",\"posture\":");
     match &net.posture {
@@ -394,9 +385,9 @@ pub(crate) fn field_opt_u64(out: &mut String, key: &str, value: Option<u64>, fir
     };
 }
 
-/// Write a JSON string literal, escaping per RFC 8259: the two mandatory metacharacters (`"` and `\`)
-/// and every control byte below 0x20 (as `\n`/`\t`/… or a `\u00XX` escape). The record's strings are
-/// already lossy-UTF-8 (`detail_display`/`comm_lossy`), so this only has to make them JSON-safe, never
+/// Writes a JSON string literal, escaping per RFC 8259: the two mandatory metacharacters and every
+/// control byte below 0x20. The record's strings are already lossy-UTF-8, so this only has to make them
+/// JSON-safe, never
 /// re-validate UTF-8.
 pub(crate) fn json_str(out: &mut String, s: &str) {
     out.push('"');

@@ -1,17 +1,15 @@
 //! `cargo xtask vendor`, snapshot every sha-pinned upstream input into a **local mirror**, so a
 //! fresh host builds the engine without the Firecracker S3 bucket or the Alpine CDN staying alive.
 //!
-//! This is the durable hardening:
-//! the boot kernel + rootfs (Firecracker CI), the Alpine minirootfs, the static `apk` tool, **and**
-//! the resolved `.apk` package closure are all fetched once, sha-verified, and written under the
-//! vendor dir alongside a [`MANIFEST_NAME`] recording each file's hash. Afterwards, setting
-//! `BSX_VENDOR_DIR` to that dir takes every build path offline: [`fetch_one`](crate::artifacts)
-//! restores the binary artifacts from the mirror, and the rootfs build installs the packages from the
-//! vendored apk cache (`--no-network`) instead of the CDN.
+//! The boot kernel and rootfs, the Alpine minirootfs, the static `apk` tool, **and** the resolved `.apk`
+//! package closure are fetched once, sha-verified, and written under the vendor dir alongside a
+//! [`MANIFEST_NAME`] recording each file's hash. Setting `BSX_VENDOR_DIR` to that dir then takes every
+//! build path offline: [`fetch_one`](crate::artifacts) restores the binary artifacts from the mirror, and
+//! the rootfs build installs packages from the vendored apk cache rather than the CDN.
 //!
-//! The mirror is **not** committed (it's gitignored, like `artifacts/`, the guardrail against
-//! carrying built/downloaded images in the tree). A self-hoster produces it once and can then rebuild
-//! offline forever; the manifest makes the vendored set auditable and offline-re-verifiable.
+//! The mirror is **not** committed, gitignored like `artifacts/`, the guardrail against carrying
+//! downloaded images in the tree. A self-hoster produces it once and rebuilds offline afterwards, and the
+//! manifest makes the vendored set auditable off-host.
 
 use std::path::{Path, PathBuf};
 

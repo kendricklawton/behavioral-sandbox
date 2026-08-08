@@ -254,7 +254,7 @@ fn addresses_the_guest_over_ipv6_and_routes_host_to_guest() {
     // `ip=`/`CONFIG_IP_PNP` param is v4-only, so the guest's v6 address rides the `guest_ip6=`
     // cmdline token that `/sbin/net-up` applies to `eth0`. Prove: the guest carries its static v6
     // address, reaches the host v6 end over the connected /64, and (deny-by-default) cannot reach an
-    // off-link v6 address, no v6 default route is installed. This is the live proof of P4.9a's link.
+    // off-link v6 address, since no v6 default route is installed.
     if !have_net_admin() {
         eprintln!("skipping: creating a tap needs CAP_NET_ADMIN");
         return;

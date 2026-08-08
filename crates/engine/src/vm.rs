@@ -182,18 +182,14 @@ pub struct BootConfig {
     /// and lands in the record's denial trail instead of dying inside the guest. See [`GuestEgress`]
     /// and design decision 9.
     ///
-    /// **Read only when [`enable_network`](BootConfig::enable_network) is set**, and ignored
-    /// otherwise rather than refused. A gateway is a *host* fact (`BSX_GATEWAY`, `.bsx.toml`),
-    /// so it is normally set once for every sandbox on a host; refusing the combination would mean
-    /// an operator who configures an uplink breaks every run that does not ask for a NIC. Whether a
-    /// caller *explicitly* asked for a gateway on a NIC-less run is visible only to the layer that
-    /// parsed the request, and both refuse it there: `--gateway` requires `--net` at the CLI, and
-    /// the daemon refuses `allow` without `net`.
+    /// **Read only when [`enable_network`](BootConfig::enable_network) is set**, and ignored otherwise
+    /// rather than refused: a gateway is a *host* fact set once for every sandbox, so refusing the
+    /// combination would break every run that does not ask for a NIC. Whether a caller *explicitly* asked
+    /// for one is visible only to the layer that parsed the request, and both refuse it there.
     ///
-    /// **Applies at cold boot only.** The addressing rides the kernel command line, which a restored
-    /// clone inherits from the snapshot rather than re-deriving, so a clone carries whatever the boot
-    /// that took the snapshot configured and this field is inert on [`Vm::restore`]. Set it on the
-    /// config that boots the snapshot source, which is the same config a pool uses for both.
+    /// **Applies at cold boot only.** The addressing rides the kernel command line, which a restored clone
+    /// inherits from the snapshot rather than re-deriving, so this field is inert on [`Vm::restore`]. Set
+    /// it on the config that boots the snapshot source.
     pub egress: Option<GuestEgress>,
     /// Run Firecracker under its **jailer**: a chroot, a uid/gid drop, and the jailer's mount
     /// namespace confine the VMM process itself (see [`Jail`]). `None` (the default) spawns
@@ -631,12 +627,10 @@ impl Vm {
         // And a gateway the guest could never reach, which would otherwise boot into a sandbox that
         // looks configured and is sealed.
         refuse_offlink_gateway(&config)?;
-        // The jail composes with every boot feature now: vsock (socket staged
-        // chroot-relative under the dropped uid), the read-only overlay (shared base bind-mounted
-        // into the chroot), a NIC (the tap lives in a per-VM netns the jailer joins), and bulk I/O
-        // (images built in place inside the chroot). The deny-by-default refusal that
-        // stood here while combinations were unjailed retired with its last member; a new
-        // not-yet-jailed feature must reinstate it rather than boot half-confined.
+        // The jail composes with every boot feature: vsock staged chroot-relative under the dropped uid,
+        // the read-only overlay bind-mounted into the chroot, a NIC whose tap lives in a per-VM netns the
+        // jailer joins, and bulk IO built in place inside the chroot. A new not-yet-jailed feature must
+        // reinstate a deny-by-default refusal here rather than boot half-confined.
         // KVM checked here, not in `launch`, so the launch/boot-failure machinery stays unit-testable
         // on hosts without KVM (a fake "firecracker" needs no VM).
         if !Path::new("/dev/kvm").exists() {
@@ -829,15 +823,12 @@ impl RunningVm {
     /// **Env scope.** The variables are set on the **spawned command only**, the guest agent
     /// applies them via `Command::env`, never its own process, so one run's environment can't
     /// bleed into the agent or a later run.
-    /// **Secret hygiene (pinned contract).** Injected file contents and env *values* are treated as
-    /// secrets: they never appear in an engine log line, in any [`VmmError`]'s `Display`/`Debug`, or
-    /// on the serial console ([`console`](Self::console)), an error path may name a file *path* or
-    /// an env *key*, never a value, and the wire copies the driver builds are zero-wiped after
-    /// send, not just freed (best-effort: the caller's own buffers and the kernel's socket buffers
-    /// are out of the engine's reach). What the *command* does with its inputs (echo them to stdout,
-    /// write them to `/output`) is the run's own data in [`RunResult`], not an engine surface. The
-    /// audit log will record *that* inputs were injected, paths/keys/sizes or
-    /// hashes, never contents.
+    /// **Secret hygiene, a pinned contract.** Injected file contents and env *values* never appear in an
+    /// engine log line, in any [`VmmError`]'s rendering, or on the serial console: an error path may name
+    /// a file *path* or an env *key*, never a value, and the wire copies the driver builds are zero-wiped
+    /// after send. Best-effort, since the caller's own buffers and the kernel's socket buffers are out of
+    /// reach. What the *command* does with its inputs is the run's own data in [`RunResult`], and the
+    /// audit log records paths, keys, and sizes rather than contents.
     /// # Errors
     /// As [`exec`](Self::exec).
     pub fn exec_with_files(
@@ -890,12 +881,10 @@ impl RunningVm {
     /// race the guest and corrupt the ext4 journal `e2fsck` replays. Read-back is fully **rootless**:
     /// `e2fsck` recovers the journal, then `debugfs rdump` extracts the tree, no loopback, no
     /// `mount`, no `sudo`.
-    /// Guest-controlled contents are sanitised: `lost+found` is dropped; symlinks whose target
-    /// escapes the destination (absolute, or `..` climbing out) are removed, so a later host read of
-    /// the results can't be redirected onto the host filesystem; and the extraction is bounded in
-    /// both real bytes and wall-clock time, so a sparse-file or
-    /// pathological image can't exhaust host disk or hang teardown. Dropping the consumed VM reclaims
-    /// the scratch dir, the image included.
+    /// Guest-controlled contents are sanitised: `lost+found` is dropped, symlinks whose target escapes the
+    /// destination are removed so a later host read cannot be redirected onto the host filesystem, and the
+    /// extraction is bounded in both real bytes and wall-clock time, so a sparse or pathological image
+    /// can't exhaust host disk or hang teardown. Dropping the consumed VM reclaims the scratch dir.
     /// # Errors
     /// [`VmmError::Vmm`] if the VM was booted without an output device (no `output_dir`), or on a
     /// host-side readback failure; [`VmmError::Artifact`] if `e2fsck`/`debugfs` are missing;
@@ -1121,10 +1110,6 @@ mod tests {
         assert_eq!(cfg.exec_wall, Duration::from_secs(60));
         assert_eq!(cfg.output_cap, 4096);
     }
-
-    // (`jail_refuses_half_confined_boots` lived here while some boot features were not yet jailed;
-    // it retired once the jail composed with every feature, so there is nothing left to
-    // refuse. If a future feature ships unjailed, reinstate the refusal in `Vm::boot` and this test.)
 
     #[test]
     fn a_vcpu_count_the_vmm_would_reject_is_refused_before_the_spawn() {

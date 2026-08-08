@@ -1,36 +1,27 @@
-//! Run Firecracker under its **jailer**: the other half of the isolation story. Hardware
-//! isolation (KVM) contains the *guest*; the jailer contains the *VMM process* on the host, so a
-//! Firecracker bug or a hostile guest that breaks out into the VMM still lands in a chroot, under a
-//! dropped uid/gid, in the jailer's mount namespace, reaching almost nothing.
+//! Run Firecracker under its **jailer**, the other half of the isolation story: hardware isolation
+//! contains the *guest*, and the jailer contains the *VMM process* on the host, so a Firecracker bug or
+//! a guest that breaks out into the VMM still lands in a chroot under a dropped uid/gid.
 //!
-//! The jailer is a separate Firecracker binary that, given `--exec-file firecracker --id <id>
-//! --uid/--gid --chroot-base-dir <base>`, builds a chroot at `<base>/firecracker/<id>/root/`, mknods
-//! the device nodes the VMM needs (`/dev/kvm`, `/dev/net/tun`), places the process in a cgroup,
-//! `chroot`s in, drops privileges, and `exec`s Firecracker with its API socket at the
-//! chroot-relative `/run/firecracker.socket`. Every resource the VMM opens (kernel, rootfs) must
-//! therefore live **inside** the chroot and be named by its chroot-relative path in the API.
+//! The jailer builds a chroot, mknods the device nodes the VMM needs, places the process in a cgroup,
+//! `chroot`s in, drops privileges, and `exec`s Firecracker with its API socket at a chroot-relative
+//! path. Every resource the VMM opens must therefore live **inside** the chroot and be named by its
+//! chroot-relative path in the API.
 //!
-//! **What this costs, and why the layout is what it is.** The chroot base is the VM's own scratch
-//! dir under `/tmp`, so teardown's `remove_dir_all` reclaims the whole jail; the cgroup the jailer
-//! creates lives outside it and is removed explicitly (like the tap). We don't `--daemonize`, so
-//! Firecracker keeps our piped stdout and the serial console still reaches [`crate::console`]. We
-//! don't mknod anything ourselves (the jailer does, which is why it needs real root, mknod of a
-//! device node is `EPERM` in a non-initial user namespace even with `CAP_MKNOD`).
-//!
-//! **Scope.** This confines both a jailed **cold boot** and a jailed **restore**: the chroot +
-//! uid/gid drop + the jailer's mount namespace, cgroup **cpu/memory limits** derived from the
-//! guest's envelope plus a fixed host-side **`pids.max`** cap (applied on cold boot *and re-applied on
-//! restore* when the host delegates the cgroup v2 controllers, each fail-open on its own), and
-//! Firecracker's built-in
-//! **seccomp** filters (on by default; we never pass `--no-seccomp`). Every
-//! boot feature composes with the jail: the **vsock exec channel** (its unix socket bound
-//! chroot-relative under the dropped uid, [`JAILED_VSOCK_UDS`]), the **read-only overlay** (the
-//! shared base bind-mounted into the chroot, [`stage_ro_base_into_chroot`], the shared-base path, not a
-//! full rootfs copy), a **NIC** (the tap lives in a per-VM netns the jailer joins via `--netns`),
-//! **bulk I/O** (images built in place inside the chroot), and **snapshot restore**
-//! (the bundle staged into the chroot; a confined prewarmed pool falls out). Leak-proof, cgroup-owned
-//! teardown lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's
-//! cgroup at its precomputed path, so host death can't leak a jailed VMM either.
+//! - **Layout.** The chroot base is the VM's own scratch dir, so teardown's `remove_dir_all` reclaims
+//!   the whole jail; the cgroup the jailer creates lives outside it and is removed explicitly. No
+//!   `--daemonize`, so Firecracker keeps the piped stdout and the serial console still reaches
+//!   [`crate::console`]. The driver mknods nothing itself, which is why the jailer needs real root:
+//!   mknod of a device node is `EPERM` in a non-initial user namespace even with `CAP_MKNOD`.
+//! - **Scope.** This confines both a jailed cold boot and a jailed restore: the chroot, the uid/gid
+//!   drop, the jailer's mount namespace, cgroup cpu/memory limits derived from the guest's envelope
+//!   plus a fixed `pids.max`, each fail-open on its own, and Firecracker's built-in seccomp filters,
+//!   which `--no-seccomp` is never passed against.
+//! - **Composition.** Every boot feature composes with the jail: the vsock exec channel bound
+//!   chroot-relative under the dropped uid, the read-only overlay bind-mounted in by
+//!   [`stage_ro_base_into_chroot`], a NIC whose tap lives in a per-VM netns the jailer joins, bulk IO
+//!   built in place inside the chroot, and snapshot restore from a bundle staged into it.
+//! - **Teardown** lives in [`crate::lifetime`]: the jailed VM's sentinel watches the jailer's cgroup at
+//!   its precomputed path, so host death can't leak a jailed VMM either.
 
 use std::num::{NonZeroU8, NonZeroU32};
 use std::path::{Path, PathBuf};

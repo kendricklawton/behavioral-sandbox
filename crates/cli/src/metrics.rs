@@ -2,22 +2,17 @@
 //! **Prometheus text-exposition endpoint** ([`serve`]) the *hoster* scrapes: the daemon exposes its
 //! own numbers; dashboards, alerting, and retention are the hoster's, above the engine.
 //!
-//! **Hand-rolled on purpose.** The exposition format is a few lines of stable text, and the daemon is
-//! synchronous with no async runtime, so the endpoint is a plain
-//! `TcpListener` + a bounded HTTP/1.1 responder on one thread, the same discipline as the driver's
-//! hand-rolled Firecracker HTTP client, not a `tokio`/framework import for one GET route. Scrapes are
-//! served sequentially (a scraper polls every few seconds; there is no fan-in to manage), each under
-//! a read/write timeout so a stalled peer can't wedge the endpoint.
-//!
-//! **Prometheus conventions, followed.** Base units (**seconds**, never milliseconds), `_total`
-//! suffixes on counters, `# HELP`/`# TYPE` for every family, cumulative histogram buckets with an
-//! explicit `+Inf` plus `_sum`/`_count`, an `bsx_build_info` gauge carrying the version as a
-//! label, and deliberately **low label cardinality** (fixed `pooled`/`verb`/`kind` sets, nothing
-//! per-session or per-client, which would grow without bound).
-//!
-//! The scraper is untrusted input too: the request head is read through a hard byte cap and a
-//! socket timeout, so a hostile or broken peer is a dropped connection, never a panic, hang, or
-//! unbounded allocation.
+//! - **Hand-rolled on purpose.** The exposition format is a few lines of stable text and the daemon is
+//!   synchronous, so the endpoint is a plain `TcpListener` plus a bounded HTTP/1.1 responder on one
+//!   thread rather than a framework import for one GET route. Scrapes are served sequentially, each under
+//!   a read and write timeout so a stalled peer can't wedge the endpoint.
+//! - **Prometheus conventions.** Base units in **seconds**, `_total` suffixes on counters,
+//!   `# HELP`/`# TYPE` for every family, cumulative histogram buckets with an explicit `+Inf` plus
+//!   `_sum`/`_count`, a `bsx_build_info` gauge carrying the version as a label, and deliberately **low
+//!   label cardinality**: fixed sets, nothing per-session or per-client.
+//! - **The scraper is untrusted input.** The request head is read through a hard byte cap and a socket
+//!   timeout, so a hostile or broken peer is a dropped connection rather than a panic, hang, or
+//!   unbounded allocation.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -118,12 +113,11 @@ impl Histogram {
     /// Record one observation.
     fn observe(&self, d: Duration) {
         let secs = d.as_secs_f64();
-        // Bump `count` (the `+Inf` cumulative) *before* the per-bucket slot. `render` sums the
-        // buckets first and reads `count` last, so this ordering lets a concurrent scrape only ever
-        // see `count` ≥ every bucket cumulative: a mid-`observe` scrape momentarily *under*-counts one
-        // bucket (valid, buckets ≤ +Inf) instead of over-counting it (a non-monotonic histogram the
-        // exposition spec forbids). On x86's store order the counter is visible before the slot; the
-        // loads stay `Relaxed` since this is a best-effort consistency nudge, not a synchronization.
+        // Bump `count` (the `+Inf` cumulative) *before* the per-bucket slot: `render` sums the buckets
+        // first and reads `count` last, so a concurrent scrape momentarily *under*-counts one bucket, which
+        // is valid, rather than over-counting it into the non-monotonic histogram the exposition spec
+        // forbids. The loads stay `Relaxed`, since this is a best-effort nudge rather than
+        // synchronization.
         self.count.fetch_add(1, Ordering::Relaxed);
         if let Some(i) = BUCKET_BOUNDS.iter().position(|(bound, _)| secs <= *bound) {
             self.buckets[i].fetch_add(1, Ordering::Relaxed);
@@ -142,12 +136,10 @@ impl Histogram {
             cumulative += self.buckets[i].load(Ordering::Relaxed);
             sample(out, name, &format!("_bucket{{le=\"{label}\"}}"), cumulative);
         }
-        // `+Inf`/`_count` must be >= every finite bucket cumulative (the exposition spec's
-        // monotonicity). `observe` bumps `count` before the slot so x86's store order keeps that
-        // true in practice, but `Relaxed` promises no cross-thread order, so a scrape can see a
-        // slot increment without the matching `count` one. Clamp up to `cumulative` so a mid-observe
-        // scrape never emits a non-monotonic histogram. Steady state (count >= cumulative) is a
-        // no-op; the raised value keeps `+Inf` and `_count` equal, as the spec also requires.
+        // `+Inf` and `_count` must be >= every finite bucket cumulative. `Relaxed` promises no
+        // cross-thread order, so a scrape can see a slot increment without the matching `count` one:
+        // clamping up to `cumulative` keeps the exposition monotonic. Steady state is a no-op, and the
+        // raised value keeps `+Inf` and `_count` equal, as the spec also requires.
         let count = self.count.load(Ordering::Relaxed).max(cumulative);
         sample(out, name, "_bucket{le=\"+Inf\"}", count);
         let sum_secs = self.sum_micros.load(Ordering::Relaxed) as f64 / 1e6;
@@ -836,11 +828,9 @@ mod tests {
 
     #[test]
     fn a_bucket_visible_before_its_count_still_renders_monotonic() {
-        // The weak-ordering transient the render-side clamp guards: a scrape sees a per-bucket
-        // increment but not yet the matching `count` one (the two `Relaxed` writes in `observe`
-        // carry no cross-thread order guarantee). Model it directly, a bucket at 1 with `count` still 0, and
-        // assert the exposition stays monotonic: `+Inf` (and `_count`) clamp up to the bucket
-        // cumulative rather than emitting a finite bucket that exceeds `+Inf`.
+        // The weak-ordering transient the render-side clamp guards: a scrape sees a per-bucket increment
+        // but not the matching `count` one, since the two `Relaxed` writes carry no cross-thread order.
+        // Modelled directly as a bucket at 1 with `count` still 0.
         let h = Histogram::default();
         h.buckets[0].store(1, Ordering::Relaxed);
         let mut out = String::new();
@@ -856,11 +846,9 @@ mod tests {
     #[test]
     #[allow(clippy::panic)] // a disappearing sample is a test failure, reported via panic
     fn counters_and_histograms_never_decrease_across_any_op_sequence() {
-        // The registry's structural claim ("counters only go up") as an asserted property, not an
-        // argument: drive a randomized-but-deterministic op sequence (xorshift, fixed seed, the
-        // fuzz_tests idiom) and after every op assert each `_total`/`_bucket`/`_count`/`_sum`
-        // sample is >= its previous render. The one gauge is exempt by design (inc/dec paired);
-        // its own clamp/pairing tests cover it.
+        // "Counters only go up" as an asserted property rather than an argument: a deterministic random op
+        // sequence, with every sample checked against its previous render after each op. The one gauge is
+        // exempt by design, being inc/dec paired, and its own tests cover it.
         fn samples(render: &str) -> std::collections::HashMap<String, f64> {
             render
                 .lines()

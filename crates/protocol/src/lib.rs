@@ -1,64 +1,43 @@
-//! The bsx wire protocol: a **versioned, newline-delimited JSON** contract. A client sends one
-//! [`Request`] line, the daemon answers with one or more [`Response`] lines; every message carries a
-//! leading [`schema`](Envelope::schema) field, so the two sides agree on the shape before either
-//! trusts the other's bytes.
+//! The bsx wire protocol: a **versioned, newline-delimited JSON** contract.
 //!
-//! **Compatibility: fields grow, values grow, replies do not.** The rule set every client must
-//! implement, stated here because each one reimplements these shapes without serde and would
-//! otherwise each invent its own answer (`docs/daemon-protocol.md` "Compatibility rules" is the
-//! same statement for a non-Rust reader):
+//! A client sends one [`Request`] line and the daemon answers with one or more [`Response`] lines,
+//! each carrying a leading [`schema`](Envelope::schema) field, so the two sides agree on the shape
+//! before either trusts the other's bytes. This is the one artifact the daemon, the reference client,
+//! and any non-Rust client share, so it lives in its own **engine-free** crate.
 //!
-//! 1. **Unknown fields are ignored.** A message may gain a field within a `schema`, so decoding
-//!    must not reject an object for carrying something extra. This is how the wire evolves without
-//!    a version bump, and it is why no message type here sets `deny_unknown_fields`.
-//! 2. **An unknown `reply` is a hard error.** Deliberately the opposite of rule 1: the protocol is
-//!    strict request/response, so a reply that cannot be interpreted means the client has lost
-//!    track of what is being answered, and skipping it would silently desynchronize the session
-//!    rather than lose one message. Growing the reply set is a [`WIRE_SCHEMA`] bump.
-//! 3. **An unknown enumerated *value* degrades.** A value carries no framing, so an unfamiliar one
-//!    can map to a conservative default without losing sync. [`FaultKind`] is the case that
-//!    exists: it decodes to [`Unknown`](FaultKind::Unknown), read as
-//!    [`Infra`](FaultKind::Infra).
+//! **Compatibility: fields grow, values grow, replies do not.** Stated here because each client
+//! reimplements these shapes without serde (`docs/daemon-protocol.md` says the same for a non-Rust
+//! reader):
 //!
-//! **This is the client contract.** It is the one artifact the daemon
-//! ([`bsx serve`](../bsx/index.html)), the reference client (`bsx-client`), and any non-Rust
-//! client share, so it lives in its own **engine-free** crate: the wire is the contract, not
-//! shared Rust internals, and a non-Rust caller reimplements these JSON shapes without linking
-//! the engine. The shape may still change, which is exactly why [`WIRE_SCHEMA`] is stamped on
-//! every message and mismatches are rejected up front rather than silently mis-decoded.
+//! 1. **Unknown fields are ignored**, which is how the wire evolves without a version bump, and why no
+//!    message type here sets `deny_unknown_fields`.
+//! 2. **An unknown `reply` is a hard error**, deliberately the opposite of rule 1: the protocol is
+//!    strict request/response, so a reply that cannot be interpreted means the client has lost track of
+//!    what is being answered, and skipping it would desynchronize the session rather than lose one
+//!    message.
+//! 3. **An unknown enumerated *value* degrades.** A value carries no framing, so an unfamiliar one can
+//!    map to a conservative default without losing sync. [`FaultKind`] is the case that exists.
 //!
-//! **Why JSON, not gRPC.** The daemon is synchronous, thread-per-connection, with no
-//! async runtime on the host path; gRPC would drag `tonic`/`prost` and a `tokio` stack into that
-//! posture. The peer is a **local, trusted-ish client** the hoster runs, so hand-debuggability
-//! (`socat`, `nc`) matters more than a compact wire, and any language can drive a line of JSON over a
-//! unix socket with only a JSON library. The one adversarial concern that still applies is the
-//! decoder's contract (no panic/hang/unbounded allocation on any input): every line is bounded
-//! before it is decoded and every failure is a typed [`ProtocolError`], never a panic.
+//! **JSON, not gRPC.** The daemon is synchronous and thread-per-connection with no async runtime on
+//! the host path, which gRPC would drag `tonic`/`prost` and a `tokio` stack into. The peer is a local
+//! client the hoster runs, so hand-debuggability (`socat`, `nc`) matters more than a compact wire. The
+//! adversarial concern that remains is the decoder's contract: every line is bounded before it is
+//! decoded and every failure is a typed [`ProtocolError`], never a panic.
 //!
-//! **The two directions carry different bounds**, [`MAX_REQUEST_BYTES`] and
-//! [`MAX_RESPONSE_BYTES`], because they bound different things: a request is an untrusted peer's
-//! line, a response is the daemon's own output under an `output_cap` an operator already controls.
-//! The read side is the direction-typed [`read_request`]/[`read_response`], the write side
-//! [`write_request`]/[`write_response`], so a call site cannot pick the wrong number. The asymmetry
-//! is a posture: a client trusts the daemon it chose to connect to further than a daemon trusts
-//! whoever reaches its socket.
+//! **The two directions carry different bounds**, [`MAX_REQUEST_BYTES`] and [`MAX_RESPONSE_BYTES`],
+//! because a request is an untrusted peer's line while a response is the daemon's own output under an
+//! `output_cap` an operator already controls. The read side is direction-typed, so a call site cannot
+//! pick the wrong number.
 //!
 //! **Text, not binary.** `stdin`, `put`/`get` `content`, and the returned `stdout`/`stderr` are
-//! **UTF-8 strings**, lossy on the way out exactly like `bsx run --json` (so the daemon and the CLI
-//! render a run identically). Bulk or binary I/O is the block-device path
-//! (`BootConfig::input_dir`/`output_dir`), an embedding-API concern, never this per-message line.
+//! **UTF-8 strings**, lossy on the way out exactly like `bsx run --json`. Bulk or binary IO is the
+//! block-device path, an embedding-API concern, never this per-message line.
 //!
-//! **Non-goals: this is the *engine's* wire, not a *platform's*.** The protocol
-//! deliberately carries **no** notion of a *tenant*, a *credential*, a *quota*, a *price*, or a
-//! *host to schedule onto*: there is no identity field, no auth handshake, no account or billing
-//! token, no request routing. One connection drives one sandbox on the one host the daemon runs on,
-//! and the daemon trusts whoever can reach its socket completely. That absence is a design
-//! commitment, not a gap to fill: the moment the wire grew a tenant id or an auth token it would
-//! stop being an embeddable engine and start being a PaaS, and multi-tenant identity, authorization,
-//! quotas, billing, and fleet scheduling all belong to the **hoster** layered *above* this, never in
-//! these shapes. Access control is the unix socket's directory permissions; a schema bump adds a
-//! verb, never a tenancy field. (The embedding-side statement of the same line is
-//! `docs/embedding.md` "Where the engine ends".)
+//! **Non-goals: this is the *engine's* wire, not a *platform's*.** No tenant, credential, quota,
+//! price, or host to schedule onto: no identity field, no auth handshake, no billing token, no request
+//! routing. One connection drives one sandbox on the one host the daemon runs on, and the daemon
+//! trusts whoever can reach its socket. Access control is the unix socket's directory permissions, and
+//! a schema bump adds a verb rather than a tenancy field.
 #![forbid(unsafe_code)]
 
 use std::io::{BufRead, Write};
@@ -72,46 +51,34 @@ use serde::{Deserialize, Serialize};
 /// request/response shape changes in a non-additive way.
 pub const WIRE_SCHEMA: u32 = 1;
 
-/// Upper bound on one **request** line, before decoding: the allocation cap so a client that never
-/// sends a newline (or sends a huge one) is a typed [`ProtocolError::TooLarge`], not an unbounded
-/// read. This is the bound on *untrusted* input. Generous: a per-message `stdin`/`content` string
-/// plus its JSON envelope fits, while the exec channel still enforces the real
-/// `bsx_engine::MAX_PAYLOAD` on the bytes that reach the guest, so this is a DoS bound, not the
-/// input-size contract.
+/// Upper bound on one **request** line before decoding, so a client that never sends a newline is a
+/// typed [`ProtocolError::TooLarge`] rather than an unbounded read. A DoS bound on untrusted input, not
+/// the input-size contract: the exec channel still enforces `bsx_engine::MAX_PAYLOAD` on the bytes that
+/// reach the guest.
 pub const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
-/// Upper bound on one **response** line. Larger than [`MAX_REQUEST_BYTES`] because the two bound
-/// different things: a request is an untrusted peer's line, while a response is the daemon's own
-/// output under an `output_cap` an operator already controls. Bounding a reply by the client-DoS
-/// number is what makes a legitimate `result` undeliverable.
+/// Upper bound on one **response** line, larger than [`MAX_REQUEST_BYTES`] because bounding a reply by
+/// the client-DoS number makes a legitimate `result` undeliverable.
 ///
-/// Twice the engine's default `output_cap` (16 MiB), so a cap's worth of quotes, backslashes or
-/// newlines still fits at its 2x escape, **plus a MiB**: twice the cap alone leaves nothing for the
-/// envelope, and the envelope is what puts a quote-dense reply 84 bytes over.
-///
-/// It deliberately does not cover the worst case: a C0 control byte is valid UTF-8 and JSON-escapes
-/// to `\u00XX`, six bytes, and a byte that is not valid UTF-8 renders as U+FFFD's three, so output
-/// dense in either still exceeds this. That case is *reported*, the daemon answering a
-/// flooded-output error, rather than designed around, since covering it would mean a bound six times
-/// the operator's cap and a peak allocation to match.
-/// `the_wire_can_carry_the_default_output_cap` holds this number against `Limits::default()` at both
-/// 1x and 2x, since this crate is engine-free and cannot read that default itself.
+/// Twice the engine's default `output_cap` so a cap's worth of quotes or newlines still fits at its 2x
+/// escape, **plus a MiB** for the envelope, which is what puts a quote-dense reply over. It
+/// deliberately does not cover the worst case: a C0 control byte escapes to six bytes and invalid UTF-8
+/// renders as three, so output dense in either is *reported* as a flooded-output error rather than
+/// designed around, since covering it would mean a bound six times the operator's cap.
+/// `the_wire_can_carry_the_default_output_cap` holds this number against `Limits::default()`, since
+/// this crate is engine-free and cannot read that default itself.
 pub const MAX_RESPONSE_BYTES: usize = 33 * 1024 * 1024;
 
-/// The ordering the two bounds exist for, checked at compile time: a reply the daemon produced under
-/// an operator's `output_cap` must not be bounded by the cap on an untrusted client's line. Equal
-/// numbers are what made a legitimate `result` undeliverable.
+/// The ordering the two bounds exist for, checked at compile time: a reply the daemon produced under an
+/// operator's `output_cap` must not be bounded by the cap on an untrusted client's line.
 const _: () = assert!(MAX_RESPONSE_BYTES > MAX_REQUEST_BYTES);
 
-/// A schema-stamped message. Every line on the wire, request or response, is an `Envelope`: the
-/// leading `schema` field plus the flattened [`Request`]/[`Response`] body, so a line reads
-/// `{"schema":1,"op":"exec",...}` and the version is legible before the body.
+/// A schema-stamped message: the leading `schema` field plus the flattened [`Request`]/[`Response`]
+/// body, so a line reads `{"schema":1,"op":"exec",...}` and the version is legible before the body.
 ///
-/// Built by [`new`](Self::new), which stamps [`WIRE_SCHEMA`], the only version this crate speaks,
-/// and that is the type's whole job: **the decode side never builds one.** The read side checks the
-/// stamp on the parsed value before the body is trusted ([`read_request`]/[`read_response`], through
-/// `decode_message`), so an `Envelope` that could carry a foreign stamp would only be a second,
-/// ungated way in. `Serialize` with no `Deserialize` is what keeps the type one-way.
+/// **The decode side never builds one.** The read side checks the stamp on the parsed value before the
+/// body is trusted, so an `Envelope` that could carry a foreign stamp would be a second, ungated way in.
+/// `Serialize` with no `Deserialize` is what keeps the type one-way.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct Envelope<T> {
@@ -123,9 +90,8 @@ pub struct Envelope<T> {
 }
 
 impl<T> Envelope<T> {
-    /// Stamp `body` with the one schema this crate speaks. There is no way to mint any other
-    /// number here, and no `Deserialize` to mint one from a peer's bytes; a foreign stamp exists
-    /// only on the decode side, where [`read_request`]/[`read_response`] refuse it.
+    /// Stamps `body` with the one schema this crate speaks. No other number can be minted here, and a
+    /// foreign stamp exists only on the decode side, where the read functions refuse it.
     #[must_use]
     pub fn new(body: T) -> Self {
         Self {
@@ -135,93 +101,74 @@ impl<T> Envelope<T> {
     }
 }
 
-/// A client → daemon message. Internally tagged by an `op` field, so a line reads
-/// `{"schema":1,"op":"exec","argv":["echo","hi"]}`, self-describing and hand-writable. The verb set
-/// is the versioned lifecycle:
-/// `open` → (`exec` | `put` | `get` | `snapshot` | `trace` | `trace_summary`)\* → `close`.
+/// A client → daemon message, internally tagged by an `op` field so a line reads
+/// `{"schema":1,"op":"exec","argv":["echo","hi"]}`, self-describing and hand-writable. The verb set is
+/// the lifecycle `open` → (`exec` | `put` | `get` | `snapshot` | `trace` | `trace_summary`)\* → `close`.
 ///
-/// `#[non_exhaustive]`: a Rust peer must keep a catch-all arm, so adding a verb is not a source
-/// break for it. That says nothing about the *wire*, where an unknown `op` is still a hard decode
-/// error; growing the verb set is a schema-level decision, this only keeps the Rust half honest.
+/// `#[non_exhaustive]` keeps a new verb from being a source break for a Rust peer. That says nothing
+/// about the *wire*, where an unknown `op` is still a hard decode error.
 ///
-/// **A verb gaining a field is not a source break either.** Each payload-carrying verb holds a
-/// dedicated params struct whose fields inline on the wire beside `op` (an internally-tagged
-/// newtype variant), so the JSON is identical to inline fields:
-/// `the_wire_bytes_of_every_message_shape_are_pinned` holds that. The structs are
-/// `#[non_exhaustive]`, built from [`Default`]/`new` plus field assignment, so an additive wire
-/// field is additive for a Rust caller too, where a struct literal's new field is a break the
-/// wire rules never intended.
+/// Each payload-carrying verb holds a params struct whose fields inline on the wire beside `op`, so the
+/// JSON is identical to inline fields (`the_wire_bytes_of_every_message_shape_are_pinned` holds that).
+/// Those structs are `#[non_exhaustive]` and built from [`Default`]/`new` plus field assignment, so an
+/// additive wire field is additive for a Rust caller too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Request {
     /// Open the connection's sandbox, the first message of a session (the VM *is* the session).
-    /// Carries **resource** knobs and the session's network request ([`OpenParams`]); the
-    /// confinement posture (jailed vs unjailed, and whether a route out exists at all) is the
-    /// daemon's launch-time choice, never a client's, so a caller can't downgrade the jail or
-    /// route itself out of the sandbox. Any omitted field keeps the conservative
-    /// `bsx_engine::Limits` default.
+    /// Carries **resource** knobs and the session's network request ([`OpenParams`]). The confinement
+    /// posture is the daemon's launch-time choice, never a client's, so a caller can't downgrade the
+    /// jail or route itself out. Any omitted field keeps the conservative default.
     Open(OpenParams),
     /// Run one command in the open sandbox ([`ExecParams`]), feeding `stdin` (UTF-8 text) to it.
     /// Repeated `exec`s share the session's working directory.
     Exec(ExecParams),
-    /// Write a UTF-8 file into the session's working directory ([`PutParams`]), so a later `exec`
-    /// sees it. A relative path is resolved against that working directory; the file persists for
-    /// the life of the session (the VM is the session).
+    /// Write a UTF-8 file into the session's working directory ([`PutParams`]), so a later `exec` sees
+    /// it. A relative path resolves against that directory, and the file persists for the session's
+    /// life.
     Put(PutParams),
-    /// Read a file back from the session's working directory ([`GetParams`]). A missing file is
-    /// not an error, the [`Response::Got`] simply reports `present: false`.
+    /// Read a file back from the session's working directory ([`GetParams`]). A missing file is not an
+    /// error; the [`Response::Got`] reports `present: false`.
     Get(GetParams),
-    /// Snapshot the session's live VM into a daemon-side bundle, answered with the bundle's host
-    /// path ([`Response::Snapshotted`]). Snapshotting a **jailed** session is a typed refusal (its
-    /// disk lives in the chroot), the prewarm-source flow is unjailed, mirroring the engine API.
+    /// Snapshot the session's live VM into a daemon-side bundle, answered with the bundle's host path
+    /// ([`Response::Snapshotted`]). Snapshotting a **jailed** session is a typed refusal, since its disk
+    /// lives in the chroot.
     Snapshot,
     /// Ask for the session's **host-observed audit record** so far ([`Response::Trace`]): the same
-    /// `RunRecord` shape the CLI's `--record` writes, as a JSON object, but sampled **live**, a
-    /// non-destructive snapshot, repeatable mid-session. So its `coverage` reflects **attach time**,
-    /// and an axis that is absent may be a *transient* read (a momentary tap/meter miss) rather than a
-    /// finalized gap, unlike the CLI's `--record`, which finalizes the record at session end and
-    /// records read failures as gaps. Fail-open, a host that couldn't attach the probes answers a
-    /// coverage-gapped record, never an error.
+    /// `RunRecord` shape `--record` writes, but sampled **live** and non-destructively, so it is
+    /// repeatable mid-session.
+    ///
+    /// Its `coverage` reflects attach time, so an absent axis may be a *transient* read rather than a
+    /// finalized gap, unlike `--record`, which finalizes at session end. Fail-open: a host that couldn't
+    /// attach the probes answers a coverage-gapped record, never an error.
     Trace,
-    /// Ask for the session's **model-legible summary** so far ([`Response::TraceSummary`]): the same
-    /// compact projection the CLI's `--record-summary` writes (what it reached, what egress was denied,
-    /// its resource envelope, any coverage gap), sampled **live** and non-destructively like
-    /// [`Trace`](Self::Trace), the face a model driving the engine reads between turns, so the wire
-    /// exposes the projection, not just the full record. Fail-open, same as `trace`.
+    /// Ask for the session's **model-legible summary** so far ([`Response::TraceSummary`]): the compact
+    /// projection `--record-summary` writes, sampled live like [`Trace`](Self::Trace), so the wire
+    /// exposes the projection and not just the full record. Fail-open, same as `trace`.
     TraceSummary,
-    /// End the session: tear the sandbox down and close the connection. Dropping the connection
-    /// without this does the same teardown; `close` just makes it explicit and acknowledged.
+    /// End the session: tear the sandbox down and close the connection. Dropping the connection does the
+    /// same teardown; `close` makes it explicit and acknowledged.
     Close,
     /// Abandon an **in-flight** request and end the session now, answered with
     /// [`Response::Cancelled`].
     ///
-    /// The one verb legal while another request is outstanding: every other verb is a protocol
-    /// violation until its predecessor is answered. It exists because a client blocked on a long
+    /// The one verb legal while another request is outstanding, since a client blocked on a long
     /// [`Exec`](Self::Exec) has no other way to reach the daemon.
     ///
-    /// **This ends the session, it does not abort one command.** The engine cancels a running exec
-    /// by killing the sandbox (the guest dies, the exec channel closes, the blocked call returns),
-    /// so there is no "stop this command, keep my VM" to expose. Session state dies with it; a
-    /// caller who wants it must `snapshot` before the exec it may cancel.
-    ///
-    /// Simply hanging up lands in the same place: the daemon polls the connection while an exec is
-    /// in flight and treats EOF exactly like a `cancel`, killing the sandbox within one poll
-    /// interval. What `cancel` adds is the acknowledgement (`cancelled`), so a client can tell a
-    /// deliberate abort was received rather than inferring it from its own closed socket.
+    /// **This ends the session, it does not abort one command.** The engine cancels a running exec by
+    /// killing the sandbox, so there is no "stop this command, keep my VM" to expose, and session state
+    /// dies with it. Hanging up lands in the same place, since the daemon treats EOF like a `cancel`;
+    /// what `cancel` adds is the acknowledgement.
     Cancel,
 }
 
-/// What a session asks for, carried by [`Request::Open`]: its resource envelope and its network
-/// request. Every field is optional; `None` keeps the daemon's conservative default.
+/// What a session asks for, carried by [`Request::Open`]: its resource envelope and its network request.
+/// Every field is optional, and `None` keeps the daemon's conservative default.
 ///
-/// `#[non_exhaustive]`: build it from [`default`](Default::default) and set the fields you want,
-/// so a new knob lands for a Rust caller exactly as it lands on the wire, additively, rather than
-/// as the source break a struct literal's new field would be.
-///
-/// No secret-bearing field (resource knobs and egress destinations), so `Debug` derives: an
-/// operator reading a log needs to see which egress a session asked for, and the same values are
-/// already on the audit record.
+/// Build it from [`default`](Default::default) and set the fields you want, so a new knob lands for a
+/// Rust caller as additively as it lands on the wire. No field carries a secret, so `Debug` derives: an
+/// operator reading a log needs to see which egress a session asked for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[non_exhaustive]
 pub struct OpenParams {
@@ -235,29 +182,22 @@ pub struct OpenParams {
     /// keeps the default 30.
     #[serde(default)]
     pub wall_secs: Option<u64>,
-    /// Aggregate captured-output cap in bytes; omitted keeps the default 16 MiB.
-    ///
-    /// `u64`, not `usize`: this is a wire value a 32-bit client and a 64-bit daemon must agree
-    /// on, so its width cannot depend on whose pointer is being counted. The daemon clamps it
-    /// to its own `usize` on the way in.
+    /// Aggregate captured-output cap in bytes; omitted keeps the default 16 MiB. `u64` rather than
+    /// `usize`, because a 32-bit client and a 64-bit daemon must agree on this width.
     #[serde(default)]
     pub output_cap: Option<u64>,
-    /// Give the session's guest a NIC (a per-VM tap the host-side probes observe); omitted is
-    /// no NIC, the sealed default.
-    ///
-    /// A NIC on its own reaches nothing beyond the host end of its /30. Whether a route out
-    /// exists is the **daemon's** launch-time choice, like the jail: a client can ask for a
-    /// NIC and bound what crosses it, never conjure a path. The daemon may refuse this outright
-    /// (its `allow_net` posture).
+    /// Give the session's guest a NIC (a per-VM tap the host-side probes observe); omitted is the sealed
+    /// default. A NIC alone reaches nothing beyond the host end of its /30: whether a route out exists is
+    /// the daemon's launch-time choice, so a client can bound what crosses the tap but never conjure a
+    /// path, and the daemon may refuse the NIC outright.
     #[serde(default)]
     pub net: Option<bool>,
-    /// Egress allowances for the session, each `IP[/CIDR][:PORT][/PROTO]`, building a
-    /// deny-by-default policy armed before the tap goes live; omitted is deny-all.
+    /// Egress allowances for the session, each `IP[/CIDR][:PORT][/PROTO]`, building a deny-by-default
+    /// policy armed before the tap goes live; omitted is deny-all. Requires [`net`](Self::net).
     ///
-    /// Requires [`net`](Self::net). Strings rather than a structured type so the wire
-    /// spells a rule exactly as `bsx run --allow` does, and one parser serves both. The daemon
-    /// validates each against its own operator ceilings and refuses the session if enforcement
-    /// cannot be armed, since egress policy is a security control and does not fail open.
+    /// Strings rather than a structured type, so the wire spells a rule exactly as `bsx run --allow` does
+    /// and one parser serves both. The daemon refuses the session if enforcement cannot be armed, since
+    /// egress policy is a security control and does not fail open.
     #[serde(default)]
     pub allow: Option<Vec<String>>,
 }
@@ -280,13 +220,12 @@ pub struct ExecParams {
     /// block-device path, not this field.
     #[serde(default)]
     pub stdin: Option<String>,
-    /// Environment variables for the **spawned command only**, as `KEY=VALUE` pairs; omitted is
-    /// none. The guest agent applies them via `Command::env`, never to its own process, so one
-    /// exec's environment cannot bleed into the agent or into a later exec on the same session.
+    /// Environment variables for the **spawned command only**, as `KEY=VALUE` pairs. The guest agent
+    /// applies them via `Command::env` and never to its own process, so one exec's environment cannot
+    /// bleed into the agent or into a later exec.
     ///
-    /// **Values are secrets by contract**: they never appear in a log line, an error, or this
-    /// type's `Debug`, which renders keys and a count only. A caller may still leak them by
-    /// having the command print them, which is the run's own output, not an engine surface.
+    /// **Values are secrets by contract**, absent from every log line, error, and this type's `Debug`. A
+    /// caller can still leak them by having the command print them, which is the run's own output.
     #[serde(default)]
     pub env: Option<Vec<(String, String)>>,
 }
@@ -374,36 +313,30 @@ impl GetParams {
     }
 }
 
-/// A daemon → client message. Internally tagged by a `reply` field.
+/// A daemon → client message, internally tagged by a `reply` field.
 ///
-/// `#[non_exhaustive]`: a Rust client must keep a catch-all arm, so a daemon that grows a reply is
-/// not a source break for it. The *wire* is stricter: an unknown `reply` is still a hard decode
-/// error, so adding one remains a schema-level decision (unlike [`FaultKind`], which degrades to
-/// [`Unknown`](FaultKind::Unknown) on purpose).
+/// `#[non_exhaustive]` keeps a new reply from being a source break for a Rust client. The *wire* is
+/// stricter: an unknown `reply` is a hard decode error, unlike [`FaultKind`], which degrades on purpose.
 ///
-/// **A reply gaining a field is not a source break either.** Every payload-carrying variant is
-/// itself `#[non_exhaustive]`, so a foreign match must carry `..` and keeps compiling when a field
-/// lands; construction goes through the constructor fns below, whose signatures take the variant's
-/// required fields, the only kind a reply can't gain within a schema (an old daemon would not send
-/// it), so an additive wire field never moves them. The one producer of these values is the
-/// daemon in this repo.
+/// Every payload-carrying variant is itself `#[non_exhaustive]`, so a foreign match must carry `..` and
+/// keeps compiling when a field lands. Construction goes through the constructor fns below, whose
+/// signatures take only each variant's required fields, so an additive wire field never moves them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum Response {
-    /// The sandbox booted; carries its boot-to-userspace latency and whether it came from the
-    /// pre-warmed pool (a fast `open`) or a cold boot.
+    /// The sandbox booted, carrying its boot-to-userspace latency and whether it came from the
+    /// pre-warmed pool or a cold boot.
     #[non_exhaustive]
     Opened {
-        /// Boot-to-userspace latency, milliseconds (a warm-pool restore is a small fraction of a
-        /// cold boot).
+        /// Boot-to-userspace latency, milliseconds.
         boot_ms: u64,
-        /// `true` if served from the daemon's pre-warmed pool, `false` for a cold boot (a custom
-        /// resource profile, or a daemon launched without `--prewarm`).
+        /// `true` if served from the daemon's pre-warmed pool, `false` for a cold boot (a custom resource
+        /// profile, or a daemon launched without `--prewarm`).
         pooled: bool,
     },
-    /// A command finished. `exit_code` is the guest command's own code (non-zero is a *result*, not
-    /// an error); `stdout`/`stderr` are lossy UTF-8 like `bsx run --json`.
+    /// A command finished. `exit_code` is the guest command's own code, so non-zero is a *result* rather
+    /// than an error.
     #[non_exhaustive]
     Result {
         /// The guest command's exit code (`128 + signal` on signal death).
@@ -431,16 +364,14 @@ pub enum Response {
         content: String,
         /// Whether the file existed.
         present: bool,
-        /// Whether `content` is a **lossy** rendering: the file's bytes were not valid UTF-8, so
-        /// replacement characters stand in and the original bytes are not recoverable from this
-        /// reply (bulk/binary transfer belongs to the engine's block-device path, not this line).
-        /// The flag is what keeps that substitution from being silent. Absent (a daemon older
-        /// than the field) reads as `false`.
+        /// Whether `content` is a **lossy** rendering, meaning the file's bytes were not valid UTF-8 and
+        /// the originals are not recoverable from this reply. The flag is what keeps that substitution
+        /// from being silent; absent reads as `false`.
         #[serde(default)]
         lossy: bool,
     },
-    /// A [`Request::Snapshot`] wrote a bundle. `dir` is a **daemon-host** path (the bundle's device
-    /// state + guest memory live on the daemon's filesystem, not sent over this line).
+    /// A [`Request::Snapshot`] wrote a bundle. `dir` is a **daemon-host** path: the bundle's device state
+    /// and guest memory live on the daemon's filesystem, not on this line.
     #[non_exhaustive]
     Snapshotted {
         /// The host directory holding the snapshot bundle.
@@ -450,10 +381,10 @@ pub enum Response {
     /// carried opaquely here so this crate stays free of the `bsx-probes-loader` types.
     #[non_exhaustive]
     Trace {
-        /// The signed envelope as a JSON object: `{schema, key_id, signature, record}`, where its
-        /// `schema` is the *delivery-surface* version and `record` is the canonical `RunRecord` JSON
-        /// carried as a string (so its signed bytes survive this re-serialization). All three are
-        /// distinct from the wire [`WIRE_SCHEMA`].
+        /// The signed envelope as a JSON object: `{schema, key_id, signature, record}`, where `record` is
+        /// the canonical `RunRecord` JSON carried as a string, so its signed bytes survive this
+        /// re-serialization. Its `schema` is the delivery-surface version, distinct from
+        /// [`WIRE_SCHEMA`].
         record: serde_json::Value,
     },
     /// The session's model-legible summary (answering [`Request::TraceSummary`]), as the projection's
@@ -467,32 +398,29 @@ pub enum Response {
     /// The session ended cleanly (acknowledging a [`Request::Close`]).
     Closed,
     /// The in-flight request was abandoned and the sandbox torn down, acknowledging a
-    /// [`Request::Cancel`]. Always the connection's last message. Whatever the cancelled request
-    /// had produced is discarded: there is no partial [`Result`](Self::Result).
+    /// [`Request::Cancel`]. Always the connection's last message, and whatever the cancelled request had
+    /// produced is discarded, so there is no partial [`Result`](Self::Result).
     Cancelled,
-    /// The request could not be served: a malformed message, a boot/channel failure, or a guest
-    /// fault. `fatal` distinguishes a session-ending failure (the sandbox is gone, reconnect) from
-    /// a per-request one the session survives (e.g. a command that couldn't spawn).
+    /// The request could not be served: a malformed message, a boot or channel failure, or a guest fault.
+    /// `fatal` distinguishes a session-ending failure from a per-request one the session survives.
     #[non_exhaustive]
     Error {
-        /// A human-readable reason (never carries injected secrets, an engine `VmmError` rendering
-        /// may name a path or an env *key*, never a value). For display and logs; branch on
-        /// [`kind`](Self::Error::kind), never on this text.
+        /// A human-readable reason, which may name a path or an env *key* but never a value. For display
+        /// and logs; branch on [`kind`](Self::Error::kind) rather than on this text.
         message: String,
         /// `true` if the session is over (the connection will close); `false` if the client may send
         /// another request.
         fatal: bool,
-        /// Which layer faulted, so a caller can decide *what to do* without parsing `message`.
-        /// Defaults to [`FaultKind::Unknown`] when absent, so a peer predating this field decodes
-        /// rather than failing.
+        /// Which layer faulted, so a caller can decide what to do without parsing `message`. Defaults to
+        /// [`FaultKind::Unknown`] when absent, so a peer predating this field decodes rather than
+        /// failing.
         #[serde(default = "unknown_fault")]
         kind: FaultKind,
     },
-    /// The daemon refused because it is **at capacity**: the `--max-sessions` count ceiling or an
-    /// aggregate resource ceiling is full. Distinct from [`Error`](Self::Error) so a
-    /// fleet dispatcher can branch on backpressure ("full, try another host") without string-matching
-    /// a message; it is always session-ending. `retry_after_ms` is a backoff hint, not a promise (the
-    /// daemon cannot know when a slot frees).
+    /// The daemon refused because it is **at capacity**, either the `--max-sessions` count ceiling or an
+    /// aggregate resource ceiling. Distinct from [`Error`](Self::Error) so a dispatcher can branch on
+    /// backpressure without string-matching a message; always session-ending. `retry_after_ms` is a hint,
+    /// since the daemon cannot know when a slot frees.
     #[non_exhaustive]
     AtCapacity {
         /// Suggested backoff before retrying, in milliseconds. A hint only.
@@ -500,9 +428,8 @@ pub enum Response {
     },
 }
 
-/// The construction surface for the `#[non_exhaustive]` variants above. Each fn takes the
-/// variant's **required** fields; an optional field added later is set on the value by the daemon,
-/// so these signatures move only when the wire itself breaks.
+/// The construction surface for the `#[non_exhaustive]` variants above. Each fn takes only the
+/// variant's **required** fields, so these signatures move only when the wire itself breaks.
 impl Response {
     /// The sandbox booted: its boot-to-userspace latency and whether the pool served it.
     #[must_use]
@@ -573,34 +500,30 @@ impl Response {
     }
 }
 
-/// The `kind` a [`Response::Error`] decodes to when the peer omitted the field entirely (a daemon
-/// predating it). Conservative on purpose: an unclassified fault is not the caller's to fix.
+/// The `kind` a [`Response::Error`] decodes to when the peer omitted the field. Conservative on purpose:
+/// an unclassified fault is not the caller's to fix.
 fn unknown_fault() -> FaultKind {
     FaultKind::Unknown(String::new())
 }
 
-/// Declares [`FaultKind`] once: each named variant's doc, its **wire string**, the `wire_str`
-/// encoder, and the `NAMED` table the decoder walks all come from this one list, so a new kind
-/// cannot be spelled in one place and forgotten in another. That is the whole reason the macro
-/// exists: with the list written out by hand, a variant missing from `NAMED` would still compile,
-/// still serialize, and silently decode as [`FaultKind::Unknown`], which is the drift the
-/// hand-written `Deserialize` prevents. The enum's own rustdoc lives inside the
-/// expansion (the type is public API, and a doc comment out here would document the macro instead).
+/// Declares [`FaultKind`] once: each variant's doc, its **wire string**, the `wire_str` encoder, and the
+/// `NAMED` table the decoder walks all come from this one list. Written out by hand, a variant missing
+/// from `NAMED` would still compile, still serialize, and silently decode as
+/// [`FaultKind::Unknown`]. The enum's own rustdoc lives inside the expansion, since a doc comment out
+/// here would document the macro instead.
 macro_rules! fault_kinds {
     ($( $(#[$doc:meta])* $variant:ident => $wire:literal ),+ $(,)?) => {
         /// Which layer faulted, so a client branches on a **value** rather than on the prose in
-        /// [`Response::Error`]'s `message`. The wire form of the engine's pinned error taxonomy
-        /// (`bsx_engine::ErrorKind`), restated here because this crate stays `bsx`-free; the daemon maps
-        /// one onto the other, and a test pins the mapping.
+        /// [`Response::Error`]'s `message`. The wire form of `bsx_engine::ErrorKind`, restated here
+        /// because this crate stays `bsx`-free; a test pins the daemon's mapping between them.
         ///
-        /// The `fatal` flag answers "is this session over?"; this answers "whose fault, and what
-        /// should I do?", which is the question a client caller actually has: a different host may
-        /// serve an [`Infra`](Self::Infra) fault, a retry never fixes a [`Guest`](Self::Guest) one.
+        /// Where `fatal` answers "is this session over?", this answers "whose fault, and what should I
+        /// do?": a different host may serve an [`Infra`](Self::Infra) fault, and a retry never fixes a
+        /// [`Guest`](Self::Guest) one.
         ///
-        /// **Unknown kinds degrade, they don't fail.** A client built against this schema that
-        /// meets a kind added later decodes it as [`Unknown`](Self::Unknown) carrying the raw
-        /// string, so the enum can grow without a schema bump breaking every existing client. Treat
-        /// `Unknown` like [`Infra`](Self::Infra) (conservative: assume the host, not the caller).
+        /// **Unknown kinds degrade rather than fail.** A kind added later decodes as
+        /// [`Unknown`](Self::Unknown) carrying the raw string, so the enum can grow without breaking
+        /// existing clients. Treat `Unknown` like [`Infra`](Self::Infra).
         #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
         #[non_exhaustive]
         pub enum FaultKind {
@@ -609,17 +532,15 @@ macro_rules! fault_kinds {
                 #[serde(rename = $wire)]
                 $variant,
             )+
-            /// A kind this client predates. Carries the raw wire string so it can still be logged
-            /// (a non-string `kind` is rendered with `to_string`, see the hand-written
-            /// `Deserialize`).
+            /// A kind this client predates, carrying the raw wire string so it can still be logged.
             #[serde(untagged)]
             Unknown(String),
         }
 
         impl FaultKind {
-            /// This kind's wire string, or `None` for [`Unknown`](Self::Unknown) (which carries
-            /// its own). The same literal the `Serialize` derive renames to, so encode and decode
-            /// cannot disagree.
+            /// This kind's wire string, or `None` for [`Unknown`](Self::Unknown), which carries its own.
+            /// The same literal the `Serialize` derive renames to, so encode and decode cannot
+            /// disagree.
             fn wire_str(&self) -> Option<&'static str> {
                 match self {
                     $( FaultKind::$variant => Some($wire), )+
@@ -627,24 +548,22 @@ macro_rules! fault_kinds {
                 }
             }
 
-            /// Every named kind, in declaration order: what the decoder searches and what
-            /// `every_named_kind_round_trips` exercises. Generated, so it cannot fall behind the
-            /// enum.
+            /// Every named kind in declaration order, what the decoder searches. Generated, so it cannot
+            /// fall behind the enum.
             const NAMED: &'static [FaultKind] = &[ $( FaultKind::$variant, )+ ];
         }
     };
 }
 
 fault_kinds! {
-    /// The host couldn't stand the sandbox up, or a bounded wait expired. Not the caller's fault:
-    /// retry, or try another host. (`bsx_engine::ErrorKind::Infra`.)
+    /// The host couldn't stand the sandbox up, or a bounded wait expired. Not the caller's fault, so
+    /// retry or try another host.
     Infra => "infra",
-    /// A framing or I/O fault on an already-established exec channel, or a guest that went silent
-    /// past its deadline. The sandbox is unreliable: retire it rather than blame the command.
-    /// (`bsx_engine::ErrorKind::Transport`.)
+    /// A framing or IO fault on an established exec channel, or a guest silent past its deadline. The
+    /// sandbox is unreliable, so retire it rather than blame the command.
     Transport => "transport",
     /// The run is at fault: the command couldn't be spawned, outran its budget, or flooded output.
-    /// Retrying the same command unchanged gets the same answer. (`bsx_engine::ErrorKind::Guest`.)
+    /// Retrying it unchanged gets the same answer.
     Guest => "guest",
     /// The client's own message was the problem: wrong [`WIRE_SCHEMA`], undecodable, oversize, or
     /// out of order (an `open` on an already-open session). Fix the client.
@@ -674,22 +593,21 @@ impl<'de> Deserialize<'de> for FaultKind {
     }
 }
 
-/// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile
-/// or buggy peer is a typed error the daemon answers or drops, never a panic.
+/// Every way the line protocol can fail to decode a peer's message, as a typed value, so a hostile or
+/// buggy peer is answered or dropped rather than panicking.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ProtocolError {
     /// The underlying stream failed.
     Io(std::io::Error),
-    /// A line whose `schema` is not [`WIRE_SCHEMA`], a version mismatch, reported before the body
-    /// is trusted. Carries the number the peer sent.
+    /// A line whose `schema` is not [`WIRE_SCHEMA`], reported before the body is trusted. Carries the
+    /// number the peer sent.
     Schema(u64),
     /// A line that isn't valid UTF-8 JSON for the expected message.
     Malformed(String),
-    /// A line exceeded the bound for its direction ([`MAX_REQUEST_BYTES`] or
-    /// [`MAX_RESPONSE_BYTES`]), rejected before it can grow host memory without bound. Carries the
-    /// bound it broke, so a caller reporting this names the number that applied rather than
-    /// guessing which direction it was reading.
+    /// A line exceeded the bound for its direction, rejected before it can grow host memory without
+    /// bound. Carries the bound it broke, so a caller names the number that applied rather than guessing
+    /// which direction it was reading.
     TooLarge {
         /// The bound this line exceeded.
         limit: usize,
@@ -701,9 +619,9 @@ impl std::fmt::Display for ProtocolError {
         match self {
             ProtocolError::Io(e) => write!(f, "protocol io: {e}"),
             ProtocolError::Schema(got) => {
-                // "this build", not "this daemon": `read_message` is shared by both ends, so a
-                // client renders this line about a *daemon's* stamp and naming a role states the
-                // mismatch backwards. `a_schema_mismatch_names_the_speaker_not_a_role` pins it.
+                // "this build", not "this daemon": `read_message` is shared by both ends, so naming a
+                // role would state the mismatch backwards when a client renders a daemon's stamp.
+                // `a_schema_mismatch_names_the_speaker_not_a_role` pins it.
                 write!(
                     f,
                     "unsupported wire schema {got} (this build speaks {WIRE_SCHEMA})"
@@ -726,28 +644,29 @@ impl std::error::Error for ProtocolError {
     }
 }
 
-/// Read one [`Request`] (the daemon's side of the wire), bounded by [`MAX_REQUEST_BYTES`].
+/// Reads one [`Request`] (the daemon's side of the wire), bounded by [`MAX_REQUEST_BYTES`].
+///
 /// # Errors
-/// [`ProtocolError`] on an I/O failure, an over-cap line, a wrong `schema`, or an undecodable body.
+/// [`ProtocolError`] on an IO failure, an over-cap line, a wrong `schema`, or an undecodable body.
 pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, ProtocolError> {
     read_message(reader, MAX_REQUEST_BYTES)
 }
 
-/// Read one [`Response`] (a client's side of the wire), bounded by [`MAX_RESPONSE_BYTES`].
+/// Reads one [`Response`] (a client's side of the wire), bounded by [`MAX_RESPONSE_BYTES`].
+///
 /// # Errors
-/// [`ProtocolError`] on an I/O failure, an over-cap line, a wrong `schema`, or an undecodable body.
+/// [`ProtocolError`] on an IO failure, an over-cap line, a wrong `schema`, or an undecodable body.
 pub fn read_response(reader: &mut impl BufRead) -> Result<Option<Response>, ProtocolError> {
     read_message(reader, MAX_RESPONSE_BYTES)
 }
 
-/// Read one schema-stamped message of type `T` from `reader`, bounded by `cap`. `Ok(None)` on a
-/// clean EOF (the peer hung up); blank lines are skipped so a stray newline isn't a protocol fault.
-/// The order of checks is deliberate: over-cap (before decoding) → JSON well-formed → **schema
-/// match** (before the body is trusted) → body decode.
+/// Reads one schema-stamped message of type `T` from `reader`, bounded by `cap`. `Ok(None)` on a clean
+/// EOF, and blank lines are skipped so a stray newline isn't a protocol fault.
 ///
-/// One decode serves both ends, so the framing and the schema gate can't drift between them, while
-/// `cap` comes from the direction-typed wrappers above: the bound is the one thing that must differ
-/// between a line a hostile client sent and a line the daemon produced.
+/// The order of checks is load-bearing: over-cap before decoding, then JSON well-formed, then **schema
+/// match** before the body is trusted, then body decode. One decode serves both ends, so the framing and
+/// the schema gate can't drift between them, while `cap` comes from the direction-typed wrappers, since
+/// the bound is the one thing that must differ.
 fn read_message<T: DeserializeOwned>(
     reader: &mut impl BufRead,
     cap: usize,
@@ -771,19 +690,18 @@ fn read_message<T: DeserializeOwned>(
     }
 }
 
-/// Decode one already-framed line into a `T`, enforcing the schema gate. Split out so the framing
-/// (bounded line read) and the decoding (schema + body) are each unit-testable in isolation.
+/// Decodes one already-framed line into a `T`, enforcing the schema gate. Split out so the framing and
+/// the decoding are each unit-testable in isolation.
 ///
 /// The direction's cap bounds the **line**, not this: parsing to a `Value` first costs a DOM some
-/// multiple of the line's size (one `Value` per token, so a line of small scalars is the worst
-/// ratio), which makes a session's peak that multiple of its cap rather than the cap itself.
-/// Bounded, not unbounded, since the cap and `--max-sessions` bound it on both axes. Depth is
-/// bounded separately by `serde_json`'s own 128-deep recursion limit, which is what makes a line of
-/// nothing but `[` a [`ProtocolError::Malformed`] rather than a stack overflow;
-/// `nesting_past_the_json_recursion_limit_is_a_typed_error` holds that.
+/// multiple of the line's size, so a session's peak is that multiple of its cap. Bounded rather than
+/// unbounded, since the cap and `--max-sessions` bound it on both axes. Depth is bounded separately by
+/// `serde_json`'s 128-deep recursion limit, which is what makes a line of nothing but `[` a
+/// [`ProtocolError::Malformed`] rather than a stack overflow
+/// (`nesting_past_the_json_recursion_limit_is_a_typed_error` holds that).
 fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
-    // Parse once to a generic value so the `schema` can be checked *before* the body is trusted,
-    // a wrong-version peer is a clean `Schema` error even if its body is a shape we don't know yet.
+    // Parse once to a generic value so the `schema` is checked *before* the body is trusted: a
+    // wrong-version peer is then a clean `Schema` error even if its body is an unknown shape.
     let value: serde_json::Value =
         serde_json::from_str(line).map_err(|e| ProtocolError::Malformed(e.to_string()))?;
     match value.get("schema").and_then(serde_json::Value::as_u64) {
@@ -795,19 +713,18 @@ fn decode_message<T: DeserializeOwned>(line: &str) -> Result<T, ProtocolError> {
             ));
         }
     }
-    // The body ignores the extra `schema` key (the message enums aren't `deny_unknown_fields`).
+    // The body ignores the extra `schema` key, since the message enums aren't `deny_unknown_fields`.
     serde_json::from_value::<T>(value).map_err(|e| ProtocolError::Malformed(e.to_string()))
 }
 
-/// Read one `\n`-terminated line into `out` (the newline excluded), bounded at `cap` bytes:
-/// [`ProtocolError::TooLarge`] the moment the line would exceed it, so a lying or never-terminating
-/// peer can't grow host memory without bound. Returns `Ok(true)` if it stopped at EOF (the line may
-/// be unterminated), `Ok(false)` if it stopped on a newline. Reads through the `BufRead`'s own buffer
-/// (`fill_buf`/`consume`), so it is byte-precise without being a syscall per byte.
-/// On the over-cap path it first drains the rest of the offending line (through its `\n`, or to EOF)
-/// before returning `TooLarge`, so the stream is left at a clean line boundary. Without that, a
-/// caller that treats `TooLarge` as per-request and keeps reading (the daemon does) would resume
-/// mid-line and emit a cascade of spurious errors for one oversize message.
+/// Reads one `\n`-terminated line into `out`, bounded at `cap` bytes, so a lying or never-terminating
+/// peer can't grow host memory without bound. Returns `Ok(true)` if it stopped at EOF, `Ok(false)` on a
+/// newline. Reads through the `BufRead`'s own buffer, so it is byte-precise without a syscall per byte.
+///
+/// On the over-cap path it drains the rest of the offending line before returning
+/// [`ProtocolError::TooLarge`], leaving the stream at a clean line boundary. Without that, a caller
+/// treating `TooLarge` as per-request and reading on would resume mid-line and emit a cascade of
+/// spurious errors for one oversize message.
 fn read_line_capped(
     reader: &mut impl BufRead,
     cap: usize,
@@ -825,8 +742,7 @@ fn read_line_capped(
         match available.iter().position(|&b| b == b'\n') {
             Some(i) => {
                 if out.len() + i > cap {
-                    // The newline is already in view: consume through it so the next read starts
-                    // at the following line, then report the oversize one.
+                    // The newline is already in view, so consume through it before reporting.
                     reader.consume(i + 1);
                     return Err(ProtocolError::TooLarge { limit: cap });
                 }
@@ -837,8 +753,7 @@ fn read_line_capped(
             None => {
                 let used = available.len();
                 if out.len() + used > cap {
-                    // Over cap with no newline yet: discard this chunk and keep draining until the
-                    // line's `\n` (or EOF) so the stream resyncs, then report the oversize line.
+                    // Over cap with no newline yet: drain to the line's end so the stream resyncs.
                     reader.consume(used);
                     discard_to_newline(reader)?;
                     return Err(ProtocolError::TooLarge { limit: cap });
@@ -850,10 +765,9 @@ fn read_line_capped(
     }
 }
 
-/// Consume and discard bytes through the next `\n` (or to EOF), leaving `reader` at a fresh line
-/// boundary. Used to resynchronize after an over-cap line so the surviving session parses the
-/// following message cleanly. Bounded in memory (nothing is buffered); it reads only what the peer
-/// already sent, the same liveness envelope as any in-progress line.
+/// Consumes and discards bytes through the next `\n` (or to EOF), leaving `reader` at a fresh line
+/// boundary, so a surviving session parses the following message cleanly. Bounded in memory, since
+/// nothing is buffered and it reads only what the peer already sent.
 fn discard_to_newline(reader: &mut impl BufRead) -> Result<(), ProtocolError> {
     loop {
         let available = match reader.fill_buf() {

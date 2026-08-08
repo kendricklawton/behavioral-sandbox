@@ -1,19 +1,18 @@
 //! Bounded external-helper execution: [`run_bounded`] for the **teardown path**, where a hung child
-//! would hang `Drop` itself, and [`output_bounded`] for the **boot path**, where one gives the
-//! caller a typed error instead of an unbounded stall.
+//! would hang `Drop` itself, and [`output_bounded`] for the **boot path**, where one gives the caller a
+//! typed error instead of an unbounded stall.
 //!
-//! Firecracker aside, the driver shells out to a few host tools (`ip`, `umount`, `mke2fs`, ...). Most
-//! run on the boot path, where the boot deadline gates them and a stall fails the *run*, which the
-//! caller sees. But `ip netns del` and `umount -l` run inside teardown/`Drop`, and both can wedge in
-//! uninterruptible kernel sleep (D state): `ip netns del` behind the rtnl lock or a device that won't
-//! release its refcount, `umount` behind a busy mount. A D-state child **cannot be killed or waited**
-//! without hanging the very thread we are protecting (a `SIGKILL` just pends until the kernel op
-//! finishes, and `wait` blocks on the same). So teardown helpers run under [`run_bounded`], which
-//! detaches on timeout: it converts a rare, unrecoverable `Drop` **hang** into a rare **leak** (one
-//! stuck kernel process, no CPU, reclaimed when the kernel unblocks or at reboot), which the engine's
-//! existing recovery already digests, a failed `netns_del` keeps the scratch dir for the sweep, a
-//! failed unmount is retried by the next sweep. No-hang beats politeness (the same rule the lifetime
-//! sentinel's bounded reap follows).
+//! Most host tools the driver shells out to run on the boot path, where the boot deadline gates them
+//! and a stall fails the *run*. But `ip netns del` and `umount -l` run inside teardown, and both can
+//! wedge in uninterruptible kernel sleep: behind the rtnl lock, a device that won't release its
+//! refcount, or a busy mount. A D-state child **cannot be killed or waited** without hanging the very
+//! thread being protected, since a `SIGKILL` pends until the kernel op finishes and `wait` blocks on
+//! the same.
+//!
+//! So teardown helpers run under [`run_bounded`], which detaches on timeout: it converts a rare,
+//! unrecoverable `Drop` **hang** into a rare **leak** of one stuck kernel process holding no CPU, which
+//! the engine's existing recovery already digests. A failed `netns_del` keeps the scratch dir for the
+//! sweep, and a failed unmount is retried by the next sweep. No-hang beats politeness.
 
 use std::io::Read as _;
 use std::process::{Command, Stdio};

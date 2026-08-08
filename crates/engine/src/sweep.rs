@@ -1,31 +1,24 @@
 //! The orphan sweep, the engine's garbage collector for crashed-driver residue.
 //!
-//! Teardown is `Drop`-based and the lifetime sentinel owns the VM *process tree*,
-//! but a driver that dies without `Drop` (SIGKILL, OOM) still leaves filesystem and network
-//! residue: its per-VM scratch dirs and its per-VM **network namespaces** (each holding the VM's
-//! tap). The netns model retired the finite-`/30`-pool exhaustion an earlier tap-in-the-host-netns
-//! design risked, every netns reuses the same fixed `/30`, so there is no shared pool to clog, but
-//! an orphaned netns is still residue (a namespace, a tap, a `/run/netns/<name>` handle) worth
-//! reclaiming. [`sweep_orphans`] reclaims both dir and netns, the garbage collection a long-running
-//! runtime owes its host for the residue a crashed sibling leaves behind.
+//! Teardown is `Drop`-based and the lifetime sentinel owns the VM *process tree*, but a driver that dies
+//! without `Drop` still leaves filesystem and network residue: its per-VM scratch dirs and its per-VM
+//! network namespaces, each holding the VM's tap. Every netns reuses the same fixed `/30`, so there is
+//! no shared pool to clog, but an orphaned netns is still residue worth reclaiming.
 //!
-//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`bsx-<pid>-<n>`). The netns
-//! is named after the dir it belongs to, so no separate record is needed and no cross-ownership
-//! confusion arises (a restored clone's netns is named after *its own* dir, not the snapshot source's).
+//! **Ownership is keyed on the pid embedded in the scratch-dir name** (`bsx-<pid>-<n>`). The netns is
+//! named after the dir it belongs to, so no separate record is needed and a restored clone's netns is
+//! named after its own dir rather than the snapshot source's.
 //!
 //! Conservative by construction:
-//! - Only dirs **owned by the sweeping euid** are candidates. The scratch base (`/tmp` by
-//!   default) is world-writable, so a hostile local user could plant a dead-looking
-//!   `bsx-<pid>-<n>` dir naming a *victim's* live netns; `create_workdir` makes real per-VM dirs
-//!   `0700`, driver-owned, so ownership is the authorship proof. The flip side is deliberate: each
-//!   uid sweeps its own residue (root sweeps root's jailed dirs, a user sweeps their user-driver
-//!   dirs), never another's.
-//! - A dir whose embedded pid is **alive** is skipped: a live driver, or a recycled pid we can't
-//!   tell from one (the orphan is reclaimed by a later sweep, once the pid frees). The error
-//!   direction is always "kept too long", never "reclaimed a live VM's resources".
-//! - A dead dir with a **still-running VMM** (only possible where the sentinel degraded: no
-//!   writable cgroup v2) is skipped with a warning. The sweep owns fs/net residue; processes are
-//!   the sentinel's, it never kills.
+//! - Only dirs **owned by the sweeping euid** are candidates. The scratch base is world-writable, so a
+//!   hostile local user could otherwise plant a dead-looking dir naming a *victim's* live netns;
+//!   `create_workdir` makes real per-VM dirs `0700` and driver-owned, so ownership is the authorship
+//!   proof. Each uid therefore sweeps its own residue and never another's.
+//! - A dir whose embedded pid is **alive** is skipped, whether a live driver or a recycled pid
+//!   indistinguishable from one. The error direction is always "kept too long", never "reclaimed a live
+//!   VM's resources".
+//! - A dead dir with a **still-running VMM**, only possible where the sentinel degraded, is skipped with
+//!   a warning: the sweep owns fs and net residue, and processes are the sentinel's.
 
 use std::collections::BTreeSet;
 use std::os::unix::fs::MetadataExt;
@@ -63,21 +56,17 @@ pub(crate) const RESTORE_STAGING_MARKER: &str = ".restore-staging";
 /// them (each holding an orphaned tap). Never touches a live driver's resources; see the module doc
 /// for the ownership rules.
 ///
-/// Safe to run at any time, embedder startup is the natural moment (the analogue of a container
-/// runtime's boot-time GC), and concurrently with live drivers: liveness is checked per dir, and
-/// everything a live pid owns is skipped. Per-entry failures are logged and skipped, never fatal,
-/// so one undeletable dir can't shadow the rest of the sweep.
+/// Safe to run at any time, embedder startup being the natural moment, and concurrently with live
+/// drivers: liveness is checked per dir and everything a live pid owns is skipped. Per-entry failures are
+/// logged and skipped rather than fatal, so one undeletable dir can't shadow the rest of the sweep.
 ///
-/// **The hoster's half.** The engine guarantees this call can't be weaponized (it
-/// only ever reclaims dirs the calling euid owns), but *deploying* it is the caller's:
-/// - **Schedule it.** Nothing calls this for you, a self-refilling janitor daemon is platform
-///   territory. Run it at startup and periodically.
-/// - **One per identity.** It reclaims only what the calling euid owns, so if drivers run as
-///   several users, each must run its own sweep; one root sweep does **not** cover a user driver's
-///   residue (nor should it, that would be the weaponization the ownership check prevents).
-/// - **Harden the base.** Prefer a scratch base only the engine user can write (via
-///   [`BootConfig::scratch_dir`]) over the world-writable `/tmp` default, so no other local user
-///   can even plant a decoy for the ownership check to reject.
+/// **The hoster's half.** This call only ever reclaims dirs the calling euid owns, but *deploying* it is
+/// the caller's:
+/// - **Schedule it.** Nothing calls this for you; a self-refilling janitor daemon is platform territory.
+/// - **One per identity.** Drivers running as several users each need their own sweep, since one root
+///   sweep does not cover a user driver's residue, nor should it.
+/// - **Harden the base.** Prefer a scratch base only the engine user can write over the world-writable
+///   `/tmp` default, so no other local user can plant a decoy for the ownership check to reject.
 ///
 /// [`BootConfig::scratch_dir`]: crate::BootConfig::scratch_dir
 ///

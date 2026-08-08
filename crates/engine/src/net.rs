@@ -1,22 +1,19 @@
 //! Per-VM guest networking, host side: a **per-VM network namespace** holding the tap that backs
 //! virtio-net, deny-by-default.
 //!
-//! Each networked VM gets its own netns (`ip netns add <name>`); the tap lives *inside* it, and the
-//! VMM runs there too (the jailer's `--netns`, or `ip netns exec` for a direct boot). Because the tap
-//! is namespaced, every VM reuses the **same fixed** name/MAC/`/30`/v6-link without any host-global
-//! allocator: two VMs holding an identically-named tap on `10.200.0.1/30` (and `fd00:200::1/64`)
-//! never collide, and a restored clone wakes with the snapshot's baked-in identity already correct in
-//! its own netns (no re-addressing). The link is **dual-stack**: v4 and v6 are both
-//! deny-by-default, each with a connected-prefix route only and no default route. Teardown is one op:
-//! `ip netns del <name>` reclaims the netns and the tap in it.
+//! Each networked VM gets its own netns, the tap lives *inside* it, and the VMM runs there too. Because
+//! the tap is namespaced, every VM reuses the **same fixed** name, MAC, `/30`, and v6 link with no
+//! host-global allocator: two VMs holding an identically-named tap never collide, and a restored clone
+//! wakes with the snapshot's baked-in identity already correct in its own netns. The link is
+//! **dual-stack**, both deny-by-default with a connected-prefix route only and no default route.
+//! Teardown is one op: `ip netns del <name>` reclaims the netns and the tap in it.
 //!
-//! The pinned Firecracker *can* rename a restored clone's host tap (`network_overrides` on
-//! `PUT /snapshot/load`), so the namespace is not a workaround for a missing API. It is the stronger
-//! choice on its own terms: a rename would still leave every clone's tap on one shared host netns,
-//! sharing a routing table and reachable from the host's own stack, whereas a namespace makes the
-//! isolation structural, gives the eBPF egress hook a per-VM interface to bind, and reduces teardown
-//! to a single `ip netns del` that cannot leave a half-configured interface behind. It also keeps
-//! restore identical to cold boot, one code path instead of a load-time fix-up.
+//! The pinned Firecracker *can* rename a restored clone's host tap, so the namespace is not a
+//! workaround for a missing API. It is the stronger choice on its own terms: a rename would leave every
+//! clone's tap on one shared host netns, sharing a routing table and reachable from the host's own
+//! stack, where a namespace makes the isolation structural, gives the eBPF egress hook a per-VM
+//! interface to bind, and reduces teardown to a single op that cannot leave a half-configured interface
+//! behind. It also keeps restore identical to cold boot, one code path rather than a load-time fix-up.
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};

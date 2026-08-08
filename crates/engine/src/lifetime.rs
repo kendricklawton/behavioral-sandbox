@@ -111,16 +111,14 @@ impl KillHandle {
         if self.torn_down.load(Ordering::Acquire) {
             return Ok(());
         }
-        // Degraded-host fallback (no cgroup accepted the kill): signal the pid via `sh`'s builtin
-        // `kill` (the host path is `unsafe`-free, so no direct `kill(2)` and no `pidfd`; `sh` is
-        // already this module's dependency). Every reap path marks teardown down *before* it waits
-        // the child (`teardown`/`abort`, and `power_off_and_wait` for the `collect_outputs` readback,
-        // which reaps the VMM seconds before its owning `RunningVm` drops), so `torn_down` is already
-        // set by the time a pid could be recycled and the checks above short-circuit, the
-        // seconds-long readback window is closed. What remains is only the inherent microsecond
-        // check-then-act TOCTOU of an *actively racing* teardown between the re-check just above and
-        // the `kill` below; closing that fully needs a `pidfd` captured at spawn, which the
-        // no-`unsafe` host path can't take without a new dep. Best-effort by construction.
+        // Degraded-host fallback, where no cgroup accepted the kill: signal the pid via `sh`'s builtin
+        // `kill`, since the host path is `unsafe`-free and so has neither `kill(2)` nor `pidfd`.
+        //
+        // Every reap path marks teardown *before* it waits the child, so `torn_down` is set by the time a
+        // pid could be recycled and the checks above short-circuit. What remains is the inherent
+        // microsecond check-then-act window of an *actively racing* teardown; closing it fully needs a
+        // `pidfd` captured at spawn, which the no-`unsafe` host path cannot take. Best-effort by
+        // construction.
         let killed = Command::new("sh")
             .arg("-c")
             .arg(format!("kill -9 {}", self.pid))

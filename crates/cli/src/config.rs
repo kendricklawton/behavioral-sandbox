@@ -1,20 +1,20 @@
-//! The `.bsx.toml` **file layer** of the config precedence `flags > env (BSX_*) > file >
-//! defaults`.
+//! The `.bsx.toml` **file layer** of the config precedence `flags > env (BSX_*) > file > defaults`.
 //!
-//! The env layer already lives in [`bsx_engine::BootConfig::from_env`], and the flags layer is the
-//! CLI's own arguments; this module inserts a file between env and defaults. **One vocabulary:** the
-//! file's keys mirror the `BSX_*` env names 1:1 (minus the prefix, lowercased), so a value is
-//! spelled the same whether it comes from a flag, the environment, or the file. Discovery is the
-//! **nearest `.bsx.toml` walking up from the cwd** (like `.gitignore`/`.editorconfig`), so a
-//! project pins its engine config beside its code.
+//! The env layer lives in [`bsx_engine::BootConfig::from_env`] and the flags layer is the CLI's own
+//! arguments, so this module inserts a file between env and defaults.
 //!
-//! **Typos are a typed error, never a silent no-op:** the file is parsed with
-//! `deny_unknown_fields`, so a misspelled key (`kernal = …`) fails loudly rather than being ignored.
-//!
-//! The layering itself is done by composing a lookup for [`BootConfig::from_env_with`](bsx_engine::BootConfig::from_env_with): return the
-//! real env var if set, else the file's value, which resolves `env > file > defaults` for the
-//! artifact/scratch keys with zero duplication of the engine's env-key logic or defaults. The `log`
-//! key has no `BootConfig` field (it drives `tracing`), so the CLI reads it from here directly.
+//! - **Two vocabularies.** The *artifact and scratch* keys mirror their `BSX_*` env names (minus the
+//!   prefix, lowercased), so a value is spelled the same wherever it comes from. The **operator-policy**
+//!   keys deliberately do not: they are the host's posture, and routing them through the precedence
+//!   above would let the caller they bound edit them (see [`BsxToml`]).
+//! - **Discovery** is the nearest `.bsx.toml` walking up from the cwd, like `.gitignore`, so a project
+//!   pins its engine config beside its code.
+//! - **Typos are a typed error**, never a silent no-op: the file is parsed with `deny_unknown_fields`,
+//!   so a misspelled key fails loudly rather than being ignored.
+//! - **The layering** composes a lookup for
+//!   [`BootConfig::from_env_with`](bsx_engine::BootConfig::from_env_with), returning the real env var if
+//!   set and the file's value otherwise, so the engine's env-key logic and defaults are not duplicated.
+//!   The `log` key has no `BootConfig` field, so the CLI reads it from here directly.
 
 use std::ffi::OsString;
 use std::net::{Ipv4Addr, Ipv6Addr};

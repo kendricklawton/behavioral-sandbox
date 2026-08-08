@@ -5,12 +5,10 @@
 //! supervisor can verify a record **without trusting the host that relayed it**. Exit non-zero on any
 //! mismatch (a tampered record, an untrusted signer, or a malformed envelope).
 //!
-//! The file's shape picks the check. One line is a single envelope (a `--record` file). Several
-//! lines are a **session chain**, one envelope per line in order, the shape a daemon client saves
-//! its `trace` replies in: each reply commits to the previous one's hash, so
-//! [`verify_chain`] additionally rejects a reordered, inserted, or dropped record, which
-//! per-envelope signatures alone cannot see (every record in a reordered chain still carries a
-//! valid signature).
+//! The file's shape picks the check. One line is a single envelope; several lines are a **session chain**,
+//! one envelope per line in order, where each commits to the previous one's hash. [`verify_chain`]
+//! therefore also rejects a reordered, inserted, or dropped record, which per-envelope signatures cannot
+//! see: every record in a reordered chain still carries a valid signature.
 
 use std::io::Read as _;
 use std::io::Write as _;

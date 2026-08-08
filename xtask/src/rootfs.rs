@@ -170,23 +170,20 @@ out=$(findfs LABEL={out_label} 2>/dev/null) && [ -n \"$out\" ] && /bin/mount -t 
     )
 }
 
-/// [`NET_UP_PATH`], the guest's static-IPv6 step (run from the inittab sysinit line). The kernel
-/// `ip=`/`CONFIG_IP_PNP` param configures the guest's v4 `eth0` before userspace but has **no** IPv6
-/// form, so the driver passes the guest v6 address as an `<key>=<addr>/<plen>` kernel cmdline token
-/// (`spawn.rs`) and this reads it back from `/proc/cmdline` and assigns it. The key is
-/// `bsx_channel::GUEST_IP6_CMDLINE_KEY`, the one host↔guest definition the driver's writer and this
-/// reader share, so they can't drift (the address itself is never baked into the image, the host owns
-/// it). Best-effort by construction: a plain (no-NIC) boot has no `eth0` and exits cleanly, and a
-/// missing token is a clean no-op, so a non-networked boot is unaffected. v6 gets only the connected
-/// `/64` and **never** a default route, where v4's is configurable (`BootConfig::egress`): `--allow`
-/// parses v4 addresses only, so a v6 route would be one no CLI-authored policy could bound. `ip`
-/// first, `ifconfig` as the fallback,
-/// so it works whether or not busybox's `ip` applet carries v6 address support.
-/// DAD is disabled (`accept_dad=0`) before the address is added, mirroring the host tap end's
-/// `nodad` (`crates/engine/src/net.rs`): the point-to-point `/64` has exactly one other endpoint,
-/// owned by the same driver, so detection can find nothing, and its tentative window (~1s) makes
-/// the address unusable as a source right after boot, a real failure for a guest command that
-/// talks v6 immediately.
+/// [`NET_UP_PATH`], the guest's static-IPv6 step, run from the inittab sysinit line.
+///
+/// The kernel's `ip=` param has no IPv6 form, so the driver passes the guest v6 address as a kernel
+/// cmdline token and this reads it back from `/proc/cmdline`. The key is
+/// `bsx_channel::GUEST_IP6_CMDLINE_KEY`, the one definition the driver's writer and this reader share, and
+/// the address is never baked into the image. Best-effort by construction: a no-NIC boot has no `eth0` and
+/// a missing token is a no-op, so a non-networked boot is unaffected.
+///
+/// v6 gets only the connected `/64` and **never** a default route, where v4's is configurable, because
+/// `--allow` parses v4 addresses only and a v6 route would be one no CLI-authored policy could bound. `ip`
+/// first with `ifconfig` as the fallback, so it works whether or not busybox's `ip` applet carries v6
+/// address support. DAD is disabled before the address is added, mirroring the host tap end's `nodad`: the
+/// point-to-point `/64` has exactly one other endpoint owned by the same driver, so detection can find
+/// nothing, and its tentative window makes the address unusable as a source right after boot.
 fn net_up_script() -> String {
     format!(
         "\
@@ -271,24 +268,22 @@ pub(crate) fn alpine_artifact() -> Result<Artifact> {
 /// The pinned static `apk` (from Alpine's `apk-tools-static` package, itself a tarball): the
 /// installer that puts [`GUEST_PACKAGES`] into the staging dir **rootless**, on any host distro.
 ///
-/// **Fetched from our own mirror, because the upstream URL expires.** An Alpine branch repo carries
-/// only the newest revision of each package, so a pinned `pkg-ver-rN` filename 404s the day upstream
-/// publishes the next one, breaking every fresh clone and every clean CI run while cached hosts keep
-/// building off theirs. The version cannot simply float either, since this is the installer itself and the sha256 is the only
-/// thing between a fresh clone and executing an unverified binary as part of the build.
+/// **Mirrored, because the upstream URL expires.** An Alpine branch repo carries only the newest revision
+/// of each package, so a pinned `pkg-ver-rN` filename 404s the day upstream publishes the next one,
+/// breaking every fresh clone while cached hosts keep building. The version cannot float either, since
+/// this is the installer itself and the sha256 is the only thing between a fresh clone and executing an
+/// unverified binary as part of the build.
 ///
-/// The mirror is the `build-inputs` release (a pre-release, so it stays out of `releases/latest`,
-/// which `install.sh` reads). Mirroring changed no bytes: the sha256 below is the one that was here
-/// when the artifact came from Alpine, so the copy is checkable against upstream rather than trusted
-/// on our say-so. Upstream, for provenance:
-/// `https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/apk-tools-static-3.0.7-r0.apk`, and
-/// apk-tools is GPL-2.0-only with source at `https://gitlab.alpinelinux.org/alpine/apk-tools`.
-/// The asset carries a `.tgz` extension only because GitHub's uploader rejects `.apk`; an `.apk`
-/// *is* a gzip-compressed tar, so the name is accurate and the bytes are untouched.
+/// The mirror is the `build-inputs` pre-release, so it stays out of `releases/latest`, which
+/// `install.sh` reads. The sha256 below is upstream's, so the copy is checkable against Alpine rather than
+/// trusted on this repo's say-so:
+/// `https://dl-cdn.alpinelinux.org/alpine/v3.24/main/x86_64/apk-tools-static-3.0.7-r0.apk`, GPL-2.0-only
+/// with source at `https://gitlab.alpinelinux.org/alpine/apk-tools`. The asset carries a `.tgz` extension
+/// because GitHub's uploader rejects `.apk`, and an `.apk` *is* a gzip-compressed tar, so the bytes are
+/// untouched.
 ///
-/// Bumping it now means uploading the new revision to that release and putting the filename and
-/// `sha256sum` here. A rebuild afterwards is not optional, since the installer writes the package
-/// database the guest image hashes over.
+/// Bumping it means uploading the new revision to that release and putting the filename and `sha256sum`
+/// here, then rebuilding: the installer writes the package database the guest image hashes over.
 pub(crate) fn apk_tools_artifact() -> Result<Artifact> {
     let dir = artifacts_dir();
     match std::env::consts::ARCH {
@@ -484,21 +479,19 @@ fn assemble_rootfs(out_image: &Path) -> Result<RootfsBuild> {
 /// two places (the file, and the init line or command line naming it) fails the build here instead
 /// of producing an image that boots into something absent.
 ///
-/// **What this proves, and what it doesn't.** It proves the tree handed to `mke2fs` carries what the
-/// constants promise, at the modes the guest needs. It does not prove the image *boots*: nothing here
-/// runs a kernel, and a script can satisfy every check and still be wrong. Booting is the privileged
-/// suite's job (`crates/engine/tests/boot.rs`).
-/// The staged tree has to be owned by uid/gid **0**, which is what the Alpine tarball ships and
-/// what a guest expects of its own `/`.
+/// It proves the tree handed to `mke2fs` carries what the constants promise at the modes the guest needs.
+/// It does not prove the image *boots*, since nothing here runs a kernel; that is the privileged suite's
+/// job (`crates/engine/tests/boot.rs`).
 ///
-/// Unprivileged `tar` cannot set ownership and `mke2fs -d` copies whatever the tree has, so before
-/// the `fakeroot` re-exec this staged as the *builder's* uid and the image carried it: the same
-/// source produced a different hash for uid 1000 than for uid 0, and the reproducibility check could
-/// not see it, because it builds twice inside one process and so compares two builds sharing a uid.
+/// The staged tree has to be owned by uid/gid **0**, which is what the Alpine tarball ships and what a
+/// guest expects of its own `/`. Unprivileged `tar` cannot set ownership and `mke2fs -d` copies whatever
+/// the tree has, so without the `fakeroot` re-exec the image hash depends on who ran the build, which the
+/// reproducibility check cannot see: it builds twice inside one process and so compares two builds sharing
+/// a uid.
 ///
-/// Separate from [`verify_guest_contract`] on purpose. That one checks paths and content, and its
-/// unit tests construct minimal trees as whoever runs `cargo test`; this checks a property of the
-/// *build environment*, so it belongs on the build path and not in a contract a fixture can satisfy.
+/// Separate from [`verify_guest_contract`] on purpose. That one checks paths and content, and its unit
+/// tests construct minimal trees as whoever runs `cargo test`; this checks a property of the *build
+/// environment*, so it belongs on the build path rather than in a contract a fixture can satisfy.
 fn verify_staged_ownership(staging: &Path) -> Result<()> {
     use std::os::unix::fs::MetadataExt;
 
@@ -638,18 +631,14 @@ struct RootfsBuild {
 /// Re-exec this xtask under `fakeroot` when the caller is unprivileged, returning `true` if it ran
 /// the build in a child (so the caller should stop).
 ///
-/// The guest rootfs must be owned by uid/gid **0**: that is what the Alpine tarball ships and what a
-/// guest expects of its own `/`. Unprivileged `tar` cannot set ownership, `mke2fs -d` copies
-/// whatever the staging tree has, and neither `tar --owner` on extract nor any `mke2fs` flag
-/// overrides it, so an unprivileged build silently produced a tree owned by the *builder's* uid. The
-/// image hash then depended on who ran the build (uid 1000 and uid 0 gave different images from the
-/// same source), which the reproducibility check could not see because it builds twice inside one
-/// process and so compares two builds that share a uid.
+/// The guest rootfs must be owned by uid/gid **0**, what the Alpine tarball ships and what a guest expects
+/// of its own `/`. Unprivileged `tar` cannot set ownership, `mke2fs -d` copies whatever the staging tree
+/// has, and neither `tar --owner` nor any `mke2fs` flag overrides it, so an unprivileged build without this
+/// yields a tree owned by the builder's uid and an image hash that depends on who ran it.
 ///
-/// One `fakeroot` has to wrap the *whole* assembly, not each command: the faked ownership lives in
-/// one process's bookkeeping, so extracting under one invocation and running `mke2fs` under another
-/// would lose it. Re-exec is how a single session spans all of them. `FAKEROOTKEY` is set inside a
-/// session, which is what stops this recursing.
+/// One `fakeroot` has to wrap the *whole* assembly rather than each command, because the faked ownership
+/// lives in one process's bookkeeping, so extracting under one invocation and running `mke2fs` under
+/// another loses it. `FAKEROOTKEY` is set inside a session, which is what stops this recursing.
 fn reexec_under_fakeroot_if_needed(verify: bool, update_lock: bool) -> Result<bool> {
     if crate::effective_uid()? == 0 || std::env::var_os("FAKEROOTKEY").is_some() {
         return Ok(false);

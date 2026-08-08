@@ -1,14 +1,13 @@
 //! Privileged proof that the per-drive virtio-blk bandwidth limiter (`RateLimiter::default_guest_io`)
 //! actually throttles a sustained-thrashing guest, and leaves a cold boot unthrottled.
 //!
-//! The limiter is a 256 MiB/s steady cap with a 1 GiB one-time burst on every drive. Two facts shape
-//! the test. A *single* write can never show the cap: the only guest-writable virtio-blk device is
-//! `/output` (256 MiB, `OUTPUT_IMAGE_MIB`), which is the steady bucket's size, so one write fits it.
-//! The threat the cap targets is *sustained* thrashing, so the proof is a **continuous rewrite loop**:
-//! once its cumulative virtio traffic clears the 1 GiB burst, the stream pins to the 256 MiB/s cap.
-//! It is self-calibrating (a short in-burst write measures this host's raw `/output` speed in the same
-//! VM, so the throttle assertion needs no absolute disk model) and skips honestly on a disk too slow
-//! to distinguish the cap, rather than asserting something the hardware can't show.
+//! The limiter is a 256 MiB/s steady cap with a 1 GiB one-time burst per drive, and two facts shape the
+//! test. A *single* write can never show the cap, since the only guest-writable device is `/output` at the
+//! steady bucket's own size, so one write fits inside it. The threat the cap targets is *sustained*
+//! thrashing, so the proof is a **continuous rewrite loop**: once cumulative virtio traffic clears the
+//! burst, the stream pins to the cap. Self-calibrating, since a short in-burst write measures this host's
+//! raw `/output` speed in the same VM, and it skips honestly on a disk too slow to distinguish the cap
+//! rather than asserting something the hardware can't show.
 //!
 //! `#[ignore]`d: needs `/dev/kvm` + real root + the fetched artifacts. Run via `cargo xtask ci-privileged`.
 // A test binary: `panic!`/`.expect()` are the idiomatic assertion here, which the workspace's

@@ -350,21 +350,20 @@ pub struct Limits {
     /// Guest memory, MiB. Typed [`NonZeroU32`] for the same reason as [`vcpus`](Limits::vcpus):
     /// zero is not a budget, so it can't be constructed.
     pub mem_mib: NonZeroU32,
-    /// The wall-clock budget: the boot-to-userspace deadline **and** each command's exec budget,
-    /// one `wall` for the whole run, not just boot. On the exec side it is sent to
-    /// the guest agent, which kills the command past it (the cooperative
-    /// [`ExecTimeout`](VmmError::ExecTimeout)); the host's own give-up deadline, the
-    /// [`ExecUnresponsive`](VmmError::ExecUnresponsive) liveness backstop, is derived from it
-    /// (budget + kill slack), so raising the budget moves both together and a long quiet command is
-    /// never cut off by the transport. Should be a realistic duration: it is also the boot deadline,
-    /// and on the exec side a zero or sub-millisecond wall is floored to a **1 ms** command budget
-    /// on the wire, so a tiny wall still means "very short" rather than truncating away to nothing.
-    /// At the top end the guest agent clamps any exec budget to a **1 h** ceiling
-    /// (`MAX_EXEC_TIMEOUT`), so a `wall` above an hour
-    /// kills the command at one hour, the effective exec budget is `min(wall, 1 h)` even though the
-    /// reported [`ExecTimeout`](VmmError::ExecTimeout) names the configured `wall`. (A caller that
-    /// genuinely needs different boot and exec ceilings sets [`BootConfig::boot_timeout`] /
-    /// [`BootConfig::exec_wall`] under the public API.)
+    /// The wall-clock budget: the boot-to-userspace deadline **and** each command's exec budget, one
+    /// `wall` for the whole run rather than just boot.
+    ///
+    /// On the exec side it is sent to the guest agent, which kills the command past it (the cooperative
+    /// [`ExecTimeout`](VmmError::ExecTimeout)). The host's own give-up deadline, the
+    /// [`ExecUnresponsive`](VmmError::ExecUnresponsive) liveness backstop, derives from it plus kill
+    /// slack, so raising the budget moves both together and a long quiet command is never cut off by the
+    /// transport.
+    ///
+    /// A zero or sub-millisecond wall is floored to a **1 ms** command budget on the wire, so a tiny wall
+    /// still means "very short" rather than nothing. At the top end the guest agent clamps any exec budget
+    /// to **1 h**, so the effective budget is `min(wall, 1 h)` even though the reported
+    /// [`ExecTimeout`](VmmError::ExecTimeout) names the configured `wall`. A caller needing different boot
+    /// and exec ceilings sets [`BootConfig::boot_timeout`] and [`BootConfig::exec_wall`].
     pub wall: Duration,
     /// Aggregate cap, in bytes, on what the host buffers for one exec, stdout + stderr + returned
     /// artifacts (plus a small per-frame accounting floor), so a flooding guest can't grow host
@@ -451,18 +450,17 @@ pub struct ExecMetrics {
 /// the VM is the session, every exec shares its persistent working directory and overlay, and
 /// closing the sandbox discards the state.
 ///
-/// **Confined by default.** [`open`](Sandbox::open) and [`boot`](Sandbox::boot) run
-/// the VMM **under the jailer**, chroot, uid/gid drop, seccomp, its own mount and network
-/// namespaces, on top of the KVM hardware boundary, so the headline "run untrusted code" path is
-/// the double-walled one. That needs real root and the `jailer` binary; the opt-out is
+/// **Confined by default.** [`open`](Sandbox::open) and [`boot`](Sandbox::boot) run the VMM **under the
+/// jailer**, adding a chroot, a uid/gid drop, seccomp, and its own mount and network namespaces on top of
+/// the KVM boundary. That needs real root and the `jailer` binary, and the opt-out is
 /// [`open_unjailed`](Sandbox::open_unjailed), deliberately a *differently-named constructor* so an
-/// unconfined sandbox can never happen by a forgotten flag, only by writing "unjailed".
+/// unconfined sandbox cannot happen by a forgotten flag.
 ///
-/// **Inputs at the public API.** Per-exec files and env ride [`exec_with_files`](Sandbox::exec_with_files)
-/// under the secret-hygiene contract pinned on [`RunningVm::exec_with_files`]; bulk directories ride
-/// [`BootConfig::input_dir`]/[`BootConfig::output_dir`] into [`open`](Sandbox::open), and
-/// [`collect_outputs`](Sandbox::collect_outputs) pulls the guest's `/output` tree back. An embedder
-/// never needs to reach the [`RunningVm`] layer.
+/// **Inputs at the public API.** Per-exec files and env ride
+/// [`exec_with_files`](Sandbox::exec_with_files) under the secret-hygiene contract pinned on
+/// [`RunningVm::exec_with_files`]; bulk directories ride [`BootConfig::input_dir`] and
+/// [`BootConfig::output_dir`], and [`collect_outputs`](Sandbox::collect_outputs) pulls the guest's
+/// `/output` tree back. An embedder never needs to reach the [`RunningVm`] layer.
 #[derive(Debug)]
 #[must_use = "dropping a Sandbox kills its microVM"]
 pub struct Sandbox {
